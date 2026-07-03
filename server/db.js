@@ -603,6 +603,29 @@ export function deleteImage(db, id) {
   return row.filename;
 }
 
+// Pull a board's images out of the tagging queue. Images that still carry
+// their previous tags go back to 'tagged'; never-tagged ones also become
+// 'tagged' but flagged undecided — the same untagged-for-human-review state
+// as when the AI can't place an image. An in-flight 'processing' image is
+// left to finish.
+export function cancelBoardQueue(db, boardId) {
+  const tx = db.transaction(() => {
+    const now = Date.now();
+    const restored = db
+      .prepare(
+        "UPDATE images SET status='tagged', attempts=0, error=NULL, updated_at=? WHERE board_id=? AND status='pending' AND tags != '[]'"
+      )
+      .run(now, boardId).changes;
+    const cleared = db
+      .prepare(
+        "UPDATE images SET status='tagged', undecided=1, attempts=0, error=NULL, updated_at=? WHERE board_id=? AND status='pending'"
+      )
+      .run(now, boardId).changes;
+    return { restored, cleared };
+  });
+  return tx();
+}
+
 // Reset an image back to the tagging queue. Returns true if it existed.
 export function reprocessImage(db, id) {
   const info = db

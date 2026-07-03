@@ -14,6 +14,7 @@ import {
   listImages,
   deleteImage,
   reprocessImage,
+  cancelBoardQueue,
   seedAdmin,
   createUser,
   listUsers,
@@ -258,7 +259,18 @@ app.get("/api/admin/boards", requireAdmin, (_req, res) => {
   const boards = listBoards(db);
   const counts = db.prepare("SELECT board_id, COUNT(*) AS c FROM images GROUP BY board_id").all();
   const countMap = Object.fromEntries(counts.map((r) => [r.board_id, r.c]));
-  res.json(boards.map((b) => ({ ...b, image_count: countMap[b.id] || 0, memberIds: getBoardMemberIds(db, b.id) })));
+  const pending = db
+    .prepare("SELECT board_id, COUNT(*) AS c FROM images WHERE status='pending' GROUP BY board_id")
+    .all();
+  const pendingMap = Object.fromEntries(pending.map((r) => [r.board_id, r.c]));
+  res.json(
+    boards.map((b) => ({
+      ...b,
+      image_count: countMap[b.id] || 0,
+      pending_count: pendingMap[b.id] || 0,
+      memberIds: getBoardMemberIds(db, b.id),
+    }))
+  );
 });
 
 app.post("/api/admin/boards", requireAdmin, (req, res) => {
@@ -307,6 +319,14 @@ app.post("/api/admin/boards/:id/retag", requireAdmin, (req, res) => {
   invalidateBoardCache(req.params.id);
   console.log(`retag queued: ${info.changes} image(s) in board ${req.params.id}`);
   res.json({ ok: true, queued: info.changes });
+});
+
+app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, (req, res) => {
+  const board = getBoard(db, req.params.id);
+  if (!board) return res.status(404).json({ error: "not found" });
+  const { restored, cleared } = cancelBoardQueue(db, req.params.id);
+  console.log(`retag cancelled: board ${req.params.id} — ${restored} restored, ${cleared} left untagged (undecided)`);
+  res.json({ ok: true, cancelled: restored + cleared, restored, cleared });
 });
 
 app.delete("/api/admin/boards/:id", requireAdmin, (req, res) => {

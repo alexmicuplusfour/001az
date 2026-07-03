@@ -448,7 +448,7 @@
           tr.id = `board-row-${b.id}`;
           tr.innerHTML = `
             <td><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></td>
-            <td>${b.image_count}</td>
+            <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}</td>
             <td></td>`;
 
           const actCell = tr.querySelector("td:last-child");
@@ -481,7 +481,7 @@
               retagBtn.textContent = "queuing…";
               const { queued } = await api("POST", `/api/admin/boards/${b.id}/retag`);
               retagBtn.textContent = `queued ${queued}`;
-              setTimeout(() => { retagBtn.textContent = "retag ↺"; retagBtn.disabled = false; }, 3000);
+              setTimeout(renderBoards, 1500);
             } catch (err) {
               alert("Error: " + err.message);
               retagBtn.textContent = "retag ↺";
@@ -489,6 +489,26 @@
             }
           };
           wrap.appendChild(retagBtn);
+
+          if (b.pending_count > 0) {
+            const stopBtn = document.createElement("button");
+            stopBtn.className = "danger";
+            stopBtn.textContent = "stop ■";
+            stopBtn.title = "Cancel queued AI tagging for this board";
+            stopBtn.onclick = async () => {
+              if (!confirm(`Stop the tagging queue for "${b.name}"? ${b.pending_count} queued image(s) will be pulled out — ones with previous tags keep them, the rest show as untagged for review.`)) return;
+              try {
+                stopBtn.disabled = true;
+                stopBtn.textContent = "stopping…";
+                await api("POST", `/api/admin/boards/${b.id}/retag/cancel`);
+                renderBoards();
+              } catch (err) {
+                alert("Error: " + err.message);
+                renderBoards();
+              }
+            };
+            wrap.appendChild(stopBtn);
+          }
 
           const delBtn = document.createElement("button");
           delBtn.className = "danger";
