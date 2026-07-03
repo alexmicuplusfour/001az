@@ -300,6 +300,51 @@ main#grid {
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
 }
 
+.upload-status {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 301;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #111;
+  color: #fff;
+  font-size: 13px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+.upload-status .bar {
+  width: 140px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+.upload-status .bar > div {
+  height: 100%;
+  background: #fff;
+  width: 0;
+  transition: width 0.2s;
+}
+.upload-status button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+  cursor: pointer;
+}
+.upload-status button:hover {
+  color: #fff;
+}
+/* Toasts are appended after the pill, so lift them above it while it shows. */
+.upload-status:not([hidden]) ~ .toast {
+  bottom: 72px;
+}
+
 .card img {
   width: 100%;
   height: auto;

@@ -67,7 +67,10 @@ const FACETS_JSON = process.env.FACETS_JSON || path.join(ROOT, "facets.json");
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 
-const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+// Backstop limits only — the client pre-filters oversized files and chunks
+// large drops (see UPLOAD_* in app.js; keep UPLOAD_MAX_BYTES in sync). If
+// multer still trips one of these, the whole request 413s.
+const MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
 const MAX_FILES = 200; // per request
 const THUMB_WIDTH = 600;
 const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };

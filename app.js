@@ -1144,40 +1144,182 @@ function toast(msg) {
   setTimeout(() => t.remove(), 4500);
 }
 
-async function handleFiles(fileList) {
+// ── Upload pipeline ─────────────────────────────────────────────────────────
+// Drops are validated up front (type + size), split into small chunks, and
+// uploaded with limited concurrency. Each chunk succeeds or fails on its own,
+// with retries for transient errors, so one bad file or dropped connection
+// never cancels the rest of the batch. Placeholder tiles exist only for
+// in-flight chunks (bounded object URLs); overall progress lives in the pill.
+const UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // keep in sync with server MAX_BYTES
+const UPLOAD_CHUNK_FILES = 20; // max files per request
+const UPLOAD_CHUNK_BYTES = 32 * 1024 * 1024; // max payload per request
+const UPLOAD_CONCURRENCY = 3;
+const UPLOAD_ATTEMPTS = 3;
+
+let uploadQueue = []; // File[][] chunks not yet started
+let uploadWorkers = 0;
+let uploadStats = null; // progress for the current batch; null when idle
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function handleFiles(fileList) {
   const files = [...fileList].filter((f) => f.type.startsWith("image/") || /\.(avif|heif|heic)$/i.test(f.name));
   if (!files.length) return;
 
-  const batch = files.map((f) => ({ tempId: ++uid, objURL: URL.createObjectURL(f) }));
+  // Drops during an active upload merge into the running batch.
+  if (!uploadStats) uploadStats = { total: 0, done: 0, uploaded: 0, failed: 0, canceled: 0, failReason: "", skipped: new Map() };
+  uploadStats.total += files.length;
+
+  const valid = [];
+  for (const f of files) {
+    if (f.size === 0) bumpSkip("empty file");
+    else if (f.size > UPLOAD_MAX_BYTES) bumpSkip("larger than 10 MB");
+    else valid.push(f);
+  }
+
+  uploadQueue.push(...chunkFiles(valid));
+  pumpUploads();
+}
+
+function bumpSkip(reason, n = 1) {
+  uploadStats.skipped.set(reason, (uploadStats.skipped.get(reason) || 0) + n);
+  uploadStats.done += n;
+}
+
+// Split by count and payload size, preserving drop order.
+function chunkFiles(files) {
+  const chunks = [];
+  let cur = [];
+  let curBytes = 0;
+  for (const f of files) {
+    if (cur.length && (cur.length >= UPLOAD_CHUNK_FILES || curBytes + f.size > UPLOAD_CHUNK_BYTES)) {
+      chunks.push(cur);
+      cur = [];
+      curBytes = 0;
+    }
+    cur.push(f);
+    curBytes += f.size;
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+
+function pumpUploads() {
+  while (uploadWorkers < UPLOAD_CONCURRENCY && uploadQueue.length) {
+    uploadWorkers++;
+    uploadWorker();
+  }
+  renderUploadStatus();
+  maybeFinishUploads(); // covers drops where every file was pre-skipped
+}
+
+async function uploadWorker() {
+  while (uploadQueue.length) {
+    await uploadChunk(uploadQueue.shift());
+    renderUploadStatus();
+  }
+  uploadWorkers--;
+  maybeFinishUploads();
+}
+
+async function uploadChunk(chunk) {
+  const batch = chunk.map((f) => ({ tempId: ++uid, objURL: URL.createObjectURL(f) }));
   uploading.push(...batch);
   render();
 
   const fd = new FormData();
-  for (const f of files) fd.append("files", f);
+  for (const f of chunk) fd.append("files", f);
 
-  try {
-    const res = await fetch(`/api/upload?board=${boardId}`, { method: "POST", body: fd });
-    const data = await res.json();
-    for (const b of batch) URL.revokeObjectURL(b.objURL);
-    uploading = uploading.filter((u) => !batch.includes(u));
-
-    if (data.error) toast(data.error);
-    if (Array.isArray(data.uploaded)) {
-      for (const row of [...data.uploaded].reverse()) {
-        images.unshift({ id: row.id, name: row.name, status: "pending", tags: [], tagSet: new Set() });
+  let data = null;
+  let failReason = "network error";
+  for (let attempt = 1; attempt <= UPLOAD_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(`/api/upload?board=${boardId}`, { method: "POST", body: fd });
+      if (res.ok) {
+        data = await res.json();
+        break;
       }
+      const body = await res.json().catch(() => null);
+      failReason = (body && body.error) || `server error (${res.status})`;
+      if (res.status < 500) break; // client errors won't get better on retry
+    } catch {
+      failReason = "network error";
     }
-    if (data.rejected && data.rejected.length) {
-      toast(`${data.rejected.length} file(s) skipped (${data.rejected[0].reason})`);
-    }
-    render();
-    ensurePolling();
-  } catch {
-    for (const b of batch) URL.revokeObjectURL(b.objURL);
-    uploading = uploading.filter((u) => !batch.includes(u));
-    toast("Upload failed");
-    render();
+    if (attempt < UPLOAD_ATTEMPTS) await sleep(1000 * attempt);
   }
+
+  for (const b of batch) URL.revokeObjectURL(b.objURL);
+  uploading = uploading.filter((u) => !batch.includes(u));
+
+  uploadStats.done += chunk.length;
+  if (data) {
+    const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
+    for (const row of [...rows].reverse()) {
+      images.unshift({ id: row.id, name: row.name, status: "pending", tags: [], tagSet: new Set() });
+    }
+    uploadStats.uploaded += rows.length;
+    for (const r of data.rejected || []) {
+      uploadStats.skipped.set(r.reason, (uploadStats.skipped.get(r.reason) || 0) + 1);
+    }
+  } else {
+    uploadStats.failed += chunk.length;
+    uploadStats.failReason = failReason;
+  }
+  render();
+  ensurePolling();
+}
+
+function cancelQueuedUploads() {
+  const dropped = uploadQueue.splice(0).reduce((n, c) => n + c.length, 0);
+  if (!uploadStats || !dropped) return;
+  uploadStats.canceled += dropped;
+  uploadStats.done += dropped;
+  renderUploadStatus();
+  maybeFinishUploads();
+}
+
+function maybeFinishUploads() {
+  if (!uploadStats || uploadWorkers > 0 || uploadQueue.length) return;
+  if (uploadStats.done < uploadStats.total) return;
+  const s = uploadStats;
+  uploadStats = null;
+  renderUploadStatus();
+
+  const parts = [];
+  if (s.uploaded) parts.push(`Uploaded ${s.uploaded} image${s.uploaded === 1 ? "" : "s"}`);
+  for (const [reason, n] of s.skipped) parts.push(`${n} skipped (${reason})`);
+  if (s.failed) parts.push(`${s.failed} failed (${s.failReason}) — drop them again to retry`);
+  if (s.canceled) parts.push(`${s.canceled} canceled`);
+  if (parts.length) toast(parts.join(" · "));
+}
+
+const elUploadStatus = (() => {
+  const el = document.createElement("div");
+  el.className = "upload-status";
+  el.hidden = true;
+  const text = document.createElement("span");
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.appendChild(document.createElement("div"));
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", cancelQueuedUploads);
+  el.append(text, bar, cancel);
+  document.body.appendChild(el);
+  return el;
+})();
+
+function renderUploadStatus() {
+  if (!uploadStats) {
+    elUploadStatus.hidden = true;
+    return;
+  }
+  const { done, total } = uploadStats;
+  elUploadStatus.hidden = false;
+  elUploadStatus.querySelector("span").textContent = `Uploading ${Math.min(done, total)} / ${total}`;
+  elUploadStatus.querySelector(".bar > div").style.width = total ? `${Math.round((done / total) * 100)}%` : "0%";
+  elUploadStatus.querySelector("button").hidden = uploadQueue.length === 0;
 }
 
 // Merge fresh server state into `images` by id (status/tags updates + new rows).
