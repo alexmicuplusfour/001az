@@ -28,7 +28,7 @@ function getAiClient(apiKey) {
 function resolveWorkerConfig(db) {
   const apiKey = getSetting(db, "api_key") || process.env.ANTHROPIC_API_KEY || null;
   const model = getSetting(db, "model") || process.env.MODEL || "claude-haiku-4-5";
-  const dailyCap = Number(process.env.DAILY_CAP || 200);
+  const dailyCap = Number(process.env.DAILY_CAP || 2000);
   return { apiKey, model, dailyCap };
 }
 
@@ -101,6 +101,7 @@ export function startWorker({ db, thumbsDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 10000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
+  let capNoticeDay = null; // last day the cap warning was logged
 
   async function tagOne(row, client, model) {
     const prompt = getBoardPrompt(db, row.board_id);
@@ -146,7 +147,19 @@ export function startWorker({ db, thumbsDir }) {
 
     const recovered = recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
-    if (usageToday(db) >= dailyCap) return 0;
+    if (usageToday(db) >= dailyCap) {
+      // Say so once a day — otherwise pending images just spin forever
+      // with no hint of why (cap exhaustion looks identical to a hang).
+      const day = new Date().toISOString().slice(0, 10);
+      if (capNoticeDay !== day) {
+        const { n } = db.prepare("SELECT COUNT(*) AS n FROM images WHERE status='pending'").get();
+        if (n > 0) {
+          console.warn(`worker: daily cap (${dailyCap}) reached — ${n} pending image(s) deferred until tomorrow (raise DAILY_CAP or reset ai_usage to resume today)`);
+          capNoticeDay = day;
+        }
+      }
+      return 0;
+    }
 
     const row = claimNextPending(db);
     if (!row) return 0;
@@ -175,9 +188,9 @@ export function startWorker({ db, thumbsDir }) {
     }
   })();
 
-  const { apiKey, model } = resolveWorkerConfig(db);
+  const { apiKey, model, dailyCap } = resolveWorkerConfig(db);
   if (apiKey) {
-    console.log(`AI tagging worker started (model=${model}, dailyCap=${process.env.DAILY_CAP || 200}, facets per-board).`);
+    console.log(`AI tagging worker started (model=${model}, dailyCap=${dailyCap}, facets per-board).`);
   } else {
     console.log("AI tagging worker started (no key — configure one in admin to enable tagging).");
   }
