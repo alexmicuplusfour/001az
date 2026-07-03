@@ -5,6 +5,7 @@ export const state = {
   images: [],
   uploading: [],
   selected: new Map(),
+  bulkSelected: new Set(),
   filtersHidden: false,
   uid: 0,
   me: null,

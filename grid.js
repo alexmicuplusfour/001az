@@ -6,6 +6,7 @@ import { ensurePolling } from './data.js';
 import { openLightbox } from './lightbox.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
+import { toggleBulkSelect } from './bulk.js';
 
 const elGrid = document.getElementById("grid");
 const elGridSentinel = document.getElementById("grid-sentinel");
@@ -206,17 +207,38 @@ function cardFor(img) {
   im.src = thumbUrl(img.name);
   im.loading = "lazy";
   im.decoding = "async";
-  if (img.w && img.h) { im.width = img.w; im.height = img.h; }
+  if (img.w && img.h) {
+    im.width = img.w;
+    im.height = img.h;
+    // Pin the ratio to the border box (box-sizing: border-box) so selection
+    // padding cover-crops the image without changing the card's height.
+    im.style.aspectRatio = `${img.w} / ${img.h}`;
+  }
   im.alt = img.tags.length ? img.tags.join(", ") : img.name;
   im.addEventListener("error", () => card.remove());
   im.addEventListener("load", () => { im.classList.add("loaded"); card.classList.add("loaded"); scheduleLayout(); });
   if (im.complete && im.naturalWidth > 0) { im.classList.add("loaded"); card.classList.add("loaded"); }
   card.appendChild(im);
-  card.addEventListener("click", () => openLightbox(img));
+  card.addEventListener("click", () => {
+    if (state.bulkSelected.size) { toggleBulkSelect(img, card); return; }
+    openLightbox(img);
+  });
+
+  if (state.me) {
+    const cb = document.createElement("button");
+    cb.className = "sel-cb";
+    cb.title = "Select";
+    cb.innerHTML = ICONS.check;
+    cb.setAttribute("aria-pressed", String(state.bulkSelected.has(img.id)));
+    cb.addEventListener("click", (e) => { e.stopPropagation(); toggleBulkSelect(img, card); });
+    card.appendChild(cb);
+    if (state.bulkSelected.has(img.id)) card.classList.add("selected");
+  }
 
   if (state.me && (img.hearts > 0 || img.favoritedByMe)) card.appendChild(heartControl(img));
 
   card.addEventListener("pointerenter", () => {
+    if (state.bulkSelected.size) return;
     if (state.me && !card.querySelector(".card-actions")) card.appendChild(cardActions(img));
     if (!card.querySelector(".tag-chip")) card.appendChild(tagChip(img));
     if (state.me && !card.querySelector(".heart")) card.appendChild(heartControl(img));
