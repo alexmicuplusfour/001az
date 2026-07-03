@@ -50,9 +50,9 @@ function buildPrompt(facets, context = "") {
   });
   const contextBlock = context.trim() ? `\n${context.trim()}\n` : "";
   const systemText = `You tag images for a private research gallery.${contextBlock}
-Also judge whether the image belongs on this board. Set "fit" to "match" unless the image is so obviously unrelated that anyone glancing at the board would ask why it is there at all. Anything that mostly consists of the board's kind of material is a match — including edge cases, adjacent or off-scope examples, and material shown inside a device mockup, presentation frame, or photo. Doubt, partial fit, or difficulty choosing tags are never reasons for "undecided"; in those cases choose "match" and tag conservatively. Reserve "undecided" for a glaring, at-a-glance mismatch only.
+Also decide whether the image is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the image is a match — set "fit" to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set "fit" to "undecided" only when the image is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet array empty. Never combine "undecided" with facet selections: an image you were able to describe with the facets is a match by definition.
 
-For each image, select every applicable tag from the facets below. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when "fit" is "undecided", any facet may be left empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.
+For each image, select every applicable tag from the facets below. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when "fit" is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.
 
 Facets and allowed values:
 ${lines.join("\n")}
@@ -137,16 +137,23 @@ export function startWorker({ db, thumbsDir }) {
     const block = msg.content.find((b) => b.type === "tool_use");
     if (!block) throw new Error("no tool_use block in response");
     const tags = [];
+    let filledFacets = 0;
     for (const f of facets) {
       const vals = block.input[f.key];
-      if (Array.isArray(vals)) {
-        for (const v of vals) {
-          const t = `${f.key}/${v}`;
-          if (allowed.has(t)) tags.push(t);
-        }
+      if (!Array.isArray(vals)) continue;
+      const before = tags.length;
+      for (const v of vals) {
+        const t = `${f.key}/${v}`;
+        if (allowed.has(t)) tags.push(t);
       }
+      if (tags.length > before) filledFacets++;
     }
-    return { tags, undecided: block.input.fit === "undecided" };
+    // Only honor an undecided verdict when the model also found the facets
+    // mostly inapplicable. It keeps folding "off-scope but taggable" into
+    // undecided regardless of prompt wording, and an image it could describe
+    // with most of the facets is board material by definition.
+    const undecided = block.input.fit === "undecided" && filledFacets < facets.length / 2;
+    return { tags, undecided };
   }
 
   async function tick() {
