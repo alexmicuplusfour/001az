@@ -203,6 +203,7 @@ export function teardownCardHover(card) {
 function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
+  if (img.undecided) card.classList.add("undecided");
   const im = document.createElement("img");
   im.src = thumbUrl(img.name);
   im.loading = "lazy";

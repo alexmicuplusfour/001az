@@ -50,7 +50,9 @@ function buildPrompt(facets, context = "") {
   });
   const contextBlock = context.trim() ? `\n${context.trim()}\n` : "";
   const systemText = `You tag images for a private research gallery.${contextBlock}
-For each image, select every applicable tag from the facets below. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.
+First judge whether the image belongs in this collection at all: the description above and the facet vocabulary below define the kind of material this board collects. If the image is clearly a different kind of material — or you cannot confidently place it in that picture — set "fit" to "undecided". Otherwise set "fit" to "match".
+
+For each image, select every applicable tag from the facets below. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when "fit" is "undecided", any facet may be left empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.
 
 Facets and allowed values:
 ${lines.join("\n")}
@@ -67,6 +69,13 @@ Return your answer only by calling the tag_screenshot tool.`;
     };
     required.push(f.key);
   }
+  // Defined after the facet loop so a facet named "fit" can't clobber it.
+  properties.fit = {
+    type: "string",
+    enum: ["match", "undecided"],
+    description: "Whether the image fits the kind of material this board collects.",
+  };
+  required.push("fit");
   const tool = {
     name: "tag_screenshot",
     description: "Record the applicable taxonomy tags for this UI screenshot.",
@@ -137,7 +146,7 @@ export function startWorker({ db, thumbsDir }) {
         }
       }
     }
-    return tags;
+    return { tags, undecided: block.input.fit === "undecided" };
   }
 
   async function tick() {
@@ -164,10 +173,10 @@ export function startWorker({ db, thumbsDir }) {
     const row = claimNextPending(db);
     if (!row) return 0;
     try {
-      const tags = await tagOne(row, client, model);
-      markTagged(db, row.id, tags);
+      const { tags, undecided } = await tagOne(row, client, model);
+      markTagged(db, row.id, tags, undecided);
       bumpUsage(db);
-      console.log(`tagged #${row.id} ${row.filename} [${model}] -> [${tags.join(", ")}]`);
+      console.log(`tagged #${row.id} ${row.filename} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
     } catch (err) {
       const failed = failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS);
       console.warn(`tag error #${row.id} ${row.filename}: ${err.message} (${failed ? "failed" : "requeued"})`);

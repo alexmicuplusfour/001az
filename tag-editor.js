@@ -104,6 +104,7 @@ export function openTagEditor(img) {
       img.tags = saved;
       img.tagSet = new Set(saved);
       img.status = "tagged";
+      img.undecided = false;
       close();
       document.dispatchEvent(new Event('app:render'));
     } catch {

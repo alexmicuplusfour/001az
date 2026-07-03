@@ -24,6 +24,7 @@ export function reconcile(data) {
       ex.status = d.status;
       ex.tags = list;
       ex.tagSet = new Set(list);
+      ex.undecided = !!d.undecided;
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);

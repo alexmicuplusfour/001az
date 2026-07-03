@@ -12,6 +12,7 @@ export function toImage(d) {
     status: d.status,
     tags: list,
     tagSet: new Set(list),
+    undecided: !!d.undecided,
     hearts: d.hearts || 0,
     favoritedByMe: !!d.favoritedByMe,
     crateIds: new Set(Array.isArray(d.crateIds) ? d.crateIds : []),

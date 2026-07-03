@@ -409,6 +409,16 @@ body.bulk-mode .card.loaded .sel-cb {
   box-shadow: none;
   color: #fff;
 }
+/* AI couldn't confidently place the image in this board's taxonomy —
+   same inset effect as bulk selection, but with a dotted outline */
+.card.undecided {
+  outline: 2px dotted #111;
+  background: #fff;
+}
+.card.undecided img {
+  padding: 8px;
+  border-radius: 12px;
+}
 .card.selected {
   outline: 2px solid #111;
   background: #fff;

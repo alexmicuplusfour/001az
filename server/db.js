@@ -106,6 +106,7 @@ export function openDb(dbPath) {
   try { db.exec("ALTER TABLE boards ADD COLUMN glosses TEXT NOT NULL DEFAULT '{}'"); } catch {}
   try { db.exec("ALTER TABLE images ADD COLUMN thumb_w INTEGER"); } catch {}
   try { db.exec("ALTER TABLE images ADD COLUMN thumb_h INTEGER"); } catch {}
+  try { db.exec("ALTER TABLE images ADD COLUMN undecided INTEGER NOT NULL DEFAULT 0"); } catch {}
   return db;
 }
 
@@ -148,7 +149,7 @@ export function listImages(db, userId = null, boardId = null) {
   const boardClause = boardId != null ? "WHERE i.board_id = @bid" : "";
   const rows = db
     .prepare(
-      `SELECT i.id, i.filename, i.status, i.tags, i.thumb_w, i.thumb_h,
+      `SELECT i.id, i.filename, i.status, i.tags, i.thumb_w, i.thumb_h, i.undecided,
         (SELECT COUNT(*) FROM favorites f WHERE f.image_id = i.id) AS hearts,
         CASE WHEN @uid IS NOT NULL AND EXISTS(
           SELECT 1 FROM favorites f WHERE f.image_id = i.id AND f.user_id = @uid
@@ -178,6 +179,7 @@ export function listImages(db, userId = null, boardId = null) {
     name: r.filename,
     status: r.status,
     tags: JSON.parse(r.tags),
+    undecided: !!r.undecided,
     hearts: r.hearts,
     favoritedByMe: !!r.fav,
     crateIds: crateMap.get(r.id) || [],
@@ -547,9 +549,10 @@ export function claimNextPending(db) {
   return tx();
 }
 
-export function markTagged(db, id, tags) {
-  db.prepare("UPDATE images SET status='tagged', tags=?, error=NULL, updated_at=? WHERE id=?").run(
+export function markTagged(db, id, tags, undecided = false) {
+  db.prepare("UPDATE images SET status='tagged', tags=?, undecided=?, error=NULL, updated_at=? WHERE id=?").run(
     JSON.stringify(tags),
+    undecided ? 1 : 0,
     Date.now(),
     id
   );
@@ -603,7 +606,7 @@ export function deleteImage(db, id) {
 // Reset an image back to the tagging queue. Returns true if it existed.
 export function reprocessImage(db, id) {
   const info = db
-    .prepare("UPDATE images SET status='pending', tags='[]', attempts=0, error=NULL, updated_at=? WHERE id=?")
+    .prepare("UPDATE images SET status='pending', tags='[]', undecided=0, attempts=0, error=NULL, updated_at=? WHERE id=?")
     .run(Date.now(), id);
   return info.changes > 0;
 }

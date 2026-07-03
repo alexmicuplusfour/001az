@@ -450,7 +450,8 @@ app.patch("/api/images/:id/tags", requireAuth, (req, res) => {
   const allowed = new Set();
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
-  db.prepare("UPDATE images SET status='tagged', tags=?, updated_at=? WHERE id=?").run(JSON.stringify(clean), Date.now(), id);
+  // A human made the call, so any AI "undecided" flag is resolved.
+  db.prepare("UPDATE images SET status='tagged', tags=?, undecided=0, updated_at=? WHERE id=?").run(JSON.stringify(clean), Date.now(), id);
   res.json({ ok: true, tags: clean });
 });
 
