@@ -67,7 +67,7 @@ async function doReprocess(id) {
     if (img) { img.status = "pending"; img.tags = []; img.tagSet = new Set(); }
     document.dispatchEvent(new Event('app:render'));
     ensurePolling();
-    toast.success("Reprocessing…");
+    toast("Reprocessing…", { duration: "short" });
   } catch {
     toast.error("Reprocess failed");
   }

@@ -86,7 +86,7 @@ async function doBulkReprocess() {
   document.dispatchEvent(new Event('app:render'));
   ensurePolling();
   if (failed) toast.error(`Reprocess failed for ${failed} of ${imgs.length}`);
-  else toast.success(`Reprocessing ${imgs.length} image${imgs.length === 1 ? "" : "s"}…`);
+  else toast(`Reprocessing ${imgs.length} image${imgs.length === 1 ? "" : "s"}…`, { duration: "short" });
 }
 
 async function doBulkDelete() {
@@ -125,7 +125,7 @@ async function addAllToCrate(crateId) {
   const failed = imgs.length - counts.length;
   document.dispatchEvent(new Event('app:render'));
   if (failed) toast.error(`Couldn't add ${failed} of ${imgs.length} to crate`);
-  else toast.success(`Added ${counts.length} to "${crate ? crate.name : "crate"}"`);
+  else toast(`Added ${counts.length} to "${crate ? crate.name : "crate"}"`, { duration: "short" });
 }
 
 function closeBulkCratePop() {
