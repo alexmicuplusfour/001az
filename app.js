@@ -1153,7 +1153,7 @@ function toast(msg) {
 const UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // keep in sync with server MAX_BYTES
 const UPLOAD_CHUNK_FILES = 20; // max files per request
 const UPLOAD_CHUNK_BYTES = 32 * 1024 * 1024; // max payload per request
-const UPLOAD_CONCURRENCY = 3;
+const UPLOAD_CONCURRENCY = 2; // modest: the server decodes one image at a time (small droplet)
 const UPLOAD_ATTEMPTS = 3;
 
 let uploadQueue = []; // File[][] chunks not yet started
