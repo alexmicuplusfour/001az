@@ -73,6 +73,7 @@ const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
 const MAX_FILES = 200; // per request
 const THUMB_WIDTH = 600;
+const SVG_RASTER_WIDTH = 2000; // SVG uploads are rasterized to WebP at this width
 const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };
 
 fs.mkdirSync(GALLERY_DIR, { recursive: true });
@@ -375,8 +376,18 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), async (re
 
   for (const f of files) {
     try {
-      const buf = await fs.promises.readFile(f.path);
-      const meta = await sharp(buf, { pages: 1 }).metadata();
+      let buf = await fs.promises.readFile(f.path);
+      let meta = await sharp(buf, { pages: 1 }).metadata();
+      if (meta.format === "svg") {
+        // Rasterize SVGs to WebP: vectors can embed scripts, so the original
+        // markup is never stored or served. Render at high density, then cap.
+        const density = Math.min(2400, Math.max(72, (72 * SVG_RASTER_WIDTH) / (meta.width || SVG_RASTER_WIDTH)));
+        buf = await sharp(buf, { density })
+          .resize({ width: SVG_RASTER_WIDTH, withoutEnlargement: true })
+          .webp({ quality: 90 })
+          .toBuffer();
+        meta = await sharp(buf).metadata();
+      }
       const ext = ALLOWED[meta.format];
       if (!ext) {
         rejected.push({ name: f.originalname, reason: "unsupported image type" });

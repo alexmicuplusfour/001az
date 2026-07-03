@@ -1163,7 +1163,7 @@ let uploadStats = null; // progress for the current batch; null when idle
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function handleFiles(fileList) {
-  const files = [...fileList].filter((f) => f.type.startsWith("image/") || /\.(avif|heif|heic)$/i.test(f.name));
+  const files = [...fileList].filter((f) => f.type.startsWith("image/") || /\.(avif|heif|heic|svg)$/i.test(f.name));
   if (!files.length) return;
 
   // Drops during an active upload merge into the running batch.
