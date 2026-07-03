@@ -1,0 +1,20 @@
+{
+  "name": "inspo-gallery",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "populate": "node populate.js",
+    "serve": "node serve.js",
+    "clear-tags": "node clear-tags.js",
+    "deploy": "python deploy.py",
+    "server": "node server/server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.108.0",
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "multer": "^2.0.1",
+    "sharp": "^0.33.5"
+  }
+}

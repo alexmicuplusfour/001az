@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>logs · 001</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #0c0d10;
+        color: #d6d9de;
+        font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      body { display: flex; flex-direction: column; }
+      header {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 14px;
+        border-bottom: 1px solid #1c1e24;
+        background: #111319;
+      }
+      header .title { color: #9aa0aa; font-weight: 600; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c40f; }
+      .dot.on { background: #2ecc71; }
+      .dot.off { background: #e74c3c; }
+      header .status { color: #6b7280; }
+      header .spacer { margin-left: auto; }
+      header button {
+        background: #1b1e26;
+        color: #c9ccd3;
+        border: 1px solid #2a2e38;
+        border-radius: 6px;
+        padding: 3px 9px;
+        font: inherit;
+        cursor: pointer;
+      }
+      header button:hover { background: #232732; }
+      header label { color: #6b7280; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+      #log {
+        flex: 1;
+        overflow-y: auto;
+        padding: 10px 14px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .row { padding: 1px 0; }
+      .ts { color: #565d68; }
+      .lvl { font-weight: 700; margin: 0 6px; }
+      .lvl.LOG { color: #58a6ff; }
+      .lvl.WARN { color: #f1c40f; }
+      .lvl.ERROR { color: #ff6b6b; }
+      .row.WARN { background: rgba(241, 196, 15, 0.05); }
+      .row.ERROR { background: rgba(231, 76, 60, 0.08); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="dot" id="dot"></span>
+      <span class="title">001 server logs</span>
+      <span class="status" id="status">connecting…</span>
+      <span class="spacer"></span>
+      <label><input type="checkbox" id="follow" checked /> follow</label>
+      <button id="clear">clear</button>
+    </header>
+    <div id="log"></div>
+
+    <script>
+      const elLog = document.getElementById("log");
+      const elStatus = document.getElementById("status");
+      const elDot = document.getElementById("dot");
+      const elFollow = document.getElementById("follow");
+      const MAX_ROWS = 2000;
+
+      document.getElementById("clear").addEventListener("click", () => elLog.replaceChildren());
+
+      function atBottom() {
+        return elLog.scrollHeight - elLog.scrollTop - elLog.clientHeight < 40;
+      }
+
+      function append(line) {
+        const sp = line.indexOf(" ");
+        const ts = line.slice(0, sp);
+        const rest = line.slice(sp + 1);
+        const sp2 = rest.indexOf(" ");
+        const lvl = rest.slice(0, sp2);
+        const msg = rest.slice(sp2 + 1);
+
+        const row = document.createElement("div");
+        row.className = "row " + (lvl === "WARN" || lvl === "ERROR" ? lvl : "");
+        const t = document.createElement("span");
+        t.className = "ts";
+        t.textContent = ts.replace("T", " ").replace("Z", "");
+        const l = document.createElement("span");
+        l.className = "lvl " + lvl;
+        l.textContent = lvl;
+        const m = document.createElement("span");
+        m.textContent = msg;
+        row.append(t, l, m);
+
+        const stick = elFollow.checked && atBottom();
+        elLog.appendChild(row);
+        while (elLog.childElementCount > MAX_ROWS) elLog.removeChild(elLog.firstChild);
+        if (stick) elLog.scrollTop = elLog.scrollHeight;
+      }
+
+      function connect() {
+        const es = new EventSource("/api/logs/stream");
+        es.onopen = () => {
+          elStatus.textContent = "live";
+          elDot.className = "dot on";
+        };
+        es.onmessage = (e) => {
+          try {
+            append(JSON.parse(e.data));
+          } catch {}
+        };
+        es.onerror = () => {
+          elStatus.textContent = "reconnecting…";
+          elDot.className = "dot off";
+          // EventSource auto-reconnects; no manual retry needed
+        };
+      }
+      connect();
+    </script>
+  </body>
+</html>

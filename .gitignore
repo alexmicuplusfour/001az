@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# server-owned data — lives on the droplet, never in git
+gallery/
+thumbnails/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# local scratch / tooling state (settings.local.json holds credentials)
+.claude/
+pets-test/
+
+# personal deploy tooling for the author's own instance
+deploy.py
+deploy.local.json
+
+# personal working files — kept locally, not part of the published project
+ui-redesign-taxonomy.md
+tags.json
+populate.js
+serve.js
+clear-tags.js

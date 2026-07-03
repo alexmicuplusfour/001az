@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>admin · 001</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #fff;
+        color: #111;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 28px 24px 60px;
+      }
+      h1 { font-size: 19px; margin: 0 0 4px; }
+      .sub { color: #6b6b72; margin: 0 0 22px; }
+      a { color: #2563eb; }
+      .gate { color: #6b6b72; padding: 40px 0; }
+      form { display: flex; gap: 8px; margin-bottom: 22px; flex-wrap: wrap; }
+      input {
+        flex: 1;
+        min-width: 140px;
+        padding: 8px 10px;
+        border: 1px solid #d8d8de;
+        border-radius: 7px;
+        font: inherit;
+      }
+      button {
+        border: 1px solid transparent;
+        border-radius: 7px;
+        padding: 8px 14px;
+        font: inherit;
+        cursor: pointer;
+        background: #111;
+        color: #fff;
+      }
+      button.ghost { background: #f1f1f3; color: #111; }
+      button.ghost:hover { background: #e6e6ea; }
+      button.danger { background: transparent; color: #d33; border-color: #f0caca; }
+      button.danger:hover { background: #fdeaea; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid #eee; font-size: 13px; }
+      th { color: #6b6b72; font-weight: 600; }
+      td .email { color: #6b6b72; font-size: 12px; }
+      .badge { font-size: 11px; background: #eef; color: #224; padding: 1px 6px; border-radius: 999px; }
+      .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+      .linkbox {
+        margin: 10px 0 0;
+        padding: 10px 12px;
+        background: #f6f8ff;
+        border: 1px solid #d9e2ff;
+        border-radius: 8px;
+        font-size: 12px;
+        word-break: break-all;
+        display: none;
+      }
+      .linkbox.show { display: block; }
+      .linkbox code { color: #1d4ed8; }
+      .muted { color: #9aa0aa; }
+      .section { margin-top: 40px; }
+      .section h2 { font-size: 16px; margin: 0 0 4px; }
+      .section .sub { margin: 0 0 18px; }
+      textarea {
+        width: 100%;
+        font: 12px/1.5 "SF Mono", Consolas, monospace;
+        padding: 8px 10px;
+        border: 1px solid #d8d8de;
+        border-radius: 7px;
+        resize: vertical;
+        box-sizing: border-box;
+      }
+      .inline-edit { background: #f8f8fb; border: 1px solid #e4e4ec; border-radius: 8px; padding: 14px; margin: 8px 0 6px; }
+      .inline-edit label { display: block; font-size: 12px; color: #6b6b72; margin-bottom: 4px; }
+      .inline-edit input, .inline-edit textarea { margin-bottom: 10px; }
+      .row-actions-wrap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+
+      /* facet editor */
+      .fe-root { margin-bottom: 10px; }
+      .fe-facet { margin-bottom: 10px; }
+      .fe-head { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+      input.fe-label { flex: none; width: 240px; padding: 5px 8px; font: inherit; font-weight: 500; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
+      .fe-key-hint { font-size: 11px; color: #b0b0b8; font-family: "SF Mono", Consolas, monospace; white-space: nowrap; }
+      .fe-val-row input { flex: none; width: 240px; padding: 4px 8px; font: inherit; font-size: 13px; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
+      .fe-values { padding-left: 22px; }
+      .fe-val-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+      .fe-single { display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1; color: #6b6b72; cursor: pointer; white-space: nowrap; user-select: none; margin-left: auto; }
+      .fe-single input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; border: none; border-radius: 0; background: none; cursor: pointer; }
+      .fe-rm { display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #bbb; cursor: pointer; padding: 2px 4px; font-size: 15px; line-height: 1; border-radius: 4px; }
+      .fe-rm:hover { color: #d33; background: #fdeaea; }
+      .fe-add-val { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 2px 0; margin-top: 2px; display: block; }
+      .fe-add-val:hover { text-decoration: underline; }
+      .fe-add-facet { margin-top: 4px; background: none; border: 1px dashed #ccc; border-radius: 6px; padding: 5px 14px; cursor: pointer; color: #6b6b72; font: inherit; font-size: 13px; }
+      .fe-add-facet:hover { border-color: #999; color: #111; }
+      .fe-toolbar { display: flex; gap: 6px; }
+      .fe-clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }
+      .fe-clip-btn:hover { border-color: #999; color: #111; }
+      .modal-overlay { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+      .modal-dialog { background: #fff; border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,0.22); width: 600px; max-width: calc(100vw - 48px); max-height: calc(100vh - 64px); display: flex; flex-direction: column; overflow: hidden; }
+      .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #eee; flex-shrink: 0; }
+      .modal-title { font-size: 15px; font-weight: 600; margin: 0; }
+      .modal-close { background: none; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: #aaa; padding: 0 2px; }
+      .modal-close:hover { color: #111; }
+      .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
+      .modal-footer { padding: 14px 20px; border-top: 1px solid #eee; display: flex; gap: 8px; flex-shrink: 0; }
+      .modal-body > label { display: block; font-size: 12px; color: #6b6b72; margin-bottom: 4px; }
+      .modal-body > input, .modal-body > textarea { margin-bottom: 10px; }
+      .access-wrap { position: relative; }
+      .access-drop { position: absolute; top: calc(100% + 4px); right: 0; background: #fff; border: 1px solid #d8d8de; border-radius: 8px; padding: 10px 12px; min-width: 200px; box-shadow: 0 4px 16px rgba(0,0,0,.1); z-index: 100; }
+      .access-drop-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+      .access-drop-list label { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+      .access-drop-list label.is-admin { color: #9aa0aa; cursor: default; }
+      .access-drop-list input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>Colleagues</h1>
+    <p class="sub">Invite-only access. Add an email, then send them the generated login link. <a href="/">← gallery</a></p>
+    <div id="content"><p class="gate">Checking access…</p></div>
+    <div id="boards-content"></div>
+    <div id="ai-config-content"></div>
+
+    <script>
+      const content = document.getElementById("content");
+
+      function buildFacetEditor(textarea) {
+        textarea.hidden = true;
+        let facets = [];
+        try { facets = JSON.parse(textarea.value) || []; } catch {}
+
+        const copyJsonBtn = document.createElement("button");
+        copyJsonBtn.type = "button";
+        copyJsonBtn.className = "fe-clip-btn";
+        copyJsonBtn.textContent = "Copy JSON";
+        copyJsonBtn.onclick = () => {
+          navigator.clipboard.writeText(textarea.value).then(() => {
+            const prev = copyJsonBtn.textContent;
+            copyJsonBtn.textContent = "Copied!";
+            setTimeout(() => (copyJsonBtn.textContent = prev), 1200);
+          });
+        };
+        const pasteJsonBtn = document.createElement("button");
+        pasteJsonBtn.type = "button";
+        pasteJsonBtn.className = "fe-clip-btn";
+        pasteJsonBtn.textContent = "Paste JSON";
+        pasteJsonBtn.onclick = async () => {
+          try {
+            const text = await navigator.clipboard.readText();
+            const parsed = JSON.parse(text);
+            if (!Array.isArray(parsed)) throw new Error();
+            facets = parsed;
+            render();
+            sync();
+          } catch { alert("Clipboard doesn't contain valid facets JSON."); }
+        };
+        const prevLabel = textarea.previousElementSibling;
+        if (prevLabel) {
+          prevLabel.style.cssText += "; display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;";
+          const btnGroup = document.createElement("div");
+          btnGroup.className = "fe-toolbar";
+          btnGroup.append(copyJsonBtn, pasteJsonBtn);
+          prevLabel.appendChild(btnGroup);
+        }
+
+        const root = document.createElement("div");
+        root.className = "fe-root";
+        textarea.insertAdjacentElement("afterend", root);
+
+        function sync() {
+          textarea.value = JSON.stringify(facets.map((f) => {
+            const out = { key: f.key, label: f.label, values: f.values };
+            if (f.single) out.single = true;
+            return out;
+          }));
+        }
+
+        function render() {
+          root.replaceChildren();
+          facets.forEach((f, fi) => {
+            const facetEl = document.createElement("div");
+            facetEl.className = "fe-facet";
+
+            const head = document.createElement("div");
+            head.className = "fe-head";
+
+            const labelIn = document.createElement("input");
+            labelIn.className = "fe-label";
+            labelIn.placeholder = "Label";
+            labelIn.value = f.label || "";
+            labelIn.oninput = () => {
+              f.label = labelIn.value;
+              if (f._new) {
+                f.key = f.label.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+                keyHint.textContent = f.key;
+              }
+              sync();
+            };
+
+            const rmFacet = document.createElement("button");
+            rmFacet.className = "fe-rm";
+            rmFacet.type = "button";
+            rmFacet.textContent = "×";
+            rmFacet.onclick = () => { facets.splice(fi, 1); render(); sync(); };
+
+            const keyHint = document.createElement("span");
+            keyHint.className = "fe-key-hint";
+            keyHint.textContent = f.key || "";
+
+            const singleWrap = document.createElement("span");
+            singleWrap.style.cssText = "display:flex;align-items:center;gap:5px;margin-left:auto;font-size:11px;color:#6b6b72;cursor:pointer;white-space:nowrap;user-select:none;";
+            const singleCb = document.createElement("input");
+            singleCb.type = "checkbox";
+            singleCb.checked = !!f.single;
+            singleCb.style.cssText = "flex:none;width:13px;height:13px;min-width:0;padding:0;margin:0;border:1px solid #bbb;border-radius:3px;cursor:pointer;";
+            singleCb.addEventListener("click", (e) => e.stopPropagation());
+            singleCb.onchange = () => { f.single = singleCb.checked; sync(); };
+            const singleTxt = document.createElement("span");
+            singleTxt.textContent = "single value";
+            singleWrap.append(singleCb, singleTxt);
+            singleWrap.addEventListener("click", () => {
+              singleCb.checked = !singleCb.checked;
+              f.single = singleCb.checked;
+              sync();
+            });
+
+            head.append(labelIn, keyHint, rmFacet, singleWrap);
+            facetEl.appendChild(head);
+
+            const valuesEl = document.createElement("div");
+            valuesEl.className = "fe-values";
+            (f.values || []).forEach((v, vi) => {
+              const row = document.createElement("div");
+              row.className = "fe-val-row";
+              const valIn = document.createElement("input");
+              valIn.placeholder = "value";
+              valIn.value = v;
+              valIn.oninput = () => {
+                const clean = valIn.value.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9+\-]/g, "");
+                if (valIn.value !== clean) {
+                  const pos = valIn.selectionStart;
+                  valIn.value = clean;
+                  valIn.setSelectionRange(pos, pos);
+                }
+                f.values[vi] = clean;
+                sync();
+              };
+              const rmVal = document.createElement("button");
+              rmVal.className = "fe-rm";
+              rmVal.type = "button";
+              rmVal.textContent = "×";
+              rmVal.onclick = () => { f.values.splice(vi, 1); render(); sync(); };
+              row.append(valIn, rmVal);
+              valuesEl.appendChild(row);
+            });
+
+            const addVal = document.createElement("button");
+            addVal.className = "fe-add-val";
+            addVal.type = "button";
+            addVal.textContent = "+ value";
+            addVal.onclick = () => {
+              f.values = f.values || [];
+              f.values.push("");
+              render();
+              sync();
+              root.querySelectorAll(".fe-facet")[fi]?.querySelectorAll(".fe-val-row input").item(f.values.length - 1)?.focus();
+            };
+            valuesEl.appendChild(addVal);
+            facetEl.appendChild(valuesEl);
+            root.appendChild(facetEl);
+          });
+
+          const addFacet = document.createElement("button");
+          addFacet.className = "fe-add-facet";
+          addFacet.type = "button";
+          addFacet.textContent = "+ facet";
+          addFacet.onclick = () => {
+            facets.push({ key: "", label: "", values: [], _new: true });
+            render();
+            sync();
+            root.querySelectorAll(".fe-label").item(facets.length - 1)?.focus();
+          };
+          root.appendChild(addFacet);
+        }
+
+        render();
+        sync();
+      }
+
+      async function api(method, url, body) {
+        const r = await fetch(url, {
+          method,
+          headers: body ? { "Content-Type": "application/json" } : {},
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+        return r.json();
+      }
+
+      function copy(text, btn) {
+        navigator.clipboard.writeText(text).then(() => {
+          const t = btn.textContent;
+          btn.textContent = "copied!";
+          setTimeout(() => (btn.textContent = t), 1200);
+        });
+      }
+
+      async function render() {
+        const me = await fetch("/api/me").then((r) => r.json());
+        if (!me || !me.is_admin) {
+          content.innerHTML = '<p class="gate">Not authorized. <a href="/">Back to gallery</a></p>';
+          return;
+        }
+        const users = await api("GET", "/api/admin/users");
+        content.innerHTML = `
+          <form id="add">
+            <input id="name" placeholder="Name (optional)" />
+            <input id="email" type="email" placeholder="colleague@email.com" required />
+            <button type="submit">Add & make link</button>
+          </form>
+          <div class="linkbox" id="linkbox"></div>
+          <table>
+            <thead><tr><th>Name</th><th>Last login</th><th>♥ given</th><th></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>`;
+
+        const rows = document.getElementById("rows");
+        for (const u of users) {
+          u.link = u.link_token ? `${location.origin}/auth/${u.link_token}` : null;
+
+          const tr = document.createElement("tr");
+          const last = u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : '<span class="muted">never</span>';
+          tr.innerHTML = `
+            <td><div>${u.name || "—"} ${u.is_admin ? '<span class="badge">admin</span>' : ""}</div><div class="email">${u.email}</div></td>
+            <td>${last}</td>
+            <td>${u.hearts_given}</td>
+            <td><div class="row-actions"></div></td>`;
+          const act = tr.querySelector(".row-actions");
+
+          const copyBtn = document.createElement("button");
+          copyBtn.className = "ghost";
+          copyBtn.textContent = "copy link";
+          copyBtn.disabled = !u.link;
+          if (u.link) copyBtn.onclick = () => copy(u.link, copyBtn);
+          act.appendChild(copyBtn);
+
+          const newLinkBtn = document.createElement("button");
+          newLinkBtn.className = "ghost";
+          newLinkBtn.textContent = u.link ? "new link" : "make link";
+          newLinkBtn.onclick = async () => {
+            newLinkBtn.disabled = true;
+            try {
+              const { link } = await api("POST", `/api/admin/users/${u.id}/link`);
+              u.link = link;
+              copyBtn.disabled = false;
+              copyBtn.onclick = () => copy(u.link, copyBtn);
+              newLinkBtn.textContent = "new link";
+              showLink(u.email, link);
+              copy(link, copyBtn);
+            } catch (err) {
+              alert("Error: " + err.message);
+            } finally {
+              newLinkBtn.disabled = false;
+            }
+          };
+          act.appendChild(newLinkBtn);
+
+          if (!u.is_admin) {
+            const del = document.createElement("button");
+            del.className = "danger";
+            del.textContent = "remove";
+            del.onclick = async () => {
+              if (!confirm(`Remove ${u.email}? They lose access immediately.`)) return;
+              await api("DELETE", `/api/admin/users/${u.id}`);
+              render();
+            };
+            act.appendChild(del);
+          }
+          rows.appendChild(tr);
+        }
+
+        document.getElementById("add").onsubmit = async (e) => {
+          e.preventDefault();
+          const email = document.getElementById("email").value.trim();
+          const name = document.getElementById("name").value.trim();
+          try {
+            const { user, link } = await api("POST", "/api/admin/users", { email, name });
+            showLink(user.email, link);
+            render();
+          } catch (err) {
+            alert("Error: " + err.message);
+          }
+        };
+      }
+
+      function showLink(email, link) {
+        const box = document.getElementById("linkbox");
+        box.classList.add("show");
+        box.innerHTML = `Login link for <b>${email}</b>:<br><code>${link}</code> `;
+        const b = document.createElement("button");
+        b.className = "ghost";
+        b.textContent = "copy";
+        b.style.marginTop = "8px";
+        b.onclick = () => copy(link, b);
+        box.appendChild(b);
+      }
+
+      render().catch((e) => (content.innerHTML = '<p class="gate">Error loading. <a href="/">Back</a></p>'));
+
+      // --- Boards ---
+      const boardsContent = document.getElementById("boards-content");
+
+      function boardUrl(id) {
+        return `${location.origin}/?board=${id}`;
+      }
+
+      function defaultFacetsJson() {
+        return JSON.stringify([
+          { key: "category", label: "Category", single: true, values: ["tops", "bottoms", "footwear", "accessories", "outerwear"] },
+          { key: "season", label: "Season", values: ["summer", "winter", "spring-fall", "year-round"] },
+          { key: "formality", label: "Formality", single: true, values: ["casual", "workwear", "formal", "athletic"] }
+        ], null, 2);
+      }
+
+      async function renderBoards() {
+        const me = await fetch("/api/me").then((r) => r.json());
+        if (!me || !me.is_admin) return;
+
+        let boards;
+        try {
+          boards = await api("GET", "/api/admin/boards");
+        } catch { return; }
+
+        const sec = document.createElement("div");
+        sec.className = "section";
+        sec.innerHTML = `<h2>Boards</h2><p class="sub">Each board has its own images, taxonomy, and URL. Share the URL to give access.</p>`;
+
+        // Board table
+        const table = document.createElement("table");
+        table.innerHTML = `<thead><tr><th>Name</th><th>Images</th><th></th></tr></thead>`;
+        const tbody = document.createElement("tbody");
+
+        for (const b of boards) {
+          const url = boardUrl(b.id);
+
+          const tr = document.createElement("tr");
+          tr.id = `board-row-${b.id}`;
+          tr.innerHTML = `
+            <td><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></td>
+            <td>${b.image_count}</td>
+            <td></td>`;
+
+          const actCell = tr.querySelector("td:last-child");
+          const wrap = document.createElement("div");
+          wrap.className = "row-actions-wrap";
+
+          const editBtn = document.createElement("button");
+          editBtn.className = "ghost";
+          editBtn.textContent = "edit";
+          editBtn.onclick = () => openEditModal(b);
+          wrap.appendChild(editBtn);
+
+          const accessWrap = document.createElement("div");
+          accessWrap.className = "access-wrap";
+          const accessBtn = document.createElement("button");
+          accessBtn.className = "ghost";
+          accessBtn.textContent = "access ▾";
+          accessBtn.onclick = (e) => { e.stopPropagation(); toggleAccessDrop(b, accessWrap); };
+          accessWrap.appendChild(accessBtn);
+          wrap.appendChild(accessWrap);
+
+          const retagBtn = document.createElement("button");
+          retagBtn.className = "danger";
+          retagBtn.textContent = "retag ↺";
+          retagBtn.title = "Re-queue all images in this board for AI tagging";
+          retagBtn.onclick = async () => {
+            if (!confirm(`Re-tag all ${b.image_count} image(s) in "${b.name}"? Existing tags will be cleared and reprocessed.`)) return;
+            try {
+              retagBtn.disabled = true;
+              retagBtn.textContent = "queuing…";
+              const { queued } = await api("POST", `/api/admin/boards/${b.id}/retag`);
+              retagBtn.textContent = `queued ${queued}`;
+              setTimeout(() => { retagBtn.textContent = "retag ↺"; retagBtn.disabled = false; }, 3000);
+            } catch (err) {
+              alert("Error: " + err.message);
+              retagBtn.textContent = "retag ↺";
+              retagBtn.disabled = false;
+            }
+          };
+          wrap.appendChild(retagBtn);
+
+          const delBtn = document.createElement("button");
+          delBtn.className = "danger";
+          delBtn.textContent = "delete";
+          delBtn.onclick = async () => {
+            const msg = b.image_count > 0
+              ? `Delete board "${b.name}" and its ${b.image_count} image(s)? This cannot be undone.`
+              : `Delete board "${b.name}"?`;
+            if (!confirm(msg)) return;
+            try {
+              await api("DELETE", `/api/admin/boards/${b.id}`);
+              renderBoards();
+            } catch (err) { alert("Error: " + err.message); }
+          };
+          wrap.appendChild(delBtn);
+
+          actCell.appendChild(wrap);
+          tbody.appendChild(tr);
+        }
+
+        table.appendChild(tbody);
+        sec.appendChild(table);
+
+        // Create form
+        const createSec = document.createElement("div");
+        createSec.style.marginTop = "20px";
+        createSec.innerHTML = `<button id="show-create-board" class="ghost">+ New board</button>`;
+        const createForm = document.createElement("div");
+        createForm.className = "inline-edit";
+        createForm.hidden = true;
+        createForm.innerHTML = `
+          <label>Board name</label>
+          <input id="new-board-name" placeholder="e.g. Wardrobe Items" style="width:100%;margin-bottom:10px" />
+          <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
+          <textarea id="new-board-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
+          <label>Facets</label>
+          <textarea id="new-board-facets" rows="12">${defaultFacetsJson()}</textarea>
+          <div style="display:flex;gap:8px">
+            <button id="create-board-submit">Create board</button>
+            <button class="ghost" id="cancel-create-board">Cancel</button>
+          </div>`;
+
+        createSec.appendChild(createForm);
+        sec.appendChild(createSec);
+
+        boardsContent.replaceChildren(sec);
+        buildFacetEditor(document.getElementById("new-board-facets"));
+
+        document.getElementById("show-create-board").onclick = () => {
+          createForm.hidden = !createForm.hidden;
+          if (!createForm.hidden) document.getElementById("new-board-name").focus();
+        };
+        document.getElementById("cancel-create-board").onclick = () => { createForm.hidden = true; };
+        document.getElementById("create-board-submit").onclick = async () => {
+          const name = document.getElementById("new-board-name").value.trim();
+          if (!name) return alert("Name required.");
+          const context = document.getElementById("new-board-context").value.trim();
+          let facets;
+          try { facets = JSON.parse(document.getElementById("new-board-facets").value); }
+          catch { return alert("Facets JSON is invalid."); }
+          if (!Array.isArray(facets)) return alert("Facets must be a JSON array.");
+          try {
+            await api("POST", "/api/admin/boards", { name, context, facets });
+            renderBoards();
+          } catch (err) { alert("Error: " + err.message); }
+        };
+      }
+
+      async function toggleAccessDrop(board, container) {
+        const existing = document.getElementById(`access-drop-${board.id}`);
+        if (existing) { existing.remove(); return; }
+        document.querySelectorAll(".access-drop").forEach((d) => d.remove());
+
+        let users;
+        try { users = await api("GET", "/api/admin/users"); }
+        catch { return; }
+
+        const drop = document.createElement("div");
+        drop.className = "access-drop";
+        drop.id = `access-drop-${board.id}`;
+
+        const listEl = document.createElement("div");
+        listEl.className = "access-drop-list";
+        const memberSet = new Set(board.memberIds || []);
+        const nonAdmins = users.filter((u) => !u.is_admin);
+        for (const u of users) {
+          const lbl = document.createElement("label");
+          lbl.className = u.is_admin ? "is-admin" : "";
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.value = u.id;
+          cb.checked = u.is_admin || memberSet.has(u.id);
+          cb.disabled = !!u.is_admin;
+          const nameEl = document.createElement("span");
+          nameEl.textContent = (u.name || u.email) + (u.is_admin ? " (admin)" : "");
+          lbl.append(cb, nameEl);
+          listEl.appendChild(lbl);
+        }
+        drop.appendChild(listEl);
+
+        const saveBtn = document.createElement("button");
+        saveBtn.textContent = "Save";
+        saveBtn.onclick = async () => {
+          const memberIds = [...listEl.querySelectorAll("input:not(:disabled):checked")].map((cb) => Number(cb.value));
+          try {
+            await api("PATCH", `/api/admin/boards/${board.id}`, { memberIds });
+            board.memberIds = memberIds;
+            drop.remove();
+          } catch (err) { alert("Error: " + err.message); }
+        };
+        drop.appendChild(saveBtn);
+        container.appendChild(drop);
+
+        function onOutside(e) {
+          if (!container.contains(e.target)) {
+            drop.remove();
+            document.removeEventListener("click", onOutside);
+          }
+        }
+        setTimeout(() => document.addEventListener("click", onOutside), 0);
+      }
+
+      function openEditModal(board) {
+        document.getElementById("board-edit-modal")?.remove();
+
+        const overlay = document.createElement("div");
+        overlay.className = "modal-overlay";
+        overlay.id = "board-edit-modal";
+
+        const dialog = document.createElement("div");
+        dialog.className = "modal-dialog";
+        dialog.addEventListener("click", (e) => e.stopPropagation());
+
+        const header = document.createElement("div");
+        header.className = "modal-header";
+        const title = document.createElement("div");
+        title.className = "modal-title";
+        title.textContent = board.name;
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "modal-close";
+        closeBtn.type = "button";
+        closeBtn.textContent = "×";
+        closeBtn.onclick = () => overlay.remove();
+        header.append(title, closeBtn);
+
+        const body = document.createElement("div");
+        body.className = "modal-body";
+        body.innerHTML = `
+          <label>Board name</label>
+          <input id="edit-name-${board.id}" value="${board.name}" style="width:100%" />
+          <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
+          <textarea id="edit-context-${board.id}" rows="5">${board.context || ""}</textarea>
+          <label>Facets</label>
+          <textarea id="edit-facets-${board.id}" rows="12">${JSON.stringify(board.facets, null, 2)}</textarea>`;
+
+        const footer = document.createElement("div");
+        footer.className = "modal-footer";
+        footer.innerHTML = `<button id="save-board-${board.id}">Save</button><button class="ghost" id="cancel-edit-${board.id}">Cancel</button>`;
+
+        dialog.append(header, body, footer);
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        document.body.style.overflow = "hidden";
+
+        function close() { overlay.remove(); document.body.style.overflow = ""; document.removeEventListener("keydown", onKey); }
+        closeBtn.onclick = close;
+        overlay.addEventListener("remove", () => document.body.style.overflow = "");
+
+        let mdOnOverlay = false;
+        overlay.addEventListener("mousedown", (e) => { mdOnOverlay = e.target === overlay; });
+        overlay.addEventListener("click", (e) => { if (e.target === overlay && mdOnOverlay) close(); });
+        const onKey = (e) => { if (e.key === "Escape") close(); };
+        document.addEventListener("keydown", onKey);
+
+        buildFacetEditor(document.getElementById(`edit-facets-${board.id}`));
+        document.getElementById(`edit-name-${board.id}`).focus();
+
+        document.getElementById(`cancel-edit-${board.id}`).onclick = close;
+        document.getElementById(`save-board-${board.id}`).onclick = async () => {
+          const name = document.getElementById(`edit-name-${board.id}`).value.trim();
+          if (!name) return alert("Name required.");
+          const context = document.getElementById(`edit-context-${board.id}`).value.trim();
+          let facets;
+          try { facets = JSON.parse(document.getElementById(`edit-facets-${board.id}`).value); }
+          catch { return alert("Facets JSON is invalid."); }
+          if (!Array.isArray(facets)) return alert("Facets must be a JSON array.");
+          try {
+            await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets });
+            close();
+            renderBoards();
+          } catch (err) { alert("Error: " + err.message); }
+        };
+      }
+
+      renderBoards().catch(() => {});
+
+      // --- AI Config ---
+      const KNOWN_MODELS = [
+        { id: "claude-haiku-4-5", label: "Haiku 4.5 — fast, cheapest" },
+        { id: "claude-sonnet-4-6", label: "Sonnet 4.6 — balanced" },
+        { id: "claude-opus-4-8", label: "Opus 4.8 — sharpest, most expensive" },
+      ];
+
+      async function renderAiConfig() {
+        const me = await fetch("/api/me").then((r) => r.json());
+        if (!me || !me.is_admin) return;
+
+        let cfg;
+        try { cfg = await api("GET", "/api/admin/ai-config"); } catch { return; }
+
+        const sec = document.createElement("div");
+        sec.className = "section";
+        sec.id = "ai-config-section";
+        sec.innerHTML = `<h2>AI Tagger</h2><p class="sub">Model and API key used for automatic image tagging.</p>`;
+
+        const grid = document.createElement("div");
+        grid.style.cssText = "display:flex;flex-direction:column;gap:14px;max-width:480px;";
+
+        // Model row
+        const modelRow = document.createElement("div");
+        modelRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Model</label>`;
+        const modelSel = document.createElement("select");
+        modelSel.style.cssText = "width:100%;padding:8px 10px;border:1px solid #d8d8de;border-radius:7px;font:inherit;background:#fff;";
+        for (const m of KNOWN_MODELS) {
+          const opt = document.createElement("option");
+          opt.value = m.id;
+          opt.textContent = m.id + " — " + m.label.split("—")[1].trim();
+          if (m.id === cfg.model) opt.selected = true;
+          modelSel.appendChild(opt);
+        }
+        // If current model isn't in the list, add it
+        if (!KNOWN_MODELS.find((m) => m.id === cfg.model)) {
+          const opt = document.createElement("option");
+          opt.value = cfg.model;
+          opt.textContent = cfg.model;
+          opt.selected = true;
+          modelSel.insertBefore(opt, modelSel.firstChild);
+        }
+        modelRow.appendChild(modelSel);
+        grid.appendChild(modelRow);
+
+        // Key row
+        const keyRow = document.createElement("div");
+        const keySourceLabel = cfg.keySource === "db" ? "DB key set" : cfg.keySource === "env" ? "env var active" : "no key — tagging disabled";
+        const keySourceColor = cfg.keySource === "none" ? "#d33" : "#2a7a2a";
+        keyRow.innerHTML = `
+          <label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">
+            API Key <span id="key-status" style="color:${keySourceColor};margin-left:6px;">${keySourceLabel}</span>
+          </label>`;
+        const keyWrap = document.createElement("div");
+        keyWrap.style.cssText = "display:flex;gap:6px;";
+        const keyInput = document.createElement("input");
+        keyInput.type = "password";
+        keyInput.placeholder = cfg.keySource !== "none" ? "Enter new key to replace…" : "sk-ant-…";
+        keyInput.autocomplete = "off";
+        keyInput.style.cssText = "flex:1;padding:8px 10px;border:1px solid #d8d8de;border-radius:7px;font:inherit;font-family:\"SF Mono\",Consolas,monospace;font-size:13px;";
+        const showBtn = document.createElement("button");
+        showBtn.type = "button";
+        showBtn.className = "ghost";
+        showBtn.textContent = "show";
+        showBtn.style.flexShrink = "0";
+        showBtn.onclick = () => {
+          keyInput.type = keyInput.type === "password" ? "text" : "password";
+          showBtn.textContent = keyInput.type === "password" ? "show" : "hide";
+        };
+        keyWrap.append(keyInput, showBtn);
+
+        if (cfg.keySource === "db") {
+          const clearBtn = document.createElement("button");
+          clearBtn.type = "button";
+          clearBtn.className = "danger";
+          clearBtn.textContent = "remove";
+          clearBtn.style.flexShrink = "0";
+          clearBtn.onclick = async () => {
+            if (!confirm("Remove the stored API key? Tagging will fall back to the env var (or stop if none).")) return;
+            try {
+              await api("DELETE", "/api/admin/ai-config/key");
+              renderAiConfig();
+            } catch (err) { alert("Error: " + err.message); }
+          };
+          keyWrap.appendChild(clearBtn);
+        }
+        keyRow.appendChild(keyWrap);
+        grid.appendChild(keyRow);
+
+        // Action row
+        const actionRow = document.createElement("div");
+        actionRow.style.cssText = "display:flex;gap:8px;align-items:center;";
+
+        const saveBtn = document.createElement("button");
+        saveBtn.textContent = "Save";
+        saveBtn.onclick = async () => {
+          saveBtn.disabled = true;
+          saveBtn.textContent = "Saving…";
+          try {
+            const body = { model: modelSel.value };
+            const key = keyInput.value.trim();
+            if (key) body.apiKey = key;
+            await api("POST", "/api/admin/ai-config", body);
+            keyInput.value = "";
+            await renderAiConfig();
+          } catch (err) {
+            alert("Error: " + err.message);
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Save";
+          }
+        };
+
+        const testBtn = document.createElement("button");
+        testBtn.className = "ghost";
+        testBtn.textContent = "Test";
+        const testStatus = document.createElement("span");
+        testStatus.style.cssText = "font-size:13px;";
+        testBtn.onclick = async () => {
+          testBtn.disabled = true;
+          testBtn.textContent = "Testing…";
+          testStatus.textContent = "";
+          try {
+            const { model: m } = await api("POST", "/api/admin/ai-config/test");
+            testStatus.style.color = "#2a7a2a";
+            testStatus.textContent = `✓ ${m} reachable`;
+          } catch (err) {
+            testStatus.style.color = "#d33";
+            testStatus.textContent = "✗ " + err.message;
+          } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = "Test";
+          }
+        };
+
+        actionRow.append(saveBtn, testBtn, testStatus);
+        grid.appendChild(actionRow);
+        sec.appendChild(grid);
+
+        document.getElementById("ai-config-content").replaceChildren(sec);
+      }
+
+      renderAiConfig().catch(() => {});
+    </script>
+  </body>
+</html>

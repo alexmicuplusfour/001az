@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gallery</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <div id="toolbar"></div>
+      <div id="toolbar-sub"></div>
+    </header>
+    <div id="filters"></div>
+    <main id="grid"></main>
+    <div id="grid-sentinel" aria-hidden="true"></div>
+
+    <input id="file-input" type="file" accept="image/*" multiple hidden />
+    <div id="drop-overlay" hidden><div class="drop-hint">Drop images to upload</div></div>
+
+    <div id="lightbox" class="lightbox" hidden>
+      <button id="lightbox-prev" class="lightbox-nav prev" aria-label="Previous">‹</button>
+      <img id="lightbox-img" alt="" />
+      <button id="lightbox-next" class="lightbox-nav next" aria-label="Next">›</button>
+      <div id="lightbox-controls" class="lightbox-controls">
+        <button id="lightbox-crate" class="lightbox-action lightbox-crate" hidden></button>
+        <button id="lightbox-fav" class="lightbox-action lightbox-fav" hidden></button>
+      </div>
+      <div id="lightbox-tags" class="lightbox-tags"></div>
+      <div id="lightbox-count" class="lightbox-count"></div>
+    </div>
+
+    <div id="filter-drawer" class="filter-drawer">
+      <div class="filter-drawer-scrim" id="filter-drawer-scrim"></div>
+      <div class="filter-drawer-panel">
+        <div class="filter-drawer-head">
+          <span class="filter-drawer-title">Filters</span>
+          <button id="filter-drawer-close" class="filter-drawer-close">Done</button>
+        </div>
+        <div id="filters-mobile"></div>
+      </div>
+    </div>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
