@@ -300,6 +300,9 @@ main#grid {
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
 }
 
+.upload-status[hidden] {
+  display: none; /* display:flex below would otherwise defeat the hidden attribute */
+}
 .upload-status {
   position: fixed;
   bottom: 24px;
