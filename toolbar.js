@@ -106,7 +106,7 @@ export function renderToolbar(resultCount) {
     }
 
     if (state.me) {
-      elToolbar.appendChild(toolBtn("+", "upload", triggerFilePicker));
+      elToolbar.appendChild(toolBtn(ICONS.plus, "upload", triggerFilePicker));
     }
   }
 

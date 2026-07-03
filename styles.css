@@ -232,7 +232,14 @@ main#grid {
   background: var(--pill-active);
   color: #fff;
   border-color: var(--pill-active);
-  font-weight: 500;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.tool-btn.upload svg {
+  width: 17px;
+  height: 17px;
 }
 .tool-btn.upload:hover {
   background: #000;

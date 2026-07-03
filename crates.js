@@ -43,6 +43,9 @@ async function toggleCrateImageApi(img, crateId, checkbox) {
     const crate = state.crates.find((c) => c.id === crateId);
     if (crate) crate.image_count = count;
     if (state.selectedCrateId === crateId && !added) {
+      // The image just left the filtered crate: its card is about to be
+      // re-rendered away, so a card-anchored pop would be left orphaned.
+      if (cratePopState && cratePopState.card) closeCratePop(true);
       document.dispatchEvent(new Event('app:render'));
     } else {
       // Targeted update: only the lightbox crate button needs refreshing.
