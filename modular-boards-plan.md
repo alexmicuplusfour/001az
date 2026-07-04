@@ -15,8 +15,9 @@ Shipped ahead of the refactor, on the image-only codebase:
 - **Per-board token usage** — `ai_board_usage` (call count + input/output/cache-read tokens) with a 14-day sparkline in admin.
 - **Tag snapshots (2026-07-05)** — every tagging event appends `{source: 'ai'|'user', tags, reasoning, undecided, tagged_at}` to `tag_snapshots` (AI runs via `markTagged`, manual edits via `setImageTags`), so scheduled retags accrue history instead of overwriting it. Keyed `image_id` until the items rename; no UI yet.
 - **Daily cap removed (2026-07-05)** — worker gate, compose/env passthrough, README row all deleted; `ai_board_usage` + the sparkline is the spend visibility, cadence is the control.
+- **Migration step 1 (2026-07-05)** — `images` → `items` with the image columns folded into a `payload` JSONB (`{filename, original_name, w, h}`); `favorites.item_id`, `crate_images` → `crate_items.item_id`, `tag_snapshots.item_id`; `boards.type` (default `'image'`); UNIQUE(filename) carried over as an expression index. Live DBs migrate via a guarded transactional rename in `initDb` (verified on the real dev DB, 116 items); the sqlite→pg ETL writes the new shape directly. db.js function names (`listImages` etc.) intentionally unchanged — they get re-homed when the adapter forms in step 2. API shapes untouched; zero frontend changes.
 
-Not started: everything type-shaped — the `items` generalization, adapters/registries, ctx, the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
+Not started: adapters/registries, ctx, route renames, the type picker, the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
 
 ---
 
@@ -71,7 +72,7 @@ CREATE TABLE IF NOT EXISTS tag_snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_item ON tag_snapshots(item_id, tagged_at);
 ```
 
-Two earlier drafts of this plan are superseded by shipped work: per-item `refresh_after`/`retag_after` timers are gone (retag shipped **board-level** via `auto_tag_next_run_at`, and refresh mirrors that — a board's items share one staleness profile), and the planned `ai_usage_v2` table shipped richer as `ai_board_usage` (token counts split by input/output/cache-read, sparkline in admin) — nothing left to build there.
+✅ **This data model shipped 2026-07-05** (migration step 1) exactly as above, except `refresh_every_min` — that lands with the refresh loop (step 7). Two earlier drafts of this plan are superseded by shipped work: per-item `refresh_after`/`retag_after` timers are gone (retag shipped **board-level** via `auto_tag_next_run_at`, and refresh mirrors that — a board's items share one staleness profile), and the planned `ai_usage_v2` table shipped richer as `ai_board_usage` (token counts split by input/output/cache-read, sparkline in admin) — nothing left to build there.
 
 Migration mechanics: `schema.sql` stays the fresh-install truth; changes to live instances ride as idempotent guards in `initDb` (`ADD COLUMN IF NOT EXISTS` is native Postgres; the `images` → `items` rename — table plus `favorites.image_id`/`crate_images.image_id` columns — is a one-time function gated on a `to_regclass('items')` check). Postgres DDL is transactional, so each migration step is atomic — a real upgrade over the SQLite try/ALTER style this plan originally assumed.
 
@@ -237,7 +238,7 @@ Retag cadence UI already exists in the board modal; refresh reuses the same patt
 
 Steps 1–4 are pure refactor — the app must behave identically after each, verified against the running instance before moving on. Features start at step 5.
 
-1. **Schema:** `images` → `items` (+ `payload`; `tag_reasoning` rides along), move filename/original_name/thumb_w/thumb_h into `payload` JSONB, preserve ids and FK cascades (`favorites`/`crate_images`/`tag_snapshots` column renames ride along — snapshot capture ✅ already live); add `boards.type` defaulting `'image'`. Mechanics: update `schema.sql` for fresh installs + a one-time guarded migration in `initDb` for live DBs (transactional DDL makes it atomic; see Data model). Note the prod droplet is still on the pre-Docker SQLite stack — if the Docker/Postgres cutover hasn't happened there yet, fold this rename into that cutover's ETL and skip the live-DB migration path entirely.
+1. ✅ **Schema (2026-07-05):** `images` → `items` (+ `payload`; `tag_reasoning` rides along), image columns folded into `payload` JSONB, ids and FK cascades preserved, `favorites`/`crate_items`/`tag_snapshots` renamed, `boards.type` added. Fresh installs via `schema.sql`; live DBs via the guarded transactional migration in `initDb`; the sqlite→pg ETL writes the new shape for the droplet cutover.
 2. **Server image adapter:** create registry (validates manifest/`apiVersion`) + `server/types/image.js`; move upload route, sharp pipeline, thumbnail serving, delete-cleanup, and the worker's image-message building into it; build the ctx facade. Rename routes with aliases.
 3. **Client image adapter:** create registry + `types/image/`; move `upload.js` → `ingestUI`, `lightbox.js` → `openDetail`, the card `<img>` body → `renderCardBody`; switch fetches to `/api/items`, drop server aliases.
 4. **Type plumbing:** board creation UI gains a type picker next to the shipped tagger/model pickers (✅ per-board AI config is done, ✅ cap deleted); client resolves the adapter from `board.type`; suggested-facet presets (with descriptions) wired in.

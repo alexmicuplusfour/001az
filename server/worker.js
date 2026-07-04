@@ -187,7 +187,7 @@ export function startWorker({ db, thumbsDir }) {
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw new Error("no API key configured");
 
-    const buf = await fs.promises.readFile(path.join(thumbsDir, row.filename + ".webp"));
+    const buf = await fs.promises.readFile(path.join(thumbsDir, row.payload.filename + ".webp"));
     const { input, usage } = await callTagger({
       provider: ai.provider,
       apiKey: ai.apiKey,
@@ -251,14 +251,15 @@ export function startWorker({ db, thumbsDir }) {
     const hasDefault = !!(await resolveDefaultAi(db));
     const row = await claimNextPending(db, hasDefault);
     if (!row) return 0;
+    const label = row.payload?.filename || `item ${row.id}`;
     try {
       const { tags, undecided, reasoning, usage, model } = await tagOne(row);
       await markTagged(db, row.id, tags, undecided, reasoning);
       await bumpUsage(db, row.board_id, usage);
-      console.log(`tagged #${row.id} ${row.filename} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
+      console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS);
-      console.warn(`tag error #${row.id} ${row.filename}: ${err.message} (${failed ? "failed" : "requeued"})`);
+      console.warn(`tag error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
     }
     return 1;
   }

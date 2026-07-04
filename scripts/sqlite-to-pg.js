@@ -32,10 +32,10 @@ const pool = openDb(DATABASE_URL);
 await initDb(pool);
 
 const { c: existing } = (
-  await pool.query("SELECT (SELECT COUNT(*) FROM users) + (SELECT COUNT(*) FROM images) AS c")
+  await pool.query("SELECT (SELECT COUNT(*) FROM users) + (SELECT COUNT(*) FROM items) AS c")
 ).rows[0];
 if (existing > 0) {
-  console.error(`target already has data (${existing} users+images) — refusing to import`);
+  console.error(`target already has data (${existing} users+items) — refusing to import`);
   process.exit(1);
 }
 
@@ -80,13 +80,19 @@ try {
     ])
   );
 
-  await copy("images", src.prepare("SELECT * FROM images").all(), (r) =>
+  // The source's image columns become the item payload (modular boards).
+  const toPayload = (r) => {
+    const p = { filename: r.filename };
+    if (r.original_name) p.original_name = r.original_name;
+    if (r.thumb_w) p.w = r.thumb_w;
+    if (r.thumb_h) p.h = r.thumb_h;
+    return JSON.stringify(p);
+  };
+  await copy("items", src.prepare("SELECT * FROM images").all(), (r) =>
     client.query(
-      `INSERT INTO images (id, filename, original_name, status, tags, error, attempts, board_id,
-        undecided, thumb_w, thumb_h, created_at, updated_at)
-       OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-      [r.id, r.filename, r.original_name, r.status, r.tags, r.error, r.attempts, r.board_id,
-        bool(r.undecided), r.thumb_w, r.thumb_h, r.created_at, r.updated_at]
+      `INSERT INTO items (id, status, tags, error, attempts, board_id, undecided, payload, created_at, updated_at)
+       OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [r.id, r.status, r.tags, r.error, r.attempts, r.board_id, bool(r.undecided), toPayload(r), r.created_at, r.updated_at]
     )
   );
 
@@ -107,7 +113,7 @@ try {
   );
 
   await copy("favorites", src.prepare("SELECT * FROM favorites").all(), (r) =>
-    client.query("INSERT INTO favorites (user_id, image_id, created_at) VALUES ($1, $2, $3)", [
+    client.query("INSERT INTO favorites (user_id, item_id, created_at) VALUES ($1, $2, $3)", [
       r.user_id,
       r.image_id,
       r.created_at,
@@ -124,14 +130,14 @@ try {
   );
 
   await copy(
-    "crate_images",
+    "crate_items",
     src
       .prepare(
         "SELECT ci.* FROM crate_images ci JOIN crates c ON c.id = ci.crate_id WHERE c.board_id != ''"
       )
       .all(),
     (r) =>
-      client.query("INSERT INTO crate_images (crate_id, image_id, created_at) VALUES ($1, $2, $3)", [
+      client.query("INSERT INTO crate_items (crate_id, item_id, created_at) VALUES ($1, $2, $3)", [
         r.crate_id,
         r.image_id,
         r.created_at,
@@ -147,7 +153,7 @@ try {
   );
 
   // Identity sequences must resume past the copied ids.
-  for (const table of ["users", "images", "crates"]) {
+  for (const table of ["users", "items", "crates"]) {
     await client.query(
       `SELECT setval(pg_get_serial_sequence('${table}','id'), GREATEST((SELECT COALESCE(MAX(id),0) FROM ${table}), 1))`
     );
