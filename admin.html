@@ -162,9 +162,9 @@
       </div>
       <div class="layout">
         <nav class="tabs" id="tabs">
-          <button class="tab active" data-tab="collaborators">
+          <button class="tab active" data-tab="members">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            Collaborators
+            Members
           </button>
           <button class="tab" data-tab="boards">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
@@ -176,8 +176,8 @@
           </button>
         </nav>
         <main class="panels">
-          <section class="panel" id="panel-collaborators">
-            <h2>Collaborators</h2>
+          <section class="panel" id="panel-members">
+            <h2>Members</h2>
             <p class="sub">Invite-only access. Add an email, then send them the generated login link.</p>
             <div id="content"></div>
           </section>
@@ -199,12 +199,12 @@
       const adminUi = document.getElementById("admin-ui");
 
       // --- Tabs ---
-      const TAB_NAMES = ["collaborators", "boards", "ai"];
+      const TAB_NAMES = ["members", "boards", "ai"];
       const tabBtns = [...document.querySelectorAll(".tab")];
       function selectTab(name) {
         tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
         document.querySelectorAll(".panel").forEach((p) => (p.hidden = p.id !== "panel-" + name));
-        history.replaceState(null, "", name === "collaborators" ? location.pathname : "#" + name);
+        history.replaceState(null, "", name === "members" ? location.pathname : "#" + name);
       }
       tabBtns.forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
       const initialTab = location.hash.slice(1);
@@ -434,7 +434,7 @@
         content.innerHTML = `
           <form id="add">
             <input id="name" placeholder="Name (optional)" />
-            <input id="email" type="email" placeholder="collaborator@email.com" required />
+            <input id="email" type="email" placeholder="member@email.com" required />
             <button type="submit">Add & make link</button>
           </form>
           <div class="linkbox" id="linkbox"></div>

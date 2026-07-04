@@ -222,7 +222,7 @@ app.post("/api/crates/:id/images/:imageId", requireAuth, wrap(async (req, res) =
   res.json(result);
 }));
 
-// --- admin: manage collaborators ---
+// --- admin: manage members ---
 app.get("/api/admin/users", requireAdmin, wrap(async (_req, res) => {
   res.json(await listUsers(db));
 }));
