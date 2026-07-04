@@ -200,9 +200,30 @@ export function teardownCardHover(card) {
   if (heart && !heart.classList.contains("on") && !heart.classList.contains("has")) heart.remove();
 }
 
+export function scrollToCard(img) {
+  if (!img) return;
+  let card = elGrid.querySelector(`[data-id="${img.id}"]`);
+  if (!card) {
+    const items = taggedFiltered();
+    const targetIdx = items.indexOf(img);
+    if (targetIdx < 0) return;
+    for (let i = 0; i <= targetIdx; i++) {
+      if (renderedIds.has(items[i].id)) continue;
+      elGrid.appendChild(cardFor(items[i]));
+      renderedIds.add(items[i].id);
+    }
+    renderLimit = Math.max(renderLimit, targetIdx + 1);
+    layoutGrid();
+    pokeSentinel();
+    card = elGrid.querySelector(`[data-id="${img.id}"]`);
+  }
+  if (card) card.scrollIntoView({ behavior: "instant", block: "center" });
+}
+
 function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
+  card.dataset.id = img.id;
   if (img.undecided) card.classList.add("undecided");
   const im = document.createElement("img");
   im.src = thumbUrl(img.name);

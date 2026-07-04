@@ -932,8 +932,11 @@ a.tool-btn {
 .lightbox-action {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 7px;
-  padding: 8px 15px;
+  height: 36px;
+  padding: 0 15px;
+  line-height: 1;
   border: none;
   border-radius: 999px;
   background: rgba(18, 18, 22, 0.7);
@@ -943,10 +946,12 @@ a.tool-btn {
   cursor: pointer;
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
+  overflow: hidden;
 }
 .lightbox-action svg {
   width: 18px;
   height: 18px;
+  flex-shrink: 0;
 }
 .lightbox-action[hidden] {
   display: none;
@@ -983,28 +988,6 @@ a.tool-btn {
 }
 .lightbox-nav.next {
   right: 18px;
-}
-.lightbox-tags {
-  position: absolute;
-  bottom: 52px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  justify-content: center;
-  max-width: 72%;
-  pointer-events: none;
-}
-.lightbox-tags .ltp {
-  font-size: 11px;
-  color: #cdd2da;
-  background: rgba(23, 27, 36, 0.82);
-  padding: 3px 9px;
-  border-radius: 999px;
-  white-space: nowrap;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 .lightbox-count {
   position: absolute;
@@ -1058,7 +1041,6 @@ a.tool-btn {
 .lightbox.panel-open .lightbox-controls {
   right: 364px;
 }
-.lightbox.panel-open .lightbox-tags,
 .lightbox.panel-open .lightbox-count {
   left: calc((100% - 340px) / 2);
 }

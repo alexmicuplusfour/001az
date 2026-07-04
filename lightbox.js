@@ -3,6 +3,7 @@ import { fullUrl, ICONS } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
+import { scrollToCard } from './grid.js';
 
 const elLightbox = document.getElementById("lightbox");
 const elLightboxImg = document.getElementById("lightbox-img");
@@ -10,7 +11,6 @@ const elLightboxFav = document.getElementById("lightbox-fav");
 const elLightboxCrate = document.getElementById("lightbox-crate");
 const elLightboxPrev = document.getElementById("lightbox-prev");
 const elLightboxNext = document.getElementById("lightbox-next");
-const elLightboxTags = document.getElementById("lightbox-tags");
 const elLightboxCount = document.getElementById("lightbox-count");
 const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
@@ -32,7 +32,7 @@ function renderLightboxCrate() {
   if (!lightboxImg) return;
   const n = lightboxImg.crateIds.size;
   elLightboxCrate.className = "lightbox-action lightbox-crate" + (n > 0 ? " on" : "");
-  elLightboxCrate.innerHTML = `${ICONS.crate}<span>${n > 0 ? n : ""}</span>`;
+  elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
 }
 
 // Paint the reasoning panel for img. reasoning is null while the fetch is in
@@ -151,13 +151,6 @@ function showLightbox() {
     elLightboxImg.style.opacity = "1";
   }
   elLightboxImg.alt = lightboxImg.tags.length ? lightboxImg.tags.join(", ") : lightboxImg.name;
-  elLightboxTags.replaceChildren();
-  for (const t of lightboxImg.tags) {
-    const s = document.createElement("span");
-    s.className = "ltp";
-    s.textContent = t;
-    elLightboxTags.appendChild(s);
-  }
   if (state.me) {
     renderLightboxFav();
     elLightboxFav.hidden = false;
@@ -198,13 +191,13 @@ export function navLightbox(delta) {
 export function closeLightbox() {
   closeCratePop();
   setPanel(false);
+  scrollToCard(lightboxImg);
   elLightbox.hidden = true;
   document.body.style.overflow = "";
   elLightbox.classList.remove("loading");
   elLightboxImg.onload = null;
   elLightboxImg.src = "";
   elLightboxImg.alt = "";
-  elLightboxTags.replaceChildren();
   lightboxImg = null;
   lightboxList = [];
   lightboxIndex = -1;
