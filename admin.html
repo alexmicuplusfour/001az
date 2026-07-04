@@ -105,7 +105,11 @@
       .switch.sm { width: 26px; height: 15px; }
       .switch.sm::after { width: 11px; height: 11px; }
       .switch.sm.on::after { left: 13px; }
-      .switch-row { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+      /* Align the switch with the first text line, not the middle of the
+         block, so rows whose hint wraps keep the toggle on row one. */
+      .switch-row { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; user-select: none; line-height: 1.4; }
+      .switch-row .switch { margin-top: -1px; }
+      .switch-row .switch.sm { margin-top: 2px; }
 
       /* facet editor */
       .fe-root { margin-bottom: 10px; }
