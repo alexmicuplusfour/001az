@@ -104,15 +104,14 @@ export function renderToolbar(resultCount) {
       name.textContent = state.boardName;
       elToolbar.appendChild(name);
     }
-
-    if (state.me) {
-      elToolbar.appendChild(toolBtn(ICONS.plus, "upload", triggerFilePicker));
-    }
   }
 
   const auth = document.createElement("div");
   auth.className = "auth";
   if (state.me) {
+    if (state.boardName) {
+      auth.appendChild(toolBtn(ICONS.plus, "upload", triggerFilePicker));
+    }
     const userBtn = document.createElement("button");
     userBtn.className = "tool-btn user-menu-btn";
     const nameSpan = document.createElement("span");

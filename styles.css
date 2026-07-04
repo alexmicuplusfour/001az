@@ -40,7 +40,9 @@ header {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 #toolbar-sub {
@@ -452,7 +454,11 @@ body.bulk-mode .card.loaded .sel-cb {
   border-radius: 999px;
   padding: 6px 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-  animation: toast-in 0.18s ease;
+  animation: bulk-bar-in 0.18s ease;
+}
+@keyframes bulk-bar-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
 }
 #bulk-bar[hidden] {
   display: none;
@@ -478,12 +484,6 @@ body.bulk-mode .card.loaded .sel-cb {
 }
 .bb-btn.delete:hover {
   background: #e5484d;
-}
-.bb-btn.reprocess:hover {
-  background: #3b82f6;
-}
-.bb-btn.crate:hover {
-  background: #7c3aed;
 }
 .bb-count {
   font-size: 13px;
@@ -562,12 +562,6 @@ body.bulk-mode .heart {
 }
 .act.delete:hover {
   background: #e5484d;
-}
-.act.reprocess:hover {
-  background: #3b82f6;
-}
-.act.crate:hover {
-  background: #7c3aed;
 }
 
 .tag-chip {
@@ -905,8 +899,8 @@ body.bulk-mode .heart {
 }
 
 .cp-row.active {
-  background: rgba(167, 139, 250, 0.12);
-  color: #a78bfa;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
 }
 .cd-del {
   flex-shrink: 0;
@@ -1098,7 +1092,7 @@ a.tool-btn {
 
 /* lightbox crate button (same row as fav, to its left) */
 .lightbox-crate.on {
-  color: #a78bfa;
+  color: #fff;
 }
 
 /* crate popover */
@@ -1122,7 +1116,7 @@ a.tool-btn {
 }
 .cp-row input[type="checkbox"] {
   flex-shrink: 0;
-  accent-color: #a78bfa;
+  accent-color: #5a6170;
   cursor: pointer;
   width: 14px;
   height: 14px;
@@ -1152,7 +1146,7 @@ a.tool-btn {
   margin-top: 2px;
 }
 .cp-input:focus {
-  border-color: #a78bfa;
+  border-color: #5a6170;
 }
 .cp-input::placeholder {
   color: #4a5060;
@@ -1278,6 +1272,11 @@ a.tool-btn {
 @media (max-width: 640px) {
   header {
     padding: 10px 14px 8px;
+  }
+
+  #toolbar {
+    margin-bottom: 8px;
+    padding-bottom: 8px;
   }
 
   #filters {
