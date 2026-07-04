@@ -23,7 +23,7 @@ export function handleFiles(fileList) {
   if (!files.length) return;
 
   if (!uploadStats) {
-    uploadStats = { total: 0, done: 0, uploaded: 0, failed: 0, canceled: 0, failReason: "", skipped: new Map(), uploadedIds: [] };
+    uploadStats = { total: 0, done: 0, uploaded: 0, failed: 0, canceled: 0, failReason: "", skipped: new Map(), pendingIds: [] };
   }
   uploadStats.total += files.length;
 
@@ -108,8 +108,18 @@ async function uploadChunk(chunk) {
   if (data) {
     const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
     for (const row of [...rows].reverse()) {
-      state.images.unshift({ id: row.id, name: row.name, status: "pending", tags: [], tagSet: new Set() });
-      uploadStats.uploadedIds.push(row.id);
+      // Boards can hold uploads for scheduled tagging ('held') or skip auto
+      // tagging entirely ('tagged' + undecided) — only truly pending images
+      // feed the "Processing images…" watcher.
+      state.images.unshift({
+        id: row.id,
+        name: row.name,
+        status: row.status || "pending",
+        undecided: !!row.undecided,
+        tags: [],
+        tagSet: new Set(),
+      });
+      if ((row.status || "pending") === "pending") uploadStats.pendingIds.push(row.id);
     }
     uploadStats.uploaded += rows.length;
     for (const r of data.rejected || []) {
@@ -149,9 +159,9 @@ function maybeFinishUploads() {
     else toast(parts.join(" · "), { duration: 'short' });
   }
 
-  if (s.uploadedIds.length) {
+  if (s.pendingIds.length) {
     document.dispatchEvent(new CustomEvent('app:uploads-pending-tag', {
-      detail: { ids: new Set(s.uploadedIds), n: s.uploadedIds.length },
+      detail: { ids: new Set(s.pendingIds), n: s.pendingIds.length },
     }));
     if (!processingToast) processingToast = toast("Processing images…", { loading: true });
   }

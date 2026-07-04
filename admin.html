@@ -558,9 +558,12 @@
 
           const tr = document.createElement("tr");
           tr.id = `board-row-${b.id}`;
+          const nextRun = b.auto_tag_next_run_at
+            ? `next scheduled run: ${new Date(b.auto_tag_next_run_at).toLocaleString()}`
+            : "";
           tr.innerHTML = `
             <td><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></td>
-            <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}</td>
+            <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="${nextRun}">(${b.held_count} held)</span>` : ""}</td>
             <td></td>`;
 
           const actCell = tr.querySelector("td:last-child");
@@ -602,6 +605,28 @@
             }
           };
           wrap.appendChild(retagBtn);
+
+          if (b.held_count > 0) {
+            const tagHeldBtn = document.createElement("button");
+            tagHeldBtn.className = "ghost";
+            tagHeldBtn.textContent = "tag held ▸";
+            tagHeldBtn.title = nextRun
+              ? `Tag the ${b.held_count} held image(s) now instead of waiting (${nextRun})`
+              : `Tag the ${b.held_count} held image(s) now`;
+            tagHeldBtn.onclick = async () => {
+              try {
+                tagHeldBtn.disabled = true;
+                tagHeldBtn.textContent = "queuing…";
+                const { released } = await api("POST", `/api/admin/boards/${b.id}/tag-held`);
+                toast(`Queued ${released} held image(s) for tagging`);
+                renderBoards();
+              } catch (err) {
+                toast.error(err.message);
+                renderBoards();
+              }
+            };
+            wrap.appendChild(tagHeldBtn);
+          }
 
           if (b.pending_count > 0) {
             const stopBtn = document.createElement("button");
@@ -749,6 +774,7 @@
           <div id="board-modal-reasoning" style="margin:2px 0 12px;font-size:13px"></div>
           <label>AI tagger <span style="font-weight:400;color:#9aa0aa">(which API key and model tag this board)</span></label>
           <div id="board-modal-ai" style="display:flex;gap:8px;margin-bottom:12px;"></div>
+          <div id="board-modal-autotag" style="margin:2px 0 12px;font-size:13px"></div>
           <label>Facets</label>
           <textarea id="board-modal-facets" rows="12"></textarea>`;
         body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
@@ -779,6 +805,54 @@
         document.getElementById("board-modal-reasoning").appendChild(
           switchRow("AI reasoning", "(the tagger justifies each facet; shown in the lightbox)", aiReasoning, (on) => { aiReasoning = on; })
         );
+
+        // Auto tagging: on/off, plus an optional schedule that batches new
+        // uploads instead of tagging them the moment they arrive.
+        const at = {
+          enabled: isNew ? true : board.auto_tag !== false,
+          periodic: !isNew && !!board.auto_tag_periodic,
+          everyMin: (!isNew && board.auto_tag_every_min) || 1440,
+          skipWeekends: !isNew && !!board.auto_tag_skip_weekends,
+        };
+        const atWrap = document.getElementById("board-modal-autotag");
+        const atSub = document.createElement("div");
+        atSub.style.cssText = "margin:6px 0 0 30px;display:flex;flex-direction:column;gap:6px;";
+        const atSched = document.createElement("div");
+        atSched.style.cssText = "display:flex;align-items:center;gap:14px;margin-left:30px;flex-wrap:wrap;";
+        const EVERY_OPTIONS = [
+          [60, "every hour"], [180, "every 3 hours"], [360, "every 6 hours"], [720, "every 12 hours"],
+          [1440, "every day"], [2880, "every 2 days"], [10080, "every week"],
+        ];
+        const everySel = document.createElement("select");
+        everySel.style.cssText = SELECT_CSS;
+        for (const [min, label] of EVERY_OPTIONS) {
+          const opt = document.createElement("option");
+          opt.value = String(min);
+          opt.textContent = label;
+          everySel.appendChild(opt);
+        }
+        if (!EVERY_OPTIONS.some(([min]) => min === at.everyMin)) {
+          const opt = document.createElement("option");
+          opt.value = String(at.everyMin);
+          opt.textContent = `every ${at.everyMin} min`;
+          everySel.insertBefore(opt, everySel.firstChild);
+        }
+        everySel.value = String(at.everyMin);
+        everySel.onchange = () => { at.everyMin = Number(everySel.value); };
+        const syncAt = () => { atSub.hidden = !at.enabled; atSched.hidden = !at.periodic; };
+        atSched.append(
+          everySel,
+          switchRow("exclude weekends", null, at.skipWeekends, (on) => { at.skipWeekends = on; }, { small: true })
+        );
+        atSub.append(
+          switchRow("Tag on a schedule", "(hold new uploads and tag them in batches)", at.periodic, (on) => { at.periodic = on; syncAt(); }),
+          atSched
+        );
+        atWrap.append(
+          switchRow("Auto tagging", "(new uploads are tagged by the AI; off = tag by hand)", at.enabled, (on) => { at.enabled = on; syncAt(); }),
+          atSub
+        );
+        syncAt();
 
         // Per-board tagger override — key registry is fetched async; the
         // selects stay disabled until it arrives.
@@ -838,9 +912,15 @@
                 ai_model: aiKeySel.value && !aiModelSel.hidden ? aiModelSel.value : null,
               }
             : {};
+          const autoTagBody = {
+            auto_tag: at.enabled,
+            auto_tag_periodic: at.periodic,
+            auto_tag_every_min: at.everyMin,
+            auto_tag_skip_weekends: at.skipWeekends,
+          };
           try {
-            if (isNew) await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride });
-            else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride });
+            if (isNew) await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
+            else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
             close();
             renderBoards();
             toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);

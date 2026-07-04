@@ -33,11 +33,24 @@ CREATE TABLE IF NOT EXISTS boards (
   -- per-board tagger override; NULL = app default (settings / env)
   ai_key_id    BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL,
   ai_model     TEXT,
+  -- auto-tagging: off = uploads land untagged for manual review; periodic =
+  -- uploads are 'held' and released to the queue every N minutes (optionally
+  -- skipping weekends, server-local time)
+  auto_tag               BOOLEAN NOT NULL DEFAULT TRUE,
+  auto_tag_periodic      BOOLEAN NOT NULL DEFAULT FALSE,
+  auto_tag_every_min     INTEGER NOT NULL DEFAULT 1440,
+  auto_tag_skip_weekends BOOLEAN NOT NULL DEFAULT FALSE,
+  auto_tag_next_run_at   BIGINT,
   created_at   BIGINT NOT NULL
 );
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_reasoning BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_key_id BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_model TEXT;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_periodic BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_every_min INTEGER NOT NULL DEFAULT 1440;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_skip_weekends BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_next_run_at BIGINT;
 
 CREATE TABLE IF NOT EXISTS board_members (
   board_id   TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -48,6 +61,8 @@ CREATE TABLE IF NOT EXISTS board_members (
 CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
 
 -- status: pending -> processing -> tagged | failed
+-- ('held' sits before pending: uploads to a periodic auto-tag board wait
+--  there, untagged, until the board's next scheduled run releases them)
 CREATE TABLE IF NOT EXISTS images (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   filename      TEXT UNIQUE NOT NULL,

@@ -25,8 +25,10 @@ function matchesExcept(img, exceptKey) {
   return true;
 }
 
+// "Done" as far as the grid is concerned — held images (waiting for a board's
+// scheduled tagging run) show up like any other untagged image.
 export function isTagged(img) {
-  return img.status === "tagged" || img.status === "failed" || !img.status;
+  return img.status === "tagged" || img.status === "failed" || img.status === "held" || !img.status;
 }
 
 export function taggedFiltered() {

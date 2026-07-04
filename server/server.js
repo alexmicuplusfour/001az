@@ -37,9 +37,10 @@ import {
   getBoard,
   updateBoard,
   deleteBoard,
-  boardExists,
   boardImageStats,
   retagBoard,
+  releaseHeld,
+  heldToUntagged,
   getBoardMemberIds,
   setBoardMembers,
   canAccessBoard,
@@ -62,7 +63,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, nextAutoTagRun } from "./worker.js";
 import { testKey, PROVIDERS } from "./providers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -275,11 +276,19 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
         ...b,
         image_count: stats[b.id]?.c || 0,
         pending_count: stats[b.id]?.p || 0,
+        held_count: stats[b.id]?.h || 0,
         memberIds: await getBoardMemberIds(db, b.id),
       }))
     )
   );
 }));
+
+// Clamp a requested auto-tag interval to something sane; null when unparsable.
+function parseEveryMin(v) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(Math.max(n, 15), 60 * 24 * 28); // 15 min .. 4 weeks
+}
 
 app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
@@ -297,13 +306,24 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
     if (!(await getAiKey(db, aiKeyId))) return res.status(400).json({ error: "unknown ai_key_id" });
   }
   const aiModel = req.body && req.body.ai_model ? String(req.body.ai_model) : null;
-  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null);
+  const autoTag = {
+    enabled: !req.body || req.body.auto_tag !== false,
+    periodic: !!(req.body && req.body.auto_tag_periodic),
+    everyMin: (req.body && parseEveryMin(req.body.auto_tag_every_min)) || 1440,
+    skipWeekends: !!(req.body && req.body.auto_tag_skip_weekends),
+  };
+  autoTag.nextRunAt = autoTag.enabled && autoTag.periodic
+    ? nextAutoTagRun(Date.now(), autoTag.everyMin, autoTag.skipWeekends)
+    : null;
+  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag);
   console.log(`created board "${name}" ${id}`);
   res.json({ id, name, facets, context, ai_reasoning: aiReasoning });
 }));
 
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const id = req.params.id;
+  const prev = await getBoard(db, id);
+  if (!prev) return res.status(404).json({ error: "not found" });
   const update = {};
   if (req.body && req.body.name !== undefined) update.name = String(req.body.name).trim();
   if (req.body && req.body.facets !== undefined) {
@@ -325,11 +345,47 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   if (req.body && req.body.ai_model !== undefined && update.aiKeyId !== null) {
     update.aiModel = req.body.ai_model ? String(req.body.ai_model) : null;
   }
-  if (Object.keys(update).length > 0) {
-    if (!(await updateBoard(db, id, update))) return res.status(404).json({ error: "not found" });
-  } else if (!(await getBoard(db, id))) {
-    return res.status(404).json({ error: "not found" });
+  if (req.body && req.body.auto_tag !== undefined) update.autoTag = !!req.body.auto_tag;
+  if (req.body && req.body.auto_tag_periodic !== undefined) update.autoTagPeriodic = !!req.body.auto_tag_periodic;
+  if (req.body && req.body.auto_tag_every_min !== undefined) {
+    const m = parseEveryMin(req.body.auto_tag_every_min);
+    if (m === null) return res.status(400).json({ error: "invalid auto_tag_every_min" });
+    update.autoTagEveryMin = m;
   }
+  if (req.body && req.body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!req.body.auto_tag_skip_weekends;
+
+  // Schedule bookkeeping: (re)arm the timer when the schedule turns on or
+  // changes shape, disarm it when it turns off.
+  const eff = {
+    autoTag: update.autoTag ?? prev.auto_tag,
+    periodic: update.autoTagPeriodic ?? prev.auto_tag_periodic,
+    everyMin: update.autoTagEveryMin ?? prev.auto_tag_every_min,
+    skipWeekends: update.autoTagSkipWeekends ?? prev.auto_tag_skip_weekends,
+  };
+  const wasScheduled = prev.auto_tag && prev.auto_tag_periodic;
+  const isScheduled = eff.autoTag && eff.periodic;
+  const shapeChanged = eff.everyMin !== prev.auto_tag_every_min || eff.skipWeekends !== prev.auto_tag_skip_weekends;
+  if (isScheduled && (!wasScheduled || shapeChanged)) {
+    update.autoTagNextRunAt = nextAutoTagRun(Date.now(), eff.everyMin, eff.skipWeekends);
+  } else if (!isScheduled && prev.auto_tag_next_run_at !== null) {
+    update.autoTagNextRunAt = null;
+  }
+
+  if (Object.keys(update).length > 0) await updateBoard(db, id, update);
+
+  // Leaving scheduled mode strands any held images — resolve them now: back
+  // into the queue while auto-tagging stays on, untagged for review when the
+  // whole feature was switched off.
+  if (wasScheduled && !isScheduled) {
+    if (eff.autoTag) {
+      const n = await releaseHeld(db, id);
+      if (n) console.log(`board ${id}: schedule off — ${n} held image(s) queued for tagging`);
+    } else {
+      const n = await heldToUntagged(db, id);
+      if (n) console.log(`board ${id}: auto-tagging off — ${n} held image(s) left untagged for review`);
+    }
+  }
+
   if (req.body && Array.isArray(req.body.memberIds)) {
     await setBoardMembers(db, id, req.body.memberIds.map(Number).filter(Boolean));
   }
@@ -344,6 +400,16 @@ app.post("/api/admin/boards/:id/retag", requireAdmin, wrap(async (req, res) => {
   invalidateBoardCache(req.params.id);
   console.log(`retag queued: ${queued} image(s) in board ${req.params.id}`);
   res.json({ ok: true, queued });
+}));
+
+// "Tag now" for a scheduled board: release held images without waiting for
+// (or moving) the next scheduled run.
+app.post("/api/admin/boards/:id/tag-held", requireAdmin, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board) return res.status(404).json({ error: "not found" });
+  const released = await releaseHeld(db, req.params.id);
+  console.log(`tag-held: released ${released} held image(s) in board ${req.params.id}`);
+  res.json({ ok: true, released });
 }));
 
 app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, wrap(async (req, res) => {
@@ -472,9 +538,15 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 
 app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {
   const boardId = req.query.board || (req.body && req.body.board_id) || null;
-  if (!boardId || !(await boardExists(db, boardId))) {
+  const board = boardId ? await getBoard(db, boardId) : null;
+  if (!board) {
     return res.status(400).json({ error: "valid board required" });
   }
+
+  // The board's auto-tag mode decides where uploads land: the tagging queue,
+  // held for the next scheduled run, or straight to untagged-for-review.
+  const uploadStatus = !board.auto_tag ? "tagged" : board.auto_tag_periodic ? "held" : "pending";
+  const uploadUndecided = !board.auto_tag;
 
   const files = req.files || [];
   const uploaded = [];
@@ -509,9 +581,9 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(asyn
           .toFile(path.join(THUMBS_DIR, filename + ".webp"));
         await fs.promises.writeFile(path.join(GALLERY_DIR, filename), buf);
 
-        const rowId = await insertImage(db, filename, f.originalname || filename, boardId);
+        const rowId = await insertImage(db, filename, f.originalname || filename, boardId, uploadStatus, uploadUndecided);
         await setThumbDimensions(db, rowId, thumbInfo.width, thumbInfo.height);
-        uploaded.push({ id: rowId, name: filename, status: "pending", tags: [], w: thumbInfo.width, h: thumbInfo.height });
+        uploaded.push({ id: rowId, name: filename, status: uploadStatus, undecided: uploadUndecided, tags: [], w: thumbInfo.width, h: thumbInfo.height });
       });
     } catch (err) {
       console.error("upload error:", f.originalname, err.message);

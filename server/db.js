@@ -94,12 +94,14 @@ export async function listImages(db, userId = null, boardId = null) {
   }));
 }
 
-export async function insertImage(db, filename, originalName, boardId) {
+// status: 'pending' (tag now), 'held' (wait for the board's scheduled run),
+// or 'tagged' + undecided (auto-tagging off — straight to manual review).
+export async function insertImage(db, filename, originalName, boardId, status = "pending", undecided = false) {
   const now = Date.now();
   const { rows } = await db.query(
-    `INSERT INTO images (filename, original_name, status, board_id, created_at, updated_at)
-     VALUES ($1, $2, 'pending', $3, $4, $4) RETURNING id`,
-    [filename, originalName, boardId, now]
+    `INSERT INTO images (filename, original_name, status, undecided, board_id, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id`,
+    [filename, originalName, status, undecided, boardId, now]
   );
   return rows[0].id;
 }
@@ -397,31 +399,36 @@ export async function deleteAiKey(db, id) {
 
 // --- boards ---
 
-export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null) {
+const BOARD_COLS =
+  "id, name, facets, context, ai_reasoning, ai_key_id, ai_model, " +
+  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at";
+
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}) {
   const id = crypto.randomUUID();
   await db.query(
-    "INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_key_id, ai_model, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    [id, name, JSON.stringify(facets), context, !!aiReasoning, aiKeyId, aiModel, Date.now()]
+    `INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_key_id, ai_model,
+       auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    [
+      id, name, JSON.stringify(facets), context, !!aiReasoning, aiKeyId, aiModel,
+      autoTag.enabled !== false, !!autoTag.periodic, autoTag.everyMin || 1440,
+      !!autoTag.skipWeekends, autoTag.nextRunAt ?? null, Date.now(),
+    ]
   );
   return id;
 }
 
 export async function listBoards(db) {
-  const { rows } = await db.query(
-    "SELECT id, name, facets, context, ai_reasoning, ai_key_id, ai_model, created_at FROM boards ORDER BY created_at ASC"
-  );
+  const { rows } = await db.query(`SELECT ${BOARD_COLS} FROM boards ORDER BY created_at ASC`);
   return rows;
 }
 
 export async function getBoard(db, id) {
-  const { rows } = await db.query(
-    "SELECT id, name, facets, context, ai_reasoning, ai_key_id, ai_model, created_at FROM boards WHERE id=$1",
-    [id]
-  );
+  const { rows } = await db.query(`SELECT ${BOARD_COLS} FROM boards WHERE id=$1`, [id]);
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiKeyId, aiModel } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
@@ -430,6 +437,11 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (aiReasoning !== undefined) { vals.push(!!aiReasoning); sets.push(`ai_reasoning=$${vals.length}`); }
   if (aiKeyId !== undefined) { vals.push(aiKeyId); sets.push(`ai_key_id=$${vals.length}`); }
   if (aiModel !== undefined) { vals.push(aiModel); sets.push(`ai_model=$${vals.length}`); }
+  if (autoTag !== undefined) { vals.push(!!autoTag); sets.push(`auto_tag=$${vals.length}`); }
+  if (autoTagPeriodic !== undefined) { vals.push(!!autoTagPeriodic); sets.push(`auto_tag_periodic=$${vals.length}`); }
+  if (autoTagEveryMin !== undefined) { vals.push(autoTagEveryMin); sets.push(`auto_tag_every_min=$${vals.length}`); }
+  if (autoTagSkipWeekends !== undefined) { vals.push(!!autoTagSkipWeekends); sets.push(`auto_tag_skip_weekends=$${vals.length}`); }
+  if (autoTagNextRunAt !== undefined) { vals.push(autoTagNextRunAt); sets.push(`auto_tag_next_run_at=$${vals.length}`); }
   if (!sets.length) return false;
   vals.push(id);
   const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
@@ -452,22 +464,60 @@ export async function boardExists(db, id) {
   return rows.length > 0;
 }
 
-// Per-board image totals + pending counts in one pass: { boardId: { c, p } }.
+// Per-board image totals + pending/held counts in one pass: { boardId: { c, p, h } }.
 export async function boardImageStats(db) {
   const { rows } = await db.query(
-    `SELECT board_id, COUNT(*) AS c, COUNT(*) FILTER (WHERE status='pending') AS p
+    `SELECT board_id, COUNT(*) AS c,
+       COUNT(*) FILTER (WHERE status='pending') AS p,
+       COUNT(*) FILTER (WHERE status='held') AS h
      FROM images GROUP BY board_id`
   );
-  return Object.fromEntries(rows.map((r) => [r.board_id, { c: r.c, p: r.p }]));
+  return Object.fromEntries(rows.map((r) => [r.board_id, { c: r.c, p: r.p, h: r.h }]));
 }
 
-// Queue every non-pending image in a board for retagging. Returns the count.
+// Queue every non-pending image in a board for retagging (held ones included —
+// retag is an explicit "tag now"). Returns the count.
 export async function retagBoard(db, boardId) {
   const result = await db.query(
     "UPDATE images SET status='pending', attempts=0, error=NULL, updated_at=$1 WHERE board_id=$2 AND status != 'pending'",
     [Date.now(), boardId]
   );
   return result.rowCount;
+}
+
+// --- periodic auto-tagging ---
+
+// Release a board's held images into the tagging queue. Returns the count.
+export async function releaseHeld(db, boardId) {
+  const result = await db.query(
+    "UPDATE images SET status='pending', updated_at=$1 WHERE board_id=$2 AND status='held'",
+    [Date.now(), boardId]
+  );
+  return result.rowCount;
+}
+
+// Held images become plain untagged-for-review (auto-tagging was switched off,
+// so nothing will ever release them). Same state cancelBoardQueue produces.
+export async function heldToUntagged(db, boardId) {
+  const result = await db.query(
+    "UPDATE images SET status='tagged', undecided=TRUE, updated_at=$1 WHERE board_id=$2 AND status='held'",
+    [Date.now(), boardId]
+  );
+  return result.rowCount;
+}
+
+// Periodic boards whose scheduled run time has arrived.
+export async function dueBoards(db, now) {
+  const { rows } = await db.query(
+    `SELECT id, name, auto_tag_every_min, auto_tag_skip_weekends FROM boards
+     WHERE auto_tag AND auto_tag_periodic AND auto_tag_next_run_at IS NOT NULL AND auto_tag_next_run_at <= $1`,
+    [now]
+  );
+  return rows;
+}
+
+export async function setBoardNextRun(db, boardId, ts) {
+  await db.query("UPDATE boards SET auto_tag_next_run_at=$1 WHERE id=$2", [ts, boardId]);
 }
 
 // --- board membership ---

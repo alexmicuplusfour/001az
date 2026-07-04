@@ -27,6 +27,8 @@ services:
       MODEL: ${MODEL:-}
       DAILY_CAP: ${DAILY_CAP:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-1}
+      # scheduled auto-tagging (weekend detection, run times) uses server-local time
+      TZ: ${TZ:-UTC}
     volumes:
       - appdata:/data
     depends_on:
