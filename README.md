@@ -65,7 +65,6 @@ Open http://127.0.0.1:3001 and sign in with the printed link. To enable AI taggi
 | `ADMIN_EMAIL` | — | seeded as admin on startup |
 | `ANTHROPIC_API_KEY` | — | enables the tagging worker (admin-panel key overrides) |
 | `MODEL` | `claude-haiku-4-5` | tagging model (admin-panel setting overrides) |
-| `DAILY_CAP` | `200` | max tagging calls per day |
 | `BASE_URL` | `http://127.0.0.1:3001` | used in minted login links |
 | `COOKIE_SECURE` | `1` | set `0` for plain-http local dev |
 | `PORT` / `HOST` | `3001` / `127.0.0.1` | listen address |

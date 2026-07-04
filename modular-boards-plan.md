@@ -4,6 +4,20 @@ The gallery becomes a universal comparator: a board has a **type** (images, stoc
 
 Why this is cheap: the core is already ~80% type-blind. Boards own their facets/context/glosses, tags are generic `facet/value` strings, and the worker builds its prompt entirely from board config. The image-specific surface is four spots: the `images` table's filename columns, the upload route + sharp pipeline, the worker's "read webp, send image block" step, and the card/lightbox rendering.
 
+## Status (2026-07-05)
+
+Shipped ahead of the refactor, on the image-only codebase:
+
+- **Per-board AI tagger, multi-provider** — named key registry (`ai_keys`: anthropic | openai) with per-board `ai_key_id`/`ai_model`, app-default pointer + env fallback; per-image resolution after claim; keyless boards hold their images pending; masked keys; `server/providers.js` drives both providers off one strict schema.
+- **Reasoning** — the tagger writes a one-sentence justification per facet plus the fit verdict (`boards.ai_reasoning` → `images.tag_reasoning` JSONB), with reasoning declared *before* values in the schema so the model justifies first, selects second.
+- **Scheduled retag** — `boards.auto_tag_*`: periodic whole-board requeue every N minutes, optional weekend skip; auto-tagging off = uploads wait as `held`.
+- **Facet descriptions** — facets carry an optional `description`; the prompt gloss prefers it over the legacy hardcoded GLOSS table.
+- **Per-board token usage** — `ai_board_usage` (call count + input/output/cache-read tokens) with a 14-day sparkline in admin.
+- **Tag snapshots (2026-07-05)** — every tagging event appends `{source: 'ai'|'user', tags, reasoning, undecided, tagged_at}` to `tag_snapshots` (AI runs via `markTagged`, manual edits via `setImageTags`), so scheduled retags accrue history instead of overwriting it. Keyed `image_id` until the items rename; no UI yet.
+- **Daily cap removed (2026-07-05)** — worker gate, compose/env passthrough, README row all deleted; `ai_board_usage` + the sparkline is the spend visibility, cadence is the control.
+
+Not started: everything type-shaped — the `items` generalization, adapters/registries, ctx, the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
+
 ---
 
 ## Design rules
@@ -21,46 +35,43 @@ Why this is cheap: the core is already ~80% type-blind. Boards own their facets/
 Postgres conventions per `server/schema.sql`: BIGINT IDENTITY ids, JSONB blobs, real booleans, ms-epoch BIGINT timestamps, FKs with ON DELETE CASCADE.
 
 ```sql
--- images → items (rename + generalize)
+-- images → items (rename + generalize). tag_reasoning (✅ shipped) rides along.
 CREATE TABLE IF NOT EXISTS items (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   board_id      TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-  status        TEXT NOT NULL DEFAULT 'pending',    -- pending | processing | tagged | failed
+  status        TEXT NOT NULL DEFAULT 'pending',    -- held | pending | processing | tagged | failed
   tags          JSONB NOT NULL DEFAULT '[]',        -- latest snapshot, same format as today
+  tag_reasoning JSONB NOT NULL DEFAULT '{}',        -- { facetKey: sentence, fit: sentence }
   undecided     BOOLEAN NOT NULL DEFAULT FALSE,
   error         TEXT,
   attempts      INTEGER NOT NULL DEFAULT 0,
   payload       JSONB NOT NULL DEFAULT '{}',        -- type-specific; see below
-  refresh_after BIGINT,                             -- next cheap data refresh (NULL = never)
-  retag_after   BIGINT,                             -- next AI retag (NULL = never)
   created_at    BIGINT NOT NULL,
   updated_at    BIGINT NOT NULL
 );
 
--- boards gain a type and their own AI config (NULL = inherit global)
-ALTER TABLE boards ADD COLUMN IF NOT EXISTS type    TEXT NOT NULL DEFAULT 'image';
-ALTER TABLE boards ADD COLUMN IF NOT EXISTS model   TEXT;
-ALTER TABLE boards ADD COLUMN IF NOT EXISTS api_key TEXT;
+-- boards: type is the only structural addition left — per-board AI config
+-- (ai_key_id / ai_model / ai_reasoning) and the retag schedule (auto_tag_*)
+-- ✅ shipped and are already in schema.sql. Data refresh gets a sibling cadence.
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'image';
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS refresh_every_min INTEGER;  -- NULL = static type
 
--- usage counter becomes per-board. Visibility only — the daily cap is
--- REMOVED (no enforcement anywhere); this just lets admin see spend per board.
-CREATE TABLE IF NOT EXISTS ai_usage_v2 (
-  day      TEXT NOT NULL,
-  board_id TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-  count    INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (day, board_id)
-);
-
--- judgment history (see Liveness)
+-- judgment history — ✅ shipped 2026-07-05 (in schema.sql keyed image_id,
+-- with a source column: 'ai' = tagger run, 'user' = manual edit). The
+-- image_id → item_id rename rides step 1. Post-rename shape:
 CREATE TABLE IF NOT EXISTS tag_snapshots (
   id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   item_id   BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-  tags      JSONB NOT NULL,
+  source    TEXT NOT NULL DEFAULT 'ai',
+  tags      JSONB NOT NULL DEFAULT '[]',
+  reasoning JSONB NOT NULL DEFAULT '{}',
   undecided BOOLEAN NOT NULL DEFAULT FALSE,
   tagged_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_item ON tag_snapshots(item_id, tagged_at);
 ```
+
+Two earlier drafts of this plan are superseded by shipped work: per-item `refresh_after`/`retag_after` timers are gone (retag shipped **board-level** via `auto_tag_next_run_at`, and refresh mirrors that — a board's items share one staleness profile), and the planned `ai_usage_v2` table shipped richer as `ai_board_usage` (token counts split by input/output/cache-read, sparkline in admin) — nothing left to build there.
 
 Migration mechanics: `schema.sql` stays the fresh-install truth; changes to live instances ride as idempotent guards in `initDb` (`ADD COLUMN IF NOT EXISTS` is native Postgres; the `images` → `items` rename — table plus `favorites.image_id`/`crate_images.image_id` columns — is a one-time function gated on a `to_regclass('items')` check). Postgres DDL is transactional, so each migration step is atomic — a real upgrade over the SQLite try/ALTER style this plan originally assumed.
 
@@ -120,34 +131,24 @@ Adapters import nothing from core; core imports only the registry. If an adapter
 
 ### Worker seam (the cut that matters)
 
-In `server/worker.js`, `tagOne()` currently reads the webp and builds the image message inline. That block becomes:
+The multi-provider split (✅) already did half the work, and it strengthened the seam: `worker.js` owns prompt/schema building (including the reasoning object shape) and validation, while `providers.js#callTagger` owns wire formats and takes `{ systemText, schema, imageB64 }`. The remaining cut is small — `tagOne()` still reads the webp itself, and `callTagger`'s image parameter is image-specific:
 
 ```js
-const { content, extraTools } = await adapter.buildModelInput(row, ctx);
-const msg = await client.messages.create({
-  model, max_tokens, system,
-  tools: [tool, ...(extraTools || [])],
-  tool_choice: { type: "tool", name: "tag_screenshot" },
-  messages: [{ role: "user", content }],
-});
+const { parts, research } = await adapter.buildModelInput(row, ctx);
+// parts: provider-neutral content, e.g.
+//   [{ kind: "image", b64, mediaType }, { kind: "text", text }]
+const { input, usage } = await callTagger({ provider, apiKey, model, systemText, schema, parts, research });
 ```
 
-Everything else in the worker — claim/requeue/stuck recovery, per-board prompt cache, facet→schema building, allowed-tag validation, the undecided-vs-filled-facets guard — is already type-blind and does not move.
+`providers.js` maps `parts` to each provider's content blocks — it already does exactly this for the fixed image+text pair. Everything else — claim/requeue/stuck recovery, per-board prompt cache, facet→schema building (reasoning included), allowed-tag validation, the undecided-vs-filled-facets guard, the retag scheduler — is type-blind and does not move. The image-worded strings generalize with this cut: `TOOL_NAME`/`TOOL_DESC`/`USER_TEXT` in providers.js and "You tag images…" in `buildPrompt` take a per-type noun from the adapter manifest.
 
-### Per-board AI config
+### Per-board AI config (✅ shipped 2026-07-04)
 
-Model and API key become board-level with fallback: **board → global settings (admin UI) → env**. Different types want different models (images are fine on Haiku; stock narrative facets want Sonnet), and a separate key per board separates spend per project/collaborator.
+Shipped beyond the original spec: a **named key registry** (`ai_keys`: anthropic | openai) instead of a raw per-board key column, with `boards.ai_key_id` (FK, ON DELETE SET NULL) + `ai_model`, NULL inheriting the app default (settings pointer) with env as final fallback. Resolution runs per image *after* claiming, exactly as planned; boards with no resolvable key keep their images pending rather than failing them. Clients are cached per key in a Map, raw keys never leave the server (masked hints, per-key test buttons), and the board modal has the tagger/model pickers.
 
-Worker changes this forces:
+One consequence for the stock design: **research capability is per-provider.** The plan's web_search is an Anthropic server tool; OpenAI has its own web-search mechanism. So the adapter declares the *need* (`capabilities: { research: true }` in its manifest) and `providers.js` maps it to each provider's tool — with the adapter's own fetched dossier (e.g. headlines from the stocks API) as the provider-neutral fallback. Forced tool choice blocks research-before-tagging on both providers, so when research is on, tool choice relaxes to auto and validation requires the tagging call (the retry path already exists).
 
-- **Resolve config per item, not per tick.** `resolveWorkerConfig()` currently runs once before claiming; it must run *after* `claimNextPending()`, from the claimed item's board. If resolution yields no key at all, requeue the item (don't fail it — a key can be added later) and skip that board in subsequent claims for the tick.
-- **Client cache becomes a map.** `getAiClient` caches one client keyed by the last key; make it `Map<apiKey, client>` (bounded — a handful of keys at most).
-- The per-board prompt cache already exists and now also carries the resolved model; invalidate on board PATCH as today.
-- **The daily cap goes away entirely.** Remove `DAILY_CAP`, the `usageToday` gate, and the once-a-day cap warning from the worker — a small core deletion. Also drop the `DAILY_CAP` passthrough from `docker-compose.yml` and `.env.example`. Keep `bumpUsage` but count per `(day, board_id)` purely for admin visibility (per-board keys make "which board is spending what" worth seeing). With no cap, the retag cadence is the only thing bounding recurring spend — set per-type defaults conservatively (monthly).
-
-Admin UI: board create/edit gains a model picker and an optional key field. Board API responses never echo the raw key — return `has_key: true` / last-4 masking, same treatment the global ai-config endpoint should get. Keys live in the DB like the current settings-stored key; same trust model.
-
-Note on `tool_choice` + web search: a forced tool choice prevents the model from calling web_search first. For stocks, drop `tool_choice` to `{type: "auto"}` when `extraTools` is present and require the tagging tool call in validation instead (retry path already exists). Also expect stock tagging to want a stronger model than Haiku — model is already a per-install setting; consider making it a per-board override later.
+**✅ The daily cap is gone (2026-07-05):** worker gate (`usageToday`/`countPending` deleted with it), compose/env passthrough, README row. Spend visibility lives in `ai_board_usage` + the admin sparkline; retag cadence is the control on recurring work.
 
 ### Route changes
 
@@ -205,23 +206,24 @@ This trust model is the easy one, and it's worth being explicit about why: a mod
 
 ## Liveness (core feature, not a stock feature)
 
-Anything live decays: stock prices move, product prices/availability change, docs get edited upstream. Images just opt out. So liveness is core machinery that any adapter can plug into, as **two loops with very different costs**:
+Anything live decays: stock prices move, product prices/availability change, docs get edited upstream. Images just opt out. Liveness is core machinery that any adapter can plug into, as **two loops with very different costs** — both board-level, since a board's items share one staleness profile:
 
-1. **Data refresh** — cheap, no AI. Core sweeps items where `refresh_after <= now` and the board's adapter has `refresh()`; calls it, bumps `refresh_after` by the board's cadence. Stocks: daily/weekly price series update. Products: price/stock check. Docs: re-fetch source URL, diff.
-2. **AI retag** — expensive, goes through the normal worker. Core sweeps items where `retag_after <= now` and flips them to `pending`. Existing claim/retry machinery handles the rest with zero new code — and `claimNextPending` already uses `FOR UPDATE SKIP LOCKED` under Postgres, so the sweeps and any future second worker are concurrency-safe for free. Refresh runs before retag is due, so the AI always judges fresh data.
+1. **AI retag — ✅ shipped (2026-07-04), board-level.** `boards.auto_tag_periodic/every_min/skip_weekends/next_run_at`; `retagDue()` in the worker requeues the whole board each run, weekend runs roll forward keeping time-of-day, and queued counts are logged (the cadence-visibility ask from this plan shipped with it). Existing claim/retry machinery handles the rest — `claimNextPending` uses `FOR UPDATE SKIP LOCKED` under Postgres, so a future second worker is safe for free. This replaces the per-item `retag_after` sweep from earlier drafts.
+2. **Data refresh — to build, mirroring the shipped pattern.** Cheap, no AI: `boards.refresh_every_min` (NULL = static type); a due board gets `adapter.refresh(item, ctx)` across its items to update payloads. Stocks: price series. Products: price/stock check. Docs: re-fetch source, diff. The one ordering rule: a board due for a scheduled retag refreshes first, so the AI always judges fresh data — cards may tolerate day-old prices, but a retag judging stale data is wasted spend.
 
-Cadences are per-board settings with per-type defaults (stocks: refresh daily, retag monthly; images: both NULL). With the daily cap removed, cadence **is** the spend control for recurring work — the retag sweep should also log how many items it flips, so a misconfigured cadence is visible in the logs rather than only on the bill.
+Retag cadence UI already exists in the board modal; refresh reuses the same pattern with per-type defaults (stocks: refresh daily, retag ~monthly; images: both off). Once the daily cap is deleted, cadence **is** the spend control for recurring work — the shipped per-run queue logging and the usage sparkline are what make a misconfigured cadence visible.
 
-**Snapshots make retagging valuable instead of destructive.** Every tagging result appends to `tag_snapshots`; `items.tags` stays the latest snapshot so all current filter/render code is untouched. History is what buys the interesting feature: thesis-at-buy vs. thesis-now ("what did the AI think of RIVN in July vs. December"). Without it, each retag silently deletes the best data the board produces. UI for viewing history can come much later; capturing it must start with the first retag.
+**Snapshots make retagging valuable instead of destructive — ✅ capture shipped (2026-07-05).** Every tagging result appends `{source, tags, reasoning, undecided, tagged_at}` to `tag_snapshots` — AI runs as `source='ai'`, manual tag edits as `source='user'` (your own corrections are arguably the highest-value entries) — while `images.tags` stays the latest state so no filter/render code changed. Reasoning (✅) makes the history dramatically better than originally planned: thesis-then vs. thesis-now is literal stored sentences ("what did the AI say about RIVN's momentum in July vs. December"), not just facet values flipping. History is accruing from today; the timeline/diff UI stays deferred until there's something to look at.
 
 ---
 
 ## Stock type spec
 
 - **Data source:** structured basics from a stocks API free tier (Finnhub or Alpha Vantage — pick at implementation time; key stored in settings like the Anthropic key). Fetches: name, sector, market cap, daily closes ~1y, weekly closes ~5y, a few fundamentals.
-- **No scraping.** Narrative facets come from giving the tagging call the `web_search` tool and letting the model research the ticker itself. One call replaces a scraping subsystem; stock boards hold dozens of items, not thousands, so the cost is fine.
-- **Model input** (`buildModelInput`): the 5y weekly chart rendered server-side (SVG → sharp rasterize; sharp is already a dep) + a text dossier from payload fundamentals + web_search enabled. The model sees the chart shape the same way a human does — that's the input the feeling-facets actually run on.
-- **Suggested facets** (starting point; boards edit freely):
+- **No scraping.** Narrative facets come from a research-capable tagging call — the adapter declares `research: true` and providers.js maps it to each provider's web-search tool (see Per-board AI config), with an adapter-fetched dossier (recent headlines via the stocks API) as the provider-neutral fallback. One call replaces a scraping subsystem; stock boards hold dozens of items, not thousands, so the cost is fine.
+- **Model input** (`buildModelInput`): the 5y weekly chart rendered server-side (SVG → sharp rasterize; sharp is already a dep) + a text dossier from payload fundamentals, research enabled. The model sees the chart shape the same way a human does — that's the input the feeling-facets actually run on.
+- **Keep `ai_reasoning` on (✅ exists) for stock boards.** The per-facet justification sentences *are* the thesis text — snapshotted over time, "Intel-as-you-saw-it-at-the-bottom" becomes stored prose, not just facet values.
+- **Suggested facets** (starting point; boards edit freely). Each preset ships a `description` (✅ facets support them; the prompt prefers them over the legacy GLOSS fallback) — the feeling-facets are exactly the ones that need one, e.g. thesis: "the story you'd be buying — judge from the narrative, not the fundamentals":
   - `thesis` — contrarian-bottom, turnaround, hype-ride, lottery-ticket, quiet-compounder, dividend-hold *(pick exactly one)*
   - `moat` — brand/social-capital, tech, network-effects, scale, none
   - `recognition` — household-name, sector-famous, obscure
@@ -235,13 +237,13 @@ Cadences are per-board settings with per-type defaults (stocks: refresh daily, r
 
 Steps 1–4 are pure refactor — the app must behave identically after each, verified against the running instance before moving on. Features start at step 5.
 
-1. **Schema:** `images` → `items` (+ `payload`, `refresh_after`, `retag_after`), move filename/original_name/thumb_w/thumb_h into `payload` JSONB, preserve ids and FK cascades (`favorites`/`crate_images` column renames ride along); add `boards.type` defaulting `'image'`; create `tag_snapshots`. Mechanics: update `schema.sql` for fresh installs + a one-time guarded migration in `initDb` for live DBs (transactional DDL makes it atomic; see Data model). Note the prod droplet is still on the pre-Docker SQLite stack — if the Docker/Postgres cutover hasn't happened there yet, fold this rename into that cutover's ETL and skip the live-DB migration path entirely.
+1. **Schema:** `images` → `items` (+ `payload`; `tag_reasoning` rides along), move filename/original_name/thumb_w/thumb_h into `payload` JSONB, preserve ids and FK cascades (`favorites`/`crate_images`/`tag_snapshots` column renames ride along — snapshot capture ✅ already live); add `boards.type` defaulting `'image'`. Mechanics: update `schema.sql` for fresh installs + a one-time guarded migration in `initDb` for live DBs (transactional DDL makes it atomic; see Data model). Note the prod droplet is still on the pre-Docker SQLite stack — if the Docker/Postgres cutover hasn't happened there yet, fold this rename into that cutover's ETL and skip the live-DB migration path entirely.
 2. **Server image adapter:** create registry (validates manifest/`apiVersion`) + `server/types/image.js`; move upload route, sharp pipeline, thumbnail serving, delete-cleanup, and the worker's image-message building into it; build the ctx facade. Rename routes with aliases.
 3. **Client image adapter:** create registry + `types/image/`; move `upload.js` → `ingestUI`, `lightbox.js` → `openDetail`, the card `<img>` body → `renderCardBody`; switch fetches to `/api/items`, drop server aliases.
-4. **Type plumbing + per-board AI config:** board creation UI gains a type picker, model picker, and optional API key; worker resolves key/model per claimed item's board (fallback board → global → env); daily cap removed (usage counted per `(day, board_id)` for visibility only); client resolves the adapter from `board.type`; suggested-facet presets wired in.
-5. **Stock adapter (server):** stocks API client, ingest route, payload shape, chart rasterizer, `buildModelInput` with web_search, `refresh()`.
+4. **Type plumbing:** board creation UI gains a type picker next to the shipped tagger/model pickers (✅ per-board AI config is done, ✅ cap deleted); client resolves the adapter from `board.type`; suggested-facet presets (with descriptions) wired in.
+5. **Stock adapter (server):** stocks API client, ingest route, payload shape, chart rasterizer, `buildModelInput` returning provider-neutral parts with research enabled, `refresh()`.
 6. **Stock adapter (client):** card body with canvas chart, board-level period selector, ticker ingest UI, detail panel.
-7. **Liveness:** refresh sweep, retag sweep, per-board cadence settings, snapshot append on every tag. (Snapshot writing can land as early as step 1–2 — it's cheap and starts accruing history immediately.)
+7. **Liveness (what's left):** the retag schedule shipped (✅); remaining = the board-level `refresh_every_min` sweep with refresh-before-retag ordering. (Snapshots moved into step 1 — see above.)
 
 Deferred / open:
 
@@ -249,4 +251,4 @@ Deferred / open:
 - Docs/products adapters — only after stocks proves the interface; each should pass the insulation test.
 - `PLUGIN.md` + reference module/template repo — write once the interface survives contact with the stock adapter (documenting it before then would freeze mistakes).
 - Public deploy story (README quickstart, Dockerfile) — prerequisite for anyone else running an instance; see Plugin architecture.
-- `tag_screenshot` tool name and "You tag images…" prompt wording generalize when the worker seam is cut (tool name: `record_tags`; prompt gets a per-type noun from the adapter).
+- `tag_screenshot` tool name and "You tag images…" prompt wording generalize when the worker seam is cut (tool name: `record_tags`; per-type noun from the adapter manifest) — now split between `worker.js#buildPrompt` and the `TOOL_NAME`/`TOOL_DESC`/`USER_TEXT` constants in `providers.js`. The facet-gloss half of this already shipped as facet `description`s (the hardcoded GLOSS table is just the fallback now).

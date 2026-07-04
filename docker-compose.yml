@@ -25,7 +25,6 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MODEL: ${MODEL:-}
-      DAILY_CAP: ${DAILY_CAP:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-1}
       # scheduled auto-tagging (weekend detection, run times) uses server-local time
       TZ: ${TZ:-UTC}

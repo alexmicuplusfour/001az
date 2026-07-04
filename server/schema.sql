@@ -85,6 +85,20 @@ CREATE INDEX IF NOT EXISTS idx_images_status ON images(status);
 CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);
 CREATE INDEX IF NOT EXISTS idx_images_board ON images(board_id);
 
+-- Judgment history: one row per tagging event (AI run or manual edit), so
+-- scheduled retags accrue a timeline instead of overwriting the only copy.
+-- images.tags/tag_reasoning stay the latest state; this is the log behind it.
+CREATE TABLE IF NOT EXISTS tag_snapshots (
+  id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  image_id  BIGINT NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  source    TEXT NOT NULL DEFAULT 'ai',  -- 'ai' | 'user'
+  tags      JSONB NOT NULL DEFAULT '[]',
+  reasoning JSONB NOT NULL DEFAULT '{}',
+  undecided BOOLEAN NOT NULL DEFAULT FALSE,
+  tagged_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_image ON tag_snapshots(image_id, tagged_at);
+
 CREATE TABLE IF NOT EXISTS invites (
   token      TEXT PRIMARY KEY,
   user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

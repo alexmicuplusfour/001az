@@ -5,9 +5,7 @@ import {
   markTagged,
   failOrRequeue,
   recoverStuck,
-  usageToday,
   bumpUsage,
-  countPending,
   getBoard,
   getAiKey,
   getSetting,
@@ -180,7 +178,6 @@ export function startWorker({ db, thumbsDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 10000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
-  let capNoticeDay = null; // last day the cap warning was logged
 
   async function tagOne(row) {
     const prompt = await getBoardPrompt(db, row.board_id);
@@ -245,24 +242,9 @@ export function startWorker({ db, thumbsDir }) {
   }
 
   async function tick() {
-    const dailyCap = Number(process.env.DAILY_CAP || 2000);
-
     const recovered = await recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
     await retagDue();
-    if ((await usageToday(db)) >= dailyCap) {
-      // Say so once a day — otherwise pending images just spin forever
-      // with no hint of why (cap exhaustion looks identical to a hang).
-      const day = new Date().toISOString().slice(0, 10);
-      if (capNoticeDay !== day) {
-        const n = await countPending(db);
-        if (n > 0) {
-          console.warn(`worker: daily cap (${dailyCap}) reached — ${n} pending image(s) deferred until tomorrow (raise DAILY_CAP or reset ai_board_usage to resume today)`);
-          capNoticeDay = day;
-        }
-      }
-      return 0;
-    }
 
     // Boards without their own key only tag when a default exists; their
     // images stay pending in the queue until one is configured.
@@ -296,7 +278,7 @@ export function startWorker({ db, thumbsDir }) {
 
   resolveDefaultAi(db).then((ai) => {
     if (ai) {
-      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, dailyCap=${Number(process.env.DAILY_CAP || 2000)}, per-board overrides in board settings).`);
+      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings).`);
     } else {
       console.log("AI tagging worker started (no default key — only boards with their own key will tag).");
     }

@@ -150,6 +150,15 @@ export async function setImageTags(db, id, tags) {
     "UPDATE images SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, updated_at=$3 WHERE id=$4",
     [JSON.stringify(tags), JSON.stringify(reasoning), Date.now(), id]
   );
+  await addTagSnapshot(db, id, "user", tags, reasoning, false);
+}
+
+// Append one row of judgment history (see tag_snapshots in schema.sql).
+async function addTagSnapshot(db, imageId, source, tags, reasoning, undecided) {
+  await db.query(
+    "INSERT INTO tag_snapshots (image_id, source, tags, reasoning, undecided, tagged_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    [imageId, source, JSON.stringify(tags || []), JSON.stringify(reasoning || {}), undecided, Date.now()]
+  );
 }
 
 export async function getImageReasoning(db, id) {
@@ -596,6 +605,7 @@ export async function markTagged(db, id, tags, undecided = false, reasoning = {}
     "UPDATE images SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, updated_at=$4 WHERE id=$5",
     [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), Date.now(), id]
   );
+  await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
 }
 
 // Increment attempts; mark failed once attempts reach maxAttempts, else requeue. Returns true if failed.
@@ -623,18 +633,8 @@ export async function recoverStuck(db, olderThanMs) {
   return result.rowCount;
 }
 
-export async function countPending(db) {
-  const { rows } = await db.query("SELECT COUNT(*) AS n FROM images WHERE status='pending'");
-  return rows[0].n;
-}
-
 function today() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-}
-
-export async function usageToday(db) {
-  const { rows } = await db.query("SELECT COALESCE(SUM(count), 0) AS n FROM ai_board_usage WHERE day=$1", [today()]);
-  return Number(rows[0].n);
 }
 
 // One successful tagging call: bump the board's daily row with the token
