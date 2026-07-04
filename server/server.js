@@ -41,7 +41,7 @@ import {
   boardAiUsage,
   retagBoard,
   releaseHeld,
-  heldToUntagged,
+  queueUntagged,
   getBoardMemberIds,
   setBoardMembers,
   canAccessBoard,
@@ -376,17 +376,15 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
 
   if (Object.keys(update).length > 0) await updateBoard(db, id, update);
 
-  // Leaving scheduled mode strands any held images — resolve them now: back
-  // into the queue while auto-tagging stays on, untagged for review when the
-  // whole feature was switched off.
-  if (wasScheduled && !isScheduled) {
-    if (eff.autoTag) {
-      const n = await releaseHeld(db, id);
-      if (n) console.log(`board ${id}: schedule off — ${n} held image(s) queued for tagging`);
-    } else {
-      const n = await heldToUntagged(db, id);
-      if (n) console.log(`board ${id}: auto-tagging off — ${n} held image(s) left untagged for review`);
-    }
+  // The moment the board becomes tag-immediately (auto-tagging re-enabled,
+  // or the schedule dropped), sweep it: queue everything untagged — held
+  // uploads, AI-undecided, failed. Turning auto-tagging off queues nothing —
+  // uploads pile up as 'held', untagged, until tagging returns.
+  const wasImmediate = prev.auto_tag && !prev.auto_tag_periodic;
+  const isImmediate = eff.autoTag && !eff.periodic;
+  if (isImmediate && !wasImmediate) {
+    const n = await queueUntagged(db, id);
+    if (n) console.log(`board ${id}: auto-tagging on — swept ${n} untagged image(s) into the queue`);
   }
 
   if (req.body && Array.isArray(req.body.memberIds)) {
@@ -546,10 +544,10 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(asyn
     return res.status(400).json({ error: "valid board required" });
   }
 
-  // The board's auto-tag mode decides where uploads land: the tagging queue,
-  // held for the next scheduled run, or straight to untagged-for-review.
-  const uploadStatus = !board.auto_tag ? "tagged" : board.auto_tag_periodic ? "held" : "pending";
-  const uploadUndecided = !board.auto_tag;
+  // The board's auto-tag mode decides where uploads land: straight into the
+  // tagging queue, or 'held' — untagged in the gallery but still owed to the
+  // AI, released when the schedule fires or auto-tagging is (re-)enabled.
+  const uploadStatus = board.auto_tag && !board.auto_tag_periodic ? "pending" : "held";
 
   const files = req.files || [];
   const uploaded = [];
@@ -584,9 +582,9 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(asyn
           .toFile(path.join(THUMBS_DIR, filename + ".webp"));
         await fs.promises.writeFile(path.join(GALLERY_DIR, filename), buf);
 
-        const rowId = await insertImage(db, filename, f.originalname || filename, boardId, uploadStatus, uploadUndecided);
+        const rowId = await insertImage(db, filename, f.originalname || filename, boardId, uploadStatus);
         await setThumbDimensions(db, rowId, thumbInfo.width, thumbInfo.height);
-        uploaded.push({ id: rowId, name: filename, status: uploadStatus, undecided: uploadUndecided, tags: [], w: thumbInfo.width, h: thumbInfo.height });
+        uploaded.push({ id: rowId, name: filename, status: uploadStatus, tags: [], w: thumbInfo.width, h: thumbInfo.height });
       });
     } catch (err) {
       console.error("upload error:", f.originalname, err.message);

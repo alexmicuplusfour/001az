@@ -882,7 +882,7 @@
           atSched
         );
         atWrap.append(
-          switchRow("Auto tagging", "(new uploads are tagged by the AI; off = tag by hand)", at.enabled, (on) => { at.enabled = on; syncAt(); }),
+          switchRow("Auto tagging", "(new uploads are tagged by the AI; off = they wait untagged until this is back on)", at.enabled, (on) => { at.enabled = on; syncAt(); }),
           atSub
         );
         syncAt();

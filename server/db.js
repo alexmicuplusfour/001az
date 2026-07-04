@@ -94,14 +94,14 @@ export async function listImages(db, userId = null, boardId = null) {
   }));
 }
 
-// status: 'pending' (tag now), 'held' (wait for the board's scheduled run),
-// or 'tagged' + undecided (auto-tagging off — straight to manual review).
-export async function insertImage(db, filename, originalName, boardId, status = "pending", undecided = false) {
+// status: 'pending' (tag now) or 'held' (wait — for the board's scheduled
+// run, or for auto-tagging to be switched back on).
+export async function insertImage(db, filename, originalName, boardId, status = "pending") {
   const now = Date.now();
   const { rows } = await db.query(
-    `INSERT INTO images (filename, original_name, status, undecided, board_id, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id`,
-    [filename, originalName, status, undecided, boardId, now]
+    `INSERT INTO images (filename, original_name, status, board_id, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
+    [filename, originalName, status, boardId, now]
   );
   return rows[0].id;
 }
@@ -496,11 +496,14 @@ export async function releaseHeld(db, boardId) {
   return result.rowCount;
 }
 
-// Held images become plain untagged-for-review (auto-tagging was switched off,
-// so nothing will ever release them). Same state cancelBoardQueue produces.
-export async function heldToUntagged(db, boardId) {
+// Queue everything untagged in a board: held uploads, AI-undecided images,
+// and failed ones (fresh attempts). Fired when auto-tagging turns on — the
+// point of the board is tags, so nothing untagged is left behind. In-flight
+// ('processing') and human-tagged images are untouched.
+export async function queueUntagged(db, boardId) {
   const result = await db.query(
-    "UPDATE images SET status='tagged', undecided=TRUE, updated_at=$1 WHERE board_id=$2 AND status='held'",
+    `UPDATE images SET status='pending', attempts=0, error=NULL, updated_at=$1
+     WHERE board_id=$2 AND status IN ('held','tagged','failed') AND tags='[]'::jsonb`,
     [Date.now(), boardId]
   );
   return result.rowCount;

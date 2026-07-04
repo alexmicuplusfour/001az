@@ -224,7 +224,9 @@ function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = img.id;
-  if (img.undecided) card.classList.add("undecided");
+  // Held images (waiting for auto-tagging) get the same dashed "needs tags"
+  // treatment as AI-undecided ones.
+  if (img.undecided || img.status === "held") card.classList.add("undecided");
   const im = document.createElement("img");
   im.src = thumbUrl(img.name);
   im.loading = "lazy";

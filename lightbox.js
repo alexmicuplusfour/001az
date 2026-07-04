@@ -49,7 +49,12 @@ function paintPanel(img, reasoning) {
   }
   const why = reasoning || {};
 
-  if (img.undecided) {
+  if (img.status === "held") {
+    const note = document.createElement("div");
+    note.className = "lbp-undecided";
+    note.textContent = "Not tagged yet — this board's auto-tagging is off or waiting for its next scheduled run.";
+    elLightboxPanelBody.appendChild(note);
+  } else if (img.undecided) {
     const note = document.createElement("div");
     note.className = "lbp-undecided";
     note.textContent = why.fit || "The AI couldn't apply this board's facets to this image.";
@@ -93,7 +98,7 @@ function paintPanel(img, reasoning) {
     elLightboxPanelBody.appendChild(row);
   }
 
-  if (!rows && !img.undecided) {
+  if (!rows && !img.undecided && img.status !== "held") {
     const empty = document.createElement("p");
     empty.className = "lbp-hint";
     empty.textContent = reasoning === null ? "Loading…" : "No AI tags for this image.";
