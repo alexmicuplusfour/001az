@@ -595,7 +595,7 @@
             : "";
           tr.innerHTML = `
             <td><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></td>
-            <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="${nextRun}">(${b.held_count} held)</span>` : ""}</td>
+            <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="uploads waiting while auto-tagging is off">(${b.held_count} held)</span>` : ""}</td>
             <td>${usageCell(b.ai_usage)}</td>
             <td></td>`;
 
@@ -621,7 +621,7 @@
           const retagBtn = document.createElement("button");
           retagBtn.className = "danger";
           retagBtn.textContent = "retag ↺";
-          retagBtn.title = "Re-queue all images in this board for AI tagging";
+          retagBtn.title = "Re-queue all images in this board for AI tagging" + (nextRun ? ` (${nextRun})` : "");
           retagBtn.onclick = async () => {
             if (!confirm(`Re-tag all ${b.image_count} image(s) in "${b.name}"? Existing tags will be cleared and reprocessed.`)) return;
             try {
@@ -643,9 +643,7 @@
             const tagHeldBtn = document.createElement("button");
             tagHeldBtn.className = "ghost";
             tagHeldBtn.textContent = "tag held ▸";
-            tagHeldBtn.title = nextRun
-              ? `Tag the ${b.held_count} held image(s) now instead of waiting (${nextRun})`
-              : `Tag the ${b.held_count} held image(s) now`;
+            tagHeldBtn.title = `Tag the ${b.held_count} held image(s) now, without turning auto-tagging back on`;
             tagHeldBtn.onclick = async () => {
               try {
                 tagHeldBtn.disabled = true;
@@ -839,8 +837,8 @@
           switchRow("AI reasoning", "(the tagger justifies each facet; shown in the lightbox)", aiReasoning, (on) => { aiReasoning = on; })
         );
 
-        // Auto tagging: on/off, plus an optional schedule that batches new
-        // uploads instead of tagging them the moment they arrive.
+        // Auto tagging: on/off, plus an optional schedule that periodically
+        // re-tags the whole board (for object types whose content goes stale).
         const at = {
           enabled: isNew ? true : board.auto_tag !== false,
           periodic: !isNew && !!board.auto_tag_periodic,
@@ -872,13 +870,17 @@
         }
         everySel.value = String(at.everyMin);
         everySel.onchange = () => { at.everyMin = Number(everySel.value); };
-        const syncAt = () => { atSub.hidden = !at.enabled; atSched.hidden = !at.periodic; };
+        // hidden loses to the inline display:flex, so toggle display directly.
+        const syncAt = () => {
+          atSub.style.display = at.enabled ? "flex" : "none";
+          atSched.style.display = at.periodic ? "flex" : "none";
+        };
         atSched.append(
           everySel,
           switchRow("exclude weekends", null, at.skipWeekends, (on) => { at.skipWeekends = on; }, { small: true })
         );
         atSub.append(
-          switchRow("Tag on a schedule", "(hold new uploads and tag them in batches)", at.periodic, (on) => { at.periodic = on; syncAt(); }),
+          switchRow("Retag on a schedule", "(periodically re-tags every image in this board — for content that goes stale)", at.periodic, (on) => { at.periodic = on; syncAt(); }),
           atSched
         );
         atWrap.append(

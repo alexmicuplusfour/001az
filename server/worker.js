@@ -12,7 +12,7 @@ import {
   getAiKey,
   getSetting,
   dueBoards,
-  releaseHeld,
+  retagBoard,
   setBoardNextRun,
 } from "./db.js";
 import { callTagger, PROVIDER_DEFAULT_MODEL } from "./providers.js";
@@ -163,7 +163,7 @@ export function invalidateAllBoardCaches() {
   boardPromptCache.clear();
 }
 
-// --- periodic auto-tagging schedule (server-local time; set TZ to move it) ---
+// --- periodic retag schedule (server-local time; set TZ to move it) ---
 
 const DAY_MS = 24 * 3600 * 1000;
 const isWeekend = (ts) => [0, 6].includes(new Date(ts).getDay());
@@ -229,17 +229,18 @@ export function startWorker({ db, thumbsDir }) {
     return { tags, undecided, reasoning, usage, model: ai.model, provider: ai.provider };
   }
 
-  // Fire due periodic boards: release their held images into the queue and
-  // schedule the next run. A run landing on an excluded weekend releases
-  // nothing — it just rolls forward to the next weekday slot.
-  async function releaseDue() {
+  // Fire due scheduled boards: re-queue everything for a fresh tagging pass
+  // (content the board tracks can go stale) and schedule the next run. A run
+  // landing on an excluded weekend retags nothing — it just rolls forward to
+  // the next weekday slot.
+  async function retagDue() {
     for (const b of await dueBoards(db, Date.now())) {
       const now = Date.now();
       const skipped = b.auto_tag_skip_weekends && isWeekend(now);
-      const released = skipped ? 0 : await releaseHeld(db, b.id);
+      const queued = skipped ? 0 : await retagBoard(db, b.id);
       await setBoardNextRun(db, b.id, nextAutoTagRun(now, b.auto_tag_every_min, b.auto_tag_skip_weekends));
-      if (released) console.log(`scheduled tagging: released ${released} held image(s) in board "${b.name}"`);
-      else if (skipped) console.log(`scheduled tagging: board "${b.name}" skipped (weekend) — rescheduled`);
+      if (queued) console.log(`scheduled retag: queued ${queued} image(s) in board "${b.name}"`);
+      else if (skipped) console.log(`scheduled retag: board "${b.name}" skipped (weekend) — rescheduled`);
     }
   }
 
@@ -248,7 +249,7 @@ export function startWorker({ db, thumbsDir }) {
 
     const recovered = await recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
-    await releaseDue();
+    await retagDue();
     if ((await usageToday(db)) >= dailyCap) {
       // Say so once a day — otherwise pending images just spin forever
       // with no hint of why (cap exhaustion looks identical to a hang).

@@ -108,8 +108,8 @@ async function uploadChunk(chunk) {
   if (data) {
     const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
     for (const row of [...rows].reverse()) {
-      // Boards with auto-tagging off or on a schedule hold uploads ('held')
-      // instead of queueing them — only truly pending images feed the
+      // Boards with auto-tagging off hold uploads ('held') instead of
+      // queueing them — only truly pending images feed the
       // "Processing images…" watcher.
       state.images.unshift({
         id: row.id,

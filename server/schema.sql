@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS boards (
   ai_key_id    BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL,
   ai_model     TEXT,
   -- auto-tagging: off = uploads wait as 'held' until it's re-enabled;
-  -- periodic = uploads are 'held' and released to the queue every N minutes
-  -- (optionally skipping weekends, server-local time)
+  -- periodic = the whole board is re-tagged every N minutes (for content
+  -- that goes stale; optionally skipping weekends, server-local time)
   auto_tag               BOOLEAN NOT NULL DEFAULT TRUE,
   auto_tag_periodic      BOOLEAN NOT NULL DEFAULT FALSE,
   auto_tag_every_min     INTEGER NOT NULL DEFAULT 1440,
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
 
 -- status: pending -> processing -> tagged | failed
 -- ('held' sits before pending: uploads wait there, untagged, while the
---  board's auto-tagging is off or between scheduled runs)
+--  board's auto-tagging is off)
 CREATE TABLE IF NOT EXISTS images (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   filename      TEXT UNIQUE NOT NULL,

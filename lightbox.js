@@ -52,7 +52,7 @@ function paintPanel(img, reasoning) {
   if (img.status === "held") {
     const note = document.createElement("div");
     note.className = "lbp-undecided";
-    note.textContent = "Not tagged yet — this board's auto-tagging is off or waiting for its next scheduled run.";
+    note.textContent = "Not tagged yet — this board's auto-tagging is off. Tag it by hand, or turn auto-tagging back on.";
     elLightboxPanelBody.appendChild(note);
   } else if (img.undecided) {
     const note = document.createElement("div");

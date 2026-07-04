@@ -376,13 +376,10 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
 
   if (Object.keys(update).length > 0) await updateBoard(db, id, update);
 
-  // The moment the board becomes tag-immediately (auto-tagging re-enabled,
-  // or the schedule dropped), sweep it: queue everything untagged — held
-  // uploads, AI-undecided, failed. Turning auto-tagging off queues nothing —
-  // uploads pile up as 'held', untagged, until tagging returns.
-  const wasImmediate = prev.auto_tag && !prev.auto_tag_periodic;
-  const isImmediate = eff.autoTag && !eff.periodic;
-  if (isImmediate && !wasImmediate) {
+  // The moment auto-tagging comes back on, sweep the board: queue everything
+  // untagged — held uploads, AI-undecided, failed. Turning it off queues
+  // nothing — uploads pile up as 'held', untagged, until tagging returns.
+  if (eff.autoTag && !prev.auto_tag) {
     const n = await queueUntagged(db, id);
     if (n) console.log(`board ${id}: auto-tagging on — swept ${n} untagged image(s) into the queue`);
   }
@@ -544,10 +541,10 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(asyn
     return res.status(400).json({ error: "valid board required" });
   }
 
-  // The board's auto-tag mode decides where uploads land: straight into the
-  // tagging queue, or 'held' — untagged in the gallery but still owed to the
-  // AI, released when the schedule fires or auto-tagging is (re-)enabled.
-  const uploadStatus = board.auto_tag && !board.auto_tag_periodic ? "pending" : "held";
+  // Auto-tagging on: uploads go straight into the tagging queue. Off: they
+  // wait as 'held' — untagged in the gallery but still owed to the AI,
+  // swept into the queue when auto-tagging comes back on.
+  const uploadStatus = board.auto_tag ? "pending" : "held";
 
   const files = req.files || [];
   const uploaded = [];
