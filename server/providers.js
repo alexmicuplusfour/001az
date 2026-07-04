@@ -21,8 +21,11 @@ function anthropicClient(apiKey) {
   return anthropicClients.get(apiKey);
 }
 
-// Run one tagging call. Returns the tool-call input object (facet key ->
-// selection, plus "fit"); throws with a readable message on any failure.
+// Run one tagging call. Returns { input, usage }: the tool-call input object
+// (facet key -> selection, plus "fit") and the token usage the provider
+// reported, normalized to { input, output, cacheRead } — cache reads are kept
+// out of `input` because they bill at a fraction of the input rate. Throws
+// with a readable message on any failure.
 export async function callTagger({ provider, apiKey, model, systemText, schema, imageB64 }) {
   if (provider === "openai") return openaiTag({ apiKey, model, systemText, schema, imageB64 });
   return anthropicTag({ apiKey, model, systemText, schema, imageB64 });
@@ -47,7 +50,16 @@ async function anthropicTag({ apiKey, model, systemText, schema, imageB64 }) {
   });
   const block = msg.content.find((b) => b.type === "tool_use");
   if (!block) throw new Error("no tool_use block in response");
-  return block.input;
+  const u = msg.usage || {};
+  return {
+    input: block.input,
+    usage: {
+      // cache writes bill as (slightly dearer) input, so fold them in
+      input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+      output: u.output_tokens || 0,
+      cacheRead: u.cache_read_input_tokens || 0,
+    },
+  };
 }
 
 // OpenAI via plain fetch — one endpoint, not worth a dependency. Chat
@@ -81,7 +93,17 @@ async function openaiTag({ apiKey, model, systemText, schema, imageB64 }) {
   const data = await r.json();
   const call = data.choices?.[0]?.message?.tool_calls?.[0];
   if (!call) throw new Error("no tool call in response");
-  return JSON.parse(call.function.arguments);
+  const u = data.usage || {};
+  const cached = u.prompt_tokens_details?.cached_tokens || 0;
+  return {
+    input: JSON.parse(call.function.arguments),
+    usage: {
+      // prompt_tokens includes cached ones; pull those out to match Anthropic
+      input: Math.max((u.prompt_tokens || 0) - cached, 0),
+      output: u.completion_tokens || 0,
+      cacheRead: cached,
+    },
+  };
 }
 
 // Cheap key/model validation for the admin "Test" buttons. Throws with the

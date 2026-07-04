@@ -127,9 +127,24 @@ CREATE TABLE IF NOT EXISTS crate_images (
 );
 CREATE INDEX IF NOT EXISTS idx_crate_images_image ON crate_images(image_id);
 
+-- Legacy global counter, superseded by ai_board_usage; kept because
+-- sqlite-to-pg imports it and old rows are the only pre-board history.
 CREATE TABLE IF NOT EXISTS ai_usage (
   day   TEXT PRIMARY KEY,
   count INTEGER NOT NULL DEFAULT 0
+);
+
+-- Tagger usage per board per day: call count plus token counts as reported by
+-- the provider. Cache reads are broken out from input because they bill at a
+-- fraction of the input rate.
+CREATE TABLE IF NOT EXISTS ai_board_usage (
+  day               TEXT   NOT NULL,
+  board_id          TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  count             INTEGER NOT NULL DEFAULT 0,
+  input_tokens      BIGINT NOT NULL DEFAULT 0,
+  output_tokens     BIGINT NOT NULL DEFAULT 0,
+  cache_read_tokens BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, board_id)
 );
 
 CREATE TABLE IF NOT EXISTS settings (

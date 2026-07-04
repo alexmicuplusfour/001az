@@ -550,8 +550,40 @@
 
         // Board table
         const table = document.createElement("table");
-        table.innerHTML = `<thead><tr><th>Name</th><th>Images</th><th></th></tr></thead>`;
+        table.innerHTML = `<thead><tr><th>Name</th><th>Images</th><th>AI tokens</th><th></th></tr></thead>`;
         const tbody = document.createElement("tbody");
+
+        const fmtTok = (n) =>
+          n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M"
+          : n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "K"
+          : String(n);
+        // Last 14 days as 2px bars, height = billable input tokens (cache
+        // reads excluded), scaled to the board's busiest day in the window.
+        // Idle days show a 1px baseline tick; bottom-aligned flex puts the
+        // ticks exactly on the text baseline.
+        function sparkline(days) {
+          if (!days || !days.some((d) => d.input > 0)) return "";
+          const byDay = Object.fromEntries(days.map((d) => [d.day, d]));
+          const max = Math.max(...days.map((d) => d.input));
+          let bars = "";
+          for (let i = 13; i >= 0; i--) {
+            const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+            const d = byDay[day];
+            const h = d && d.input ? Math.max(2, Math.round((d.input / max) * 12)) : 1;
+            const tip = d ? `${day} — ${d.calls} call(s), ${fmtTok(d.input)} in / ${fmtTok(d.output)} out` : `${day} — no tagging`;
+            bars += `<span title="${tip}" style="width:2px;height:${h}px;background:#000"></span>`;
+          }
+          return `<span style="display:inline-flex;align-items:flex-end;gap:2px;margin-left:10px;cursor:default">${bars}</span>`;
+        }
+        function usageCell(u) {
+          if (!u || !u.calls) return `<span style="color:#9aa0aa">—</span>`;
+          const tip = [
+            `${u.calls} call(s) all-time`,
+            u.cacheRead ? `${fmtTok(u.cacheRead)} cached input reads` : "",
+            u.today.calls ? `today: ${u.today.calls} call(s), ${fmtTok(u.today.input)} in / ${fmtTok(u.today.output)} out` : "",
+          ].filter(Boolean).join(" · ");
+          return `<span title="${tip}">${fmtTok(u.input)} in · ${fmtTok(u.output)} out</span>${sparkline(u.days)}`;
+        }
 
         for (const b of boards) {
           const url = boardUrl(b.id);
@@ -564,6 +596,7 @@
           tr.innerHTML = `
             <td><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></td>
             <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="${nextRun}">(${b.held_count} held)</span>` : ""}</td>
+            <td>${usageCell(b.ai_usage)}</td>
             <td></td>`;
 
           const actCell = tr.querySelector("td:last-child");

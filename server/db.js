@@ -630,15 +630,68 @@ function today() {
 }
 
 export async function usageToday(db) {
-  const { rows } = await db.query("SELECT count FROM ai_usage WHERE day=$1", [today()]);
-  return rows.length ? rows[0].count : 0;
+  const { rows } = await db.query("SELECT COALESCE(SUM(count), 0) AS n FROM ai_board_usage WHERE day=$1", [today()]);
+  return Number(rows[0].n);
 }
 
-export async function bumpUsage(db) {
+// One successful tagging call: bump the board's daily row with the token
+// usage the provider reported ({ input, output, cacheRead }).
+export async function bumpUsage(db, boardId, usage = {}) {
   await db.query(
-    "INSERT INTO ai_usage (day, count) VALUES ($1, 1) ON CONFLICT(day) DO UPDATE SET count = ai_usage.count + 1",
+    `INSERT INTO ai_board_usage (day, board_id, count, input_tokens, output_tokens, cache_read_tokens)
+     VALUES ($1, $2, 1, $3, $4, $5)
+     ON CONFLICT (day, board_id) DO UPDATE SET
+       count = ai_board_usage.count + 1,
+       input_tokens = ai_board_usage.input_tokens + EXCLUDED.input_tokens,
+       output_tokens = ai_board_usage.output_tokens + EXCLUDED.output_tokens,
+       cache_read_tokens = ai_board_usage.cache_read_tokens + EXCLUDED.cache_read_tokens`,
+    [today(), boardId, Number(usage.input) || 0, Number(usage.output) || 0, Number(usage.cacheRead) || 0]
+  );
+}
+
+// Per-board tagger usage, all-time + today, plus the last 14 days broken out
+// for the admin sparkline:
+// { boardId: { calls, input, output, cacheRead, today: { calls, input, output },
+//              days: [{ day, calls, input, output }] } }  (days ascending, gaps omitted)
+export async function boardAiUsage(db) {
+  const { rows } = await db.query(
+    `SELECT board_id,
+       SUM(count) AS calls, SUM(input_tokens) AS input,
+       SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cache_read,
+       COALESCE(SUM(count)         FILTER (WHERE day=$1), 0) AS t_calls,
+       COALESCE(SUM(input_tokens)  FILTER (WHERE day=$1), 0) AS t_input,
+       COALESCE(SUM(output_tokens) FILTER (WHERE day=$1), 0) AS t_output
+     FROM ai_board_usage GROUP BY board_id`,
     [today()]
   );
+  const out = Object.fromEntries(
+    rows.map((r) => [
+      r.board_id,
+      {
+        calls: Number(r.calls),
+        input: Number(r.input),
+        output: Number(r.output),
+        cacheRead: Number(r.cache_read),
+        today: { calls: Number(r.t_calls), input: Number(r.t_input), output: Number(r.t_output) },
+        days: [],
+      },
+    ])
+  );
+  const cutoff = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
+  const { rows: dayRows } = await db.query(
+    `SELECT board_id, day, count, input_tokens, output_tokens
+     FROM ai_board_usage WHERE day >= $1 ORDER BY day`,
+    [cutoff]
+  );
+  for (const r of dayRows) {
+    out[r.board_id]?.days.push({
+      day: r.day,
+      calls: Number(r.count),
+      input: Number(r.input_tokens),
+      output: Number(r.output_tokens),
+    });
+  }
+  return out;
 }
 
 // Delete a row; returns its filename (caller removes the files) or null if missing.

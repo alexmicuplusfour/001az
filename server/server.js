@@ -38,6 +38,7 @@ import {
   updateBoard,
   deleteBoard,
   boardImageStats,
+  boardAiUsage,
   retagBoard,
   releaseHeld,
   heldToUntagged,
@@ -270,6 +271,7 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
 app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
   const boards = await listBoards(db);
   const stats = await boardImageStats(db);
+  const usage = await boardAiUsage(db);
   res.json(
     await Promise.all(
       boards.map(async (b) => ({
@@ -277,6 +279,7 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
         image_count: stats[b.id]?.c || 0,
         pending_count: stats[b.id]?.p || 0,
         held_count: stats[b.id]?.h || 0,
+        ai_usage: usage[b.id] || null,
         memberIds: await getBoardMemberIds(db, b.id),
       }))
     )

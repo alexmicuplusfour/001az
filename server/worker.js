@@ -191,7 +191,7 @@ export function startWorker({ db, thumbsDir }) {
     if (!ai) throw new Error("no API key configured");
 
     const buf = await fs.promises.readFile(path.join(thumbsDir, row.filename + ".webp"));
-    const input = await callTagger({
+    const { input, usage } = await callTagger({
       provider: ai.provider,
       apiKey: ai.apiKey,
       model: ai.model,
@@ -226,7 +226,7 @@ export function startWorker({ db, thumbsDir }) {
     // undecided regardless of prompt wording, and an image it could describe
     // with most of the facets is board material by definition.
     const undecided = verdict === "undecided" && filledFacets < facets.length / 2;
-    return { tags, undecided, reasoning, model: ai.model, provider: ai.provider };
+    return { tags, undecided, reasoning, usage, model: ai.model, provider: ai.provider };
   }
 
   // Fire due periodic boards: release their held images into the queue and
@@ -256,7 +256,7 @@ export function startWorker({ db, thumbsDir }) {
       if (capNoticeDay !== day) {
         const n = await countPending(db);
         if (n > 0) {
-          console.warn(`worker: daily cap (${dailyCap}) reached — ${n} pending image(s) deferred until tomorrow (raise DAILY_CAP or reset ai_usage to resume today)`);
+          console.warn(`worker: daily cap (${dailyCap}) reached — ${n} pending image(s) deferred until tomorrow (raise DAILY_CAP or reset ai_board_usage to resume today)`);
           capNoticeDay = day;
         }
       }
@@ -269,9 +269,9 @@ export function startWorker({ db, thumbsDir }) {
     const row = await claimNextPending(db, hasDefault);
     if (!row) return 0;
     try {
-      const { tags, undecided, reasoning, model } = await tagOne(row);
+      const { tags, undecided, reasoning, usage, model } = await tagOne(row);
       await markTagged(db, row.id, tags, undecided, reasoning);
-      await bumpUsage(db);
+      await bumpUsage(db, row.board_id, usage);
       console.log(`tagged #${row.id} ${row.filename} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS);
