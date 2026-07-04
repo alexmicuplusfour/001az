@@ -51,6 +51,17 @@
         border-radius: 7px;
         font: inherit;
       }
+      select {
+        appearance: none;
+        -webkit-appearance: none;
+        padding: 8px 30px 8px 10px;
+        border: 1px solid #d8d8de;
+        border-radius: 7px;
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+        background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b6b72' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 11px center;
+      }
       button {
         border: 1px solid transparent;
         border-radius: 7px;
@@ -866,7 +877,6 @@
           [1440, "every day"], [2880, "every 2 days"], [10080, "every week"],
         ];
         const everySel = document.createElement("select");
-        everySel.style.cssText = SELECT_CSS;
         for (const [min, label] of EVERY_OPTIONS) {
           const opt = document.createElement("option");
           opt.value = String(min);
@@ -904,10 +914,10 @@
         // selects stay disabled until it arrives.
         const aiWrap = document.getElementById("board-modal-ai");
         const aiKeySel = document.createElement("select");
-        aiKeySel.style.cssText = SELECT_CSS + "flex:1;min-width:0;";
+        aiKeySel.style.cssText = "flex:1;min-width:0;";
         aiKeySel.disabled = true;
         const aiModelSel = document.createElement("select");
-        aiModelSel.style.cssText = SELECT_CSS + "flex:1;min-width:0;";
+        aiModelSel.style.cssText = "flex:1;min-width:0;";
         aiModelSel.hidden = true;
         aiWrap.append(aiKeySel, aiModelSel);
         let aiKeys = [];
@@ -991,7 +1001,6 @@
       };
       // Keep in sync with PROVIDER_DEFAULT_MODEL in server/providers.js.
       const PROVIDER_DEFAULT_MODEL = { anthropic: "claude-haiku-4-5", openai: "gpt-5-mini" };
-      const SELECT_CSS = "padding:8px 10px;border:1px solid #d8d8de;border-radius:7px;font:inherit;background:#fff;";
 
       // (Re)populate a <select> with the provider's models; keeps an unknown
       // current model as an extra option instead of silently dropping it.
@@ -1099,7 +1108,7 @@
         nameIn.placeholder = "Name (e.g. Personal Anthropic)";
         nameIn.required = true;
         const provSel = document.createElement("select");
-        provSel.style.cssText = SELECT_CSS + "flex:none;";
+        provSel.style.cssText = "flex:none;";
         for (const p of ["anthropic", "openai"]) {
           const opt = document.createElement("option");
           opt.value = p;
@@ -1138,7 +1147,7 @@
         const keyRow = document.createElement("div");
         keyRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Key</label>`;
         const keySel = document.createElement("select");
-        keySel.style.cssText = SELECT_CSS + "width:100%;";
+        keySel.style.cssText = "width:100%;";
         for (const k of keys) {
           const opt = document.createElement("option");
           opt.value = String(k.id);
@@ -1164,7 +1173,7 @@
         const modelRow = document.createElement("div");
         modelRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Model</label>`;
         const modelSel = document.createElement("select");
-        modelSel.style.cssText = SELECT_CSS + "width:100%;";
+        modelSel.style.cssText = "width:100%;";
         const providerOf = () => {
           if (keySel.value === "env") return "anthropic";
           const k = keys.find((x) => String(x.id) === keySel.value);
