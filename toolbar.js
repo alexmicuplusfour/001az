@@ -169,12 +169,6 @@ export function renderToolbar(resultCount) {
     }
   }
 
-  elToolbarSub.appendChild(toolBtn(
-    `${ICONS.heart} Top`,
-    "sort" + (state.sortByHearts ? " active" : ""),
-    () => { state.sortByHearts = !state.sortByHearts; document.dispatchEvent(new Event('app:render')); }
-  ));
-
   const count = document.createElement("span");
   count.className = "result-count";
   count.textContent = `${resultCount} image${resultCount === 1 ? "" : "s"}`;
@@ -184,4 +178,10 @@ export function renderToolbar(resultCount) {
   if (active > 0) {
     elToolbarSub.appendChild(toolBtn(`Clear filters (${active})`, "clear", clearAll));
   }
+
+  elToolbarSub.appendChild(toolBtn(
+    `${ICONS.heart} Top`,
+    "sort" + (state.sortByHearts ? " active" : ""),
+    () => { state.sortByHearts = !state.sortByHearts; document.dispatchEvent(new Event('app:render')); }
+  ));
 }

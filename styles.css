@@ -773,11 +773,16 @@ body.bulk-mode .heart {
   color: #fff;
   border-color: var(--pill-active);
 }
-.tool-btn.fav,
+.tool-btn.fav {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 .tool-btn.sort {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  margin-left: auto;
 }
 .tool-btn.fav svg,
 .tool-btn.sort svg {
