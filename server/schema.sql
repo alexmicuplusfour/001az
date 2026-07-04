@@ -12,6 +12,16 @@ CREATE TABLE IF NOT EXISTS users (
   last_login_at BIGINT
 );
 
+-- Named API keys for the AI tagger. Multiple providers can coexist; boards
+-- pick one (boards.ai_key_id) or inherit the app default (settings.default_key_id).
+CREATE TABLE IF NOT EXISTS ai_keys (
+  id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name       TEXT NOT NULL,
+  provider   TEXT NOT NULL,  -- 'anthropic' | 'openai'
+  api_key    TEXT NOT NULL,
+  created_at BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS boards (
   id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
@@ -20,9 +30,14 @@ CREATE TABLE IF NOT EXISTS boards (
   context      TEXT NOT NULL DEFAULT '',
   -- ask the tagger for a per-facet justification (stored in images.tag_reasoning)
   ai_reasoning BOOLEAN NOT NULL DEFAULT TRUE,
+  -- per-board tagger override; NULL = app default (settings / env)
+  ai_key_id    BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL,
+  ai_model     TEXT,
   created_at   BIGINT NOT NULL
 );
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_reasoning BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_key_id BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_model TEXT;
 
 CREATE TABLE IF NOT EXISTS board_members (
   board_id   TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,

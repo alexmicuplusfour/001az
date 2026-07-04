@@ -1,0 +1,105 @@
+// Provider plumbing for the AI tagger: the tagging call itself and key
+// validation, per provider. Prompt building, the queue, and tag validation
+// are provider-agnostic and live in worker.js.
+import Anthropic from "@anthropic-ai/sdk";
+
+export const PROVIDERS = ["anthropic", "openai"];
+export const PROVIDER_DEFAULT_MODEL = {
+  anthropic: "claude-haiku-4-5",
+  openai: "gpt-5-mini",
+};
+
+const TOOL_NAME = "tag_screenshot";
+const TOOL_DESC = "Record the applicable taxonomy tags for this UI screenshot.";
+const USER_TEXT = "Tag this UI screenshot using the tag_screenshot tool.";
+
+// Cached Anthropic clients, keyed by API key — multiple keys can be active at
+// once (per-board overrides), and the registry holds at most a handful.
+const anthropicClients = new Map();
+function anthropicClient(apiKey) {
+  if (!anthropicClients.has(apiKey)) anthropicClients.set(apiKey, new Anthropic({ apiKey }));
+  return anthropicClients.get(apiKey);
+}
+
+// Run one tagging call. Returns the tool-call input object (facet key ->
+// selection, plus "fit"); throws with a readable message on any failure.
+export async function callTagger({ provider, apiKey, model, systemText, schema, imageB64 }) {
+  if (provider === "openai") return openaiTag({ apiKey, model, systemText, schema, imageB64 });
+  return anthropicTag({ apiKey, model, systemText, schema, imageB64 });
+}
+
+async function anthropicTag({ apiKey, model, systemText, schema, imageB64 }) {
+  const msg = await anthropicClient(apiKey).messages.create({
+    model,
+    max_tokens: 2048,
+    system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
+    tools: [{ name: TOOL_NAME, description: TOOL_DESC, strict: true, input_schema: schema }],
+    tool_choice: { type: "tool", name: TOOL_NAME },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/webp", data: imageB64 } },
+          { type: "text", text: USER_TEXT },
+        ],
+      },
+    ],
+  });
+  const block = msg.content.find((b) => b.type === "tool_use");
+  if (!block) throw new Error("no tool_use block in response");
+  return block.input;
+}
+
+// OpenAI via plain fetch — one endpoint, not worth a dependency. Chat
+// completions with a forced function call mirrors the Anthropic tool shape;
+// the same strict JSON schema works for both.
+async function openaiTag({ apiKey, model, systemText, schema, imageB64 }) {
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      max_completion_tokens: 2048,
+      messages: [
+        { role: "system", content: systemText },
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: `data:image/webp;base64,${imageB64}` } },
+            { type: "text", text: USER_TEXT },
+          ],
+        },
+      ],
+      tools: [{ type: "function", function: { name: TOOL_NAME, description: TOOL_DESC, parameters: schema, strict: true } }],
+      tool_choice: { type: "function", function: { name: TOOL_NAME } },
+    }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.error?.message || `OpenAI HTTP ${r.status}`);
+  }
+  const data = await r.json();
+  const call = data.choices?.[0]?.message?.tool_calls?.[0];
+  if (!call) throw new Error("no tool call in response");
+  return JSON.parse(call.function.arguments);
+}
+
+// Cheap key/model validation for the admin "Test" buttons. Throws with the
+// provider's error message on failure.
+export async function testKey({ provider, apiKey, model }) {
+  if (provider === "openai") {
+    const id = model || PROVIDER_DEFAULT_MODEL.openai;
+    const r = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.error?.message || `OpenAI HTTP ${r.status}`);
+    }
+    return;
+  }
+  await anthropicClient(apiKey).messages.countTokens({
+    model: model || PROVIDER_DEFAULT_MODEL.anthropic,
+    messages: [{ role: "user", content: "hi" }],
+  });
+}

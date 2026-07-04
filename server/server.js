@@ -1,7 +1,6 @@
 import express from "express";
 import multer from "multer";
 import sharp from "sharp";
-import Anthropic from "@anthropic-ai/sdk";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
@@ -49,6 +48,10 @@ import {
   getImageReasoning,
   getSetting,
   setSetting,
+  listAiKeys,
+  getAiKey,
+  createAiKey,
+  deleteAiKey,
   setThumbDimensions,
   listImagesMissingThumbDims,
 } from "./db.js";
@@ -59,7 +62,8 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi } from "./worker.js";
+import { testKey, PROVIDERS } from "./providers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -216,7 +220,7 @@ app.post("/api/crates/:id/images/:imageId", requireAuth, wrap(async (req, res) =
   res.json(result);
 }));
 
-// --- admin: manage colleagues ---
+// --- admin: manage collaborators ---
 app.get("/api/admin/users", requireAdmin, wrap(async (_req, res) => {
   res.json(await listUsers(db));
 }));
@@ -287,7 +291,13 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   }
   const context = req.body && req.body.context ? String(req.body.context) : "";
   const aiReasoning = !req.body || req.body.ai_reasoning !== false;
-  const id = await createBoard(db, name, facets, context, aiReasoning);
+  let aiKeyId = null;
+  if (req.body && req.body.ai_key_id != null) {
+    aiKeyId = Number(req.body.ai_key_id);
+    if (!(await getAiKey(db, aiKeyId))) return res.status(400).json({ error: "unknown ai_key_id" });
+  }
+  const aiModel = req.body && req.body.ai_model ? String(req.body.ai_model) : null;
+  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null);
   console.log(`created board "${name}" ${id}`);
   res.json({ id, name, facets, context, ai_reasoning: aiReasoning });
 }));
@@ -302,6 +312,19 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   }
   if (req.body && req.body.context !== undefined) update.context = String(req.body.context);
   if (req.body && req.body.ai_reasoning !== undefined) update.aiReasoning = !!req.body.ai_reasoning;
+  if (req.body && req.body.ai_key_id !== undefined) {
+    if (req.body.ai_key_id === null) {
+      update.aiKeyId = null;
+      update.aiModel = null; // model override is meaningless without a key
+    } else {
+      const keyId = Number(req.body.ai_key_id);
+      if (!(await getAiKey(db, keyId))) return res.status(400).json({ error: "unknown ai_key_id" });
+      update.aiKeyId = keyId;
+    }
+  }
+  if (req.body && req.body.ai_model !== undefined && update.aiKeyId !== null) {
+    update.aiModel = req.body.ai_model ? String(req.body.ai_model) : null;
+  }
   if (Object.keys(update).length > 0) {
     if (!(await updateBoard(db, id, update))) return res.status(404).json({ error: "not found" });
   } else if (!(await getBoard(db, id))) {
@@ -343,40 +366,82 @@ app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   res.json({ ok: true, deleted: filenames.length });
 }));
 
-// --- admin: AI tagger config ---
-app.get("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const dbModel = await getSetting(db, "model");
-  const dbKey = await getSetting(db, "api_key");
-  const model = dbModel || process.env.MODEL || "claude-haiku-4-5";
-  const keySource = dbKey ? "db" : process.env.ANTHROPIC_API_KEY ? "env" : "none";
-  res.json({ model, keySource, dbModel });
+// --- admin: AI tagger config (key registry + app default) ---
+app.get("/api/admin/ai-keys", requireAdmin, wrap(async (_req, res) => {
+  const keys = await listAiKeys(db);
+  res.json(
+    keys.map((k) => ({
+      id: k.id,
+      name: k.name,
+      provider: k.provider,
+      hint: "…" + String(k.api_key).slice(-4), // raw keys never leave the server
+      boards_using: k.boards_using,
+      created_at: k.created_at,
+    }))
+  );
+}));
+
+app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
+  const name = (req.body && req.body.name ? String(req.body.name) : "").trim().slice(0, 64);
+  const provider = req.body && req.body.provider ? String(req.body.provider) : "";
+  const apiKey = (req.body && req.body.key ? String(req.body.key) : "").trim();
+  if (!name) return res.status(400).json({ error: "name required" });
+  if (!PROVIDERS.includes(provider)) return res.status(400).json({ error: "provider must be anthropic or openai" });
+  if (!apiKey) return res.status(400).json({ error: "key required" });
+  const id = await createAiKey(db, name, provider, apiKey);
+  console.log(`ai-key added: "${name}" (${provider})`);
+  res.json({ id, name, provider });
+}));
+
+app.delete("/api/admin/ai-keys/:id", requireAdmin, wrap(async (req, res) => {
+  if (!(await deleteAiKey(db, Number(req.params.id)))) return res.status(404).json({ error: "not found" });
+  // Boards that used the key fell back to default (FK SET NULL) — their
+  // cached entries still carry the old key id.
+  invalidateAllBoardCaches();
+  console.log(`ai-key #${req.params.id} deleted by admin`);
+  res.json({ ok: true });
+}));
+
+app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
+  const key = await getAiKey(db, Number(req.params.id));
+  if (!key) return res.status(404).json({ error: "not found" });
+  const model = req.body && req.body.model ? String(req.body.model) : null;
+  try {
+    await testKey({ provider: key.provider, apiKey: key.api_key, model });
+    res.json({ ok: true, provider: key.provider });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}));
+
+app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
+  const defaultKeyId = Number(await getSetting(db, "default_key_id")) || null;
+  const model = (await getSetting(db, "model")) || process.env.MODEL || "claude-haiku-4-5";
+  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY });
 }));
 
 app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const { model, apiKey } = req.body || {};
+  const { model, defaultKeyId } = req.body || {};
+  if (defaultKeyId !== undefined) {
+    if (defaultKeyId === null) {
+      await setSetting(db, "default_key_id", null);
+    } else {
+      const key = await getAiKey(db, Number(defaultKeyId));
+      if (!key) return res.status(400).json({ error: "unknown key" });
+      await setSetting(db, "default_key_id", String(key.id));
+    }
+  }
   if (model !== undefined) await setSetting(db, "model", model || null);
-  if (apiKey !== undefined && apiKey !== "") await setSetting(db, "api_key", apiKey);
-  console.log(`ai-config updated by admin: model=${model ?? "(unchanged)"}`);
+  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"}`);
   res.json({ ok: true });
 }));
 
-app.delete("/api/admin/ai-config/key", requireAdmin, wrap(async (req, res) => {
-  await setSetting(db, "api_key", null);
-  console.log("ai-config: DB API key cleared by admin");
-  res.json({ ok: true });
-}));
-
-app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (req, res) => {
-  const apiKey = (await getSetting(db, "api_key")) || process.env.ANTHROPIC_API_KEY;
-  const model = (await getSetting(db, "model")) || process.env.MODEL || "claude-haiku-4-5";
-  if (!apiKey) return res.status(400).json({ error: "No API key configured" });
+app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
+  const ai = await resolveDefaultAi(db);
+  if (!ai) return res.status(400).json({ error: "No default API key configured" });
   try {
-    const client = new Anthropic({ apiKey });
-    await client.messages.countTokens({
-      model,
-      messages: [{ role: "user", content: "hi" }],
-    });
-    res.json({ ok: true, model });
+    await testKey(ai);
+    res.json({ ok: true, model: ai.model, provider: ai.provider });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

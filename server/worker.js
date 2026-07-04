@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -10,27 +9,45 @@ import {
   bumpUsage,
   countPending,
   getBoard,
+  getAiKey,
   getSetting,
 } from "./db.js";
+import { callTagger, PROVIDER_DEFAULT_MODEL } from "./providers.js";
 
-// Cached Anthropic client — recreated only when the API key changes.
-let _aiClient = null;
-let _aiClientKey = null;
-
-function getAiClient(apiKey) {
-  if (!apiKey) return null;
-  if (apiKey !== _aiClientKey) {
-    _aiClient = new Anthropic({ apiKey });
-    _aiClientKey = apiKey;
+// The app-default tagger: settings-designated key, else the legacy env var.
+// Returns { provider, apiKey, model } or null when nothing is configured.
+export async function resolveDefaultAi(db) {
+  const defId = Number(await getSetting(db, "default_key_id")) || 0;
+  if (defId) {
+    const key = await getAiKey(db, defId);
+    if (key) {
+      const model = (await getSetting(db, "model")) || PROVIDER_DEFAULT_MODEL[key.provider];
+      return { provider: key.provider, apiKey: key.api_key, model };
+    }
   }
-  return _aiClient;
+  if (process.env.ANTHROPIC_API_KEY) {
+    return {
+      provider: "anthropic",
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      model: (await getSetting(db, "model")) || process.env.MODEL || PROVIDER_DEFAULT_MODEL.anthropic,
+    };
+  }
+  return null;
 }
 
-async function resolveWorkerConfig(db) {
-  const apiKey = (await getSetting(db, "api_key")) || process.env.ANTHROPIC_API_KEY || null;
-  const model = (await getSetting(db, "model")) || process.env.MODEL || "claude-haiku-4-5";
-  const dailyCap = Number(process.env.DAILY_CAP || 2000);
-  return { apiKey, model, dailyCap };
+// A board's effective tagger: its own key (+ model) when set, else the default.
+async function resolveBoardAi(db, boardEntry) {
+  if (boardEntry.aiKeyId) {
+    const key = await getAiKey(db, boardEntry.aiKeyId);
+    if (key) {
+      return {
+        provider: key.provider,
+        apiKey: key.api_key,
+        model: boardEntry.aiModel || PROVIDER_DEFAULT_MODEL[key.provider],
+      };
+    }
+  }
+  return resolveDefaultAi(db);
 }
 
 // Generic fallback glosses for common design-vocabulary facet keys, used when
@@ -114,17 +131,12 @@ Return your answer only by calling the tag_screenshot tool.`;
         description: "Whether the image fits the kind of material this board collects.",
       };
   required.push("fit");
-  const tool = {
-    name: "tag_screenshot",
-    description: "Record the applicable taxonomy tags for this UI screenshot.",
-    strict: true,
-    input_schema: { type: "object", properties, required, additionalProperties: false },
-  };
-  const system = [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }];
-  return { system, tool };
+  const schema = { type: "object", properties, required, additionalProperties: false };
+  return { systemText, schema };
 }
 
-// Per-board prompt cache: board_id -> { system, tool, allowed, facets }
+// Per-board cache: board_id -> { systemText, schema, allowed, facets, aiKeyId, aiModel }
+// Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
 
 async function getBoardPrompt(db, boardId) {
@@ -134,8 +146,8 @@ async function getBoardPrompt(db, boardId) {
   const { facets, context } = board;
   const allowed = new Set();
   for (const f of facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
-  const { system, tool } = buildPrompt(facets, context, board.ai_reasoning !== false);
-  const entry = { system, tool, allowed, facets };
+  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false);
+  const entry = { systemText, schema, allowed, facets, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   boardPromptCache.set(boardId, entry);
   return entry;
 }
@@ -144,41 +156,38 @@ export function invalidateBoardCache(boardId) {
   boardPromptCache.delete(boardId);
 }
 
+export function invalidateAllBoardCaches() {
+  boardPromptCache.clear();
+}
+
 export function startWorker({ db, thumbsDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 10000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
   let capNoticeDay = null; // last day the cap warning was logged
 
-  async function tagOne(row, client, model) {
+  async function tagOne(row) {
     const prompt = await getBoardPrompt(db, row.board_id);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
-    const { system, tool, allowed, facets } = prompt;
+    const { systemText, schema, allowed, facets } = prompt;
+
+    const ai = await resolveBoardAi(db, prompt);
+    if (!ai) throw new Error("no API key configured");
 
     const buf = await fs.promises.readFile(path.join(thumbsDir, row.filename + ".webp"));
-    const msg = await client.messages.create({
-      model,
-      max_tokens: 2048,
-      system,
-      tools: [tool],
-      tool_choice: { type: "tool", name: "tag_screenshot" },
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: "image/webp", data: buf.toString("base64") } },
-            { type: "text", text: "Tag this UI screenshot using the tag_screenshot tool." },
-          ],
-        },
-      ],
+    const input = await callTagger({
+      provider: ai.provider,
+      apiKey: ai.apiKey,
+      model: ai.model,
+      systemText,
+      schema,
+      imageB64: buf.toString("base64"),
     });
-    const block = msg.content.find((b) => b.type === "tool_use");
-    if (!block) throw new Error("no tool_use block in response");
     const tags = [];
     const reasoning = {};
     let filledFacets = 0;
     for (const f of facets) {
-      const entry = block.input[f.key];
+      const entry = input[f.key];
       // Tolerate the pre-reasoning shape (bare array) in case the model drifts.
       const vals = Array.isArray(entry) ? entry : entry && Array.isArray(entry.values) ? entry.values : [];
       if (entry && typeof entry.reasoning === "string" && entry.reasoning.trim()) {
@@ -191,7 +200,7 @@ export function startWorker({ db, thumbsDir }) {
       }
       if (tags.length > before) filledFacets++;
     }
-    const fit = block.input.fit;
+    const fit = input.fit;
     const verdict = typeof fit === "string" ? fit : fit && fit.verdict;
     if (fit && typeof fit.reasoning === "string" && fit.reasoning.trim()) {
       reasoning.fit = fit.reasoning.trim();
@@ -201,13 +210,11 @@ export function startWorker({ db, thumbsDir }) {
     // undecided regardless of prompt wording, and an image it could describe
     // with most of the facets is board material by definition.
     const undecided = verdict === "undecided" && filledFacets < facets.length / 2;
-    return { tags, undecided, reasoning };
+    return { tags, undecided, reasoning, model: ai.model, provider: ai.provider };
   }
 
   async function tick() {
-    const { apiKey, model, dailyCap } = await resolveWorkerConfig(db);
-    const client = getAiClient(apiKey);
-    if (!client) return 0;
+    const dailyCap = Number(process.env.DAILY_CAP || 2000);
 
     const recovered = await recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
@@ -225,10 +232,13 @@ export function startWorker({ db, thumbsDir }) {
       return 0;
     }
 
-    const row = await claimNextPending(db);
+    // Boards without their own key only tag when a default exists; their
+    // images stay pending in the queue until one is configured.
+    const hasDefault = !!(await resolveDefaultAi(db));
+    const row = await claimNextPending(db, hasDefault);
     if (!row) return 0;
     try {
-      const { tags, undecided, reasoning } = await tagOne(row, client, model);
+      const { tags, undecided, reasoning, model } = await tagOne(row);
       await markTagged(db, row.id, tags, undecided, reasoning);
       await bumpUsage(db);
       console.log(`tagged #${row.id} ${row.filename} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
@@ -252,11 +262,11 @@ export function startWorker({ db, thumbsDir }) {
     }
   })();
 
-  resolveWorkerConfig(db).then(({ apiKey, model, dailyCap }) => {
-    if (apiKey) {
-      console.log(`AI tagging worker started (model=${model}, dailyCap=${dailyCap}, facets per-board).`);
+  resolveDefaultAi(db).then((ai) => {
+    if (ai) {
+      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, dailyCap=${Number(process.env.DAILY_CAP || 2000)}, per-board overrides in board settings).`);
     } else {
-      console.log("AI tagging worker started (no key — configure one in admin to enable tagging).");
+      console.log("AI tagging worker started (no default key — only boards with their own key will tag).");
     }
   });
   return () => {

@@ -20,6 +20,17 @@ export function openDb(databaseUrl) {
 export async function initDb(db) {
   const sql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   await db.query(sql);
+  // One-time migration: fold the legacy single-key setting into the ai_keys
+  // registry and point the default at it.
+  const legacy = await getSetting(db, "api_key");
+  if (legacy) {
+    const { rows } = await db.query(
+      "INSERT INTO ai_keys (name, provider, api_key, created_at) VALUES ('Anthropic', 'anthropic', $1, $2) RETURNING id",
+      [legacy, Date.now()]
+    );
+    await setSetting(db, "default_key_id", String(rows[0].id));
+    await setSetting(db, "api_key", null);
+  }
 }
 
 // Run fn with a dedicated client inside BEGIN/COMMIT.
@@ -348,39 +359,77 @@ export async function toggleCrateImage(db, userId, crateId, imageId) {
   return { added: !exists, count: rows[0].c };
 }
 
+// --- AI keys (multi-provider registry for the tagger) ---
+
+export async function listAiKeys(db) {
+  const { rows } = await db.query(
+    `SELECT k.id, k.name, k.provider, k.api_key, k.created_at,
+      (SELECT COUNT(*) FROM boards b WHERE b.ai_key_id = k.id) AS boards_using
+     FROM ai_keys k ORDER BY k.created_at ASC`
+  );
+  return rows;
+}
+
+export async function getAiKey(db, id) {
+  const { rows } = await db.query("SELECT id, name, provider, api_key FROM ai_keys WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+export async function createAiKey(db, name, provider, apiKey) {
+  const { rows } = await db.query(
+    "INSERT INTO ai_keys (name, provider, api_key, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
+    [name, provider, apiKey, Date.now()]
+  );
+  return rows[0].id;
+}
+
+// Boards referencing the key fall back to the default via ON DELETE SET NULL;
+// their model override goes with it, and if the key *was* the default, clear
+// the settings pointer too.
+export async function deleteAiKey(db, id) {
+  await db.query("UPDATE boards SET ai_model=NULL WHERE ai_key_id=$1", [id]);
+  const result = await db.query("DELETE FROM ai_keys WHERE id=$1", [id]);
+  if (result.rowCount > 0 && Number(await getSetting(db, "default_key_id")) === id) {
+    await setSetting(db, "default_key_id", null);
+  }
+  return result.rowCount > 0;
+}
+
 // --- boards ---
 
-export async function createBoard(db, name, facets = [], context = "", aiReasoning = true) {
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null) {
   const id = crypto.randomUUID();
   await db.query(
-    "INSERT INTO boards (id, name, facets, context, ai_reasoning, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-    [id, name, JSON.stringify(facets), context, !!aiReasoning, Date.now()]
+    "INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_key_id, ai_model, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    [id, name, JSON.stringify(facets), context, !!aiReasoning, aiKeyId, aiModel, Date.now()]
   );
   return id;
 }
 
 export async function listBoards(db) {
   const { rows } = await db.query(
-    "SELECT id, name, facets, context, ai_reasoning, created_at FROM boards ORDER BY created_at ASC"
+    "SELECT id, name, facets, context, ai_reasoning, ai_key_id, ai_model, created_at FROM boards ORDER BY created_at ASC"
   );
   return rows;
 }
 
 export async function getBoard(db, id) {
   const { rows } = await db.query(
-    "SELECT id, name, facets, context, ai_reasoning, created_at FROM boards WHERE id=$1",
+    "SELECT id, name, facets, context, ai_reasoning, ai_key_id, ai_model, created_at FROM boards WHERE id=$1",
     [id]
   );
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiKeyId, aiModel } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
   if (facets !== undefined) { vals.push(JSON.stringify(facets)); sets.push(`facets=$${vals.length}`); }
   if (context !== undefined) { vals.push(String(context)); sets.push(`context=$${vals.length}`); }
   if (aiReasoning !== undefined) { vals.push(!!aiReasoning); sets.push(`ai_reasoning=$${vals.length}`); }
+  if (aiKeyId !== undefined) { vals.push(aiKeyId); sets.push(`ai_key_id=$${vals.length}`); }
+  if (aiModel !== undefined) { vals.push(aiModel); sets.push(`ai_model=$${vals.length}`); }
   if (!sets.length) return false;
   vals.push(id);
   const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
@@ -472,16 +521,19 @@ export async function setSetting(db, key, value) {
 
 // Atomically take the oldest pending image and mark it processing. SKIP LOCKED
 // keeps concurrent claimers (or a second worker) from grabbing the same row.
-export async function claimNextPending(db) {
+// When no default key is configured, boards without their own key are skipped —
+// their images stay pending until a key appears (never failed for a missing key).
+export async function claimNextPending(db, hasDefaultKey = true) {
   const { rows } = await db.query(
     `UPDATE images SET status='processing', updated_at=$1
      WHERE id = (
-       SELECT id FROM images WHERE status='pending'
-       ORDER BY created_at ASC, id ASC LIMIT 1
-       FOR UPDATE SKIP LOCKED
+       SELECT i.id FROM images i JOIN boards b ON b.id = i.board_id
+       WHERE i.status='pending' AND (b.ai_key_id IS NOT NULL OR $2)
+       ORDER BY i.created_at ASC, i.id ASC LIMIT 1
+       FOR UPDATE OF i SKIP LOCKED
      )
      RETURNING *`,
-    [Date.now()]
+    [Date.now(), hasDefaultKey]
   );
   return rows[0] || null;
 }

@@ -4,19 +4,42 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>admin · 001</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="/toast.css" />
     <style>
       * { box-sizing: border-box; }
       body {
         margin: 0;
         background: #fff;
         color: #111;
-        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        max-width: 760px;
+        font: 14px/1.5 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        max-width: 1000px;
         margin: 0 auto;
         padding: 28px 24px 60px;
       }
       h1 { font-size: 19px; margin: 0 0 4px; }
       .sub { color: #6b6b72; margin: 0 0 22px; }
+
+      /* tabbed layout */
+      .page-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 26px; }
+      .page-head h1 { margin: 0; }
+      .page-head a { font-size: 13px; }
+      .layout { display: flex; gap: 40px; align-items: flex-start; }
+      .tabs { flex: none; width: 190px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 28px; }
+      .tab { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border: none; border-radius: 10px; background: none; color: #4b4b52; font: inherit; text-align: left; cursor: pointer; }
+      .tab:hover { background: #f4f4f5; }
+      .tab.active { background: #ececef; color: #111; font-weight: 600; }
+      .tab svg { width: 16px; height: 16px; flex: none; }
+      .panels { flex: 1; min-width: 0; }
+      .panel > h2 { font-size: 16px; margin: 0 0 4px; }
+      .panel .section { margin-top: 0; }
+      @media (max-width: 720px) {
+        .layout { flex-direction: column; gap: 20px; }
+        .tabs { position: static; width: 100%; flex-direction: row; overflow-x: auto; }
+        .tab { white-space: nowrap; }
+      }
       a { color: #2563eb; }
       .gate { color: #6b6b72; padding: 40px 0; }
       form { display: flex; gap: 8px; margin-bottom: 22px; flex-wrap: wrap; }
@@ -72,9 +95,6 @@
         resize: vertical;
         box-sizing: border-box;
       }
-      .inline-edit { background: #f8f8fb; border: 1px solid #e4e4ec; border-radius: 8px; padding: 14px; margin: 8px 0 6px; }
-      .inline-edit label { display: block; font-size: 12px; color: #6b6b72; margin-bottom: 4px; }
-      .inline-edit input, .inline-edit textarea { margin-bottom: 10px; }
       .row-actions-wrap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
 
       /* toggle switch (see makeSwitch) */
@@ -109,7 +129,7 @@
       .fe-toolbar { display: flex; gap: 6px; }
       .fe-clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }
       .fe-clip-btn:hover { border-color: #999; color: #111; }
-      .modal-overlay { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
+      .modal-overlay { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
       .modal-dialog { background: #fff; border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,0.22); width: 600px; max-width: calc(100vw - 48px); max-height: calc(100vh - 64px); display: flex; flex-direction: column; overflow: hidden; }
       .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #eee; flex-shrink: 0; }
       .modal-title { font-size: 15px; font-weight: 600; margin: 0; }
@@ -128,14 +148,61 @@
     </style>
   </head>
   <body>
-    <h1>Colleagues</h1>
-    <p class="sub">Invite-only access. Add an email, then send them the generated login link. <a href="/">← gallery</a></p>
-    <div id="content"><p class="gate">Checking access…</p></div>
-    <div id="boards-content"></div>
-    <div id="ai-config-content"></div>
+    <div id="gate" class="gate">Checking access…</div>
+    <div id="admin-ui" hidden>
+      <div class="page-head">
+        <h1>Admin</h1>
+        <a href="/">← gallery</a>
+      </div>
+      <div class="layout">
+        <nav class="tabs" id="tabs">
+          <button class="tab active" data-tab="collaborators">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            Collaborators
+          </button>
+          <button class="tab" data-tab="boards">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            Boards
+          </button>
+          <button class="tab" data-tab="ai">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7 5.7 1.9-5.7 1.9L12 18.2l-1.9-5.7-5.7-1.9 5.7-1.9z"/><path d="M19 15l.9 2.6L22.5 18.5l-2.6.9L19 22l-.9-2.6-2.6-.9 2.6-.9z"/></svg>
+            AI Tagger
+          </button>
+        </nav>
+        <main class="panels">
+          <section class="panel" id="panel-collaborators">
+            <h2>Collaborators</h2>
+            <p class="sub">Invite-only access. Add an email, then send them the generated login link.</p>
+            <div id="content"></div>
+          </section>
+          <section class="panel" id="panel-boards" hidden>
+            <div id="boards-content"></div>
+          </section>
+          <section class="panel" id="panel-ai" hidden>
+            <div id="ai-config-content"></div>
+          </section>
+        </main>
+      </div>
+    </div>
 
-    <script>
+    <script type="module">
+      import { toast } from "/toast.js";
+
       const content = document.getElementById("content");
+      const gate = document.getElementById("gate");
+      const adminUi = document.getElementById("admin-ui");
+
+      // --- Tabs ---
+      const TAB_NAMES = ["collaborators", "boards", "ai"];
+      const tabBtns = [...document.querySelectorAll(".tab")];
+      function selectTab(name) {
+        tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+        document.querySelectorAll(".panel").forEach((p) => (p.hidden = p.id !== "panel-" + name));
+        history.replaceState(null, "", name === "collaborators" ? location.pathname : "#" + name);
+      }
+      tabBtns.forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
+      const initialTab = location.hash.slice(1);
+      if (TAB_NAMES.includes(initialTab)) selectTab(initialTab);
 
       // Reusable toggle switch: a button that flips .on and reports the new
       // state. opts.small for compact contexts (e.g. facet rows).
@@ -201,7 +268,7 @@
             facets = parsed;
             render();
             sync();
-          } catch { alert("Clipboard doesn't contain valid facets JSON."); }
+          } catch { toast.warn("Clipboard doesn't contain valid facets JSON"); }
         };
         const prevLabel = textarea.previousElementSibling;
         if (prevLabel) {
@@ -352,14 +419,16 @@
       async function render() {
         const me = await fetch("/api/me").then((r) => r.json());
         if (!me || !me.is_admin) {
-          content.innerHTML = '<p class="gate">Not authorized. <a href="/">Back to gallery</a></p>';
+          gate.innerHTML = 'Not authorized. <a href="/">Back to gallery</a>';
           return;
         }
         const users = await api("GET", "/api/admin/users");
+        gate.hidden = true;
+        adminUi.hidden = false;
         content.innerHTML = `
           <form id="add">
             <input id="name" placeholder="Name (optional)" />
-            <input id="email" type="email" placeholder="colleague@email.com" required />
+            <input id="email" type="email" placeholder="collaborator@email.com" required />
             <button type="submit">Add & make link</button>
           </form>
           <div class="linkbox" id="linkbox"></div>
@@ -402,7 +471,7 @@
               showLink(u.email, link);
               copy(link, copyBtn);
             } catch (err) {
-              alert("Error: " + err.message);
+              toast.error(err.message);
             } finally {
               newLinkBtn.disabled = false;
             }
@@ -432,7 +501,7 @@
             showLink(user.email, link);
             render();
           } catch (err) {
-            alert("Error: " + err.message);
+            toast.error(err.message);
           }
         };
       }
@@ -449,7 +518,7 @@
         box.appendChild(b);
       }
 
-      render().catch((e) => (content.innerHTML = '<p class="gate">Error loading. <a href="/">Back</a></p>'));
+      render().catch(() => (gate.innerHTML = 'Error loading. <a href="/">Back</a>'));
 
       // --- Boards ---
       const boardsContent = document.getElementById("boards-content");
@@ -501,7 +570,7 @@
           const editBtn = document.createElement("button");
           editBtn.className = "ghost";
           editBtn.textContent = "edit";
-          editBtn.onclick = () => openEditModal(b);
+          editBtn.onclick = () => openBoardModal(b);
           wrap.appendChild(editBtn);
 
           const accessWrap = document.createElement("div");
@@ -524,9 +593,10 @@
               retagBtn.textContent = "queuing…";
               const { queued } = await api("POST", `/api/admin/boards/${b.id}/retag`);
               retagBtn.textContent = `queued ${queued}`;
+              toast(`Queued ${queued} image(s) for retagging`);
               setTimeout(renderBoards, 1500);
             } catch (err) {
-              alert("Error: " + err.message);
+              toast.error(err.message);
               retagBtn.textContent = "retag ↺";
               retagBtn.disabled = false;
             }
@@ -544,9 +614,10 @@
                 stopBtn.disabled = true;
                 stopBtn.textContent = "stopping…";
                 await api("POST", `/api/admin/boards/${b.id}/retag/cancel`);
+                toast("Tagging queue stopped");
                 renderBoards();
               } catch (err) {
-                alert("Error: " + err.message);
+                toast.error(err.message);
                 renderBoards();
               }
             };
@@ -563,8 +634,9 @@
             if (!confirm(msg)) return;
             try {
               await api("DELETE", `/api/admin/boards/${b.id}`);
+              toast(`Board "${b.name}" deleted`);
               renderBoards();
-            } catch (err) { alert("Error: " + err.message); }
+            } catch (err) { toast.error(err.message); }
           };
           wrap.appendChild(delBtn);
 
@@ -575,55 +647,17 @@
         table.appendChild(tbody);
         sec.appendChild(table);
 
-        // Create form
+        // Create button — same modal as edit, in create mode
         const createSec = document.createElement("div");
         createSec.style.marginTop = "20px";
-        createSec.innerHTML = `<button id="show-create-board" class="ghost">+ New board</button>`;
-        const createForm = document.createElement("div");
-        createForm.className = "inline-edit";
-        createForm.hidden = true;
-        createForm.innerHTML = `
-          <label>Board name</label>
-          <input id="new-board-name" placeholder="e.g. Wardrobe Items" style="width:100%;margin-bottom:10px" />
-          <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
-          <textarea id="new-board-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
-          <div id="new-board-reasoning" style="margin:2px 0 12px;font-size:13px"></div>
-          <label>Facets</label>
-          <textarea id="new-board-facets" rows="12">${defaultFacetsJson()}</textarea>
-          <div style="display:flex;gap:8px">
-            <button id="create-board-submit">Create board</button>
-            <button class="ghost" id="cancel-create-board">Cancel</button>
-          </div>`;
-
-        createSec.appendChild(createForm);
+        const createBtn = document.createElement("button");
+        createBtn.className = "ghost";
+        createBtn.textContent = "+ New board";
+        createBtn.onclick = () => openBoardModal(null);
+        createSec.appendChild(createBtn);
         sec.appendChild(createSec);
 
         boardsContent.replaceChildren(sec);
-        buildFacetEditor(document.getElementById("new-board-facets"));
-
-        let newBoardReasoning = true;
-        document.getElementById("new-board-reasoning").appendChild(
-          switchRow("AI reasoning", "(the tagger justifies each facet; shown in the lightbox)", true, (on) => { newBoardReasoning = on; })
-        );
-
-        document.getElementById("show-create-board").onclick = () => {
-          createForm.hidden = !createForm.hidden;
-          if (!createForm.hidden) document.getElementById("new-board-name").focus();
-        };
-        document.getElementById("cancel-create-board").onclick = () => { createForm.hidden = true; };
-        document.getElementById("create-board-submit").onclick = async () => {
-          const name = document.getElementById("new-board-name").value.trim();
-          if (!name) return alert("Name required.");
-          const context = document.getElementById("new-board-context").value.trim();
-          let facets;
-          try { facets = JSON.parse(document.getElementById("new-board-facets").value); }
-          catch { return alert("Facets JSON is invalid."); }
-          if (!Array.isArray(facets)) return alert("Facets must be a JSON array.");
-          try {
-            await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: newBoardReasoning });
-            renderBoards();
-          } catch (err) { alert("Error: " + err.message); }
-        };
       }
 
       async function toggleAccessDrop(board, container) {
@@ -666,7 +700,8 @@
             await api("PATCH", `/api/admin/boards/${board.id}`, { memberIds });
             board.memberIds = memberIds;
             drop.remove();
-          } catch (err) { alert("Error: " + err.message); }
+            toast("Access updated");
+          } catch (err) { toast.error(err.message); }
         };
         drop.appendChild(saveBtn);
         container.appendChild(drop);
@@ -680,7 +715,9 @@
         setTimeout(() => document.addEventListener("click", onOutside), 0);
       }
 
-      function openEditModal(board) {
+      // board = null opens the modal in create mode.
+      function openBoardModal(board) {
+        const isNew = !board;
         document.getElementById("board-edit-modal")?.remove();
 
         const overlay = document.createElement("div");
@@ -695,28 +732,32 @@
         header.className = "modal-header";
         const title = document.createElement("div");
         title.className = "modal-title";
-        title.textContent = board.name;
+        title.textContent = isNew ? "New board" : board.name;
         const closeBtn = document.createElement("button");
         closeBtn.className = "modal-close";
         closeBtn.type = "button";
         closeBtn.textContent = "×";
-        closeBtn.onclick = () => overlay.remove();
         header.append(title, closeBtn);
 
         const body = document.createElement("div");
         body.className = "modal-body";
         body.innerHTML = `
           <label>Board name</label>
-          <input id="edit-name-${board.id}" value="${board.name}" style="width:100%" />
+          <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
           <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
-          <textarea id="edit-context-${board.id}" rows="5">${board.context || ""}</textarea>
-          <div id="edit-reasoning-${board.id}" style="margin:2px 0 12px;font-size:13px"></div>
+          <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
+          <div id="board-modal-reasoning" style="margin:2px 0 12px;font-size:13px"></div>
+          <label>AI tagger <span style="font-weight:400;color:#9aa0aa">(which API key and model tag this board)</span></label>
+          <div id="board-modal-ai" style="display:flex;gap:8px;margin-bottom:12px;"></div>
           <label>Facets</label>
-          <textarea id="edit-facets-${board.id}" rows="12">${JSON.stringify(board.facets, null, 2)}</textarea>`;
+          <textarea id="board-modal-facets" rows="12"></textarea>`;
+        body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
+        body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
+        body.querySelector("#board-modal-facets").value = isNew ? defaultFacetsJson() : JSON.stringify(board.facets, null, 2);
 
         const footer = document.createElement("div");
         footer.className = "modal-footer";
-        footer.innerHTML = `<button id="save-board-${board.id}">Save</button><button class="ghost" id="cancel-edit-${board.id}">Cancel</button>`;
+        footer.innerHTML = `<button id="board-modal-save">${isNew ? "Create board" : "Save"}</button><button class="ghost" id="board-modal-cancel">Cancel</button>`;
 
         dialog.append(header, body, footer);
         overlay.appendChild(dialog);
@@ -725,7 +766,6 @@
 
         function close() { overlay.remove(); document.body.style.overflow = ""; document.removeEventListener("keydown", onKey); }
         closeBtn.onclick = close;
-        overlay.addEventListener("remove", () => document.body.style.overflow = "");
 
         let mdOnOverlay = false;
         overlay.addEventListener("mousedown", (e) => { mdOnOverlay = e.target === overlay; });
@@ -733,141 +773,298 @@
         const onKey = (e) => { if (e.key === "Escape") close(); };
         document.addEventListener("keydown", onKey);
 
-        buildFacetEditor(document.getElementById(`edit-facets-${board.id}`));
+        buildFacetEditor(document.getElementById("board-modal-facets"));
 
-        let aiReasoning = board.ai_reasoning !== false;
-        document.getElementById(`edit-reasoning-${board.id}`).appendChild(
+        let aiReasoning = isNew ? true : board.ai_reasoning !== false;
+        document.getElementById("board-modal-reasoning").appendChild(
           switchRow("AI reasoning", "(the tagger justifies each facet; shown in the lightbox)", aiReasoning, (on) => { aiReasoning = on; })
         );
 
-        document.getElementById(`edit-name-${board.id}`).focus();
+        // Per-board tagger override — key registry is fetched async; the
+        // selects stay disabled until it arrives.
+        const aiWrap = document.getElementById("board-modal-ai");
+        const aiKeySel = document.createElement("select");
+        aiKeySel.style.cssText = SELECT_CSS + "flex:1;min-width:0;";
+        aiKeySel.disabled = true;
+        const aiModelSel = document.createElement("select");
+        aiModelSel.style.cssText = SELECT_CSS + "flex:1;min-width:0;";
+        aiModelSel.hidden = true;
+        aiWrap.append(aiKeySel, aiModelSel);
+        let aiKeys = [];
+        let aiLoaded = false; // don't send the override until the registry arrived
+        const syncAiModelSel = () => {
+          const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
+          aiModelSel.hidden = !key;
+          if (key) {
+            const current = board && board.ai_key_id === key.id ? board.ai_model : null;
+            fillModelSelect(aiModelSel, key.provider, current);
+          }
+        };
+        api("GET", "/api/admin/ai-keys").then((keys) => {
+          aiKeys = keys;
+          const defOpt = document.createElement("option");
+          defOpt.value = "";
+          defOpt.textContent = "App default";
+          aiKeySel.appendChild(defOpt);
+          for (const k of keys) {
+            const opt = document.createElement("option");
+            opt.value = String(k.id);
+            opt.textContent = `${k.name} — ${k.provider}`;
+            aiKeySel.appendChild(opt);
+          }
+          if (board && board.ai_key_id && keys.find((k) => k.id === board.ai_key_id)) {
+            aiKeySel.value = String(board.ai_key_id);
+          }
+          aiKeySel.disabled = false;
+          aiKeySel.onchange = syncAiModelSel;
+          syncAiModelSel();
+          aiLoaded = true;
+        }).catch(() => {});
 
-        document.getElementById(`cancel-edit-${board.id}`).onclick = close;
-        document.getElementById(`save-board-${board.id}`).onclick = async () => {
-          const name = document.getElementById(`edit-name-${board.id}`).value.trim();
-          if (!name) return alert("Name required.");
-          const context = document.getElementById(`edit-context-${board.id}`).value.trim();
+        document.getElementById("board-modal-name").focus();
+
+        document.getElementById("board-modal-cancel").onclick = close;
+        document.getElementById("board-modal-save").onclick = async () => {
+          const name = document.getElementById("board-modal-name").value.trim();
+          if (!name) return toast.warn("Name required");
+          const context = document.getElementById("board-modal-context").value.trim();
           let facets;
-          try { facets = JSON.parse(document.getElementById(`edit-facets-${board.id}`).value); }
-          catch { return alert("Facets JSON is invalid."); }
-          if (!Array.isArray(facets)) return alert("Facets must be a JSON array.");
+          try { facets = JSON.parse(document.getElementById("board-modal-facets").value); }
+          catch { return toast.warn("Facets JSON is invalid"); }
+          if (!Array.isArray(facets)) return toast.warn("Facets must be a JSON array");
+          const aiOverride = aiLoaded
+            ? {
+                ai_key_id: aiKeySel.value ? Number(aiKeySel.value) : null,
+                ai_model: aiKeySel.value && !aiModelSel.hidden ? aiModelSel.value : null,
+              }
+            : {};
           try {
-            await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning });
+            if (isNew) await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride });
+            else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride });
             close();
             renderBoards();
-          } catch (err) { alert("Error: " + err.message); }
+            toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);
+          } catch (err) { toast.error(err.message); }
         };
       }
 
       renderBoards().catch(() => {});
 
-      // --- AI Config ---
-      const KNOWN_MODELS = [
-        { id: "claude-haiku-4-5", label: "Haiku 4.5 — fast, cheapest" },
-        { id: "claude-sonnet-4-6", label: "Sonnet 4.6 — balanced" },
-        { id: "claude-opus-4-8", label: "Opus 4.8 — sharpest, most expensive" },
-      ];
+      // --- AI Config: multi-provider key registry + app default ---
+      const PROVIDER_MODELS = {
+        anthropic: [
+          { id: "claude-haiku-4-5", note: "fast, cheapest" },
+          { id: "claude-sonnet-4-6", note: "balanced" },
+          { id: "claude-opus-4-8", note: "sharpest, most expensive" },
+        ],
+        openai: [
+          { id: "gpt-5-nano", note: "fast, cheapest" },
+          { id: "gpt-5-mini", note: "balanced" },
+          { id: "gpt-5.1", note: "sharpest, most expensive" },
+        ],
+      };
+      // Keep in sync with PROVIDER_DEFAULT_MODEL in server/providers.js.
+      const PROVIDER_DEFAULT_MODEL = { anthropic: "claude-haiku-4-5", openai: "gpt-5-mini" };
+      const SELECT_CSS = "padding:8px 10px;border:1px solid #d8d8de;border-radius:7px;font:inherit;background:#fff;";
+
+      // (Re)populate a <select> with the provider's models; keeps an unknown
+      // current model as an extra option instead of silently dropping it.
+      function fillModelSelect(sel, provider, current) {
+        sel.replaceChildren();
+        const models = PROVIDER_MODELS[provider] || [];
+        const selected = current || PROVIDER_DEFAULT_MODEL[provider];
+        for (const m of models) {
+          const opt = document.createElement("option");
+          opt.value = m.id;
+          opt.textContent = `${m.id} — ${m.note}`;
+          if (m.id === selected) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        if (selected && !models.find((m) => m.id === selected)) {
+          const opt = document.createElement("option");
+          opt.value = selected;
+          opt.textContent = selected;
+          opt.selected = true;
+          sel.insertBefore(opt, sel.firstChild);
+        }
+      }
 
       async function renderAiConfig() {
         const me = await fetch("/api/me").then((r) => r.json());
         if (!me || !me.is_admin) return;
 
-        let cfg;
-        try { cfg = await api("GET", "/api/admin/ai-config"); } catch { return; }
+        let cfg, keys;
+        try {
+          [cfg, keys] = await Promise.all([
+            api("GET", "/api/admin/ai-config"),
+            api("GET", "/api/admin/ai-keys"),
+          ]);
+        } catch { return; }
 
         const sec = document.createElement("div");
         sec.className = "section";
         sec.id = "ai-config-section";
-        sec.innerHTML = `<h2>AI Tagger</h2><p class="sub">Model and API key used for automatic image tagging.</p>`;
+        sec.innerHTML = `<h2>AI Tagger</h2><p class="sub">API keys for automatic image tagging. The default applies to every board; a board can pick a different key in its settings.</p>`;
 
-        const grid = document.createElement("div");
-        grid.style.cssText = "display:flex;flex-direction:column;gap:14px;max-width:480px;";
+        // --- keys table ---
+        if (keys.length) {
+          const table = document.createElement("table");
+          table.innerHTML = `<thead><tr><th>Name</th><th>Provider</th><th>Key</th><th></th></tr></thead>`;
+          const tbody = document.createElement("tbody");
+          for (const k of keys) {
+            const tr = document.createElement("tr");
+            const isDefault = cfg.defaultKeyId === k.id;
+            tr.innerHTML = `
+              <td>${k.name} ${isDefault ? '<span class="badge">default</span>' : ""}</td>
+              <td>${k.provider}</td>
+              <td style="font-family:'SF Mono',Consolas,monospace;color:#9aa0aa">${k.hint}</td>
+              <td><div class="row-actions"></div></td>`;
+            const act = tr.querySelector(".row-actions");
 
-        // Model row
+            const testBtn = document.createElement("button");
+            testBtn.className = "ghost";
+            testBtn.textContent = "test";
+            testBtn.onclick = async () => {
+              testBtn.disabled = true;
+              testBtn.textContent = "testing…";
+              try {
+                await api("POST", `/api/admin/ai-keys/${k.id}/test`);
+                toast(`✓ "${k.name}" key works`);
+              } catch (err) {
+                toast.error(`"${k.name}": ${err.message}`);
+              } finally {
+                testBtn.disabled = false;
+                testBtn.textContent = "test";
+              }
+            };
+            act.appendChild(testBtn);
+
+            const delBtn = document.createElement("button");
+            delBtn.className = "danger";
+            delBtn.textContent = "remove";
+            delBtn.onclick = async () => {
+              const uses = Number(k.boards_using) || 0;
+              const extra = uses ? ` ${uses} board(s) use it and will fall back to the default.` : "";
+              if (!confirm(`Remove key "${k.name}"?${extra}${isDefault ? " It is the current default — tagging falls back to the env var (or stops)." : ""}`)) return;
+              try {
+                await api("DELETE", `/api/admin/ai-keys/${k.id}`);
+                toast(`Key "${k.name}" removed`);
+                renderAiConfig();
+              } catch (err) { toast.error(err.message); }
+            };
+            act.appendChild(delBtn);
+            tbody.appendChild(tr);
+          }
+          table.appendChild(tbody);
+          sec.appendChild(table);
+        } else {
+          const none = document.createElement("p");
+          none.className = "muted";
+          none.textContent = cfg.envKey
+            ? "No keys stored — tagging runs on the ANTHROPIC_API_KEY env var."
+            : "No keys yet — add one to enable tagging.";
+          sec.appendChild(none);
+        }
+
+        // --- add key form ---
+        const addForm = document.createElement("form");
+        addForm.style.cssText = "margin-top:14px;";
+        const nameIn = document.createElement("input");
+        nameIn.placeholder = "Name (e.g. Personal Anthropic)";
+        nameIn.required = true;
+        const provSel = document.createElement("select");
+        provSel.style.cssText = SELECT_CSS + "flex:none;";
+        for (const p of ["anthropic", "openai"]) {
+          const opt = document.createElement("option");
+          opt.value = p;
+          opt.textContent = p;
+          provSel.appendChild(opt);
+        }
+        const keyIn = document.createElement("input");
+        keyIn.type = "password";
+        keyIn.placeholder = "sk-…";
+        keyIn.autocomplete = "off";
+        keyIn.required = true;
+        keyIn.style.cssText = "font-family:'SF Mono',Consolas,monospace;font-size:13px;";
+        const addBtn = document.createElement("button");
+        addBtn.type = "submit";
+        addBtn.textContent = "Add key";
+        addForm.append(nameIn, provSel, keyIn, addBtn);
+        addForm.onsubmit = async (e) => {
+          e.preventDefault();
+          addBtn.disabled = true;
+          try {
+            await api("POST", "/api/admin/ai-keys", { name: nameIn.value.trim(), provider: provSel.value, key: keyIn.value.trim() });
+            toast(`Key "${nameIn.value.trim()}" added`);
+            renderAiConfig();
+          } catch (err) {
+            toast.error(err.message);
+            addBtn.disabled = false;
+          }
+        };
+        sec.appendChild(addForm);
+
+        // --- default tagger ---
+        const defSec = document.createElement("div");
+        defSec.style.cssText = "margin-top:28px;max-width:480px;display:flex;flex-direction:column;gap:14px;";
+        defSec.innerHTML = `<div><h2 style="font-size:14px;margin:0 0 2px;">Default tagger</h2><p class="sub" style="margin:0;">Used by every board that doesn't set its own.</p></div>`;
+
+        const keyRow = document.createElement("div");
+        keyRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Key</label>`;
+        const keySel = document.createElement("select");
+        keySel.style.cssText = SELECT_CSS + "width:100%;";
+        for (const k of keys) {
+          const opt = document.createElement("option");
+          opt.value = String(k.id);
+          opt.textContent = `${k.name} — ${k.provider}`;
+          keySel.appendChild(opt);
+        }
+        if (cfg.envKey) {
+          const opt = document.createElement("option");
+          opt.value = "env";
+          opt.textContent = "ANTHROPIC_API_KEY env var — anthropic";
+          keySel.appendChild(opt);
+        }
+        if (!keys.length && !cfg.envKey) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "none — tagging disabled";
+          keySel.appendChild(opt);
+        }
+        keySel.value = cfg.defaultKeyId ? String(cfg.defaultKeyId) : cfg.envKey ? "env" : "";
+        keyRow.appendChild(keySel);
+        defSec.appendChild(keyRow);
+
         const modelRow = document.createElement("div");
         modelRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Model</label>`;
         const modelSel = document.createElement("select");
-        modelSel.style.cssText = "width:100%;padding:8px 10px;border:1px solid #d8d8de;border-radius:7px;font:inherit;background:#fff;";
-        for (const m of KNOWN_MODELS) {
-          const opt = document.createElement("option");
-          opt.value = m.id;
-          opt.textContent = m.id + " — " + m.label.split("—")[1].trim();
-          if (m.id === cfg.model) opt.selected = true;
-          modelSel.appendChild(opt);
-        }
-        // If current model isn't in the list, add it
-        if (!KNOWN_MODELS.find((m) => m.id === cfg.model)) {
-          const opt = document.createElement("option");
-          opt.value = cfg.model;
-          opt.textContent = cfg.model;
-          opt.selected = true;
-          modelSel.insertBefore(opt, modelSel.firstChild);
-        }
-        modelRow.appendChild(modelSel);
-        grid.appendChild(modelRow);
-
-        // Key row
-        const keyRow = document.createElement("div");
-        const keySourceLabel = cfg.keySource === "db" ? "DB key set" : cfg.keySource === "env" ? "env var active" : "no key — tagging disabled";
-        const keySourceColor = cfg.keySource === "none" ? "#d33" : "#2a7a2a";
-        keyRow.innerHTML = `
-          <label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">
-            API Key <span id="key-status" style="color:${keySourceColor};margin-left:6px;">${keySourceLabel}</span>
-          </label>`;
-        const keyWrap = document.createElement("div");
-        keyWrap.style.cssText = "display:flex;gap:6px;";
-        const keyInput = document.createElement("input");
-        keyInput.type = "password";
-        keyInput.placeholder = cfg.keySource !== "none" ? "Enter new key to replace…" : "sk-ant-…";
-        keyInput.autocomplete = "off";
-        keyInput.style.cssText = "flex:1;padding:8px 10px;border:1px solid #d8d8de;border-radius:7px;font:inherit;font-family:\"SF Mono\",Consolas,monospace;font-size:13px;";
-        const showBtn = document.createElement("button");
-        showBtn.type = "button";
-        showBtn.className = "ghost";
-        showBtn.textContent = "show";
-        showBtn.style.flexShrink = "0";
-        showBtn.onclick = () => {
-          keyInput.type = keyInput.type === "password" ? "text" : "password";
-          showBtn.textContent = keyInput.type === "password" ? "show" : "hide";
+        modelSel.style.cssText = SELECT_CSS + "width:100%;";
+        const providerOf = () => {
+          if (keySel.value === "env") return "anthropic";
+          const k = keys.find((x) => String(x.id) === keySel.value);
+          return k ? k.provider : "anthropic";
         };
-        keyWrap.append(keyInput, showBtn);
+        fillModelSelect(modelSel, providerOf(), cfg.model);
+        keySel.onchange = () => fillModelSelect(modelSel, providerOf(), null);
+        modelRow.appendChild(modelSel);
+        defSec.appendChild(modelRow);
 
-        if (cfg.keySource === "db") {
-          const clearBtn = document.createElement("button");
-          clearBtn.type = "button";
-          clearBtn.className = "danger";
-          clearBtn.textContent = "remove";
-          clearBtn.style.flexShrink = "0";
-          clearBtn.onclick = async () => {
-            if (!confirm("Remove the stored API key? Tagging will fall back to the env var (or stop if none).")) return;
-            try {
-              await api("DELETE", "/api/admin/ai-config/key");
-              renderAiConfig();
-            } catch (err) { alert("Error: " + err.message); }
-          };
-          keyWrap.appendChild(clearBtn);
-        }
-        keyRow.appendChild(keyWrap);
-        grid.appendChild(keyRow);
-
-        // Action row
         const actionRow = document.createElement("div");
         actionRow.style.cssText = "display:flex;gap:8px;align-items:center;";
-
         const saveBtn = document.createElement("button");
         saveBtn.textContent = "Save";
         saveBtn.onclick = async () => {
           saveBtn.disabled = true;
           saveBtn.textContent = "Saving…";
           try {
-            const body = { model: modelSel.value };
-            const key = keyInput.value.trim();
-            if (key) body.apiKey = key;
-            await api("POST", "/api/admin/ai-config", body);
-            keyInput.value = "";
+            await api("POST", "/api/admin/ai-config", {
+              defaultKeyId: keySel.value && keySel.value !== "env" ? Number(keySel.value) : null,
+              model: modelSel.value,
+            });
+            toast("Default tagger saved");
             await renderAiConfig();
           } catch (err) {
-            alert("Error: " + err.message);
+            toast.error(err.message);
             saveBtn.disabled = false;
             saveBtn.textContent = "Save";
           }
@@ -876,28 +1073,23 @@
         const testBtn = document.createElement("button");
         testBtn.className = "ghost";
         testBtn.textContent = "Test";
-        const testStatus = document.createElement("span");
-        testStatus.style.cssText = "font-size:13px;";
         testBtn.onclick = async () => {
           testBtn.disabled = true;
           testBtn.textContent = "Testing…";
-          testStatus.textContent = "";
           try {
-            const { model: m } = await api("POST", "/api/admin/ai-config/test");
-            testStatus.style.color = "#2a7a2a";
-            testStatus.textContent = `✓ ${m} reachable`;
+            const { model: m, provider: p } = await api("POST", "/api/admin/ai-config/test");
+            toast(`✓ ${p}/${m} reachable`);
           } catch (err) {
-            testStatus.style.color = "#d33";
-            testStatus.textContent = "✗ " + err.message;
+            toast.error(err.message);
           } finally {
             testBtn.disabled = false;
             testBtn.textContent = "Test";
           }
         };
 
-        actionRow.append(saveBtn, testBtn, testStatus);
-        grid.appendChild(actionRow);
-        sec.appendChild(grid);
+        actionRow.append(saveBtn, testBtn);
+        defSec.appendChild(actionRow);
+        sec.appendChild(defSec);
 
         document.getElementById("ai-config-content").replaceChildren(sec);
       }
