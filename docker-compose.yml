@@ -1,0 +1,63 @@
+name: 001az
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-gallery}:${POSTGRES_PASSWORD:-gallery}@db:5432/${POSTGRES_DB:-gallery}
+      BASE_URL: ${BASE_URL:-http://localhost}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MODEL: ${MODEL:-}
+      DAILY_CAP: ${DAILY_CAP:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-1}
+    volumes:
+      - appdata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gallery}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gallery}
+      POSTGRES_DB: ${POSTGRES_DB:-gallery}
+    ports:
+      # host access for dev tooling (mintlink from the host, the sqlite ETL)
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-gallery} -d $${POSTGRES_DB:-gallery}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  appdata:
+  caddy_data:
+  caddy_config:

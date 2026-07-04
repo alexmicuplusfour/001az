@@ -1,0 +1,11 @@
+# TLS + reverse proxy only; the app serves its own static files.
+# SITE_ADDRESS=":80" (default) = plain http for local use;
+# set SITE_ADDRESS to a real hostname in .env for automatic HTTPS.
+{
+	admin off
+}
+
+{$SITE_ADDRESS::80} {
+	encode gzip
+	reverse_proxy app:3001
+}
