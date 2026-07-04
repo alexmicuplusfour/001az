@@ -25,9 +25,17 @@
       <div id="lightbox-controls" class="lightbox-controls">
         <button id="lightbox-crate" class="lightbox-action lightbox-crate" hidden></button>
         <button id="lightbox-fav" class="lightbox-action lightbox-fav" hidden></button>
+        <button id="lightbox-info" class="lightbox-action lightbox-info" title="AI tagging details" aria-label="AI tagging details"></button>
       </div>
       <div id="lightbox-tags" class="lightbox-tags"></div>
       <div id="lightbox-count" class="lightbox-count"></div>
+      <aside id="lightbox-panel" class="lightbox-panel" hidden>
+        <div class="lbp-head">
+          <span>AI tagging</span>
+          <button id="lightbox-panel-close" class="lbp-close" aria-label="Close panel">×</button>
+        </div>
+        <div id="lightbox-panel-body" class="lbp-body"></div>
+      </aside>
     </div>
 
     <div id="filter-drawer" class="filter-drawer">

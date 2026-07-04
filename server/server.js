@@ -10,8 +10,10 @@ import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
 import {
   openDb,
-  seedIfEmpty,
+  initDb,
+  countImages,
   listImages,
+  insertImage,
   deleteImage,
   reprocessImage,
   cancelBoardQueue,
@@ -19,6 +21,7 @@ import {
   createUser,
   listUsers,
   deleteUser,
+  userExists,
   mintPermanentInvite,
   consumeInvite,
   createSession,
@@ -35,15 +38,19 @@ import {
   getBoard,
   updateBoard,
   deleteBoard,
-  migrateOrphanImages,
+  boardExists,
+  boardImageStats,
+  retagBoard,
   getBoardMemberIds,
   setBoardMembers,
   canAccessBoard,
-  migrateInitialBoardMembers,
-  migrateCratesPerBoard,
+  getImageBoard,
+  setImageTags,
+  getImageReasoning,
   getSetting,
   setSetting,
   setThumbDimensions,
+  listImagesMissingThumbDims,
 } from "./db.js";
 import {
   attachUser,
@@ -59,12 +66,11 @@ const ROOT = path.join(__dirname, "..");
 
 const PORT = Number(process.env.PORT || 3001);
 const HOST = process.env.HOST || "127.0.0.1";
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data.db");
-const TAGS_JSON = process.env.TAGS_JSON || path.join(ROOT, "tags.json");
+const DATABASE_URL =
+  process.env.DATABASE_URL || "postgres://gallery:gallery@127.0.0.1:5433/gallery"; // local compose default
 const STATIC_DIR = process.env.STATIC_DIR || ROOT; // local dev only; prod uses Caddy
 const GALLERY_DIR = process.env.GALLERY_DIR || path.join(ROOT, "gallery");
 const THUMBS_DIR = process.env.THUMBS_DIR || path.join(ROOT, "thumbnails");
-const FACETS_JSON = process.env.FACETS_JSON || path.join(ROOT, "facets.json");
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 
@@ -127,18 +133,9 @@ for (const level of ["log", "warn", "error"]) {
   };
 }
 
-const db = openDb(DB_PATH);
-const seeded = seedIfEmpty(db, TAGS_JSON);
-if (seeded) console.log(`Seeded ${seeded} images from ${TAGS_JSON}`);
-seedAdmin(db, ADMIN_EMAIL);
-migrateOrphanImages(db, FACETS_JSON);
-migrateInitialBoardMembers(db);
-migrateCratesPerBoard(db);
-
-const insertImage = db.prepare(
-  `INSERT INTO images (filename, original_name, status, tags, board_id, created_at, updated_at)
-   VALUES (?, ?, 'pending', '[]', ?, ?, ?)`
-);
+const db = openDb(DATABASE_URL);
+await initDb(db);
+await seedAdmin(db, ADMIN_EMAIL);
 
 // Disk-backed upload (bounded memory; we process one file at a time).
 const upload = multer({
@@ -153,127 +150,134 @@ app.use(attachUser(db));
 
 const inviteLink = (token) => `${BASE_URL}/auth/${token}`;
 
-app.get("/api/health", (_req, res) => {
-  const { c } = db.prepare("SELECT COUNT(*) AS c FROM images").get();
-  res.json({ ok: true, images: c });
-});
+// Express 4 doesn't forward rejected promises from async handlers; every
+// async route goes through wrap() so a DB error becomes a 500, not a crash.
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.get("/api/health", wrap(async (_req, res) => {
+  res.json({ ok: true, images: await countImages(db) });
+}));
 
 // --- auth ---
 app.get("/api/me", (req, res) => {
   res.json(req.user ? { email: req.user.email, name: req.user.name, is_admin: !!req.user.is_admin } : null);
 });
 
-app.get("/auth/:token", (req, res) => {
-  const userId = consumeInvite(db, req.params.token);
+app.get("/auth/:token", wrap(async (req, res) => {
+  const userId = await consumeInvite(db, req.params.token);
   if (!userId) return res.redirect("/?login=invalid");
-  const sid = createSession(db, userId);
-  touchLogin(db, userId);
+  const sid = await createSession(db, userId);
+  await touchLogin(db, userId);
   setSessionCookie(res, sid);
   console.log(`login: user #${userId}`);
   res.redirect("/");
-});
+}));
 
-app.post("/api/logout", (req, res) => {
-  deleteSession(db, req.sid);
+app.post("/api/logout", wrap(async (req, res) => {
+  await deleteSession(db, req.sid);
   clearSessionCookie(res);
   res.json({ ok: true });
-});
+}));
 
 // --- favorites (any logged-in user) ---
-app.post("/api/images/:id/favorite", requireAuth, (req, res) => {
-  const result = toggleFavorite(db, req.user.id, Number(req.params.id));
+app.post("/api/images/:id/favorite", requireAuth, wrap(async (req, res) => {
+  const result = await toggleFavorite(db, req.user.id, Number(req.params.id));
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
-});
+}));
 
-app.get("/api/images/:id/hearts", requireAuth, (req, res) => {
-  res.json({ names: heartNames(db, Number(req.params.id)) });
-});
+app.get("/api/images/:id/hearts", requireAuth, wrap(async (req, res) => {
+  res.json({ names: await heartNames(db, Number(req.params.id)) });
+}));
 
 // --- crates (any logged-in user) ---
-app.get("/api/crates", requireAuth, (req, res) => {
-  res.json(listCrates(db, req.user.id, req.query.board || ""));
-});
+app.get("/api/crates", requireAuth, wrap(async (req, res) => {
+  res.json(await listCrates(db, req.user.id, req.query.board || ""));
+}));
 
-app.post("/api/crates", requireAuth, (req, res) => {
+app.post("/api/crates", requireAuth, wrap(async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
   const boardId = (req.body && req.body.board_id ? String(req.body.board_id) : "").trim();
-  const crate = createCrate(db, req.user.id, boardId, name);
+  const crate = await createCrate(db, req.user.id, boardId, name);
   if (!crate) return res.status(400).json({ error: "invalid name" });
   res.json({ crate });
-});
+}));
 
-app.delete("/api/crates/:id", requireAuth, (req, res) => {
-  if (!deleteCrate(db, req.user.id, Number(req.params.id)))
+app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
+  if (!(await deleteCrate(db, req.user.id, Number(req.params.id))))
     return res.status(404).json({ error: "not found" });
   res.json({ ok: true });
-});
+}));
 
-app.post("/api/crates/:id/images/:imageId", requireAuth, (req, res) => {
-  const result = toggleCrateImage(db, req.user.id, Number(req.params.id), Number(req.params.imageId));
+app.post("/api/crates/:id/images/:imageId", requireAuth, wrap(async (req, res) => {
+  const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), Number(req.params.imageId));
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
-});
+}));
 
 // --- admin: manage colleagues ---
-app.get("/api/admin/users", requireAdmin, (_req, res) => {
-  res.json(listUsers(db));
-});
+app.get("/api/admin/users", requireAdmin, wrap(async (_req, res) => {
+  res.json(await listUsers(db));
+}));
 
-app.post("/api/admin/users", requireAdmin, (req, res) => {
+app.post("/api/admin/users", requireAdmin, wrap(async (req, res) => {
   const email = (req.body && req.body.email ? String(req.body.email) : "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "invalid email" });
-  const user = createUser(db, email, req.body.name ? String(req.body.name).trim() : null);
-  const token = mintPermanentInvite(db, user.id);
+  const user = await createUser(db, email, req.body.name ? String(req.body.name).trim() : null);
+  const token = await mintPermanentInvite(db, user.id);
   console.log(`invited ${user.email}`);
   res.json({ user: { id: user.id, email: user.email, name: user.name }, link: inviteLink(token) });
-});
+}));
 
-app.post("/api/admin/users/:id/link", requireAdmin, (req, res) => {
+app.post("/api/admin/users/:id/link", requireAdmin, wrap(async (req, res) => {
   const id = Number(req.params.id);
-  const user = db.prepare("SELECT id FROM users WHERE id=?").get(id);
-  if (!user) return res.status(404).json({ error: "not found" });
-  res.json({ link: inviteLink(mintPermanentInvite(db, id)) });
-});
+  if (!(await userExists(db, id))) return res.status(404).json({ error: "not found" });
+  res.json({ link: inviteLink(await mintPermanentInvite(db, id)) });
+}));
 
-app.delete("/api/admin/users/:id", requireAdmin, (req, res) => {
-  deleteUser(db, Number(req.params.id));
+app.delete("/api/admin/users/:id", requireAdmin, wrap(async (req, res) => {
+  await deleteUser(db, Number(req.params.id));
   res.json({ ok: true });
-});
+}));
 
 // --- boards ---
-app.get("/api/boards", requireAuth, (req, res) => {
-  const all = listBoards(db);
-  const accessible = all.filter((b) => canAccessBoard(db, b.id, req.user));
+app.get("/api/boards", requireAuth, wrap(async (req, res) => {
+  const all = await listBoards(db);
+  const accessible = [];
+  for (const b of all) if (await canAccessBoard(db, b.id, req.user)) accessible.push(b);
   res.json(accessible.map((b) => ({ id: b.id, name: b.name })));
-});
+}));
 
-app.get("/api/boards/:id", requireAuth, (req, res) => {
-  const board = getBoard(db, req.params.id);
-  if (!board || !canAccessBoard(db, board.id, req.user)) return res.status(404).json({ error: "not found" });
-  res.json({ id: board.id, name: board.name, facets: board.facets, context: board.context });
-});
+app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  res.json({
+    id: board.id,
+    name: board.name,
+    facets: board.facets,
+    context: board.context,
+    ai_reasoning: board.ai_reasoning !== false,
+  });
+}));
 
-app.get("/api/admin/boards", requireAdmin, (_req, res) => {
-  const boards = listBoards(db);
-  const counts = db.prepare("SELECT board_id, COUNT(*) AS c FROM images GROUP BY board_id").all();
-  const countMap = Object.fromEntries(counts.map((r) => [r.board_id, r.c]));
-  const pending = db
-    .prepare("SELECT board_id, COUNT(*) AS c FROM images WHERE status='pending' GROUP BY board_id")
-    .all();
-  const pendingMap = Object.fromEntries(pending.map((r) => [r.board_id, r.c]));
+app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
+  const boards = await listBoards(db);
+  const stats = await boardImageStats(db);
   res.json(
-    boards.map((b) => ({
-      ...b,
-      image_count: countMap[b.id] || 0,
-      pending_count: pendingMap[b.id] || 0,
-      memberIds: getBoardMemberIds(db, b.id),
-    }))
+    await Promise.all(
+      boards.map(async (b) => ({
+        ...b,
+        image_count: stats[b.id]?.c || 0,
+        pending_count: stats[b.id]?.p || 0,
+        memberIds: await getBoardMemberIds(db, b.id),
+      }))
+    )
   );
-});
+}));
 
-app.post("/api/admin/boards", requireAdmin, (req, res) => {
+app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
   let facets = [];
@@ -282,12 +286,13 @@ app.post("/api/admin/boards", requireAdmin, (req, res) => {
     facets = req.body.facets;
   }
   const context = req.body && req.body.context ? String(req.body.context) : "";
-  const id = createBoard(db, name, facets, context);
+  const aiReasoning = !req.body || req.body.ai_reasoning !== false;
+  const id = await createBoard(db, name, facets, context, aiReasoning);
   console.log(`created board "${name}" ${id}`);
-  res.json({ id, name, facets, context });
-});
+  res.json({ id, name, facets, context, ai_reasoning: aiReasoning });
+}));
 
-app.patch("/api/admin/boards/:id", requireAdmin, (req, res) => {
+app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const id = req.params.id;
   const update = {};
   if (req.body && req.body.name !== undefined) update.name = String(req.body.name).trim();
@@ -296,41 +301,38 @@ app.patch("/api/admin/boards/:id", requireAdmin, (req, res) => {
     update.facets = req.body.facets;
   }
   if (req.body && req.body.context !== undefined) update.context = String(req.body.context);
+  if (req.body && req.body.ai_reasoning !== undefined) update.aiReasoning = !!req.body.ai_reasoning;
   if (Object.keys(update).length > 0) {
-    if (!updateBoard(db, id, update)) return res.status(404).json({ error: "not found" });
-  } else if (!getBoard(db, id)) {
+    if (!(await updateBoard(db, id, update))) return res.status(404).json({ error: "not found" });
+  } else if (!(await getBoard(db, id))) {
     return res.status(404).json({ error: "not found" });
   }
   if (req.body && Array.isArray(req.body.memberIds)) {
-    setBoardMembers(db, id, req.body.memberIds.map(Number).filter(Boolean));
+    await setBoardMembers(db, id, req.body.memberIds.map(Number).filter(Boolean));
   }
   invalidateBoardCache(id);
   res.json({ ok: true });
-});
+}));
 
-app.post("/api/admin/boards/:id/retag", requireAdmin, (req, res) => {
-  const board = getBoard(db, req.params.id);
+app.post("/api/admin/boards/:id/retag", requireAdmin, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
   if (!board) return res.status(404).json({ error: "not found" });
-  const info = db
-    .prepare(
-      "UPDATE images SET status='pending', attempts=0, error=NULL, updated_at=? WHERE board_id=? AND status != 'pending'"
-    )
-    .run(Date.now(), req.params.id);
+  const queued = await retagBoard(db, req.params.id);
   invalidateBoardCache(req.params.id);
-  console.log(`retag queued: ${info.changes} image(s) in board ${req.params.id}`);
-  res.json({ ok: true, queued: info.changes });
-});
+  console.log(`retag queued: ${queued} image(s) in board ${req.params.id}`);
+  res.json({ ok: true, queued });
+}));
 
-app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, (req, res) => {
-  const board = getBoard(db, req.params.id);
+app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
   if (!board) return res.status(404).json({ error: "not found" });
-  const { restored, cleared } = cancelBoardQueue(db, req.params.id);
+  const { restored, cleared } = await cancelBoardQueue(db, req.params.id);
   console.log(`retag cancelled: board ${req.params.id} — ${restored} restored, ${cleared} left untagged (undecided)`);
   res.json({ ok: true, cancelled: restored + cleared, restored, cleared });
-});
+}));
 
-app.delete("/api/admin/boards/:id", requireAdmin, (req, res) => {
-  const filenames = deleteBoard(db, req.params.id);
+app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
+  const filenames = await deleteBoard(db, req.params.id);
   if (filenames === null) return res.status(404).json({ error: "not found" });
   for (const fn of filenames) {
     fs.rmSync(path.join(GALLERY_DIR, fn), { force: true });
@@ -339,34 +341,34 @@ app.delete("/api/admin/boards/:id", requireAdmin, (req, res) => {
   invalidateBoardCache(req.params.id);
   console.log(`deleted board ${req.params.id} + ${filenames.length} images`);
   res.json({ ok: true, deleted: filenames.length });
-});
+}));
 
 // --- admin: AI tagger config ---
-app.get("/api/admin/ai-config", requireAdmin, (req, res) => {
-  const dbModel = getSetting(db, "model");
-  const dbKey = getSetting(db, "api_key");
+app.get("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
+  const dbModel = await getSetting(db, "model");
+  const dbKey = await getSetting(db, "api_key");
   const model = dbModel || process.env.MODEL || "claude-haiku-4-5";
   const keySource = dbKey ? "db" : process.env.ANTHROPIC_API_KEY ? "env" : "none";
   res.json({ model, keySource, dbModel });
-});
+}));
 
-app.post("/api/admin/ai-config", requireAdmin, (req, res) => {
+app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
   const { model, apiKey } = req.body || {};
-  if (model !== undefined) setSetting(db, "model", model || null);
-  if (apiKey !== undefined && apiKey !== "") setSetting(db, "api_key", apiKey);
+  if (model !== undefined) await setSetting(db, "model", model || null);
+  if (apiKey !== undefined && apiKey !== "") await setSetting(db, "api_key", apiKey);
   console.log(`ai-config updated by admin: model=${model ?? "(unchanged)"}`);
   res.json({ ok: true });
-});
+}));
 
-app.delete("/api/admin/ai-config/key", requireAdmin, (req, res) => {
-  setSetting(db, "api_key", null);
+app.delete("/api/admin/ai-config/key", requireAdmin, wrap(async (req, res) => {
+  await setSetting(db, "api_key", null);
   console.log("ai-config: DB API key cleared by admin");
   res.json({ ok: true });
-});
+}));
 
-app.post("/api/admin/ai-config/test", requireAdmin, async (req, res) => {
-  const apiKey = getSetting(db, "api_key") || process.env.ANTHROPIC_API_KEY;
-  const model = getSetting(db, "model") || process.env.MODEL || "claude-haiku-4-5";
+app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (req, res) => {
+  const apiKey = (await getSetting(db, "api_key")) || process.env.ANTHROPIC_API_KEY;
+  const model = (await getSetting(db, "model")) || process.env.MODEL || "claude-haiku-4-5";
   if (!apiKey) return res.status(400).json({ error: "No API key configured" });
   try {
     const client = new Anthropic({ apiKey });
@@ -378,13 +380,13 @@ app.post("/api/admin/ai-config/test", requireAdmin, async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
-});
+}));
 
-app.get("/api/images", requireAuth, (req, res) => {
+app.get("/api/images", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
-  if (!boardId || !canAccessBoard(db, boardId, req.user)) return res.json([]);
-  res.json(listImages(db, req.user.id, boardId));
-});
+  if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
+  res.json(await listImages(db, req.user.id, boardId));
+}));
 
 // Live server logs via Server-Sent Events.
 app.get("/api/logs/stream", requireAdmin, (req, res) => {
@@ -403,9 +405,9 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
   });
 });
 
-app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), async (req, res) => {
+app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {
   const boardId = req.query.board || (req.body && req.body.board_id) || null;
-  if (!boardId || !db.prepare("SELECT 1 FROM boards WHERE id=?").get(boardId)) {
+  if (!boardId || !(await boardExists(db, boardId))) {
     return res.status(400).json({ error: "valid board required" });
   }
 
@@ -442,10 +444,8 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), async (re
           .toFile(path.join(THUMBS_DIR, filename + ".webp"));
         await fs.promises.writeFile(path.join(GALLERY_DIR, filename), buf);
 
-        const now = Date.now();
-        const info = insertImage.run(filename, f.originalname || filename, boardId, now, now);
-        const rowId = Number(info.lastInsertRowid);
-        setThumbDimensions(db, rowId, thumbInfo.width, thumbInfo.height);
+        const rowId = await insertImage(db, filename, f.originalname || filename, boardId);
+        await setThumbDimensions(db, rowId, thumbInfo.width, thumbInfo.height);
         uploaded.push({ id: rowId, name: filename, status: "pending", tags: [], w: thumbInfo.width, h: thumbInfo.height });
       });
     } catch (err) {
@@ -457,43 +457,57 @@ app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), async (re
   }
 
   res.json({ uploaded, rejected });
-});
+}));
 
-app.patch("/api/images/:id/tags", requireAuth, (req, res) => {
+// The AI's per-facet justification for an image's tags. Kept out of the
+// /api/images list payload — fetched lazily when the lightbox panel opens.
+app.get("/api/images/:id/reasoning", requireAuth, wrap(async (req, res) => {
+  const row = await getImageReasoning(db, Number(req.params.id));
+  if (!row) return res.status(404).json({ error: "not found" });
+  if (!(await canAccessBoard(db, row.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
+  res.json({ reasoning: row.tag_reasoning || {} });
+}));
+
+app.patch("/api/images/:id/tags", requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   const tags = req.body && Array.isArray(req.body.tags) ? req.body.tags : null;
   if (!tags) return res.status(400).json({ error: "tags array required" });
-  const image = db.prepare("SELECT board_id FROM images WHERE id=?").get(id);
+  const image = await getImageBoard(db, id);
   if (!image) return res.status(404).json({ error: "not found" });
-  if (!canAccessBoard(db, image.board_id, req.user)) return res.status(403).json({ error: "forbidden" });
-  const board = getBoard(db, image.board_id);
+  if (!(await canAccessBoard(db, image.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
+  const board = await getBoard(db, image.board_id);
   const allowed = new Set();
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
-  // A human made the call, so any AI "undecided" flag is resolved.
-  db.prepare("UPDATE images SET status='tagged', tags=?, undecided=0, updated_at=? WHERE id=?").run(JSON.stringify(clean), Date.now(), id);
+  await setImageTags(db, id, clean);
   res.json({ ok: true, tags: clean });
-});
+}));
 
-app.delete("/api/images/:id", requireAuth, (req, res) => {
+app.delete("/api/images/:id", requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
-  const filename = deleteImage(db, id);
+  const filename = await deleteImage(db, id);
   if (!filename) return res.status(404).json({ error: "not found" });
   fs.rmSync(path.join(GALLERY_DIR, filename), { force: true });
   fs.rmSync(path.join(THUMBS_DIR, filename + ".webp"), { force: true });
   console.log(`deleted #${id} ${filename}`);
   res.json({ ok: true });
-});
+}));
 
-app.post("/api/images/:id/reprocess", requireAuth, (req, res) => {
+app.post("/api/images/:id/reprocess", requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
-  if (!reprocessImage(db, id)) return res.status(404).json({ error: "not found" });
+  if (!(await reprocessImage(db, id))) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued #${id}`);
   res.json({ ok: true, status: "pending" });
-});
+}));
 
-// Local-dev static serving so fetch('/api/...') is same-origin while testing.
-// In production Caddy serves these and only proxies /api/* here.
+// Uploaded originals + thumbnails live in GALLERY_DIR/THUMBS_DIR, which in the
+// container sit outside STATIC_DIR — mount them explicitly. Filenames are
+// random per upload and never reused, so long-lived caching is safe.
+app.use("/gallery", express.static(GALLERY_DIR, { maxAge: "7d", immutable: true }));
+app.use("/thumbnails", express.static(THUMBS_DIR, { maxAge: "7d", immutable: true }));
+
+// Frontend assets (same-origin /api during host dev; in the container the app
+// is the only file server and Caddy just proxies).
 app.use(express.static(STATIC_DIR, { extensions: ["html"], cacheControl: false }));
 
 // Upload/size error handler.
@@ -502,18 +516,22 @@ app.use((err, _req, res, _next) => {
     return res.status(413).json({ error: "file too large (max 10 MB)" });
   if (err && err.code === "LIMIT_FILE_COUNT")
     return res.status(413).json({ error: `too many files (max ${MAX_FILES})` });
-  if (err) return res.status(400).json({ error: err.message });
+  // Errors that carry a status (body-parser, multer field errors) keep it;
+  // anything else is an unexpected failure (e.g. the DB) — log it, say 500.
+  const status = err && (err.status || err.statusCode);
+  if (status) return res.status(status).json({ error: err.message });
+  console.error("unhandled route error:", err);
   res.status(500).json({ error: "server error" });
 });
 
 app.listen(PORT, HOST, () => {
-  console.log(`API listening on http://${HOST}:${PORT}  (db: ${DB_PATH})`);
+  console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   startWorker({ db, thumbsDir: THUMBS_DIR });
-  backfillThumbDimensions();
+  backfillThumbDimensions().catch((err) => console.error("thumb backfill error:", err.message));
 });
 
 async function backfillThumbDimensions() {
-  const rows = db.prepare("SELECT id, filename FROM images WHERE thumb_w IS NULL").all();
+  const rows = await listImagesMissingThumbDims(db);
   if (!rows.length) return;
   console.log(`backfilling thumbnail dimensions for ${rows.length} image(s)...`);
   let done = 0;
@@ -521,7 +539,7 @@ async function backfillThumbDimensions() {
     try {
       const meta = await sharp(path.join(THUMBS_DIR, row.filename + ".webp")).metadata();
       if (meta.width && meta.height) {
-        setThumbDimensions(db, row.id, meta.width, meta.height);
+        await setThumbDimensions(db, row.id, meta.width, meta.height);
         done++;
       }
     } catch {}

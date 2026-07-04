@@ -77,6 +77,16 @@
       .inline-edit input, .inline-edit textarea { margin-bottom: 10px; }
       .row-actions-wrap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
 
+      /* toggle switch (see makeSwitch) */
+      .switch { position: relative; display: inline-flex; flex: none; width: 34px; height: 20px; border-radius: 999px; background: #d8d8de; border: none; padding: 0; cursor: pointer; transition: background 0.15s; }
+      .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.25); transition: left 0.15s; }
+      .switch.on { background: #111; }
+      .switch.on::after { left: 16px; }
+      .switch.sm { width: 26px; height: 15px; }
+      .switch.sm::after { width: 11px; height: 11px; }
+      .switch.sm.on::after { left: 13px; }
+      .switch-row { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+
       /* facet editor */
       .fe-root { margin-bottom: 10px; }
       .fe-facet { margin-bottom: 10px; }
@@ -85,6 +95,8 @@
       .fe-key-hint { font-size: 11px; color: #b0b0b8; font-family: "SF Mono", Consolas, monospace; white-space: nowrap; }
       .fe-val-row input { flex: none; width: 240px; padding: 4px 8px; font: inherit; font-size: 13px; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
       .fe-values { padding-left: 22px; }
+      textarea.fe-desc { display: block; width: calc(100% - 22px); margin: 0 0 6px 22px; padding: 4px 8px; font: inherit; font-size: 12px; color: #4b4b52; border: 1px solid #e4e4ec; border-radius: 6px; resize: vertical; min-height: 0; }
+      textarea.fe-desc::placeholder { color: #b0b0b8; }
       .fe-val-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
       .fe-single { display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1; color: #6b6b72; cursor: pointer; white-space: nowrap; user-select: none; margin-left: auto; }
       .fe-single input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; border: none; border-radius: 0; background: none; cursor: pointer; }
@@ -124,6 +136,42 @@
 
     <script>
       const content = document.getElementById("content");
+
+      // Reusable toggle switch: a button that flips .on and reports the new
+      // state. opts.small for compact contexts (e.g. facet rows).
+      function makeSwitch(checked, onChange, opts = {}) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "switch" + (opts.small ? " sm" : "") + (checked ? " on" : "");
+        btn.setAttribute("role", "switch");
+        btn.setAttribute("aria-checked", String(!!checked));
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const on = !btn.classList.contains("on");
+          btn.classList.toggle("on", on);
+          btn.setAttribute("aria-checked", String(on));
+          if (onChange) onChange(on);
+        });
+        return btn;
+      }
+
+      // Labeled switch row — clicking anywhere on the row toggles.
+      function switchRow(label, hint, checked, onChange, opts = {}) {
+        const row = document.createElement("div");
+        row.className = "switch-row";
+        const sw = makeSwitch(checked, onChange, opts);
+        const text = document.createElement("span");
+        text.append(label);
+        if (hint) {
+          const h = document.createElement("span");
+          h.style.cssText = "font-weight:400;color:#9aa0aa;";
+          h.append(" " + hint);
+          text.appendChild(h);
+        }
+        row.append(sw, text);
+        row.addEventListener("click", (e) => { if (e.target === row || e.target === text) sw.click(); });
+        return row;
+      }
 
       function buildFacetEditor(textarea) {
         textarea.hidden = true;
@@ -172,6 +220,7 @@
           textarea.value = JSON.stringify(facets.map((f) => {
             const out = { key: f.key, label: f.label, values: f.values };
             if (f.single) out.single = true;
+            if (f.description && f.description.trim()) out.description = f.description.trim();
             return out;
           }));
         }
@@ -208,25 +257,19 @@
             keyHint.className = "fe-key-hint";
             keyHint.textContent = f.key || "";
 
-            const singleWrap = document.createElement("span");
-            singleWrap.style.cssText = "display:flex;align-items:center;gap:5px;margin-left:auto;font-size:11px;color:#6b6b72;cursor:pointer;white-space:nowrap;user-select:none;";
-            const singleCb = document.createElement("input");
-            singleCb.type = "checkbox";
-            singleCb.checked = !!f.single;
-            singleCb.style.cssText = "flex:none;width:13px;height:13px;min-width:0;padding:0;margin:0;border:1px solid #bbb;border-radius:3px;cursor:pointer;";
-            singleCb.addEventListener("click", (e) => e.stopPropagation());
-            singleCb.onchange = () => { f.single = singleCb.checked; sync(); };
-            const singleTxt = document.createElement("span");
-            singleTxt.textContent = "single value";
-            singleWrap.append(singleCb, singleTxt);
-            singleWrap.addEventListener("click", () => {
-              singleCb.checked = !singleCb.checked;
-              f.single = singleCb.checked;
-              sync();
-            });
+            const singleWrap = switchRow("single value", null, !!f.single, (on) => { f.single = on; sync(); }, { small: true });
+            singleWrap.style.cssText = "margin-left:auto;font-size:11px;color:#6b6b72;white-space:nowrap;gap:5px;";
 
             head.append(labelIn, keyHint, rmFacet, singleWrap);
             facetEl.appendChild(head);
+
+            const descIn = document.createElement("textarea");
+            descIn.className = "fe-desc";
+            descIn.rows = 2;
+            descIn.placeholder = "AI guidance (optional) — what this facet means, how to judge it";
+            descIn.value = f.description || "";
+            descIn.oninput = () => { f.description = descIn.value; sync(); };
+            facetEl.appendChild(descIn);
 
             const valuesEl = document.createElement("div");
             valuesEl.className = "fe-values";
@@ -544,6 +587,7 @@
           <input id="new-board-name" placeholder="e.g. Wardrobe Items" style="width:100%;margin-bottom:10px" />
           <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
           <textarea id="new-board-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
+          <div id="new-board-reasoning" style="margin:2px 0 12px;font-size:13px"></div>
           <label>Facets</label>
           <textarea id="new-board-facets" rows="12">${defaultFacetsJson()}</textarea>
           <div style="display:flex;gap:8px">
@@ -556,6 +600,11 @@
 
         boardsContent.replaceChildren(sec);
         buildFacetEditor(document.getElementById("new-board-facets"));
+
+        let newBoardReasoning = true;
+        document.getElementById("new-board-reasoning").appendChild(
+          switchRow("AI reasoning", "(the tagger justifies each facet; shown in the lightbox)", true, (on) => { newBoardReasoning = on; })
+        );
 
         document.getElementById("show-create-board").onclick = () => {
           createForm.hidden = !createForm.hidden;
@@ -571,7 +620,7 @@
           catch { return alert("Facets JSON is invalid."); }
           if (!Array.isArray(facets)) return alert("Facets must be a JSON array.");
           try {
-            await api("POST", "/api/admin/boards", { name, context, facets });
+            await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: newBoardReasoning });
             renderBoards();
           } catch (err) { alert("Error: " + err.message); }
         };
@@ -661,6 +710,7 @@
           <input id="edit-name-${board.id}" value="${board.name}" style="width:100%" />
           <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
           <textarea id="edit-context-${board.id}" rows="5">${board.context || ""}</textarea>
+          <div id="edit-reasoning-${board.id}" style="margin:2px 0 12px;font-size:13px"></div>
           <label>Facets</label>
           <textarea id="edit-facets-${board.id}" rows="12">${JSON.stringify(board.facets, null, 2)}</textarea>`;
 
@@ -684,6 +734,12 @@
         document.addEventListener("keydown", onKey);
 
         buildFacetEditor(document.getElementById(`edit-facets-${board.id}`));
+
+        let aiReasoning = board.ai_reasoning !== false;
+        document.getElementById(`edit-reasoning-${board.id}`).appendChild(
+          switchRow("AI reasoning", "(the tagger justifies each facet; shown in the lightbox)", aiReasoning, (on) => { aiReasoning = on; })
+        );
+
         document.getElementById(`edit-name-${board.id}`).focus();
 
         document.getElementById(`cancel-edit-${board.id}`).onclick = close;
@@ -696,7 +752,7 @@
           catch { return alert("Facets JSON is invalid."); }
           if (!Array.isArray(facets)) return alert("Facets must be a JSON array.");
           try {
-            await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets });
+            await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning });
             close();
             renderBoards();
           } catch (err) { alert("Error: " + err.message); }

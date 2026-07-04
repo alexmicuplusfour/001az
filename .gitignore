@@ -13,6 +13,9 @@ thumbnails/
 .claude/
 pets-test/
 
+# compose secrets/overrides — .env.example is the template
+.env
+
 # personal deploy tooling for the author's own instance
 deploy.py
 deploy.local.json

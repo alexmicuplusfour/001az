@@ -2,6 +2,7 @@ export const state = {
   boardId: null,
   boardName: null,
   facets: [],
+  aiReasoning: true,
   images: [],
   uploading: [],
   selected: new Map(),

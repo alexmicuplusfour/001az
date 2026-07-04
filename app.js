@@ -56,6 +56,7 @@ async function main() {
 
   state.facets = boardData ? boardData.facets : [];
   state.boardName = boardData ? boardData.name : null;
+  state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
   state.me = meData;
   state.images = imagesData.map(toImage);
   state.crates = Array.isArray(cratesData) ? cratesData : [];

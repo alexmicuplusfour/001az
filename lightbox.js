@@ -12,10 +12,15 @@ const elLightboxPrev = document.getElementById("lightbox-prev");
 const elLightboxNext = document.getElementById("lightbox-next");
 const elLightboxTags = document.getElementById("lightbox-tags");
 const elLightboxCount = document.getElementById("lightbox-count");
+const elLightboxInfo = document.getElementById("lightbox-info");
+const elLightboxPanel = document.getElementById("lightbox-panel");
+const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
 
 let lightboxImg = null;
 let lightboxList = [];
 let lightboxIndex = -1;
+let panelOpen = false;
+let reasoningReq = 0; // stale-response guard for the reasoning fetch
 
 function renderLightboxFav() {
   if (!lightboxImg) return;
@@ -28,6 +33,101 @@ function renderLightboxCrate() {
   const n = lightboxImg.crateIds.size;
   elLightboxCrate.className = "lightbox-action lightbox-crate" + (n > 0 ? " on" : "");
   elLightboxCrate.innerHTML = `${ICONS.crate}<span>${n > 0 ? n : ""}</span>`;
+}
+
+// Paint the reasoning panel for img. reasoning is null while the fetch is in
+// flight — tags render immediately, reasoning lines fill in when it lands.
+function paintPanel(img, reasoning) {
+  elLightboxPanelBody.replaceChildren();
+  const byFacet = new Map();
+  for (const t of img.tags) {
+    const i = t.indexOf("/");
+    if (i <= 0) continue;
+    const k = t.slice(0, i);
+    if (!byFacet.has(k)) byFacet.set(k, []);
+    byFacet.get(k).push(t.slice(i + 1));
+  }
+  const why = reasoning || {};
+
+  if (img.undecided) {
+    const note = document.createElement("div");
+    note.className = "lbp-undecided";
+    note.textContent = why.fit || "The AI couldn't apply this board's facets to this image.";
+    elLightboxPanelBody.appendChild(note);
+  }
+
+  let rows = 0;
+  for (const f of state.facets) {
+    const vals = byFacet.get(f.key) || [];
+    const text = why[f.key];
+    if (!vals.length && !text) continue;
+    rows++;
+    const row = document.createElement("div");
+    row.className = "lbp-facet";
+    const head = document.createElement("div");
+    head.className = "lbp-facet-head";
+    const label = document.createElement("span");
+    label.className = "lbp-facet-label";
+    label.textContent = f.label;
+    head.appendChild(label);
+    if (vals.length) {
+      for (const v of vals) {
+        const chip = document.createElement("span");
+        chip.className = "lbp-chip";
+        chip.textContent = v;
+        head.appendChild(chip);
+      }
+    } else {
+      const none = document.createElement("span");
+      none.className = "lbp-none";
+      none.textContent = "—";
+      head.appendChild(none);
+    }
+    row.appendChild(head);
+    if (text) {
+      const p = document.createElement("p");
+      p.className = "lbp-why";
+      p.textContent = text;
+      row.appendChild(p);
+    }
+    elLightboxPanelBody.appendChild(row);
+  }
+
+  if (!rows && !img.undecided) {
+    const empty = document.createElement("p");
+    empty.className = "lbp-hint";
+    empty.textContent = reasoning === null ? "Loading…" : "No AI tags for this image.";
+    elLightboxPanelBody.appendChild(empty);
+  } else if (reasoning !== null && img.tags.length && !Object.keys(why).length) {
+    const hint = document.createElement("p");
+    hint.className = "lbp-hint";
+    hint.textContent = state.aiReasoning
+      ? "No reasoning recorded — this image was tagged before reasoning was captured. Retag it to record one."
+      : "AI reasoning is turned off for this board.";
+    elLightboxPanelBody.appendChild(hint);
+  }
+}
+
+async function renderPanel() {
+  if (!panelOpen || !lightboxImg) return;
+  const img = lightboxImg;
+  paintPanel(img, null);
+  const token = ++reasoningReq;
+  let reasoning = {};
+  try {
+    const r = await fetch(`/api/images/${img.id}/reasoning`);
+    if (r.ok) reasoning = (await r.json()).reasoning || {};
+  } catch { /* panel just shows tags without reasoning */ }
+  if (token !== reasoningReq || lightboxImg !== img || !panelOpen) return;
+  paintPanel(img, reasoning);
+}
+
+function setPanel(open) {
+  panelOpen = open;
+  elLightboxPanel.hidden = !open;
+  elLightbox.classList.toggle("panel-open", open);
+  elLightboxInfo.classList.toggle("on", open);
+  if (open) renderPanel();
 }
 
 function preloadFull(i) {
@@ -69,6 +169,7 @@ function showLightbox() {
   }
   elLightboxCount.textContent =
     lightboxList.length > 1 ? `${lightboxIndex + 1} / ${lightboxList.length}` : "";
+  if (panelOpen) renderPanel();
   elLightboxPrev.style.visibility = lightboxIndex > 0 ? "visible" : "hidden";
   elLightboxNext.style.visibility = lightboxIndex < lightboxList.length - 1 ? "visible" : "hidden";
   for (let d = 1; d <= 2; d++) {
@@ -83,6 +184,7 @@ export function openLightbox(img) {
   if (lightboxIndex < 0) { lightboxList = [img]; lightboxIndex = 0; }
   showLightbox();
   elLightbox.hidden = false;
+  document.body.style.overflow = "hidden";
 }
 
 export function navLightbox(delta) {
@@ -95,7 +197,9 @@ export function navLightbox(delta) {
 
 export function closeLightbox() {
   closeCratePop();
+  setPanel(false);
   elLightbox.hidden = true;
+  document.body.style.overflow = "";
   elLightbox.classList.remove("loading");
   elLightboxImg.onload = null;
   elLightboxImg.src = "";
@@ -134,9 +238,17 @@ export function initLightbox() {
     openCratePop(elLightboxCrate, lightboxImg);
   });
 
+  elLightboxInfo.innerHTML = ICONS.info;
+  elLightboxInfo.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setPanel(!panelOpen);
+  });
+  elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
+  document.getElementById("lightbox-panel-close").addEventListener("click", () => setPanel(false));
+
   document.addEventListener("keydown", (e) => {
     if (elLightbox.hidden) return;
-    if (e.key === "Escape") closeLightbox();
+    if (e.key === "Escape") panelOpen ? setPanel(false) : closeLightbox();
     else if (e.key === "ArrowLeft") navLightbox(-1);
     else if (e.key === "ArrowRight") navLightbox(1);
   });

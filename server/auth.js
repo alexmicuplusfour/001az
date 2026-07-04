@@ -32,12 +32,16 @@ export function clearSessionCookie(res) {
 
 // Middleware: attach req.sid and req.user (or null) to every request.
 export function attachUser(db) {
-  return (req, res, next) => {
-    req.sid = parseCookies(req)[COOKIE] || null;
-    req.user = req.sid ? getSessionUser(db, req.sid) : null;
-    // Slide the session forward on activity; refresh the cookie when it renews.
-    if (req.user && touchSession(db, req.sid)) setSessionCookie(res, req.sid);
-    next();
+  return async (req, res, next) => {
+    try {
+      req.sid = parseCookies(req)[COOKIE] || null;
+      req.user = req.sid ? await getSessionUser(db, req.sid) : null;
+      // Slide the session forward on activity; refresh the cookie when it renews.
+      if (req.user && (await touchSession(db, req.sid))) setSessionCookie(res, req.sid);
+      next();
+    } catch (err) {
+      next(err);
+    }
   };
 }
 

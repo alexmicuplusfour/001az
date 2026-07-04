@@ -130,9 +130,13 @@ export function openCratePop(anchorEl, img = null) {
           const found = state.crates.find((c) => c.id === crate.id);
           if (found) found.image_count = count;
         }
-        closeCratePop(true); // skip teardown — anchorEl must stay in DOM for repositioning
+        // Rebuild pop without going through closeCratePop — card DOM must stay intact
+        if (cratePopState) {
+          cratePopState.pop.remove();
+          document.removeEventListener("click", cratePopState.outside, true);
+          cratePopState = null;
+        }
         openCratePop(anchorEl, img);
-        document.dispatchEvent(new Event('app:render'));
       } catch {
         toast.error("Couldn't create crate");
       }

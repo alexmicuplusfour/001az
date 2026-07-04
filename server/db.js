@@ -1,174 +1,69 @@
-import Database from "better-sqlite3";
+import pg from "pg";
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 
-// status: pending -> processing -> tagged | failed
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS boards (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL,
-  facets     TEXT NOT NULL DEFAULT '[]',
-  created_at INTEGER NOT NULL
-);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-CREATE TABLE IF NOT EXISTS board_members (
-  board_id   TEXT NOT NULL,
-  user_id    INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (board_id, user_id)
-);
-CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
+// BIGINT (int8) comes back from pg as a string by default. Everything we store
+// in BIGINT is a ms epoch or a row id — both far below 2^53 — so parse to
+// Number globally. Without this, every `expires_at < Date.now()` style
+// comparison silently breaks.
+pg.types.setTypeParser(20, Number);
 
-CREATE TABLE IF NOT EXISTS images (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  filename      TEXT UNIQUE NOT NULL,
-  original_name TEXT,
-  status        TEXT NOT NULL DEFAULT 'pending',
-  tags          TEXT NOT NULL DEFAULT '[]',
-  error         TEXT,
-  attempts      INTEGER NOT NULL DEFAULT 0,
-  board_id      TEXT NOT NULL DEFAULT '',
-  created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_images_status ON images(status);
-CREATE INDEX IF NOT EXISTS idx_images_created ON images(created_at);
-
-CREATE TABLE IF NOT EXISTS ai_usage (
-  day   TEXT PRIMARY KEY,
-  count INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  email         TEXT UNIQUE NOT NULL,
-  name          TEXT,
-  is_admin      INTEGER NOT NULL DEFAULT 0,
-  created_at    INTEGER NOT NULL,
-  last_login_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS invites (
-  token      TEXT PRIMARY KEY,
-  user_id    INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  used_at    INTEGER,
-  created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  id         TEXT PRIMARY KEY,
-  user_id    INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS favorites (
-  user_id    INTEGER NOT NULL,
-  image_id   INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (user_id, image_id)
-);
-CREATE INDEX IF NOT EXISTS idx_fav_image ON favorites(image_id);
-
-CREATE TABLE IF NOT EXISTS crates (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id    INTEGER NOT NULL,
-  name       TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  UNIQUE(user_id, name)
-);
-CREATE INDEX IF NOT EXISTS idx_crates_user ON crates(user_id);
-
-CREATE TABLE IF NOT EXISTS crate_images (
-  crate_id   INTEGER NOT NULL,
-  image_id   INTEGER NOT NULL,
-  created_at INTEGER NOT NULL,
-  PRIMARY KEY (crate_id, image_id)
-);
-CREATE INDEX IF NOT EXISTS idx_crate_images_image ON crate_images(image_id);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-`;
-
-export function openDb(dbPath) {
-  const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.exec(SCHEMA);
-  try { db.exec("ALTER TABLE invites ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0"); } catch {}
-  try { db.exec("ALTER TABLE images ADD COLUMN board_id TEXT NOT NULL DEFAULT ''"); } catch {}
-  try { db.exec("CREATE INDEX IF NOT EXISTS idx_images_board ON images(board_id)"); } catch {}
-  try { db.exec("ALTER TABLE boards ADD COLUMN context TEXT NOT NULL DEFAULT ''"); } catch {}
-  try { db.exec("ALTER TABLE boards ADD COLUMN glosses TEXT NOT NULL DEFAULT '{}'"); } catch {}
-  try { db.exec("ALTER TABLE images ADD COLUMN thumb_w INTEGER"); } catch {}
-  try { db.exec("ALTER TABLE images ADD COLUMN thumb_h INTEGER"); } catch {}
-  try { db.exec("ALTER TABLE images ADD COLUMN undecided INTEGER NOT NULL DEFAULT 0"); } catch {}
-  return db;
+export function openDb(databaseUrl) {
+  return new pg.Pool({ connectionString: databaseUrl, max: 5 });
 }
 
-// One-time seed of the existing collection from tags.json (filename -> [tags]).
-// No-op once the table has rows.
-export function seedIfEmpty(db, tagsJsonPath) {
-  const { c } = db.prepare("SELECT COUNT(*) AS c FROM images").get();
-  if (c > 0) return 0;
+// Apply schema.sql (idempotent CREATE IF NOT EXISTS statements).
+export async function initDb(db) {
+  const sql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
+  await db.query(sql);
+}
 
-  let data = {};
+// Run fn with a dedicated client inside BEGIN/COMMIT.
+async function withTx(db, fn) {
+  const client = await db.connect();
   try {
-    data = JSON.parse(fs.readFileSync(tagsJsonPath, "utf8"));
-  } catch {
-    return 0;
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
   }
-
-  const now = Date.now();
-  const insert = db.prepare(
-    `INSERT INTO images (filename, original_name, status, tags, created_at, updated_at)
-     VALUES (@filename, @original_name, @status, @tags, @created_at, @updated_at)`
-  );
-  const tx = db.transaction((entries) => {
-    for (const [name, tags] of entries) {
-      const t = Array.isArray(tags) ? tags : [];
-      insert.run({
-        filename: name,
-        original_name: name,
-        status: t.length ? "tagged" : "pending",
-        tags: JSON.stringify(t),
-        created_at: now,
-        updated_at: now,
-      });
-    }
-  });
-  tx(Object.entries(data));
-  return Object.keys(data).length;
 }
 
-export function listImages(db, userId = null, boardId = null) {
-  const boardClause = boardId != null ? "WHERE i.board_id = @bid" : "";
-  const rows = db
-    .prepare(
-      `SELECT i.id, i.filename, i.status, i.tags, i.thumb_w, i.thumb_h, i.undecided,
-        (SELECT COUNT(*) FROM favorites f WHERE f.image_id = i.id) AS hearts,
-        CASE WHEN @uid IS NOT NULL AND EXISTS(
-          SELECT 1 FROM favorites f WHERE f.image_id = i.id AND f.user_id = @uid
-        ) THEN 1 ELSE 0 END AS fav
-       FROM images i
-       ${boardClause}
-       ORDER BY i.created_at DESC, i.id DESC`
-    )
-    .all({ uid: userId, bid: boardId });
+export async function countImages(db) {
+  const { rows } = await db.query("SELECT COUNT(*) AS c FROM images");
+  return rows[0].c;
+}
+
+export async function listImages(db, userId = null, boardId = null) {
+  const { rows } = await db.query(
+    `SELECT i.id, i.filename, i.status, i.tags, i.thumb_w, i.thumb_h, i.undecided,
+      (SELECT COUNT(*) FROM favorites f WHERE f.image_id = i.id) AS hearts,
+      EXISTS(
+        SELECT 1 FROM favorites f WHERE f.image_id = i.id AND f.user_id = $1
+      ) AS fav
+     FROM images i
+     WHERE ($2::text IS NULL OR i.board_id = $2)
+     ORDER BY i.created_at DESC, i.id DESC`,
+    [userId, boardId]
+  );
 
   const crateMap = new Map();
   if (userId) {
-    const memberships = db
-      .prepare(
-        `SELECT ci.image_id, ci.crate_id FROM crate_images ci
-         JOIN crates c ON c.id = ci.crate_id WHERE c.user_id = ? AND c.board_id = ?`
-      )
-      .all(userId, boardId || "");
-    for (const m of memberships) {
+    const memberships = await db.query(
+      `SELECT ci.image_id, ci.crate_id FROM crate_images ci
+       JOIN crates c ON c.id = ci.crate_id WHERE c.user_id = $1 AND c.board_id = $2`,
+      [userId, boardId]
+    );
+    for (const m of memberships.rows) {
       if (!crateMap.has(m.image_id)) crateMap.set(m.image_id, []);
       crateMap.get(m.image_id).push(m.crate_id);
     }
@@ -178,7 +73,7 @@ export function listImages(db, userId = null, boardId = null) {
     id: r.id,
     name: r.filename,
     status: r.status,
-    tags: JSON.parse(r.tags),
+    tags: r.tags,
     undecided: !!r.undecided,
     hearts: r.hearts,
     favoritedByMe: !!r.fav,
@@ -188,419 +83,466 @@ export function listImages(db, userId = null, boardId = null) {
   }));
 }
 
-export function setThumbDimensions(db, id, w, h) {
-  db.prepare("UPDATE images SET thumb_w=?, thumb_h=? WHERE id=?").run(w, h, id);
+export async function insertImage(db, filename, originalName, boardId) {
+  const now = Date.now();
+  const { rows } = await db.query(
+    `INSERT INTO images (filename, original_name, status, board_id, created_at, updated_at)
+     VALUES ($1, $2, 'pending', $3, $4, $4) RETURNING id`,
+    [filename, originalName, boardId, now]
+  );
+  return rows[0].id;
+}
+
+export async function setThumbDimensions(db, id, w, h) {
+  await db.query("UPDATE images SET thumb_w=$1, thumb_h=$2 WHERE id=$3", [w, h, id]);
+}
+
+export async function listImagesMissingThumbDims(db) {
+  const { rows } = await db.query("SELECT id, filename FROM images WHERE thumb_w IS NULL");
+  return rows;
+}
+
+export async function getImageBoard(db, id) {
+  const { rows } = await db.query("SELECT board_id FROM images WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+// Group "facet/value" tag strings into { facetKey: Set(values) }.
+function tagsByFacet(tags) {
+  const map = new Map();
+  for (const t of tags) {
+    const i = t.indexOf("/");
+    if (i <= 0) continue;
+    const key = t.slice(0, i);
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(t.slice(i + 1));
+  }
+  return map;
+}
+
+// A human made the call, so any AI "undecided" flag is resolved. AI reasoning
+// is dropped for facets whose values changed — it justified a different choice.
+export async function setImageTags(db, id, tags) {
+  const { rows } = await db.query("SELECT tags, tag_reasoning FROM images WHERE id=$1", [id]);
+  const reasoning = { ...(rows[0]?.tag_reasoning || {}) };
+  const before = tagsByFacet(rows[0]?.tags || []);
+  const after = tagsByFacet(tags);
+  for (const key of Object.keys(reasoning)) {
+    if (key === "fit") continue;
+    const b = before.get(key) || new Set();
+    const a = after.get(key) || new Set();
+    if (b.size !== a.size || [...b].some((v) => !a.has(v))) delete reasoning[key];
+  }
+  await db.query(
+    "UPDATE images SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, updated_at=$3 WHERE id=$4",
+    [JSON.stringify(tags), JSON.stringify(reasoning), Date.now(), id]
+  );
+}
+
+export async function getImageReasoning(db, id) {
+  const { rows } = await db.query("SELECT board_id, tag_reasoning FROM images WHERE id=$1", [id]);
+  return rows[0] || null;
 }
 
 // --- users / invites / sessions / favorites ---
 
-export function seedAdmin(db, email) {
+export async function seedAdmin(db, email) {
   if (!email) return;
   email = email.trim().toLowerCase();
-  db.prepare(
-    `INSERT INTO users (email, name, is_admin, created_at) VALUES (?, ?, 1, ?)
-     ON CONFLICT(email) DO UPDATE SET is_admin = 1`
-  ).run(email, email.split("@")[0], Date.now());
+  await db.query(
+    `INSERT INTO users (email, name, is_admin, created_at) VALUES ($1, $2, TRUE, $3)
+     ON CONFLICT(email) DO UPDATE SET is_admin = TRUE`,
+    [email, email.split("@")[0], Date.now()]
+  );
 }
 
-export function createUser(db, email, name) {
+export async function createUser(db, email, name) {
   email = String(email).trim().toLowerCase();
-  const existing = db.prepare("SELECT * FROM users WHERE email=?").get(email);
+  const existing = await getUserByEmail(db, email);
   if (existing) return existing;
-  const info = db
-    .prepare("INSERT INTO users (email, name, is_admin, created_at) VALUES (?, ?, 0, ?)")
-    .run(email, name || null, Date.now());
-  return db.prepare("SELECT * FROM users WHERE id=?").get(info.lastInsertRowid);
+  const { rows } = await db.query(
+    "INSERT INTO users (email, name, is_admin, created_at) VALUES ($1, $2, FALSE, $3) RETURNING *",
+    [email, name || null, Date.now()]
+  );
+  return rows[0];
 }
 
-export function getUserByEmail(db, email) {
-  return db.prepare("SELECT * FROM users WHERE email=?").get(String(email).trim().toLowerCase());
+export async function getUserByEmail(db, email) {
+  const { rows } = await db.query("SELECT * FROM users WHERE email=$1", [
+    String(email).trim().toLowerCase(),
+  ]);
+  return rows[0] || null;
 }
 
-export function listUsers(db) {
-  return db
-    .prepare(
-      `SELECT u.id, u.email, u.name, u.is_admin, u.last_login_at,
-        (SELECT COUNT(*) FROM favorites f WHERE f.user_id = u.id) AS hearts_given,
-        (SELECT token FROM invites WHERE user_id = u.id AND permanent = 1 ORDER BY created_at DESC LIMIT 1) AS link_token
-       FROM users u ORDER BY u.is_admin DESC, u.created_at ASC`
-    )
-    .all();
+export async function userExists(db, id) {
+  const { rows } = await db.query("SELECT 1 FROM users WHERE id=$1", [id]);
+  return rows.length > 0;
 }
 
-export function deleteUser(db, id) {
-  db.transaction(() => {
-    db.prepare("DELETE FROM favorites WHERE user_id=?").run(id);
-    db.prepare("DELETE FROM sessions WHERE user_id=?").run(id);
-    db.prepare("DELETE FROM invites WHERE user_id=?").run(id);
-    db.prepare("DELETE FROM users WHERE id=? AND is_admin=0").run(id);
-  })();
+export async function listUsers(db) {
+  const { rows } = await db.query(
+    `SELECT u.id, u.email, u.name, u.is_admin, u.last_login_at,
+      (SELECT COUNT(*) FROM favorites f WHERE f.user_id = u.id) AS hearts_given,
+      (SELECT token FROM invites WHERE user_id = u.id AND permanent ORDER BY created_at DESC LIMIT 1) AS link_token
+     FROM users u ORDER BY u.is_admin DESC, u.created_at ASC`
+  );
+  return rows;
 }
 
-export function mintInvite(db, userId, ttlMs = 14 * 24 * 3600 * 1000) {
-  const token = crypto.randomBytes(24).toString("hex");
-  const now = Date.now();
-  db.prepare(
-    "INSERT INTO invites (token, user_id, expires_at, used_at, created_at) VALUES (?, ?, ?, NULL, ?)"
-  ).run(token, userId, now + ttlMs, now);
-  return token;
+export async function deleteUser(db, id) {
+  // FKs cascade sessions/invites/favorites/crates.
+  await db.query("DELETE FROM users WHERE id=$1 AND NOT is_admin", [id]);
 }
 
-export function consumeInvite(db, token) {
-  const row = db.prepare("SELECT * FROM invites WHERE token=?").get(token);
+export async function consumeInvite(db, token) {
+  const { rows } = await db.query("SELECT * FROM invites WHERE token=$1", [token]);
+  const row = rows[0];
   if (!row || row.expires_at < Date.now()) return null;
   if (!row.permanent) {
     if (row.used_at) return null;
-    db.prepare("UPDATE invites SET used_at=? WHERE token=?").run(Date.now(), token);
+    await db.query("UPDATE invites SET used_at=$1 WHERE token=$2", [Date.now(), token]);
   }
   return row.user_id;
 }
 
-export function mintPermanentInvite(db, userId) {
+export async function mintPermanentInvite(db, userId) {
   const token = crypto.randomBytes(24).toString("hex");
   const now = Date.now();
-  db.transaction(() => {
-    db.prepare("DELETE FROM invites WHERE user_id=? AND permanent=1").run(userId);
-    db.prepare(
-      "INSERT INTO invites (token, user_id, expires_at, used_at, created_at, permanent) VALUES (?, ?, ?, NULL, ?, 1)"
-    ).run(token, userId, now + 100 * 365 * 24 * 3600 * 1000, now);
-  })();
+  await withTx(db, async (client) => {
+    await client.query("DELETE FROM invites WHERE user_id=$1 AND permanent", [userId]);
+    await client.query(
+      `INSERT INTO invites (token, user_id, expires_at, used_at, created_at, permanent)
+       VALUES ($1, $2, $3, NULL, $4, TRUE)`,
+      [token, userId, now + 100 * 365 * 24 * 3600 * 1000, now]
+    );
+  });
   return token;
 }
 
-export function createSession(db, userId, ttlMs = 90 * 24 * 3600 * 1000) {
+export async function createSession(db, userId, ttlMs = 90 * 24 * 3600 * 1000) {
   const id = crypto.randomBytes(24).toString("hex");
   const now = Date.now();
-  db.prepare("INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)").run(
-    id,
-    userId,
-    now,
-    now + ttlMs
+  await db.query(
+    "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+    [id, userId, now, now + ttlMs]
   );
   return id;
 }
 
-export function getSessionUser(db, sid) {
+export async function getSessionUser(db, sid) {
   if (!sid) return null;
-  return (
-    db
-      .prepare(
-        `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-         WHERE s.id = ? AND s.expires_at > ?`
-      )
-      .get(sid, Date.now()) || null
+  const { rows } = await db.query(
+    `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.id = $1 AND s.expires_at > $2`,
+    [sid, Date.now()]
   );
+  return rows[0] || null;
 }
 
-export function deleteSession(db, sid) {
-  if (sid) db.prepare("DELETE FROM sessions WHERE id=?").run(sid);
+export async function deleteSession(db, sid) {
+  if (sid) await db.query("DELETE FROM sessions WHERE id=$1", [sid]);
 }
 
 // Sliding expiry: renew the session to now+ttl, but only write if it hasn't
 // been renewed in the last `minIdleMs` (≈ once/day). Returns true if renewed.
-export function touchSession(db, sid, ttlMs = 90 * 24 * 3600 * 1000, minIdleMs = 24 * 3600 * 1000) {
+export async function touchSession(db, sid, ttlMs = 90 * 24 * 3600 * 1000, minIdleMs = 24 * 3600 * 1000) {
   if (!sid) return false;
   const now = Date.now();
-  const info = db
-    .prepare("UPDATE sessions SET expires_at=? WHERE id=? AND expires_at < ?")
-    .run(now + ttlMs, sid, now + ttlMs - minIdleMs);
-  return info.changes > 0;
+  const result = await db.query("UPDATE sessions SET expires_at=$1 WHERE id=$2 AND expires_at < $3", [
+    now + ttlMs,
+    sid,
+    now + ttlMs - minIdleMs,
+  ]);
+  return result.rowCount > 0;
 }
 
-export function touchLogin(db, userId) {
-  db.prepare("UPDATE users SET last_login_at=? WHERE id=?").run(Date.now(), userId);
+export async function touchLogin(db, userId) {
+  await db.query("UPDATE users SET last_login_at=$1 WHERE id=$2", [Date.now(), userId]);
 }
 
-export function toggleFavorite(db, userId, imageId) {
-  const exists = db.prepare("SELECT 1 FROM favorites WHERE user_id=? AND image_id=?").get(userId, imageId);
+export async function toggleFavorite(db, userId, imageId) {
+  const exists = (
+    await db.query("SELECT 1 FROM favorites WHERE user_id=$1 AND image_id=$2", [userId, imageId])
+  ).rows.length > 0;
   if (exists) {
-    db.prepare("DELETE FROM favorites WHERE user_id=? AND image_id=?").run(userId, imageId);
+    await db.query("DELETE FROM favorites WHERE user_id=$1 AND image_id=$2", [userId, imageId]);
   } else {
-    if (!db.prepare("SELECT 1 FROM images WHERE id=?").get(imageId)) return null;
-    db.prepare("INSERT INTO favorites (user_id, image_id, created_at) VALUES (?, ?, ?)").run(
+    const img = await db.query("SELECT 1 FROM images WHERE id=$1", [imageId]);
+    if (!img.rows.length) return null;
+    await db.query("INSERT INTO favorites (user_id, image_id, created_at) VALUES ($1, $2, $3)", [
       userId,
       imageId,
-      Date.now()
-    );
+      Date.now(),
+    ]);
   }
-  const count = db.prepare("SELECT COUNT(*) AS c FROM favorites WHERE image_id=?").get(imageId).c;
-  return { favorited: !exists, count };
+  const { rows } = await db.query("SELECT COUNT(*) AS c FROM favorites WHERE image_id=$1", [imageId]);
+  return { favorited: !exists, count: rows[0].c };
 }
 
-export function heartNames(db, imageId) {
-  return db
-    .prepare(
-      `SELECT u.name, u.email FROM favorites f JOIN users u ON u.id = f.user_id
-       WHERE f.image_id = ? ORDER BY f.created_at ASC`
-    )
-    .all(imageId)
-    .map((r) => r.name || r.email);
+export async function heartNames(db, imageId) {
+  const { rows } = await db.query(
+    `SELECT u.name, u.email FROM favorites f JOIN users u ON u.id = f.user_id
+     WHERE f.image_id = $1 ORDER BY f.created_at ASC`,
+    [imageId]
+  );
+  return rows.map((r) => r.name || r.email);
 }
 
 // --- crates ---
 
-export function listCrates(db, userId, boardId) {
-  return db
-    .prepare(
-      `SELECT c.id, c.name,
-        (SELECT COUNT(*) FROM crate_images ci WHERE ci.crate_id = c.id) AS image_count
-       FROM crates c WHERE c.user_id = ? AND c.board_id = ? ORDER BY c.created_at ASC`
-    )
-    .all(userId, boardId || "");
+export async function listCrates(db, userId, boardId) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.name,
+      (SELECT COUNT(*) FROM crate_images ci WHERE ci.crate_id = c.id) AS image_count
+     FROM crates c WHERE c.user_id = $1 AND c.board_id = $2 ORDER BY c.created_at ASC`,
+    [userId, boardId]
+  );
+  return rows;
 }
 
-export function createCrate(db, userId, boardId, name) {
+export async function createCrate(db, userId, boardId, name) {
   name = String(name).trim().slice(0, 64);
-  const bid = boardId || "";
-  if (!name) return null;
+  if (!name || !boardId) return null;
   try {
-    const info = db
-      .prepare("INSERT INTO crates (user_id, board_id, name, created_at) VALUES (?, ?, ?, ?)")
-      .run(userId, bid, name, Date.now());
-    return { id: Number(info.lastInsertRowid), name, image_count: 0 };
-  } catch {
-    const row = db.prepare("SELECT id, name FROM crates WHERE user_id=? AND board_id=? AND name=?").get(userId, bid, name);
-    if (!row) return null;
-    const { c } = db.prepare("SELECT COUNT(*) AS c FROM crate_images WHERE crate_id=?").get(row.id);
-    return { id: row.id, name: row.name, image_count: c };
+    const { rows } = await db.query(
+      "INSERT INTO crates (user_id, board_id, name, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
+      [userId, boardId, name, Date.now()]
+    );
+    return { id: rows[0].id, name, image_count: 0 };
+  } catch (err) {
+    if (err.code !== "23505") throw err; // anything but unique_violation is real
+    const { rows } = await db.query(
+      "SELECT id, name FROM crates WHERE user_id=$1 AND board_id=$2 AND name=$3",
+      [userId, boardId, name]
+    );
+    if (!rows.length) return null;
+    const count = await db.query("SELECT COUNT(*) AS c FROM crate_images WHERE crate_id=$1", [rows[0].id]);
+    return { id: rows[0].id, name: rows[0].name, image_count: count.rows[0].c };
   }
 }
 
-export function deleteCrate(db, userId, crateId) {
-  const crate = db.prepare("SELECT id FROM crates WHERE id=? AND user_id=?").get(crateId, userId);
-  if (!crate) return false;
-  db.transaction(() => {
-    db.prepare("DELETE FROM crate_images WHERE crate_id=?").run(crateId);
-    db.prepare("DELETE FROM crates WHERE id=?").run(crateId);
-  })();
-  return true;
+export async function deleteCrate(db, userId, crateId) {
+  // crate_images cascades.
+  const result = await db.query("DELETE FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
+  return result.rowCount > 0;
 }
 
-export function toggleCrateImage(db, userId, crateId, imageId) {
-  const crate = db.prepare("SELECT id FROM crates WHERE id=? AND user_id=?").get(crateId, userId);
-  if (!crate) return null;
-  const exists = db.prepare("SELECT 1 FROM crate_images WHERE crate_id=? AND image_id=?").get(crateId, imageId);
+export async function toggleCrateImage(db, userId, crateId, imageId) {
+  const crate = await db.query("SELECT id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
+  if (!crate.rows.length) return null;
+  const exists = (
+    await db.query("SELECT 1 FROM crate_images WHERE crate_id=$1 AND image_id=$2", [crateId, imageId])
+  ).rows.length > 0;
   if (exists) {
-    db.prepare("DELETE FROM crate_images WHERE crate_id=? AND image_id=?").run(crateId, imageId);
+    await db.query("DELETE FROM crate_images WHERE crate_id=$1 AND image_id=$2", [crateId, imageId]);
   } else {
-    if (!db.prepare("SELECT 1 FROM images WHERE id=?").get(imageId)) return null;
-    db
-      .prepare("INSERT INTO crate_images (crate_id, image_id, created_at) VALUES (?, ?, ?)")
-      .run(crateId, imageId, Date.now());
+    const img = await db.query("SELECT 1 FROM images WHERE id=$1", [imageId]);
+    if (!img.rows.length) return null;
+    await db.query("INSERT INTO crate_images (crate_id, image_id, created_at) VALUES ($1, $2, $3)", [
+      crateId,
+      imageId,
+      Date.now(),
+    ]);
   }
-  const { c } = db.prepare("SELECT COUNT(*) AS c FROM crate_images WHERE crate_id=?").get(crateId);
-  return { added: !exists, count: c };
+  const { rows } = await db.query("SELECT COUNT(*) AS c FROM crate_images WHERE crate_id=$1", [crateId]);
+  return { added: !exists, count: rows[0].c };
 }
 
 // --- boards ---
 
-export function createBoard(db, name, facets = [], context = "") {
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true) {
   const id = crypto.randomUUID();
-  db.prepare("INSERT INTO boards (id, name, facets, context, created_at) VALUES (?, ?, ?, ?, ?)")
-    .run(id, name, JSON.stringify(facets), context, Date.now());
+  await db.query(
+    "INSERT INTO boards (id, name, facets, context, ai_reasoning, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    [id, name, JSON.stringify(facets), context, !!aiReasoning, Date.now()]
+  );
   return id;
 }
 
-function parseBoard(r) {
-  return { id: r.id, name: r.name, facets: JSON.parse(r.facets), context: r.context || "", created_at: r.created_at };
+export async function listBoards(db) {
+  const { rows } = await db.query(
+    "SELECT id, name, facets, context, ai_reasoning, created_at FROM boards ORDER BY created_at ASC"
+  );
+  return rows;
 }
 
-export function listBoards(db) {
-  return db.prepare("SELECT id, name, facets, context, created_at FROM boards ORDER BY created_at ASC").all()
-    .map(parseBoard);
+export async function getBoard(db, id) {
+  const { rows } = await db.query(
+    "SELECT id, name, facets, context, ai_reasoning, created_at FROM boards WHERE id=$1",
+    [id]
+  );
+  return rows[0] || null;
 }
 
-export function getBoard(db, id) {
-  const r = db.prepare("SELECT id, name, facets, context, created_at FROM boards WHERE id=?").get(id);
-  return r ? parseBoard(r) : null;
-}
-
-export function updateBoard(db, id, { name, facets, context } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning } = {}) {
   const sets = [];
   const vals = [];
-  if (name !== undefined) { sets.push("name=?"); vals.push(String(name).trim()); }
-  if (facets !== undefined) { sets.push("facets=?"); vals.push(JSON.stringify(facets)); }
-  if (context !== undefined) { sets.push("context=?"); vals.push(String(context)); }
+  if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
+  if (facets !== undefined) { vals.push(JSON.stringify(facets)); sets.push(`facets=$${vals.length}`); }
+  if (context !== undefined) { vals.push(String(context)); sets.push(`context=$${vals.length}`); }
+  if (aiReasoning !== undefined) { vals.push(!!aiReasoning); sets.push(`ai_reasoning=$${vals.length}`); }
   if (!sets.length) return false;
   vals.push(id);
-  return db.prepare(`UPDATE boards SET ${sets.join(",")} WHERE id=?`).run(...vals).changes > 0;
+  const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
+  return result.rowCount > 0;
 }
 
-export function deleteBoard(db, id) {
-  return db.transaction(() => {
-    if (!db.prepare("SELECT 1 FROM boards WHERE id=?").get(id)) return null;
-    const imgs = db.prepare("SELECT id, filename FROM images WHERE board_id=?").all(id);
-    if (imgs.length) {
-      const qs = imgs.map(() => "?").join(",");
-      const ids = imgs.map((r) => r.id);
-      db.prepare(`DELETE FROM favorites WHERE image_id IN (${qs})`).run(...ids);
-      db.prepare(`DELETE FROM crate_images WHERE image_id IN (${qs})`).run(...ids);
-      db.prepare("DELETE FROM images WHERE board_id=?").run(id);
-    }
-    db.prepare("DELETE FROM boards WHERE id=?").run(id);
-    return imgs.map((r) => r.filename);
-  })();
+// Returns the deleted board's image filenames (caller removes the files),
+// or null if the board doesn't exist. Rows cascade via FKs.
+export async function deleteBoard(db, id) {
+  return withTx(db, async (client) => {
+    const imgs = await client.query("SELECT filename FROM images WHERE board_id=$1", [id]);
+    const result = await client.query("DELETE FROM boards WHERE id=$1", [id]);
+    if (result.rowCount === 0) return null;
+    return imgs.rows.map((r) => r.filename);
+  });
 }
 
-export function countBoardImages(db, id) {
-  return db.prepare("SELECT COUNT(*) AS c FROM images WHERE board_id=?").get(id).c;
+export async function boardExists(db, id) {
+  const { rows } = await db.query("SELECT 1 FROM boards WHERE id=$1", [id]);
+  return rows.length > 0;
+}
+
+// Per-board image totals + pending counts in one pass: { boardId: { c, p } }.
+export async function boardImageStats(db) {
+  const { rows } = await db.query(
+    `SELECT board_id, COUNT(*) AS c, COUNT(*) FILTER (WHERE status='pending') AS p
+     FROM images GROUP BY board_id`
+  );
+  return Object.fromEntries(rows.map((r) => [r.board_id, { c: r.c, p: r.p }]));
+}
+
+// Queue every non-pending image in a board for retagging. Returns the count.
+export async function retagBoard(db, boardId) {
+  const result = await db.query(
+    "UPDATE images SET status='pending', attempts=0, error=NULL, updated_at=$1 WHERE board_id=$2 AND status != 'pending'",
+    [Date.now(), boardId]
+  );
+  return result.rowCount;
 }
 
 // --- board membership ---
 
-export function getBoardMemberIds(db, boardId) {
-  return db.prepare("SELECT user_id FROM board_members WHERE board_id=?").all(boardId).map((r) => r.user_id);
+export async function getBoardMemberIds(db, boardId) {
+  const { rows } = await db.query("SELECT user_id FROM board_members WHERE board_id=$1", [boardId]);
+  return rows.map((r) => r.user_id);
 }
 
-export function setBoardMembers(db, boardId, userIds) {
-  db.transaction(() => {
-    db.prepare("DELETE FROM board_members WHERE board_id=?").run(boardId);
-    const ins = db.prepare("INSERT INTO board_members (board_id, user_id, created_at) VALUES (?, ?, ?)");
-    for (const uid of userIds) ins.run(boardId, uid, Date.now());
-  })();
+export async function setBoardMembers(db, boardId, userIds) {
+  await withTx(db, async (client) => {
+    await client.query("DELETE FROM board_members WHERE board_id=$1", [boardId]);
+    for (const uid of userIds) {
+      await client.query(
+        "INSERT INTO board_members (board_id, user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        [boardId, uid, Date.now()]
+      );
+    }
+  });
 }
 
-export function canAccessBoard(db, boardId, user) {
+export async function canAccessBoard(db, boardId, user) {
   if (!user) return false;
   if (user.is_admin) return true;
-  return !!db.prepare("SELECT 1 FROM board_members WHERE board_id=? AND user_id=?").get(boardId, user.id);
-}
-
-// One-time migration: when board_members is empty, seed all non-admin users into all boards.
-export function migrateInitialBoardMembers(db) {
-  const { c } = db.prepare("SELECT COUNT(*) AS c FROM board_members").get();
-  if (c > 0) return;
-  const users = db.prepare("SELECT id FROM users WHERE is_admin=0").all();
-  const boards = db.prepare("SELECT id FROM boards").all();
-  if (!users.length || !boards.length) return;
-  const ins = db.prepare("INSERT OR IGNORE INTO board_members (board_id, user_id, created_at) VALUES (?, ?, ?)");
-  db.transaction(() => {
-    for (const b of boards) for (const u of users) ins.run(b.id, u.id, Date.now());
-  })();
-}
-
-// Migration: add board_id to crates and update unique constraint.
-export function migrateCratesPerBoard(db) {
-  const cols = db.prepare("PRAGMA table_info(crates)").all();
-  if (cols.find((c) => c.name === "board_id")) return;
-  db.transaction(() => {
-    db.prepare(`CREATE TABLE crates_new (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id    INTEGER NOT NULL,
-      board_id   TEXT NOT NULL DEFAULT '',
-      name       TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      UNIQUE(user_id, board_id, name)
-    )`).run();
-    db.prepare(`INSERT INTO crates_new (id, user_id, board_id, name, created_at)
-      SELECT id, user_id, '', name, created_at FROM crates`).run();
-    db.prepare("DROP TABLE crates").run();
-    db.prepare("ALTER TABLE crates_new RENAME TO crates").run();
-    db.prepare("CREATE INDEX IF NOT EXISTS idx_crates_user ON crates(user_id)").run();
-  })();
-}
-
-// On first deploy: assign any images with board_id='' to an existing or new board.
-export function migrateOrphanImages(db, facetsJsonPath) {
-  const { c: orphanCount } = db.prepare("SELECT COUNT(*) AS c FROM images WHERE board_id=''").get();
-  if (!orphanCount) return;
-  const first = db.prepare("SELECT id FROM boards ORDER BY created_at ASC LIMIT 1").get();
-  let boardId;
-  if (first) {
-    boardId = first.id;
-  } else {
-    let facets = [];
-    try { facets = JSON.parse(fs.readFileSync(facetsJsonPath, "utf8")).facets || []; } catch {}
-    boardId = createBoard(db, "Gallery", facets);
-  }
-  db.prepare("UPDATE images SET board_id=? WHERE board_id=''").run(boardId);
-  console.log(`migrated ${orphanCount} orphan image(s) to board ${boardId}`);
+  const { rows } = await db.query("SELECT 1 FROM board_members WHERE board_id=$1 AND user_id=$2", [
+    boardId,
+    user.id,
+  ]);
+  return rows.length > 0;
 }
 
 // --- settings ---
 
-export function getSetting(db, key) {
-  const row = db.prepare("SELECT value FROM settings WHERE key=?").get(key);
-  return row ? row.value : null;
+export async function getSetting(db, key) {
+  const { rows } = await db.query("SELECT value FROM settings WHERE key=$1", [key]);
+  return rows.length ? rows[0].value : null;
 }
 
-export function setSetting(db, key, value) {
+export async function setSetting(db, key, value) {
   if (value === null || value === undefined || value === "") {
-    db.prepare("DELETE FROM settings WHERE key=?").run(key);
+    await db.query("DELETE FROM settings WHERE key=$1", [key]);
   } else {
-    db.prepare(
-      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
-    ).run(key, String(value));
+    await db.query(
+      "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+      [key, String(value)]
+    );
   }
 }
 
 // --- AI tagging queue helpers ---
 
-// Atomically take the oldest pending image and mark it processing.
-export function claimNextPending(db) {
-  const tx = db.transaction(() => {
-    const row = db
-      .prepare("SELECT * FROM images WHERE status='pending' ORDER BY created_at ASC, id ASC LIMIT 1")
-      .get();
-    if (!row) return null;
-    db.prepare("UPDATE images SET status='processing', updated_at=? WHERE id=?").run(Date.now(), row.id);
-    return row;
-  });
-  return tx();
+// Atomically take the oldest pending image and mark it processing. SKIP LOCKED
+// keeps concurrent claimers (or a second worker) from grabbing the same row.
+export async function claimNextPending(db) {
+  const { rows } = await db.query(
+    `UPDATE images SET status='processing', updated_at=$1
+     WHERE id = (
+       SELECT id FROM images WHERE status='pending'
+       ORDER BY created_at ASC, id ASC LIMIT 1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING *`,
+    [Date.now()]
+  );
+  return rows[0] || null;
 }
 
-export function markTagged(db, id, tags, undecided = false) {
-  db.prepare("UPDATE images SET status='tagged', tags=?, undecided=?, error=NULL, updated_at=? WHERE id=?").run(
-    JSON.stringify(tags),
-    undecided ? 1 : 0,
-    Date.now(),
-    id
+export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {
+  await db.query(
+    "UPDATE images SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, updated_at=$4 WHERE id=$5",
+    [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), Date.now(), id]
   );
 }
 
 // Increment attempts; mark failed once attempts reach maxAttempts, else requeue. Returns true if failed.
-export function failOrRequeue(db, id, error, maxAttempts) {
-  const row = db.prepare("SELECT attempts FROM images WHERE id=?").get(id);
-  const attempts = (row ? row.attempts : 0) + 1;
+export async function failOrRequeue(db, id, error, maxAttempts) {
+  const { rows } = await db.query("SELECT attempts FROM images WHERE id=$1", [id]);
+  const attempts = (rows.length ? rows[0].attempts : 0) + 1;
   const status = attempts >= maxAttempts ? "failed" : "pending";
-  db.prepare("UPDATE images SET status=?, attempts=?, error=?, updated_at=? WHERE id=?").run(
+  await db.query("UPDATE images SET status=$1, attempts=$2, error=$3, updated_at=$4 WHERE id=$5", [
     status,
     attempts,
     String(error).slice(0, 500),
     Date.now(),
-    id
-  );
+    id,
+  ]);
   return status === "failed";
 }
 
 // Recover rows stuck in 'processing' (e.g. after a crash) back to pending.
-export function recoverStuck(db, olderThanMs) {
+export async function recoverStuck(db, olderThanMs) {
   const cutoff = Date.now() - olderThanMs;
-  return db.prepare("UPDATE images SET status='pending' WHERE status='processing' AND updated_at < ?").run(cutoff)
-    .changes;
+  const result = await db.query(
+    "UPDATE images SET status='pending' WHERE status='processing' AND updated_at < $1",
+    [cutoff]
+  );
+  return result.rowCount;
+}
+
+export async function countPending(db) {
+  const { rows } = await db.query("SELECT COUNT(*) AS n FROM images WHERE status='pending'");
+  return rows[0].n;
 }
 
 function today() {
   return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 }
 
-export function usageToday(db) {
-  const row = db.prepare("SELECT count FROM ai_usage WHERE day=?").get(today());
-  return row ? row.count : 0;
+export async function usageToday(db) {
+  const { rows } = await db.query("SELECT count FROM ai_usage WHERE day=$1", [today()]);
+  return rows.length ? rows[0].count : 0;
 }
 
-export function bumpUsage(db) {
-  db.prepare(
-    "INSERT INTO ai_usage (day, count) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET count = count + 1"
-  ).run(today());
+export async function bumpUsage(db) {
+  await db.query(
+    "INSERT INTO ai_usage (day, count) VALUES ($1, 1) ON CONFLICT(day) DO UPDATE SET count = ai_usage.count + 1",
+    [today()]
+  );
 }
 
 // Delete a row; returns its filename (caller removes the files) or null if missing.
-export function deleteImage(db, id) {
-  const row = db.prepare("SELECT filename FROM images WHERE id=?").get(id);
-  if (!row) return null;
-  db.prepare("DELETE FROM images WHERE id=?").run(id);
-  return row.filename;
+export async function deleteImage(db, id) {
+  const { rows } = await db.query("DELETE FROM images WHERE id=$1 RETURNING filename", [id]);
+  return rows.length ? rows[0].filename : null;
 }
 
 // Pull a board's images out of the tagging queue. Images that still carry
@@ -608,28 +550,32 @@ export function deleteImage(db, id) {
 // 'tagged' but flagged undecided — the same untagged-for-human-review state
 // as when the AI can't place an image. An in-flight 'processing' image is
 // left to finish.
-export function cancelBoardQueue(db, boardId) {
-  const tx = db.transaction(() => {
+export async function cancelBoardQueue(db, boardId) {
+  return withTx(db, async (client) => {
     const now = Date.now();
-    const restored = db
-      .prepare(
-        "UPDATE images SET status='tagged', attempts=0, error=NULL, updated_at=? WHERE board_id=? AND status='pending' AND tags != '[]'"
+    const restored = (
+      await client.query(
+        `UPDATE images SET status='tagged', attempts=0, error=NULL, updated_at=$1
+         WHERE board_id=$2 AND status='pending' AND tags != '[]'::jsonb`,
+        [now, boardId]
       )
-      .run(now, boardId).changes;
-    const cleared = db
-      .prepare(
-        "UPDATE images SET status='tagged', undecided=1, attempts=0, error=NULL, updated_at=? WHERE board_id=? AND status='pending'"
+    ).rowCount;
+    const cleared = (
+      await client.query(
+        `UPDATE images SET status='tagged', undecided=TRUE, attempts=0, error=NULL, updated_at=$1
+         WHERE board_id=$2 AND status='pending'`,
+        [now, boardId]
       )
-      .run(now, boardId).changes;
+    ).rowCount;
     return { restored, cleared };
   });
-  return tx();
 }
 
 // Reset an image back to the tagging queue. Returns true if it existed.
-export function reprocessImage(db, id) {
-  const info = db
-    .prepare("UPDATE images SET status='pending', tags='[]', undecided=0, attempts=0, error=NULL, updated_at=? WHERE id=?")
-    .run(Date.now(), id);
-  return info.changes > 0;
+export async function reprocessImage(db, id) {
+  const result = await db.query(
+    "UPDATE images SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
+    [Date.now(), id]
+  );
+  return result.rowCount > 0;
 }
