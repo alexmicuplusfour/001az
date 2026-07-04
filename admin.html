@@ -880,7 +880,7 @@
           switchRow("exclude weekends", null, at.skipWeekends, (on) => { at.skipWeekends = on; }, { small: true })
         );
         atSub.append(
-          switchRow("Retag on a schedule", "(periodically re-tags every image in this board — for content that goes stale)", at.periodic, (on) => { at.periodic = on; syncAt(); }),
+          switchRow("Retag on a schedule", "(periodically re-tags everything in this board)", at.periodic, (on) => { at.periodic = on; syncAt(); }),
           atSched
         );
         atWrap.append(
