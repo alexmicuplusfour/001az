@@ -35,7 +35,9 @@ async function main() {
     const accessible = await fetch("/api/boards", { cache: "no-store" })
       .then((r) => r.ok ? r.json() : []).catch(() => []);
     if (accessible.length > 0) {
-      location.replace(`/?board=${accessible[0].id}`);
+      const last = localStorage.getItem("lastBoard");
+      const target = accessible.find((b) => String(b.id) === last) || accessible[0];
+      location.replace(`/?board=${target.id}`);
       return;
     }
   }
@@ -53,6 +55,8 @@ async function main() {
       : Promise.resolve([]),
     fetch("/api/boards", { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => []),
   ]);
+
+  if (boardData) localStorage.setItem("lastBoard", String(state.boardId));
 
   state.facets = boardData ? boardData.facets : [];
   state.boardName = boardData ? boardData.name : null;
