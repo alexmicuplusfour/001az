@@ -9,9 +9,8 @@ export const PROVIDER_DEFAULT_MODEL = {
   openai: "gpt-5-mini",
 };
 
-const TOOL_NAME = "tag_screenshot";
-const TOOL_DESC = "Record the applicable taxonomy tags for this UI screenshot.";
-const USER_TEXT = "Tag this UI screenshot using the tag_screenshot tool.";
+const TOOL_NAME = "record_tags";
+const TOOL_DESC = "Record the applicable taxonomy tags for this item.";
 
 // Cached Anthropic clients, keyed by API key — multiple keys can be active at
 // once (per-board overrides), and the registry holds at most a handful.
@@ -21,32 +20,31 @@ function anthropicClient(apiKey) {
   return anthropicClients.get(apiKey);
 }
 
-// Run one tagging call. Returns { input, usage }: the tool-call input object
-// (facet key -> selection, plus "fit") and the token usage the provider
-// reported, normalized to { input, output, cacheRead } — cache reads are kept
-// out of `input` because they bill at a fraction of the input rate. Throws
-// with a readable message on any failure.
-export async function callTagger({ provider, apiKey, model, systemText, schema, imageB64 }) {
-  if (provider === "openai") return openaiTag({ apiKey, model, systemText, schema, imageB64 });
-  return anthropicTag({ apiKey, model, systemText, schema, imageB64 });
+// Run one tagging call. `parts` is the provider-neutral user content the
+// board type built ({ kind: "image", mediaType, b64 } | { kind: "text", text });
+// each provider maps it to its own wire format here. Returns { input, usage }:
+// the tool-call input object (facet key -> selection, plus "fit") and the
+// token usage the provider reported, normalized to { input, output, cacheRead }
+// — cache reads are kept out of `input` because they bill at a fraction of
+// the input rate. Throws with a readable message on any failure.
+export async function callTagger({ provider, apiKey, model, systemText, schema, parts }) {
+  if (provider === "openai") return openaiTag({ apiKey, model, systemText, schema, parts });
+  return anthropicTag({ apiKey, model, systemText, schema, parts });
 }
 
-async function anthropicTag({ apiKey, model, systemText, schema, imageB64 }) {
+async function anthropicTag({ apiKey, model, systemText, schema, parts }) {
+  const content = parts.map((p) =>
+    p.kind === "image"
+      ? { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } }
+      : { type: "text", text: p.text }
+  );
   const msg = await anthropicClient(apiKey).messages.create({
     model,
     max_tokens: 2048,
     system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
     tools: [{ name: TOOL_NAME, description: TOOL_DESC, strict: true, input_schema: schema }],
     tool_choice: { type: "tool", name: TOOL_NAME },
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: "image/webp", data: imageB64 } },
-          { type: "text", text: USER_TEXT },
-        ],
-      },
-    ],
+    messages: [{ role: "user", content }],
   });
   const block = msg.content.find((b) => b.type === "tool_use");
   if (!block) throw new Error("no tool_use block in response");
@@ -65,7 +63,12 @@ async function anthropicTag({ apiKey, model, systemText, schema, imageB64 }) {
 // OpenAI via plain fetch — one endpoint, not worth a dependency. Chat
 // completions with a forced function call mirrors the Anthropic tool shape;
 // the same strict JSON schema works for both.
-async function openaiTag({ apiKey, model, systemText, schema, imageB64 }) {
+async function openaiTag({ apiKey, model, systemText, schema, parts }) {
+  const content = parts.map((p) =>
+    p.kind === "image"
+      ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }
+      : { type: "text", text: p.text }
+  );
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -74,13 +77,7 @@ async function openaiTag({ apiKey, model, systemText, schema, imageB64 }) {
       max_completion_tokens: 2048,
       messages: [
         { role: "system", content: systemText },
-        {
-          role: "user",
-          content: [
-            { type: "image_url", image_url: { url: `data:image/webp;base64,${imageB64}` } },
-            { type: "text", text: USER_TEXT },
-          ],
-        },
+        { role: "user", content },
       ],
       tools: [{ type: "function", function: { name: TOOL_NAME, description: TOOL_DESC, parameters: schema, strict: true } }],
       tool_choice: { type: "function", function: { name: TOOL_NAME } },

@@ -15,9 +15,10 @@ Shipped ahead of the refactor, on the image-only codebase:
 - **Per-board token usage** — `ai_board_usage` (call count + input/output/cache-read tokens) with a 14-day sparkline in admin.
 - **Tag snapshots (2026-07-05)** — every tagging event appends `{source: 'ai'|'user', tags, reasoning, undecided, tagged_at}` to `tag_snapshots` (AI runs via `markTagged`, manual edits via `setImageTags`), so scheduled retags accrue history instead of overwriting it. Keyed `image_id` until the items rename; no UI yet.
 - **Daily cap removed (2026-07-05)** — worker gate, compose/env passthrough, README row all deleted; `ai_board_usage` + the sparkline is the spend visibility, cadence is the control.
-- **Migration step 1 (2026-07-05)** — `images` → `items` with the image columns folded into a `payload` JSONB (`{filename, original_name, w, h}`); `favorites.item_id`, `crate_images` → `crate_items.item_id`, `tag_snapshots.item_id`; `boards.type` (default `'image'`); UNIQUE(filename) carried over as an expression index. Live DBs migrate via a guarded transactional rename in `initDb` (verified on the real dev DB, 116 items); the sqlite→pg ETL writes the new shape directly. db.js function names (`listImages` etc.) intentionally unchanged — they get re-homed when the adapter forms in step 2. API shapes untouched; zero frontend changes.
+- **Migration step 1 (2026-07-05)** — `images` → `items` with the image columns folded into a `payload` JSONB (`{filename, original_name, w, h}`); `favorites.item_id`, `crate_images` → `crate_items.item_id`, `tag_snapshots.item_id`; `boards.type` (default `'image'`); UNIQUE(filename) carried over as an expression index. Live DBs migrate via a guarded transactional rename in `initDb` (verified on the real dev DB, 116 items); the sqlite→pg ETL writes the new shape directly. API shapes untouched; zero frontend changes.
+- **Migration step 2 (2026-07-05)** — server registry (`server/types/index.js`: manifest/apiVersion validation, namespaced type ids, ctx facade) + the image adapter (`server/types/image.js`: upload route, sharp pipeline + OOM guards, `/gallery`+`/thumbnails` statics, `buildModelInput`, `onDelete` file cleanup, dims backfill). Worker seam cut: `buildModelInput` returns provider-neutral `parts`; `providers.js` maps them per provider and the tool is now **`record_tags`** with generalized wording (per-type `subject` from the manifest). Core delete routes call `adapter.onDelete`. `/api/items*` routes live with `/api/images*` as aliases until the client migrates. Verified e2e on the dev stack: upload → Sonnet tagged with reasoning → snapshot → board delete cleaned files.
 
-Not started: adapters/registries, ctx, route renames, the type picker, the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
+Not started: the client adapter (step 3), type picker, the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
 
 ---
 
@@ -87,9 +88,9 @@ Payload being JSONB is a quiet win over the original SQLite plan: core still tre
 
 ---
 
-## Server adapter contract
+## Server adapter contract (✅ shipped 2026-07-05, image adapter proves it)
 
-`server/types/<type>.js`, registered in `server/types/index.js`. Core imports only the registry.
+`server/types/<type>.js`, registered in `server/types/index.js`. Core imports only the registry. As implemented: adapters are factories (`imageType(options)`) so deployment config (gallery/thumbs dirs) arrives as opaque options, not through ctx; `buildModelInput` returns `{ parts }` (provider-neutral content blocks) with `extraTools`/research arriving later with stocks; ctx so far carries `items.create` (which applies the held-vs-pending policy so adapters never learn `held` exists), `items.updatePayload`, `items.listAll`, `boards.get` (sanitized), `auth.requireAuth`, and `log` — settings/storage get added when a type actually needs them.
 
 ```js
 export default {
@@ -239,7 +240,7 @@ Retag cadence UI already exists in the board modal; refresh reuses the same patt
 Steps 1–4 are pure refactor — the app must behave identically after each, verified against the running instance before moving on. Features start at step 5.
 
 1. ✅ **Schema (2026-07-05):** `images` → `items` (+ `payload`; `tag_reasoning` rides along), image columns folded into `payload` JSONB, ids and FK cascades preserved, `favorites`/`crate_items`/`tag_snapshots` renamed, `boards.type` added. Fresh installs via `schema.sql`; live DBs via the guarded transactional migration in `initDb`; the sqlite→pg ETL writes the new shape for the droplet cutover.
-2. **Server image adapter:** create registry (validates manifest/`apiVersion`) + `server/types/image.js`; move upload route, sharp pipeline, thumbnail serving, delete-cleanup, and the worker's image-message building into it; build the ctx facade. Rename routes with aliases.
+2. ✅ **Server image adapter (2026-07-05):** registry + `server/types/image.js` + ctx facade; upload/sharp/statics/delete-cleanup/model-input moved in; worker seam cut (`parts`, `record_tags`); `/api/items*` routes with `/api/images*` aliases.
 3. **Client image adapter:** create registry + `types/image/`; move `upload.js` → `ingestUI`, `lightbox.js` → `openDetail`, the card `<img>` body → `renderCardBody`; switch fetches to `/api/items`, drop server aliases.
 4. **Type plumbing:** board creation UI gains a type picker next to the shipped tagger/model pickers (✅ per-board AI config is done, ✅ cap deleted); client resolves the adapter from `board.type`; suggested-facet presets (with descriptions) wired in.
 5. **Stock adapter (server):** stocks API client, ingest route, payload shape, chart rasterizer, `buildModelInput` returning provider-neutral parts with research enabled, `refresh()`.
@@ -252,4 +253,4 @@ Deferred / open:
 - Docs/products adapters — only after stocks proves the interface; each should pass the insulation test.
 - `PLUGIN.md` + reference module/template repo — write once the interface survives contact with the stock adapter (documenting it before then would freeze mistakes).
 - Public deploy story (README quickstart, Dockerfile) — prerequisite for anyone else running an instance; see Plugin architecture.
-- `tag_screenshot` tool name and "You tag images…" prompt wording generalize when the worker seam is cut (tool name: `record_tags`; per-type noun from the adapter manifest) — now split between `worker.js#buildPrompt` and the `TOOL_NAME`/`TOOL_DESC`/`USER_TEXT` constants in `providers.js`. The facet-gloss half of this already shipped as facet `description`s (the hardcoded GLOSS table is just the fallback now).
+- ~~`tag_screenshot` tool name and prompt wording~~ — ✅ done with the step-2 seam cut: tool is `record_tags`, the prompt takes the adapter manifest's `subject`, the user-text arrives as a part from the adapter, and facet `description`s replaced the GLOSS table (now just a fallback).

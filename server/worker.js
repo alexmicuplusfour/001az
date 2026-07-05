@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import {
   claimNextPending,
   markTagged,
@@ -65,7 +63,7 @@ const GLOSS = {
 
 const facetGloss = (f) => (f.description || "").trim() || GLOSS[f.key] || f.label;
 
-function buildPrompt(facets, context = "", withReasoning = true) {
+function buildPrompt(facets, context = "", withReasoning = true, subject = "images") {
   const lines = facets.map((f) => {
     const note = f.single ? " — pick exactly one" : "";
     return `- ${f.key} (${facetGloss(f)}): ${f.values.join(", ")}${note}`;
@@ -74,7 +72,7 @@ function buildPrompt(facets, context = "", withReasoning = true) {
   const selectPara = withReasoning
     ? `For each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is "undecided", leave every facet's values empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`
     : `For each image, select every applicable tag from the facets below. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`;
-  const systemText = `You tag images for a private research gallery.${contextBlock}
+  const systemText = `You tag ${subject} for a private research gallery.${contextBlock}
 Also decide whether the image is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the image is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the image is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an image you were able to describe with the facets is a match by definition.
 
 ${selectPara}
@@ -82,7 +80,7 @@ ${selectPara}
 Facets and allowed values:
 ${lines.join("\n")}
 
-Return your answer only by calling the tag_screenshot tool.`;
+Return your answer only by calling the record_tags tool.`;
 
   const properties = {};
   const required = [];
@@ -136,19 +134,21 @@ Return your answer only by calling the tag_screenshot tool.`;
   return { systemText, schema };
 }
 
-// Per-board cache: board_id -> { systemText, schema, allowed, facets, aiKeyId, aiModel }
+// Per-board cache: board_id -> { systemText, schema, allowed, facets, adapter, aiKeyId, aiModel }
 // Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
 
-async function getBoardPrompt(db, boardId) {
+async function getBoardPrompt(db, registry, boardId) {
   if (boardPromptCache.has(boardId)) return boardPromptCache.get(boardId);
   const board = await getBoard(db, boardId);
   if (!board || !board.facets.length) return null;
+  const adapter = registry.get(board.type);
+  if (!adapter) throw new Error(`board ${boardId} has unknown type "${board.type}"`);
   const { facets, context } = board;
   const allowed = new Set();
   for (const f of facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
-  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false);
-  const entry = { systemText, schema, allowed, facets, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, adapter.manifest.subject);
+  const entry = { systemText, schema, allowed, facets, adapter, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   boardPromptCache.set(boardId, entry);
   return entry;
 }
@@ -174,27 +174,29 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
   return t;
 }
 
-export function startWorker({ db, thumbsDir }) {
+export function startWorker({ db, registry }) {
   const POLL_MS = Number(process.env.POLL_MS || 10000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
 
   async function tagOne(row) {
-    const prompt = await getBoardPrompt(db, row.board_id);
+    const prompt = await getBoardPrompt(db, registry, row.board_id);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
     const { systemText, schema, allowed, facets } = prompt;
 
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw new Error("no API key configured");
 
-    const buf = await fs.promises.readFile(path.join(thumbsDir, row.payload.filename + ".webp"));
+    // The board type decides what the model sees; the worker owns everything
+    // around it (prompt, schema, validation, retries).
+    const { parts } = await prompt.adapter.buildModelInput({ id: row.id, payload: row.payload });
     const { input, usage } = await callTagger({
       provider: ai.provider,
       apiKey: ai.apiKey,
       model: ai.model,
       systemText,
       schema,
-      imageB64: buf.toString("base64"),
+      parts,
     });
     const tags = [];
     const reasoning = {};

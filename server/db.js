@@ -134,29 +134,25 @@ export async function listImages(db, userId = null, boardId = null) {
 
 // status: 'pending' (tag now) or 'held' (wait — for the board's scheduled
 // run, or for auto-tagging to be switched back on).
-export async function insertImage(db, filename, originalName, boardId, status = "pending") {
-  const now = Date.now();
-  const payload = { filename };
-  if (originalName) payload.original_name = originalName;
+export async function insertItem(db, boardId, payload, status = "pending") {
   const { rows } = await db.query(
     `INSERT INTO items (payload, status, board_id, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $4) RETURNING id`,
-    [JSON.stringify(payload), status, boardId, now]
+    [JSON.stringify(payload || {}), status, boardId, Date.now()]
   );
   return rows[0].id;
 }
 
-export async function setThumbDimensions(db, id, w, h) {
-  await db.query("UPDATE items SET payload = payload || jsonb_build_object('w', $1::int, 'h', $2::int) WHERE id=$3", [
-    w,
-    h,
-    id,
-  ]);
+// Shallow-merge a patch into an item's payload.
+export async function updateItemPayload(db, id, patch) {
+  await db.query("UPDATE items SET payload = payload || $1::jsonb WHERE id=$2", [JSON.stringify(patch || {}), id]);
 }
 
-export async function listImagesMissingThumbDims(db) {
+// All items living on boards of the given type: { id, payload }.
+export async function listItemsByType(db, type) {
   const { rows } = await db.query(
-    "SELECT id, payload->>'filename' AS filename FROM items WHERE payload ? 'filename' AND payload->>'w' IS NULL"
+    "SELECT i.id, i.payload FROM items i JOIN boards b ON b.id = i.board_id WHERE b.type=$1 ORDER BY i.id",
+    [type]
   );
   return rows;
 }
@@ -455,7 +451,7 @@ export async function deleteAiKey(db, id) {
 // --- boards ---
 
 const BOARD_COLS =
-  "id, name, facets, context, ai_reasoning, ai_key_id, ai_model, " +
+  "id, name, type, facets, context, ai_reasoning, ai_key_id, ai_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at";
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}) {
@@ -503,17 +499,15 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   return result.rowCount > 0;
 }
 
-// Returns the deleted board's image filenames (caller removes the files),
-// or null if the board doesn't exist. Rows cascade via FKs.
+// Returns the deleted board's item payloads (the board type's onDelete cleans
+// up whatever they reference), or null if the board doesn't exist. Rows
+// cascade via FKs.
 export async function deleteBoard(db, id) {
   return withTx(db, async (client) => {
-    const files = await client.query(
-      "SELECT payload->>'filename' AS filename FROM items WHERE board_id=$1 AND payload ? 'filename'",
-      [id]
-    );
+    const items = await client.query("SELECT payload FROM items WHERE board_id=$1", [id]);
     const result = await client.query("DELETE FROM boards WHERE id=$1", [id]);
     if (result.rowCount === 0) return null;
-    return files.rows.map((r) => r.filename);
+    return items.rows.map((r) => r.payload);
   });
 }
 
@@ -746,10 +740,11 @@ export async function boardAiUsage(db) {
   return out;
 }
 
-// Delete a row; returns its filename (caller removes the files) or null if missing.
-export async function deleteImage(db, id) {
-  const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload->>'filename' AS filename", [id]);
-  return rows.length ? rows[0].filename : null;
+// Delete a row; returns { payload, board_id } (the board type's onDelete
+// cleans up whatever the payload references) or null if missing.
+export async function deleteItem(db, id) {
+  const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload, board_id", [id]);
+  return rows[0] || null;
 }
 
 // Pull a board's images out of the tagging queue. Images that still carry

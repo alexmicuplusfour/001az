@@ -1,10 +1,5 @@
 import express from "express";
-import multer from "multer";
-import sharp from "sharp";
-import fs from "node:fs";
-import crypto from "node:crypto";
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
 import {
@@ -12,8 +7,7 @@ import {
   initDb,
   countImages,
   listImages,
-  insertImage,
-  deleteImage,
+  deleteItem,
   reprocessImage,
   cancelBoardQueue,
   seedAdmin,
@@ -54,8 +48,6 @@ import {
   getAiKey,
   createAiKey,
   deleteAiKey,
-  setThumbDimensions,
-  listImagesMissingThumbDims,
 } from "./db.js";
 import {
   attachUser,
@@ -66,6 +58,8 @@ import {
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, nextAutoTagRun } from "./worker.js";
 import { testKey, PROVIDERS } from "./providers.js";
+import { createRegistry } from "./types/index.js";
+import imageType from "./types/image.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -79,37 +73,6 @@ const GALLERY_DIR = process.env.GALLERY_DIR || path.join(ROOT, "gallery");
 const THUMBS_DIR = process.env.THUMBS_DIR || path.join(ROOT, "thumbnails");
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
-
-// Backstop limits only — the client pre-filters oversized files and chunks
-// large drops (see UPLOAD_* in app.js; keep UPLOAD_MAX_BYTES in sync). If
-// multer still trips one of these, the whole request 413s.
-const MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
-const MAX_FILES = 200; // per request
-const THUMB_WIDTH = 600;
-const SVG_RASTER_WIDTH = 2000; // SVG uploads are rasterized to WebP at this width
-const MAX_PIXELS = 40e6; // decode cap: a 40MP image is ~160 MB of raw pixels
-
-// The droplet is small (1 vCPU / 458 MB, no swap — node got OOM-killed under
-// a concurrent bulk upload). Keep libvips lean: no operation cache holding
-// decoded images, single worker thread.
-sharp.cache(false);
-sharp.concurrency(1);
-
-// All upload image processing goes through this gate: decode strictly one
-// image at a time process-wide, no matter how many requests are in flight.
-let processGate = Promise.resolve();
-function serializeProcessing(fn) {
-  const run = processGate.then(fn);
-  processGate = run.then(
-    () => {},
-    () => {}
-  );
-  return run;
-}
-const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };
-
-fs.mkdirSync(GALLERY_DIR, { recursive: true });
-fs.mkdirSync(THUMBS_DIR, { recursive: true });
 
 // --- live log capture: mirror console output into a ring buffer + SSE clients ---
 const LOG_MAX = 500;
@@ -143,11 +106,10 @@ const db = openDb(DATABASE_URL);
 await initDb(db);
 await seedAdmin(db, ADMIN_EMAIL);
 
-// Disk-backed upload (bounded memory; we process one file at a time).
-const upload = multer({
-  dest: os.tmpdir(),
-  limits: { fileSize: MAX_BYTES, files: MAX_FILES },
-});
+// Board types (see server/types/): core stays type-blind, adapters own
+// ingestion, model input, and item-payload cleanup.
+const registry = createRegistry({ db });
+registry.register(imageType({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR }));
 
 const app = express();
 app.disable("x-powered-by");
@@ -186,13 +148,15 @@ app.post("/api/logout", wrap(async (req, res) => {
 }));
 
 // --- favorites (any logged-in user) ---
-app.post("/api/images/:id/favorite", requireAuth, wrap(async (req, res) => {
+// Item routes answer under /api/items (canonical) and /api/images (legacy
+// alias until the client is migrated).
+app.post(["/api/items/:id/favorite", "/api/images/:id/favorite"], requireAuth, wrap(async (req, res) => {
   const result = await toggleFavorite(db, req.user.id, Number(req.params.id));
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
 
-app.get("/api/images/:id/hearts", requireAuth, wrap(async (req, res) => {
+app.get(["/api/items/:id/hearts", "/api/images/:id/hearts"], requireAuth, wrap(async (req, res) => {
   res.json({ names: await heartNames(db, Number(req.params.id)) });
 }));
 
@@ -216,8 +180,8 @@ app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.post("/api/crates/:id/images/:imageId", requireAuth, wrap(async (req, res) => {
-  const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), Number(req.params.imageId));
+app.post(["/api/crates/:id/items/:itemId", "/api/crates/:id/images/:itemId"], requireAuth, wrap(async (req, res) => {
+  const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), Number(req.params.itemId));
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
@@ -419,15 +383,14 @@ app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, wrap(async (req, re
 }));
 
 app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
-  const filenames = await deleteBoard(db, req.params.id);
-  if (filenames === null) return res.status(404).json({ error: "not found" });
-  for (const fn of filenames) {
-    fs.rmSync(path.join(GALLERY_DIR, fn), { force: true });
-    fs.rmSync(path.join(THUMBS_DIR, fn + ".webp"), { force: true });
-  }
+  const board = await getBoard(db, req.params.id); // type needed after the rows are gone
+  const payloads = await deleteBoard(db, req.params.id);
+  if (payloads === null) return res.status(404).json({ error: "not found" });
+  const adapter = registry.get(board?.type || "image");
+  for (const payload of payloads) await adapter?.onDelete?.({ payload });
   invalidateBoardCache(req.params.id);
-  console.log(`deleted board ${req.params.id} + ${filenames.length} images`);
-  res.json({ ok: true, deleted: filenames.length });
+  console.log(`deleted board ${req.params.id} + ${payloads.length} items`);
+  res.json({ ok: true, deleted: payloads.length });
 }));
 
 // --- admin: AI tagger config (key registry + app default) ---
@@ -511,7 +474,7 @@ app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
   }
 }));
 
-app.get("/api/images", requireAuth, wrap(async (req, res) => {
+app.get(["/api/items", "/api/images"], requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
   res.json(await listImages(db, req.user.id, boardId));
@@ -534,83 +497,23 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
   });
 });
 
-app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {
-  const boardId = req.query.board || (req.body && req.body.board_id) || null;
-  const board = boardId ? await getBoard(db, boardId) : null;
-  if (!board) {
-    return res.status(400).json({ error: "valid board required" });
-  }
-
-  // Auto-tagging on: uploads go straight into the tagging queue. Off: they
-  // wait as 'held' — untagged in the gallery but still owed to the AI,
-  // swept into the queue when auto-tagging comes back on.
-  const uploadStatus = board.auto_tag ? "pending" : "held";
-
-  const files = req.files || [];
-  const uploaded = [];
-  const rejected = [];
-
-  for (const f of files) {
-    try {
-      await serializeProcessing(async () => {
-        let buf = await fs.promises.readFile(f.path);
-        let meta = await sharp(buf, { pages: 1, limitInputPixels: MAX_PIXELS }).metadata();
-        if (meta.format === "svg") {
-          // Rasterize SVGs to WebP: vectors can embed scripts, so the original
-          // markup is never stored or served. Render at high density, then cap.
-          const density = Math.min(2400, Math.max(72, (72 * SVG_RASTER_WIDTH) / (meta.width || SVG_RASTER_WIDTH)));
-          buf = await sharp(buf, { density, limitInputPixels: MAX_PIXELS })
-            .resize({ width: SVG_RASTER_WIDTH, withoutEnlargement: true })
-            .webp({ quality: 90 })
-            .toBuffer();
-          meta = await sharp(buf).metadata();
-        }
-        const ext = ALLOWED[meta.format];
-        if (!ext) {
-          rejected.push({ name: f.originalname, reason: "unsupported image type" });
-          return;
-        }
-        const id = crypto.randomBytes(8).toString("hex");
-        const filename = `${id}.${ext}`;
-        const thumbInfo = await sharp(buf, { pages: 1, limitInputPixels: MAX_PIXELS })
-          .rotate()
-          .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
-          .webp({ quality: 72 })
-          .toFile(path.join(THUMBS_DIR, filename + ".webp"));
-        await fs.promises.writeFile(path.join(GALLERY_DIR, filename), buf);
-
-        const rowId = await insertImage(db, filename, f.originalname || filename, boardId, uploadStatus);
-        await setThumbDimensions(db, rowId, thumbInfo.width, thumbInfo.height);
-        uploaded.push({ id: rowId, name: filename, status: uploadStatus, tags: [], w: thumbInfo.width, h: thumbInfo.height });
-      });
-    } catch (err) {
-      console.error("upload error:", f.originalname, err.message);
-      rejected.push({ name: f.originalname, reason: "could not process image" });
-    } finally {
-      await fs.promises.unlink(f.path).catch(() => {});
-    }
-  }
-
-  res.json({ uploaded, rejected });
-}));
-
-// The AI's per-facet justification for an image's tags. Kept out of the
-// /api/images list payload — fetched lazily when the lightbox panel opens.
-app.get("/api/images/:id/reasoning", requireAuth, wrap(async (req, res) => {
+// The AI's per-facet justification for an item's tags. Kept out of the
+// /api/items list payload — fetched lazily when the lightbox panel opens.
+app.get(["/api/items/:id/reasoning", "/api/images/:id/reasoning"], requireAuth, wrap(async (req, res) => {
   const row = await getImageReasoning(db, Number(req.params.id));
   if (!row) return res.status(404).json({ error: "not found" });
   if (!(await canAccessBoard(db, row.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
   res.json({ reasoning: row.tag_reasoning || {} });
 }));
 
-app.patch("/api/images/:id/tags", requireAuth, wrap(async (req, res) => {
+app.patch(["/api/items/:id/tags", "/api/images/:id/tags"], requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   const tags = req.body && Array.isArray(req.body.tags) ? req.body.tags : null;
   if (!tags) return res.status(400).json({ error: "tags array required" });
-  const image = await getImageBoard(db, id);
-  if (!image) return res.status(404).json({ error: "not found" });
-  if (!(await canAccessBoard(db, image.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
-  const board = await getBoard(db, image.board_id);
+  const item = await getImageBoard(db, id);
+  if (!item) return res.status(404).json({ error: "not found" });
+  if (!(await canAccessBoard(db, item.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
+  const board = await getBoard(db, item.board_id);
   const allowed = new Set();
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
@@ -618,39 +521,32 @@ app.patch("/api/images/:id/tags", requireAuth, wrap(async (req, res) => {
   res.json({ ok: true, tags: clean });
 }));
 
-app.delete("/api/images/:id", requireAuth, wrap(async (req, res) => {
+app.delete(["/api/items/:id", "/api/images/:id"], requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
-  const filename = await deleteImage(db, id);
-  if (!filename) return res.status(404).json({ error: "not found" });
-  fs.rmSync(path.join(GALLERY_DIR, filename), { force: true });
-  fs.rmSync(path.join(THUMBS_DIR, filename + ".webp"), { force: true });
-  console.log(`deleted #${id} ${filename}`);
+  const row = await deleteItem(db, id);
+  if (!row) return res.status(404).json({ error: "not found" });
+  const type = (await getBoard(db, row.board_id))?.type || "image";
+  await registry.get(type)?.onDelete?.({ id, payload: row.payload });
+  console.log(`deleted #${id} ${row.payload?.filename || ""}`.trim());
   res.json({ ok: true });
 }));
 
-app.post("/api/images/:id/reprocess", requireAuth, wrap(async (req, res) => {
+app.post(["/api/items/:id/reprocess", "/api/images/:id/reprocess"], requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   if (!(await reprocessImage(db, id))) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued #${id}`);
   res.json({ ok: true, status: "pending" });
 }));
 
-// Uploaded originals + thumbnails live in GALLERY_DIR/THUMBS_DIR, which in the
-// container sit outside STATIC_DIR — mount them explicitly. Filenames are
-// random per upload and never reused, so long-lived caching is safe.
-app.use("/gallery", express.static(GALLERY_DIR, { maxAge: "7d", immutable: true }));
-app.use("/thumbnails", express.static(THUMBS_DIR, { maxAge: "7d", immutable: true }));
+// Board-type routes: ingestion (/api/upload for images) + type-owned statics
+// (/gallery, /thumbnails). Mounted before the frontend catch-all.
+registry.mountAll(app);
 
 // Frontend assets (same-origin /api during host dev; in the container the app
 // is the only file server and Caddy just proxies).
 app.use(express.static(STATIC_DIR, { extensions: ["html"], cacheControl: false }));
 
-// Upload/size error handler.
 app.use((err, _req, res, _next) => {
-  if (err && err.code === "LIMIT_FILE_SIZE")
-    return res.status(413).json({ error: "file too large (max 10 MB)" });
-  if (err && err.code === "LIMIT_FILE_COUNT")
-    return res.status(413).json({ error: `too many files (max ${MAX_FILES})` });
   // Errors that carry a status (body-parser, multer field errors) keep it;
   // anything else is an unexpected failure (e.g. the DB) — log it, say 500.
   const status = err && (err.status || err.statusCode);
@@ -661,23 +557,5 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
-  startWorker({ db, thumbsDir: THUMBS_DIR });
-  backfillThumbDimensions().catch((err) => console.error("thumb backfill error:", err.message));
+  startWorker({ db, registry });
 });
-
-async function backfillThumbDimensions() {
-  const rows = await listImagesMissingThumbDims(db);
-  if (!rows.length) return;
-  console.log(`backfilling thumbnail dimensions for ${rows.length} image(s)...`);
-  let done = 0;
-  for (const row of rows) {
-    try {
-      const meta = await sharp(path.join(THUMBS_DIR, row.filename + ".webp")).metadata();
-      if (meta.width && meta.height) {
-        await setThumbDimensions(db, row.id, meta.width, meta.height);
-        done++;
-      }
-    } catch {}
-  }
-  console.log(`thumbnail dimension backfill complete: ${done}/${rows.length}`);
-}
