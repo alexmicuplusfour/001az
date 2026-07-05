@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { startServer, adminSession, seedUser, seedBoard, seedItem, req } from "./helpers.js";
-import { mintPermanentInvite } from "../server/db.js";
+import { mintPermanentInvite, setBoardMembers } from "../server/db.js";
 
 let srv, db, base;
 let admin, member, outsider;
@@ -108,6 +108,72 @@ test("crates are pinned to their own board", async () => {
 test("crate cannot be created on an inaccessible board", async () => {
   const r = await req(base, "POST", "/api/crates", { sid: outsider.sid, body: { name: "x", board_id: boardA } });
   assert.equal(r.status, 404);
+});
+
+test("public crates are visible to other board members", async () => {
+  const owner = await seedUser(db, "crate-owner@test.local");
+  await db.query("UPDATE users SET name = $1 WHERE id = $2", ["Alice", owner.id]);
+  await setBoardMembers(db, boardA, [member.id, owner.id]);
+
+  const create = await req(base, "POST", "/api/crates", {
+    sid: owner.sid,
+    body: { name: "shared", board_id: boardA },
+  });
+  assert.equal(create.status, 200);
+  const crateId = create.json.crate.id;
+
+  const privateList = await req(base, "GET", `/api/crates?board=${boardA}`, { sid: member.sid });
+  assert.equal(privateList.status, 200);
+  assert.equal(privateList.json.some((c) => c.id === crateId), false);
+
+  const pub = await req(base, "PATCH", `/api/crates/${crateId}`, {
+    sid: owner.sid,
+    body: { public: true },
+  });
+  assert.equal(pub.status, 200);
+  assert.equal(pub.json.crate.public, true);
+
+  const publicList = await req(base, "GET", `/api/crates?board=${boardA}`, { sid: member.sid });
+  assert.equal(publicList.status, 200);
+  const shared = publicList.json.find((c) => c.id === crateId);
+  assert.ok(shared);
+  assert.equal(shared.owned, false);
+  assert.equal(shared.owner_name, "Alice");
+  assert.match(shared.name, /shared/);
+});
+
+test("only the owner can toggle crate visibility", async () => {
+  const owner = await seedUser(db, "crate-owner2@test.local");
+  await setBoardMembers(db, boardA, [member.id, owner.id]);
+  const create = await req(base, "POST", "/api/crates", {
+    sid: owner.sid,
+    body: { name: "mine", board_id: boardA },
+  });
+  const crateId = create.json.crate.id;
+  await req(base, "PATCH", `/api/crates/${crateId}`, { sid: owner.sid, body: { public: true } });
+
+  const denied = await req(base, "PATCH", `/api/crates/${crateId}`, {
+    sid: member.sid,
+    body: { public: false },
+  });
+  assert.equal(denied.status, 404);
+});
+
+test("items expose memberships in other members' public crates", async () => {
+  const owner = await seedUser(db, "crate-owner3@test.local");
+  await setBoardMembers(db, boardA, [member.id, owner.id]);
+  const create = await req(base, "POST", "/api/crates", {
+    sid: owner.sid,
+    body: { name: "filter-me", board_id: boardA },
+  });
+  const crateId = create.json.crate.id;
+  await req(base, "PATCH", `/api/crates/${crateId}`, { sid: owner.sid, body: { public: true } });
+  await req(base, "POST", `/api/crates/${crateId}/items/${itemA.id}`, { sid: owner.sid });
+
+  const items = await req(base, "GET", `/api/items?board=${boardA}`, { sid: member.sid });
+  assert.equal(items.status, 200);
+  const row = items.json.find((i) => i.id === itemA.id);
+  assert.ok(row.crateIds.includes(crateId));
 });
 
 test("static image bytes require a session", async () => {

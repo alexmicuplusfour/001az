@@ -34,6 +34,7 @@ export async function initDb(db) {
   // built in (>= PG 11); text::bytea gives the same bytes Node hashes.
   await db.query("UPDATE sessions SET id = encode(sha256(id::bytea), 'hex') WHERE length(id) <> 64");
   await db.query("UPDATE invites SET token = encode(sha256(token::bytea), 'hex') WHERE length(token) <> 64");
+  await db.query("ALTER TABLE crates ADD COLUMN IF NOT EXISTS public BOOLEAN NOT NULL DEFAULT FALSE");
   // One-time migration: fold the legacy single-key setting into the ai_keys
   // registry and point the default at it.
   const legacy = await getSetting(db, "api_key");
@@ -122,7 +123,8 @@ export async function listItems(db, userId = null, boardId = null) {
   if (userId) {
     const memberships = await db.query(
       `SELECT ci.item_id, ci.crate_id FROM crate_items ci
-       JOIN crates c ON c.id = ci.crate_id WHERE c.user_id = $1 AND c.board_id = $2`,
+       JOIN crates c ON c.id = ci.crate_id
+       WHERE c.board_id = $2 AND (c.user_id = $1 OR c.public = TRUE)`,
       [userId, boardId]
     );
     for (const m of memberships.rows) {
@@ -371,9 +373,13 @@ export async function heartNames(db, itemId) {
 
 export async function listCrates(db, userId, boardId) {
   const { rows } = await db.query(
-    `SELECT c.id, c.name,
+    `SELECT c.id, c.name, c.public, c.user_id = $1 AS owned,
+      COALESCE(u.name, u.email) AS owner_name,
       (SELECT COUNT(*) FROM crate_items ci WHERE ci.crate_id = c.id) AS item_count
-     FROM crates c WHERE c.user_id = $1 AND c.board_id = $2 ORDER BY c.created_at ASC`,
+     FROM crates c
+     JOIN users u ON u.id = c.user_id
+     WHERE c.board_id = $2 AND (c.user_id = $1 OR c.public = TRUE)
+     ORDER BY (c.user_id = $1) DESC, c.created_at ASC`,
     [userId, boardId]
   );
   return rows;
@@ -387,17 +393,34 @@ export async function createCrate(db, userId, boardId, name) {
       "INSERT INTO crates (user_id, board_id, name, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
       [userId, boardId, name, Date.now()]
     );
-    return { id: rows[0].id, name, item_count: 0 };
+    return { id: rows[0].id, name, public: false, owned: true, item_count: 0 };
   } catch (err) {
     if (err.code !== "23505") throw err; // anything but unique_violation is real
     const { rows } = await db.query(
-      "SELECT id, name FROM crates WHERE user_id=$1 AND board_id=$2 AND name=$3",
+      "SELECT id, name, public FROM crates WHERE user_id=$1 AND board_id=$2 AND name=$3",
       [userId, boardId, name]
     );
     if (!rows.length) return null;
     const count = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [rows[0].id]);
-    return { id: rows[0].id, name: rows[0].name, item_count: count.rows[0].c };
+    return { id: rows[0].id, name: rows[0].name, public: !!rows[0].public, owned: true, item_count: count.rows[0].c };
   }
+}
+
+export async function setCratePublic(db, userId, crateId, isPublic) {
+  const { rows } = await db.query(
+    `UPDATE crates SET public = $3 WHERE id = $1 AND user_id = $2
+     RETURNING id, name, public`,
+    [crateId, userId, !!isPublic]
+  );
+  if (!rows.length) return null;
+  const count = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [crateId]);
+  return {
+    id: rows[0].id,
+    name: rows[0].name,
+    public: rows[0].public,
+    owned: true,
+    item_count: count.rows[0].c,
+  };
 }
 
 export async function deleteCrate(db, userId, crateId) {

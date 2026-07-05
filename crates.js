@@ -10,6 +10,31 @@ export function closeCratePop(skipTeardown = false) {
   crateState?.close(skipTeardown ? "keep-card" : "manual");
 }
 
+export function crateDisplayName(crate) {
+  return crate.owned ? crate.name : `${crate.name} (${crate.owner_name})`;
+}
+
+export function appendCrateLabel(parent, crate) {
+  parent.append(crate.name);
+  if (!crate.owned) {
+    const owner = document.createElement("span");
+    owner.className = "crate-owner";
+    owner.textContent = ` (${crate.owner_name})`;
+    parent.appendChild(owner);
+  }
+}
+
+export function crateLabelEl(crate) {
+  const el = document.createElement("span");
+  el.className = "dd-label";
+  appendCrateLabel(el, crate);
+  return el;
+}
+
+function ownCrates() {
+  return state.crates.filter((c) => c.owned);
+}
+
 async function doDeleteCrate(crate, onClose) {
   try {
     const r = await fetch(`/api/crates/${crate.id}`, { method: "DELETE" });
@@ -35,6 +60,43 @@ function crateDelBtn(crate) {
     await doDeleteCrate(crate, closeCratePop);
   });
   return del;
+}
+
+function crateVisBtn(crate) {
+  const btn = document.createElement("button");
+  btn.className = "dd-vis";
+  const sync = () => {
+    btn.title = crate.public ? "Make private" : "Make public";
+    btn.innerHTML = crate.public ? ICONS.eye : ICONS.eyeOff;
+  };
+  sync();
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const next = !crate.public;
+    try {
+      const r = await fetch(`/api/crates/${crate.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public: next }),
+      });
+      if (!r.ok) throw new Error();
+      const { crate: updated } = await r.json();
+      crate.public = updated.public;
+      sync();
+      toast(crate.public ? "Crate is now public" : "Crate is now private", { duration: "short" });
+    } catch {
+      toast.error("Couldn't update crate visibility");
+    }
+  });
+  return btn;
+}
+
+function crateTrailing(crate) {
+  if (!crate.owned) return null;
+  const wrap = document.createElement("span");
+  wrap.className = "dd-actions";
+  wrap.append(crateVisBtn(crate), crateDelBtn(crate));
+  return wrap;
 }
 
 async function toggleCrateItemApi(img, crateId, checkbox) {
@@ -90,13 +152,14 @@ async function createCrateWithItem(name, img, anchorEl) {
 
 export function openCratePop(anchorEl, img = null) {
   const card = img ? anchorEl.closest(".card") : null;
+  const crates = img ? ownCrates() : state.crates;
 
   const ctx = openDropdown(anchorEl, {
     className: "crate-pop",
     minWidth: 190,
     focus: img ? ".dd-input" : undefined,
     build: (body) => {
-      for (const crate of state.crates) {
+      for (const crate of crates) {
         if (img) {
           // Assign mode: checkboxes to add/remove the item from crates.
           const cb = document.createElement("input");
@@ -106,7 +169,7 @@ export function openCratePop(anchorEl, img = null) {
           body.appendChild(ddRow({
             label: crate.name,
             leading: cb,
-            trailing: crateDelBtn(crate),
+            trailing: crateTrailing(crate),
             onClick: () => {
               cb.checked = !cb.checked;
               toggleCrateItemApi(img, crate.id, cb);
@@ -115,9 +178,9 @@ export function openCratePop(anchorEl, img = null) {
         } else {
           // Filter mode: click a crate to filter the gallery.
           body.appendChild(ddRow({
-            label: crate.name,
+            labelEl: crateLabelEl(crate),
             active: state.selectedCrateId === crate.id,
-            trailing: crateDelBtn(crate),
+            trailing: crateTrailing(crate),
             onClick: () => {
               state.selectedCrateId = state.selectedCrateId === crate.id ? null : crate.id;
               closeCratePop();
@@ -128,7 +191,7 @@ export function openCratePop(anchorEl, img = null) {
       }
     },
     footer: img ? (foot) => {
-      if (state.crates.length) foot.appendChild(ddSep());
+      if (crates.length) foot.appendChild(ddSep());
       foot.appendChild(ddInput({
         placeholder: "New crate…",
         onSubmit: (name) => createCrateWithItem(name, img, anchorEl),

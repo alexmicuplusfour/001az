@@ -25,6 +25,7 @@ import {
   listCrates,
   createCrate,
   deleteCrate,
+  setCratePublic,
   toggleCrateItem,
   listFilterConfigs,
   saveFilterConfig,
@@ -222,7 +223,10 @@ app.get("/api/items/:id/hearts", requireAuth, requireItemAccess, wrap(async (req
 
 // --- crates (any logged-in user) ---
 app.get("/api/crates", requireAuth, wrap(async (req, res) => {
-  res.json(await listCrates(db, req.user.id, req.query.board || ""));
+  const boardId = (req.query.board || "").trim();
+  if (!boardId || !(await boardExists(db, boardId)) || !(await canAccessBoard(db, boardId, req.user)))
+    return res.status(404).json({ error: "board not found" });
+  res.json(await listCrates(db, req.user.id, boardId));
 }));
 
 app.post("/api/crates", requireAuth, wrap(async (req, res) => {
@@ -242,6 +246,15 @@ app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
   if (!(await deleteCrate(db, req.user.id, Number(req.params.id))))
     return res.status(404).json({ error: "not found" });
   res.json({ ok: true });
+}));
+
+app.patch("/api/crates/:id", requireAuth, wrap(async (req, res) => {
+  const crateId = Number(req.params.id);
+  if (!Number.isInteger(crateId) || crateId <= 0) return res.status(404).json({ error: "not found" });
+  if (typeof req.body?.public !== "boolean") return res.status(400).json({ error: "public required" });
+  const crate = await setCratePublic(db, req.user.id, crateId, req.body.public);
+  if (!crate) return res.status(404).json({ error: "not found" });
+  res.json({ crate });
 }));
 
 app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => {

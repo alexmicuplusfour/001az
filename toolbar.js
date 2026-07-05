@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { ICONS, toolBtn } from './utils.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, toggleFiltersOrDrawer } from './filters.js';
-import { openCratePop } from './crates.js';
+import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 
 const elToolbar = document.getElementById("toolbar");
@@ -134,7 +134,9 @@ export function renderToolbar(resultCount) {
       cratesBtn.className = "tool-btn crates-btn" + (activeCrate ? " active" : "");
       cratesBtn.innerHTML = ICONS.crate;
       const lbl = document.createElement("span");
-      lbl.textContent = activeCrate ? activeCrate.name : "Crates";
+      lbl.replaceChildren();
+      if (activeCrate) appendCrateLabel(lbl, activeCrate);
+      else lbl.textContent = "Crates";
       cratesBtn.appendChild(lbl);
       const chev = document.createElement("span");
       chev.className = "crates-chevron";

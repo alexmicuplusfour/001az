@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS crates (
   user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   board_id   TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
+  public     BOOLEAN NOT NULL DEFAULT FALSE,
   created_at BIGINT NOT NULL,
   UNIQUE(user_id, board_id, name)
 );

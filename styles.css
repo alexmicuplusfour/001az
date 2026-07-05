@@ -820,6 +820,9 @@ body.bulk-mode .heart {
   width: 13px;
   height: 13px;
 }
+.tool-btn .crate-owner {
+  color: var(--text-dim);
+}
 .crates-chevron {
   display: inline-flex;
   margin-left: -1px;

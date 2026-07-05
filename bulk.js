@@ -150,7 +150,7 @@ function openBulkCratePop(anchorEl) {
     minWidth: 190,
     focus: ".dd-input",
     build: (body) => {
-      for (const crate of state.crates) {
+      for (const crate of state.crates.filter((c) => c.owned)) {
         body.appendChild(ddRow({
           label: crate.name,
           onClick: () => {

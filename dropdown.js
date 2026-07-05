@@ -185,16 +185,14 @@ export function openDropdown(anchor, {
 
 // A standard menu row: [leading?] label [trailing?]. Clicks on the embedded
 // leading/trailing controls are theirs to handle; onClick gets the rest.
-export function ddRow({ label, active = false, href, leading, trailing, onClick } = {}) {
+export function ddRow({ label, labelEl, active = false, href, leading, trailing, onClick } = {}) {
   const row = document.createElement(href ? "a" : "div");
   row.className = "dd-row" + (active ? " active" : "");
   row.setAttribute("role", "menuitem");
   row.tabIndex = -1;
   if (href) row.href = href;
   if (leading) row.appendChild(leading);
-  const lbl = document.createElement("span");
-  lbl.className = "dd-label";
-  lbl.textContent = label;
+  const lbl = labelEl || Object.assign(document.createElement("span"), { className: "dd-label", textContent: label });
   row.appendChild(lbl);
   if (trailing) row.appendChild(trailing);
   if (onClick) {
