@@ -252,7 +252,6 @@
             <input id="email" type="email" placeholder="member@email.com" required />
             <button type="submit">Add & make link</button>
           </form>
-          <div class="linkbox" id="linkbox"></div>
           <table>
             <thead><tr><th>Name</th><th>Last login</th><th>♥ given</th><th></th></tr></thead>
             <tbody id="rows"></tbody>
@@ -276,23 +275,16 @@
           const act = tr.querySelector(".row-actions");
 
           const copyBtn = document.createElement("button");
-          const newLinkBtn = document.createElement("button");
-
-          async function mintLink() {
-            const { link } = await api("POST", `/api/admin/users/${u.id}/link`);
-            u.link = link;
-            newLinkBtn.textContent = "new link";
-            showLink(u.email, link);
-            return link;
-          }
-
           copyBtn.className = "ghost";
           copyBtn.textContent = "copy link";
           copyBtn.title = "Copies the login link (mints a fresh one first if needed — the previous link stops working)";
           copyBtn.onclick = async () => {
             copyBtn.disabled = true;
             try {
-              if (!u.link) await mintLink();
+              if (!u.link) {
+                const { link } = await api("POST", `/api/admin/users/${u.id}/link`);
+                u.link = link;
+              }
               copy(u.link, copyBtn);
             } catch (err) {
               toast.error(err.message);
@@ -301,21 +293,6 @@
             }
           };
           act.appendChild(copyBtn);
-
-          newLinkBtn.className = "ghost";
-          newLinkBtn.textContent = "new link";
-          newLinkBtn.title = "Mints a fresh login link — the previous link stops working";
-          newLinkBtn.onclick = async () => {
-            newLinkBtn.disabled = true;
-            try {
-              copy(await mintLink(), copyBtn);
-            } catch (err) {
-              toast.error(err.message);
-            } finally {
-              newLinkBtn.disabled = false;
-            }
-          };
-          act.appendChild(newLinkBtn);
 
           if (!u.is_admin) {
             const del = document.createElement("button");
@@ -337,24 +314,13 @@
           const name = document.getElementById("name").value.trim();
           try {
             const { user, link } = await api("POST", "/api/admin/users", { email, name });
-            showLink(user.email, link);
+            await navigator.clipboard.writeText(link).catch(() => {});
+            toast.info(`${user.email} added — login link copied`);
             render();
           } catch (err) {
             toast.error(err.message);
           }
         };
-      }
-
-      function showLink(email, link) {
-        const box = document.getElementById("linkbox");
-        box.classList.add("show");
-        box.innerHTML = `Login link for <b>${email}</b>:<br><code>${link}</code> `;
-        const b = document.createElement("button");
-        b.className = "ghost";
-        b.textContent = "copy";
-        b.style.marginTop = "8px";
-        b.onclick = () => copy(link, b);
-        box.appendChild(b);
       }
 
       render().catch(() => (gate.innerHTML = 'Error loading. <a href="/">Back</a>'));
