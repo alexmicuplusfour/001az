@@ -30,10 +30,20 @@ export function dropPendingUploadId(id) {
   document.dispatchEvent(new Event('app:uploads-pending-changed'));
 }
 
+function needsPoll() {
+  return (
+    state.uploading.length > 0 ||
+    state.items.some((img) => img.status === "pending" || img.status === "processing")
+  );
+}
+
+// First-time tags (no tags yet) show at the top; retags stay in the grid.
 export function inProgress() {
   return [
     ...state.uploading,
-    ...state.items.filter((img) => img.status === "pending" || img.status === "processing"),
+    ...state.items.filter(
+      (img) => (img.status === "pending" || img.status === "processing") && !img.tags.length
+    ),
   ];
 }
 
@@ -44,8 +54,11 @@ export function reconcile(data) {
     if (ex) {
       const list = Array.isArray(d.tags) ? d.tags : [];
       ex.status = d.status;
-      ex.tags = list;
-      ex.tagSet = new Set(list);
+      // Server clears tags while re-queuing; keep stale tags until a result lands.
+      if (d.status === "tagged" || d.status === "failed" || list.length) {
+        ex.tags = list;
+        ex.tagSet = new Set(list);
+      }
       ex.undecided = !!d.undecided;
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
@@ -73,7 +86,7 @@ export function reconcile(data) {
 let polling = false;
 
 async function pollTick() {
-  if (inProgress().length === 0) {
+  if (!needsPoll()) {
     polling = false;
     return;
   }
@@ -88,7 +101,7 @@ async function pollTick() {
 }
 
 export function ensurePolling() {
-  if (!polling && inProgress().length > 0) {
+  if (!polling && needsPoll()) {
     polling = true;
     setTimeout(pollTick, 4000);
   }

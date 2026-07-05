@@ -65,7 +65,10 @@ async function doReprocess(id) {
     const r = await fetch(`/api/items/${id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
     const img = state.items.find((i) => i.id === id);
-    if (img) { img.status = "pending"; img.tags = []; img.tagSet = new Set(); }
+    if (img) {
+      img.status = "pending";
+      if (!img.tags.length) img.tagSet = new Set();
+    }
     document.dispatchEvent(new Event('app:render'));
     ensurePolling();
     toast("Reprocessing…", { duration: "short" });
@@ -247,6 +250,12 @@ function cardFor(img) {
   if (img.undecided || img.status === "held") card.classList.add("undecided");
   // The board type owns the card body (the media); grid owns the frame + chrome.
   card.appendChild(state.adapter.renderCardBody(img, card, scheduleLayout));
+  if (img.status === "pending" || img.status === "processing") {
+    card.classList.add("loading");
+    const sp = document.createElement("div");
+    sp.className = "spinner";
+    card.appendChild(sp);
+  }
   card.addEventListener("click", () => {
     if (state.bulkSelected.size) { toggleBulkSelect(img, card); return; }
     state.adapter.openDetail(img);

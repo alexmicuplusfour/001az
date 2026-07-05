@@ -28,6 +28,7 @@ function matchesExcept(img, exceptKey) {
 // "Done" as far as the grid is concerned — held items (waiting for the
 // board's auto-tagging to come back on) show up like any other untagged item.
 export function isTagged(img) {
+  if (img.tags.length > 0) return true;
   return img.status === "tagged" || img.status === "failed" || img.status === "held" || !img.status;
 }
 

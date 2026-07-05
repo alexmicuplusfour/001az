@@ -91,8 +91,7 @@ async function doBulkReprocess() {
     const r = await fetch(`/api/items/${img.id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
     img.status = "pending";
-    img.tags = [];
-    img.tagSet = new Set();
+    if (!img.tags.length) img.tagSet = new Set();
   }));
   const failed = results.filter((r) => r.status === "rejected").length;
   clearBulk();
