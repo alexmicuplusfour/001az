@@ -392,7 +392,7 @@ export async function deleteCrate(db, userId, crateId) {
 }
 
 export async function toggleCrateImage(db, userId, crateId, itemId) {
-  const crate = await db.query("SELECT id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
+  const crate = await db.query("SELECT id, board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
   if (!crate.rows.length) return null;
   const exists = (
     await db.query("SELECT 1 FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId])
@@ -400,7 +400,8 @@ export async function toggleCrateImage(db, userId, crateId, itemId) {
   if (exists) {
     await db.query("DELETE FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId]);
   } else {
-    const item = await db.query("SELECT 1 FROM items WHERE id=$1", [itemId]);
+    // A crate only holds items from its own board.
+    const item = await db.query("SELECT 1 FROM items WHERE id=$1 AND board_id=$2", [itemId, crate.rows[0].board_id]);
     if (!item.rows.length) return null;
     await db.query("INSERT INTO crate_items (crate_id, item_id, created_at) VALUES ($1, $2, $3)", [
       crateId,

@@ -84,7 +84,10 @@ export default function imageType({ galleryDir, thumbsDir }) {
       app.post("/api/upload", ctx.auth.requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {
         const boardId = req.query.board || (req.body && req.body.board_id) || null;
         const board = boardId ? await ctx.boards.get(boardId) : null;
-        if (!board) {
+        // Missing and inaccessible answer alike, so board ids can't be probed.
+        // Multer has already spooled the files to tmp — clean up on refusal.
+        if (!board || !(await ctx.boards.canAccess(board.id, req.user))) {
+          for (const f of req.files || []) await fs.promises.unlink(f.path).catch(() => {});
           return res.status(400).json({ error: "valid board required" });
         }
 
@@ -159,9 +162,12 @@ export default function imageType({ galleryDir, thumbsDir }) {
 
       // Uploaded originals + thumbnails live outside the app's static dir —
       // mount them explicitly. Filenames are random per upload and never
-      // reused, so long-lived caching is safe.
-      app.use("/gallery", express.static(galleryDir, { maxAge: "7d", immutable: true }));
-      app.use("/thumbnails", express.static(thumbsDir, { maxAge: "7d", immutable: true }));
+      // reused, so long-lived caching is safe. Login required: without it the
+      // bytes are world-readable to anyone holding a URL. Within a session the
+      // 64-bit random filenames are the per-board barrier — filenames only
+      // surface through the board-ACL'd /api/items.
+      app.use("/gallery", ctx.auth.requireAuth, express.static(galleryDir, { maxAge: "7d", immutable: true }));
+      app.use("/thumbnails", ctx.auth.requireAuth, express.static(thumbsDir, { maxAge: "7d", immutable: true }));
 
       // Legacy: items uploaded before thumb dimensions were stored.
       backfillThumbDimensions(ctx).catch((err) => ctx.log("thumb backfill error:", err.message));

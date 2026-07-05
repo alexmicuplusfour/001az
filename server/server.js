@@ -31,6 +31,7 @@ import {
   getBoard,
   updateBoard,
   deleteBoard,
+  boardExists,
   boardImageStats,
   boardAiUsage,
   retagBoard,
@@ -122,6 +123,19 @@ const inviteLink = (token) => `${BASE_URL}/auth/${token}`;
 // async route goes through wrap() so a DB error becomes a 500, not a crash.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// Item-scoped routes (/api/items/:id/*): resolve the item's board and enforce
+// board access. Missing and forbidden both answer 404 so item ids can't be
+// probed across boards. Attaches req.itemId / req.itemBoardId.
+const requireItemAccess = wrap(async (req, res, next) => {
+  const id = Number(req.params.id);
+  const item = Number.isInteger(id) && id > 0 ? await getImageBoard(db, id) : null;
+  if (!item || !(await canAccessBoard(db, item.board_id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  req.itemId = id;
+  req.itemBoardId = item.board_id;
+  next();
+});
+
 app.get("/api/health", wrap(async (_req, res) => {
   res.json({ ok: true, images: await countImages(db) });
 }));
@@ -147,15 +161,15 @@ app.post("/api/logout", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// --- favorites (any logged-in user) ---
-app.post("/api/items/:id/favorite", requireAuth, wrap(async (req, res) => {
-  const result = await toggleFavorite(db, req.user.id, Number(req.params.id));
+// --- favorites (members of the item's board) ---
+app.post("/api/items/:id/favorite", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const result = await toggleFavorite(db, req.user.id, req.itemId);
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
 
-app.get("/api/items/:id/hearts", requireAuth, wrap(async (req, res) => {
-  res.json({ names: await heartNames(db, Number(req.params.id)) });
+app.get("/api/items/:id/hearts", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  res.json({ names: await heartNames(db, req.itemId) });
 }));
 
 // --- crates (any logged-in user) ---
@@ -167,6 +181,10 @@ app.post("/api/crates", requireAuth, wrap(async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
   const boardId = (req.body && req.body.board_id ? String(req.body.board_id) : "").trim();
+  // Existence first: canAccessBoard short-circuits true for admins, and a
+  // missing board would otherwise surface as an FK error (500).
+  if (!boardId || !(await boardExists(db, boardId)) || !(await canAccessBoard(db, boardId, req.user)))
+    return res.status(404).json({ error: "board not found" });
   const crate = await createCrate(db, req.user.id, boardId, name);
   if (!crate) return res.status(400).json({ error: "invalid name" });
   res.json({ crate });
@@ -179,7 +197,11 @@ app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
 }));
 
 app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => {
-  const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), Number(req.params.itemId));
+  const itemId = Number(req.params.itemId);
+  const item = Number.isInteger(itemId) && itemId > 0 ? await getImageBoard(db, itemId) : null;
+  if (!item || !(await canAccessBoard(db, item.board_id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), itemId);
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
@@ -505,42 +527,34 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 
 // The AI's per-facet justification for an item's tags. Kept out of the
 // /api/items list payload — fetched lazily when the lightbox panel opens.
-app.get("/api/items/:id/reasoning", requireAuth, wrap(async (req, res) => {
-  const row = await getImageReasoning(db, Number(req.params.id));
-  if (!row) return res.status(404).json({ error: "not found" });
-  if (!(await canAccessBoard(db, row.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
-  res.json({ reasoning: row.tag_reasoning || {} });
+app.get("/api/items/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const row = await getImageReasoning(db, req.itemId);
+  res.json({ reasoning: row?.tag_reasoning || {} });
 }));
 
-app.patch("/api/items/:id/tags", requireAuth, wrap(async (req, res) => {
-  const id = Number(req.params.id);
+app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const tags = req.body && Array.isArray(req.body.tags) ? req.body.tags : null;
   if (!tags) return res.status(400).json({ error: "tags array required" });
-  const item = await getImageBoard(db, id);
-  if (!item) return res.status(404).json({ error: "not found" });
-  if (!(await canAccessBoard(db, item.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
-  const board = await getBoard(db, item.board_id);
+  const board = await getBoard(db, req.itemBoardId);
   const allowed = new Set();
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
-  await setImageTags(db, id, clean);
+  await setImageTags(db, req.itemId, clean);
   res.json({ ok: true, tags: clean });
 }));
 
-app.delete("/api/items/:id", requireAuth, wrap(async (req, res) => {
-  const id = Number(req.params.id);
-  const row = await deleteItem(db, id);
+app.delete("/api/items/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const row = await deleteItem(db, req.itemId);
   if (!row) return res.status(404).json({ error: "not found" });
   const type = (await getBoard(db, row.board_id))?.type || "image";
-  await registry.get(type)?.onDelete?.({ id, payload: row.payload });
-  console.log(`deleted #${id} ${row.payload?.filename || ""}`.trim());
+  await registry.get(type)?.onDelete?.({ id: req.itemId, payload: row.payload });
+  console.log(`deleted #${req.itemId} ${row.payload?.filename || ""}`.trim());
   res.json({ ok: true });
 }));
 
-app.post("/api/items/:id/reprocess", requireAuth, wrap(async (req, res) => {
-  const id = Number(req.params.id);
-  if (!(await reprocessImage(db, id))) return res.status(404).json({ error: "not found" });
-  console.log(`reprocess queued #${id}`);
+app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  if (!(await reprocessImage(db, req.itemId))) return res.status(404).json({ error: "not found" });
+  console.log(`reprocess queued #${req.itemId}`);
   res.json({ ok: true, status: "pending" });
 }));
 

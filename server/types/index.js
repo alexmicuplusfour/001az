@@ -2,7 +2,7 @@
 // adapters (see modular-boards-plan.md). Core imports only this file; adapters
 // import nothing from core: every capability an adapter has is one its ctx
 // hands it, so a type's behavior is knowable from its own module alone.
-import { getBoard, insertItem, updateItemPayload, listItemsByType } from "../db.js";
+import { getBoard, insertItem, updateItemPayload, listItemsByType, canAccessBoard } from "../db.js";
 import { requireAuth } from "../auth.js";
 
 const API_VERSION = 1;
@@ -69,6 +69,11 @@ function makeCtx(db, type) {
       async get(id) {
         const b = await getBoard(db, id);
         return b ? { id: b.id, name: b.name, type: b.type } : null;
+      },
+      // Board ACL (admin, or board member). Ingestion routes must check this
+      // before writing — a valid session alone doesn't grant board access.
+      async canAccess(id, user) {
+        return canAccessBoard(db, id, user);
       },
     },
     auth: { requireAuth },
