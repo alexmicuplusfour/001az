@@ -17,9 +17,11 @@ deploy.local.json
 # tooling, docs, and the docker files themselves
 .git
 .gitignore
+.github
 *.md
 deploy.py
 scripts
+test
 pets-test
 docker-compose.yml
 Dockerfile

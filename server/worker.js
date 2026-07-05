@@ -63,7 +63,7 @@ const GLOSS = {
 
 const facetGloss = (f) => (f.description || "").trim() || GLOSS[f.key] || f.label;
 
-function buildPrompt(facets, context = "", withReasoning = true, subject = "images") {
+export function buildPrompt(facets, context = "", withReasoning = true, subject = "images") {
   const lines = facets.map((f) => {
     const note = f.single ? " — pick exactly one" : "";
     return `- ${f.key} (${facetGloss(f)}): ${f.values.join(", ")}${note}`;

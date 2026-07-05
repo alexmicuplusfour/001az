@@ -58,6 +58,18 @@ DB_PATH=server/data.db BASE_URL=http://127.0.0.1:3001 node server/mintlink.js yo
 
 Open http://127.0.0.1:3001 and sign in with the printed link. To enable AI tagging, set `ANTHROPIC_API_KEY` (or configure a key in the admin panel).
 
+### Tests
+
+```sh
+npm test
+```
+
+Built-in `node:test` runner (no extra dependency). The suite creates a throwaway
+Postgres database per test file, so it needs a reachable Postgres whose role can
+`CREATE DATABASE` — the compose `db` (on `127.0.0.1:5433`) works out of the box
+locally; point elsewhere with `TEST_ADMIN_URL`. CI runs this against a Postgres
+service on every push and PR (`.github/workflows/ci.yml`).
+
 ## Configuration
 
 | Env var | Default | Purpose |

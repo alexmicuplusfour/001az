@@ -64,16 +64,21 @@ reserved), but it's robustness, not a privilege gap.
 
 What devs check before reading a line of logic:
 
-- [ ] **Tests + `npm test`.** Currently zero. Highest-leverage targets: the queue
-      state machine (`held/pending/processing/tagged/failed`, `cancelBoardQueue`,
-      `queueUntagged`), `buildPrompt` schema generation, tag validation in
-      `tagOne`, and the auth/access matrix (would have caught Tier 1). Node's
-      built-in `node:test` = no new dependency; route tests via supertest against
-      the compose Postgres. A **contract test for board-type adapters** (register
-      a fake type; assert core never reads payload; assert hooks fire) is worth
-      more than any doc once outside builders arrive.
-- [ ] **CI.** No `.github/`. One workflow: lint + test + `docker build` on
-      push/PR. ~40 lines.
+- [x] **Tests + `npm test`** (2026-07-05). `node:test`, no new runtime dep.
+      `test/helpers.js` spins up a throwaway Postgres db + in-process server per
+      test file (made possible by an entry-point guard in `server.js` — it
+      exports `app`/`db` and only listens when run directly). Shipped:
+      `test/access.test.js` (the full board-access matrix — the Tier 1 behaviors,
+      now regression-locked: outsider/foreign-member/anon denials, member+admin
+      allows, cross-board crate, static-asset auth, NaN-id, tag-value filtering)
+      and `test/prompt.test.js` (`buildPrompt` schema generation, incl. the
+      `fit`-clobber edge). 16 tests, green. Still open: queue state-machine tests
+      (`cancelBoardQueue`/`queueUntagged`/`failOrRequeue`) and a board-type
+      adapter contract test (register a fake type; assert core never reads
+      payload) — both higher-value once the second type lands.
+- [x] **CI** (2026-07-05). `.github/workflows/ci.yml`: `test` job (Postgres 17
+      service, `npm ci && npm test`) + `build` job (`docker build`). Lint step to
+      add once a linter is chosen.
 - [ ] **Lint/format config.** Nothing checked in. Biome (one tool, one config)
       fits a build-less vanilla-JS repo; ESLint+Prettier is the classic pick.
 - [ ] **LICENSE.** Missing entirely — without it nobody can legally use or

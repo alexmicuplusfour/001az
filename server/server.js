@@ -1,6 +1,6 @@
 import express from "express";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { inspect } from "node:util";
 import {
   openDb,
@@ -575,7 +575,16 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "server error" });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
-  startWorker({ db, registry });
-});
+// Run as a server only when executed directly (node server/server.js). Under
+// test the module is imported for its `app`/`db` exports: schema + admin seed
+// run at import (against the test DATABASE_URL), but nothing listens and the
+// tagging worker stays off.
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
+if (isMain) {
+  app.listen(PORT, HOST, () => {
+    console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
+    startWorker({ db, registry });
+  });
+}
+
+export { app, db, registry };
