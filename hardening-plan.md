@@ -132,16 +132,15 @@ here is fixed yet.
       readable in any dump. Self-hosted single-tenant lowers urgency: README note
       now; envelope encryption (AES-256-GCM, master key from an env var, decrypt in
       `getAiKey`/`resolveDefaultAi`/`testKey`) is the real fix later.
-- [ ] **Rate limiting.** None. Highest-value targets: `/auth/:token` (unauth) and
-      `/api/upload` (auth but sharp/CPU-heavy). Tokens are 192-bit so this is
-      abuse/DoS throttling, not brute-force prevention. Single process → a small
-      in-memory limiter needs no dependency; requires `trust proxy` (above) to key
-      on the real client IP.
-- [ ] **Request logging.** No structured access log (method/path/status/duration)
-      or levels — just ad-hoc `console.log`s. Cheap first step with zero deps: a
-      middleware that logs one line per request through the existing console patch,
-      so it flows into the SSE viewer for free. `pino` + `pino-http` is the
-      convention if/when structure is wanted.
+- [x] **Rate limiting** (2026-07-05). `server/ratelimit.js` — dependency-free
+      fixed-window limiter keyed on `req.ip` (real client via `trust proxy`), lazy
+      pruning so no cleanup timer. `/auth/:token` at 30/15min, `/api/upload` at
+      60/min. Verified in-container (31st `/auth` hit → 429 + `Retry-After`) and
+      unit-tested (`ratelimit.test.js`: cap, per-IP isolation, window reset).
+- [x] **Request logging** (2026-07-05). Middleware logs one line per request
+      (`METHOD status ms path`) through the console patch, so it reaches the SSE
+      viewer; skips the SSE stream itself and successful static-asset noise.
+      `pino`/`pino-http` remains the upgrade path if structured logs are wanted.
 - [ ] **Backups.** Nothing dumps Postgres or snapshots the `appdata`/`pgdata`
       volumes. `pg_dump` cron + uploads tar, with a documented restore path (or
       lean on droplet snapshots and say so).

@@ -59,6 +59,7 @@ import {
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, nextAutoTagRun } from "./worker.js";
 import { testKey, PROVIDERS } from "./providers.js";
+import { rateLimit } from "./ratelimit.js";
 import { createRegistry } from "./types/index.js";
 import imageType from "./types/image.js";
 
@@ -143,6 +144,24 @@ app.use((_req, res, next) => {
 app.use(express.json());
 app.use(attachUser(db));
 
+// One access-log line per request, through console.log so it also reaches the
+// live SSE viewer. Skips the long-lived log stream and static-asset noise
+// (thumbnails etc.) unless they error.
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const p = req.path;
+    if (p === "/api/logs/stream") return;
+    if (res.statusCode < 400 && !(p.startsWith("/api") || p.startsWith("/auth"))) return;
+    console.log(`${req.method} ${res.statusCode} ${Date.now() - start}ms ${p}`);
+  });
+  next();
+});
+
+// Throttle the unauthenticated login endpoint and the CPU-heavy upload path.
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
+app.use("/api/upload", rateLimit({ windowMs: 60 * 1000, max: 60 }));
+
 const inviteLink = (token) => `${BASE_URL}/auth/${token}`;
 
 // Express 4 doesn't forward rejected promises from async handlers; every
@@ -171,7 +190,7 @@ app.get("/api/me", (req, res) => {
   res.json(req.user ? { email: req.user.email, name: req.user.name, is_admin: !!req.user.is_admin } : null);
 });
 
-app.get("/auth/:token", wrap(async (req, res) => {
+app.get("/auth/:token", authLimiter, wrap(async (req, res) => {
   const userId = await consumeInvite(db, req.params.token);
   if (!userId) return res.redirect("/?login=invalid");
   const sid = await createSession(db, userId);
