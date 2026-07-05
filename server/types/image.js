@@ -60,6 +60,26 @@ export default function imageType({ galleryDir, thumbsDir }) {
       capabilities: {},
     },
 
+    // Starter facets offered at board creation (suggestion only — boards own
+    // their facets and edit freely).
+    suggestedFacets: [
+      {
+        key: "category", label: "Category", single: true,
+        values: ["tops", "bottoms", "footwear", "accessories", "outerwear"],
+        description: "what kind of item this is",
+      },
+      {
+        key: "season", label: "Season",
+        values: ["summer", "winter", "spring-fall", "year-round"],
+        description: "when you'd wear or use it",
+      },
+      {
+        key: "formality", label: "Formality", single: true,
+        values: ["casual", "workwear", "formal", "athletic"],
+        description: "how dressed-up the item reads",
+      },
+    ],
+
     mountRoutes(app, ctx) {
       app.post("/api/upload", ctx.auth.requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {
         const boardId = req.query.board || (req.body && req.body.board_id) || null;

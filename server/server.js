@@ -224,6 +224,7 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
   res.json({
     id: board.id,
     name: board.name,
+    type: board.type,
     facets: board.facets,
     context: board.context,
     ai_reasoning: board.ai_reasoning !== false,
@@ -255,9 +256,16 @@ function parseEveryMin(v) {
   return Math.min(Math.max(n, 15), 60 * 24 * 28); // 15 min .. 4 weeks
 }
 
+// Registered board types + their suggested starter facets, for the create UI.
+app.get("/api/admin/board-types", requireAdmin, (_req, res) => {
+  res.json(registry.list());
+});
+
 app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
+  const type = req.body && req.body.type ? String(req.body.type) : "image";
+  if (!registry.get(type)) return res.status(400).json({ error: `unknown board type "${type}"` });
   let facets = [];
   if (req.body && req.body.facets !== undefined) {
     if (!Array.isArray(req.body.facets)) return res.status(400).json({ error: "facets must be an array" });
@@ -280,9 +288,9 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   autoTag.nextRunAt = autoTag.enabled && autoTag.periodic
     ? nextAutoTagRun(Date.now(), autoTag.everyMin, autoTag.skipWeekends)
     : null;
-  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag);
-  console.log(`created board "${name}" ${id}`);
-  res.json({ id, name, facets, context, ai_reasoning: aiReasoning });
+  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, type);
+  console.log(`created board "${name}" ${id} (${type})`);
+  res.json({ id, name, type, facets, context, ai_reasoning: aiReasoning });
 }));
 
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {

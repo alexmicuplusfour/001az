@@ -413,6 +413,15 @@
 
         render();
         sync();
+
+        // Lets the modal swap in a type's suggested facets after build.
+        return {
+          setFacets(next) {
+            facets = Array.isArray(next) ? JSON.parse(JSON.stringify(next)) : [];
+            render();
+            sync();
+          },
+        };
       }
 
       async function api(method, url, body) {
@@ -544,13 +553,6 @@
         return `${location.origin}/?board=${id}`;
       }
 
-      function defaultFacetsJson() {
-        return JSON.stringify([
-          { key: "category", label: "Category", single: true, values: ["tops", "bottoms", "footwear", "accessories", "outerwear"] },
-          { key: "season", label: "Season", values: ["summer", "winter", "spring-fall", "year-round"] },
-          { key: "formality", label: "Formality", single: true, values: ["casual", "workwear", "formal", "athletic"] }
-        ], null, 2);
-      }
 
       async function renderBoards() {
         const me = await fetch("/api/me").then((r) => r.json());
@@ -815,9 +817,11 @@
         const body = document.createElement("div");
         body.className = "modal-body";
         body.innerHTML = `
+          <label>Board type <span style="font-weight:400;color:#9aa0aa">(what this board collects — set at creation, permanent)</span></label>
+          <select id="board-modal-type" style="width:100%;margin-bottom:14px;"></select>
           <label>Board name</label>
           <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
-          <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the images are, any guidance for tagging)</span></label>
+          <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
           <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
           <div class="modal-section">
             <div class="modal-section-title">AI tagging</div>
@@ -832,7 +836,7 @@
           </div>`;
         body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
         body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
-        body.querySelector("#board-modal-facets").value = isNew ? defaultFacetsJson() : JSON.stringify(board.facets, null, 2);
+        body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
 
         const footer = document.createElement("div");
         footer.className = "modal-footer";
@@ -852,7 +856,45 @@
         const onKey = (e) => { if (e.key === "Escape") close(); };
         document.addEventListener("keydown", onKey);
 
-        buildFacetEditor(document.getElementById("board-modal-facets"));
+        const facetsTextarea = document.getElementById("board-modal-facets");
+        const facetEditor = buildFacetEditor(facetsTextarea);
+
+        // Board type: picked at creation, permanent afterwards. Choosing a
+        // type offers its suggested starter facets; a facet set the user has
+        // already edited is only replaced after a confirm.
+        const typeSel = document.getElementById("board-modal-type");
+        if (!isNew) {
+          const opt = document.createElement("option");
+          opt.textContent = board.type || "image";
+          typeSel.appendChild(opt);
+          typeSel.disabled = true;
+        } else {
+          typeSel.disabled = true; // until the type list arrives
+          let boardTypes = [];
+          let lastSuggested = "";
+          const applySuggested = () => {
+            const t = boardTypes.find((x) => x.type === typeSel.value);
+            if (!t) return;
+            const cur = facetsTextarea.value;
+            const untouched = cur === "" || cur === "[]" || cur === lastSuggested;
+            if (!untouched && !confirm("Replace the current facets with this type's suggested ones?")) return;
+            facetEditor.setFacets(t.suggestedFacets || []);
+            lastSuggested = facetsTextarea.value;
+          };
+          api("GET", "/api/admin/board-types").then((types) => {
+            boardTypes = types;
+            for (const t of types) {
+              const opt = document.createElement("option");
+              opt.value = t.type;
+              opt.textContent = t.name;
+              typeSel.appendChild(opt);
+            }
+            typeSel.value = types.some((t) => t.type === "image") ? "image" : types[0]?.type;
+            typeSel.disabled = false;
+            typeSel.onchange = applySuggested;
+            applySuggested();
+          }).catch(() => {});
+        }
 
         let aiReasoning = isNew ? true : board.ai_reasoning !== false;
         document.getElementById("board-modal-reasoning").appendChild(
@@ -975,7 +1017,7 @@
             auto_tag_skip_weekends: at.skipWeekends,
           };
           try {
-            if (isNew) await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
+            if (isNew) await api("POST", "/api/admin/boards", { name, type: typeSel.value || "image", context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
             else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
             close();
             renderBoards();

@@ -30,7 +30,16 @@ export function createRegistry({ db }) {
     for (const adapter of types.values()) adapter.mountRoutes?.(app, makeCtx(db, adapter.manifest.type));
   }
 
-  return { register, get, mountAll };
+  // What the board-creation UI needs to offer a type choice.
+  function list() {
+    return [...types.values()].map((a) => ({
+      type: a.manifest.type,
+      name: a.manifest.name,
+      suggestedFacets: a.suggestedFacets || [],
+    }));
+  }
+
+  return { register, get, mountAll, list };
 }
 
 // The one door between an adapter and the app. Narrow on purpose: no raw DB

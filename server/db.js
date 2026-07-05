@@ -454,14 +454,14 @@ const BOARD_COLS =
   "id, name, type, facets, context, ai_reasoning, ai_key_id, ai_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at";
 
-export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}) {
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, type = "image") {
   const id = crypto.randomUUID();
   await db.query(
-    `INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_key_id, ai_model,
+    `INSERT INTO boards (id, name, type, facets, context, ai_reasoning, ai_key_id, ai_model,
        auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [
-      id, name, JSON.stringify(facets), context, !!aiReasoning, aiKeyId, aiModel,
+      id, name, type, JSON.stringify(facets), context, !!aiReasoning, aiKeyId, aiModel,
       autoTag.enabled !== false, !!autoTag.periodic, autoTag.everyMin || 1440,
       !!autoTag.skipWeekends, autoTag.nextRunAt ?? null, Date.now(),
     ]
