@@ -15,7 +15,7 @@ async function doDeleteCrate(crate, onClose) {
     const r = await fetch(`/api/crates/${crate.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
     state.crates = state.crates.filter((c) => c.id !== crate.id);
-    for (const im of state.images) im.crateIds.delete(crate.id);
+    for (const im of state.items) im.crateIds.delete(crate.id);
     if (state.selectedCrateId === crate.id) state.selectedCrateId = null;
     onClose();
     document.dispatchEvent(new Event('app:render'));
@@ -37,7 +37,7 @@ function crateDelBtn(crate) {
   return del;
 }
 
-async function toggleCrateImageApi(img, crateId, checkbox) {
+async function toggleCrateItemApi(img, crateId, checkbox) {
   const prev = checkbox.checked;
   try {
     const r = await fetch(`/api/crates/${crateId}/items/${img.id}`, { method: "POST" });
@@ -47,9 +47,9 @@ async function toggleCrateImageApi(img, crateId, checkbox) {
     if (added) img.crateIds.add(crateId);
     else img.crateIds.delete(crateId);
     const crate = state.crates.find((c) => c.id === crateId);
-    if (crate) crate.image_count = count;
+    if (crate) crate.item_count = count;
     if (state.selectedCrateId === crateId && !added) {
-      // The image just left the filtered crate: its card is about to be
+      // The item just left the filtered crate: its card is about to be
       // re-rendered away, so a card-anchored pop would be left orphaned.
       if (crateState?.card) closeCratePop(true);
       document.dispatchEvent(new Event('app:render'));
@@ -63,7 +63,7 @@ async function toggleCrateImageApi(img, crateId, checkbox) {
   }
 }
 
-async function createCrateWithImage(name, img, anchorEl) {
+async function createCrateWithItem(name, img, anchorEl) {
   try {
     const r = await fetch("/api/crates", {
       method: "POST",
@@ -78,7 +78,7 @@ async function createCrateWithImage(name, img, anchorEl) {
       const { added, count } = await r2.json();
       if (added) img.crateIds.add(crate.id);
       const found = state.crates.find((c) => c.id === crate.id);
-      if (found) found.image_count = count;
+      if (found) found.item_count = count;
     }
     // Reopen so the new crate shows up as a row; keep the card's hover chrome.
     closeCratePop(true);
@@ -98,18 +98,18 @@ export function openCratePop(anchorEl, img = null) {
     build: (body) => {
       for (const crate of state.crates) {
         if (img) {
-          // Assign mode: checkboxes to add/remove the image from crates.
+          // Assign mode: checkboxes to add/remove the item from crates.
           const cb = document.createElement("input");
           cb.type = "checkbox";
           cb.checked = img.crateIds.has(crate.id);
-          cb.addEventListener("change", () => toggleCrateImageApi(img, crate.id, cb));
+          cb.addEventListener("change", () => toggleCrateItemApi(img, crate.id, cb));
           body.appendChild(ddRow({
             label: crate.name,
             leading: cb,
             trailing: crateDelBtn(crate),
             onClick: () => {
               cb.checked = !cb.checked;
-              toggleCrateImageApi(img, crate.id, cb);
+              toggleCrateItemApi(img, crate.id, cb);
             },
           }));
         } else {
@@ -131,7 +131,7 @@ export function openCratePop(anchorEl, img = null) {
       if (state.crates.length) foot.appendChild(ddSep());
       foot.appendChild(ddInput({
         placeholder: "New crate…",
-        onSubmit: (name) => createCrateWithImage(name, img, anchorEl),
+        onSubmit: (name) => createCrateWithItem(name, img, anchorEl),
       }));
     } : undefined,
     onClose: (reason) => {

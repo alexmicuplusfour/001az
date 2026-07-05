@@ -42,7 +42,7 @@ async function main() {
     }
   }
 
-  const [boardData, imagesData, meData, cratesData, boardsData] = await Promise.all([
+  const [boardData, itemsData, meData, cratesData, boardsData] = await Promise.all([
     state.boardId
       ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
       : Promise.resolve(null),
@@ -64,7 +64,7 @@ async function main() {
   state.adapter = getType(boardData?.type);
   state.adapter.init?.();
   state.me = meData;
-  state.images = imagesData.map(toItem);
+  state.items = itemsData.map(toItem);
   state.crates = Array.isArray(cratesData) ? cratesData : [];
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   render();

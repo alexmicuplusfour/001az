@@ -100,12 +100,12 @@ async function withTx(db, fn) {
   }
 }
 
-export async function countImages(db) {
+export async function countItems(db) {
   const { rows } = await db.query("SELECT COUNT(*) AS c FROM items");
   return rows[0].c;
 }
 
-export async function listImages(db, userId = null, boardId = null) {
+export async function listItems(db, userId = null, boardId = null) {
   const { rows } = await db.query(
     `SELECT i.id, i.payload, i.status, i.tags, i.undecided,
       (SELECT COUNT(*) FROM favorites f WHERE f.item_id = i.id) AS hearts,
@@ -170,7 +170,7 @@ export async function listItemsByType(db, type) {
   return rows;
 }
 
-export async function getImageBoard(db, id) {
+export async function getItemBoard(db, id) {
   const { rows } = await db.query("SELECT board_id FROM items WHERE id=$1", [id]);
   return rows[0] || null;
 }
@@ -190,7 +190,7 @@ function tagsByFacet(tags) {
 
 // A human made the call, so any AI "undecided" flag is resolved. AI reasoning
 // is dropped for facets whose values changed — it justified a different choice.
-export async function setImageTags(db, id, tags) {
+export async function setItemTags(db, id, tags) {
   const { rows } = await db.query("SELECT tags, tag_reasoning FROM items WHERE id=$1", [id]);
   const reasoning = { ...(rows[0]?.tag_reasoning || {}) };
   const before = tagsByFacet(rows[0]?.tags || []);
@@ -216,7 +216,7 @@ async function addTagSnapshot(db, itemId, source, tags, reasoning, undecided) {
   );
 }
 
-export async function getImageReasoning(db, id) {
+export async function getItemReasoning(db, id) {
   const { rows } = await db.query("SELECT board_id, tag_reasoning FROM items WHERE id=$1", [id]);
   return rows[0] || null;
 }
@@ -372,7 +372,7 @@ export async function heartNames(db, itemId) {
 export async function listCrates(db, userId, boardId) {
   const { rows } = await db.query(
     `SELECT c.id, c.name,
-      (SELECT COUNT(*) FROM crate_items ci WHERE ci.crate_id = c.id) AS image_count
+      (SELECT COUNT(*) FROM crate_items ci WHERE ci.crate_id = c.id) AS item_count
      FROM crates c WHERE c.user_id = $1 AND c.board_id = $2 ORDER BY c.created_at ASC`,
     [userId, boardId]
   );
@@ -387,7 +387,7 @@ export async function createCrate(db, userId, boardId, name) {
       "INSERT INTO crates (user_id, board_id, name, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
       [userId, boardId, name, Date.now()]
     );
-    return { id: rows[0].id, name, image_count: 0 };
+    return { id: rows[0].id, name, item_count: 0 };
   } catch (err) {
     if (err.code !== "23505") throw err; // anything but unique_violation is real
     const { rows } = await db.query(
@@ -396,7 +396,7 @@ export async function createCrate(db, userId, boardId, name) {
     );
     if (!rows.length) return null;
     const count = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [rows[0].id]);
-    return { id: rows[0].id, name: rows[0].name, image_count: count.rows[0].c };
+    return { id: rows[0].id, name: rows[0].name, item_count: count.rows[0].c };
   }
 }
 
@@ -406,7 +406,7 @@ export async function deleteCrate(db, userId, crateId) {
   return result.rowCount > 0;
 }
 
-export async function toggleCrateImage(db, userId, crateId, itemId) {
+export async function toggleCrateItem(db, userId, crateId, itemId) {
   const crate = await db.query("SELECT id, board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
   if (!crate.rows.length) return null;
   const exists = (
@@ -532,8 +532,8 @@ export async function boardExists(db, id) {
   return rows.length > 0;
 }
 
-// Per-board image totals + pending/held counts in one pass: { boardId: { c, p, h } }.
-export async function boardImageStats(db) {
+// Per-board item totals + pending/held counts in one pass: { boardId: { c, p, h } }.
+export async function boardItemStats(db) {
   const { rows } = await db.query(
     `SELECT board_id, COUNT(*) AS c,
        COUNT(*) FILTER (WHERE status='pending') AS p,
@@ -543,7 +543,7 @@ export async function boardImageStats(db) {
   return Object.fromEntries(rows.map((r) => [r.board_id, { c: r.c, p: r.p, h: r.h }]));
 }
 
-// Queue every non-pending image in a board for retagging (held ones included —
+// Queue every non-pending item in a board for retagging (held ones included —
 // retag is an explicit "tag now"). Returns the count.
 export async function retagBoard(db, boardId) {
   const result = await db.query(
@@ -555,7 +555,7 @@ export async function retagBoard(db, boardId) {
 
 // --- periodic auto-tagging ---
 
-// Release a board's held images into the tagging queue. Returns the count.
+// Release a board's held items into the tagging queue. Returns the count.
 export async function releaseHeld(db, boardId) {
   const result = await db.query(
     "UPDATE items SET status='pending', updated_at=$1 WHERE board_id=$2 AND status='held'",
@@ -564,10 +564,10 @@ export async function releaseHeld(db, boardId) {
   return result.rowCount;
 }
 
-// Queue everything untagged in a board: held uploads, AI-undecided images,
+// Queue everything untagged in a board: held uploads, AI-undecided items,
 // and failed ones (fresh attempts). Fired when auto-tagging turns on — the
 // point of the board is tags, so nothing untagged is left behind. In-flight
-// ('processing') and human-tagged images are untouched.
+// ('processing') and human-tagged items are untouched.
 export async function queueUntagged(db, boardId) {
   const result = await db.query(
     `UPDATE items SET status='pending', attempts=0, error=NULL, updated_at=$1
@@ -763,10 +763,10 @@ export async function deleteItem(db, id) {
   return rows[0] || null;
 }
 
-// Pull a board's images out of the tagging queue. Images that still carry
+// Pull a board's items out of the tagging queue. Items that still carry
 // their previous tags go back to 'tagged'; never-tagged ones also become
 // 'tagged' but flagged undecided — the same untagged-for-human-review state
-// as when the AI can't place an image. An in-flight 'processing' image is
+// as when the AI can't place an item. An in-flight 'processing' item is
 // left to finish.
 export async function cancelBoardQueue(db, boardId) {
   return withTx(db, async (client) => {
@@ -790,7 +790,7 @@ export async function cancelBoardQueue(db, boardId) {
 }
 
 // Reset an item back to the tagging queue. Returns true if it existed.
-export async function reprocessImage(db, id) {
+export async function reprocessItem(db, id) {
   const result = await db.query(
     "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
     [Date.now(), id]

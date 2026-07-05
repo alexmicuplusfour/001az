@@ -25,14 +25,14 @@ function matchesExcept(img, exceptKey) {
   return true;
 }
 
-// "Done" as far as the grid is concerned — held images (waiting for the
-// board's auto-tagging to come back on) show up like any other untagged image.
+// "Done" as far as the grid is concerned — held items (waiting for the
+// board's auto-tagging to come back on) show up like any other untagged item.
 export function isTagged(img) {
   return img.status === "tagged" || img.status === "failed" || img.status === "held" || !img.status;
 }
 
 export function taggedFiltered() {
-  const list = state.images.filter(
+  const list = state.items.filter(
     (img) =>
       isTagged(img) &&
       (!state.showFavorites || img.favoritedByMe) &&
@@ -45,14 +45,14 @@ export function taggedFiltered() {
 
 function valueCount(facetKey, value) {
   let n = 0;
-  for (const img of state.images) {
+  for (const img of state.items) {
     if (img.tagSet.has(tag(facetKey, value)) && matchesExcept(img, facetKey)) n++;
   }
   return n;
 }
 
 function facetHasData(facetKey) {
-  return state.images.some((img) => img.tags.some((t) => t.startsWith(facetKey + "/")));
+  return state.items.some((img) => img.tags.some((t) => t.startsWith(facetKey + "/")));
 }
 
 export function activeCount() {
@@ -88,7 +88,7 @@ export function renderFacetsInto(container) {
     const pills = document.createElement("div");
     pills.className = "pills";
     for (const value of facet.values) {
-      const total = state.images.filter((img) => img.tagSet.has(tag(facet.key, value))).length;
+      const total = state.items.filter((img) => img.tagSet.has(tag(facet.key, value))).length;
       if (total === 0) continue;
       const ctxCount = valueCount(facet.key, value);
       const active = sel.has(value);

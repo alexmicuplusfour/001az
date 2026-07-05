@@ -139,7 +139,7 @@ export function renderToolbar(resultCount) {
 
   const count = document.createElement("span");
   count.className = "result-count";
-  count.textContent = `${resultCount} image${resultCount === 1 ? "" : "s"}`;
+  count.textContent = `${resultCount} item${resultCount === 1 ? "" : "s"}`;
   elToolbarSub.appendChild(count);
 
   const active = activeCount();

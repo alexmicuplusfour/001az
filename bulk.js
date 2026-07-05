@@ -42,8 +42,8 @@ function ensureBar() {
   document.body.appendChild(bar);
 }
 
-function selectedImages() {
-  return state.images.filter((i) => state.bulkSelected.has(i.id));
+function selectedItems() {
+  return state.items.filter((i) => state.bulkSelected.has(i.id));
 }
 
 export function updateBulkBar() {
@@ -74,7 +74,7 @@ export function clearBulk() {
 }
 
 async function doBulkReprocess() {
-  const imgs = selectedImages();
+  const imgs = selectedItems();
   const results = await Promise.allSettled(imgs.map(async (img) => {
     const r = await fetch(`/api/items/${img.id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
@@ -87,19 +87,19 @@ async function doBulkReprocess() {
   document.dispatchEvent(new Event('app:render'));
   ensurePolling();
   if (failed) toast.error(`Reprocess failed for ${failed} of ${imgs.length}`);
-  else toast(`Reprocessing ${imgs.length} image${imgs.length === 1 ? "" : "s"}…`, { duration: "short" });
+  else toast(`Reprocessing ${imgs.length} item${imgs.length === 1 ? "" : "s"}…`, { duration: "short" });
 }
 
 async function doBulkDelete() {
-  const imgs = selectedImages();
-  if (!confirm(`Delete ${imgs.length} image${imgs.length === 1 ? "" : "s"}?`)) return;
+  const imgs = selectedItems();
+  if (!confirm(`Delete ${imgs.length} item${imgs.length === 1 ? "" : "s"}?`)) return;
   const deleted = new Set();
   await Promise.allSettled(imgs.map(async (img) => {
     const r = await fetch(`/api/items/${img.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
     deleted.add(img.id);
   }));
-  state.images = state.images.filter((i) => !deleted.has(i.id));
+  state.items = state.items.filter((i) => !deleted.has(i.id));
   const failed = imgs.length - deleted.size;
   clearBulk();
   document.dispatchEvent(new Event('app:render'));
@@ -108,8 +108,8 @@ async function doBulkDelete() {
 
 async function addAllToCrate(crateId) {
   const crate = state.crates.find((c) => c.id === crateId);
-  // The API toggles membership, so skip images already in the crate.
-  const imgs = selectedImages().filter((i) => !i.crateIds.has(crateId));
+  // The API toggles membership, so skip items already in the crate.
+  const imgs = selectedItems().filter((i) => !i.crateIds.has(crateId));
   if (!imgs.length) {
     toast.info(`Already in "${crate ? crate.name : "crate"}"`);
     return;
@@ -122,7 +122,7 @@ async function addAllToCrate(crateId) {
     if (added) img.crateIds.add(crateId);
     counts.push(count);
   }));
-  if (crate && counts.length) crate.image_count = Math.max(crate.image_count || 0, ...counts);
+  if (crate && counts.length) crate.item_count = Math.max(crate.item_count || 0, ...counts);
   const failed = imgs.length - counts.length;
   document.dispatchEvent(new Event('app:render'));
   if (failed) toast.error(`Couldn't add ${failed} of ${imgs.length} to crate`);
@@ -176,10 +176,10 @@ function openBulkCratePop(anchorEl) {
   if (ctx) closeCratePop = ctx.close;
 }
 
-// Drop selections for images that no longer exist (deleted elsewhere, board change).
+// Drop selections for items that no longer exist (deleted elsewhere, board change).
 document.addEventListener('app:render', () => {
   if (!state.bulkSelected.size) return;
-  const ids = new Set(state.images.map((i) => i.id));
+  const ids = new Set(state.items.map((i) => i.id));
   for (const id of [...state.bulkSelected]) {
     if (!ids.has(id)) state.bulkSelected.delete(id);
   }

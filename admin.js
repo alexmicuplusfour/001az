@@ -344,11 +344,11 @@
 
         const sec = document.createElement("div");
         sec.className = "section";
-        sec.innerHTML = `<h2>Boards</h2><p class="sub">Each board has its own images, taxonomy, and URL. Share the URL to give access.</p>`;
+        sec.innerHTML = `<h2>Boards</h2><p class="sub">Each board has its own items, taxonomy, and URL. Share the URL to give access.</p>`;
 
         // Board table
         const table = document.createElement("table");
-        table.innerHTML = `<thead><tr><th>Name</th><th>Images</th><th>AI tokens</th><th></th></tr></thead>`;
+        table.innerHTML = `<thead><tr><th>Name</th><th>Items</th><th>AI tokens</th><th></th></tr></thead>`;
         const tbody = document.createElement("tbody");
 
         const fmtTok = (n) =>
@@ -393,7 +393,7 @@
             : "";
           tr.innerHTML = `
             <td><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></td>
-            <td>${b.image_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="uploads waiting while auto-tagging is off">(${b.held_count} held)</span>` : ""}</td>
+            <td>${b.item_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="uploads waiting while auto-tagging is off">(${b.held_count} held)</span>` : ""}</td>
             <td>${usageCell(b.ai_usage)}</td>
             <td></td>`;
 
@@ -419,15 +419,15 @@
           const retagBtn = document.createElement("button");
           retagBtn.className = "danger";
           retagBtn.textContent = "retag ↺";
-          retagBtn.title = "Re-queue all images in this board for AI tagging" + (nextRun ? ` (${nextRun})` : "");
+          retagBtn.title = "Re-queue all items in this board for AI tagging" + (nextRun ? ` (${nextRun})` : "");
           retagBtn.onclick = async () => {
-            if (!confirm(`Re-tag all ${b.image_count} image(s) in "${b.name}"? Existing tags will be cleared and reprocessed.`)) return;
+            if (!confirm(`Re-tag all ${b.item_count} item(s) in "${b.name}"? Existing tags will be cleared and reprocessed.`)) return;
             try {
               retagBtn.disabled = true;
               retagBtn.textContent = "queuing…";
               const { queued } = await api("POST", `/api/admin/boards/${b.id}/retag`);
               retagBtn.textContent = `queued ${queued}`;
-              toast(`Queued ${queued} image(s) for retagging`);
+              toast(`Queued ${queued} item(s) for retagging`);
               setTimeout(renderBoards, 1500);
             } catch (err) {
               toast.error(err.message);
@@ -441,13 +441,13 @@
             const tagHeldBtn = document.createElement("button");
             tagHeldBtn.className = "ghost";
             tagHeldBtn.textContent = "tag held ▸";
-            tagHeldBtn.title = `Tag the ${b.held_count} held image(s) now, without turning auto-tagging back on`;
+            tagHeldBtn.title = `Tag the ${b.held_count} held item(s) now, without turning auto-tagging back on`;
             tagHeldBtn.onclick = async () => {
               try {
                 tagHeldBtn.disabled = true;
                 tagHeldBtn.textContent = "queuing…";
                 const { released } = await api("POST", `/api/admin/boards/${b.id}/tag-held`);
-                toast(`Queued ${released} held image(s) for tagging`);
+                toast(`Queued ${released} held item(s) for tagging`);
                 renderBoards();
               } catch (err) {
                 toast.error(err.message);
@@ -463,7 +463,7 @@
             stopBtn.textContent = "stop ■";
             stopBtn.title = "Cancel queued AI tagging for this board";
             stopBtn.onclick = async () => {
-              if (!confirm(`Stop the tagging queue for "${b.name}"? ${b.pending_count} queued image(s) will be pulled out — ones with previous tags keep them, the rest show as untagged for review.`)) return;
+              if (!confirm(`Stop the tagging queue for "${b.name}"? ${b.pending_count} queued item(s) will be pulled out — ones with previous tags keep them, the rest show as untagged for review.`)) return;
               try {
                 stopBtn.disabled = true;
                 stopBtn.textContent = "stopping…";
@@ -482,8 +482,8 @@
           delBtn.className = "danger";
           delBtn.textContent = "delete";
           delBtn.onclick = async () => {
-            const msg = b.image_count > 0
-              ? `Delete board "${b.name}" and its ${b.image_count} image(s)? This cannot be undone.`
+            const msg = b.item_count > 0
+              ? `Delete board "${b.name}" and its ${b.item_count} item(s)? This cannot be undone.`
               : `Delete board "${b.name}"?`;
             if (!confirm(msg)) return;
             try {
@@ -860,7 +860,7 @@
         const sec = document.createElement("div");
         sec.className = "section";
         sec.id = "ai-config-section";
-        sec.innerHTML = `<h2>AI Tagger</h2><p class="sub">API keys for automatic image tagging. The default applies to every board; a board can pick a different key in its settings.</p>`;
+        sec.innerHTML = `<h2>AI Tagger</h2><p class="sub">API keys for automatic tagging. The default applies to every board; a board can pick a different key in its settings.</p>`;
 
         // --- keys table ---
         if (keys.length) {

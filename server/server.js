@@ -5,10 +5,10 @@ import { inspect } from "node:util";
 import {
   openDb,
   initDb,
-  countImages,
-  listImages,
+  countItems,
+  listItems,
   deleteItem,
-  reprocessImage,
+  reprocessItem,
   cancelBoardQueue,
   seedAdmin,
   createUser,
@@ -25,14 +25,14 @@ import {
   listCrates,
   createCrate,
   deleteCrate,
-  toggleCrateImage,
+  toggleCrateItem,
   createBoard,
   listBoards,
   getBoard,
   updateBoard,
   deleteBoard,
   boardExists,
-  boardImageStats,
+  boardItemStats,
   boardAiUsage,
   retagBoard,
   releaseHeld,
@@ -40,9 +40,9 @@ import {
   getBoardMemberIds,
   setBoardMembers,
   canAccessBoard,
-  getImageBoard,
-  setImageTags,
-  getImageReasoning,
+  getItemBoard,
+  setItemTags,
+  getItemReasoning,
   getSetting,
   setSetting,
   listAiKeys,
@@ -173,7 +173,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // probed across boards. Attaches req.itemId / req.itemBoardId.
 const requireItemAccess = wrap(async (req, res, next) => {
   const id = Number(req.params.id);
-  const item = Number.isInteger(id) && id > 0 ? await getImageBoard(db, id) : null;
+  const item = Number.isInteger(id) && id > 0 ? await getItemBoard(db, id) : null;
   if (!item || !(await canAccessBoard(db, item.board_id, req.user)))
     return res.status(404).json({ error: "not found" });
   req.itemId = id;
@@ -182,7 +182,7 @@ const requireItemAccess = wrap(async (req, res, next) => {
 });
 
 app.get("/api/health", wrap(async (_req, res) => {
-  res.json({ ok: true, images: await countImages(db) });
+  res.json({ ok: true, items: await countItems(db) });
 }));
 
 // --- auth ---
@@ -243,10 +243,10 @@ app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
 
 app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => {
   const itemId = Number(req.params.itemId);
-  const item = Number.isInteger(itemId) && itemId > 0 ? await getImageBoard(db, itemId) : null;
+  const item = Number.isInteger(itemId) && itemId > 0 ? await getItemBoard(db, itemId) : null;
   if (!item || !(await canAccessBoard(db, item.board_id, req.user)))
     return res.status(404).json({ error: "not found" });
-  const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), itemId);
+  const result = await toggleCrateItem(db, req.user.id, Number(req.params.id), itemId);
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
@@ -300,13 +300,13 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
 
 app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
   const boards = await listBoards(db);
-  const stats = await boardImageStats(db);
+  const stats = await boardItemStats(db);
   const usage = await boardAiUsage(db);
   res.json(
     await Promise.all(
       boards.map(async (b) => ({
         ...b,
-        image_count: stats[b.id]?.c || 0,
+        item_count: stats[b.id]?.c || 0,
         pending_count: stats[b.id]?.p || 0,
         held_count: stats[b.id]?.h || 0,
         ai_usage: usage[b.id] || null,
@@ -418,7 +418,7 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   // nothing — uploads pile up as 'held', untagged, until tagging returns.
   if (eff.autoTag && !prev.auto_tag) {
     const n = await queueUntagged(db, id);
-    if (n) console.log(`board ${id}: auto-tagging on — swept ${n} untagged image(s) into the queue`);
+    if (n) console.log(`board ${id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
   }
 
   if (req.body && Array.isArray(req.body.memberIds)) {
@@ -433,17 +433,17 @@ app.post("/api/admin/boards/:id/retag", requireAdmin, wrap(async (req, res) => {
   if (!board) return res.status(404).json({ error: "not found" });
   const queued = await retagBoard(db, req.params.id);
   invalidateBoardCache(req.params.id);
-  console.log(`retag queued: ${queued} image(s) in board ${req.params.id}`);
+  console.log(`retag queued: ${queued} item(s) in board ${req.params.id}`);
   res.json({ ok: true, queued });
 }));
 
-// "Tag now" for a scheduled board: release held images without waiting for
+// "Tag now" for a scheduled board: release held items without waiting for
 // (or moving) the next scheduled run.
 app.post("/api/admin/boards/:id/tag-held", requireAdmin, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
   if (!board) return res.status(404).json({ error: "not found" });
   const released = await releaseHeld(db, req.params.id);
-  console.log(`tag-held: released ${released} held image(s) in board ${req.params.id}`);
+  console.log(`tag-held: released ${released} held item(s) in board ${req.params.id}`);
   res.json({ ok: true, released });
 }));
 
@@ -550,7 +550,7 @@ app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
 app.get("/api/items", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
-  res.json(await listImages(db, req.user.id, boardId));
+  res.json(await listItems(db, req.user.id, boardId));
 }));
 
 // Live server logs via Server-Sent Events.
@@ -573,7 +573,7 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 // The AI's per-facet justification for an item's tags. Kept out of the
 // /api/items list payload — fetched lazily when the lightbox panel opens.
 app.get("/api/items/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const row = await getImageReasoning(db, req.itemId);
+  const row = await getItemReasoning(db, req.itemId);
   res.json({ reasoning: row?.tag_reasoning || {} });
 }));
 
@@ -584,7 +584,7 @@ app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req
   const allowed = new Set();
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
-  await setImageTags(db, req.itemId, clean);
+  await setItemTags(db, req.itemId, clean);
   res.json({ ok: true, tags: clean });
 }));
 
@@ -598,7 +598,7 @@ app.delete("/api/items/:id", requireAuth, requireItemAccess, wrap(async (req, re
 }));
 
 app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  if (!(await reprocessImage(db, req.itemId))) return res.status(404).json({ error: "not found" });
+  if (!(await reprocessItem(db, req.itemId))) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued #${req.itemId}`);
   res.json({ ok: true, status: "pending" });
 }));

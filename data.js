@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
 
-// Batches of uploaded images we're waiting to see fully tagged.
+// Batches of uploaded items we're waiting to see fully tagged.
 const pendingBatches = []; // [{ ids: Set<id>, n: number }]
 
 document.addEventListener('app:uploads-pending-tag', (e) => {
@@ -11,12 +11,12 @@ document.addEventListener('app:uploads-pending-tag', (e) => {
 export function inProgress() {
   return [
     ...state.uploading,
-    ...state.images.filter((img) => img.status === "pending" || img.status === "processing"),
+    ...state.items.filter((img) => img.status === "pending" || img.status === "processing"),
   ];
 }
 
 export function reconcile(data) {
-  const byId = new Map(state.images.map((i) => [i.id, i]));
+  const byId = new Map(state.items.map((i) => [i.id, i]));
   for (const d of data) {
     const ex = byId.get(d.id);
     if (ex) {
@@ -29,7 +29,7 @@ export function reconcile(data) {
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
     } else {
-      state.images.unshift(toItem(d));
+      state.items.unshift(toItem(d));
     }
   }
 
@@ -37,7 +37,7 @@ export function reconcile(data) {
   for (let i = pendingBatches.length - 1; i >= 0; i--) {
     const { ids, n } = pendingBatches[i];
     const allDone = [...ids].every((id) => {
-      const img = state.images.find((m) => m.id === id);
+      const img = state.items.find((m) => m.id === id);
       return !img || img.status === 'tagged' || img.status === 'failed';
     });
     if (allDone) {

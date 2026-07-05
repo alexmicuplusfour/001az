@@ -4,7 +4,7 @@ export const state = {
   adapter: null, // the board type's client adapter (types/), set at boot
   facets: [],
   aiReasoning: true,
-  images: [],
+  items: [],
   uploading: [],
   selected: new Map(),
   bulkSelected: new Set(),

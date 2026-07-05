@@ -111,7 +111,7 @@ async function uploadChunk(chunk) {
       // Boards with auto-tagging off hold uploads ('held') instead of
       // queueing them — only truly pending images feed the
       // "Processing images…" watcher.
-      state.images.unshift({
+      state.items.unshift({
         id: row.id,
         name: row.name,
         status: row.status || "pending",

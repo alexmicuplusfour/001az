@@ -48,11 +48,11 @@ export function scheduleLayout() {
 }
 
 async function doDelete(id) {
-  if (!confirm("Delete this image?")) return;
+  if (!confirm("Delete this item?")) return;
   try {
     const r = await fetch(`/api/items/${id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
-    state.images = state.images.filter((i) => i.id !== id);
+    state.items = state.items.filter((i) => i.id !== id);
     document.dispatchEvent(new Event('app:render'));
   } catch {
     toast.error("Delete failed");
@@ -63,7 +63,7 @@ async function doReprocess(id) {
   try {
     const r = await fetch(`/api/items/${id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
-    const img = state.images.find((i) => i.id === id);
+    const img = state.items.find((i) => i.id === id);
     if (img) { img.status = "pending"; img.tags = []; img.tagSet = new Set(); }
     document.dispatchEvent(new Event('app:render'));
     ensurePolling();
@@ -241,7 +241,7 @@ function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = img.id;
-  // Held images (waiting for auto-tagging) get the same dashed "needs tags"
+  // Held items (waiting for auto-tagging) get the same dashed "needs tags"
   // treatment as AI-undecided ones.
   if (img.undecided || img.status === "held") card.classList.add("undecided");
   // The board type owns the card body (the media); grid owns the frame + chrome.
@@ -289,7 +289,7 @@ export function renderGrid(key, progressItems, items) {
   if (!items.length && !progressItems.length) {
     const e = document.createElement("div");
     e.className = "empty";
-    e.textContent = "No images match these filters.";
+    e.textContent = "No items match these filters.";
     elGrid.appendChild(e);
     return;
   }
