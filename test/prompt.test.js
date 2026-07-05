@@ -50,3 +50,11 @@ test("subject and context flow into the system text", () => {
   assert.match(systemText, /You tag widgets for a private research gallery/);
   assert.match(systemText, /Only tag blue things\./);
 });
+
+test("nothing image-specific leaks into a non-image board's prompt", () => {
+  for (const withReasoning of [true, false]) {
+    const { systemText, schema } = buildPrompt(facets, "", withReasoning, "stocks");
+    assert.doesNotMatch(systemText, /image/i);
+    assert.doesNotMatch(schema.properties.fit.description, /image/i);
+  }
+});

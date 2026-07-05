@@ -159,13 +159,25 @@ to fix before a second type exists:
       inside payload. A stock item has no filename. Either return raw payload and
       let the client adapter project it, or add a `summarize(payload)` hook.
       Breaks on day one of the stock type.
-- [ ] **Image-named core functions**: `countImages`, `listImages`,
-      `reprocessImage`, `getImageBoard`, `setImageTags`, `boardImageStats`,
-      `crates.image_count`, client `state.images`. Pure rename; do it while grep
-      is still honest.
-- [ ] **Prompt wording is image-hardcoded in the generic worker** —
-      `buildPrompt`'s non-reasoning paragraph says "For each image…" and the fit
-      descriptions say "the image" even though `subject` is parameterized.
+- [x] **Image-named core functions** (2026-07-05). Renamed `…Image…` → `…Item…`
+      across `db.js`/`server.js` — including `getImageReasoning` and
+      `toggleCrateImage`, which the original list missed. Two names crossed the
+      wire and changed with their client consumers in the same commit:
+      `crates.image_count` → `item_count` (crates.js, bulk.js, admin.js) and the
+      health endpoint's `images` count key → `items`. Client `state.images` →
+      `state.items` plus user-visible "image(s)" copy in admin/bulk/grid/toolbar
+      generalized to "item(s)". `grep -i image` in core files is now honest:
+      remaining hits are the image adapters, the legacy-migration code, and
+      provider part-kinds (`kind: "image"`), all genuinely image-specific.
+- [x] **Prompt wording is image-hardcoded in the generic worker** (2026-07-05).
+      The non-reasoning paragraph now opens "For each facet, select every
+      applicable value…" (mirroring the reasoning variant) and the fit
+      paragraph + both fit schema descriptions say "the item" — the plural
+      `subject` keeps its slot in the opening sentence. Regression-locked in
+      `prompt.test.js`: with a non-image subject, `systemText` and the fit
+      description contain no occurrence of "image" in either reasoning mode.
+      Deliberately not added: a `subjectSingular` manifest field — "item" is
+      unambiguous and the adapter contract stays smaller.
 - [ ] **Client unknown-type fallback renders the image adapter**
       (`types/index.js`) — an old client on a stock board requests
       `thumbnails/undefined.webp` per card. Fall back to a neutral

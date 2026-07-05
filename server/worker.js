@@ -71,9 +71,9 @@ export function buildPrompt(facets, context = "", withReasoning = true, subject 
   const contextBlock = context.trim() ? `\n${context.trim()}\n` : "";
   const selectPara = withReasoning
     ? `For each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is "undecided", leave every facet's values empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`
-    : `For each image, select every applicable tag from the facets below. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`;
+    : `For each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`;
   const systemText = `You tag ${subject} for a private research gallery.${contextBlock}
-Also decide whether the image is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the image is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the image is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an image you were able to describe with the facets is a match by definition.
+Also decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an item you were able to describe with the facets is a match by definition.
 
 ${selectPara}
 
@@ -113,7 +113,7 @@ Return your answer only by calling the record_tags tool.`;
   properties.fit = withReasoning
     ? {
         type: "object",
-        description: "Whether the image fits the kind of material this board collects.",
+        description: "Whether the item fits the kind of material this board collects.",
         properties: {
           reasoning: {
             type: "string",
@@ -127,7 +127,7 @@ Return your answer only by calling the record_tags tool.`;
     : {
         type: "string",
         enum: ["match", "undecided"],
-        description: "Whether the image fits the kind of material this board collects.",
+        description: "Whether the item fits the kind of material this board collects.",
       };
   required.push("fit");
   const schema = { type: "object", properties, required, additionalProperties: false };
@@ -223,7 +223,7 @@ export function startWorker({ db, registry }) {
     }
     // Only honor an undecided verdict when the model also found the facets
     // mostly inapplicable. It keeps folding "off-scope but taggable" into
-    // undecided regardless of prompt wording, and an image it could describe
+    // undecided regardless of prompt wording, and an item it could describe
     // with most of the facets is board material by definition.
     const undecided = verdict === "undecided" && filledFacets < facets.length / 2;
     return { tags, undecided, reasoning, usage, model: ai.model, provider: ai.provider };
@@ -239,7 +239,7 @@ export function startWorker({ db, registry }) {
       const skipped = b.auto_tag_skip_weekends && isWeekend(now);
       const queued = skipped ? 0 : await retagBoard(db, b.id);
       await setBoardNextRun(db, b.id, nextAutoTagRun(now, b.auto_tag_every_min, b.auto_tag_skip_weekends));
-      if (queued) console.log(`scheduled retag: queued ${queued} image(s) in board "${b.name}"`);
+      if (queued) console.log(`scheduled retag: queued ${queued} item(s) in board "${b.name}"`);
       else if (skipped) console.log(`scheduled retag: board "${b.name}" skipped (weekend) — rescheduled`);
     }
   }
@@ -259,11 +259,11 @@ export function startWorker({ db, registry }) {
 
   async function tick() {
     const recovered = await recoverStuck(db, STUCK_MS);
-    if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
+    if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
     await retagDue();
 
     // Boards without their own key only tag when a default exists; their
-    // images stay pending in the queue until one is configured.
+    // items stay pending in the queue until one is configured.
     const hasDefault = !!(await resolveDefaultAi(db));
     const rows = [];
     while (rows.length < CONCURRENCY) {
