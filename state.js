@@ -13,6 +13,7 @@ export const state = {
   me: null,
   boards: [],
   crates: [],
+  filterConfigs: [],
   selectedCrateId: null,
   showFavorites: false,
   sortByHearts: false,

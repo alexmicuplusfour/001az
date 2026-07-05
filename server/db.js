@@ -428,6 +428,36 @@ export async function toggleCrateItem(db, userId, crateId, itemId) {
   return { added: !exists, count: rows[0].c };
 }
 
+// --- filter configs (named facet-selection snapshots, per user per board) ---
+
+export async function listFilterConfigs(db, userId, boardId) {
+  const { rows } = await db.query(
+    "SELECT id, name, config FROM filter_configs WHERE user_id=$1 AND board_id=$2 ORDER BY created_at ASC",
+    [userId, boardId]
+  );
+  return rows;
+}
+
+// Saving under an existing name overwrites its config — "save" means
+// "this name now points at the current filters".
+export async function saveFilterConfig(db, userId, boardId, name, config) {
+  name = String(name).trim().slice(0, 64);
+  if (!name || !boardId) return null;
+  const { rows } = await db.query(
+    `INSERT INTO filter_configs (user_id, board_id, name, config, created_at)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (user_id, board_id, name) DO UPDATE SET config = EXCLUDED.config
+     RETURNING id, name, config`,
+    [userId, boardId, name, JSON.stringify(config || {}), Date.now()]
+  );
+  return rows[0];
+}
+
+export async function deleteFilterConfig(db, userId, id) {
+  const result = await db.query("DELETE FROM filter_configs WHERE id=$1 AND user_id=$2", [id, userId]);
+  return result.rowCount > 0;
+}
+
 // --- AI keys (multi-provider registry for the tagger) ---
 
 export async function listAiKeys(db) {

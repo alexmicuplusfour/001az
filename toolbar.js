@@ -3,6 +3,7 @@ import { ICONS, toolBtn } from './utils.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop } from './crates.js';
+import { openFilterConfigPop } from './filterconfigs.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -97,12 +98,26 @@ export function renderToolbar(resultCount) {
   // Row 2: filters / sort / count
   if (!state.boardName) return;
 
+  // Filters is a split button: the label toggles the facet panel, the
+  // chevron opens saved filter configs (logged-in only — they're per-user).
   const ac = activeCount();
-  elToolbarSub.appendChild(toolBtn(
+  const filtersWrap = document.createElement("div");
+  filtersWrap.className = "split-btn";
+  filtersWrap.appendChild(toolBtn(
     ac > 0 ? `Filters (${ac})` : "Filters",
     ac > 0 ? "active" : "",
     toggleFiltersOrDrawer
   ));
+  if (state.me) {
+    const arrow = document.createElement("button");
+    arrow.className = "tool-btn split-arrow" + (ac > 0 ? " active" : "");
+    arrow.title = "Saved filters";
+    arrow.setAttribute("aria-label", "Saved filters");
+    arrow.innerHTML = ICONS.chevron;
+    arrow.addEventListener("click", () => openFilterConfigPop(arrow));
+    filtersWrap.appendChild(arrow);
+  }
+  elToolbarSub.appendChild(filtersWrap);
 
   if (state.me) {
     elToolbarSub.appendChild(toolBtn(

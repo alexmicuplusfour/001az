@@ -46,8 +46,14 @@
       <div class="filter-drawer-scrim" id="filter-drawer-scrim"></div>
       <div class="filter-drawer-panel">
         <div class="filter-drawer-head">
-          <span class="filter-drawer-title">Filters</span>
-          <button id="filter-drawer-close" class="filter-drawer-close">Done</button>
+          <div class="filter-drawer-title-group">
+            <span class="filter-drawer-title">Filters</span>
+            <button id="filter-drawer-saved" class="filter-drawer-saved" title="Saved filters" aria-label="Saved filters" hidden></button>
+          </div>
+          <div class="filter-drawer-actions">
+            <button id="filter-drawer-clear" class="filter-drawer-clear" hidden>Clear filters</button>
+            <button id="filter-drawer-close" class="filter-drawer-close">Done</button>
+          </div>
         </div>
         <div id="filters-mobile"></div>
       </div>

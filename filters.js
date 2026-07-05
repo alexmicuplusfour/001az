@@ -74,6 +74,75 @@ export function clearAll() {
   document.dispatchEvent(new Event('app:render'));
 }
 
+// --- saved filter configs + URL encoding ---
+// A config is the facet selection as a plain object: { facetKey: [values] }.
+// Loading one is one-shot — it just sets the pills, nothing stays "applied".
+
+export function selectedAsConfig() {
+  const out = {};
+  for (const [key, values] of state.selected) {
+    if (values.size) out[key] = [...values].sort();
+  }
+  return out;
+}
+
+export function applyFilterConfig(config) {
+  state.selected = new Map(
+    Object.entries(config || {}).map(([k, v]) => [k, new Set(v)])
+  );
+  document.dispatchEvent(new Event('app:render'));
+}
+
+// True when a config matches the current pills exactly — pure feedback for
+// highlighting, not a mode. Compared canonically (sorted keys/values):
+// JSONB reorders object keys, so plain stringify comparison would lie.
+function canonConfig(config) {
+  return JSON.stringify(
+    Object.keys(config).sort().map((k) => [k, [...config[k]].sort()])
+  );
+}
+
+export function configMatchesCurrent(config) {
+  return canonConfig(config) === canonConfig(selectedAsConfig());
+}
+
+// Compact query-param form: "key:v1,v2;key2:v3" (parts URI-encoded so the
+// separators can't collide with facet names/values).
+export function encodeSelected() {
+  const parts = [];
+  for (const [key, values] of [...state.selected.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (!values.size) continue;
+    parts.push(
+      encodeURIComponent(key) + ":" + [...values].sort().map(encodeURIComponent).join(",")
+    );
+  }
+  return parts.join(";");
+}
+
+export function decodeSelected(str) {
+  const map = new Map();
+  if (!str) return map;
+  for (const part of str.split(";")) {
+    const i = part.indexOf(":");
+    if (i <= 0) continue;
+    const key = decodeURIComponent(part.slice(0, i));
+    const values = part.slice(i + 1).split(",").filter(Boolean).map(decodeURIComponent);
+    if (values.length) map.set(key, new Set(values));
+  }
+  return map;
+}
+
+// Mirror the current selection into ?f= so filtered views are shareable
+// links. replaceState keeps Back/Forward out of it.
+export function syncFiltersToUrl() {
+  const url = new URL(location.href);
+  const f = encodeSelected();
+  if (f) url.searchParams.set("f", f);
+  else url.searchParams.delete("f");
+  const next = url.pathname + url.search;
+  if (next !== location.pathname + location.search) history.replaceState(null, "", next);
+}
+
 export function renderFacetsInto(container) {
   container.replaceChildren();
   for (const facet of state.facets) {
@@ -105,6 +174,11 @@ export function renderFacets() {
   elFilters.classList.toggle("is-hidden", state.filtersHidden);
   if (!state.filtersHidden) renderFacetsInto(elFilters);
   renderFacetsInto(elFiltersMobile);
+  // drawer header: mirror the toolbar's "Clear filters (n)" button
+  const clear = document.getElementById("filter-drawer-clear");
+  const n = activeCount();
+  clear.hidden = n === 0;
+  clear.textContent = `Clear filters (${n})`;
 }
 
 function toggleFiltersDesktop() {
@@ -146,4 +220,5 @@ export function toggleFiltersOrDrawer() {
 export function initFilters() {
   document.getElementById("filter-drawer-scrim").addEventListener("click", closeFilterDrawer);
   document.getElementById("filter-drawer-close").addEventListener("click", closeFilterDrawer);
+  document.getElementById("filter-drawer-clear").addEventListener("click", clearAll);
 }

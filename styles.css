@@ -73,6 +73,34 @@ header {
   color: var(--text-dim);
 }
 
+/* split button (Filters + saved-filters chevron): two tool-btns fused into
+   one control, sharing the middle border */
+.split-btn {
+  display: inline-flex;
+}
+.split-btn .tool-btn:first-child:not(:only-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-btn .split-arrow {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+  padding: 4px 5px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.split-btn .split-arrow svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.65;
+}
+/* keep the seam visible when both halves go dark */
+.split-btn .split-arrow.active {
+  border-left-color: rgba(255, 255, 255, 0.3);
+}
+
 .toolbar-logo {
   font-family: monospace;
   font-size: 13px;
@@ -1161,6 +1189,53 @@ a.tool-btn {
 .filter-drawer-title {
   font-size: 14px;
   font-weight: 600;
+}
+
+.filter-drawer-title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* same affordance as the toolbar split-button chevron */
+.filter-drawer-saved {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #e2e2e6;
+  background: #fff;
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 5px;
+  line-height: 0;
+  cursor: pointer;
+}
+.filter-drawer-saved:hover {
+  background: var(--pill-bg);
+}
+.filter-drawer-saved svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.65;
+}
+
+.filter-drawer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* quiet, like the toolbar's clear button */
+.filter-drawer-clear {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 5px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.filter-drawer-clear:hover {
+  color: var(--text);
 }
 
 .filter-drawer-close {

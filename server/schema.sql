@@ -141,6 +141,20 @@ CREATE TABLE IF NOT EXISTS crates (
 );
 CREATE INDEX IF NOT EXISTS idx_crates_user ON crates(user_id);
 
+-- Saved filter configurations: a named snapshot of the facet selection.
+-- Applied one-shot (loading one just sets the filters; nothing stays
+-- "active"). Per user per board — facets differ across boards.
+CREATE TABLE IF NOT EXISTS filter_configs (
+  id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  board_id   TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  config     JSONB NOT NULL DEFAULT '{}',  -- { facetKey: [values] }
+  created_at BIGINT NOT NULL,
+  UNIQUE(user_id, board_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_filter_configs_user ON filter_configs(user_id, board_id);
+
 CREATE TABLE IF NOT EXISTS crate_items (
   crate_id   BIGINT NOT NULL REFERENCES crates(id) ON DELETE CASCADE,
   item_id    BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,

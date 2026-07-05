@@ -73,6 +73,16 @@
   white-space: nowrap;
 }
 
+/* non-interactive hint (e.g. an empty menu explaining itself) */
+.dd-empty {
+  padding: 6px 8px;
+  color: #6a7080;
+  font-size: 12.5px;
+  max-width: 210px;
+  line-height: 1.45;
+  user-select: none;
+}
+
 .dd-sep {
   flex-shrink: 0;
   height: 1px;

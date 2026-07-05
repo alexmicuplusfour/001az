@@ -26,6 +26,9 @@ import {
   createCrate,
   deleteCrate,
   toggleCrateItem,
+  listFilterConfigs,
+  saveFilterConfig,
+  deleteFilterConfig,
   createBoard,
   listBoards,
   getBoard,
@@ -249,6 +252,37 @@ app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => 
   const result = await toggleCrateItem(db, req.user.id, Number(req.params.id), itemId);
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
+}));
+
+// --- saved filter configs (any logged-in user) ---
+app.get("/api/filter-configs", requireAuth, wrap(async (req, res) => {
+  res.json(await listFilterConfigs(db, req.user.id, req.query.board || ""));
+}));
+
+app.post("/api/filter-configs", requireAuth, wrap(async (req, res) => {
+  const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
+  if (!name) return res.status(400).json({ error: "name required" });
+  const boardId = (req.body && req.body.board_id ? String(req.body.board_id) : "").trim();
+  if (!boardId || !(await boardExists(db, boardId)) || !(await canAccessBoard(db, boardId, req.user)))
+    return res.status(404).json({ error: "board not found" });
+  // config: { facetKey: [values] } — keep only that shape.
+  const raw = req.body && typeof req.body.config === "object" && req.body.config ? req.body.config : {};
+  const config = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!Array.isArray(v)) continue;
+    const values = v.filter((x) => typeof x === "string").slice(0, 100);
+    if (values.length) config[String(k).slice(0, 100)] = values;
+  }
+  if (!Object.keys(config).length) return res.status(400).json({ error: "empty config" });
+  const saved = await saveFilterConfig(db, req.user.id, boardId, name, config);
+  if (!saved) return res.status(400).json({ error: "invalid name" });
+  res.json({ config: saved });
+}));
+
+app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
+  if (!(await deleteFilterConfig(db, req.user.id, Number(req.params.id))))
+    return res.status(404).json({ error: "not found" });
+  res.json({ ok: true });
 }));
 
 // --- admin: manage members ---

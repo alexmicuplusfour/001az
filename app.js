@@ -1,10 +1,11 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
-import { filterKey, taggedFiltered, renderFacets, initFilters } from './filters.js';
+import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl } from './filters.js';
 import { inProgress, reconcile, ensurePolling } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
 import { renderToolbar } from './toolbar.js';
+import { initFilterConfigsUI } from './filterconfigs.js';
 import { registerType, getType } from './types/index.js';
 import imageType from './types/image/index.js';
 
@@ -16,6 +17,7 @@ function render() {
   renderToolbar(tagged.length);
   renderFacets();
   renderGrid(key, inProgress(), tagged);
+  syncFiltersToUrl();
   requestAnimationFrame(() => {
     layoutGrid();
     pokeSentinel();
@@ -30,6 +32,7 @@ async function main() {
 
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
+  state.selected = decodeSelected(params.get("f")); // shareable filtered links
 
   if (!state.boardId) {
     const accessible = await fetch("/api/boards", { cache: "no-store" })
@@ -42,7 +45,7 @@ async function main() {
     }
   }
 
-  const [boardData, itemsData, meData, cratesData, boardsData] = await Promise.all([
+  const [boardData, itemsData, meData, cratesData, boardsData, filterConfigsData] = await Promise.all([
     state.boardId
       ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
       : Promise.resolve(null),
@@ -54,6 +57,9 @@ async function main() {
       ? fetch(`/api/crates?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
       : Promise.resolve([]),
     fetch("/api/boards", { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => []),
+    state.boardId
+      ? fetch(`/api/filter-configs?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   if (boardData) localStorage.setItem("lastBoard", String(state.boardId));
@@ -66,6 +72,8 @@ async function main() {
   state.me = meData;
   state.items = itemsData.map(toItem);
   state.crates = Array.isArray(cratesData) ? cratesData : [];
+  state.filterConfigs = Array.isArray(filterConfigsData) ? filterConfigsData : [];
+  initFilterConfigsUI();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   render();
   ensurePolling();
