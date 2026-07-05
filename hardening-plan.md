@@ -116,22 +116,17 @@ here is fixed yet.
       upload object URLs), `'unsafe-inline'` styles (admin's inline attrs), and
       `object-src/frame-ancestors 'none'`. Regression-tested in `access.test.js`.
       HSTS still belongs at Caddy where TLS terminates — not yet added.
-- [ ] **Hash session + invite tokens at rest.** Verified raw: `sessions.id` and
-      `invites.token` are the tokens themselves (PKs), looked up by equality; the
-      cookie holds the raw `sid`. A DB read = instant login as anyone + every
-      permanent invite (100-year expiry ≈ a password). Both are 192-bit random, so
-      this is purely at-rest exposure. **Good news — the migration is
-      non-breaking:** store `sha256(token)` (hex) and hash the incoming value on
-      lookup; a one-time in-place `UPDATE … SET token = sha256(token)` preserves
-      *every* existing session cookie and already-sent invite link, because the
-      raw value still hashes to the stored digest. Raw tokens then live only in the
-      cookie and the minted URL.
-- [ ] **Don't hand every user's permanent token to the admin page.** Related:
-      `listUsers` (`db.js`) eagerly returns each user's newest permanent invite
-      `link_token`, and `admin.html` builds login URLs from them — so the admin DOM
-      holds a permanent credential for *every* user at once. The "new link" button
-      already mints on demand (`POST /users/:id/link`); stop returning tokens in
-      the list and build links only from that action.
+- [x] **Hash session + invite tokens at rest** (2026-07-05). `db.js` stores only
+      `sha256(token)` (hex) for sessions and invites and hashes the incoming value
+      on lookup; raw tokens live only in the cookie / minted URL. The one-time
+      in-place migration in `initDb` (`UPDATE … SET id = encode(sha256(id::bytea),
+      'hex') WHERE length <> 64`) proved non-breaking against the live DB: 16
+      sessions + 2 invites hashed, yet the pre-existing session cookie still
+      authenticated and the already-minted invite link still redeemed. Round-trip
+      regression-tested (`access.test.js`).
+- [x] **Stopped handing every user's token to the admin page** (2026-07-05).
+      `listUsers` no longer returns `link_token` (it's a hash now anyway);
+      `admin.html` mints on demand via the existing `POST /users/:id/link`.
 - [ ] **AI keys plaintext in Postgres** (`ai_keys.api_key`). Raw key never leaves
       the server (list endpoint returns only a last-4 hint — good), but it's
       readable in any dump. Self-hosted single-tenant lowers urgency: README note

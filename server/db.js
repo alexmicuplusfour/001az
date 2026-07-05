@@ -12,6 +12,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // comparison silently breaks.
 pg.types.setTypeParser(20, Number);
 
+// Session ids and invite tokens are bearer credentials: the raw value goes to
+// the client (cookie / login URL) but only its SHA-256 is stored, so a DB read
+// can't be replayed as a login. Raw tokens are 48 hex chars, digests 64 — the
+// length gap drives the one-time migration in initDb.
+const hashToken = (t) => crypto.createHash("sha256").update(String(t)).digest("hex");
+
 export function openDb(databaseUrl) {
   return new pg.Pool({ connectionString: databaseUrl, max: 5 });
 }
@@ -21,6 +27,13 @@ export async function initDb(db) {
   await migrateImagesToItems(db); // must run before schema.sql (see below)
   const sql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   await db.query(sql);
+  // One-time: hash any raw session ids / invite tokens left at rest (48 hex
+  // chars → 64-char SHA-256). Non-breaking — an existing cookie or login link
+  // still hashes to the stored digest. Idempotent via the length guard, so
+  // fresh installs and already-migrated DBs skip it. Postgres has sha256()
+  // built in (>= PG 11); text::bytea gives the same bytes Node hashes.
+  await db.query("UPDATE sessions SET id = encode(sha256(id::bytea), 'hex') WHERE length(id) <> 64");
+  await db.query("UPDATE invites SET token = encode(sha256(token::bytea), 'hex') WHERE length(token) <> 64");
   // One-time migration: fold the legacy single-key setting into the ai_keys
   // registry and point the default at it.
   const legacy = await getSetting(db, "api_key");
@@ -244,10 +257,11 @@ export async function userExists(db, id) {
 }
 
 export async function listUsers(db) {
+  // No invite token here: it's a bearer credential and only its hash is stored
+  // now anyway. The admin mints a fresh link on demand (POST /users/:id/link).
   const { rows } = await db.query(
     `SELECT u.id, u.email, u.name, u.is_admin, u.last_login_at,
-      (SELECT COUNT(*) FROM favorites f WHERE f.user_id = u.id) AS hearts_given,
-      (SELECT token FROM invites WHERE user_id = u.id AND permanent ORDER BY created_at DESC LIMIT 1) AS link_token
+      (SELECT COUNT(*) FROM favorites f WHERE f.user_id = u.id) AS hearts_given
      FROM users u ORDER BY u.is_admin DESC, u.created_at ASC`
   );
   return rows;
@@ -259,12 +273,13 @@ export async function deleteUser(db, id) {
 }
 
 export async function consumeInvite(db, token) {
-  const { rows } = await db.query("SELECT * FROM invites WHERE token=$1", [token]);
+  const hash = hashToken(token);
+  const { rows } = await db.query("SELECT * FROM invites WHERE token=$1", [hash]);
   const row = rows[0];
   if (!row || row.expires_at < Date.now()) return null;
   if (!row.permanent) {
     if (row.used_at) return null;
-    await db.query("UPDATE invites SET used_at=$1 WHERE token=$2", [Date.now(), token]);
+    await db.query("UPDATE invites SET used_at=$1 WHERE token=$2", [Date.now(), hash]);
   }
   return row.user_id;
 }
@@ -277,10 +292,10 @@ export async function mintPermanentInvite(db, userId) {
     await client.query(
       `INSERT INTO invites (token, user_id, expires_at, used_at, created_at, permanent)
        VALUES ($1, $2, $3, NULL, $4, TRUE)`,
-      [token, userId, now + 100 * 365 * 24 * 3600 * 1000, now]
+      [hashToken(token), userId, now + 100 * 365 * 24 * 3600 * 1000, now]
     );
   });
-  return token;
+  return token; // raw token — returned once, only its hash is stored
 }
 
 export async function createSession(db, userId, ttlMs = 90 * 24 * 3600 * 1000) {
@@ -288,9 +303,9 @@ export async function createSession(db, userId, ttlMs = 90 * 24 * 3600 * 1000) {
   const now = Date.now();
   await db.query(
     "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
-    [id, userId, now, now + ttlMs]
+    [hashToken(id), userId, now, now + ttlMs]
   );
-  return id;
+  return id; // raw id for the cookie; the DB holds only its hash
 }
 
 export async function getSessionUser(db, sid) {
@@ -298,13 +313,13 @@ export async function getSessionUser(db, sid) {
   const { rows } = await db.query(
     `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.id = $1 AND s.expires_at > $2`,
-    [sid, Date.now()]
+    [hashToken(sid), Date.now()]
   );
   return rows[0] || null;
 }
 
 export async function deleteSession(db, sid) {
-  if (sid) await db.query("DELETE FROM sessions WHERE id=$1", [sid]);
+  if (sid) await db.query("DELETE FROM sessions WHERE id=$1", [hashToken(sid)]);
 }
 
 // Sliding expiry: renew the session to now+ttl, but only write if it hasn't
@@ -314,7 +329,7 @@ export async function touchSession(db, sid, ttlMs = 90 * 24 * 3600 * 1000, minId
   const now = Date.now();
   const result = await db.query("UPDATE sessions SET expires_at=$1 WHERE id=$2 AND expires_at < $3", [
     now + ttlMs,
-    sid,
+    hashToken(sid),
     now + ttlMs - minIdleMs,
   ]);
   return result.rowCount > 0;

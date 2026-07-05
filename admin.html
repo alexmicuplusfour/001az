@@ -465,7 +465,9 @@
 
         const rows = document.getElementById("rows");
         for (const u of users) {
-          u.link = u.link_token ? `${location.origin}/auth/${u.link_token}` : null;
+          // Login links are minted on demand — the server no longer hands out
+          // tokens in this list (they're bearer credentials, hashed at rest).
+          u.link = null;
 
           const tr = document.createElement("tr");
           const last = u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : '<span class="muted">never</span>';
