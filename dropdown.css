@@ -58,13 +58,6 @@
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
 }
-.dd-row input[type="checkbox"] {
-  flex-shrink: 0;
-  accent-color: #5a6170;
-  cursor: pointer;
-  width: 14px;
-  height: 14px;
-}
 .dd-label {
   flex: 1;
   min-width: 0;

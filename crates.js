@@ -1,6 +1,7 @@
 import { state } from './state.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
+import { createCheckbox } from './checkbox.js';
 import { toast } from './toast.js';
 import { teardownCardHover } from './grid.js';
 
@@ -162,13 +163,14 @@ export function openCratePop(anchorEl, img = null) {
       for (const crate of crates) {
         if (img) {
           // Assign mode: checkboxes to add/remove the item from crates.
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = img.crateIds.has(crate.id);
-          cb.addEventListener("change", () => toggleCrateItemApi(img, crate.id, cb));
+          const cb = createCheckbox({
+            variant: "dark",
+            checked: img.crateIds.has(crate.id),
+            onChange: () => toggleCrateItemApi(img, crate.id, cb),
+          });
           body.appendChild(ddRow({
             label: crate.name,
-            leading: cb,
+            leading: cb.el,
             trailing: crateTrailing(crate),
             onClick: () => {
               cb.checked = !cb.checked;
