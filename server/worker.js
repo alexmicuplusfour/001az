@@ -175,9 +175,10 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
 }
 
 export function startWorker({ db, registry }) {
-  const POLL_MS = Number(process.env.POLL_MS || 10000);
+  const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
+  const CONCURRENCY = Math.max(1, Number(process.env.TAG_CONCURRENCY) || 4);
 
   async function tagOne(row) {
     const prompt = await getBoardPrompt(db, registry, row.board_id);
@@ -243,16 +244,7 @@ export function startWorker({ db, registry }) {
     }
   }
 
-  async function tick() {
-    const recovered = await recoverStuck(db, STUCK_MS);
-    if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
-    await retagDue();
-
-    // Boards without their own key only tag when a default exists; their
-    // images stay pending in the queue until one is configured.
-    const hasDefault = !!(await resolveDefaultAi(db));
-    const row = await claimNextPending(db, hasDefault);
-    if (!row) return 0;
+  async function processOne(row) {
     const label = row.payload?.filename || `item ${row.id}`;
     try {
       const { tags, undecided, reasoning, usage, model } = await tagOne(row);
@@ -263,7 +255,25 @@ export function startWorker({ db, registry }) {
       const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS);
       console.warn(`tag error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
     }
-    return 1;
+  }
+
+  async function tick() {
+    const recovered = await recoverStuck(db, STUCK_MS);
+    if (recovered) console.log(`worker: recovered ${recovered} stuck image(s)`);
+    await retagDue();
+
+    // Boards without their own key only tag when a default exists; their
+    // images stay pending in the queue until one is configured.
+    const hasDefault = !!(await resolveDefaultAi(db));
+    const rows = [];
+    while (rows.length < CONCURRENCY) {
+      const row = await claimNextPending(db, hasDefault);
+      if (!row) break;
+      rows.push(row);
+    }
+    if (!rows.length) return 0;
+    await Promise.all(rows.map(processOne));
+    return rows.length;
   }
 
   let running = true;
@@ -281,9 +291,9 @@ export function startWorker({ db, registry }) {
 
   resolveDefaultAi(db).then((ai) => {
     if (ai) {
-      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings).`);
+      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings, ${CONCURRENCY} concurrent).`);
     } else {
-      console.log("AI tagging worker started (no default key — only boards with their own key will tag).");
+      console.log(`AI tagging worker started (no default key — only boards with their own key will tag, ${CONCURRENCY} concurrent).`);
     }
   });
   return () => {
