@@ -173,6 +173,10 @@ header {
   white-space: nowrap;
 }
 
+.facet-label-empty {
+  visibility: hidden;
+}
+
 .pills {
   display: flex;
   flex-wrap: wrap;

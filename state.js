@@ -16,5 +16,6 @@ export const state = {
   filterConfigs: [],
   selectedCrateId: null,
   showFavorites: false,
+  showUntagged: false,
   sortByHearts: false,
 };

@@ -10,7 +10,7 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.sortByHearts, state.selectedCrateId, state.boardId]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.sortByHearts, state.selectedCrateId, state.boardId]);
 }
 
 function matchesExcept(img, exceptKey) {
@@ -31,10 +31,15 @@ export function isTagged(img) {
   return img.status === "tagged" || img.status === "failed" || img.status === "held" || !img.status;
 }
 
+export function isUntagged(img) {
+  return img.tags.length === 0;
+}
+
 export function taggedFiltered() {
   const list = state.items.filter(
     (img) =>
       isTagged(img) &&
+      (!state.showUntagged || isUntagged(img)) &&
       (!state.showFavorites || img.favoritedByMe) &&
       (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId)) &&
       matchesExcept(img, null)
@@ -58,6 +63,7 @@ function facetHasData(facetKey) {
 export function activeCount() {
   let n = 0;
   for (const values of state.selected.values()) n += values.size;
+  if (state.showUntagged) n++;
   return n;
 }
 
@@ -71,6 +77,24 @@ export function toggle(facetKey, value) {
 
 export function clearAll() {
   state.selected = new Map();
+  state.showUntagged = false;
+  document.dispatchEvent(new Event('app:render'));
+}
+
+function untaggedCount() {
+  let n = 0;
+  for (const img of state.items) {
+    if (!isTagged(img) || !isUntagged(img)) continue;
+    if (state.showFavorites && !img.favoritedByMe) continue;
+    if (state.selectedCrateId != null && !img.crateIds.has(state.selectedCrateId)) continue;
+    if (!matchesExcept(img, null)) continue;
+    n++;
+  }
+  return n;
+}
+
+function toggleUntagged() {
+  state.showUntagged = !state.showUntagged;
   document.dispatchEvent(new Event('app:render'));
 }
 
@@ -145,9 +169,26 @@ export function syncFiltersToUrl() {
 
 export function renderFacetsInto(container) {
   container.replaceChildren();
+  const totalUntagged = state.items.filter((img) => isTagged(img) && isUntagged(img)).length;
+  if (totalUntagged > 0 || state.showUntagged) {
+    const row = document.createElement("div");
+    row.className = "facet facet-untagged";
+    const spacer = document.createElement("div");
+    spacer.className = "facet-label facet-label-empty";
+    spacer.setAttribute("aria-hidden", "true");
+    row.appendChild(spacer);
+    const pills = document.createElement("div");
+    pills.className = "pills";
+    const ctxCount = untaggedCount();
+    pills.appendChild(
+      pill("Untagged", ctxCount, state.showUntagged, !state.showUntagged && ctxCount === 0, toggleUntagged)
+    );
+    row.appendChild(pills);
+    container.appendChild(row);
+  }
   for (const facet of state.facets) {
-    if (!facetHasData(facet.key)) continue;
     const sel = state.selected.get(facet.key) || new Set();
+    if (!facetHasData(facet.key) && sel.size === 0) continue;
     const row = document.createElement("div");
     row.className = "facet";
     const label = document.createElement("div");
@@ -158,9 +199,9 @@ export function renderFacetsInto(container) {
     pills.className = "pills";
     for (const value of facet.values) {
       const total = state.items.filter((img) => img.tagSet.has(tag(facet.key, value))).length;
-      if (total === 0) continue;
-      const ctxCount = valueCount(facet.key, value);
       const active = sel.has(value);
+      if (total === 0 && !active) continue;
+      const ctxCount = valueCount(facet.key, value);
       pills.appendChild(
         pill(value, ctxCount, active, !active && ctxCount === 0, () => toggle(facet.key, value))
       );
