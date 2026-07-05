@@ -114,6 +114,32 @@ registry.register(imageType({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR }))
 
 const app = express();
 app.disable("x-powered-by");
+// Caddy terminates in front of us; trust one hop so req.ip is the client,
+// not the proxy (rate limiting and request logs key on it).
+app.set("trust proxy", 1);
+
+// Security headers on every response. CSP notes: fonts come from Google Fonts;
+// img needs data: (inline SVG chevron in admin.css) and blob: (upload
+// placeholder object URLs); 'unsafe-inline' styles cover admin.html's style=""
+// attrs and logs.html's <style> block. HSTS is Caddy's job (TLS lives there).
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src https://fonts.gstatic.com",
+  "img-src 'self' data: blob:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+app.use((_req, res, next) => {
+  res.setHeader("Content-Security-Policy", CSP);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
+  next();
+});
+
 app.use(express.json());
 app.use(attachUser(db));
 
@@ -581,10 +607,32 @@ app.use((err, _req, res, _next) => {
 // tagging worker stays off.
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
 if (isMain) {
-  app.listen(PORT, HOST, () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
-    startWorker({ db, registry });
   });
+  const stopWorker = startWorker({ db, registry });
+
+  // Graceful shutdown. In the container node is PID 1, which ignores signals
+  // it has no handler for — without this, every `docker stop` waits out the
+  // grace period and SIGKILLs mid-tag. Order: stop claiming work, close the
+  // listener (SSE streams would hold it open forever, so end those and drop
+  // lingering keep-alives), let an in-flight tag finish (bounded), then end
+  // the pool.
+  let shuttingDown = false;
+  async function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`${signal}: shutting down`);
+    const drained = stopWorker();
+    server.close();
+    for (const res of logClients) res.end();
+    server.closeAllConnections();
+    await Promise.race([drained, new Promise((r) => setTimeout(r, 5000).unref())]);
+    await db.end();
+    process.exit(0);
+  }
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 export { app, db, registry };

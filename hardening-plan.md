@@ -95,28 +95,61 @@ What devs check before reading a line of logic:
 
 ## Tier 3 — Ops & security conventions
 
-- [ ] **Graceful shutdown.** `startWorker` returns a stop fn that's never wired;
-      no SIGTERM handler, so every deploy kills mid-tag (stuck-recovery masks it,
-      but each deploy burns an in-flight call and strands a `processing` row for
-      ~3 min). On SIGTERM: stop claiming, `server.close()`, `db.end()`.
-- [ ] **Security headers.** No CSP / `X-Content-Type-Options` / `Referrer-Policy`
-      / `frame-ancestors`. Cheapest as a Caddy `header` block; strict CSP is very
-      doable since the frontend is dependency-free same-origin modules.
-      (CSRF is already mostly covered: SameSite=Lax + all mutations non-GET.)
-- [ ] **Hash tokens at rest.** Sessions and invite tokens stored raw — a DB dump
-      yields live logins. Store `sha256(token)`, hash on lookup. Extra weight
-      here: permanent invites are effectively passwords with a 100-year expiry.
-- [ ] **AI keys are plaintext in Postgres.** Fine for self-hosted, but README
-      should say so; envelope encryption with an env-provided key is the usual
-      next step.
-- [ ] **Rate limiting** on `/auth/:token` and `/api/upload`. Tokens are 192-bit
-      random so brute force isn't practical, but an unthrottled unauthenticated
-      endpoint gets flagged on sight.
-- [ ] **Backups.** Nothing dumps Postgres or snapshots the uploads volume.
-      `pg_dump` cron + documented restore path.
-- [ ] **Request logging.** Console-patch + SSE ring buffer is fine for the live
-      viewer, but there's no request logging (status/duration) or levels/structure.
-      pino + pino-http; the SSE viewer can consume it just as well.
+Deep-dived 2026-07-05. Ordered by leverage (cheap correctness first). Nothing
+here is fixed yet.
+
+- [x] **Graceful shutdown** (2026-07-05). `server.js` keeps the `startWorker`
+      return value and installs `SIGTERM`/`SIGINT` handlers: stop claiming, close
+      the listener, end SSE `logClients`, `closeAllConnections()`, race the
+      in-flight tick against a 5s cap, then `db.end()`. `startWorker`'s stop fn now
+      returns the loop promise and its poll sleep is interruptible, so shutdown
+      doesn't wait out a poll. Verified in-container: `docker compose stop app`
+      dropped from ~10s (SIGKILL) to **460ms**, logging `SIGTERM: shutting down`.
+- [x] **`app.set('trust proxy', 1)`** (2026-07-05). In place; `req.ip` is now the
+      real client behind Caddy.
+- [x] **Security headers / CSP** (2026-07-05). One Express middleware sets CSP +
+      `X-Content-Type-Options: nosniff` + `Referrer-Policy: same-origin` on every
+      response (covers compose and droplet uniformly; verified through Caddy).
+      `logs.html`'s inline `<script>` was externalized to `logs.js` so
+      `script-src 'self'` holds with no hash/nonce. Policy allows Google Fonts
+      (`style-src`/`font-src`), `img-src 'self' data: blob:` (admin chevron SVG +
+      upload object URLs), `'unsafe-inline'` styles (admin's inline attrs), and
+      `object-src/frame-ancestors 'none'`. Regression-tested in `access.test.js`.
+      HSTS still belongs at Caddy where TLS terminates — not yet added.
+- [ ] **Hash session + invite tokens at rest.** Verified raw: `sessions.id` and
+      `invites.token` are the tokens themselves (PKs), looked up by equality; the
+      cookie holds the raw `sid`. A DB read = instant login as anyone + every
+      permanent invite (100-year expiry ≈ a password). Both are 192-bit random, so
+      this is purely at-rest exposure. **Good news — the migration is
+      non-breaking:** store `sha256(token)` (hex) and hash the incoming value on
+      lookup; a one-time in-place `UPDATE … SET token = sha256(token)` preserves
+      *every* existing session cookie and already-sent invite link, because the
+      raw value still hashes to the stored digest. Raw tokens then live only in the
+      cookie and the minted URL.
+- [ ] **Don't hand every user's permanent token to the admin page.** Related:
+      `listUsers` (`db.js`) eagerly returns each user's newest permanent invite
+      `link_token`, and `admin.html` builds login URLs from them — so the admin DOM
+      holds a permanent credential for *every* user at once. The "new link" button
+      already mints on demand (`POST /users/:id/link`); stop returning tokens in
+      the list and build links only from that action.
+- [ ] **AI keys plaintext in Postgres** (`ai_keys.api_key`). Raw key never leaves
+      the server (list endpoint returns only a last-4 hint — good), but it's
+      readable in any dump. Self-hosted single-tenant lowers urgency: README note
+      now; envelope encryption (AES-256-GCM, master key from an env var, decrypt in
+      `getAiKey`/`resolveDefaultAi`/`testKey`) is the real fix later.
+- [ ] **Rate limiting.** None. Highest-value targets: `/auth/:token` (unauth) and
+      `/api/upload` (auth but sharp/CPU-heavy). Tokens are 192-bit so this is
+      abuse/DoS throttling, not brute-force prevention. Single process → a small
+      in-memory limiter needs no dependency; requires `trust proxy` (above) to key
+      on the real client IP.
+- [ ] **Request logging.** No structured access log (method/path/status/duration)
+      or levels — just ad-hoc `console.log`s. Cheap first step with zero deps: a
+      middleware that logs one line per request through the existing console patch,
+      so it flows into the SSE viewer for free. `pino` + `pino-http` is the
+      convention if/when structure is wanted.
+- [ ] **Backups.** Nothing dumps Postgres or snapshots the `appdata`/`pgdata`
+      volumes. `pg_dump` cron + uploads tar, with a documented restore path (or
+      lean on droplet snapshots and say so).
 
 ## Generalization pre-work (before the stock adapter)
 

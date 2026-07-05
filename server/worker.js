@@ -277,7 +277,8 @@ export function startWorker({ db, registry }) {
   }
 
   let running = true;
-  (async function loop() {
+  let wake = () => {};
+  const loop = (async () => {
     while (running) {
       let n = 0;
       try {
@@ -285,7 +286,16 @@ export function startWorker({ db, registry }) {
       } catch (e) {
         console.error("worker tick error:", e.message);
       }
-      await new Promise((r) => setTimeout(r, n > 0 ? 400 : POLL_MS));
+      if (!running) break;
+      // Interruptible sleep: stop() short-circuits it so shutdown never
+      // waits out a poll interval.
+      await new Promise((r) => {
+        const t = setTimeout(r, n > 0 ? 400 : POLL_MS);
+        wake = () => {
+          clearTimeout(t);
+          r();
+        };
+      });
     }
   })();
 
@@ -296,7 +306,11 @@ export function startWorker({ db, registry }) {
       console.log(`AI tagging worker started (no default key — only boards with their own key will tag, ${CONCURRENCY} concurrent).`);
     }
   });
+  // Stop claiming immediately; the returned promise resolves once the
+  // in-flight tick (if any) has finished, so callers can drain before exit.
   return () => {
     running = false;
+    wake();
+    return loop;
   };
 }

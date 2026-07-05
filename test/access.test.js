@@ -119,6 +119,17 @@ test("static image bytes require a session", async () => {
   assert.equal(authed.status, 200);
 });
 
+test("security headers are set on every response", async () => {
+  const res = await fetch(base + "/api/health");
+  const csp = res.headers.get("content-security-policy");
+  assert.match(csp, /default-src 'self'/);
+  assert.match(csp, /object-src 'none'/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.equal(res.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(res.headers.get("referrer-policy"), "same-origin");
+  assert.equal(res.headers.get("x-powered-by"), null);
+});
+
 test("delete removes the item and is idempotent afterward", async () => {
   const victim = await seedItem(db, boardA);
   const del = await req(base, "DELETE", `/api/items/${victim.id}`, { sid: member.sid });
