@@ -110,8 +110,11 @@ here is fixed yet.
 - [x] **Security headers / CSP** (2026-07-05). One Express middleware sets CSP +
       `X-Content-Type-Options: nosniff` + `Referrer-Policy: same-origin` on every
       response (covers compose and droplet uniformly; verified through Caddy).
-      `logs.html`'s inline `<script>` was externalized to `logs.js` so
-      `script-src 'self'` holds with no hash/nonce. Policy allows Google Fonts
+      Both inline page scripts were externalized so `script-src 'self'` holds
+      with no hash/nonce: `logs.html` → `logs.js`, and `admin.html` → `admin.js`
+      (the initial per-page inline-script count missed `<script type="module">`;
+      admin's block tripped CSP in the browser and was moved out after the fact).
+      Policy allows Google Fonts
       (`style-src`/`font-src`), `img-src 'self' data: blob:` (admin chevron SVG +
       upload object URLs), `'unsafe-inline'` styles (admin's inline attrs), and
       `object-src/frame-ancestors 'none'`. Regression-tested in `access.test.js`.
@@ -127,11 +130,12 @@ here is fixed yet.
 - [x] **Stopped handing every user's token to the admin page** (2026-07-05).
       `listUsers` no longer returns `link_token` (it's a hash now anyway);
       `admin.html` mints on demand via the existing `POST /users/:id/link`.
-- [ ] **AI keys plaintext in Postgres** (`ai_keys.api_key`). Raw key never leaves
+- [~] **AI keys plaintext in Postgres** (`ai_keys.api_key`). Raw key never leaves
       the server (list endpoint returns only a last-4 hint — good), but it's
-      readable in any dump. Self-hosted single-tenant lowers urgency: README note
-      now; envelope encryption (AES-256-GCM, master key from an env var, decrypt in
-      `getAiKey`/`resolveDefaultAi`/`testKey`) is the real fix later.
+      readable in any dump. **README now documents the caveat** (2026-07-05).
+      Envelope encryption (AES-256-GCM, master key from an env var, decrypt in
+      `getAiKey`/`resolveDefaultAi`/`testKey`) is the real fix, still deferred —
+      low urgency for single-tenant self-hosted.
 - [x] **Rate limiting** (2026-07-05). `server/ratelimit.js` — dependency-free
       fixed-window limiter keyed on `req.ip` (real client via `trust proxy`), lazy
       pruning so no cleanup timer. `/auth/:token` at 30/15min, `/api/upload` at
@@ -141,9 +145,9 @@ here is fixed yet.
       (`METHOD status ms path`) through the console patch, so it reaches the SSE
       viewer; skips the SSE stream itself and successful static-asset noise.
       `pino`/`pino-http` remains the upgrade path if structured logs are wanted.
-- [ ] **Backups.** Nothing dumps Postgres or snapshots the `appdata`/`pgdata`
-      volumes. `pg_dump` cron + uploads tar, with a documented restore path (or
-      lean on droplet snapshots and say so).
+- [~] **Backups.** README now documents the approach (`pg_dump` + uploads-volume
+      tar of `appdata`/`pgdata`, with a restore path) (2026-07-05). Actually
+      wiring a scheduled job is still an ops task, not code.
 
 ## Generalization pre-work (before the stock adapter)
 
