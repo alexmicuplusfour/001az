@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { startServer, adminSession, seedUser, seedBoard, seedItem, req } from "./helpers.js";
-import { mintPermanentInvite, setBoardMembers } from "../server/db.js";
+import { mintPermanentInvite, setBoardMembers, createAiKey, setSetting } from "../server/db.js";
 
 let srv, db, base;
 let admin, member, outsider;
@@ -174,6 +174,42 @@ test("items expose memberships in other members' public crates", async () => {
   assert.equal(items.status, 200);
   const row = items.json.find((i) => i.id === itemA.id);
   assert.ok(row.crateIds.includes(crateId));
+});
+
+test("semantic search respects auth, board access, and the enabled flag", async () => {
+  // Feature off: even a member gets 404 (indistinguishable from missing).
+  let r = await req(base, "GET", `/api/search?board=${boardA}&q=x`, { sid: member.sid });
+  assert.equal(r.status, 404);
+  r = await req(base, "GET", `/api/search?board=${boardA}&q=x`);
+  assert.equal(r.status, 401);
+
+  // Turn it on with a fake (never-called) eligible key.
+  const keyId = await createAiKey(db, "embed-test", "openai", "sk-test");
+  await setSetting(db, "embed_key_id", String(keyId));
+  await setSetting(db, "embed_enabled", "1");
+  try {
+    // Board access still gates it.
+    r = await req(base, "GET", `/api/search?board=${boardA}&q=x`, { sid: outsider.sid });
+    assert.equal(r.status, 404);
+    // Empty query short-circuits before any embedding call.
+    r = await req(base, "GET", `/api/search?board=${boardA}&q=`, { sid: member.sid });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.results, []);
+  } finally {
+    await setSetting(db, "embed_enabled", null);
+    await setSetting(db, "embed_key_id", null);
+  }
+});
+
+test("enabling semantic search requires an embeddings-capable key", async () => {
+  // No embed key configured → refuse to enable.
+  let r = await req(base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { embedEnabled: true } });
+  assert.equal(r.status, 400);
+  // An anthropic key is not eligible either.
+  const anthKey = await createAiKey(db, "anth", "anthropic", "sk-ant-test");
+  r = await req(base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { embedKeyId: anthKey, embedEnabled: true } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /embeddings/);
 });
 
 test("static image bytes require a session", async () => {

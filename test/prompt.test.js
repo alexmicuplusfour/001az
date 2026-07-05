@@ -3,7 +3,7 @@
 // structurally impossible, so it's worth pinning precisely.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrompt } from "../server/worker.js";
+import { buildPrompt, embedTextFor } from "../server/worker.js";
 
 const facets = [
   { key: "kind", label: "Kind", single: true, values: ["a", "b"] },
@@ -38,11 +38,47 @@ test("single facets are told to pick exactly one", () => {
   assert.doesNotMatch(schema.properties.mood.description || "", /pick exactly one/);
 });
 
+test("reasoning schema asks for a whole-item description, declared first", () => {
+  const { schema, systemText } = buildPrompt(facets, "", true);
+  assert.equal(schema.properties.description.type, "string");
+  assert.ok(schema.required.includes("description"));
+  assert.equal(Object.keys(schema.properties)[0], "description");
+  assert.match(systemText, /description of the item as a whole/);
+});
+
+test("no-reasoning schema has no description field", () => {
+  const { schema, systemText } = buildPrompt(facets, "", false);
+  assert.equal(schema.properties.description, undefined);
+  assert.ok(!schema.required.includes("description"));
+  assert.doesNotMatch(systemText, /description of the item as a whole/);
+});
+
+test("a facet named 'description' wins; required stays duplicate-free", () => {
+  const { schema } = buildPrompt([{ key: "description", label: "Description", values: ["p", "q"] }], "", true);
+  // The facet keeps its reason-then-values shape…
+  assert.deepEqual(schema.properties.description.required, ["reasoning", "values"]);
+  // …and "description" appears in required exactly once (strict mode rejects dupes).
+  assert.equal(schema.required.filter((k) => k === "description").length, 1);
+});
+
 test("a facet named 'fit' cannot clobber the reserved fit verdict", () => {
   const { schema } = buildPrompt([{ key: "fit", label: "Fit", values: ["p", "q"] }], "", true);
   // fit stays the verdict object, defined after the facet loop.
   assert.ok(schema.properties.fit.properties.verdict);
   assert.deepEqual(schema.properties.fit.properties.verdict.enum, ["match", "undecided"]);
+});
+
+test("embedTextFor: description leads, tags flatten to words, never empty", () => {
+  const text = embedTextFor(
+    ["theme/light", "density/roomy"],
+    { description: "A calm dashboard.", theme: "White background with green accents.", fit: "Board material." }
+  );
+  assert.ok(text.startsWith("A calm dashboard."));
+  assert.match(text, /White background/);
+  assert.match(text, /theme: light; density: roomy/);
+  // Nothing to embed → falls back to a name, never an empty string.
+  assert.equal(embedTextFor([], {}, { filename: "x.png" }), "x.png");
+  assert.equal(embedTextFor(), "untitled item");
 });
 
 test("subject and context flow into the system text", () => {

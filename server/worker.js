@@ -10,8 +10,10 @@ import {
   dueBoards,
   retagBoard,
   setBoardNextRun,
+  itemsNeedingEmbedding,
+  setItemEmbedding,
 } from "./db.js";
-import { callTagger, PROVIDER_DEFAULT_MODEL } from "./providers.js";
+import { callTagger, embedTexts, PROVIDER_DEFAULT_MODEL, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
@@ -32,6 +34,36 @@ export async function resolveDefaultAi(db) {
     };
   }
   return null;
+}
+
+// The app-global embedder for semantic search: enabled flag + designated key
+// (must be an embeddings-capable provider — Anthropic has no embeddings API).
+// Returns { provider, apiKey, model } or null when off/misconfigured.
+export async function resolveEmbedder(db) {
+  if ((await getSetting(db, "embed_enabled")) !== "1") return null;
+  const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
+  if (!keyId) return null;
+  const key = await getAiKey(db, keyId);
+  if (!key || !EMBED_PROVIDERS.includes(key.provider)) return null;
+  return {
+    provider: key.provider,
+    apiKey: key.api_key,
+    model: (await getSetting(db, "embed_model")) || PROVIDER_DEFAULT_EMBED_MODEL[key.provider],
+  };
+}
+
+// The text an item's search vector is built from: whole-item description,
+// then the per-facet reasoning sentences, then the tags flattened to words
+// (so exact facet vocabulary also matches). Falls back to the filename so no
+// item ever embeds an empty string.
+export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
+  const parts = [];
+  if (reasoning.description) parts.push(reasoning.description);
+  for (const [k, v] of Object.entries(reasoning)) {
+    if (k !== "description" && typeof v === "string" && v.trim()) parts.push(v.trim());
+  }
+  if (tags.length) parts.push(tags.map((t) => t.replace("/", ": ")).join("; "));
+  return parts.join("\n") || payload.original_name || payload.filename || "untitled item";
 }
 
 // A board's effective tagger: its own key (+ model) when set, else the default.
@@ -70,7 +102,7 @@ export function buildPrompt(facets, context = "", withReasoning = true, subject 
   });
   const contextBlock = context.trim() ? `\n${context.trim()}\n` : "";
   const selectPara = withReasoning
-    ? `For each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is "undecided", leave every facet's values empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`
+    ? `Start with a freeform description of the item as a whole — one or two sentences covering what it is and its overall style and mood. Then for each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is "undecided", leave every facet's values empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`
     : `For each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`;
   const systemText = `You tag ${subject} for a private research gallery.${contextBlock}
 Also decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an item you were able to describe with the facets is a match by definition.
@@ -84,6 +116,16 @@ Return your answer only by calling the record_tags tool.`;
 
   const properties = {};
   const required = [];
+  // Declared (and emitted) first: the model describes the whole item before
+  // judging facets. Skipped if a facet claims the key, so `required` can't
+  // end up with a duplicate entry.
+  if (withReasoning && !facets.some((f) => f.key === "description")) {
+    properties.description = {
+      type: "string",
+      description: "One or two sentences describing the item as a whole: what it is, its overall style and mood.",
+    };
+    required.push("description");
+  }
   for (const f of facets) {
     const gloss = facetGloss(f) + (f.single ? " — pick exactly one value" : "");
     properties[f.key] = withReasoning
@@ -201,6 +243,12 @@ export function startWorker({ db, registry }) {
     });
     const tags = [];
     const reasoning = {};
+    // Whole-item description rides in tag_reasoning under a reserved key,
+    // like `fit`. The typeof check keeps a facet named "description" (whose
+    // entry is an object) from landing here.
+    if (typeof input.description === "string" && input.description.trim()) {
+      reasoning.description = input.description.trim();
+    }
     let filledFacets = 0;
     for (const f of facets) {
       const entry = input[f.key];
@@ -244,6 +292,36 @@ export function startWorker({ db, registry }) {
     }
   }
 
+  // Embedding sweep: (re)vectorize tagged items with no current-model vector.
+  // This single path covers fresh tags (markTagged clears the vector), manual
+  // edits, turning the feature on late, and model changes — one batched API
+  // call per tick. Failures back off for a minute so a bad key or outage
+  // doesn't turn the poll loop into an API hammer.
+  const EMBED_BATCH = Math.max(1, Number(process.env.EMBED_BATCH) || 64);
+  let embedBackoffUntil = 0;
+  async function embedDue() {
+    if (Date.now() < embedBackoffUntil) return;
+    const embedder = await resolveEmbedder(db);
+    if (!embedder) return;
+    const rows = await itemsNeedingEmbedding(db, embedder.model, EMBED_BATCH);
+    if (!rows.length) return;
+    try {
+      const { vectors } = await embedTexts({
+        provider: embedder.provider,
+        apiKey: embedder.apiKey,
+        model: embedder.model,
+        texts: rows.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
+      });
+      for (let i = 0; i < rows.length; i++) {
+        await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
+      }
+      console.log(`embedded ${rows.length} item(s) [${embedder.model}]`);
+    } catch (err) {
+      embedBackoffUntil = Date.now() + 60000;
+      console.warn(`embed error (retrying in 60s): ${err.message}`);
+    }
+  }
+
   async function processOne(row) {
     const label = row.payload?.filename || `item ${row.id}`;
     try {
@@ -261,6 +339,7 @@ export function startWorker({ db, registry }) {
     const recovered = await recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
     await retagDue();
+    await embedDue();
 
     // Boards without their own key only tag when a default exists; their
     // items stay pending in the queue until one is configured.

@@ -73,6 +73,50 @@ header {
   color: var(--text-dim);
 }
 
+/* semantic search box: shaped like a tool-btn, with an × once results are active */
+.search-box {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #e2e2e6;
+  background: #fff;
+  border-radius: 6px;
+}
+.search-box.active {
+  border-color: var(--text);
+}
+.search-box input {
+  border: none;
+  background: none;
+  outline: none;
+  font-size: 12px;
+  color: var(--text);
+  padding: 4px 10px;
+  width: 170px;
+}
+.search-box input::-webkit-search-cancel-button {
+  display: none; /* the × button handles clearing */
+}
+.search-clear {
+  border: none;
+  background: var(--pill-active);
+  color: #fff;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0 1px; /* optical centering — the × glyph sits high */
+  margin-right: 5px;
+  flex: none;
+}
+.search-clear:hover {
+  background: #333;
+}
+
 /* split button (Filters + saved-filters chevron): two tool-btns fused into
    one control, sharing the middle border */
 .split-btn {
@@ -1110,6 +1154,12 @@ a.tool-btn {
   line-height: 1.45;
   color: #6b6b72;
   margin: 0;
+}
+.lbp-desc {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #3c3c42;
+  margin: 0 0 14px;
 }
 .lbp-hint {
   font-size: 12px;

@@ -69,6 +69,7 @@ async function main() {
   state.facets = boardData ? boardData.facets : [];
   state.boardName = boardData ? boardData.name : null;
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
+  state.searchAvailable = !!boardData?.search;
   state.adapter = getType(boardData?.type);
   state.adapter.init?.();
   state.me = meData;

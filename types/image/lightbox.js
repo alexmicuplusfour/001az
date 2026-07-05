@@ -62,6 +62,13 @@ function paintPanel(img, reasoning) {
     elLightboxPanelBody.appendChild(note);
   }
 
+  if (why.description) {
+    const p = document.createElement("p");
+    p.className = "lbp-desc";
+    p.textContent = why.description;
+    elLightboxPanelBody.appendChild(p);
+  }
+
   let rows = 0;
   for (const f of state.facets) {
     const vals = byFacet.get(f.key) || [];

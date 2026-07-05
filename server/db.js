@@ -204,7 +204,7 @@ export async function setItemTags(db, id, tags) {
     if (b.size !== a.size || [...b].some((v) => !a.has(v))) delete reasoning[key];
   }
   await db.query(
-    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, updated_at=$3 WHERE id=$4",
+    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, embedding=NULL, embedding_model=NULL, updated_at=$3 WHERE id=$4",
     [JSON.stringify(tags), JSON.stringify(reasoning), Date.now(), id]
   );
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
@@ -514,6 +514,10 @@ export async function deleteAiKey(db, id) {
   if (result.rowCount > 0 && Number(await getSetting(db, "default_key_id")) === id) {
     await setSetting(db, "default_key_id", null);
   }
+  if (result.rowCount > 0 && Number(await getSetting(db, "embed_key_id")) === id) {
+    await setSetting(db, "embed_key_id", null);
+    await setSetting(db, "embed_enabled", null);
+  }
   return result.rowCount > 0;
 }
 
@@ -713,11 +717,58 @@ export async function claimNextPending(db, hasDefaultKey = true) {
 }
 
 export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {
+  // Clearing the vector marks the item for the embedding sweep — the text it
+  // was embedded from just changed.
   await db.query(
-    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, updated_at=$4 WHERE id=$5",
+    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, embedding=NULL, embedding_model=NULL, updated_at=$4 WHERE id=$5",
     [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), Date.now(), id]
   );
   await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
+}
+
+// --- semantic search embeddings ---
+
+export async function setItemEmbedding(db, id, vector, model) {
+  await db.query("UPDATE items SET embedding=$1, embedding_model=$2 WHERE id=$3", [
+    Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
+    model,
+    id,
+  ]);
+}
+
+// Tagged items whose vector is missing or from another model — the embedding
+// sweep's work queue. Newest first so fresh uploads become searchable before
+// a long backfill finishes.
+export async function itemsNeedingEmbedding(db, model, limit) {
+  const { rows } = await db.query(
+    `SELECT id, tags, tag_reasoning, payload FROM items
+     WHERE status='tagged' AND (embedding IS NULL OR embedding_model IS DISTINCT FROM $1)
+     ORDER BY updated_at DESC, id DESC LIMIT $2`,
+    [model, limit]
+  );
+  return rows;
+}
+
+// Current-model vectors for one board (the search corpus). Stale vectors are
+// excluded rather than compared wrongly; they reappear once re-embedded.
+export async function boardEmbeddings(db, boardId, model) {
+  const { rows } = await db.query(
+    "SELECT id, embedding FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
+    [boardId, model]
+  );
+  return rows;
+}
+
+// Backfill progress for the admin panel: how many tagged items exist and how
+// many already carry a current-model vector.
+export async function embeddingStats(db, model) {
+  const { rows } = await db.query(
+    `SELECT COUNT(*) FILTER (WHERE status='tagged') AS tagged,
+            COUNT(*) FILTER (WHERE status='tagged' AND embedding IS NOT NULL AND embedding_model=$1) AS embedded
+     FROM items`,
+    [model]
+  );
+  return { tagged: Number(rows[0].tagged), embedded: Number(rows[0].embedded) };
 }
 
 // Increment attempts; mark failed once attempts reach maxAttempts, else requeue. Returns true if failed.

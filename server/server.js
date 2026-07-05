@@ -53,6 +53,8 @@ import {
   getAiKey,
   createAiKey,
   deleteAiKey,
+  embeddingStats,
+  boardEmbeddings,
 } from "./db.js";
 import {
   attachUser,
@@ -61,8 +63,8 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, nextAutoTagRun } from "./worker.js";
-import { testKey, PROVIDERS } from "./providers.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
+import { testKey, embedTexts, PROVIDERS, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
 import { createRegistry } from "./types/index.js";
 import imageType from "./types/image.js";
@@ -342,6 +344,8 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     facets: board.facets,
     context: board.context,
     ai_reasoning: board.ai_reasoning !== false,
+    // tells the client whether to show the semantic search box
+    search: !!(await resolveEmbedder(db)),
   });
 }));
 
@@ -533,7 +537,7 @@ app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
   const provider = req.body && req.body.provider ? String(req.body.provider) : "";
   const apiKey = (req.body && req.body.key ? String(req.body.key) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
-  if (!PROVIDERS.includes(provider)) return res.status(400).json({ error: "provider must be anthropic or openai" });
+  if (!PROVIDERS.includes(provider)) return res.status(400).json({ error: `provider must be one of: ${PROVIDERS.join(", ")}` });
   if (!apiKey) return res.status(400).json({ error: "key required" });
   const id = await createAiKey(db, name, provider, apiKey);
   console.log(`ai-key added: "${name}" (${provider})`);
@@ -564,11 +568,20 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
 app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
   const defaultKeyId = Number(await getSetting(db, "default_key_id")) || null;
   const model = (await getSetting(db, "model")) || process.env.MODEL || "claude-haiku-4-5";
-  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY });
+  const embedder = await resolveEmbedder(db);
+  const embed = {
+    enabled: (await getSetting(db, "embed_enabled")) === "1",
+    keyId: Number(await getSetting(db, "embed_key_id")) || null,
+    model: (await getSetting(db, "embed_model")) || null,
+    // Backfill progress against the model actually in effect (settings or
+    // the provider default); zeros when not configured.
+    stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0 },
+  };
+  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed });
 }));
 
 app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const { model, defaultKeyId } = req.body || {};
+  const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel } = req.body || {};
   if (defaultKeyId !== undefined) {
     if (defaultKeyId === null) {
       await setSetting(db, "default_key_id", null);
@@ -579,8 +592,44 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     }
   }
   if (model !== undefined) await setSetting(db, "model", model || null);
-  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"}`);
+  if (embedKeyId !== undefined) {
+    if (embedKeyId === null) {
+      await setSetting(db, "embed_key_id", null);
+    } else {
+      const key = await getAiKey(db, Number(embedKeyId));
+      if (!key) return res.status(400).json({ error: "unknown key" });
+      if (!EMBED_PROVIDERS.includes(key.provider)) {
+        return res.status(400).json({ error: `embeddings need an ${EMBED_PROVIDERS.join(" or ")} key — ${key.provider} has no embeddings API` });
+      }
+      await setSetting(db, "embed_key_id", String(key.id));
+    }
+  }
+  if (embedModel !== undefined) await setSetting(db, "embed_model", embedModel || null);
+  if (embedEnabled !== undefined) {
+    // embedKeyId was applied above, so this validates the final state.
+    if (embedEnabled) {
+      const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
+      const key = keyId ? await getAiKey(db, keyId) : null;
+      if (!key || !EMBED_PROVIDERS.includes(key.provider)) {
+        return res.status(400).json({ error: "pick an OpenAI or Gemini key before enabling semantic search" });
+      }
+    }
+    await setSetting(db, "embed_enabled", embedEnabled ? "1" : null);
+  }
+  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"}`);
   res.json({ ok: true });
+}));
+
+// One tiny embedding call to prove the semantic-search config works end to end.
+app.post("/api/admin/ai-config/embed-test", requireAdmin, wrap(async (_req, res) => {
+  const embedder = await resolveEmbedder(db);
+  if (!embedder) return res.status(400).json({ error: "semantic search is not enabled/configured" });
+  try {
+    await embedTexts({ ...embedder, texts: ["ping"] });
+    res.json({ ok: true, provider: embedder.provider, model: embedder.model });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 }));
 
 app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
@@ -598,6 +647,33 @@ app.get("/api/items", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
   res.json(await listItems(db, req.user.id, boardId));
+}));
+
+// Semantic search: embed the query, dot-product against the board's stored
+// vectors (all unit length, so dot = cosine), return ranked ids. The corpus
+// is small enough to scan per request; the limiter is there because every
+// call is one paid embedding request.
+app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }), wrap(async (req, res) => {
+  const boardId = req.query.board || "";
+  if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.status(404).json({ error: "not found" });
+  const embedder = await resolveEmbedder(db);
+  if (!embedder) return res.status(404).json({ error: "semantic search is not enabled" });
+  const q = String(req.query.q || "").trim().slice(0, 500);
+  if (!q) return res.json({ results: [] });
+  const { vectors: [qv] } = await embedTexts({ ...embedder, texts: [q] });
+  const scored = [];
+  for (const row of await boardEmbeddings(db, boardId, embedder.model)) {
+    const v = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+    if (v.length !== qv.length) continue; // stale dims mid-model-change
+    let s = 0;
+    for (let i = 0; i < v.length; i++) s += v[i] * qv[i];
+    scored.push({ id: row.id, score: s });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  // Relative cutoff: keep everything within 0.15 of the best hit — absolute
+  // cosine thresholds vary too much between models to hardcode one.
+  const top = scored.length ? scored[0].score : 0;
+  res.json({ results: scored.filter((x) => x.score >= top - 0.15).slice(0, 60) });
 }));
 
 // Live server logs via Server-Sent Events.

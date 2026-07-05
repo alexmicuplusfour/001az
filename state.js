@@ -18,4 +18,10 @@ export const state = {
   showFavorites: false,
   showUntagged: false,
   sortByHearts: false,
+  // semantic search: server-enabled flag, the input's draft text, the last
+  // submitted query, and its results (Map id -> score; null = not searching)
+  searchAvailable: false,
+  searchDraft: "",
+  searchQuery: "",
+  searchResults: null,
 };

@@ -10,7 +10,7 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.sortByHearts, state.selectedCrateId, state.boardId]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.sortByHearts, state.selectedCrateId, state.boardId, state.searchResults ? state.searchQuery : ""]);
 }
 
 function matchesExcept(img, exceptKey) {
@@ -40,11 +40,14 @@ export function taggedFiltered() {
   const list = state.items.filter(
     (img) =>
       isTagged(img) &&
+      (state.searchResults == null || state.searchResults.has(img.id)) &&
       (!state.showUntagged || isUntagged(img)) &&
       (!state.showFavorites || img.favoritedByMe) &&
       (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId)) &&
       matchesExcept(img, null)
   );
+  // Active search orders by similarity; the hearts toggle still wins.
+  if (state.searchResults) list.sort((a, b) => state.searchResults.get(b.id) - state.searchResults.get(a.id));
   if (state.sortByHearts) list.sort((a, b) => b.hearts - a.hearts);
   return list;
 }

@@ -4,6 +4,7 @@ import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
+import { runSearch, clearSearch } from './search.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -46,6 +47,8 @@ function openBoardPop(anchorEl) {
 }
 
 export function renderToolbar(resultCount) {
+  // Re-rendering replaces the search input; remember focus to restore it.
+  const searchHadFocus = !!document.activeElement?.closest?.(".search-box");
   elToolbar.replaceChildren();
   elToolbarSub.replaceChildren();
 
@@ -120,6 +123,38 @@ export function renderToolbar(resultCount) {
     filtersWrap.appendChild(arrow);
   }
   elToolbarSub.appendChild(filtersWrap);
+
+  // Semantic search (only when the server has embeddings configured).
+  // Submits on Enter — every query is one paid embedding call server-side.
+  if (state.searchAvailable) {
+    const box = document.createElement("div");
+    box.className = "search-box" + (state.searchResults ? " active" : "");
+    const input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "Search by meaning…";
+    input.setAttribute("aria-label", "Semantic search");
+    input.value = state.searchDraft;
+    input.addEventListener("input", () => { state.searchDraft = input.value; });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") runSearch(input.value);
+      else if (e.key === "Escape") { e.stopPropagation(); clearSearch(); input.blur(); }
+    });
+    box.appendChild(input);
+    if (state.searchResults) {
+      const clearBtn = document.createElement("button");
+      clearBtn.className = "search-clear";
+      clearBtn.title = "Clear search";
+      clearBtn.setAttribute("aria-label", "Clear search");
+      clearBtn.textContent = "×";
+      clearBtn.addEventListener("click", clearSearch);
+      box.appendChild(clearBtn);
+    }
+    elToolbarSub.appendChild(box);
+    if (searchHadFocus) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
 
   if (state.me) {
     elToolbarSub.appendChild(toolBtn(

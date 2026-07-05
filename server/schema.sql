@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS ai_keys (
   id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name       TEXT NOT NULL,
-  provider   TEXT NOT NULL,  -- 'anthropic' | 'openai'
+  provider   TEXT NOT NULL,  -- 'anthropic' | 'openai' | 'gemini'
   api_key    TEXT NOT NULL,
   created_at BIGINT NOT NULL
 );
@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS items (
   updated_at    BIGINT NOT NULL
 );
 ALTER TABLE items ADD COLUMN IF NOT EXISTS tag_reasoning JSONB NOT NULL DEFAULT '{}';
+-- Semantic search: one vector per tagged item (raw Float32Array bytes) from
+-- the app-global embedding model (settings: embed_enabled/embed_key_id/
+-- embed_model). NULL = not embedded yet; a model mismatch means stale — the
+-- worker sweep (re)embeds both cases.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS embedding BYTEA;
+ALTER TABLE items ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_board ON items(board_id);
