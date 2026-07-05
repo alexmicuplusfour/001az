@@ -52,8 +52,10 @@ export function renderToolbar(resultCount) {
   // Row 1: identity + upload + auth
   const logo = document.createElement("span");
   logo.className = "toolbar-logo";
-  logo.textContent = "001/";
+  logo.textContent = "001az/";
   elToolbar.appendChild(logo);
+
+  document.title = state.boardName ? `001az - ${state.boardName}` : "001az";
 
   if (state.boardName) {
     if (state.me && state.boards.length > 1) {
