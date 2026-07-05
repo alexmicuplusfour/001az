@@ -19,11 +19,12 @@ deploy.local.json
 .gitignore
 .github
 *.md
-deploy.py
+deploy.ps1
 scripts
 test
 pets-test
 docker-compose.yml
+docker-compose.prod.yml
 Dockerfile
 .dockerignore
 Caddyfile

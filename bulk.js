@@ -73,6 +73,18 @@ export function clearBulk() {
   updateBulkBar();
 }
 
+export function selectAllVisible(items) {
+  state.bulkSelected.clear();
+  for (const img of items) state.bulkSelected.add(img.id);
+  for (const card of document.querySelectorAll(".card[data-id]")) {
+    const id = Number(card.dataset.id);
+    const on = state.bulkSelected.has(id);
+    card.classList.toggle("selected", on);
+    card.querySelector(".sel-cb")?.setAttribute("aria-pressed", String(on));
+  }
+  updateBulkBar();
+}
+
 async function doBulkReprocess() {
   const imgs = selectedItems();
   const results = await Promise.allSettled(imgs.map(async (img) => {
@@ -186,10 +198,3 @@ document.addEventListener('app:render', () => {
   updateBulkBar();
 });
 
-// An open dropdown consumes Escape before this handler sees it (dropdown.js).
-document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape" || !state.bulkSelected.size) return;
-  if (!document.getElementById("lightbox").hidden) return;
-  if (document.querySelector(".te-overlay")) return;
-  clearBulk();
-});

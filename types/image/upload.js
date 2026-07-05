@@ -1,6 +1,6 @@
 import { state } from '../../state.js';
 import { toast } from '../../toast.js';
-import { ensurePolling } from '../../data.js';
+import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount } from '../../data.js';
 
 const UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // keep in sync with server MAX_BYTES
 const UPLOAD_CHUNK_FILES = 20;
@@ -10,6 +10,7 @@ const UPLOAD_ATTEMPTS = 3;
 
 let uploadQueue = [];
 let uploadWorkers = 0;
+let inFlight = 0;
 let uploadStats = null;
 let uploadPill = null;
 let processingToast = null;
@@ -79,6 +80,9 @@ async function uploadWorker() {
 }
 
 async function uploadChunk(chunk) {
+  inFlight += chunk.length;
+  renderUploadStatus();
+
   const batch = chunk.map((f) => ({ tempId: ++state.uid, objURL: URL.createObjectURL(f) }));
   state.uploading.push(...batch);
   document.dispatchEvent(new Event('app:render'));
@@ -104,6 +108,7 @@ async function uploadChunk(chunk) {
   for (const b of batch) URL.revokeObjectURL(b.objURL);
   state.uploading = state.uploading.filter((u) => !batch.includes(u));
 
+  inFlight -= chunk.length;
   uploadStats.done += chunk.length;
   if (data) {
     const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
@@ -163,7 +168,24 @@ function maybeFinishUploads() {
     document.dispatchEvent(new CustomEvent('app:uploads-pending-tag', {
       detail: { ids: new Set(s.pendingIds), n: s.pendingIds.length },
     }));
-    if (!processingToast) processingToast = toast("Processing images…", { loading: true });
+  }
+}
+
+function processingMsg(n) {
+  return n === 1 ? "Processing 1 image…" : `Processing ${n} images…`;
+}
+
+function syncProcessingToast() {
+  if (!hasPendingUploadTags()) {
+    processingToast?.remove();
+    processingToast = null;
+    return;
+  }
+  const msg = processingMsg(pendingUploadTagCount());
+  if (!processingToast) {
+    processingToast = toast(msg, { loading: true });
+  } else {
+    processingToast.update(msg);
   }
 }
 
@@ -174,8 +196,11 @@ function renderUploadStatus() {
     return;
   }
   const { done, total } = uploadStats;
-  const pct = total ? Math.round((done / total) * 100) : 0;
-  const msg = `Uploading ${Math.min(done, total)} / ${total}`;
+  const effective = Math.min(done + inFlight, total);
+  const pct = total ? Math.round((effective / total) * 100) : 0;
+  const msg = inFlight
+    ? `Uploading ${done} / ${total} (${inFlight} sending…)`
+    : `Uploading ${Math.min(done, total)} / ${total}`;
   if (!uploadPill) {
     uploadPill = toast(msg, {
       duration: null,
@@ -183,17 +208,16 @@ function renderUploadStatus() {
       actions: [{ label: "Cancel", onClick: cancelQueuedUploads }],
     });
   }
-  uploadPill.update(msg, { progress: pct, showActions: uploadQueue.length > 0 });
+  uploadPill?.update(msg, { progress: pct, showActions: uploadQueue.length > 0 });
 }
 
 export function triggerFilePicker() {
   document.getElementById("file-input").click();
 }
 
-document.addEventListener('app:uploads-tagged', () => {
-  processingToast?.remove();
-  processingToast = null;
-});
+document.addEventListener('app:uploads-pending-tag', syncProcessingToast);
+document.addEventListener('app:uploads-tagged', syncProcessingToast);
+document.addEventListener('app:uploads-pending-changed', syncProcessingToast);
 
 export function initUpload() {
   const elFileInput = document.getElementById("file-input");

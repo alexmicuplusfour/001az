@@ -1,0 +1,12 @@
+# Droplet override. Host Caddy (which also serves itsalex.me) keeps 80/443 and
+# terminates TLS, proxying 001.itsalex.me -> 127.0.0.1:3001, so the compose
+# caddy service is not started in production (deploy.ps1 runs `up app db`).
+# The app image is built locally and shipped with `docker save`/`docker load`;
+# APP_TAG is pinned in /opt/001az/.env by the deploy script.
+services:
+  app:
+    image: 001az-app:${APP_TAG:-latest}
+    build: !reset null
+    pull_policy: never
+    ports:
+      - "127.0.0.1:3001:3001"

@@ -3,7 +3,7 @@ import { ICONS, actionBtn } from './utils.js';
 import { openDropdown } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
-import { ensurePolling } from './data.js';
+import { ensurePolling, dropPendingUploadId } from './data.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
@@ -53,6 +53,7 @@ async function doDelete(id) {
     const r = await fetch(`/api/items/${id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
     state.items = state.items.filter((i) => i.id !== id);
+    dropPendingUploadId(id);
     document.dispatchEvent(new Event('app:render'));
   } catch {
     toast.error("Delete failed");
@@ -328,4 +329,11 @@ sentinelObserver.observe(elGridSentinel);
 
 export function initGrid() {
   window.addEventListener("resize", scheduleLayout);
+}
+
+export function visibleGridItems() {
+  const byId = new Map(state.items.map((i) => [i.id, i]));
+  return [...document.querySelectorAll("#grid .card[data-id]")]
+    .map((c) => byId.get(Number(c.dataset.id)))
+    .filter(Boolean);
 }

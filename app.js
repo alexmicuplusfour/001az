@@ -4,6 +4,7 @@ import { toast } from './toast.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl } from './filters.js';
 import { inProgress, reconcile, ensurePolling } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
+import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
 import { initFilterConfigsUI } from './filterconfigs.js';
 import { registerType, getType } from './types/index.js';
@@ -28,6 +29,7 @@ document.addEventListener('app:render', render);
 
 async function main() {
   initGrid();
+  initShortcuts();
   initFilters();
 
   const params = new URLSearchParams(location.search);

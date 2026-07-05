@@ -16,8 +16,7 @@ pets-test/
 # compose secrets/overrides — .env.example is the template
 .env
 
-# personal deploy tooling for the author's own instance
-deploy.py
+# personal deploy config for the author's own instance (deploy.ps1 reads it)
 deploy.local.json
 
 # personal working files — kept locally, not part of the published project

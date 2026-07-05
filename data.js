@@ -8,6 +8,28 @@ document.addEventListener('app:uploads-pending-tag', (e) => {
   pendingBatches.push(e.detail);
 });
 
+export function hasPendingUploadTags() {
+  return pendingBatches.length > 0;
+}
+
+export function pendingUploadTagCount() {
+  let n = 0;
+  for (const b of pendingBatches) n += b.ids.size;
+  return n;
+}
+
+// Drop a deleted item from upload-tag batches so the processing toast
+// doesn't dismiss early or stall forever on a missing row.
+export function dropPendingUploadId(id) {
+  for (let i = pendingBatches.length - 1; i >= 0; i--) {
+    const batch = pendingBatches[i];
+    if (!batch.ids.delete(id)) continue;
+    batch.n = batch.ids.size;
+    if (batch.ids.size === 0) pendingBatches.splice(i, 1);
+  }
+  document.dispatchEvent(new Event('app:uploads-pending-changed'));
+}
+
 export function inProgress() {
   return [
     ...state.uploading,
@@ -38,11 +60,12 @@ export function reconcile(data) {
     const { ids, n } = pendingBatches[i];
     const allDone = [...ids].every((id) => {
       const img = state.items.find((m) => m.id === id);
-      return !img || img.status === 'tagged' || img.status === 'failed';
+      return img && (img.status === 'tagged' || img.status === 'failed');
     });
     if (allDone) {
       pendingBatches.splice(i, 1);
       document.dispatchEvent(new CustomEvent('app:uploads-tagged', { detail: { n } }));
+      document.dispatchEvent(new Event('app:uploads-pending-changed'));
     }
   }
 }
