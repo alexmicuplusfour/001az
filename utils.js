@@ -54,25 +54,6 @@ export function toolBtn(label, cls, onClick) {
   return b;
 }
 
-export function onOutsideClick(pop, anchorEl, onDismiss) {
-  const handler = (e) => {
-    if (!pop.contains(e.target) && !anchorEl.contains(e.target)) onDismiss();
-  };
-  setTimeout(() => document.addEventListener("click", handler, true), 0);
-  return handler;
-}
-
-export function positionPop(pop, anchor) {
-  const r = anchor.getBoundingClientRect();
-  const rect = pop.getBoundingClientRect();
-  let left = r.right - rect.width;
-  let top = r.bottom + 6;
-  if (left < 8) left = 8;
-  if (top + rect.height > window.innerHeight - 8) top = r.top - rect.height - 6;
-  pop.style.left = left + "px";
-  pop.style.top = Math.max(8, top) + "px";
-}
-
 export function pill(label, count, active, muted, onClick) {
   const b = document.createElement("button");
   b.className = "pill" + (active ? " active" : "") + (muted ? " muted" : "");

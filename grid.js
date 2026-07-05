@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { ICONS, actionBtn } from './utils.js';
+import { openDropdown } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { ensurePolling } from './data.js';
@@ -133,6 +134,50 @@ const { favorited, count: n } = await r.json();
   return wrap;
 }
 
+function openTagPop(chip, img) {
+  const card = chip.closest(".card");
+  const ctx = openDropdown(chip, {
+    className: "tag-pop",
+    hover: true,
+    align: "start",
+    minWidth: 150,
+    maxWidth: 250,
+    maxItems: 0, // tags wrap freely; only the viewport caps the height
+    build: (body) => {
+      if (img.tags.length) {
+        for (const t of img.tags) {
+          const s = document.createElement("span");
+          s.className = "tp";
+          s.textContent = t;
+          body.appendChild(s);
+        }
+      } else {
+        const s = document.createElement("span");
+        s.className = "tp empty";
+        s.textContent = "no tags";
+        body.appendChild(s);
+      }
+    },
+    footer: (state.me && state.facets.length) ? (foot, { close }) => {
+      const editBtn = document.createElement("button");
+      editBtn.className = "tp-edit";
+      editBtn.innerHTML = ICONS.pencil + "<span>Edit tags</span>";
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        close();
+        openTagEditor(img);
+      });
+      foot.appendChild(editBtn);
+    } : undefined,
+    onClose: () => {
+      if (!card) return;
+      card.classList.remove("pop-open");
+      if (!card.matches(":hover")) teardownCardHover(card);
+    },
+  });
+  if (ctx && card) card.classList.add("pop-open");
+}
+
 function tagChip(img) {
   const chip = document.createElement("div");
   chip.className = "tag-chip";
@@ -144,30 +189,7 @@ function tagChip(img) {
   count.className = "tc";
   count.textContent = img.tags.length;
   chip.append(icon, count);
-
-  const pop = document.createElement("div");
-  pop.className = "tag-pop";
-  if (img.tags.length) {
-    for (const t of img.tags) {
-      const s = document.createElement("span");
-      s.className = "tp";
-      s.textContent = t;
-      pop.appendChild(s);
-    }
-  } else {
-    const s = document.createElement("span");
-    s.className = "tp empty";
-    s.textContent = "no tags";
-    pop.appendChild(s);
-  }
-  if (state.me && state.facets.length) {
-    const editBtn = document.createElement("button");
-    editBtn.className = "tp-edit";
-    editBtn.innerHTML = ICONS.pencil + "<span>Edit tags</span>";
-    editBtn.addEventListener("click", (e) => { e.stopPropagation(); openTagEditor(img); });
-    pop.appendChild(editBtn);
-  }
-  chip.appendChild(pop);
+  chip.addEventListener("pointerenter", () => openTagPop(chip, img));
   return chip;
 }
 
@@ -249,7 +271,7 @@ function cardFor(img) {
     if (state.me && !card.querySelector(".heart")) card.appendChild(heartControl(img));
   });
   card.addEventListener("pointerleave", () => {
-    if (card.classList.contains("crate-open")) return;
+    if (card.classList.contains("pop-open")) return;
     teardownCardHover(card);
   });
   return card;

@@ -1,78 +1,47 @@
 import { state } from './state.js';
-import { ICONS, toolBtn, onOutsideClick, positionPop } from './utils.js';
+import { ICONS, toolBtn } from './utils.js';
+import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop } from './crates.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
 
-let userMenuState = null;
-
-function closeUserMenu() {
-  if (!userMenuState) return;
-  userMenuState.pop.remove();
-  document.removeEventListener("click", userMenuState.outside, true);
-  userMenuState = null;
-}
-
 function openUserMenu(anchorEl) {
-  if (userMenuState && userMenuState.anchor === anchorEl) { closeUserMenu(); return; }
-  closeUserMenu();
-  const pop = document.createElement("div");
-  pop.className = "float-menu user-menu-pop";
-  if (state.me && state.me.is_admin) {
-    const row = document.createElement("a");
-    row.href = "/admin.html";
-    row.className = "cp-row";
-    row.textContent = "Admin";
-    pop.appendChild(row);
-    const sep = document.createElement("div");
-    sep.className = "cp-sep";
-    pop.appendChild(sep);
-  }
-  const signOut = document.createElement("div");
-  signOut.className = "cp-row";
-  signOut.textContent = "Sign out";
-  signOut.addEventListener("click", async () => {
-    closeUserMenu();
-    await fetch("/api/logout", { method: "POST" });
-    location.reload();
+  openDropdown(anchorEl, {
+    className: "user-menu-pop",
+    build: (body, { close }) => {
+      if (state.me && state.me.is_admin) {
+        body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
+        body.appendChild(ddSep());
+      }
+      body.appendChild(ddRow({
+        label: "Sign out",
+        onClick: async () => {
+          close();
+          await fetch("/api/logout", { method: "POST" });
+          location.reload();
+        },
+      }));
+    },
   });
-  pop.appendChild(signOut);
-  document.body.appendChild(pop);
-  positionPop(pop, anchorEl);
-  const outside = onOutsideClick(pop, anchorEl, closeUserMenu);
-  userMenuState = { pop, outside, anchor: anchorEl };
-}
-
-let boardPopState = null;
-
-function closeBoardPop() {
-  if (!boardPopState) return;
-  boardPopState.pop.remove();
-  document.removeEventListener("click", boardPopState.outside, true);
-  boardPopState = null;
 }
 
 function openBoardPop(anchorEl) {
-  if (boardPopState && boardPopState.anchor === anchorEl) { closeBoardPop(); return; }
-  closeBoardPop();
-  const pop = document.createElement("div");
-  pop.className = "float-menu board-pop";
-  for (const b of state.boards) {
-    const row = document.createElement("div");
-    row.className = "cp-row" + (b.id === state.boardId ? " active" : "");
-    const name = document.createElement("span");
-    name.className = "cp-name";
-    name.textContent = b.name;
-    row.appendChild(name);
-    row.addEventListener("click", () => { location.href = `/?board=${b.id}`; });
-    pop.appendChild(row);
-  }
-  document.body.appendChild(pop);
-  positionPop(pop, anchorEl);
-  const outside = onOutsideClick(pop, anchorEl, closeBoardPop);
-  boardPopState = { pop, outside, anchor: anchorEl };
+  openDropdown(anchorEl, {
+    className: "board-pop",
+    align: "start",
+    minWidth: 160,
+    build: (body) => {
+      for (const b of state.boards) {
+        body.appendChild(ddRow({
+          label: b.name,
+          active: b.id === state.boardId,
+          onClick: () => { location.href = `/?board=${b.id}`; },
+        }));
+      }
+    },
+  });
 }
 
 export function renderToolbar(resultCount) {

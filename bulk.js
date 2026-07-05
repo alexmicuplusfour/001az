@@ -1,11 +1,12 @@
 import { state } from './state.js';
-import { ICONS, onOutsideClick, positionPop } from './utils.js';
+import { ICONS } from './utils.js';
+import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { toast } from './toast.js';
 import { ensurePolling } from './data.js';
 
 let bar = null;
 let countEl = null;
-let cratePopState = null;
+let closeCratePop = null; // close fn while the bulk crate pop is open
 
 function barBtn(icon, cls, title, onClick) {
   const b = document.createElement("button");
@@ -129,69 +130,50 @@ async function addAllToCrate(crateId) {
 }
 
 function closeBulkCratePop() {
-  if (!cratePopState) return;
-  cratePopState.pop.remove();
-  document.removeEventListener("click", cratePopState.outside, true);
-  cratePopState = null;
+  closeCratePop?.();
 }
 
 function openBulkCratePop(anchorEl) {
-  if (cratePopState) { closeBulkCratePop(); return; }
-
-  const pop = document.createElement("div");
-  pop.className = "float-menu crate-pop";
-
-  if (state.crates.length) {
-    for (const crate of state.crates) {
-      const row = document.createElement("div");
-      row.className = "cp-row";
-      const nameEl = document.createElement("span");
-      nameEl.className = "cp-name";
-      nameEl.textContent = crate.name;
-      row.appendChild(nameEl);
-      row.addEventListener("click", () => {
-        closeBulkCratePop();
-        addAllToCrate(crate.id);
-      });
-      pop.appendChild(row);
-    }
-    const sep = document.createElement("div");
-    sep.className = "cp-sep";
-    pop.appendChild(sep);
-  }
-
-  const inp = document.createElement("input");
-  inp.type = "text";
-  inp.placeholder = "New crate…";
-  inp.className = "cp-input";
-  inp.addEventListener("click", (e) => e.stopPropagation());
-  inp.addEventListener("keydown", async (e) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    const name = inp.value.trim();
-    if (!name) return;
-    try {
-      const r = await fetch("/api/crates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, board_id: state.boardId }),
-      });
-      if (!r.ok) { toast.error("Couldn't create crate"); return; }
-      const { crate } = await r.json();
-      if (!state.crates.find((c) => c.id === crate.id)) state.crates.push(crate);
-      closeBulkCratePop();
-      addAllToCrate(crate.id);
-    } catch {
-      toast.error("Couldn't create crate");
-    }
+  const ctx = openDropdown(anchorEl, {
+    className: "crate-pop",
+    minWidth: 190,
+    focus: ".dd-input",
+    build: (body) => {
+      for (const crate of state.crates) {
+        body.appendChild(ddRow({
+          label: crate.name,
+          onClick: () => {
+            closeBulkCratePop();
+            addAllToCrate(crate.id);
+          },
+        }));
+      }
+    },
+    footer: (foot) => {
+      if (state.crates.length) foot.appendChild(ddSep());
+      foot.appendChild(ddInput({
+        placeholder: "New crate…",
+        onSubmit: async (name) => {
+          try {
+            const r = await fetch("/api/crates", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name, board_id: state.boardId }),
+            });
+            if (!r.ok) { toast.error("Couldn't create crate"); return; }
+            const { crate } = await r.json();
+            if (!state.crates.find((c) => c.id === crate.id)) state.crates.push(crate);
+            closeBulkCratePop();
+            addAllToCrate(crate.id);
+          } catch {
+            toast.error("Couldn't create crate");
+          }
+        },
+      }));
+    },
+    onClose: () => { closeCratePop = null; },
   });
-  pop.appendChild(inp);
-
-  document.body.appendChild(pop);
-  positionPop(pop, anchorEl);
-  requestAnimationFrame(() => inp.focus());
-  const outside = onOutsideClick(pop, anchorEl, closeBulkCratePop);
-  cratePopState = { pop, outside };
+  if (ctx) closeCratePop = ctx.close;
 }
 
 // Drop selections for images that no longer exist (deleted elsewhere, board change).
@@ -204,10 +186,10 @@ document.addEventListener('app:render', () => {
   updateBulkBar();
 });
 
+// An open dropdown consumes Escape before this handler sees it (dropdown.js).
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape" || !state.bulkSelected.size) return;
   if (!document.getElementById("lightbox").hidden) return;
   if (document.querySelector(".te-overlay")) return;
-  if (cratePopState) { closeBulkCratePop(); return; }
   clearBulk();
 });
