@@ -4,7 +4,7 @@ export function isAdmin() {
   return !!(state.me && state.me.is_admin);
 }
 
-export function toImage(d) {
+export function toItem(d) {
   const list = Array.isArray(d.tags) ? d.tags : [];
   return {
     id: d.id,
@@ -22,8 +22,6 @@ export function toImage(d) {
 }
 
 export const tag = (facet, value) => `${facet}/${value}`;
-export const thumbUrl = (name) => `thumbnails/${encodeURIComponent(name)}.webp`;
-export const fullUrl = (name) => `gallery/${encodeURIComponent(name)}`;
 
 export const ICONS = {
   tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2 2 0 0 0 2.8 0l6.6-6.6a2 2 0 0 0 0-2.8z"/><circle cx="7" cy="7" r="1.3" fill="currentColor"/></svg>',

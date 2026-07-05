@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { toImage } from './utils.js';
+import { toItem } from './utils.js';
 
 // Batches of uploaded images we're waiting to see fully tagged.
 const pendingBatches = []; // [{ ids: Set<id>, n: number }]
@@ -29,7 +29,7 @@ export function reconcile(data) {
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
     } else {
-      state.images.unshift(toImage(d));
+      state.images.unshift(toItem(d));
     }
   }
 
@@ -55,7 +55,7 @@ async function pollTick() {
     return;
   }
   try {
-    const data = await fetch(`/api/images?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json());
+    const data = await fetch(`/api/items?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json());
     reconcile(data);
     document.dispatchEvent(new Event('app:render'));
   } catch {

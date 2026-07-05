@@ -148,15 +148,13 @@ app.post("/api/logout", wrap(async (req, res) => {
 }));
 
 // --- favorites (any logged-in user) ---
-// Item routes answer under /api/items (canonical) and /api/images (legacy
-// alias until the client is migrated).
-app.post(["/api/items/:id/favorite", "/api/images/:id/favorite"], requireAuth, wrap(async (req, res) => {
+app.post("/api/items/:id/favorite", requireAuth, wrap(async (req, res) => {
   const result = await toggleFavorite(db, req.user.id, Number(req.params.id));
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
 
-app.get(["/api/items/:id/hearts", "/api/images/:id/hearts"], requireAuth, wrap(async (req, res) => {
+app.get("/api/items/:id/hearts", requireAuth, wrap(async (req, res) => {
   res.json({ names: await heartNames(db, Number(req.params.id)) });
 }));
 
@@ -180,7 +178,7 @@ app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.post(["/api/crates/:id/items/:itemId", "/api/crates/:id/images/:itemId"], requireAuth, wrap(async (req, res) => {
+app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => {
   const result = await toggleCrateImage(db, req.user.id, Number(req.params.id), Number(req.params.itemId));
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
@@ -474,7 +472,7 @@ app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
   }
 }));
 
-app.get(["/api/items", "/api/images"], requireAuth, wrap(async (req, res) => {
+app.get("/api/items", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
   res.json(await listImages(db, req.user.id, boardId));
@@ -499,14 +497,14 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 
 // The AI's per-facet justification for an item's tags. Kept out of the
 // /api/items list payload — fetched lazily when the lightbox panel opens.
-app.get(["/api/items/:id/reasoning", "/api/images/:id/reasoning"], requireAuth, wrap(async (req, res) => {
+app.get("/api/items/:id/reasoning", requireAuth, wrap(async (req, res) => {
   const row = await getImageReasoning(db, Number(req.params.id));
   if (!row) return res.status(404).json({ error: "not found" });
   if (!(await canAccessBoard(db, row.board_id, req.user))) return res.status(403).json({ error: "forbidden" });
   res.json({ reasoning: row.tag_reasoning || {} });
 }));
 
-app.patch(["/api/items/:id/tags", "/api/images/:id/tags"], requireAuth, wrap(async (req, res) => {
+app.patch("/api/items/:id/tags", requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   const tags = req.body && Array.isArray(req.body.tags) ? req.body.tags : null;
   if (!tags) return res.status(400).json({ error: "tags array required" });
@@ -521,7 +519,7 @@ app.patch(["/api/items/:id/tags", "/api/images/:id/tags"], requireAuth, wrap(asy
   res.json({ ok: true, tags: clean });
 }));
 
-app.delete(["/api/items/:id", "/api/images/:id"], requireAuth, wrap(async (req, res) => {
+app.delete("/api/items/:id", requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   const row = await deleteItem(db, id);
   if (!row) return res.status(404).json({ error: "not found" });
@@ -531,7 +529,7 @@ app.delete(["/api/items/:id", "/api/images/:id"], requireAuth, wrap(async (req, 
   res.json({ ok: true });
 }));
 
-app.post(["/api/items/:id/reprocess", "/api/images/:id/reprocess"], requireAuth, wrap(async (req, res) => {
+app.post("/api/items/:id/reprocess", requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   if (!(await reprocessImage(db, id))) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued #${id}`);

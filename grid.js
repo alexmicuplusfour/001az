@@ -1,9 +1,8 @@
 import { state } from './state.js';
-import { thumbUrl, ICONS, actionBtn } from './utils.js';
+import { ICONS, actionBtn } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { ensurePolling } from './data.js';
-import { openLightbox } from './lightbox.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
@@ -50,7 +49,7 @@ export function scheduleLayout() {
 async function doDelete(id) {
   if (!confirm("Delete this image?")) return;
   try {
-    const r = await fetch(`/api/images/${id}`, { method: "DELETE" });
+    const r = await fetch(`/api/items/${id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
     state.images = state.images.filter((i) => i.id !== id);
     document.dispatchEvent(new Event('app:render'));
@@ -61,7 +60,7 @@ async function doDelete(id) {
 
 async function doReprocess(id) {
   try {
-    const r = await fetch(`/api/images/${id}/reprocess`, { method: "POST" });
+    const r = await fetch(`/api/items/${id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
     const img = state.images.find((i) => i.id === id);
     if (img) { img.status = "pending"; img.tags = []; img.tagSet = new Set(); }
@@ -108,7 +107,7 @@ function heartControl(img) {
     if (loaded || !img.hearts) { if (!img.hearts) pop.textContent = "no hearts yet"; return; }
     loaded = true;
     try {
-      const { names } = await fetch(`/api/images/${img.id}/hearts`).then((r) => r.json());
+      const { names } = await fetch(`/api/items/${img.id}/hearts`).then((r) => r.json());
       pop.textContent = names && names.length ? names.join(", ") : "no hearts yet";
     } catch { loaded = false; }
   });
@@ -116,7 +115,7 @@ function heartControl(img) {
   wrap.addEventListener("click", async (e) => {
     e.stopPropagation();
     try {
-      const r = await fetch(`/api/images/${img.id}/favorite`, { method: "POST" });
+      const r = await fetch(`/api/items/${img.id}/favorite`, { method: "POST" });
       if (r.status === 401) return toast.info("Sign in to favorite");
 const { favorited, count: n } = await r.json();
       img.favoritedByMe = favorited;
@@ -175,12 +174,8 @@ function tagChip(img) {
 function progressCard(p) {
   const card = document.createElement("div");
   card.className = "card loading";
-  const im = document.createElement("img");
-  im.src = p.objURL || thumbUrl(p.name);
-  im.alt = p.name || "uploading";
-  im.addEventListener("error", () => card.remove());
-  im.addEventListener("load", () => scheduleLayout());
-  card.appendChild(im);
+  const body = state.adapter.renderProgressBody?.(p, card, scheduleLayout);
+  if (body) card.appendChild(body);
   const sp = document.createElement("div");
   sp.className = "spinner";
   card.appendChild(sp);
@@ -227,25 +222,11 @@ function cardFor(img) {
   // Held images (waiting for auto-tagging) get the same dashed "needs tags"
   // treatment as AI-undecided ones.
   if (img.undecided || img.status === "held") card.classList.add("undecided");
-  const im = document.createElement("img");
-  im.src = thumbUrl(img.name);
-  im.loading = "lazy";
-  im.decoding = "async";
-  if (img.w && img.h) {
-    im.width = img.w;
-    im.height = img.h;
-    // Pin the ratio to the border box (box-sizing: border-box) so selection
-    // padding cover-crops the image without changing the card's height.
-    im.style.aspectRatio = `${img.w} / ${img.h}`;
-  }
-  im.alt = img.tags.length ? img.tags.join(", ") : img.name;
-  im.addEventListener("error", () => card.remove());
-  im.addEventListener("load", () => { im.classList.add("loaded"); card.classList.add("loaded"); scheduleLayout(); });
-  if (im.complete && im.naturalWidth > 0) { im.classList.add("loaded"); card.classList.add("loaded"); }
-  card.appendChild(im);
+  // The board type owns the card body (the media); grid owns the frame + chrome.
+  card.appendChild(state.adapter.renderCardBody(img, card, scheduleLayout));
   card.addEventListener("click", () => {
     if (state.bulkSelected.size) { toggleBulkSelect(img, card); return; }
-    openLightbox(img);
+    state.adapter.openDetail(img);
   });
 
   if (state.me) {

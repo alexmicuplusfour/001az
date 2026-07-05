@@ -34,7 +34,7 @@ async function doDeleteCrate(crate, onClose) {
 async function toggleCrateImageApi(img, crateId, checkbox) {
   const prev = checkbox.checked;
   try {
-    const r = await fetch(`/api/crates/${crateId}/images/${img.id}`, { method: "POST" });
+    const r = await fetch(`/api/crates/${crateId}/items/${img.id}`, { method: "POST" });
     if (!r.ok) throw new Error();
     const { added, count } = await r.json();
     checkbox.checked = added;
@@ -123,7 +123,7 @@ export function openCratePop(anchorEl, img = null) {
         if (!r.ok) { toast.error("Couldn't create crate"); return; }
         const { crate } = await r.json();
         if (!state.crates.find((c) => c.id === crate.id)) state.crates.push(crate);
-        const r2 = await fetch(`/api/crates/${crate.id}/images/${img.id}`, { method: "POST" });
+        const r2 = await fetch(`/api/crates/${crate.id}/items/${img.id}`, { method: "POST" });
         if (r2.ok) {
           const { added, count } = await r2.json();
           if (added) img.crateIds.add(crate.id);

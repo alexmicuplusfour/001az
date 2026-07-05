@@ -1,9 +1,10 @@
-import { state } from './state.js';
-import { fullUrl, ICONS } from './utils.js';
-import { toast } from './toast.js';
-import { taggedFiltered } from './filters.js';
-import { openCratePop, closeCratePop } from './crates.js';
-import { scrollToCard } from './grid.js';
+import { state } from '../../state.js';
+import { ICONS } from '../../utils.js';
+import { toast } from '../../toast.js';
+import { taggedFiltered } from '../../filters.js';
+import { openCratePop, closeCratePop } from '../../crates.js';
+import { scrollToCard } from '../../grid.js';
+import { fullUrl } from './index.js';
 
 const elLightbox = document.getElementById("lightbox");
 const elLightboxImg = document.getElementById("lightbox-img");
@@ -120,7 +121,7 @@ async function renderPanel() {
   const token = ++reasoningReq;
   let reasoning = {};
   try {
-    const r = await fetch(`/api/images/${img.id}/reasoning`);
+    const r = await fetch(`/api/items/${img.id}/reasoning`);
     if (r.ok) reasoning = (await r.json()).reasoning || {};
   } catch { /* panel just shows tags without reasoning */ }
   if (token !== reasoningReq || lightboxImg !== img || !panelOpen) return;
@@ -218,7 +219,7 @@ export function initLightbox() {
     e.stopPropagation();
     if (!lightboxImg) return;
     try {
-      const r = await fetch(`/api/images/${lightboxImg.id}/favorite`, { method: "POST" });
+      const r = await fetch(`/api/items/${lightboxImg.id}/favorite`, { method: "POST" });
       if (r.status === 401) return toast.info("Sign in to favorite");
       const { favorited, count } = await r.json();
       lightboxImg.favoritedByMe = favorited;

@@ -2,7 +2,6 @@ import { state } from './state.js';
 import { ICONS, toolBtn, onOutsideClick, positionPop } from './utils.js';
 import { activeCount, clearAll, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop } from './crates.js';
-import { triggerFilePicker } from './upload.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -109,8 +108,8 @@ export function renderToolbar(resultCount) {
   const auth = document.createElement("div");
   auth.className = "auth";
   if (state.me) {
-    if (state.boardName) {
-      auth.appendChild(toolBtn(ICONS.plus, "upload", triggerFilePicker));
+    if (state.boardName && state.adapter?.triggerIngest) {
+      auth.appendChild(toolBtn(ICONS.plus, "upload", () => state.adapter.triggerIngest()));
     }
     const userBtn = document.createElement("button");
     userBtn.className = "tool-btn user-menu-btn";

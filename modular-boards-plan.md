@@ -16,9 +16,10 @@ Shipped ahead of the refactor, on the image-only codebase:
 - **Tag snapshots (2026-07-05)** — every tagging event appends `{source: 'ai'|'user', tags, reasoning, undecided, tagged_at}` to `tag_snapshots` (AI runs via `markTagged`, manual edits via `setImageTags`), so scheduled retags accrue history instead of overwriting it. Keyed `image_id` until the items rename; no UI yet.
 - **Daily cap removed (2026-07-05)** — worker gate, compose/env passthrough, README row all deleted; `ai_board_usage` + the sparkline is the spend visibility, cadence is the control.
 - **Migration step 1 (2026-07-05)** — `images` → `items` with the image columns folded into a `payload` JSONB (`{filename, original_name, w, h}`); `favorites.item_id`, `crate_images` → `crate_items.item_id`, `tag_snapshots.item_id`; `boards.type` (default `'image'`); UNIQUE(filename) carried over as an expression index. Live DBs migrate via a guarded transactional rename in `initDb` (verified on the real dev DB, 116 items); the sqlite→pg ETL writes the new shape directly. API shapes untouched; zero frontend changes.
-- **Migration step 2 (2026-07-05)** — server registry (`server/types/index.js`: manifest/apiVersion validation, namespaced type ids, ctx facade) + the image adapter (`server/types/image.js`: upload route, sharp pipeline + OOM guards, `/gallery`+`/thumbnails` statics, `buildModelInput`, `onDelete` file cleanup, dims backfill). Worker seam cut: `buildModelInput` returns provider-neutral `parts`; `providers.js` maps them per provider and the tool is now **`record_tags`** with generalized wording (per-type `subject` from the manifest). Core delete routes call `adapter.onDelete`. `/api/items*` routes live with `/api/images*` as aliases until the client migrates. Verified e2e on the dev stack: upload → Sonnet tagged with reasoning → snapshot → board delete cleaned files.
+- **Migration step 2 (2026-07-05)** — server registry (`server/types/index.js`: manifest/apiVersion validation, namespaced type ids, ctx facade) + the image adapter (`server/types/image.js`: upload route, sharp pipeline + OOM guards, `/gallery`+`/thumbnails` statics, `buildModelInput`, `onDelete` file cleanup, dims backfill). Worker seam cut: `buildModelInput` returns provider-neutral `parts`; `providers.js` maps them per provider and the tool is now **`record_tags`** with generalized wording (per-type `subject` from the manifest). Core delete routes call `adapter.onDelete`. Verified e2e on the dev stack: upload → Sonnet tagged with reasoning → snapshot → board delete cleaned files.
+- **Migration step 3 (2026-07-05)** — client registry (`types/index.js`) + image adapter (`types/image/`: card `<img>` body, upload-progress body, moved `lightbox.js` as `openDetail`, moved `upload.js` as ingest, `triggerIngest` for the toolbar +, `previewUrl` for the tag editor, `thumbUrl`/`fullUrl` moved in). `app.js` resolves `state.adapter` from `board.type` at boot; grid owns frame + chrome, adapter owns the body. All fetches switched to `/api/items*` / crates `/items/`; server aliases dropped. Verified headless (Edge + puppeteer-core, since removed): cards, masonry, lightbox + nav + reasoning panel, hover chrome, upload button, no page errors.
 
-Not started: the client adapter (step 3), type picker, the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
+Not started: type picker (step 4), the stock type, the refresh loop. Sections below are updated where a shipped piece changed the design (marked ✅).
 
 ---
 
@@ -160,18 +161,23 @@ One consequence for the stock design: **research capability is per-provider.** T
 
 ---
 
-## Client adapter contract
+## Client adapter contract (✅ shipped 2026-07-05, image adapter proves it)
 
-`types/<type>/index.js`, registered in `types/index.js`. The board's type is known at load; look the adapter up once and hand it to the render path.
+`types/<type>/index.js`, registered in `types/index.js` via `registerType`; `app.js` resolves `state.adapter = getType(board.type)` at boot. As implemented:
 
 ```js
 export default {
-  type: "stock",
-  renderCardBody(item),  // element inside the card frame (image type: the <img>)
-  openDetail(item),      // click-through view (image type: openLightbox)
-  ingestUI(board),       // how items enter (image type: the dropzone from upload.js)
+  manifest: { apiVersion: 1, type: "image", name, version },
+  init(),                                // one-time wiring (dropzone, lightbox DOM)
+  renderCardBody(item, card, layout),    // media inside the card frame
+  renderProgressBody(p, card, layout),   // optional: upload placeholders
+  openDetail(item),                      // click-through view (image: lightbox)
+  triggerIngest(),                       // optional: toolbar "+" lands here
+  previewUrl(item),                      // optional: small preview (tag editor)
 };
 ```
+
+One deliberate looseness vs. the server side: client adapters may import the shared UI kit (`state.js`, `utils.js`, `toast.js`, `filters.js`) — imports point adapter → core only, so a new type still touches zero core files; there's no client ctx yet. Formalize one only if the stock adapter shows it's needed. Image-type static markup (file input, drop overlay, lightbox) still lives in `index.html` — acceptable until a second type needs to inject its own.
 
 What stays core, verified against current code:
 
@@ -241,7 +247,7 @@ Steps 1–4 are pure refactor — the app must behave identically after each, ve
 
 1. ✅ **Schema (2026-07-05):** `images` → `items` (+ `payload`; `tag_reasoning` rides along), image columns folded into `payload` JSONB, ids and FK cascades preserved, `favorites`/`crate_items`/`tag_snapshots` renamed, `boards.type` added. Fresh installs via `schema.sql`; live DBs via the guarded transactional migration in `initDb`; the sqlite→pg ETL writes the new shape for the droplet cutover.
 2. ✅ **Server image adapter (2026-07-05):** registry + `server/types/image.js` + ctx facade; upload/sharp/statics/delete-cleanup/model-input moved in; worker seam cut (`parts`, `record_tags`); `/api/items*` routes with `/api/images*` aliases.
-3. **Client image adapter:** create registry + `types/image/`; move `upload.js` → `ingestUI`, `lightbox.js` → `openDetail`, the card `<img>` body → `renderCardBody`; switch fetches to `/api/items`, drop server aliases.
+3. ✅ **Client image adapter (2026-07-05):** registry + `types/image/`; `upload.js` and `lightbox.js` moved in, card body/progress body/detail/ingest/preview behind adapter hooks; all fetches on `/api/items`, server aliases dropped.
 4. **Type plumbing:** board creation UI gains a type picker next to the shipped tagger/model pickers (✅ per-board AI config is done, ✅ cap deleted); client resolves the adapter from `board.type`; suggested-facet presets (with descriptions) wired in.
 5. **Stock adapter (server):** stocks API client, ingest route, payload shape, chart rasterizer, `buildModelInput` returning provider-neutral parts with research enabled, `refresh()`.
 6. **Stock adapter (client):** card body with canvas chart, board-level period selector, ticker ingest UI, detail panel.

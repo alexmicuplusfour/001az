@@ -1,12 +1,14 @@
 import { state } from './state.js';
-import { toImage } from './utils.js';
+import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters } from './filters.js';
 import { inProgress, reconcile, ensurePolling } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
 import { renderToolbar } from './toolbar.js';
-import { initLightbox } from './lightbox.js';
-import { initUpload } from './upload.js';
+import { registerType, getType } from './types/index.js';
+import imageType from './types/image/index.js';
+
+registerType(imageType);
 
 function render() {
   const key = filterKey();
@@ -25,8 +27,6 @@ document.addEventListener('app:render', render);
 async function main() {
   initGrid();
   initFilters();
-  initUpload();
-  initLightbox();
 
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
@@ -47,7 +47,7 @@ async function main() {
       ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
       : Promise.resolve(null),
     state.boardId
-      ? fetch(`/api/images?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
+      ? fetch(`/api/items?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
       : Promise.resolve([]),
     fetch("/api/me", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
     state.boardId
@@ -61,8 +61,10 @@ async function main() {
   state.facets = boardData ? boardData.facets : [];
   state.boardName = boardData ? boardData.name : null;
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
+  state.adapter = getType(boardData?.type);
+  state.adapter.init?.();
   state.me = meData;
-  state.images = imagesData.map(toImage);
+  state.images = imagesData.map(toItem);
   state.crates = Array.isArray(cratesData) ? cratesData : [];
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   render();

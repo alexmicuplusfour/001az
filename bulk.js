@@ -75,7 +75,7 @@ export function clearBulk() {
 async function doBulkReprocess() {
   const imgs = selectedImages();
   const results = await Promise.allSettled(imgs.map(async (img) => {
-    const r = await fetch(`/api/images/${img.id}/reprocess`, { method: "POST" });
+    const r = await fetch(`/api/items/${img.id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
     img.status = "pending";
     img.tags = [];
@@ -94,7 +94,7 @@ async function doBulkDelete() {
   if (!confirm(`Delete ${imgs.length} image${imgs.length === 1 ? "" : "s"}?`)) return;
   const deleted = new Set();
   await Promise.allSettled(imgs.map(async (img) => {
-    const r = await fetch(`/api/images/${img.id}`, { method: "DELETE" });
+    const r = await fetch(`/api/items/${img.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
     deleted.add(img.id);
   }));
@@ -115,7 +115,7 @@ async function addAllToCrate(crateId) {
   }
   let counts = [];
   await Promise.allSettled(imgs.map(async (img) => {
-    const r = await fetch(`/api/crates/${crateId}/images/${img.id}`, { method: "POST" });
+    const r = await fetch(`/api/crates/${crateId}/items/${img.id}`, { method: "POST" });
     if (!r.ok) throw new Error();
     const { added, count } = await r.json();
     if (added) img.crateIds.add(crateId);

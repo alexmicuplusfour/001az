@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { thumbUrl, ICONS } from './utils.js';
+import { ICONS } from './utils.js';
 import { toast } from './toast.js';
 
 export function openTagEditor(img) {
@@ -12,7 +12,9 @@ export function openTagEditor(img) {
   const header = document.createElement("div");
   header.className = "te-header";
   const thumb = document.createElement("img");
-  thumb.src = thumbUrl(img.name);
+  const preview = state.adapter.previewUrl?.(img);
+  if (preview) thumb.src = preview;
+  else thumb.hidden = true;
   thumb.className = "te-thumb";
   const closeBtn = document.createElement("button");
   closeBtn.className = "te-close";
@@ -94,7 +96,7 @@ export function openTagEditor(img) {
     saveBtn.disabled = true;
     saveBtn.textContent = "Saving…";
     try {
-      const r = await fetch(`/api/images/${img.id}/tags`, {
+      const r = await fetch(`/api/items/${img.id}/tags`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tags }),
