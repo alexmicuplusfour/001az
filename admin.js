@@ -260,8 +260,10 @@
 
         const rows = document.getElementById("rows");
         for (const u of users) {
-          // Login links are minted on demand — the server no longer hands out
-          // tokens in this list (they're bearer credentials, hashed at rest).
+          // The server stores only token hashes, so an existing link can't be
+          // shown back. "copy link" mints a fresh one on first use (replacing
+          // the user's previous link) and copies from cache after that;
+          // "new link" forces a re-mint.
           u.link = null;
 
           const tr = document.createElement("tr");
@@ -274,25 +276,39 @@
           const act = tr.querySelector(".row-actions");
 
           const copyBtn = document.createElement("button");
+          const newLinkBtn = document.createElement("button");
+
+          async function mintLink() {
+            const { link } = await api("POST", `/api/admin/users/${u.id}/link`);
+            u.link = link;
+            newLinkBtn.textContent = "new link";
+            showLink(u.email, link);
+            return link;
+          }
+
           copyBtn.className = "ghost";
           copyBtn.textContent = "copy link";
-          copyBtn.disabled = !u.link;
-          if (u.link) copyBtn.onclick = () => copy(u.link, copyBtn);
+          copyBtn.title = "Copies the login link (mints a fresh one first if needed — the previous link stops working)";
+          copyBtn.onclick = async () => {
+            copyBtn.disabled = true;
+            try {
+              if (!u.link) await mintLink();
+              copy(u.link, copyBtn);
+            } catch (err) {
+              toast.error(err.message);
+            } finally {
+              copyBtn.disabled = false;
+            }
+          };
           act.appendChild(copyBtn);
 
-          const newLinkBtn = document.createElement("button");
           newLinkBtn.className = "ghost";
-          newLinkBtn.textContent = u.link ? "new link" : "make link";
+          newLinkBtn.textContent = "new link";
+          newLinkBtn.title = "Mints a fresh login link — the previous link stops working";
           newLinkBtn.onclick = async () => {
             newLinkBtn.disabled = true;
             try {
-              const { link } = await api("POST", `/api/admin/users/${u.id}/link`);
-              u.link = link;
-              copyBtn.disabled = false;
-              copyBtn.onclick = () => copy(u.link, copyBtn);
-              newLinkBtn.textContent = "new link";
-              showLink(u.email, link);
-              copy(link, copyBtn);
+              copy(await mintLink(), copyBtn);
             } catch (err) {
               toast.error(err.message);
             } finally {
