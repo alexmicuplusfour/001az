@@ -43,6 +43,11 @@ export async function startServer() {
   // get a fresh module bound to their own DATABASE_URL.
   const mod = await import("../server/server.js?bust=" + name);
   const { app, db } = mod;
+  // DROP DATABASE ... WITH (FORCE) in close() can race db.end() and terminate
+  // an idle pool client; pg emits that as a pool 'error' event, which is an
+  // uncaughtException when unhandled (a rare CI flake). Queries in flight
+  // still reject normally where awaited — this only swallows the idle case.
+  db.on("error", () => {});
 
   const server = await new Promise((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
