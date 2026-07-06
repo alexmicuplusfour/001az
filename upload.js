@@ -19,7 +19,7 @@ let processingToast = null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const isImageFile = (f) => f.type.startsWith("image/") || /\.(avif|heif|heic|svg)$/i.test(f.name);
-const isDocFile = (f) => /\.(pdf|txt|md|csv)$/i.test(f.name);
+const isDocFile = (f) => /\.(pdf|docx|txt|md|csv)$/i.test(f.name);
 
 export function handleFiles(fileList) {
   const files = [...fileList].filter((f) => isImageFile(f) || isDocFile(f));

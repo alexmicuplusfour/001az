@@ -22,6 +22,7 @@ export function createSources({ galleryDir, thumbsDir }) {
       for (const f of files || []) {
         if (!f.name) continue;
         fs.rmSync(path.join(galleryDir, f.name), { force: true });
+        fs.rmSync(path.join(galleryDir, f.name + ".txt"), { force: true }); // docx text sidecar
         fs.rmSync(path.join(thumbsDir, f.name + ".webp"), { force: true });
       }
     },

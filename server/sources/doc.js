@@ -1,9 +1,13 @@
-// The document source handler: pdf / txt / md / csv. Stores the original in
-// the gallery store; PDFs additionally get a page-1 preview rendered into the
-// thumbnail store via poppler (pdftoppm + sharp), so their card face rides the
-// exact same path as an image thumbnail. No poppler on the box → the doc
-// still ingests, it just has no preview (title-card face).
+// The document source handler: pdf / docx / txt / md / csv. Stores the
+// original in the gallery store; PDFs get a page-1 preview rendered into the
+// thumbnail store via poppler (pdftoppm + sharp), so their card face rides
+// the exact same path as an image thumbnail (no poppler on the box → the doc
+// still ingests, just without a preview). docx gets its text extracted at
+// ingest (mammoth, pure JS) into a .txt sidecar next to the original — the
+// preview, the tagger, and the lightbox all read the sidecar, so docx flows
+// through the text pipeline and works on every provider, unlike PDFs.
 import sharp from "sharp";
+import mammoth from "mammoth";
 import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
@@ -13,11 +17,11 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
-const KIND_BY_EXT = { pdf: "pdf", txt: "text", md: "text", csv: "text" };
+const KIND_BY_EXT = { pdf: "pdf", docx: "docx", txt: "text", md: "text", csv: "text" };
 const PDF_MAX_PAGES = 100; // Anthropic document-block limit
 const THUMB_WIDTH = 600; // matches the image source
 
-export const isDocName = (name) => /\.(pdf|txt|md|csv)$/i.test(name || "");
+export const isDocName = (name) => /\.(pdf|docx|txt|md|csv)$/i.test(name || "");
 
 export function docSource({ galleryDir, thumbsDir }) {
   fs.mkdirSync(galleryDir, { recursive: true });
@@ -50,6 +54,19 @@ export function docSource({ galleryDir, thumbsDir }) {
       }
       if (kind === "text") {
         const dims = await renderTextPreview(buf.toString("utf8"), path.join(thumbsDir, filename + ".webp"));
+        if (dims) { entry.w = dims.w; entry.h = dims.h; }
+      }
+      if (kind === "docx") {
+        // docx is a zip; extraction failing means it isn't really one.
+        if (!buf.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return null;
+        let text;
+        try {
+          text = (await mammoth.extractRawText({ buffer: buf })).value;
+        } catch {
+          return null;
+        }
+        await fs.promises.writeFile(path.join(galleryDir, filename + ".txt"), text);
+        const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));
         if (dims) { entry.w = dims.w; entry.h = dims.h; }
       }
 

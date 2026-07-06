@@ -4,8 +4,13 @@
 // tests run on the host; the handler degrades to no-preview by design.
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { startServer, adminSession, seedBoard } from "./helpers.js";
 import { anthropicRequest } from "../server/providers.js";
+
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
 async function uploadFiles(base, sid, boardId, files) {
   const fd = new FormData();
@@ -19,7 +24,7 @@ async function uploadFiles(base, sid, boardId, files) {
 }
 
 test("document ingestion", async (t) => {
-  const { base, db, close } = await startServer();
+  const { base, db, galleryDir, close } = await startServer();
   t.after(close);
   const admin = await adminSession(db);
   const board = await seedBoard(db, "docs-board");
@@ -52,6 +57,33 @@ test("document ingestion", async (t) => {
     assert.equal(u.kind, "pdf");
     assert.equal(u.label, "cv.pdf");
     assert.match(u.name, /\.pdf$/);
+  });
+
+  await t.test("a docx ingests with extracted-text sidecar and page-peek preview", async () => {
+    const bytes = fs.readFileSync(path.join(FIXTURES, "sample.docx"));
+    const r = await uploadFiles(base, admin.sid, board, [
+      ["designer.docx", bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    ]);
+    const [u] = r.json.uploaded;
+    assert.equal(u.kind, "docx");
+    assert.equal(u.label, "designer.docx");
+    assert.equal(u.w, 600); // text-peek preview renders via sharp — portable
+    const { rows } = await db.query("SELECT payload FROM items WHERE id=$1", [u.id]);
+    const stored = rows[0].payload.files[0].name;
+    const sidecar = fs.readFileSync(path.join(galleryDir, stored + ".txt"), "utf8");
+    assert.match(sidecar, /Maya Lin - Principal Product Designer/);
+    // the sidecar (what the tagger + lightbox read) is served behind auth
+    const res = await fetch(`${base}/gallery/${stored}.txt`, { headers: { Cookie: `sid=${admin.sid}` } });
+    assert.equal(res.status, 200);
+    assert.match(await res.text(), /design systems/);
+  });
+
+  await t.test("a zip wearing .docx that mammoth can't read is rejected", async () => {
+    const r = await uploadFiles(base, admin.sid, board, [
+      ["fake.docx", new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]), "application/zip"],
+    ]);
+    assert.equal(r.json.uploaded.length, 0);
+    assert.equal(r.json.rejected.length, 1);
   });
 
   await t.test("binary wearing .txt and unknown types are rejected", async () => {

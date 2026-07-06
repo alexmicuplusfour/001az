@@ -245,8 +245,10 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         { kind: "text", text: "Tag this document using the record_tags tool." },
       ];
     }
-    if (file.kind === "text") {
-      const text = await fs.promises.readFile(path.join(galleryDir, file.name), "utf8");
+    if (file.kind === "text" || file.kind === "docx") {
+      // docx reads its ingest-time text sidecar (mammoth extraction).
+      const src = file.kind === "docx" ? file.name + ".txt" : file.name;
+      const text = await fs.promises.readFile(path.join(galleryDir, src), "utf8");
       return [{
         kind: "text",
         text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,

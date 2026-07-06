@@ -186,7 +186,8 @@ function showLightbox() {
     elLightboxImg.removeAttribute("src");
     elLightboxImg.hidden = true;
     elLightbox.classList.remove("loading");
-    const url = fullUrl(lightboxImg.name);
+    // docx can't render in a frame; its extracted-text sidecar can.
+    const url = fullUrl(lightboxImg.kind === "docx" ? lightboxImg.name + ".txt" : lightboxImg.name);
     if (elLightboxDoc.getAttribute("src") !== url) elLightboxDoc.src = url;
     elLightboxDoc.hidden = false;
     // The embedded viewer grabs keyboard focus; keep it on the lightbox so
