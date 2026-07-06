@@ -145,21 +145,32 @@ export async function listItems(db, userId = null, boardId = null) {
     }
   }
 
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.payload.identity,
-    status: r.status,
-    tags: r.tags,
-    undecided: !!r.undecided,
-    hearts: r.hearts,
-    favoritedByMe: !!r.fav,
-    crateIds: crateMap.get(r.id) || [],
-    w: r.payload.files?.[0]?.w || null,
-    h: r.payload.files?.[0]?.h || null,
-    // file kind drives the card face; pre-kind rows are all images
-    kind: r.payload.files?.[0]?.kind || "image",
-    label: r.payload.files?.[0]?.original_name || null,
-  }));
+  return rows.map((r) => {
+    // name = stored filename used to construct gallery/thumbnail URLs.
+    // For raw-identity items this equals payload.identity; for derived-identity
+    // items they diverge — name stays the file path, identity is the entity key.
+    const storedFile = r.payload.files?.[0]?.name || r.payload.identity;
+    const originalName = r.payload.files?.[0]?.original_name || null;
+    const identity = r.payload.identity;
+    return {
+      id: r.id,
+      name: storedFile,
+      // identity is the entity's semantic key — a human-readable derived name
+      // when the mapping uses AI identity, otherwise the stored filename.
+      // Prefer it over the original filename as the display label when derived.
+      identity,
+      status: r.status,
+      tags: r.tags,
+      undecided: !!r.undecided,
+      hearts: r.hearts,
+      favoritedByMe: !!r.fav,
+      crateIds: crateMap.get(r.id) || [],
+      w: r.payload.files?.[0]?.w || null,
+      h: r.payload.files?.[0]?.h || null,
+      kind: r.payload.files?.[0]?.kind || "image",
+      label: originalName,
+    };
+  });
 }
 
 // status: 'pending' (tag now) or 'held' (wait — for the board's scheduled
@@ -774,6 +785,63 @@ export async function markExtracted(db, id, fields) {
      WHERE id = $3`,
     [JSON.stringify(fields || {}), Date.now(), id]
   );
+}
+
+// --- derived identity helpers ---
+
+// Find an existing entity by its derived (normalised) identity string.
+export async function getItemByIdentity(db, boardId, identity) {
+  const { rows } = await db.query(
+    "SELECT * FROM items WHERE board_id=$1 AND payload->>'identity'=$2",
+    [boardId, identity]
+  );
+  return rows[0] || null;
+}
+
+// Set a derived identity on a provisional item, clearing the provisional flag.
+// Throws a pg unique-violation error (code 23505) when another entity already
+// holds this identity — caller catches and merges instead.
+export async function setItemIdentity(db, id, identity) {
+  await db.query(
+    `UPDATE items
+     SET payload = payload || jsonb_build_object(
+           'identity', $1::text,
+           'identity_provisional', false),
+         updated_at = $2
+     WHERE id = $3`,
+    [identity, Date.now(), id]
+  );
+}
+
+// Append files to an existing entity's files array (merge path).
+export async function appendItemFiles(db, targetId, files) {
+  await db.query(
+    `UPDATE items
+     SET payload = jsonb_set(payload, '{files}', payload->'files' || $1::jsonb),
+         updated_at = $2
+     WHERE id = $3`,
+    [JSON.stringify(files), Date.now(), targetId]
+  );
+}
+
+// Remove one file by zero-based index from payload.files.
+// Returns the updated payload so the caller can check if files is now empty.
+export async function removeFileFromItem(db, id, index) {
+  const { rows } = await db.query(
+    `UPDATE items
+     SET payload = jsonb_set(
+           payload, '{files}',
+           COALESCE(
+             (SELECT jsonb_agg(f ORDER BY i)
+              FROM jsonb_array_elements(payload->'files') WITH ORDINALITY t(f, i)
+              WHERE i - 1 <> $1),
+             '[]'::jsonb)),
+         updated_at = $2
+     WHERE id = $3
+     RETURNING payload`,
+    [index, Date.now(), id]
+  );
+  return rows[0]?.payload || null;
 }
 
 export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {

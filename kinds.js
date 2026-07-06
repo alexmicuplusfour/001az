@@ -2,7 +2,7 @@
 // frame, its detail view, its small preview. grid.js owns the card frame and
 // chrome; the kind owns only the face. Dispatch is by the item's file kind:
 // images get the bare-media face, documents get preview-plus-title (the
-// title showing the original filename — the stored identity is random hex).
+// title showing the display label — the stored file name is a random hex).
 import { openLightbox } from './lightbox.js';
 
 export const thumbUrl = (name) => `thumbnails/${encodeURIComponent(name)}.webp`;
@@ -64,7 +64,7 @@ const docKind = {
       im.src = thumbUrl(item.name);
       im.loading = "lazy";
       im.decoding = "async";
-      im.alt = item.label || item.name;
+      im.alt = item.displayLabel;
       im.addEventListener("load", () => { im.classList.add("loaded"); layout(); });
       preview.appendChild(im);
       wrap.appendChild(preview);
@@ -76,8 +76,8 @@ const docKind = {
     }
     const title = document.createElement("div");
     title.className = "doc-title";
-    title.textContent = item.label || item.name;
-    title.title = item.label || item.name;
+    title.textContent = item.displayLabel;
+    title.title = item.displayLabel;
     wrap.appendChild(title);
     card.classList.add("loaded");
     return wrap;

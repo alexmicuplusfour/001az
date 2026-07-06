@@ -16,6 +16,9 @@ import {
   setBoardNextRun,
   itemsNeedingEmbedding,
   setItemEmbedding,
+  getItemByIdentity,
+  setItemIdentity,
+  appendItemFiles,
 } from "./db.js";
 import { callTagger, embedTexts, PROVIDER_DEFAULT_MODEL, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 
@@ -191,18 +194,41 @@ Return your answer only by calling the record_tags tool.`;
 // vary per item so a board-level cache wouldn't help).
 export function buildFieldsPrompt(mapping) {
   const fields = (mapping && mapping.fields) || [];
+  const hasDerivedIdentity = mapping?.identity?.from === "ai";
   const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.hint || f.key}`);
+
+  const identityNote = hasDerivedIdentity
+    ? `The identity field is the entity's unique key on this board — normalise it ` +
+      `consistently so the same entity always produces the same value.\n\n`
+    : "";
   const systemText =
     `You extract structured fields from items for a private research board.\n\n` +
+    identityNote +
     `For each field, first write one short sentence explaining why you chose the value ` +
     `(or why it could not be found in the material), then provide the value. ` +
     `Set the value to null when the field cannot be determined from the material.\n\n` +
-    `Fields to extract:\n${lines.join("\n")}\n\n` +
+    (lines.length ? `Fields to extract:\n${lines.join("\n")}\n\n` : "") +
     `Return your answer only by calling the record_fields tool.`;
 
   const kindType = { text: "string", url: "string", date: "string", number: "number" };
   const properties = {};
   const required = [];
+
+  // Identity key is declared first so the model commits to it before extracting fields.
+  if (hasDerivedIdentity) {
+    properties.identity = {
+      type: "object",
+      description: mapping.identity.hint,
+      properties: {
+        why: { type: "string", description: "One short sentence: what in the material identifies this entity." },
+        value: { type: ["string", "null"] },
+      },
+      required: ["why", "value"],
+      additionalProperties: false,
+    };
+    required.push("identity");
+  }
+
   for (const f of fields) {
     const jt = kindType[f.kind] || "string";
     properties[f.key] = {
@@ -417,13 +443,31 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     }
   }
 
+  // Normalise a derived identity value for consistent collision detection.
+  const normaliseIdentity = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
+
+  // Merge a provisional item (just extracted) into an existing entity that
+  // already holds the same derived identity. Appends files, deletes the
+  // provisional item, and re-queues the existing entity for re-extraction.
+  async function mergeIntoExisting(provisionalRow, existingId) {
+    const label = provisionalRow.payload?.identity || `item ${provisionalRow.id}`;
+    await appendItemFiles(db, existingId, provisionalRow.payload.files || []);
+    await db.query("DELETE FROM items WHERE id=$1", [provisionalRow.id]);
+    await db.query(
+      "UPDATE items SET status='pending_extract', attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
+      [Date.now(), existingId]
+    );
+    console.log(`merge: provisional #${provisionalRow.id} (${label}) merged into entity #${existingId}`);
+  }
+
   // Run extraction for one pending_extract item. Resolves the board's AI the
   // same way tagOne does; writes payload.fields and advances to pending so the
-  // normal tag leg picks it up next.
+  // normal tag leg picks it up next. When the mapping has derived identity,
+  // resolves collisions by merging into the existing entity instead.
   async function extractOne(row) {
     const mapping = row.payload.mapping;
-    if (!mapping?.fields?.length) {
-      // Shouldn't happen if ingest routing is correct, but be safe.
+    if (!mapping?.fields?.length && mapping?.identity?.from !== "ai") {
+      // No extraction work to do — mapping is empty; advance straight to tagging.
       await markExtracted(db, row.id, {});
       return;
     }
@@ -445,7 +489,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
 
     // Lenient-validate each field: wrong type → null (keep the why sentence).
     const fields = {};
-    for (const f of mapping.fields) {
+    for (const f of (mapping.fields || [])) {
       const entry = input[f.key];
       if (!entry) continue;
       const why = typeof entry.why === "string" ? entry.why.trim() : "";
@@ -458,10 +502,46 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       fields[f.key] = { v, why };
     }
 
-    await markExtracted(db, row.id, fields);
+    // Derived identity: resolve before writing fields.
+    if (mapping.identity?.from === "ai") {
+      const rawIdentity = input.identity?.value;
+      if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
+        // AI couldn't derive an identity — keep provisional filename, flag it.
+        await db.query(
+          "UPDATE items SET payload = payload || '{\"identity_provisional\":true}'::jsonb, updated_at=$1 WHERE id=$2",
+          [Date.now(), row.id]
+        );
+        await markExtracted(db, row.id, fields);
+        console.log(`extracted #${row.id} [no identity derived — provisional] [${ai.model}]`);
+      } else {
+        const derived = normaliseIdentity(rawIdentity);
+        try {
+          await setItemIdentity(db, row.id, derived);
+          await markExtracted(db, row.id, fields);
+          console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
+        } catch (err) {
+          if (err.code === "23505") {
+            // Another entity already holds this identity — merge.
+            const existing = await getItemByIdentity(db, row.board_id, derived);
+            if (existing) {
+              await mergeIntoExisting(row, existing.id);
+            } else {
+              // Race resolved by the time we looked — treat as no-collision.
+              await setItemIdentity(db, row.id, derived);
+              await markExtracted(db, row.id, fields);
+            }
+          } else {
+            throw err;
+          }
+        }
+      }
+    } else {
+      await markExtracted(db, row.id, fields);
+      const label = row.payload?.identity || `item ${row.id}`;
+      console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
+    }
+
     await bumpUsage(db, row.board_id, usage);
-    const label = row.payload?.identity || `item ${row.id}`;
-    console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
   }
 
   async function processExtractOne(row) {

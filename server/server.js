@@ -58,6 +58,7 @@ import {
   listItemPayloads,
   updateItemPayload,
   reextractItem,
+  removeFileFromItem,
 } from "./db.js";
 import {
   attachUser,
@@ -414,6 +415,16 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
 const MAPPING_KINDS = new Set(["text", "number", "url", "date"]);
 // Returns an error string when mapping is invalid, null when valid.
 function validateMapping(mapping) {
+  // Optional identity slot.
+  if (mapping.identity !== undefined) {
+    const id = mapping.identity;
+    if (!id || typeof id !== "object") return "mapping.identity must be an object";
+    if (id.from !== "raw" && id.from !== "ai") return `mapping.identity.from must be "raw" or "ai"`;
+    if (id.from === "ai" && (!id.hint || typeof id.hint !== "string" || !id.hint.trim()))
+      return `mapping.identity.hint is required when from is "ai"`;
+    if (id.hint !== undefined && (typeof id.hint !== "string" || id.hint.length > 500))
+      return `mapping.identity.hint must be a string ≤500 chars`;
+  }
   if (!Array.isArray(mapping.fields)) return "mapping.fields must be an array";
   if (mapping.fields.length > 12) return "mapping.fields may have at most 12 entries";
   const seen = new Set();
@@ -726,7 +737,12 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 // /api/items list payload — fetched lazily when the lightbox panel opens.
 app.get("/api/items/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await getItemReasoning(db, req.itemId);
-  res.json({ reasoning: row?.tag_reasoning || {}, fields: row?.payload?.fields || {} });
+  res.json({
+    reasoning: row?.tag_reasoning || {},
+    fields: row?.payload?.fields || {},
+    files: row?.payload?.files || [],
+    identity_provisional: !!row?.payload?.identity_provisional,
+  });
 }));
 
 app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req, res) => {
@@ -760,6 +776,37 @@ app.post("/api/items/:id/reextract", requireAuth, requireItemAccess, wrap(async 
   if (!(await reextractItem(db, req.itemId))) return res.status(409).json({ error: "item has no stamped mapping" });
   console.log(`reextract queued #${req.itemId}`);
   res.json({ ok: true, status: "pending_extract" });
+}));
+
+// Remove one file from an entity by zero-based index.
+// If this was the last file the entity is deleted entirely; otherwise the
+// entity is re-queued for extraction so its fields are re-derived.
+app.delete("/api/items/:id/files/:index", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const index = Number(req.params.index);
+  if (!Number.isInteger(index) || index < 0) return res.status(400).json({ error: "invalid file index" });
+
+  const { rows: [item] } = await db.query("SELECT payload FROM items WHERE id=$1", [req.itemId]);
+  if (!item) return res.status(404).json({ error: "not found" });
+  const files = item.payload?.files || [];
+  if (index >= files.length) return res.status(400).json({ error: "file index out of range" });
+  if (files.length === 1) return res.status(409).json({ error: "cannot remove the only file — delete the item instead" });
+
+  const removedFile = files[index];
+  const updatedPayload = await removeFileFromItem(db, req.itemId, index);
+
+  // Clean up the removed file from disk.
+  sources.cleanup([removedFile]);
+
+  // Re-queue for extraction (or plain tagging for unmapped items).
+  const hasMapping = !!(updatedPayload?.mapping?.fields?.length || updatedPayload?.mapping?.identity?.from === "ai");
+  const newStatus = hasMapping ? "pending_extract" : "pending";
+  await db.query(
+    "UPDATE items SET status=$1, attempts=0, error=NULL, updated_at=$2 WHERE id=$3",
+    [newStatus, Date.now(), req.itemId]
+  );
+
+  console.log(`file ${index} removed from item #${req.itemId} → ${newStatus}`);
+  res.json({ ok: true, status: newStatus });
 }));
 
 // Ingestion + item-file statics, mounted before the frontend catch-all.

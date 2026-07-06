@@ -6,9 +6,15 @@ export function isAdmin() {
 
 export function toItem(d) {
   const list = Array.isArray(d.tags) ? d.tags : [];
+  // Display label: prefer a derived identity (human-readable entity name) over
+  // the original filename. Falls back to original filename, then stored name.
+  const identity = d.identity || d.name;
+  const displayLabel = identity !== d.name ? identity : (d.label || d.name);
   return {
     id: d.id,
-    name: d.name,
+    name: d.name,       // stored filename — used for URL construction
+    identity,           // entity's semantic key (derived name or stored filename)
+    displayLabel,       // what to show as the primary human-readable title
     status: d.status,
     tags: list,
     tagSet: new Set(list),

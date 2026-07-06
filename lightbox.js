@@ -40,7 +40,8 @@ function renderLightboxCrate() {
 
 // Paint the reasoning panel for img. reasoning/fields are null while the
 // fetch is in flight — tags render immediately, details fill in when it lands.
-function paintPanel(img, reasoning, fields) {
+// identityProvisional is true when the AI couldn't derive an identity.
+function paintPanel(img, reasoning, fields, identityProvisional, files) {
   // Same-origin link, so the download attribute names the saved file — the
   // item's original name, not the hashed store name.
   elLightboxDownload.href = fullUrl(img.name);
@@ -54,8 +55,8 @@ function paintPanel(img, reasoning, fields) {
   meta.className = "lbp-meta";
   const metaName = document.createElement("div");
   metaName.className = "lbp-meta-name";
-  metaName.textContent = img.label || img.name;
-  metaName.title = img.label || img.name;
+  metaName.textContent = img.displayLabel;
+  metaName.title = img.displayLabel;
   meta.appendChild(metaName);
   const metaRows = [["file", img.name], ["kind", img.kind || "image"], ["id", String(img.id)]];
   for (const [k, v] of metaRows) {
@@ -70,6 +71,52 @@ function paintPanel(img, reasoning, fields) {
     meta.appendChild(row);
   }
   elLightboxPanelBody.appendChild(meta);
+
+  // Multi-file list with per-file remove (shown when entity has ≥2 files).
+  // `files` comes from the reasoning fetch (payload.files); null while loading.
+  const allFiles = Array.isArray(files) ? files : [];
+  if (allFiles.length >= 2) {
+    const filesSec = document.createElement("div");
+    filesSec.className = "lbp-files";
+    const filesLabel = document.createElement("div");
+    filesLabel.className = "lbp-fields-label";
+    filesLabel.textContent = "Files";
+    filesSec.appendChild(filesLabel);
+    allFiles.forEach((f, i) => {
+      const row = document.createElement("div");
+      row.className = "lbp-file-row";
+      const fname = document.createElement("span");
+      fname.className = "lbp-file-name";
+      fname.textContent = f.original_name || f.name;
+      const rmBtn = document.createElement("button");
+      rmBtn.className = "lbp-file-remove";
+      rmBtn.title = "Remove this file";
+      rmBtn.textContent = "×";
+      rmBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        rmBtn.disabled = true;
+        try {
+          const r = await fetch(`/api/items/${img.id}/files/${i}`, { method: "DELETE" });
+          if (r.ok) {
+            img.status = (await r.json()).status;
+            document.dispatchEvent(new Event('app:render'));
+            renderPanel();
+          }
+        } finally { rmBtn.disabled = false; }
+      });
+      row.append(fname, rmBtn);
+      filesSec.appendChild(row);
+    });
+    elLightboxPanelBody.appendChild(filesSec);
+  }
+
+  // Provisional identity warning — shown when the AI couldn't derive an identity.
+  if (identityProvisional) {
+    const warn = document.createElement("div");
+    warn.className = "lbp-provisional-warn";
+    warn.textContent = "Identity not derived — AI couldn't identify this entity. Re-extract or remove the item.";
+    elLightboxPanelBody.appendChild(warn);
+  }
 
   // Fields section: shown when extraction has run (fields object has keys).
   const fieldKeys = fields && typeof fields === "object" ? Object.keys(fields) : [];
@@ -209,20 +256,24 @@ function paintPanel(img, reasoning, fields) {
 async function renderPanel() {
   if (!panelOpen || !lightboxImg) return;
   const img = lightboxImg;
-  paintPanel(img, null, null);
+  paintPanel(img, null, null, null);
   const token = ++reasoningReq;
   let reasoning = {};
   let fields = {};
+  let files = [];
+  let identityProvisional = false;
   try {
     const r = await fetch(`/api/items/${img.id}/reasoning`);
     if (r.ok) {
       const data = await r.json();
       reasoning = data.reasoning || {};
       fields = data.fields || {};
+      files = data.files || [];
+      identityProvisional = !!data.identity_provisional;
     }
   } catch { /* panel just shows tags without reasoning */ }
   if (token !== reasoningReq || lightboxImg !== img || !panelOpen) return;
-  paintPanel(img, reasoning, fields);
+  paintPanel(img, reasoning, fields, identityProvisional, files);
 }
 
 function setPanel(open) {

@@ -10,8 +10,10 @@ export function openMappingModal() {
   if (modalEl) return; // already open
 
   const isAdmin = !!state.me?.is_admin;
-  // Clone current mapping fields so edits are buffered until Save.
+  // Clone current mapping so edits are buffered until Save.
   let fields = (state.boardMapping?.fields || []).map((f) => ({ ...f }));
+  let identityFrom = state.boardMapping?.identity?.from || "raw";
+  let identityHint = state.boardMapping?.identity?.hint || "";
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -47,19 +49,43 @@ export function openMappingModal() {
     "Extracted values appear in the Details panel and give the tagger extra context.</p>";
   body.appendChild(intro);
 
-  // Identity row — always present, not editable in this slice (raw filename).
+  // Identity row — always present; admins can switch from raw to AI-derived.
   const identityRow = document.createElement("div");
-  identityRow.className = "mm-row mm-row-locked";
+  identityRow.className = "mm-row";
+
   const idControls = document.createElement("div");
   idControls.className = "fe-head";
+
   const idKey = document.createElement("span");
   idKey.className = "mm-key-locked";
   idKey.textContent = "identity";
-  const idBadge = document.createElement("span");
-  idBadge.className = "mm-locked-badge";
-  idBadge.textContent = "filename · raw";
-  idControls.append(idKey, idBadge);
-  identityRow.appendChild(idControls);
+
+  const idSrcSel = document.createElement("select");
+  idSrcSel.disabled = !isAdmin;
+  [["raw", "filename (raw)"], ["ai", "AI instruction"]].forEach(([val, label]) => {
+    const opt = document.createElement("option");
+    opt.value = val; opt.textContent = label;
+    if (val === identityFrom) opt.selected = true;
+    idSrcSel.appendChild(opt);
+  });
+
+  const idHintWrap = document.createElement("div");
+  idHintWrap.style.cssText = "margin-top:6px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
+  const idHint = document.createElement("textarea");
+  idHint.placeholder = "AI instruction — how to identify this entity (e.g. \"the person's full name\")";
+  idHint.rows = 2;
+  idHint.value = identityHint;
+  idHint.disabled = !isAdmin;
+  idHint.addEventListener("input", () => { identityHint = idHint.value; });
+  idHintWrap.appendChild(idHint);
+
+  idSrcSel.addEventListener("change", () => {
+    identityFrom = idSrcSel.value;
+    idHintWrap.style.display = identityFrom === "ai" ? "block" : "none";
+  });
+
+  idControls.append(idKey, idSrcSel);
+  identityRow.append(idControls, idHintWrap);
   body.appendChild(identityRow);
 
   // Section header for user-defined fields
@@ -203,8 +229,19 @@ export function openMappingModal() {
       seen.add(f.key);
     }
 
-    const mapping = valid.length
-      ? { fields: valid.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })) }
+    if (identityFrom === "ai" && !identityHint.trim()) {
+      toast.error("Identity hint is required when using AI instruction");
+      return;
+    }
+    const identitySlot = identityFrom === "ai"
+      ? { from: "ai", hint: identityHint.trim() }
+      : { from: "raw" };
+    const hasContent = valid.length > 0 || identityFrom === "ai";
+    const mapping = hasContent
+      ? {
+          identity: identitySlot,
+          fields: valid.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
+        }
       : null;
 
     try {

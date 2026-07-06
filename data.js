@@ -63,6 +63,12 @@ export function reconcile(data) {
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
+      // Pick up derived identity once extraction resolves it.
+      if (d.identity && d.identity !== ex.identity) {
+        ex.name = d.name;
+        ex.identity = d.identity;
+        ex.displayLabel = d.identity !== d.name ? d.identity : (d.label || d.name);
+      }
       // Fresh uploads are created client-side without dimensions; pick them
       // up here so their cards get the computed-height layout path.
       if (!ex.w && d.w) { ex.w = d.w; ex.h = d.h || 0; }
