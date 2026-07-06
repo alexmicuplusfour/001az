@@ -52,16 +52,58 @@ export function taggedFiltered() {
   return list;
 }
 
-function valueCount(facetKey, value) {
-  let n = 0;
-  for (const img of state.items) {
-    if (img.tagSet.has(tag(facetKey, value)) && matchesExcept(img, facetKey)) n++;
-  }
-  return n;
-}
+// One pass over the items computing every number the pills need; replaces
+// per-pill rescans, which cost items × pills on every render. Counts keep
+// the matchesExcept semantics: a value counts items that match every OTHER
+// active facet, but not necessarily its own. Tags are split at the first
+// "/" to find their facet, so facet keys must not contain slashes (the
+// facet/value tag convention already requires this).
+function computeFacetStats() {
+  const activeSel = [...state.selected].filter(([, v]) => v.size);
+  const totals = new Map(); // "facet/value" -> count over all items
+  const counts = new Map(); // "facet/value" -> count in the current filter context
+  const facetsWithData = new Set();
+  let totalUntagged = 0;
+  let untaggedInContext = 0;
 
-function facetHasData(facetKey) {
-  return state.items.some((img) => img.tags.some((t) => t.startsWith(facetKey + "/")));
+  for (const img of state.items) {
+    for (const t of img.tags) {
+      totals.set(t, (totals.get(t) || 0) + 1);
+      const slash = t.indexOf("/");
+      if (slash > 0) facetsWithData.add(t.slice(0, slash));
+    }
+
+    // How many active facets does this item fail? It counts toward a
+    // facet's values when it matches all the others: fails none, or
+    // fails only that facet itself.
+    let fails = 0;
+    let failKey = null;
+    for (const [key, values] of activeSel) {
+      let ok = false;
+      for (const v of values) {
+        if (img.tagSet.has(tag(key, v))) { ok = true; break; }
+      }
+      if (!ok) { fails++; failKey = key; if (fails > 1) break; }
+    }
+
+    if (isTagged(img) && isUntagged(img)) {
+      totalUntagged++;
+      if (
+        fails === 0 &&
+        (!state.showFavorites || img.favoritedByMe) &&
+        (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId))
+      ) untaggedInContext++;
+    }
+
+    if (fails > 1) continue;
+    for (const t of img.tags) {
+      const slash = t.indexOf("/");
+      if (slash <= 0) continue;
+      if (fails === 1 && t.slice(0, slash) !== failKey) continue;
+      counts.set(t, (counts.get(t) || 0) + 1);
+    }
+  }
+  return { totals, counts, facetsWithData, totalUntagged, untaggedInContext };
 }
 
 export function activeCount() {
@@ -83,18 +125,6 @@ export function clearAll() {
   state.selected = new Map();
   state.showUntagged = false;
   document.dispatchEvent(new Event('app:render'));
-}
-
-function untaggedCount() {
-  let n = 0;
-  for (const img of state.items) {
-    if (!isTagged(img) || !isUntagged(img)) continue;
-    if (state.showFavorites && !img.favoritedByMe) continue;
-    if (state.selectedCrateId != null && !img.crateIds.has(state.selectedCrateId)) continue;
-    if (!matchesExcept(img, null)) continue;
-    n++;
-  }
-  return n;
 }
 
 function toggleUntagged() {
@@ -171,9 +201,9 @@ export function syncFiltersToUrl() {
   if (next !== location.pathname + location.search) history.replaceState(null, "", next);
 }
 
-export function renderFacetsInto(container) {
+export function renderFacetsInto(container, stats = computeFacetStats()) {
   container.replaceChildren();
-  const totalUntagged = state.items.filter((img) => isTagged(img) && isUntagged(img)).length;
+  const { totals, counts, facetsWithData, totalUntagged, untaggedInContext } = stats;
   if (totalUntagged > 0 || state.showUntagged) {
     const row = document.createElement("div");
     row.className = "facet facet-untagged";
@@ -183,16 +213,15 @@ export function renderFacetsInto(container) {
     row.appendChild(spacer);
     const pills = document.createElement("div");
     pills.className = "pills";
-    const ctxCount = untaggedCount();
     pills.appendChild(
-      pill("Untagged", ctxCount, state.showUntagged, !state.showUntagged && ctxCount === 0, toggleUntagged)
+      pill("Untagged", untaggedInContext, state.showUntagged, !state.showUntagged && untaggedInContext === 0, toggleUntagged)
     );
     row.appendChild(pills);
     container.appendChild(row);
   }
   for (const facet of state.facets) {
     const sel = state.selected.get(facet.key) || new Set();
-    if (!facetHasData(facet.key) && sel.size === 0) continue;
+    if (!facetsWithData.has(facet.key) && sel.size === 0) continue;
     const row = document.createElement("div");
     row.className = "facet";
     const label = document.createElement("div");
@@ -202,10 +231,11 @@ export function renderFacetsInto(container) {
     const pills = document.createElement("div");
     pills.className = "pills";
     for (const value of facet.values) {
-      const total = state.items.filter((img) => img.tagSet.has(tag(facet.key, value))).length;
+      const t = tag(facet.key, value);
+      const total = totals.get(t) || 0;
       const active = sel.has(value);
       if (total === 0 && !active) continue;
-      const ctxCount = valueCount(facet.key, value);
+      const ctxCount = counts.get(t) || 0;
       pills.appendChild(
         pill(value, ctxCount, active, !active && ctxCount === 0, () => toggle(facet.key, value))
       );
@@ -217,8 +247,9 @@ export function renderFacetsInto(container) {
 
 export function renderFacets() {
   elFilters.classList.toggle("is-hidden", state.filtersHidden);
-  if (!state.filtersHidden) renderFacetsInto(elFilters);
-  renderFacetsInto(elFiltersMobile);
+  const stats = computeFacetStats();
+  if (!state.filtersHidden) renderFacetsInto(elFilters, stats);
+  renderFacetsInto(elFiltersMobile, stats);
   // drawer header: mirror the toolbar's "Clear filters (n)" button
   const clear = document.getElementById("filter-drawer-clear");
   const n = activeCount();

@@ -1,4 +1,5 @@
 import { state } from '../../state.js';
+import { toItem } from '../../utils.js';
 import { toast } from '../../toast.js';
 import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount } from '../../data.js';
 
@@ -116,14 +117,7 @@ async function uploadChunk(chunk) {
       // Boards with auto-tagging off hold uploads ('held') instead of
       // queueing them — only truly pending images feed the
       // "Processing images…" watcher.
-      state.items.unshift({
-        id: row.id,
-        name: row.name,
-        status: row.status || "pending",
-        undecided: !!row.undecided,
-        tags: [],
-        tagSet: new Set(),
-      });
+      state.items.unshift(toItem({ ...row, status: row.status || "pending" }));
       if ((row.status || "pending") === "pending") uploadStats.pendingIds.push(row.id);
     }
     uploadStats.uploaded += rows.length;

@@ -17,8 +17,31 @@ const RENDER_BATCH = 60;
 
 let layoutTimer = null;
 let renderLimit = RENDER_BATCH;
-let renderedIds = new Set();
 let lastFilterKey = "";
+
+// Rendered card elements, reused across renders so a heart click or poll
+// tick doesn't recreate the whole grid. A card is reused only while its
+// signature matches; a change (tagging finished, hearts moved) recreates
+// just that card.
+let cardCache = new Map();     // item id -> { el, sig }
+let progressCache = new Map(); // upload tempId / item id -> el
+
+// Everything cardFor bakes into the DOM that can change after creation.
+// Bulk selection isn't included: bulk.js updates card elements in place.
+function cardSig(img) {
+  return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.tags.join(",")}`;
+}
+
+function cardEl(img) {
+  const sig = cardSig(img);
+  const hit = cardCache.get(img.id);
+  // isConnected: a card that removed itself (broken image) must not be
+  // resurrected from the cache — recreate so the error path runs again.
+  if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
+  const el = cardFor(img);
+  cardCache.set(img.id, { el, sig });
+  return el;
+}
 
 export function layoutGrid() {
   const cards = [...elGrid.querySelectorAll(".card")];
@@ -31,13 +54,26 @@ export function layoutGrid() {
   const inner = elGrid.clientWidth - pl - pr;
   const cols = Math.max(1, Math.floor((inner + GAP) / (COL_MIN + GAP)));
   const cardW = (inner - GAP * (cols - 1)) / cols;
+
+  // Interleaving width writes with height reads forces a full page reflow
+  // per card, so writes and reads are split into separate passes.
+  for (const card of cards) card.style.width = cardW + "px";
+
+  // Cards without a stamped ratio (progress placeholders, items missing
+  // w/h, future bodies with content-dependent height) get measured here,
+  // all together: one reflow for the batch instead of one per card.
+  const measured = new Map();
+  for (const card of cards) {
+    if (!card.dataset.ratio) measured.set(card, card.offsetHeight);
+  }
+
   const heights = new Array(cols).fill(0);
   for (const card of cards) {
-    card.style.width = cardW + "px";
+    const h = card.dataset.ratio ? cardW / Number(card.dataset.ratio) : measured.get(card);
     const col = heights.indexOf(Math.min(...heights));
     card.style.left = (pl + col * (cardW + GAP)) + "px";
     card.style.top  = (pt + heights[col]) + "px";
-    heights[col] += card.offsetHeight + GAP;
+    heights[col] += h + GAP;
   }
   elGrid.style.height = (pt + Math.max(...heights) - GAP + pb) + "px";
 }
@@ -229,9 +265,8 @@ export function scrollToCard(img) {
     const targetIdx = items.indexOf(img);
     if (targetIdx < 0) return;
     for (let i = 0; i <= targetIdx; i++) {
-      if (renderedIds.has(items[i].id)) continue;
-      elGrid.appendChild(cardFor(items[i]));
-      renderedIds.add(items[i].id);
+      if (cardCache.has(items[i].id)) continue;
+      elGrid.appendChild(cardEl(items[i]));
     }
     renderLimit = Math.max(renderLimit, targetIdx + 1);
     layoutGrid();
@@ -245,6 +280,11 @@ function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = img.id;
+  // Lets layoutGrid compute the height (cardW / ratio) instead of measuring.
+  // Only valid while the body is a pinned-ratio image and no card state adds
+  // layout height (selected/undecided use outline + inner padding, which
+  // don't). Bodies with content-dependent height must leave this unset.
+  if (img.w && img.h) card.dataset.ratio = img.w / img.h;
   // Held items (waiting for auto-tagging) get the same dashed "needs tags"
   // treatment as AI-undecided ones.
   if (img.undecided || img.status === "held") card.classList.add("undecided");
@@ -293,20 +333,39 @@ export function renderGrid(key, progressItems, items) {
     lastFilterKey = key;
     renderLimit = RENDER_BATCH;
   }
-  elGrid.replaceChildren();
-  renderedIds = new Set();
-  for (const p of progressItems) elGrid.appendChild(progressCard(p));
+  const children = [];
+
+  const nextProgress = new Map();
+  for (const p of progressItems) {
+    const k = p.tempId != null ? `u${p.tempId}` : p.id;
+    const el = progressCache.get(k) || progressCard(p);
+    nextProgress.set(k, el);
+    children.push(el);
+  }
+  progressCache = nextProgress;
+
   if (!items.length && !progressItems.length) {
+    cardCache = new Map();
     const e = document.createElement("div");
     e.className = "empty";
     e.textContent = "No items match these filters.";
-    elGrid.appendChild(e);
+    elGrid.replaceChildren(e);
     return;
   }
-  for (const img of items.slice(0, renderLimit)) {
-    elGrid.appendChild(cardFor(img));
-    renderedIds.add(img.id);
+
+  for (const img of items.slice(0, renderLimit)) children.push(cardEl(img));
+
+  // Prune cards that fell out of view or were deleted.
+  const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
+  for (const id of cardCache.keys()) {
+    if (!keep.has(id)) cardCache.delete(id);
   }
+
+  // Nothing changed (the common poll tick) — leave the DOM alone.
+  const same =
+    children.length === elGrid.children.length &&
+    children.every((el, i) => el === elGrid.children[i]);
+  if (!same) elGrid.replaceChildren(...children);
 }
 
 export function pokeSentinel() {
@@ -319,13 +378,12 @@ function appendMoreCards() {
   let appended = 0;
   for (const img of items) {
     if (appended >= RENDER_BATCH) break;
-    if (renderedIds.has(img.id)) continue;
-    elGrid.appendChild(cardFor(img));
-    renderedIds.add(img.id);
+    if (cardCache.has(img.id)) continue;
+    elGrid.appendChild(cardEl(img));
     appended++;
   }
   if (!appended) return;
-  renderLimit = renderedIds.size;
+  renderLimit = cardCache.size;
   layoutGrid();
   pokeSentinel();
 }

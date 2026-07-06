@@ -63,6 +63,9 @@ export function reconcile(data) {
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
+      // Fresh uploads are created client-side without dimensions; pick them
+      // up here so their cards get the computed-height layout path.
+      if (!ex.w && d.w) { ex.w = d.w; ex.h = d.h || 0; }
     } else {
       state.items.unshift(toItem(d));
     }
