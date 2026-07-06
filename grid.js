@@ -293,7 +293,8 @@ function cardFor(img) {
   if (img.undecided || img.status === "held" || isUntagged(img)) card.classList.add("undecided");
   // The file kind owns the face (the media); grid owns the frame + chrome.
   card.appendChild(kindFor(img).face(img, card, scheduleLayout));
-  if (img.status === "pending" || img.status === "processing") {
+  if (img.status === "pending" || img.status === "processing" ||
+      img.status === "pending_extract" || img.status === "extracting") {
     card.classList.add("loading");
     const sp = document.createElement("div");
     sp.className = "spinner";

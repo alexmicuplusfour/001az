@@ -2,7 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   claimNextPending,
+  claimNextPendingExtract,
   markTagged,
+  markExtracted,
   failOrRequeue,
   recoverStuck,
   bumpUsage,
@@ -184,6 +186,41 @@ Return your answer only by calling the record_tags tool.`;
   return { systemText, schema };
 }
 
+// Build the extraction prompt + strict schema for a mapping's AI fields.
+// Pure function — no cache needed (extraction runs once per item; mappings
+// vary per item so a board-level cache wouldn't help).
+export function buildFieldsPrompt(mapping) {
+  const fields = (mapping && mapping.fields) || [];
+  const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.hint || f.key}`);
+  const systemText =
+    `You extract structured fields from items for a private research board.\n\n` +
+    `For each field, first write one short sentence explaining why you chose the value ` +
+    `(or why it could not be found in the material), then provide the value. ` +
+    `Set the value to null when the field cannot be determined from the material.\n\n` +
+    `Fields to extract:\n${lines.join("\n")}\n\n` +
+    `Return your answer only by calling the record_fields tool.`;
+
+  const kindType = { text: "string", url: "string", date: "string", number: "number" };
+  const properties = {};
+  const required = [];
+  for (const f of fields) {
+    const jt = kindType[f.kind] || "string";
+    properties[f.key] = {
+      type: "object",
+      description: f.hint || f.key,
+      properties: {
+        why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
+        value: { type: [jt, "null"] },
+      },
+      required: ["why", "value"],
+      additionalProperties: false,
+    };
+    required.push(f.key);
+  }
+  const schema = { type: "object", properties, required, additionalProperties: false };
+  return { systemText, schema };
+}
+
 // Per-board cache: board_id -> { systemText, schema, allowed, facets, research, aiKeyId, aiModel }
 // Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
@@ -270,6 +307,13 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     if (!ai) throw new Error("no API key configured");
 
     const parts = await modelInputFor(row.payload);
+    // Distilled extraction results ride along as a text part so the tagger
+    // sees the structured data without re-reading the raw material.
+    const fields = row.payload.fields || {};
+    const fieldLines = Object.entries(fields)
+      .filter(([, { v }]) => v !== null && v !== undefined)
+      .map(([key, { v }]) => `${key}: ${v}`);
+    if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
     const { input, usage } = await callTagger({
       provider: ai.provider,
       apiKey: ai.apiKey,
@@ -373,15 +417,85 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     }
   }
 
+  // Run extraction for one pending_extract item. Resolves the board's AI the
+  // same way tagOne does; writes payload.fields and advances to pending so the
+  // normal tag leg picks it up next.
+  async function extractOne(row) {
+    const mapping = row.payload.mapping;
+    if (!mapping?.fields?.length) {
+      // Shouldn't happen if ingest routing is correct, but be safe.
+      await markExtracted(db, row.id, {});
+      return;
+    }
+    const board = await getBoard(db, row.board_id);
+    const ai = await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
+    if (!ai) throw new Error("no API key configured");
+
+    const { systemText, schema } = buildFieldsPrompt(mapping);
+    const parts = await modelInputFor(row.payload);
+    const { input, usage } = await callTagger({
+      provider: ai.provider,
+      apiKey: ai.apiKey,
+      model: ai.model,
+      systemText,
+      schema,
+      parts,
+      tool: { name: "record_fields", description: "Record the extracted fields for this item." },
+    });
+
+    // Lenient-validate each field: wrong type → null (keep the why sentence).
+    const fields = {};
+    for (const f of mapping.fields) {
+      const entry = input[f.key];
+      if (!entry) continue;
+      const why = typeof entry.why === "string" ? entry.why.trim() : "";
+      let v = entry.value ?? null;
+      if (v !== null) {
+        if (f.kind === "number" && typeof v !== "number") v = null;
+        if (f.kind === "url" && (typeof v !== "string" || !/^https?:\/\//.test(v))) v = null;
+        if ((f.kind === "text" || f.kind === "date") && typeof v !== "string") v = null;
+      }
+      fields[f.key] = { v, why };
+    }
+
+    await markExtracted(db, row.id, fields);
+    await bumpUsage(db, row.board_id, usage);
+    const label = row.payload?.identity || `item ${row.id}`;
+    console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
+  }
+
+  async function processExtractOne(row) {
+    const label = row.payload?.identity || `item ${row.id}`;
+    try {
+      await extractOne(row);
+    } catch (err) {
+      const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS, "pending_extract");
+      console.warn(`extract error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
+    }
+  }
+
   async function tick() {
     const recovered = await recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
     await retagDue();
     await embedDue();
 
-    // Boards without their own key only tag when a default exists; their
-    // items stay pending in the queue until one is configured.
+    // Boards without their own key only process when a default exists.
     const hasDefault = !!(await resolveDefaultAi(db));
+
+    // Extract leg has priority: pending_extract items go before pending.
+    const extractRows = [];
+    while (extractRows.length < CONCURRENCY) {
+      const row = await claimNextPendingExtract(db, hasDefault);
+      if (!row) break;
+      extractRows.push(row);
+    }
+    if (extractRows.length) {
+      await Promise.all(extractRows.map(processExtractOne));
+      return extractRows.length;
+    }
+
+    // Tag leg.
     const rows = [];
     while (rows.length < CONCURRENCY) {
       const row = await claimNextPending(db, hasDefault);

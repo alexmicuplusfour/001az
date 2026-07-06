@@ -19,6 +19,7 @@ export const state = {
   sortByHearts: false,
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
+  boardMapping: null,
   searchAvailable: false,
   searchDraft: "",
   searchQuery: "",

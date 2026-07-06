@@ -44,9 +44,15 @@ export function mountIngest(app, { db, sources }) {
           rejected.push({ name: f.originalname, reason: "unsupported file type" });
           continue;
         }
-        // Uploads to a board with auto-tagging off wait as 'held'.
-        const status = board.auto_tag ? "pending" : "held";
-        const id = await insertItem(db, board.id, { identity: file.name, files: [file], fields: {} }, status);
+        // Stamp the board's mapping when it has AI fields — the item carries
+        // its own copy so re-extraction replays the mapping it was built with,
+        // never the (potentially changed) board default.
+        const hasMapping = Array.isArray(board.mapping?.fields) && board.mapping.fields.length > 0;
+        const payload = { identity: file.name, files: [file], fields: {}, ...(hasMapping ? { mapping: board.mapping } : {}) };
+        // Auto-tag off → held (releaseHeld routes to pending_extract when mapped).
+        // Auto-tag on + mapping → pending_extract; otherwise → pending.
+        const status = board.auto_tag ? (hasMapping ? "pending_extract" : "pending") : "held";
+        const id = await insertItem(db, board.id, payload, status);
         uploaded.push({
           id, name: file.name, status, tags: [],
           w: file.w, h: file.h, kind: file.kind, label: file.original_name,

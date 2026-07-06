@@ -69,6 +69,7 @@ async function main() {
   state.facets = boardData ? boardData.facets : [];
   state.boardName = boardData ? boardData.name : null;
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
+  state.boardMapping = boardData?.mapping || null;
   state.searchAvailable = !!boardData?.search;
   state.me = meData;
   state.items = itemsData.map(toItem);

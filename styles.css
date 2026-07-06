@@ -1483,3 +1483,51 @@ a.tool-btn {
     display: inline-flex !important;
   }
 }
+
+/* ─── lightbox panel: extracted fields ─── */
+.lbp-fields {
+  margin-bottom: 14px;
+}
+.lbp-fields-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.lbp-fields-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8a8a92;
+}
+.lbp-reextract {
+  margin-left: auto;
+  background: none;
+  border: 1px solid #d0d0d8;
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  color: #6b6b75;
+}
+.lbp-reextract:hover:not(:disabled) { background: #f3f3f8; }
+.lbp-reextract:disabled { opacity: 0.5; cursor: default; }
+.lbp-field-row {
+  margin-bottom: 8px;
+}
+.lbp-field-kv {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.lbp-field-key {
+  font-size: 12px;
+  font-weight: 500;
+  color: #4a4a55;
+  font-family: monospace;
+  flex-shrink: 0;
+}
+.lbp-field-val {
+  font-size: 13px;
+  color: #1a1a1f;
+}

@@ -39,9 +39,9 @@ function anthropicClient(apiKey) {
 // provider reported, normalized to { input, output, cacheRead, searches }
 // — cache reads are kept out of `input` because they bill at a fraction of
 // the input rate. Throws with a readable message on any failure.
-export async function callTagger({ provider, apiKey, model, systemText, schema, parts, research = false }) {
-  if (COMPAT[provider]) return compatTag({ provider, apiKey, model, systemText, schema, parts });
-  return anthropicTag({ apiKey, model, systemText, schema, parts, research });
+export async function callTagger({ provider, apiKey, model, systemText, schema, parts, research = false, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
+  if (COMPAT[provider]) return compatTag({ provider, apiKey, model, systemText, schema, parts, tool });
+  return anthropicTag({ apiKey, model, systemText, schema, parts, research, tool });
 }
 
 // Per-item bound on web searches; each one bills on top of tokens.
@@ -51,28 +51,28 @@ const MAX_SEARCHES = 5;
 // Research relaxes tool_choice to auto — a forced tool call would block the
 // server-side web_search tool — so the model must be trusted (and validated)
 // to finish with record_tags.
-export function anthropicRequest({ model, systemText, schema, parts, research = false }) {
+export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
   const content = parts.map((p) => {
     if (p.kind === "image") return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     if (p.kind === "document") return { type: "document", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     return { type: "text", text: p.text };
   });
-  const recordTags = { name: TOOL_NAME, description: TOOL_DESC, strict: true, input_schema: schema };
+  const toolDef = { name: tool.name, description: tool.description, strict: true, input_schema: schema };
   return {
     model,
     // searching + digesting results eats output budget
     max_tokens: research ? 4096 : 2048,
     system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
     tools: research
-      ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, recordTags]
-      : [recordTags],
-    tool_choice: research ? { type: "auto" } : { type: "tool", name: TOOL_NAME },
+      ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, toolDef]
+      : [toolDef],
+    tool_choice: research ? { type: "auto" } : { type: "tool", name: tool.name },
     messages: [{ role: "user", content }],
   };
 }
 
-async function anthropicTag({ apiKey, model, systemText, schema, parts, research = false }) {
-  const request = anthropicRequest({ model, systemText, schema, parts, research });
+async function anthropicTag({ apiKey, model, systemText, schema, parts, research = false, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
+  const request = anthropicRequest({ model, systemText, schema, parts, research, tool });
   let msg = await anthropicClient(apiKey).messages.create(request);
   const usage = { input: 0, output: 0, cacheRead: 0, searches: 0 };
   const addUsage = (u = {}) => {
@@ -85,21 +85,21 @@ async function anthropicTag({ apiKey, model, systemText, schema, parts, research
   addUsage(msg.usage);
   // A search-heavy turn can come back paused mid-work; hand the partial turn
   // back and let the model continue (bounded — beyond that, the missing
-  // record_tags call below turns it into a retryable failure).
+  // tool call below turns it into a retryable failure).
   for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
     request.messages.push({ role: "assistant", content: msg.content });
     msg = await anthropicClient(apiKey).messages.create(request);
     addUsage(msg.usage);
   }
-  const block = msg.content.find((b) => b.type === "tool_use" && b.name === TOOL_NAME);
-  if (!block) throw new Error(`model did not call ${TOOL_NAME}`);
+  const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);
+  if (!block) throw new Error(`model did not call ${tool.name}`);
   return { input: block.input, usage };
 }
 
 // OpenAI-compatible providers via plain fetch — one endpoint, not worth a
 // dependency. Chat completions with a forced function call mirrors the
 // Anthropic tool shape; the same strict JSON schema works everywhere.
-async function compatTag({ provider, apiKey, model, systemText, schema, parts }) {
+async function compatTag({ provider, apiKey, model, systemText, schema, parts, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
   const { base, label } = COMPAT[provider];
   // Document blocks are Anthropic-only: the chat-completions compat path has
   // no PDF input. Fail loud with the fix, rather than degrading silently.
@@ -121,8 +121,8 @@ async function compatTag({ provider, apiKey, model, systemText, schema, parts })
         { role: "system", content: systemText },
         { role: "user", content },
       ],
-      tools: [{ type: "function", function: { name: TOOL_NAME, description: TOOL_DESC, parameters: schema, strict: true } }],
-      tool_choice: { type: "function", function: { name: TOOL_NAME } },
+      tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: schema, strict: true } }],
+      tool_choice: { type: "function", function: { name: tool.name } },
     }),
   });
   if (!r.ok) {

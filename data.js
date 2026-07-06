@@ -30,10 +30,12 @@ export function dropPendingUploadId(id) {
   document.dispatchEvent(new Event('app:uploads-pending-changed'));
 }
 
+const IN_FLIGHT = new Set(["pending", "processing", "pending_extract", "extracting"]);
+
 function needsPoll() {
   return (
     state.uploading.length > 0 ||
-    state.items.some((img) => img.status === "pending" || img.status === "processing")
+    state.items.some((img) => IN_FLIGHT.has(img.status))
   );
 }
 
@@ -41,9 +43,7 @@ function needsPoll() {
 export function inProgress() {
   return [
     ...state.uploading,
-    ...state.items.filter(
-      (img) => (img.status === "pending" || img.status === "processing") && !img.tags.length
-    ),
+    ...state.items.filter((img) => IN_FLIGHT.has(img.status) && !img.tags.length),
   ];
 }
 

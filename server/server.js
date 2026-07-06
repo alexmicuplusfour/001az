@@ -57,6 +57,7 @@ import {
   boardEmbeddings,
   listItemPayloads,
   updateItemPayload,
+  reextractItem,
 } from "./db.js";
 import {
   attachUser,
@@ -347,6 +348,7 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     facets: board.facets,
     context: board.context,
     ai_reasoning: board.ai_reasoning !== false,
+    mapping: board.mapping || null,
     // tells the client whether to show the semantic search box
     search: !!(await resolveEmbedder(db)),
   });
@@ -409,6 +411,25 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch });
 }));
 
+const MAPPING_KINDS = new Set(["text", "number", "url", "date"]);
+// Returns an error string when mapping is invalid, null when valid.
+function validateMapping(mapping) {
+  if (!Array.isArray(mapping.fields)) return "mapping.fields must be an array";
+  if (mapping.fields.length > 12) return "mapping.fields may have at most 12 entries";
+  const seen = new Set();
+  for (const f of mapping.fields) {
+    if (!f.key || typeof f.key !== "string" || !/^[a-z][a-z0-9_]*$/.test(f.key))
+      return `invalid field key: ${JSON.stringify(f.key)}`;
+    if (seen.has(f.key)) return `duplicate field key: ${f.key}`;
+    seen.add(f.key);
+    if (!MAPPING_KINDS.has(f.kind)) return `invalid kind "${f.kind}" for field "${f.key}"`;
+    if (f.from !== "ai") return `unsupported source "${f.from}" for field "${f.key}"`;
+    if (f.hint !== undefined && (typeof f.hint !== "string" || f.hint.length > 500))
+      return `hint for field "${f.key}" must be a string ≤500 chars`;
+  }
+  return null;
+}
+
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const id = req.params.id;
   const prev = await getBoard(db, id);
@@ -443,6 +464,17 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
     update.autoTagEveryMin = m;
   }
   if (req.body && req.body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!req.body.auto_tag_skip_weekends;
+  if (req.body && req.body.mapping !== undefined) {
+    if (req.body.mapping === null) {
+      update.mapping = null;
+    } else if (typeof req.body.mapping !== "object") {
+      return res.status(400).json({ error: "mapping must be an object or null" });
+    } else {
+      const err = validateMapping(req.body.mapping);
+      if (err) return res.status(400).json({ error: err });
+      update.mapping = req.body.mapping;
+    }
+  }
 
   // Schedule bookkeeping: (re)arm the timer when the schedule turns on or
   // changes shape, disarm it when it turns off.
@@ -694,7 +726,7 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
 // /api/items list payload — fetched lazily when the lightbox panel opens.
 app.get("/api/items/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await getItemReasoning(db, req.itemId);
-  res.json({ reasoning: row?.tag_reasoning || {} });
+  res.json({ reasoning: row?.tag_reasoning || {}, fields: row?.payload?.fields || {} });
 }));
 
 app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req, res) => {
@@ -720,6 +752,14 @@ app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async 
   if (!(await reprocessItem(db, req.itemId))) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued #${req.itemId}`);
   res.json({ ok: true, status: "pending" });
+}));
+
+// Re-run extraction for an item that already has a stamped mapping. The item
+// must have payload.mapping; items without one get a 409.
+app.post("/api/items/:id/reextract", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  if (!(await reextractItem(db, req.itemId))) return res.status(409).json({ error: "item has no stamped mapping" });
+  console.log(`reextract queued #${req.itemId}`);
+  res.json({ ok: true, status: "pending_extract" });
 }));
 
 // Ingestion + item-file statics, mounted before the frontend catch-all.

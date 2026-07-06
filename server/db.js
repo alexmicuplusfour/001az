@@ -231,8 +231,18 @@ async function addTagSnapshot(db, itemId, source, tags, reasoning, undecided) {
 }
 
 export async function getItemReasoning(db, id) {
-  const { rows } = await db.query("SELECT board_id, tag_reasoning FROM items WHERE id=$1", [id]);
+  const { rows } = await db.query("SELECT board_id, tag_reasoning, payload FROM items WHERE id=$1", [id]);
   return rows[0] || null;
+}
+
+// Reset an item to the extract leg so its fields are re-derived from its
+// stamped mapping. Only succeeds when the item actually has a mapping stamped.
+export async function reextractItem(db, id) {
+  const result = await db.query(
+    "UPDATE items SET status='pending_extract', attempts=0, error=NULL, updated_at=$1 WHERE id=$2 AND payload ? 'mapping'",
+    [Date.now(), id]
+  );
+  return result.rowCount > 0;
 }
 
 // --- users / invites / sessions / favorites ---
@@ -539,7 +549,7 @@ export async function deleteAiKey(db, id) {
 // schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
   "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
-  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at";
+  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, created_at";
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
   const id = crypto.randomUUID();
@@ -566,7 +576,7 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
@@ -581,6 +591,7 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (autoTagEveryMin !== undefined) { vals.push(autoTagEveryMin); sets.push(`auto_tag_every_min=$${vals.length}`); }
   if (autoTagSkipWeekends !== undefined) { vals.push(!!autoTagSkipWeekends); sets.push(`auto_tag_skip_weekends=$${vals.length}`); }
   if (autoTagNextRunAt !== undefined) { vals.push(autoTagNextRunAt); sets.push(`auto_tag_next_run_at=$${vals.length}`); }
+  if (mapping !== undefined) { vals.push(mapping === null ? null : JSON.stringify(mapping)); sets.push(`mapping=$${vals.length}`); }
   if (!sets.length) return false;
   vals.push(id);
   const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
@@ -626,10 +637,14 @@ export async function retagBoard(db, boardId) {
 
 // --- periodic auto-tagging ---
 
-// Release a board's held items into the tagging queue. Returns the count.
+// Release a board's held items. Items with a stamped mapping enter the
+// extract leg first (pending_extract); plain items go straight to pending.
 export async function releaseHeld(db, boardId) {
   const result = await db.query(
-    "UPDATE items SET status='pending', updated_at=$1 WHERE board_id=$2 AND status='held'",
+    `UPDATE items
+     SET status = CASE WHEN payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
+         updated_at = $1
+     WHERE board_id = $2 AND status = 'held'`,
     [Date.now(), boardId]
   );
   return result.rowCount;
@@ -730,6 +745,37 @@ export async function claimNextPending(db, hasDefaultKey = true) {
   return rows[0] || null;
 }
 
+// Atomically take the oldest pending_extract item and mark it extracting.
+// Mirrors claimNextPending; the worker poll loop calls this first.
+export async function claimNextPendingExtract(db, hasDefaultKey = true) {
+  const { rows } = await db.query(
+    `UPDATE items SET status='extracting', updated_at=$1
+     WHERE id = (
+       SELECT i.id FROM items i JOIN boards b ON b.id = i.board_id
+       WHERE i.status='pending_extract' AND (b.ai_key_id IS NOT NULL OR $2)
+       ORDER BY i.created_at ASC, i.id ASC LIMIT 1
+       FOR UPDATE OF i SKIP LOCKED
+     )
+     RETURNING *`,
+    [Date.now(), hasDefaultKey]
+  );
+  return rows[0] || null;
+}
+
+// Write extracted fields into payload and advance to the tag leg.
+export async function markExtracted(db, id, fields) {
+  await db.query(
+    `UPDATE items
+     SET payload = payload || jsonb_build_object('fields', $1::jsonb),
+         status = 'pending',
+         attempts = 0,
+         error = NULL,
+         updated_at = $2
+     WHERE id = $3`,
+    [JSON.stringify(fields || {}), Date.now(), id]
+  );
+}
+
 export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {
   // Clearing the vector marks the item for the embedding sweep — the text it
   // was embedded from just changed.
@@ -785,11 +831,14 @@ export async function embeddingStats(db, model) {
   return { tagged: Number(rows[0].tagged), embedded: Number(rows[0].embedded) };
 }
 
-// Increment attempts; mark failed once attempts reach maxAttempts, else requeue. Returns true if failed.
-export async function failOrRequeue(db, id, error, maxAttempts) {
+// Increment attempts; mark failed once attempts reach maxAttempts, else
+// requeue. requeueStatus controls which queue the item returns to
+// ('pending' for the tag leg, 'pending_extract' for the extract leg).
+// Returns true if the item was failed.
+export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = "pending") {
   const { rows } = await db.query("SELECT attempts FROM items WHERE id=$1", [id]);
   const attempts = (rows.length ? rows[0].attempts : 0) + 1;
-  const status = attempts >= maxAttempts ? "failed" : "pending";
+  const status = attempts >= maxAttempts ? "failed" : requeueStatus;
   await db.query("UPDATE items SET status=$1, attempts=$2, error=$3, updated_at=$4 WHERE id=$5", [
     status,
     attempts,
@@ -800,14 +849,15 @@ export async function failOrRequeue(db, id, error, maxAttempts) {
   return status === "failed";
 }
 
-// Recover rows stuck in 'processing' (e.g. after a crash) back to pending.
+// Recover items stuck mid-flight after a crash. 'processing' → 'pending';
+// 'extracting' → 'pending_extract'. Returns total recovered count.
 export async function recoverStuck(db, olderThanMs) {
   const cutoff = Date.now() - olderThanMs;
-  const result = await db.query(
-    "UPDATE items SET status='pending' WHERE status='processing' AND updated_at < $1",
-    [cutoff]
-  );
-  return result.rowCount;
+  const [r1, r2] = await Promise.all([
+    db.query("UPDATE items SET status='pending' WHERE status='processing' AND updated_at < $1", [cutoff]),
+    db.query("UPDATE items SET status='pending_extract' WHERE status='extracting' AND updated_at < $1", [cutoff]),
+  ]);
+  return r1.rowCount + r2.rowCount;
 }
 
 function today() {

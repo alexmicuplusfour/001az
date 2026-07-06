@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS boards (
   auto_tag_every_min     INTEGER NOT NULL DEFAULT 1440,
   auto_tag_skip_weekends BOOLEAN NOT NULL DEFAULT FALSE,
   auto_tag_next_run_at   BIGINT,
+  -- per-board entity mapping (AI fields only in v1; connector fields arrive later).
+  -- NULL = plain file upload, no extraction; board behaves exactly as today.
+  mapping      JSONB,
   created_at   BIGINT NOT NULL
 );
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'image';
@@ -61,6 +64,7 @@ ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_periodic BOOLEAN NOT NULL D
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_every_min INTEGER NOT NULL DEFAULT 1440;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_skip_weekends BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_next_run_at BIGINT;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS mapping JSONB;
 
 CREATE TABLE IF NOT EXISTS board_members (
   board_id   TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -70,9 +74,9 @@ CREATE TABLE IF NOT EXISTS board_members (
 );
 CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
 
--- status: pending -> processing -> tagged | failed
--- ('held' sits before pending: uploads wait there, untagged, while the
---  board's auto-tagging is off)
+-- status: held -> pending_extract -> extracting -> pending -> processing -> tagged | failed
+-- ('held' gates all AI spend; items with a stamped mapping go through the
+--  extract leg first, plain items skip straight to pending)
 -- payload is one generic shape for every item:
 --   { identity, files: [{ name, original_name, w, h }], fields: {} }
 -- identity is the item's per-board unique key (for uploads, the stored

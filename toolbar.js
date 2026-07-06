@@ -6,6 +6,7 @@ import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
+import { openMappingModal } from './mapping-modal.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -85,7 +86,27 @@ export function renderToolbar(resultCount) {
   auth.className = "auth";
   if (state.me) {
     if (state.boardName) {
-      auth.appendChild(toolBtn(ICONS.plus, "upload", () => triggerFilePicker()));
+      // Split button: plus keeps the file picker; chevron opens the ingestion menu.
+      const plusWrap = document.createElement("div");
+      plusWrap.className = "split-btn";
+      plusWrap.appendChild(toolBtn(ICONS.plus, "upload", () => triggerFilePicker()));
+      const plusMenu = document.createElement("button");
+      plusMenu.className = "tool-btn split-arrow";
+      plusMenu.title = "More ingestion options";
+      plusMenu.setAttribute("aria-label", "More ingestion options");
+      plusMenu.innerHTML = ICONS.chevron;
+      plusMenu.addEventListener("click", () => openDropdown(plusMenu, {
+        align: "end",
+        minWidth: 180,
+        build: (body, { close }) => {
+          body.appendChild(ddRow({
+            label: "Entity mapping…",
+            onClick: () => { close(); openMappingModal(); },
+          }));
+        },
+      }));
+      plusWrap.appendChild(plusMenu);
+      auth.appendChild(plusWrap);
     }
     const userBtn = document.createElement("button");
     userBtn.className = "tool-btn user-menu-btn";

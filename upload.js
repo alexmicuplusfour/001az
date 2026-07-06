@@ -130,8 +130,10 @@ async function uploadChunk(chunk) {
       // Boards with auto-tagging off hold uploads ('held') instead of
       // queueing them — only truly pending images feed the
       // "Processing images…" watcher.
-      state.items.unshift(toItem({ ...row, status: row.status || "pending" }));
-      if ((row.status || "pending") === "pending") uploadStats.pendingIds.push(row.id);
+      const rowStatus = row.status || "pending";
+      state.items.unshift(toItem({ ...row, status: rowStatus }));
+      // Track any in-flight item (extract leg included) for the processing toast.
+      if (rowStatus === "pending" || rowStatus === "pending_extract") uploadStats.pendingIds.push(row.id);
     }
     uploadStats.uploaded += rows.length;
     for (const r of data.rejected || []) {

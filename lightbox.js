@@ -38,9 +38,9 @@ function renderLightboxCrate() {
   elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
 }
 
-// Paint the reasoning panel for img. reasoning is null while the fetch is in
-// flight — tags render immediately, reasoning lines fill in when it lands.
-function paintPanel(img, reasoning) {
+// Paint the reasoning panel for img. reasoning/fields are null while the
+// fetch is in flight — tags render immediately, details fill in when it lands.
+function paintPanel(img, reasoning, fields) {
   // Same-origin link, so the download attribute names the saved file — the
   // item's original name, not the hashed store name.
   elLightboxDownload.href = fullUrl(img.name);
@@ -70,6 +70,60 @@ function paintPanel(img, reasoning) {
     meta.appendChild(row);
   }
   elLightboxPanelBody.appendChild(meta);
+
+  // Fields section: shown when extraction has run (fields object has keys).
+  const fieldKeys = fields && typeof fields === "object" ? Object.keys(fields) : [];
+  if (fieldKeys.length > 0) {
+    const sec = document.createElement("div");
+    sec.className = "lbp-fields";
+    const secHead = document.createElement("div");
+    secHead.className = "lbp-fields-head";
+    const secLabel = document.createElement("span");
+    secLabel.className = "lbp-fields-label";
+    secLabel.textContent = "Fields";
+    secHead.appendChild(secLabel);
+    const reextractBtn = document.createElement("button");
+    reextractBtn.className = "lbp-reextract";
+    reextractBtn.textContent = "Re-extract";
+    reextractBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      reextractBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/items/${img.id}/reextract`, { method: "POST" });
+        if (r.ok) {
+          img.status = "pending_extract";
+          document.dispatchEvent(new Event('app:render'));
+        }
+      } finally {
+        reextractBtn.disabled = false;
+      }
+    });
+    secHead.appendChild(reextractBtn);
+    sec.appendChild(secHead);
+    for (const key of fieldKeys) {
+      const { v, why } = fields[key] || {};
+      const row = document.createElement("div");
+      row.className = "lbp-field-row";
+      const kv = document.createElement("div");
+      kv.className = "lbp-field-kv";
+      const k = document.createElement("span");
+      k.className = "lbp-field-key";
+      k.textContent = key;
+      const val = document.createElement("span");
+      val.className = "lbp-field-val";
+      val.textContent = v !== null && v !== undefined ? String(v) : "—";
+      kv.append(k, val);
+      row.appendChild(kv);
+      if (why) {
+        const p = document.createElement("p");
+        p.className = "lbp-why";
+        p.textContent = why;
+        row.appendChild(p);
+      }
+      sec.appendChild(row);
+    }
+    elLightboxPanelBody.appendChild(sec);
+  }
 
   const byFacet = new Map();
   for (const t of img.tags) {
@@ -155,15 +209,20 @@ function paintPanel(img, reasoning) {
 async function renderPanel() {
   if (!panelOpen || !lightboxImg) return;
   const img = lightboxImg;
-  paintPanel(img, null);
+  paintPanel(img, null, null);
   const token = ++reasoningReq;
   let reasoning = {};
+  let fields = {};
   try {
     const r = await fetch(`/api/items/${img.id}/reasoning`);
-    if (r.ok) reasoning = (await r.json()).reasoning || {};
+    if (r.ok) {
+      const data = await r.json();
+      reasoning = data.reasoning || {};
+      fields = data.fields || {};
+    }
   } catch { /* panel just shows tags without reasoning */ }
   if (token !== reasoningReq || lightboxImg !== img || !panelOpen) return;
-  paintPanel(img, reasoning);
+  paintPanel(img, reasoning, fields);
 }
 
 function setPanel(open) {

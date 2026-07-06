@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
     <link rel="stylesheet" href="/toast.css" />
+    <link rel="stylesheet" href="/modal.css" />
     <style>
       * { box-sizing: border-box; }
       body {
@@ -96,54 +97,6 @@
       }
       .row-actions-wrap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
 
-      /* toggle switch (see makeSwitch) */
-      .switch { position: relative; display: inline-flex; flex: none; width: 34px; height: 20px; border-radius: 999px; background: #d8d8de; border: none; padding: 0; cursor: pointer; transition: background 0.15s; }
-      .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.25); transition: left 0.15s; }
-      .switch.on { background: #111; }
-      .switch.on::after { left: 16px; }
-      .switch.sm { width: 26px; height: 15px; }
-      .switch.sm::after { width: 11px; height: 11px; }
-      .switch.sm.on::after { left: 13px; }
-      /* Align the switch with the first text line, not the middle of the
-         block, so rows whose hint wraps keep the toggle on row one. */
-      .switch-row { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; user-select: none; line-height: 1.4; }
-      .switch-row .switch { margin-top: -1px; }
-      .switch-row .switch.sm { margin-top: 2px; }
-
-      /* facet editor */
-      .fe-root { margin-bottom: 10px; }
-      .fe-facet { margin-bottom: 10px; }
-      .fe-head { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
-      input.fe-label { flex: none; width: 240px; padding: 5px 8px; font: inherit; font-weight: 500; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
-      .fe-key-hint { font-size: 11px; color: #b0b0b8; font-family: "SF Mono", Consolas, monospace; white-space: nowrap; }
-      .fe-val-row input { flex: none; width: 240px; padding: 4px 8px; font: inherit; font-size: 13px; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
-      .fe-values { padding-left: 22px; }
-      textarea.fe-desc { display: block; width: calc(100% - 22px); margin: 0 0 6px 22px; padding: 4px 8px; font: inherit; font-size: 12px; color: #4b4b52; border: 1px solid #e4e4ec; border-radius: 6px; resize: vertical; min-height: 0; }
-      textarea.fe-desc::placeholder { color: #b0b0b8; }
-      .fe-val-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
-      .fe-single { display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1; color: #6b6b72; cursor: pointer; white-space: nowrap; user-select: none; margin-left: auto; }
-      .fe-single input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; border: none; border-radius: 0; background: none; cursor: pointer; }
-      .fe-rm { display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #bbb; cursor: pointer; padding: 2px 4px; font-size: 15px; line-height: 1; border-radius: 4px; }
-      .fe-rm:hover { color: #d33; background: #fdeaea; }
-      .fe-add-val { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 2px 0; margin-top: 2px; display: block; }
-      .fe-add-val:hover { text-decoration: underline; }
-      .fe-add-facet { margin-top: 4px; background: none; border: 1px dashed #ccc; border-radius: 6px; padding: 5px 14px; cursor: pointer; color: #6b6b72; font: inherit; font-size: 13px; }
-      .fe-add-facet:hover { border-color: #999; color: #111; }
-      .fe-toolbar { display: flex; gap: 6px; }
-      .fe-clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }
-      .fe-clip-btn:hover { border-color: #999; color: #111; }
-      .modal-overlay { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.3); backdrop-filter: blur(2px); -webkit-backdrop-filter: blur(2px); }
-      .modal-dialog { background: #fff; border-radius: 12px; box-shadow: 0 12px 48px rgba(0,0,0,0.22); width: 600px; max-width: calc(100vw - 48px); max-height: calc(100vh - 64px); display: flex; flex-direction: column; overflow: hidden; }
-      .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #eee; flex-shrink: 0; }
-      .modal-title { font-size: 15px; font-weight: 600; margin: 0; }
-      .modal-close { background: none; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: #aaa; padding: 0 2px; }
-      .modal-close:hover { color: #111; }
-      .modal-body { padding: 20px; overflow-y: auto; flex: 1; }
-      .modal-footer { padding: 14px 20px; border-top: 1px solid #eee; display: flex; gap: 8px; flex-shrink: 0; }
-      .modal-body > label, .modal-section > label { display: block; font-size: 12px; color: #6b6b72; margin-bottom: 4px; }
-      .modal-body > input, .modal-body > textarea { margin-bottom: 10px; }
-      .modal-section { border-top: 1px solid #eee; margin-top: 18px; padding-top: 14px; }
-      .modal-section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: #9aa0aa; margin-bottom: 12px; }
       .access-wrap { position: relative; }
       .access-drop { position: absolute; top: calc(100% + 4px); right: 0; background: #fff; border: 1px solid #d8d8de; border-radius: 8px; padding: 10px 12px; min-width: 200px; box-shadow: 0 4px 16px rgba(0,0,0,.1); z-index: 100; }
       .access-drop-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
