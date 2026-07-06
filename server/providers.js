@@ -30,42 +30,70 @@ function anthropicClient(apiKey) {
 
 // Run one tagging call. `parts` is the provider-neutral user content the
 // board type built ({ kind: "image", mediaType, b64 } | { kind: "text", text });
-// each provider maps it to its own wire format here. Returns { input, usage }:
-// the tool-call input object (facet key -> selection, plus "fit") and the
-// token usage the provider reported, normalized to { input, output, cacheRead }
+// each provider maps it to its own wire format here. `research` lets the
+// model use the provider's web-search tool before tagging — Anthropic only;
+// the compat providers ignore the flag and tag from the given input (OpenAI's
+// web search lives on its Responses API, not chat completions, and Gemini's
+// compat layer exposes no grounding). Returns { input, usage }: the tool-call
+// input object (facet key -> selection, plus "fit") and the token usage the
+// provider reported, normalized to { input, output, cacheRead, searches }
 // — cache reads are kept out of `input` because they bill at a fraction of
 // the input rate. Throws with a readable message on any failure.
-export async function callTagger({ provider, apiKey, model, systemText, schema, parts }) {
+export async function callTagger({ provider, apiKey, model, systemText, schema, parts, research = false }) {
   if (COMPAT[provider]) return compatTag({ provider, apiKey, model, systemText, schema, parts });
-  return anthropicTag({ apiKey, model, systemText, schema, parts });
+  return anthropicTag({ apiKey, model, systemText, schema, parts, research });
 }
 
-async function anthropicTag({ apiKey, model, systemText, schema, parts }) {
+// Per-item bound on web searches; each one bills on top of tokens.
+const MAX_SEARCHES = 5;
+
+// Request construction, split out pure so tests can assert the shape.
+// Research relaxes tool_choice to auto — a forced tool call would block the
+// server-side web_search tool — so the model must be trusted (and validated)
+// to finish with record_tags.
+export function anthropicRequest({ model, systemText, schema, parts, research = false }) {
   const content = parts.map((p) =>
     p.kind === "image"
       ? { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } }
       : { type: "text", text: p.text }
   );
-  const msg = await anthropicClient(apiKey).messages.create({
-    model,
-    max_tokens: 2048,
-    system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
-    tools: [{ name: TOOL_NAME, description: TOOL_DESC, strict: true, input_schema: schema }],
-    tool_choice: { type: "tool", name: TOOL_NAME },
-    messages: [{ role: "user", content }],
-  });
-  const block = msg.content.find((b) => b.type === "tool_use");
-  if (!block) throw new Error("no tool_use block in response");
-  const u = msg.usage || {};
+  const recordTags = { name: TOOL_NAME, description: TOOL_DESC, strict: true, input_schema: schema };
   return {
-    input: block.input,
-    usage: {
-      // cache writes bill as (slightly dearer) input, so fold them in
-      input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0),
-      output: u.output_tokens || 0,
-      cacheRead: u.cache_read_input_tokens || 0,
-    },
+    model,
+    // searching + digesting results eats output budget
+    max_tokens: research ? 4096 : 2048,
+    system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
+    tools: research
+      ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, recordTags]
+      : [recordTags],
+    tool_choice: research ? { type: "auto" } : { type: "tool", name: TOOL_NAME },
+    messages: [{ role: "user", content }],
   };
+}
+
+async function anthropicTag({ apiKey, model, systemText, schema, parts, research = false }) {
+  const request = anthropicRequest({ model, systemText, schema, parts, research });
+  let msg = await anthropicClient(apiKey).messages.create(request);
+  const usage = { input: 0, output: 0, cacheRead: 0, searches: 0 };
+  const addUsage = (u = {}) => {
+    // cache writes bill as (slightly dearer) input, so fold them in
+    usage.input += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    usage.output += u.output_tokens || 0;
+    usage.cacheRead += u.cache_read_input_tokens || 0;
+    usage.searches += u.server_tool_use?.web_search_requests || 0;
+  };
+  addUsage(msg.usage);
+  // A search-heavy turn can come back paused mid-work; hand the partial turn
+  // back and let the model continue (bounded — beyond that, the missing
+  // record_tags call below turns it into a retryable failure).
+  for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
+    request.messages.push({ role: "assistant", content: msg.content });
+    msg = await anthropicClient(apiKey).messages.create(request);
+    addUsage(msg.usage);
+  }
+  const block = msg.content.find((b) => b.type === "tool_use" && b.name === TOOL_NAME);
+  if (!block) throw new Error(`model did not call ${TOOL_NAME}`);
+  return { input: block.input, usage };
 }
 
 // OpenAI-compatible providers via plain fetch — one endpoint, not worth a

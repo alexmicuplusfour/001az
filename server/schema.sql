@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS boards (
   context      TEXT NOT NULL DEFAULT '',
   -- ask the tagger for a per-facet justification (stored in items.tag_reasoning)
   ai_reasoning BOOLEAN NOT NULL DEFAULT TRUE,
+  -- let the tagger use the provider's web-search tool before judging
+  -- (Anthropic only so far; other providers tag from the given input)
+  ai_research  BOOLEAN NOT NULL DEFAULT FALSE,
   -- per-board tagger override; NULL = app default (settings / env)
   ai_key_id    BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL,
   ai_model     TEXT,
@@ -50,6 +53,7 @@ CREATE TABLE IF NOT EXISTS boards (
 );
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'image';
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_reasoning BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_research BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_key_id BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS ai_model TEXT;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag BOOLEAN NOT NULL DEFAULT TRUE;
@@ -187,8 +191,11 @@ CREATE TABLE IF NOT EXISTS ai_board_usage (
   input_tokens      BIGINT NOT NULL DEFAULT 0,
   output_tokens     BIGINT NOT NULL DEFAULT 0,
   cache_read_tokens BIGINT NOT NULL DEFAULT 0,
+  -- web searches (ai_research boards) bill per search, on top of tokens
+  search_count      BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (day, board_id)
 );
+ALTER TABLE ai_board_usage ADD COLUMN IF NOT EXISTS search_count BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,

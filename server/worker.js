@@ -95,12 +95,18 @@ const GLOSS = {
 
 const facetGloss = (f) => (f.description || "").trim() || GLOSS[f.key] || f.label;
 
-export function buildPrompt(facets, context = "", withReasoning = true, subject = "images") {
+export function buildPrompt(facets, context = "", withReasoning = true, subject = "images", withResearch = false) {
   const lines = facets.map((f) => {
     const note = f.single ? " — pick exactly one" : "";
     return `- ${f.key} (${facetGloss(f)}): ${f.values.join(", ")}${note}`;
   });
   const contextBlock = context.trim() ? `\n${context.trim()}\n` : "";
+  // Phrased conditionally on purpose: the systemText is cached per board, but
+  // the provider is resolved per item (per-board key with app-default
+  // fallback), and only Anthropic actually gets a web_search tool.
+  const researchPara = withResearch
+    ? `\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n`
+    : "";
   const selectPara = withReasoning
     ? `Start with a freeform description of the item as a whole — one or two sentences covering what it is and its overall style and mood. Then for each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is "undecided", leave every facet's values empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`
     : `For each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`;
@@ -108,7 +114,7 @@ export function buildPrompt(facets, context = "", withReasoning = true, subject 
 Also decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an item you were able to describe with the facets is a match by definition.
 
 ${selectPara}
-
+${researchPara}
 Facets and allowed values:
 ${lines.join("\n")}
 
@@ -176,7 +182,7 @@ Return your answer only by calling the record_tags tool.`;
   return { systemText, schema };
 }
 
-// Per-board cache: board_id -> { systemText, schema, allowed, facets, adapter, aiKeyId, aiModel }
+// Per-board cache: board_id -> { systemText, schema, allowed, facets, adapter, research, aiKeyId, aiModel }
 // Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
 
@@ -189,8 +195,9 @@ async function getBoardPrompt(db, registry, boardId) {
   const { facets, context } = board;
   const allowed = new Set();
   for (const f of facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
-  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, adapter.manifest.subject);
-  const entry = { systemText, schema, allowed, facets, adapter, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  const research = board.ai_research === true;
+  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, adapter.manifest.subject, research);
+  const entry = { systemText, schema, allowed, facets, adapter, research, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   boardPromptCache.set(boardId, entry);
   return entry;
 }
@@ -240,6 +247,7 @@ export function startWorker({ db, registry }) {
       systemText,
       schema,
       parts,
+      research: prompt.research,
     });
     const tags = [];
     const reasoning = {};

@@ -368,7 +368,9 @@
             const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
             const d = byDay[day];
             const h = d && d.input ? Math.max(2, Math.round((d.input / max) * 12)) : 1;
-            const tip = d ? `${day} — ${d.calls} call(s), ${fmtTok(d.input)} in / ${fmtTok(d.output)} out` : `${day} — no tagging`;
+            const tip = d
+              ? `${day} — ${d.calls} call(s), ${fmtTok(d.input)} in / ${fmtTok(d.output)} out${d.searches ? `, ${d.searches} search(es)` : ""}`
+              : `${day} — no tagging`;
             bars += `<span title="${tip}" style="width:2px;height:${h}px;background:#000"></span>`;
           }
           return `<span style="display:inline-flex;align-items:flex-end;gap:2px;margin-left:10px;cursor:default">${bars}</span>`;
@@ -377,6 +379,7 @@
           if (!u || !u.calls) return `<span style="color:#9aa0aa">—</span>`;
           const tip = [
             `${u.calls} call(s) all-time`,
+            u.searches ? `${u.searches} web search(es)` : "",
             u.cacheRead ? `${fmtTok(u.cacheRead)} cached input reads` : "",
             u.today.calls ? `today: ${u.today.calls} call(s), ${fmtTok(u.today.input)} in / ${fmtTok(u.today.output)} out` : "",
           ].filter(Boolean).join(" · ");
@@ -607,6 +610,7 @@
             <label>AI tagger <span style="font-weight:400;color:#9aa0aa">(which API key and model tag this board)</span></label>
             <div id="board-modal-ai" style="display:flex;gap:8px;margin-bottom:14px;"></div>
             <div id="board-modal-reasoning" style="margin:0 0 10px;font-size:13px"></div>
+            <div id="board-modal-research" style="margin:0 0 10px;font-size:13px"></div>
             <div id="board-modal-autotag" style="font-size:13px"></div>
           </div>
           <div class="modal-section">
@@ -678,6 +682,11 @@
         let aiReasoning = isNew ? true : board.ai_reasoning !== false;
         document.getElementById("board-modal-reasoning").appendChild(
           switchRow("AI reasoning", "(the tagger describes the item and justifies each facet; shown in the lightbox and powers semantic search)", aiReasoning, (on) => { aiReasoning = on; })
+        );
+
+        let aiResearch = isNew ? false : board.ai_research === true;
+        document.getElementById("board-modal-research").appendChild(
+          switchRow("Web research", "(the tagger may search the web before judging — works on Anthropic taggers; searches bill on top of tokens)", aiResearch, (on) => { aiResearch = on; })
         );
 
         // Auto tagging: on/off, plus an optional schedule that periodically
@@ -796,8 +805,8 @@
             auto_tag_skip_weekends: at.skipWeekends,
           };
           try {
-            if (isNew) await api("POST", "/api/admin/boards", { name, type: typeSel.value || "image", context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
-            else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ...aiOverride, ...autoTagBody });
+            if (isNew) await api("POST", "/api/admin/boards", { name, type: typeSel.value || "image", context, facets, ai_reasoning: aiReasoning, ai_research: aiResearch, ...aiOverride, ...autoTagBody });
+            else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ai_research: aiResearch, ...aiOverride, ...autoTagBody });
             close();
             renderBoards();
             toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);

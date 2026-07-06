@@ -391,6 +391,8 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   }
   const context = req.body && req.body.context ? String(req.body.context) : "";
   const aiReasoning = !req.body || req.body.ai_reasoning !== false;
+  // off by default: research bills per web search, on top of tokens
+  const aiResearch = !!(req.body && req.body.ai_research);
   let aiKeyId = null;
   if (req.body && req.body.ai_key_id != null) {
     aiKeyId = Number(req.body.ai_key_id);
@@ -406,9 +408,9 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   autoTag.nextRunAt = autoTag.enabled && autoTag.periodic
     ? nextAutoTagRun(Date.now(), autoTag.everyMin, autoTag.skipWeekends)
     : null;
-  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, type);
+  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, type, aiResearch);
   console.log(`created board "${name}" ${id} (${type})`);
-  res.json({ id, name, type, facets, context, ai_reasoning: aiReasoning });
+  res.json({ id, name, type, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch });
 }));
 
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
@@ -423,6 +425,7 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   }
   if (req.body && req.body.context !== undefined) update.context = String(req.body.context);
   if (req.body && req.body.ai_reasoning !== undefined) update.aiReasoning = !!req.body.ai_reasoning;
+  if (req.body && req.body.ai_research !== undefined) update.aiResearch = !!req.body.ai_research;
   if (req.body && req.body.ai_key_id !== undefined) {
     if (req.body.ai_key_id === null) {
       update.aiKeyId = null;

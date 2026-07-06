@@ -524,17 +524,17 @@ export async function deleteAiKey(db, id) {
 // --- boards ---
 
 const BOARD_COLS =
-  "id, name, type, facets, context, ai_reasoning, ai_key_id, ai_model, " +
+  "id, name, type, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at";
 
-export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, type = "image") {
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, type = "image", aiResearch = false) {
   const id = crypto.randomUUID();
   await db.query(
-    `INSERT INTO boards (id, name, type, facets, context, ai_reasoning, ai_key_id, ai_model,
+    `INSERT INTO boards (id, name, type, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model,
        auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [
-      id, name, type, JSON.stringify(facets), context, !!aiReasoning, aiKeyId, aiModel,
+      id, name, type, JSON.stringify(facets), context, !!aiReasoning, !!aiResearch, aiKeyId, aiModel,
       autoTag.enabled !== false, !!autoTag.periodic, autoTag.everyMin || 1440,
       !!autoTag.skipWeekends, autoTag.nextRunAt ?? null, Date.now(),
     ]
@@ -552,13 +552,14 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
   if (facets !== undefined) { vals.push(JSON.stringify(facets)); sets.push(`facets=$${vals.length}`); }
   if (context !== undefined) { vals.push(String(context)); sets.push(`context=$${vals.length}`); }
   if (aiReasoning !== undefined) { vals.push(!!aiReasoning); sets.push(`ai_reasoning=$${vals.length}`); }
+  if (aiResearch !== undefined) { vals.push(!!aiResearch); sets.push(`ai_research=$${vals.length}`); }
   if (aiKeyId !== undefined) { vals.push(aiKeyId); sets.push(`ai_key_id=$${vals.length}`); }
   if (aiModel !== undefined) { vals.push(aiModel); sets.push(`ai_model=$${vals.length}`); }
   if (autoTag !== undefined) { vals.push(!!autoTag); sets.push(`auto_tag=$${vals.length}`); }
@@ -801,29 +802,31 @@ function today() {
 }
 
 // One successful tagging call: bump the board's daily row with the token
-// usage the provider reported ({ input, output, cacheRead }).
+// usage the provider reported ({ input, output, cacheRead, searches }).
 export async function bumpUsage(db, boardId, usage = {}) {
   await db.query(
-    `INSERT INTO ai_board_usage (day, board_id, count, input_tokens, output_tokens, cache_read_tokens)
-     VALUES ($1, $2, 1, $3, $4, $5)
+    `INSERT INTO ai_board_usage (day, board_id, count, input_tokens, output_tokens, cache_read_tokens, search_count)
+     VALUES ($1, $2, 1, $3, $4, $5, $6)
      ON CONFLICT (day, board_id) DO UPDATE SET
        count = ai_board_usage.count + 1,
        input_tokens = ai_board_usage.input_tokens + EXCLUDED.input_tokens,
        output_tokens = ai_board_usage.output_tokens + EXCLUDED.output_tokens,
-       cache_read_tokens = ai_board_usage.cache_read_tokens + EXCLUDED.cache_read_tokens`,
-    [today(), boardId, Number(usage.input) || 0, Number(usage.output) || 0, Number(usage.cacheRead) || 0]
+       cache_read_tokens = ai_board_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
+       search_count = ai_board_usage.search_count + EXCLUDED.search_count`,
+    [today(), boardId, Number(usage.input) || 0, Number(usage.output) || 0, Number(usage.cacheRead) || 0, Number(usage.searches) || 0]
   );
 }
 
 // Per-board tagger usage, all-time + today, plus the last 14 days broken out
 // for the admin sparkline:
-// { boardId: { calls, input, output, cacheRead, today: { calls, input, output },
-//              days: [{ day, calls, input, output }] } }  (days ascending, gaps omitted)
+// { boardId: { calls, input, output, cacheRead, searches, today: { calls, input, output },
+//              days: [{ day, calls, input, output, searches }] } }  (days ascending, gaps omitted)
 export async function boardAiUsage(db) {
   const { rows } = await db.query(
     `SELECT board_id,
        SUM(count) AS calls, SUM(input_tokens) AS input,
        SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cache_read,
+       SUM(search_count) AS searches,
        COALESCE(SUM(count)         FILTER (WHERE day=$1), 0) AS t_calls,
        COALESCE(SUM(input_tokens)  FILTER (WHERE day=$1), 0) AS t_input,
        COALESCE(SUM(output_tokens) FILTER (WHERE day=$1), 0) AS t_output
@@ -838,6 +841,7 @@ export async function boardAiUsage(db) {
         input: Number(r.input),
         output: Number(r.output),
         cacheRead: Number(r.cache_read),
+        searches: Number(r.searches),
         today: { calls: Number(r.t_calls), input: Number(r.t_input), output: Number(r.t_output) },
         days: [],
       },
@@ -845,7 +849,7 @@ export async function boardAiUsage(db) {
   );
   const cutoff = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
   const { rows: dayRows } = await db.query(
-    `SELECT board_id, day, count, input_tokens, output_tokens
+    `SELECT board_id, day, count, input_tokens, output_tokens, search_count
      FROM ai_board_usage WHERE day >= $1 ORDER BY day`,
     [cutoff]
   );
@@ -855,6 +859,7 @@ export async function boardAiUsage(db) {
       calls: Number(r.count),
       input: Number(r.input_tokens),
       output: Number(r.output_tokens),
+      searches: Number(r.search_count),
     });
   }
   return out;
