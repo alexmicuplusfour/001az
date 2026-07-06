@@ -8,6 +8,7 @@ import { fullUrl } from './kinds.js';
 
 const elLightbox = document.getElementById("lightbox");
 const elLightboxImg = document.getElementById("lightbox-img");
+const elLightboxDoc = document.getElementById("lightbox-doc");
 const elLightboxFav = document.getElementById("lightbox-fav");
 const elLightboxCrate = document.getElementById("lightbox-crate");
 const elLightboxPrev = document.getElementById("lightbox-prev");
@@ -40,6 +41,30 @@ function renderLightboxCrate() {
 // flight — tags render immediately, reasoning lines fill in when it lands.
 function paintPanel(img, reasoning) {
   elLightboxPanelBody.replaceChildren();
+
+  // Item reference block: whatever the item carries. Values are
+  // click-to-select for easy copying.
+  const meta = document.createElement("div");
+  meta.className = "lbp-meta";
+  const metaName = document.createElement("div");
+  metaName.className = "lbp-meta-name";
+  metaName.textContent = img.label || img.name;
+  metaName.title = img.label || img.name;
+  meta.appendChild(metaName);
+  const metaRows = [["file", img.name], ["kind", img.kind || "image"], ["id", String(img.id)]];
+  for (const [k, v] of metaRows) {
+    const row = document.createElement("div");
+    row.className = "lbp-meta-row";
+    const key = document.createElement("span");
+    key.textContent = k;
+    const val = document.createElement("span");
+    val.className = "lbp-meta-val";
+    val.textContent = v;
+    row.append(key, val);
+    meta.appendChild(row);
+  }
+  elLightboxPanelBody.appendChild(meta);
+
   const byFacet = new Map();
   for (const t of img.tags) {
     const i = t.indexOf("/");
@@ -58,7 +83,7 @@ function paintPanel(img, reasoning) {
   } else if (img.undecided) {
     const note = document.createElement("div");
     note.className = "lbp-undecided";
-    note.textContent = why.fit || "The AI couldn't apply this board's facets to this image.";
+    note.textContent = why.fit || "The AI couldn't apply this board's facets to this item.";
     elLightboxPanelBody.appendChild(note);
   }
 
@@ -109,13 +134,13 @@ function paintPanel(img, reasoning) {
   if (!rows && !img.undecided && img.status !== "held") {
     const empty = document.createElement("p");
     empty.className = "lbp-hint";
-    empty.textContent = reasoning === null ? "Loading…" : "No AI tags for this image.";
+    empty.textContent = reasoning === null ? "Loading…" : "No AI tags for this item.";
     elLightboxPanelBody.appendChild(empty);
   } else if (reasoning !== null && img.tags.length && !Object.keys(why).length) {
     const hint = document.createElement("p");
     hint.className = "lbp-hint";
     hint.textContent = state.aiReasoning
-      ? "No reasoning recorded — this image was tagged before reasoning was captured. Retag it to record one."
+      ? "No reasoning recorded — this item was tagged before reasoning was captured. Retag it to record one."
       : "AI reasoning is turned off for this board.";
     elLightboxPanelBody.appendChild(hint);
   }
@@ -143,8 +168,10 @@ function setPanel(open) {
   if (open) renderPanel();
 }
 
+const isDocItem = (it) => it.kind && it.kind !== "image";
+
 function preloadFull(i) {
-  if (i >= 0 && i < lightboxList.length) {
+  if (i >= 0 && i < lightboxList.length && !isDocItem(lightboxList[i])) {
     const im = new Image();
     im.src = fullUrl(lightboxList[i].name);
   }
@@ -152,18 +179,36 @@ function preloadFull(i) {
 
 function showLightbox() {
   lightboxImg = lightboxList[lightboxIndex];
-  elLightboxImg.style.opacity = "0";
-  elLightbox.classList.add("loading");
-  elLightboxImg.onload = () => {
+  if (isDocItem(lightboxImg)) {
+    // Documents render inline in a same-origin frame; the frame paints
+    // progressively, so no loading spinner.
+    elLightboxImg.onload = null;
+    elLightboxImg.removeAttribute("src");
+    elLightboxImg.hidden = true;
     elLightbox.classList.remove("loading");
-    elLightboxImg.style.opacity = "1";
-  };
-  elLightboxImg.src = fullUrl(lightboxImg.name);
-  if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
-    elLightbox.classList.remove("loading");
-    elLightboxImg.style.opacity = "1";
+    const url = fullUrl(lightboxImg.name);
+    if (elLightboxDoc.getAttribute("src") !== url) elLightboxDoc.src = url;
+    elLightboxDoc.hidden = false;
+    // The embedded viewer grabs keyboard focus; keep it on the lightbox so
+    // arrows/Escape work. Clicking into the document refocuses the viewer —
+    // fine, that's how you scroll it.
+    elLightbox.focus({ preventScroll: true });
+  } else {
+    if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
+    elLightboxImg.hidden = false;
+    elLightboxImg.style.opacity = "0";
+    elLightbox.classList.add("loading");
+    elLightboxImg.onload = () => {
+      elLightbox.classList.remove("loading");
+      elLightboxImg.style.opacity = "1";
+    };
+    elLightboxImg.src = fullUrl(lightboxImg.name);
+    if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
+      elLightbox.classList.remove("loading");
+      elLightboxImg.style.opacity = "1";
+    }
+    elLightboxImg.alt = lightboxImg.tags.length ? lightboxImg.tags.join(", ") : lightboxImg.name;
   }
-  elLightboxImg.alt = lightboxImg.tags.length ? lightboxImg.tags.join(", ") : lightboxImg.name;
   if (state.me) {
     renderLightboxFav();
     elLightboxFav.hidden = false;
@@ -185,9 +230,7 @@ function showLightbox() {
 }
 
 export function openLightbox(img) {
-  // Mixed boards: prev/next stays within image items — doc items have their
-  // own detail (the original opens in a tab) and don't belong in the strip.
-  lightboxList = taggedFiltered().filter((i) => !i.kind || i.kind === "image");
+  lightboxList = taggedFiltered();
   lightboxIndex = lightboxList.indexOf(img);
   if (lightboxIndex < 0) { lightboxList = [img]; lightboxIndex = 0; }
   showLightbox();
@@ -213,6 +256,9 @@ export function closeLightbox() {
   elLightboxImg.onload = null;
   elLightboxImg.src = "";
   elLightboxImg.alt = "";
+  elLightboxImg.hidden = false;
+  elLightboxDoc.hidden = true;
+  elLightboxDoc.removeAttribute("src");
   lightboxImg = null;
   lightboxList = [];
   lightboxIndex = -1;
@@ -259,6 +305,12 @@ export function initLightbox() {
     if (e.key === "Escape") panelOpen ? setPanel(false) : closeLightbox();
     else if (e.key === "ArrowLeft") navLightbox(-1);
     else if (e.key === "ArrowRight") navLightbox(1);
+  });
+
+  // The document viewer steals focus as it loads; take it back so keyboard
+  // nav keeps working right after opening.
+  elLightboxDoc.addEventListener("load", () => {
+    if (!elLightbox.hidden && !elLightboxDoc.hidden) elLightbox.focus({ preventScroll: true });
   });
 
   // Crates module dispatches this when a crate membership changes while the lightbox is open.

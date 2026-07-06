@@ -247,7 +247,8 @@ test("security headers are set on every response", async () => {
   const csp = res.headers.get("content-security-policy");
   assert.match(csp, /default-src 'self'/);
   assert.match(csp, /object-src 'none'/);
-  assert.match(csp, /frame-ancestors 'none'/);
+  // 'self', not 'none': the lightbox frames /gallery documents same-origin
+  assert.match(csp, /frame-ancestors 'self'/);
   assert.equal(res.headers.get("x-content-type-options"), "nosniff");
   assert.equal(res.headers.get("referrer-policy"), "same-origin");
   assert.equal(res.headers.get("x-powered-by"), null);

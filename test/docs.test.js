@@ -34,6 +34,9 @@ test("document ingestion", async (t) => {
     assert.equal(u.kind, "text");
     assert.equal(u.label, "resume.txt");
     assert.match(u.name, /^[0-9a-f]{16}\.txt$/);
+    // text previews render via sharp (no poppler involved), so dims are portable
+    assert.equal(u.w, 600);
+    assert.equal(u.h, 760);
     const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [u.id]);
     assert.equal(rows[0].status, "pending");
     assert.equal(rows[0].payload.identity, u.name);

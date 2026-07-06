@@ -50,24 +50,24 @@ const imageKind = {
 };
 
 const docKind = {
-  // Preview (PDF page-1 render, when the server has one) or an extension
-  // badge, plus the original filename as the card title. Content-dependent
-  // height, so grid.js must NOT stamp dataset.ratio for these — they take
-  // the measured layout lane.
+  // A fixed-height (200px) peek at the document — page-1 render cropped from
+  // the top with a fade into the title strip — or an extension badge when
+  // there's no preview; the original filename as the card title. Height is
+  // still content-ish (title strip), so no dataset.ratio: measured lane.
   face(item, card, layout) {
     const wrap = document.createElement("div");
     wrap.className = "doc-face";
     if (item.w && item.h) {
+      const preview = document.createElement("div");
+      preview.className = "doc-preview";
       const im = document.createElement("img");
       im.src = thumbUrl(item.name);
       im.loading = "lazy";
       im.decoding = "async";
-      im.width = item.w;
-      im.height = item.h;
-      im.style.aspectRatio = `${item.w} / ${item.h}`;
       im.alt = item.label || item.name;
       im.addEventListener("load", () => { im.classList.add("loaded"); layout(); });
-      wrap.appendChild(im);
+      preview.appendChild(im);
+      wrap.appendChild(preview);
     } else {
       const badge = document.createElement("div");
       badge.className = "doc-badge";
@@ -96,9 +96,10 @@ const docKind = {
     return wrap;
   },
 
-  // The original opens in a new tab (browsers render PDFs and text natively).
+  // Same lightbox as images; it renders the document inline (browsers
+  // display PDFs and plain text natively in a same-origin frame).
   openDetail(item) {
-    window.open(fullUrl(item.name), "_blank", "noopener");
+    openLightbox(item);
   },
 
   previewUrl(item) {

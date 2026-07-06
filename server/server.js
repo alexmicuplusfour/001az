@@ -129,7 +129,9 @@ app.set("trust proxy", 1);
 // Security headers on every response. CSP notes: fonts come from Google Fonts;
 // img needs data: (inline SVG chevron in admin.css) and blob: (upload
 // placeholder object URLs); 'unsafe-inline' styles cover admin.html's style=""
-// attrs and logs.html's <style> block. HSTS is Caddy's job (TLS lives there).
+// attrs and logs.html's <style> block. frame-ancestors is 'self', not 'none':
+// the lightbox renders /gallery documents in a same-origin frame — external
+// embedding stays blocked. HSTS is Caddy's job (TLS lives there).
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
@@ -139,7 +141,7 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
-  "frame-ancestors 'none'",
+  "frame-ancestors 'self'",
 ].join("; ");
 app.use((_req, res, next) => {
   res.setHeader("Content-Security-Policy", CSP);
@@ -726,7 +728,15 @@ app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async 
 // holding a URL; within a session the 64-bit random filenames are the
 // per-board barrier — they only surface through the board-ACL'd /api/items.
 mountIngest(app, { db, sources });
-app.use("/gallery", requireAuth, express.static(GALLERY_DIR, { maxAge: "7d", immutable: true }));
+app.use("/gallery", requireAuth, express.static(GALLERY_DIR, {
+  maxAge: "7d",
+  immutable: true,
+  // md/csv would otherwise download; the lightbox renders originals inline
+  // in a frame, so serve all text-ish docs as plain text.
+  setHeaders: (res, p) => {
+    if (/\.(md|csv)$/i.test(p)) res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  },
+}));
 app.use("/thumbnails", requireAuth, express.static(THUMBS_DIR, { maxAge: "7d", immutable: true }));
 
 // Legacy: items uploaded before thumb dimensions were stored.
