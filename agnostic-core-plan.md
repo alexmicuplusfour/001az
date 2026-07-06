@@ -65,7 +65,7 @@ The client type seam is five hooks (`renderCardBody`, `renderProgressBody`, `ope
 
 ## Step 3 — generic ingest + model input (server) — ✅ shipped 2026-07-06 (together with step 4)
 
-*Verified: 45 tests green; `/api/items` byte-identical pre/post on all boards; live e2e — type-less board create → upload through `ingest.js` + `sources/image.js` → **real Sonnet tagging call through the core `modelInputFor`** (`theme/light`) → item delete cleaned both files → board delete. Headless: board page renders, admin "New board" modal has no type picker and prefills the starter facets. (Steps 3+4 shipped as one pass: deleting the registry breaks the board-types endpoint, so leaving the picker up in between would have been a broken interim.)*
+*Verified: 45 tests green; `/api/items` byte-identical pre/post on all boards; live e2e — type-less board create → upload through `ingest.js` + `sources/image.js` → **real Sonnet tagging call through the core `modelInputFor`** (`theme/light`) → item delete cleaned both files → board delete. Headless: board page renders, admin "New board" modal has no type picker and prefills the starter facets. (Steps 3+4 shipped as one pass: deleting the registry breaks the board-types endpoint, so leaving the picker up in between would have been a broken interim.) Superseded 869c879, after documents landed: the subject is now the literal `"items"` — boards mix file kinds, so the byte-identical invariant was deliberately broken; one-time prompt-cache re-prime, tag-snapshot comparability boundary at that commit.*
 
 - **`server/ingest.js`**: `/api/upload` moves out of the image adapter unchanged (auth, board ACL, multer limits, per-file loop, uploaded/rejected response). Per file it calls a **source handler** picked by sniffed type — images only, as today.
 - **`server/sources/image.js`**: the sharp pipeline verbatim — process-wide decode gate, SVG rasterization, `ALLOWED` map, thumbnailing, the OOM constants. Returns the file entry `{ name, original_name, w, h }`; ingest wraps it into the item.
@@ -86,7 +86,7 @@ The client type seam is five hooks (`renderCardBody`, `renderProgressBody`, `ope
 ## Risks / invariants
 
 - **Step 1 rewrites every live item row.** Idempotent single-statement UPDATE, guarded on shape, rehearsed against a copy of the dev DB before any real one — same discipline as the `images → items` rename.
-- **The tagging prompt must not change byte-for-byte**: subject `"images"`, tool `record_tags`, gloss path untouched. Prompt cache keys and snapshot comparability both ride on it.
+- **The tagging prompt must not change byte-for-byte**: subject `"images"`, tool `record_tags`, gloss path untouched. Prompt cache keys and snapshot comparability both ride on it. *(Held through the migration; superseded by 869c879 once boards mixed file kinds — see step 3 note.)*
 - **Step 2 is the only visually exposed step**; layout math, card cache, and chrome don't change — only where the body element comes from. Parity or it doesn't ship.
 - **API contract frozen throughout**: `/api/items` keeps emitting `name`/`w`/`h` exactly as today; `toItem()` and everything downstream never notices.
 - The board-type plugin seam is deleted deliberately: one built-in behavior needs no adapter layer. Extension points return later as source handlers / file kinds / connectors — smaller, sharper contracts.

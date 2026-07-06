@@ -72,9 +72,13 @@ export function imageSource({ galleryDir, thumbsDir }) {
       });
     },
 
-    // Legacy: items uploaded before thumb dimensions were stored.
+    // Legacy: items uploaded before thumb dimensions were stored. Image kind
+    // only — a doc without dims has no preview by design, not a missing value.
     async backfillDims(rows, update) {
-      const todo = rows.filter((r) => r.payload.files?.[0]?.name && !r.payload.files[0].w);
+      const todo = rows.filter((r) => {
+        const f = r.payload.files?.[0];
+        return f?.name && !f.w && (f.kind || "image") === "image";
+      });
       if (!todo.length) return;
       console.log(`backfilling thumbnail dimensions for ${todo.length} image(s)...`);
       let done = 0;

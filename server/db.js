@@ -587,9 +587,8 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   return result.rowCount > 0;
 }
 
-// Returns the deleted board's item payloads (the board type's onDelete cleans
-// up whatever they reference), or null if the board doesn't exist. Rows
-// cascade via FKs.
+// Returns the deleted board's item payloads (the caller hands their files to
+// sources.cleanup), or null if the board doesn't exist. Rows cascade via FKs.
 export async function deleteBoard(db, id) {
   return withTx(db, async (client) => {
     const items = await client.query("SELECT payload FROM items WHERE board_id=$1", [id]);
@@ -879,8 +878,8 @@ export async function boardAiUsage(db) {
   return out;
 }
 
-// Delete a row; returns { payload, board_id } (the board type's onDelete
-// cleans up whatever the payload references) or null if missing.
+// Delete a row; returns { payload, board_id } (the caller hands the payload's
+// files to sources.cleanup) or null if missing.
 export async function deleteItem(db, id) {
   const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload, board_id", [id]);
   return rows[0] || null;

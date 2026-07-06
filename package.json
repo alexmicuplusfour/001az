@@ -7,7 +7,6 @@
     "populate": "node populate.js",
     "serve": "node serve.js",
     "clear-tags": "node clear-tags.js",
-    "deploy": "python deploy.py",
     "server": "node server/server.js",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
   },

@@ -209,7 +209,7 @@
         render();
         sync();
 
-        // Lets the modal swap in a type's suggested facets after build.
+        // Lets the modal prefill the starter facets after build.
         return {
           setFacets(next) {
             facets = Array.isArray(next) ? JSON.parse(JSON.stringify(next)) : [];
