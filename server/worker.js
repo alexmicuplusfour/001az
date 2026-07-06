@@ -97,7 +97,7 @@ const GLOSS = {
 
 const facetGloss = (f) => (f.description || "").trim() || GLOSS[f.key] || f.label;
 
-export function buildPrompt(facets, context = "", withReasoning = true, subject = "images", withResearch = false) {
+export function buildPrompt(facets, context = "", withReasoning = true, subject = "items", withResearch = false) {
   const lines = facets.map((f) => {
     const note = f.single ? " — pick exactly one" : "";
     return `- ${f.key} (${facetGloss(f)}): ${f.values.join(", ")}${note}`;
@@ -196,9 +196,9 @@ async function getBoardPrompt(db, boardId) {
   const allowed = new Set();
   for (const f of facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const research = board.ai_research === true;
-  // Subject stays the literal "images" until non-image items exist — the
-  // prompt (and so the prompt cache + snapshot comparability) must not change.
-  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, "images", research);
+  // Boards mix file kinds now, so the honest per-board subject is "items";
+  // the per-item wording ("Tag this image/document…") rides in the user turn.
+  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, "items", research);
   const entry = { systemText, schema, allowed, facets, research, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   boardPromptCache.set(boardId, entry);
   return entry;
