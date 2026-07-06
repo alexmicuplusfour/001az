@@ -24,4 +24,5 @@ export const state = {
   searchDraft: "",
   searchQuery: "",
   searchResults: null,
+  searchLoading: false,
 };

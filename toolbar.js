@@ -140,7 +140,12 @@ export function renderToolbar(resultCount) {
       else if (e.key === "Escape") { e.stopPropagation(); clearSearch(); input.blur(); }
     });
     box.appendChild(input);
-    if (state.searchResults) {
+    if (state.searchLoading) {
+      const spin = document.createElement("span");
+      spin.className = "search-spinner";
+      spin.setAttribute("aria-label", "Searching…");
+      box.appendChild(spin);
+    } else if (state.searchResults) {
       const clearBtn = document.createElement("button");
       clearBtn.className = "search-clear";
       clearBtn.title = "Clear search";
