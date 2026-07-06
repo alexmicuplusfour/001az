@@ -17,6 +17,7 @@ const elLightboxCount = document.getElementById("lightbox-count");
 const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
+const elLightboxDownload = document.getElementById("lightbox-download");
 
 let lightboxImg = null;
 let lightboxList = [];
@@ -40,6 +41,11 @@ function renderLightboxCrate() {
 // Paint the reasoning panel for img. reasoning is null while the fetch is in
 // flight — tags render immediately, reasoning lines fill in when it lands.
 function paintPanel(img, reasoning) {
+  // Same-origin link, so the download attribute names the saved file — the
+  // item's original name, not the hashed store name.
+  elLightboxDownload.href = fullUrl(img.name);
+  elLightboxDownload.download = img.label || img.name;
+
   elLightboxPanelBody.replaceChildren();
 
   // Item reference block: whatever the item carries. Values are
@@ -299,6 +305,7 @@ export function initLightbox() {
     setPanel(!panelOpen);
   });
   elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
+  elLightboxDownload.innerHTML = ICONS.download;
   document.getElementById("lightbox-panel-close").addEventListener("click", () => setPanel(false));
 
   document.addEventListener("keydown", (e) => {

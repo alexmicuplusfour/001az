@@ -1173,6 +1173,11 @@ a.tool-btn {
   font-weight: 600;
   flex: none;
 }
+.lbp-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 .lbp-close {
   background: none;
   border: none;
@@ -1183,6 +1188,18 @@ a.tool-btn {
   padding: 0 2px;
 }
 .lbp-close:hover {
+  color: #111;
+}
+.lbp-download {
+  display: inline-flex;
+  color: #aaa;
+  cursor: pointer;
+}
+.lbp-download svg {
+  width: 16px;
+  height: 16px;
+}
+.lbp-download:hover {
   color: #111;
 }
 .lbp-body {
