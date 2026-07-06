@@ -52,11 +52,11 @@ const MAX_SEARCHES = 5;
 // server-side web_search tool — so the model must be trusted (and validated)
 // to finish with record_tags.
 export function anthropicRequest({ model, systemText, schema, parts, research = false }) {
-  const content = parts.map((p) =>
-    p.kind === "image"
-      ? { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } }
-      : { type: "text", text: p.text }
-  );
+  const content = parts.map((p) => {
+    if (p.kind === "image") return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
+    if (p.kind === "document") return { type: "document", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
+    return { type: "text", text: p.text };
+  });
   const recordTags = { name: TOOL_NAME, description: TOOL_DESC, strict: true, input_schema: schema };
   return {
     model,
@@ -101,6 +101,10 @@ async function anthropicTag({ apiKey, model, systemText, schema, parts, research
 // Anthropic tool shape; the same strict JSON schema works everywhere.
 async function compatTag({ provider, apiKey, model, systemText, schema, parts }) {
   const { base, label } = COMPAT[provider];
+  // Document blocks are Anthropic-only: the chat-completions compat path has
+  // no PDF input. Fail loud with the fix, rather than degrading silently.
+  if (parts.some((p) => p.kind === "document"))
+    throw new Error(`${label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
   const content = parts.map((p) =>
     p.kind === "image"
       ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }

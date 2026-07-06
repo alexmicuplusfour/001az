@@ -2,6 +2,11 @@
 # defaults to the repo root baked in below); Caddy in front does TLS and proxying.
 FROM node:22-slim
 
+# poppler renders PDF page-1 previews (pdftoppm/pdfinfo in sources/doc.js);
+# without it docs still ingest, they just get no thumbnail.
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 WORKDIR /app
 

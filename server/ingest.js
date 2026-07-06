@@ -1,8 +1,8 @@
 // The one upload door: files arrive here, a source handler (by file type)
 // turns each into a stored file entry, and the item is created with the
 // generic payload ({ identity, files, fields }). Raw identity = the stored
-// filename. Only image files are accepted so far; new file types plug in as
-// new source handlers, this route stays format-blind.
+// filename. Images and documents (pdf/txt/md/csv) are accepted; new file
+// types plug in as new source handlers, this route stays format-blind.
 import multer from "multer";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,7 +18,7 @@ const MAX_FILES = 200; // per request
 // Express 4 doesn't forward rejected promises from async handlers.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-export function mountIngest(app, { db, source }) {
+export function mountIngest(app, { db, sources }) {
   // Disk-backed upload (bounded memory; we process one file at a time).
   const upload = multer({
     dest: os.tmpdir(),
@@ -39,18 +39,22 @@ export function mountIngest(app, { db, source }) {
     const rejected = [];
     for (const f of req.files || []) {
       try {
-        const file = await source.ingest(f.path, f.originalname);
+        const file = await sources.forUpload(f.originalname).ingest(f.path, f.originalname);
         if (!file) {
-          rejected.push({ name: f.originalname, reason: "unsupported image type" });
+          rejected.push({ name: f.originalname, reason: "unsupported file type" });
           continue;
         }
         // Uploads to a board with auto-tagging off wait as 'held'.
         const status = board.auto_tag ? "pending" : "held";
         const id = await insertItem(db, board.id, { identity: file.name, files: [file], fields: {} }, status);
-        uploaded.push({ id, name: file.name, status, tags: [], w: file.w, h: file.h });
+        uploaded.push({
+          id, name: file.name, status, tags: [],
+          w: file.w, h: file.h, kind: file.kind, label: file.original_name,
+        });
       } catch (err) {
         console.error("upload error:", f.originalname, err.message);
-        rejected.push({ name: f.originalname, reason: "could not process image" });
+        // err.reason marks a user-explainable refusal (e.g. PDF page cap)
+        rejected.push({ name: f.originalname, reason: err.reason || "could not process file" });
       } finally {
         await fs.promises.unlink(f.path).catch(() => {});
       }

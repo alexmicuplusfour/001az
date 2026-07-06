@@ -65,19 +65,11 @@ export function imageSource({ galleryDir, thumbsDir }) {
         return {
           name: filename,
           original_name: originalName || filename,
+          kind: "image",
           w: thumbInfo.width,
           h: thumbInfo.height,
         };
       });
-    },
-
-    // Remove everything a payload's files put on disk.
-    cleanup(files) {
-      for (const f of files || []) {
-        if (!f.name) continue;
-        fs.rmSync(path.join(galleryDir, f.name), { force: true });
-        fs.rmSync(path.join(thumbsDir, f.name + ".webp"), { force: true });
-      }
     },
 
     // Legacy: items uploaded before thumb dimensions were stored.

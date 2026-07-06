@@ -18,10 +18,11 @@ let processingToast = null;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const isImageFile = (f) => f.type.startsWith("image/") || /\.(avif|heif|heic|svg)$/i.test(f.name);
+const isDocFile = (f) => /\.(pdf|txt|md|csv)$/i.test(f.name);
+
 export function handleFiles(fileList) {
-  const files = [...fileList].filter(
-    (f) => f.type.startsWith("image/") || /\.(avif|heif|heic|svg)$/i.test(f.name)
-  );
+  const files = [...fileList].filter((f) => isImageFile(f) || isDocFile(f));
   if (!files.length) return;
 
   if (!uploadStats) {
@@ -84,7 +85,13 @@ async function uploadChunk(chunk) {
   inFlight += chunk.length;
   renderUploadStatus();
 
-  const batch = chunk.map((f) => ({ tempId: ++state.uid, objURL: URL.createObjectURL(f) }));
+  // Doc placeholders get a badge face, not an <img> (no object URL to show).
+  const batch = chunk.map((f) => ({
+    tempId: ++state.uid,
+    name: f.name,
+    kind: isImageFile(f) ? "image" : "doc",
+    objURL: isImageFile(f) ? URL.createObjectURL(f) : null,
+  }));
   state.uploading.push(...batch);
   document.dispatchEvent(new Event('app:render'));
 
@@ -112,7 +119,7 @@ async function uploadChunk(chunk) {
     if (attempt < UPLOAD_ATTEMPTS) await sleep(1000 * attempt);
   }
 
-  for (const b of batch) URL.revokeObjectURL(b.objURL);
+  for (const b of batch) if (b.objURL) URL.revokeObjectURL(b.objURL);
   state.uploading = state.uploading.filter((u) => !batch.includes(u));
 
   inFlight -= chunk.length;
@@ -155,7 +162,7 @@ function maybeFinishUploads() {
   renderUploadStatus();
 
   const parts = [];
-  if (s.uploaded) parts.push(`Uploaded ${s.uploaded} image${s.uploaded === 1 ? "" : "s"}`);
+  if (s.uploaded) parts.push(`Uploaded ${s.uploaded} file${s.uploaded === 1 ? "" : "s"}`);
   for (const [reason, n] of s.skipped) parts.push(`${n} skipped (${reason})`);
   if (s.failed) parts.push(`${s.failed} failed (${s.failReason}) — drop them again to retry`);
   if (s.canceled) parts.push(`${s.canceled} canceled`);
@@ -180,7 +187,7 @@ function maybeFinishUploads() {
 }
 
 function processingMsg(n) {
-  return n === 1 ? "Processing 1 image…" : `Processing ${n} images…`;
+  return n === 1 ? "Processing 1 item…" : `Processing ${n} items…`;
 }
 
 function syncProcessingToast() {

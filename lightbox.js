@@ -185,7 +185,9 @@ function showLightbox() {
 }
 
 export function openLightbox(img) {
-  lightboxList = taggedFiltered();
+  // Mixed boards: prev/next stays within image items — doc items have their
+  // own detail (the original opens in a tab) and don't belong in the strip.
+  lightboxList = taggedFiltered().filter((i) => !i.kind || i.kind === "image");
   lightboxIndex = lightboxList.indexOf(img);
   if (lightboxIndex < 0) { lightboxList = [img]; lightboxIndex = 0; }
   showLightbox();

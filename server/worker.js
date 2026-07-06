@@ -225,16 +225,34 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
   return t;
 }
 
-export function startWorker({ db, thumbsDir }) {
+export function startWorker({ db, thumbsDir, galleryDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
   const CONCURRENCY = Math.max(1, Number(process.env.TAG_CONCURRENCY) || 4);
+  const TEXT_DOC_MAX_CHARS = 50000; // ~12k tokens; plenty for tagging judgment
 
   // What the model sees for an item: parts built from its files by kind.
-  // The tagger sees the thumbnail (cheap) rather than the original.
+  // Images: the thumbnail (cheap) rather than the original. PDFs: the original
+  // as a document block (Anthropic-only — providers.js rejects it elsewhere).
+  // Text docs: the content inline, capped.
   async function modelInputFor(payload) {
-    const buf = await fs.promises.readFile(path.join(thumbsDir, payload.files[0].name + ".webp"));
+    const file = payload.files[0];
+    if (file.kind === "pdf") {
+      const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+      return [
+        { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
+        { kind: "text", text: "Tag this document using the record_tags tool." },
+      ];
+    }
+    if (file.kind === "text") {
+      const text = await fs.promises.readFile(path.join(galleryDir, file.name), "utf8");
+      return [{
+        kind: "text",
+        text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
+      }];
+    }
+    const buf = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp"));
     return [
       { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
       { kind: "text", text: "Tag this image using the record_tags tool." },

@@ -156,6 +156,9 @@ export async function listItems(db, userId = null, boardId = null) {
     crateIds: crateMap.get(r.id) || [],
     w: r.payload.files?.[0]?.w || null,
     h: r.payload.files?.[0]?.h || null,
+    // file kind drives the card face; pre-kind rows are all images
+    kind: r.payload.files?.[0]?.kind || "image",
+    label: r.payload.files?.[0]?.original_name || null,
   }));
 }
 

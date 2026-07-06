@@ -68,7 +68,7 @@ import {
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
 import { testKey, embedTexts, PROVIDERS, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
-import { imageSource } from "./sources/image.js";
+import { createSources } from "./sources/index.js";
 import { mountIngest } from "./ingest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -116,9 +116,9 @@ const db = openDb(DATABASE_URL);
 await initDb(db);
 await seedAdmin(db, ADMIN_EMAIL);
 
-// The image source handler (server/sources/): stores originals + thumbnails
-// and cleans them up on delete. The upload route itself is core (ingest.js).
-const source = imageSource({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR });
+// Source handlers (server/sources/): store originals + faces (thumbnails)
+// and clean them up on delete. The upload route itself is core (ingest.js).
+const sources = createSources({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR });
 
 const app = express();
 app.disable("x-powered-by");
@@ -506,7 +506,7 @@ app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, wrap(async (req, re
 app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const payloads = await deleteBoard(db, req.params.id);
   if (payloads === null) return res.status(404).json({ error: "not found" });
-  for (const payload of payloads) source.cleanup(payload?.files);
+  for (const payload of payloads) sources.cleanup(payload?.files);
   invalidateBoardCache(req.params.id);
   console.log(`deleted board ${req.params.id} + ${payloads.length} items`);
   res.json({ ok: true, deleted: payloads.length });
@@ -709,7 +709,7 @@ app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req
 app.delete("/api/items/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await deleteItem(db, req.itemId);
   if (!row) return res.status(404).json({ error: "not found" });
-  source.cleanup(row.payload?.files);
+  sources.cleanup(row.payload?.files);
   console.log(`deleted #${req.itemId} ${row.payload?.identity || ""}`.trim());
   res.json({ ok: true });
 }));
@@ -725,12 +725,12 @@ app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async 
 // safe. Login required: without it the bytes are world-readable to anyone
 // holding a URL; within a session the 64-bit random filenames are the
 // per-board barrier — they only surface through the board-ACL'd /api/items.
-mountIngest(app, { db, source });
+mountIngest(app, { db, sources });
 app.use("/gallery", requireAuth, express.static(GALLERY_DIR, { maxAge: "7d", immutable: true }));
 app.use("/thumbnails", requireAuth, express.static(THUMBS_DIR, { maxAge: "7d", immutable: true }));
 
 // Legacy: items uploaded before thumb dimensions were stored.
-source.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayload(db, id, patch))
+sources.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayload(db, id, patch))
   .catch((err) => console.log("thumb backfill error:", err.message));
 
 // Frontend assets (same-origin /api during host dev; in the container the app
@@ -755,7 +755,7 @@ if (isMain) {
   const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   });
-  const stopWorker = startWorker({ db, thumbsDir: THUMBS_DIR });
+  const stopWorker = startWorker({ db, thumbsDir: THUMBS_DIR, galleryDir: GALLERY_DIR });
 
   // Graceful shutdown. In the container node is PID 1, which ignores signals
   // it has no handler for — without this, every `docker stop` waits out the

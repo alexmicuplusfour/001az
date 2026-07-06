@@ -284,8 +284,9 @@ function cardFor(img) {
   // Lets layoutGrid compute the height (cardW / ratio) instead of measuring.
   // Only valid while the body is a pinned-ratio image and no card state adds
   // layout height (selected/undecided use outline + inner padding, which
-  // don't). Bodies with content-dependent height must leave this unset.
-  if (img.w && img.h) card.dataset.ratio = img.w / img.h;
+  // don't). Bodies with content-dependent height (doc faces carry a title
+  // strip) must leave this unset — they take the measured lane.
+  if (img.w && img.h && img.kind === "image") card.dataset.ratio = img.w / img.h;
   // Held items (waiting for auto-tagging) get the same dashed "needs tags"
   // treatment as AI-undecided ones.
   if (img.undecided || img.status === "held") card.classList.add("undecided");

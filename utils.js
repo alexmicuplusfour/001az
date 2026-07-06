@@ -18,6 +18,8 @@ export function toItem(d) {
     crateIds: new Set(Array.isArray(d.crateIds) ? d.crateIds : []),
     w: d.w || 0,
     h: d.h || 0,
+    kind: d.kind || "image",
+    label: d.label || null,
   };
 }
 
