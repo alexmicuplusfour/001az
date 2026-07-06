@@ -80,13 +80,14 @@ try {
     ])
   );
 
-  // The source's image columns become the item payload (modular boards).
+  // The source's image columns become the generic item payload
+  // ({identity, files, fields} — see schema.sql).
   const toPayload = (r) => {
-    const p = { filename: r.filename };
-    if (r.original_name) p.original_name = r.original_name;
-    if (r.thumb_w) p.w = r.thumb_w;
-    if (r.thumb_h) p.h = r.thumb_h;
-    return JSON.stringify(p);
+    const f = { name: r.filename };
+    if (r.original_name) f.original_name = r.original_name;
+    if (r.thumb_w) f.w = r.thumb_w;
+    if (r.thumb_h) f.h = r.thumb_h;
+    return JSON.stringify({ identity: r.filename, files: [f], fields: {} });
   };
   await copy("items", src.prepare("SELECT * FROM images").all(), (r) =>
     client.query(

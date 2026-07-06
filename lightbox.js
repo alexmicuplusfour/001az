@@ -1,10 +1,10 @@
-import { state } from '../../state.js';
-import { ICONS } from '../../utils.js';
-import { toast } from '../../toast.js';
-import { taggedFiltered } from '../../filters.js';
-import { openCratePop, closeCratePop } from '../../crates.js';
-import { scrollToCard } from '../../grid.js';
-import { fullUrl } from './index.js';
+import { state } from './state.js';
+import { ICONS } from './utils.js';
+import { toast } from './toast.js';
+import { taggedFiltered } from './filters.js';
+import { openCratePop, closeCratePop } from './crates.js';
+import { scrollToCard } from './grid.js';
+import { fullUrl } from './kinds.js';
 
 const elLightbox = document.getElementById("lightbox");
 const elLightboxImg = document.getElementById("lightbox-img");

@@ -77,7 +77,8 @@ test("embedTextFor: description leads, tags flatten to words, never empty", () =
   assert.match(text, /White background/);
   assert.match(text, /theme: light; density: roomy/);
   // Nothing to embed → falls back to a name, never an empty string.
-  assert.equal(embedTextFor([], {}, { filename: "x.png" }), "x.png");
+  assert.equal(embedTextFor([], {}, { identity: "y.png", files: [{ name: "y.png", original_name: "x.png" }] }), "x.png");
+  assert.equal(embedTextFor([], {}, { identity: "y.png", files: [{ name: "y.png" }] }), "y.png");
   assert.equal(embedTextFor(), "untitled item");
 });
 

@@ -55,6 +55,8 @@ import {
   deleteAiKey,
   embeddingStats,
   boardEmbeddings,
+  listItemPayloads,
+  updateItemPayload,
 } from "./db.js";
 import {
   attachUser,
@@ -66,8 +68,8 @@ import {
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
 import { testKey, embedTexts, PROVIDERS, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
-import { createRegistry } from "./types/index.js";
-import imageType from "./types/image.js";
+import { imageSource } from "./sources/image.js";
+import { mountIngest } from "./ingest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -114,10 +116,9 @@ const db = openDb(DATABASE_URL);
 await initDb(db);
 await seedAdmin(db, ADMIN_EMAIL);
 
-// Board types (see server/types/): core stays type-blind, adapters own
-// ingestion, model input, and item-payload cleanup.
-const registry = createRegistry({ db });
-registry.register(imageType({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR }));
+// The image source handler (server/sources/): stores originals + thumbnails
+// and cleans them up on delete. The upload route itself is core (ingest.js).
+const source = imageSource({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR });
 
 const app = express();
 app.disable("x-powered-by");
@@ -341,7 +342,6 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
   res.json({
     id: board.id,
     name: board.name,
-    type: board.type,
     facets: board.facets,
     context: board.context,
     ai_reasoning: board.ai_reasoning !== false,
@@ -375,16 +375,9 @@ function parseEveryMin(v) {
   return Math.min(Math.max(n, 15), 60 * 24 * 28); // 15 min .. 4 weeks
 }
 
-// Registered board types + their suggested starter facets, for the create UI.
-app.get("/api/admin/board-types", requireAdmin, (_req, res) => {
-  res.json(registry.list());
-});
-
 app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
-  const type = req.body && req.body.type ? String(req.body.type) : "image";
-  if (!registry.get(type)) return res.status(400).json({ error: `unknown board type "${type}"` });
   let facets = [];
   if (req.body && req.body.facets !== undefined) {
     if (!Array.isArray(req.body.facets)) return res.status(400).json({ error: "facets must be an array" });
@@ -409,9 +402,9 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   autoTag.nextRunAt = autoTag.enabled && autoTag.periodic
     ? nextAutoTagRun(Date.now(), autoTag.everyMin, autoTag.skipWeekends)
     : null;
-  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, type, aiResearch);
-  console.log(`created board "${name}" ${id} (${type})`);
-  res.json({ id, name, type, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch });
+  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, aiResearch);
+  console.log(`created board "${name}" ${id}`);
+  res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch });
 }));
 
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
@@ -511,11 +504,9 @@ app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, wrap(async (req, re
 }));
 
 app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
-  const board = await getBoard(db, req.params.id); // type needed after the rows are gone
   const payloads = await deleteBoard(db, req.params.id);
   if (payloads === null) return res.status(404).json({ error: "not found" });
-  const adapter = registry.get(board?.type || "image");
-  for (const payload of payloads) await adapter?.onDelete?.({ payload });
+  for (const payload of payloads) source.cleanup(payload?.files);
   invalidateBoardCache(req.params.id);
   console.log(`deleted board ${req.params.id} + ${payloads.length} items`);
   res.json({ ok: true, deleted: payloads.length });
@@ -718,9 +709,8 @@ app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req
 app.delete("/api/items/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await deleteItem(db, req.itemId);
   if (!row) return res.status(404).json({ error: "not found" });
-  const type = (await getBoard(db, row.board_id))?.type || "image";
-  await registry.get(type)?.onDelete?.({ id: req.itemId, payload: row.payload });
-  console.log(`deleted #${req.itemId} ${row.payload?.filename || ""}`.trim());
+  source.cleanup(row.payload?.files);
+  console.log(`deleted #${req.itemId} ${row.payload?.identity || ""}`.trim());
   res.json({ ok: true });
 }));
 
@@ -730,9 +720,18 @@ app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async 
   res.json({ ok: true, status: "pending" });
 }));
 
-// Board-type routes: ingestion (/api/upload for images) + type-owned statics
-// (/gallery, /thumbnails). Mounted before the frontend catch-all.
-registry.mountAll(app);
+// Ingestion + item-file statics, mounted before the frontend catch-all.
+// Filenames are random per upload and never reused, so long-lived caching is
+// safe. Login required: without it the bytes are world-readable to anyone
+// holding a URL; within a session the 64-bit random filenames are the
+// per-board barrier — they only surface through the board-ACL'd /api/items.
+mountIngest(app, { db, source });
+app.use("/gallery", requireAuth, express.static(GALLERY_DIR, { maxAge: "7d", immutable: true }));
+app.use("/thumbnails", requireAuth, express.static(THUMBS_DIR, { maxAge: "7d", immutable: true }));
+
+// Legacy: items uploaded before thumb dimensions were stored.
+source.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayload(db, id, patch))
+  .catch((err) => console.log("thumb backfill error:", err.message));
 
 // Frontend assets (same-origin /api during host dev; in the container the app
 // is the only file server and Caddy just proxies).
@@ -756,7 +755,7 @@ if (isMain) {
   const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   });
-  const stopWorker = startWorker({ db, registry });
+  const stopWorker = startWorker({ db, thumbsDir: THUMBS_DIR });
 
   // Graceful shutdown. In the container node is PID 1, which ignores signals
   // it has no handler for — without this, every `docker stop` waits out the
@@ -781,4 +780,4 @@ if (isMain) {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-export { app, db, registry };
+export { app, db };

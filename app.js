@@ -7,10 +7,8 @@ import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
 import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
 import { initFilterConfigsUI } from './filterconfigs.js';
-import { registerType, getType } from './types/index.js';
-import imageType from './types/image/index.js';
-
-registerType(imageType);
+import { initUpload } from './upload.js';
+import { initLightbox } from './lightbox.js';
 
 function render() {
   const key = filterKey();
@@ -31,6 +29,8 @@ async function main() {
   initGrid();
   initShortcuts();
   initFilters();
+  initUpload();
+  initLightbox();
 
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
@@ -70,8 +70,6 @@ async function main() {
   state.boardName = boardData ? boardData.name : null;
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
   state.searchAvailable = !!boardData?.search;
-  state.adapter = getType(boardData?.type);
-  state.adapter.init?.();
   state.me = meData;
   state.items = itemsData.map(toItem);
   state.crates = Array.isArray(cratesData) ? cratesData : [];

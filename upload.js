@@ -1,7 +1,7 @@
-import { state } from '../../state.js';
-import { toItem } from '../../utils.js';
-import { toast } from '../../toast.js';
-import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount } from '../../data.js';
+import { state } from './state.js';
+import { toItem } from './utils.js';
+import { toast } from './toast.js';
+import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount } from './data.js';
 
 const UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // keep in sync with server MAX_BYTES
 const UPLOAD_CHUNK_FILES = 20;

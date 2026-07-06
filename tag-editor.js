@@ -1,6 +1,7 @@
 import { state } from './state.js';
 import { ICONS } from './utils.js';
 import { toast } from './toast.js';
+import { kindFor } from './kinds.js';
 
 export function openTagEditor(img) {
   const overlay = document.createElement("div");
@@ -12,7 +13,7 @@ export function openTagEditor(img) {
   const header = document.createElement("div");
   header.className = "te-header";
   const thumb = document.createElement("img");
-  const preview = state.adapter.previewUrl?.(img);
+  const preview = kindFor(img).previewUrl?.(img);
   if (preview) thumb.src = preview;
   else thumb.hidden = true;
   thumb.className = "te-thumb";

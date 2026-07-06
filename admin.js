@@ -572,6 +572,26 @@
         setTimeout(() => document.addEventListener("click", onOutside), 0);
       }
 
+      // Starter facets prefilled into a new board's facet editor — just a
+      // suggestion; boards own their facets and edit freely.
+      const STARTER_FACETS = [
+        {
+          key: "category", label: "Category", single: true,
+          values: ["tops", "bottoms", "footwear", "accessories", "outerwear"],
+          description: "what kind of item this is",
+        },
+        {
+          key: "season", label: "Season",
+          values: ["summer", "winter", "spring-fall", "year-round"],
+          description: "when you'd wear or use it",
+        },
+        {
+          key: "formality", label: "Formality", single: true,
+          values: ["casual", "workwear", "formal", "athletic"],
+          description: "how dressed-up the item reads",
+        },
+      ];
+
       // board = null opens the modal in create mode.
       function openBoardModal(board) {
         const isNew = !board;
@@ -599,8 +619,6 @@
         const body = document.createElement("div");
         body.className = "modal-body";
         body.innerHTML = `
-          <label>Board type <span style="font-weight:400;color:#9aa0aa">(what this board collects — set at creation, permanent)</span></label>
-          <select id="board-modal-type" style="width:100%;margin-bottom:14px;"></select>
           <label>Board name</label>
           <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
           <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
@@ -642,42 +660,9 @@
         const facetsTextarea = document.getElementById("board-modal-facets");
         const facetEditor = buildFacetEditor(facetsTextarea);
 
-        // Board type: picked at creation, permanent afterwards. Choosing a
-        // type offers its suggested starter facets; a facet set the user has
-        // already edited is only replaced after a confirm.
-        const typeSel = document.getElementById("board-modal-type");
-        if (!isNew) {
-          const opt = document.createElement("option");
-          opt.textContent = board.type || "image";
-          typeSel.appendChild(opt);
-          typeSel.disabled = true;
-        } else {
-          typeSel.disabled = true; // until the type list arrives
-          let boardTypes = [];
-          let lastSuggested = "";
-          const applySuggested = () => {
-            const t = boardTypes.find((x) => x.type === typeSel.value);
-            if (!t) return;
-            const cur = facetsTextarea.value;
-            const untouched = cur === "" || cur === "[]" || cur === lastSuggested;
-            if (!untouched && !confirm("Replace the current facets with this type's suggested ones?")) return;
-            facetEditor.setFacets(t.suggestedFacets || []);
-            lastSuggested = facetsTextarea.value;
-          };
-          api("GET", "/api/admin/board-types").then((types) => {
-            boardTypes = types;
-            for (const t of types) {
-              const opt = document.createElement("option");
-              opt.value = t.type;
-              opt.textContent = t.name;
-              typeSel.appendChild(opt);
-            }
-            typeSel.value = types.some((t) => t.type === "image") ? "image" : types[0]?.type;
-            typeSel.disabled = false;
-            typeSel.onchange = applySuggested;
-            applySuggested();
-          }).catch(() => {});
-        }
+        // New boards start from the starter facets (the editor is empty at
+        // this point, so nothing user-written is ever overwritten).
+        if (isNew) facetEditor.setFacets(STARTER_FACETS);
 
         let aiReasoning = isNew ? true : board.ai_reasoning !== false;
         document.getElementById("board-modal-reasoning").appendChild(
@@ -805,7 +790,7 @@
             auto_tag_skip_weekends: at.skipWeekends,
           };
           try {
-            if (isNew) await api("POST", "/api/admin/boards", { name, type: typeSel.value || "image", context, facets, ai_reasoning: aiReasoning, ai_research: aiResearch, ...aiOverride, ...autoTagBody });
+            if (isNew) await api("POST", "/api/admin/boards", { name, context, facets, ai_reasoning: aiReasoning, ai_research: aiResearch, ...aiOverride, ...autoTagBody });
             else await api("PATCH", `/api/admin/boards/${board.id}`, { name, context, facets, ai_reasoning: aiReasoning, ai_research: aiResearch, ...aiOverride, ...autoTagBody });
             close();
             renderBoards();

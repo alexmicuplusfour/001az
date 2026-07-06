@@ -35,6 +35,18 @@ export async function initDb(db) {
   await db.query("UPDATE sessions SET id = encode(sha256(id::bytea), 'hex') WHERE length(id) <> 64");
   await db.query("UPDATE invites SET token = encode(sha256(token::bytea), 'hex') WHERE length(token) <> 64");
   await db.query("ALTER TABLE crates ADD COLUMN IF NOT EXISTS public BOOLEAN NOT NULL DEFAULT FALSE");
+  // One-time: image-era payloads ({filename, original_name, w, h}) become the
+  // generic item shape ({identity, files, fields}). Identity = the filename,
+  // which was globally unique, so the per-board unique index (schema.sql)
+  // can't collide. Idempotent via the WHERE guard; a single UPDATE is atomic.
+  await db.query(`UPDATE items SET payload = jsonb_build_object(
+      'identity', payload->>'filename',
+      'files', jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
+        'name', payload->>'filename', 'original_name', payload->>'original_name',
+        'w', payload->'w', 'h', payload->'h'))),
+      'fields', '{}'::jsonb)
+    WHERE payload ? 'filename' AND NOT payload ? 'identity'`);
+  await db.query("DROP INDEX IF EXISTS idx_items_filename"); // superseded by idx_items_board_identity
   // One-time migration: fold the legacy single-key setting into the ai_keys
   // registry and point the default at it.
   const legacy = await getSetting(db, "api_key");
@@ -135,15 +147,15 @@ export async function listItems(db, userId = null, boardId = null) {
 
   return rows.map((r) => ({
     id: r.id,
-    name: r.payload.filename,
+    name: r.payload.identity,
     status: r.status,
     tags: r.tags,
     undecided: !!r.undecided,
     hearts: r.hearts,
     favoritedByMe: !!r.fav,
     crateIds: crateMap.get(r.id) || [],
-    w: r.payload.w || null,
-    h: r.payload.h || null,
+    w: r.payload.files?.[0]?.w || null,
+    h: r.payload.files?.[0]?.h || null,
   }));
 }
 
@@ -163,12 +175,9 @@ export async function updateItemPayload(db, id, patch) {
   await db.query("UPDATE items SET payload = payload || $1::jsonb WHERE id=$2", [JSON.stringify(patch || {}), id]);
 }
 
-// All items living on boards of the given type: { id, payload }.
-export async function listItemsByType(db, type) {
-  const { rows } = await db.query(
-    "SELECT i.id, i.payload FROM items i JOIN boards b ON b.id = i.board_id WHERE b.type=$1 ORDER BY i.id",
-    [type]
-  );
+// Every item's { id, payload } (startup sweeps like the thumb-dims backfill).
+export async function listItemPayloads(db) {
+  const { rows } = await db.query("SELECT id, payload FROM items ORDER BY id");
   return rows;
 }
 
@@ -523,18 +532,20 @@ export async function deleteAiKey(db, id) {
 
 // --- boards ---
 
+// boards.type still exists in the schema (unread legacy; drop in a later
+// schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
-  "id, name, type, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
+  "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at";
 
-export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, type = "image", aiResearch = false) {
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
   const id = crypto.randomUUID();
   await db.query(
-    `INSERT INTO boards (id, name, type, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model,
+    `INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model,
        auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [
-      id, name, type, JSON.stringify(facets), context, !!aiReasoning, !!aiResearch, aiKeyId, aiModel,
+      id, name, JSON.stringify(facets), context, !!aiReasoning, !!aiResearch, aiKeyId, aiModel,
       autoTag.enabled !== false, !!autoTag.periodic, autoTag.everyMin || 1440,
       !!autoTag.skipWeekends, autoTag.nextRunAt ?? null, Date.now(),
     ]

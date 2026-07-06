@@ -1,7 +1,6 @@
 export const state = {
   boardId: null,
   boardName: null,
-  adapter: null, // the board type's client adapter (types/), set at boot
   facets: [],
   aiReasoning: true,
   items: [],

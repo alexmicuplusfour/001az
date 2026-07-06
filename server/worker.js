@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import {
   claimNextPending,
   markTagged,
@@ -63,7 +65,7 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
     if (k !== "description" && typeof v === "string" && v.trim()) parts.push(v.trim());
   }
   if (tags.length) parts.push(tags.map((t) => t.replace("/", ": ")).join("; "));
-  return parts.join("\n") || payload.original_name || payload.filename || "untitled item";
+  return parts.join("\n") || payload.files?.[0]?.original_name || payload.identity || "untitled item";
 }
 
 // A board's effective tagger: its own key (+ model) when set, else the default.
@@ -182,22 +184,22 @@ Return your answer only by calling the record_tags tool.`;
   return { systemText, schema };
 }
 
-// Per-board cache: board_id -> { systemText, schema, allowed, facets, adapter, research, aiKeyId, aiModel }
+// Per-board cache: board_id -> { systemText, schema, allowed, facets, research, aiKeyId, aiModel }
 // Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
 
-async function getBoardPrompt(db, registry, boardId) {
+async function getBoardPrompt(db, boardId) {
   if (boardPromptCache.has(boardId)) return boardPromptCache.get(boardId);
   const board = await getBoard(db, boardId);
   if (!board || !board.facets.length) return null;
-  const adapter = registry.get(board.type);
-  if (!adapter) throw new Error(`board ${boardId} has unknown type "${board.type}"`);
   const { facets, context } = board;
   const allowed = new Set();
   for (const f of facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const research = board.ai_research === true;
-  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, adapter.manifest.subject, research);
-  const entry = { systemText, schema, allowed, facets, adapter, research, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  // Subject stays the literal "images" until non-image items exist — the
+  // prompt (and so the prompt cache + snapshot comparability) must not change.
+  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, "images", research);
+  const entry = { systemText, schema, allowed, facets, research, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   boardPromptCache.set(boardId, entry);
   return entry;
 }
@@ -223,23 +225,31 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
   return t;
 }
 
-export function startWorker({ db, registry }) {
+export function startWorker({ db, thumbsDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
   const CONCURRENCY = Math.max(1, Number(process.env.TAG_CONCURRENCY) || 4);
 
+  // What the model sees for an item: parts built from its files by kind.
+  // The tagger sees the thumbnail (cheap) rather than the original.
+  async function modelInputFor(payload) {
+    const buf = await fs.promises.readFile(path.join(thumbsDir, payload.files[0].name + ".webp"));
+    return [
+      { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
+      { kind: "text", text: "Tag this image using the record_tags tool." },
+    ];
+  }
+
   async function tagOne(row) {
-    const prompt = await getBoardPrompt(db, registry, row.board_id);
+    const prompt = await getBoardPrompt(db, row.board_id);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
     const { systemText, schema, allowed, facets } = prompt;
 
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw new Error("no API key configured");
 
-    // The board type decides what the model sees; the worker owns everything
-    // around it (prompt, schema, validation, retries).
-    const { parts } = await prompt.adapter.buildModelInput({ id: row.id, payload: row.payload });
+    const parts = await modelInputFor(row.payload);
     const { input, usage } = await callTagger({
       provider: ai.provider,
       apiKey: ai.apiKey,
@@ -331,7 +341,7 @@ export function startWorker({ db, registry }) {
   }
 
   async function processOne(row) {
-    const label = row.payload?.filename || `item ${row.id}`;
+    const label = row.payload?.identity || `item ${row.id}`;
     try {
       const { tags, undecided, reasoning, usage, model } = await tagOne(row);
       await markTagged(db, row.id, tags, undecided, reasoning);

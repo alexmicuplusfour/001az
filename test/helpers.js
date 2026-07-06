@@ -75,13 +75,18 @@ export async function seedUser(db, email) {
 }
 
 export async function seedBoard(db, name, memberIds = []) {
-  const id = await createBoard(db, name, FACETS, "", true, null, null, { enabled: true }, "image");
+  const id = await createBoard(db, name, FACETS, "", true, null, null, { enabled: true });
   if (memberIds.length) await setBoardMembers(db, id, memberIds);
   return id;
 }
 
 export async function seedItem(db, boardId, filename = crypto.randomBytes(6).toString("hex") + ".png") {
-  const id = await insertItem(db, boardId, { filename, original_name: filename, w: 10, h: 10 }, "tagged");
+  const id = await insertItem(
+    db,
+    boardId,
+    { identity: filename, files: [{ name: filename, original_name: filename, w: 10, h: 10 }], fields: {} },
+    "tagged"
+  );
   return { id, filename };
 }
 

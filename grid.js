@@ -7,6 +7,7 @@ import { ensurePolling, dropPendingUploadId } from './data.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
+import { kindFor } from './kinds.js';
 
 const elGrid = document.getElementById("grid");
 const elGridSentinel = document.getElementById("grid-sentinel");
@@ -236,7 +237,7 @@ function tagChip(img) {
 function progressCard(p) {
   const card = document.createElement("div");
   card.className = "card loading";
-  const body = state.adapter.renderProgressBody?.(p, card, scheduleLayout);
+  const body = kindFor(p).progressFace?.(p, card, scheduleLayout);
   if (body) card.appendChild(body);
   const sp = document.createElement("div");
   sp.className = "spinner";
@@ -288,8 +289,8 @@ function cardFor(img) {
   // Held items (waiting for auto-tagging) get the same dashed "needs tags"
   // treatment as AI-undecided ones.
   if (img.undecided || img.status === "held") card.classList.add("undecided");
-  // The board type owns the card body (the media); grid owns the frame + chrome.
-  card.appendChild(state.adapter.renderCardBody(img, card, scheduleLayout));
+  // The file kind owns the face (the media); grid owns the frame + chrome.
+  card.appendChild(kindFor(img).face(img, card, scheduleLayout));
   if (img.status === "pending" || img.status === "processing") {
     card.classList.add("loading");
     const sp = document.createElement("div");
@@ -298,7 +299,7 @@ function cardFor(img) {
   }
   card.addEventListener("click", () => {
     if (state.bulkSelected.size) { toggleBulkSelect(img, card); return; }
-    state.adapter.openDetail(img);
+    kindFor(img).openDetail(img);
   });
 
   if (state.me) {

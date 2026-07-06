@@ -1,22 +1,16 @@
-// The image board type, client half: thumbnail card bodies, upload-progress
-// placeholders, the lightbox detail view, and drag/drop + file-picker ingest.
-import { initUpload, triggerFilePicker } from './upload.js';
-import { initLightbox, openLightbox } from './lightbox.js';
+// File kinds: how a piece of material shows itself — its face inside the card
+// frame, its detail view, its small preview. grid.js owns the card frame and
+// chrome; the kind owns only the face. Today every item's material is a single
+// image, so there is exactly one kind; kindFor is the seam new kinds (docs,
+// generated chart faces) plug into.
+import { openLightbox } from './lightbox.js';
 
 export const thumbUrl = (name) => `thumbnails/${encodeURIComponent(name)}.webp`;
 export const fullUrl = (name) => `gallery/${encodeURIComponent(name)}`;
 
-export default {
-  manifest: { apiVersion: 1, type: "image", name: "Images", version: "1.0.0" },
-
-  // One-time wiring of the type's static DOM (dropzone, file input, lightbox).
-  init() {
-    initUpload();
-    initLightbox();
-  },
-
-  // The media inside the card frame; grid.js owns the frame and its chrome.
-  renderCardBody(item, card, layout) {
+const imageKind = {
+  // The face inside the card frame.
+  face(item, card, layout) {
     const im = document.createElement("img");
     im.src = thumbUrl(item.name);
     im.loading = "lazy";
@@ -36,7 +30,7 @@ export default {
   },
 
   // Upload placeholders: the local object URL until the server row exists.
-  renderProgressBody(p, card, layout) {
+  progressFace(p, card, layout) {
     const im = document.createElement("img");
     im.src = p.objURL || thumbUrl(p.name);
     im.alt = p.name || "uploading";
@@ -49,13 +43,12 @@ export default {
     openLightbox(item);
   },
 
-  // Toolbar "+" button lands here.
-  triggerIngest() {
-    triggerFilePicker();
-  },
-
   // Small preview for chrome that wants one (tag editor).
   previewUrl(item) {
     return thumbUrl(item.name);
   },
 };
+
+export function kindFor(_item) {
+  return imageKind;
+}

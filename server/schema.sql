@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS ai_keys (
 CREATE TABLE IF NOT EXISTS boards (
   id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
-  -- board type (modular boards): decides how items are ingested, what the
-  -- tagger sees, and how cards render. 'image' is the only type so far.
+  -- legacy (board-type era): kept for old rows, read by nothing. Drop in a
+  -- future schema pass.
   type         TEXT NOT NULL DEFAULT 'image',
   facets       JSONB NOT NULL DEFAULT '[]',
   glosses      JSONB NOT NULL DEFAULT '{}',
@@ -73,9 +73,10 @@ CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
 -- status: pending -> processing -> tagged | failed
 -- ('held' sits before pending: uploads wait there, untagged, while the
 --  board's auto-tagging is off)
--- payload is the type-specific half of an item; core code passes it through
--- to the board type and never reads inside. Image items keep
--- { filename, original_name, w, h } there.
+-- payload is one generic shape for every item:
+--   { identity, files: [{ name, original_name, w, h }], fields: {} }
+-- identity is the item's per-board unique key (for uploads, the stored
+-- filename), files its material, fields reserved for extraction.
 CREATE TABLE IF NOT EXISTS items (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   board_id      TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
@@ -100,8 +101,9 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_board ON items(board_id);
--- carries over the UNIQUE(filename) the old images table enforced
-CREATE UNIQUE INDEX IF NOT EXISTS idx_items_filename ON items ((payload->>'filename'));
+-- identity is unique per board (successor of the old global UNIQUE(filename);
+-- per-board is the real semantic — the same file may exist on two boards)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_items_board_identity ON items (board_id, (payload->>'identity'));
 
 -- Judgment history: one row per tagging event (AI run or manual edit), so
 -- scheduled retags accrue a timeline instead of overwriting the only copy.
