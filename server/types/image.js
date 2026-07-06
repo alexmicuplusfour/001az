@@ -179,7 +179,7 @@ export default function imageType({ galleryDir, thumbsDir }) {
       return {
         parts: [
           { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
-          { kind: "text", text: "Tag this UI screenshot using the record_tags tool." },
+          { kind: "text", text: "Tag this image using the record_tags tool." },
         ],
       };
     },
