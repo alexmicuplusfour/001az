@@ -17,6 +17,13 @@ function resolveDuration(d) {
   return DURATIONS[d] ?? DURATIONS.medium;
 }
 
+// `duration: null` means sticky, so only an *absent* duration falls back to
+// the default (`??` would swallow the null and give sticky toasts a timer).
+function effectiveDuration(opts) {
+  if (opts.duration !== undefined) return opts.duration;
+  return opts.loading ? null : 'medium';
+}
+
 function timedCount() {
   return visible.filter(h => !h.sticky).length;
 }
@@ -29,8 +36,7 @@ function dequeue() {
 
 function _show(msg, opts = {}) {
   const { type = '', loading = false, actions = [], progress = null } = opts;
-  const duration = opts.duration ?? (loading ? null : 'medium');
-  const ms = resolveDuration(duration);
+  const ms = resolveDuration(effectiveDuration(opts));
   const sticky = ms === null;
 
   // Dedup: skip if same message+type is already on screen
@@ -126,7 +132,7 @@ function _show(msg, opts = {}) {
 }
 
 export function toast(msg, opts = {}) {
-  const ms = resolveDuration(opts.duration ?? 'medium');
+  const ms = resolveDuration(effectiveDuration(opts));
   if (ms === null || timedCount() < MAX_VISIBLE) return _show(msg, opts);
   queue.push({ msg, opts });
   return null;

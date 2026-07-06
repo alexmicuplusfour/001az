@@ -90,7 +90,7 @@ The reference setup is the Docker Compose stack (`docker-compose.yml`): Caddy te
 
 - **Sessions & invites are passwordless bearer credentials**, stored only as SHA-256 hashes; the raw value exists in the cookie / login URL. Serve over HTTPS in production (`COOKIE_SECURE=1`, a real `SITE_ADDRESS` so Caddy gets a cert).
 - **Response headers**: the app sets a Content-Security-Policy, `X-Content-Type-Options`, and `Referrer-Policy` on every response. Add HSTS at Caddy once you're on HTTPS.
-- **Rate limits**: `/auth/:token` (30 / 15 min) and `/api/upload` (60 / min) per client IP. `trust proxy` is on, so `req.ip` is the real client behind Caddy.
+- **Rate limits**: `/auth/:token` (30 / 15 min) per client IP. Uploads are not rate-limited (bulk drops arrive as many chunked requests); auth plus per-request file limits bound abuse. `trust proxy` is on, so `req.ip` is the real client behind Caddy.
 - **Graceful shutdown**: SIGTERM/SIGINT stop the tagging worker, drain connections, and close the pool, so `docker stop` / redeploys don't kill a tag mid-flight.
 - **AI keys are stored plaintext** in Postgres (only a last-4 hint is ever sent to the client). Fine for a single-tenant self-hosted box; if that's not your threat model, keep the DB and its backups access-controlled. Envelope encryption is a possible future step.
 - **Backups**: the uploads and database live in the `appdata` and `pgdata` volumes. Back them up together — e.g. `docker compose exec -T db pg_dump -U gallery gallery | gzip > db.sql.gz` plus a tar of the uploads volume — on whatever schedule matches how much you'd hate to re-tag. Restore = load the dump into a fresh db and restore the uploads volume.

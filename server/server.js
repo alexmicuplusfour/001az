@@ -164,9 +164,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Throttle the unauthenticated login endpoint and the CPU-heavy upload path.
+// Throttle the unauthenticated login endpoint. Uploads are deliberately not
+// rate-limited: bulk drops (1000+ images) arrive as many chunked requests
+// from one IP, and auth plus per-request file limits already bound abuse.
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30 });
-app.use("/api/upload", rateLimit({ windowMs: 60 * 1000, max: 60 }));
 
 const inviteLink = (token) => `${BASE_URL}/auth/${token}`;
 

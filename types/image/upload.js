@@ -99,6 +99,12 @@ async function uploadChunk(chunk) {
       if (res.ok) { data = await res.json(); break; }
       const body = await res.json().catch(() => null);
       failReason = (body && body.error) || `server error (${res.status})`;
+      if (res.status === 429) {
+        // Throttled, not broken — wait out the window instead of burning
+        // the chunk, so huge drops finish on servers that still cap uploads.
+        if (attempt < UPLOAD_ATTEMPTS) await sleep((Number(res.headers.get("Retry-After")) || 30) * 1000);
+        continue;
+      }
       if (res.status < 500) break;
     } catch {
       failReason = "network error";
@@ -154,8 +160,16 @@ function maybeFinishUploads() {
   if (s.failed) parts.push(`${s.failed} failed (${s.failReason}) — drop them again to retry`);
   if (s.canceled) parts.push(`${s.canceled} canceled`);
   if (parts.length) {
-    if (s.failed) toast.error(parts.join(" · "), { duration: 'long' });
-    else toast(parts.join(" · "), { duration: 'short' });
+    if (s.failed) {
+      // Failures stay up until dismissed — after a long upload the user may
+      // not be looking when the run ends.
+      const t = toast.error(parts.join(" · "), {
+        duration: null,
+        actions: [{ label: "Dismiss", onClick: () => t?.remove() }],
+      });
+    } else {
+      toast(parts.join(" · "), { duration: s.total > 20 ? 'long' : 'short' });
+    }
   }
 
   if (s.pendingIds.length) {
