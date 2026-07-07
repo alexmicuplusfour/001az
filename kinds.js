@@ -142,6 +142,10 @@ const connectorKind = {
     card.classList.add("loaded");
     return wrap;
   },
+  // No media to load: the symbol tile is ready at creation, so the full face
+  // doubles as the progress face. Without this, a just-added coin renders as a
+  // bodyless (zero-height) card with only the floating spinner.
+  progressFace(item, card, layout) { return connectorKind.face(item, card, layout); },
   openDetail(item) { openLightbox(item); },
   previewUrl() { return null; },
 };
