@@ -167,7 +167,7 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const p = req.path;
     if (p === "/api/logs/stream") return;
-    if (res.statusCode < 400 && !(p.startsWith("/api") || p.startsWith("/auth"))) return;
+    if (res.statusCode < 400 && !(p.startsWith("/api/") || p.startsWith("/auth/"))) return;
     console.log(`${req.method} ${res.statusCode} ${Date.now() - start}ms ${p}`);
   });
   next();

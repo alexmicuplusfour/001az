@@ -1,19 +1,10 @@
 // The board editor, shared by admin.html (full: create/edit incl. the AI
 // tagger key/model) and the gallery toolbar (content-only, for board-admins).
 // Styling for .switch / .switch-row / .modal-section / .fe-* lives in modal.css,
-// which both pages load. Self-contained: its own fetch + provider-catalog cache.
+// which both pages load. Caches the provider catalog module-side.
 import { toast } from "/toast.js";
 import { createModal } from "/modal.js";
-
-async function api(method, url, body) {
-  const r = await fetch(url, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
-  return r.json();
-}
+import { api } from "/api.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
