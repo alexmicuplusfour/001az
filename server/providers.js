@@ -3,18 +3,23 @@
 // are provider-agnostic and live in worker.js.
 import Anthropic from "@anthropic-ai/sdk";
 
-export const PROVIDERS = ["anthropic", "openai", "gemini"];
+export const PROVIDERS = ["anthropic", "openai", "gemini", "glm"];
 export const PROVIDER_DEFAULT_MODEL = {
   anthropic: "claude-haiku-4-5",
   openai: "gpt-5-mini",
   gemini: "gemini-2.5-flash",
+  // Text and vision are separate families at Z.ai (glm-5.x is text-only), so
+  // the default must be a V model or image boards break.
+  glm: "glm-4.6v",
 };
 
-// Gemini speaks OpenAI's wire format through its compatibility endpoint, so
-// both providers share the fetch code below; only base URL and label differ.
+// Gemini and GLM (Z.ai) speak OpenAI's wire format through compatibility
+// endpoints, so all three providers share the fetch code below; only base
+// URL, label, and the request quirks in compatRequest differ.
 const COMPAT = {
   openai: { base: "https://api.openai.com/v1", label: "OpenAI" },
   gemini: { base: "https://generativelanguage.googleapis.com/v1beta/openai", label: "Gemini" },
+  glm: { base: "https://api.z.ai/api/paas/v4", label: "GLM" },
 };
 
 const TOOL_NAME = "record_tags";
@@ -33,8 +38,9 @@ function anthropicClient(apiKey) {
 // each provider maps it to its own wire format here. `research` lets the
 // model use the provider's web-search tool before tagging — Anthropic only;
 // the compat providers ignore the flag and tag from the given input (OpenAI's
-// web search lives on its Responses API, not chat completions, and Gemini's
-// compat layer exposes no grounding). Returns { input, usage }: the tool-call
+// web search lives on its Responses API, not chat completions; Gemini's
+// compat layer exposes no grounding; GLM has a chat-completions web_search
+// tool that could support this later). Returns { input, usage }: the tool-call
 // input object (facet key -> selection, plus "fit") and the token usage the
 // provider reported, normalized to { input, output, cacheRead, searches }
 // — cache reads are kept out of `input` because they bill at a fraction of
@@ -96,34 +102,48 @@ async function anthropicTag({ apiKey, model, systemText, schema, parts, research
   return { input: block.input, usage };
 }
 
+// Request construction for the OpenAI-compatible providers, split out pure so
+// tests can assert the shape. A forced function call mirrors the Anthropic
+// tool shape and the same strict JSON schema works everywhere — except GLM,
+// which diverges in three places (live-verified 2026-07): its docs allow only
+// "auto" for tool_choice (the user-turn instruction plus the missing-call
+// throw below carry the forcing), `strict` isn't in its function schema, and
+// thinking defaults ON and must be disabled explicitly or it spends output
+// tokens reasoning before the call.
+export function compatRequest({ provider, model, systemText, schema, parts, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
+  const content = parts.map((p) =>
+    p.kind === "image"
+      ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }
+      : { type: "text", text: p.text }
+  );
+  const glm = provider === "glm";
+  return {
+    model,
+    // Only OpenAI takes the new name for this cap; Gemini's compat layer and
+    // GLM both want the legacy one.
+    ...(provider === "openai" ? { max_completion_tokens: 2048 } : { max_tokens: 2048 }),
+    ...(glm ? { thinking: { type: "disabled" } } : {}),
+    messages: [
+      { role: "system", content: systemText },
+      { role: "user", content },
+    ],
+    tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: schema, ...(glm ? {} : { strict: true }) } }],
+    tool_choice: glm ? "auto" : { type: "function", function: { name: tool.name } },
+  };
+}
+
 // OpenAI-compatible providers via plain fetch — one endpoint, not worth a
-// dependency. Chat completions with a forced function call mirrors the
-// Anthropic tool shape; the same strict JSON schema works everywhere.
+// dependency.
 async function compatTag({ provider, apiKey, model, systemText, schema, parts, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
   const { base, label } = COMPAT[provider];
   // Document blocks are Anthropic-only: the chat-completions compat path has
   // no PDF input. Fail loud with the fix, rather than degrading silently.
   if (parts.some((p) => p.kind === "document"))
     throw new Error(`${label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
-  const content = parts.map((p) =>
-    p.kind === "image"
-      ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }
-      : { type: "text", text: p.text }
-  );
   const r = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      // Gemini's compat layer only takes the legacy name for this cap.
-      ...(provider === "gemini" ? { max_tokens: 2048 } : { max_completion_tokens: 2048 }),
-      messages: [
-        { role: "system", content: systemText },
-        { role: "user", content },
-      ],
-      tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: schema, strict: true } }],
-      tool_choice: { type: "function", function: { name: tool.name } },
-    }),
+    body: JSON.stringify(compatRequest({ provider, model, systemText, schema, parts, tool })),
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
@@ -146,8 +166,9 @@ async function compatTag({ provider, apiKey, model, systemText, schema, parts, t
 }
 
 // --- embeddings (semantic search) ---
-// Anthropic has no embeddings API, so only the OpenAI-compatible providers
-// qualify. Each model's native dimension count is kept as-is; comparability
+// Anthropic has no embeddings API, and neither does GLM (Z.ai's international
+// platform doesn't offer one), so only OpenAI and Gemini qualify. Each
+// model's native dimension count is kept as-is; comparability
 // is guaranteed by only ever searching vectors from the current model.
 export const EMBED_PROVIDERS = ["openai", "gemini"];
 export const PROVIDER_EMBED_MODELS = {
@@ -189,6 +210,28 @@ export async function embedTexts({ provider, apiKey, model, texts }) {
 // Cheap key/model validation for the admin "Test" buttons. Throws with the
 // provider's error message on failure.
 export async function testKey({ provider, apiKey, model }) {
+  if (provider === "glm") {
+    // Z.ai has no models endpoint; the cheapest real probe is a one-token
+    // completion on the configured model — it validates key, model id, and
+    // account balance in one shot, with a readable message for each ("Unknown
+    // Model", "Insufficient balance… Please recharge", "Authentication Failed").
+    const { base, label } = COMPAT.glm;
+    const r = await fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model || PROVIDER_DEFAULT_MODEL.glm,
+        max_tokens: 1,
+        thinking: { type: "disabled" },
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.error?.message || `${label} HTTP ${r.status}`);
+    }
+    return;
+  }
   if (COMPAT[provider]) {
     const { base, label } = COMPAT[provider];
     const id = model || PROVIDER_DEFAULT_MODEL[provider];

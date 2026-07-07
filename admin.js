@@ -818,9 +818,16 @@
           { id: "gemini-2.5-flash", note: "balanced" },
           { id: "gemini-2.5-pro", note: "sharpest, most expensive" },
         ],
+        // Z.ai's text and vision models are separate families: glm-5.2 can't
+        // see images, so it only suits boards whose items are all text/entity.
+        glm: [
+          { id: "glm-4.6v-flash", note: "free" },
+          { id: "glm-4.6v", note: "balanced" },
+          { id: "glm-5.2", note: "sharpest, text boards only" },
+        ],
       };
       // Keep in sync with PROVIDER_DEFAULT_MODEL in server/providers.js.
-      const PROVIDER_DEFAULT_MODEL = { anthropic: "claude-haiku-4-5", openai: "gpt-5-mini", gemini: "gemini-2.5-flash" };
+      const PROVIDER_DEFAULT_MODEL = { anthropic: "claude-haiku-4-5", openai: "gpt-5-mini", gemini: "gemini-2.5-flash", glm: "glm-4.6v" };
 
       // (Re)populate a <select> with the provider's models; keeps an unknown
       // current model as an extra option instead of silently dropping it.
@@ -929,7 +936,7 @@
         nameIn.required = true;
         const provSel = document.createElement("select");
         provSel.style.cssText = "flex:none;";
-        for (const p of ["anthropic", "openai", "gemini"]) {
+        for (const p of ["anthropic", "openai", "gemini", "glm"]) {
           const opt = document.createElement("option");
           opt.value = p;
           opt.textContent = p;

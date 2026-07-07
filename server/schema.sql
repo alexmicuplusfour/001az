@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS ai_keys (
   id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name       TEXT NOT NULL,
-  provider   TEXT NOT NULL,  -- 'anthropic' | 'openai' | 'gemini'
+  provider   TEXT NOT NULL,  -- 'anthropic' | 'openai' | 'gemini' | 'glm'
   api_key    TEXT NOT NULL,
   created_at BIGINT NOT NULL
 );
