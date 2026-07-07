@@ -42,8 +42,10 @@ import {
   releaseHeld,
   queueUntagged,
   getBoardMemberIds,
+  getBoardAdminIds,
   setBoardMembers,
   canAccessBoard,
+  canManageBoard,
   getItemBoard,
   setItemTags,
   getItemReasoning,
@@ -192,6 +194,18 @@ const requireItemAccess = wrap(async (req, res, next) => {
     return res.status(404).json({ error: "not found" });
   req.itemId = id;
   req.itemBoardId = item.board_id;
+  next();
+});
+
+// Board-manager routes (/api/boards/:id content edits): the current user must be
+// a global admin or this board's board-admin. Missing board → 404, forbidden →
+// 403. Attaches req.board so the handler needn't refetch.
+const requireBoardManager = wrap(async (req, res, next) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board) return res.status(404).json({ error: "not found" });
+  if (!(await canManageBoard(db, board.id, req.user)))
+    return res.status(403).json({ error: "forbidden" });
+  req.board = board;
   next();
 });
 
@@ -354,7 +368,41 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     mapping: board.mapping || null,
     // tells the client whether to show the semantic search box
     search: !!(await resolveEmbedder(db)),
+    // tells the gallery whether to show the "edit board" pencil
+    manage: await canManageBoard(db, board.id, req.user),
   });
+}));
+
+// Board-manager content editing — the gallery's "edit board" modal. A global
+// admin or this board's board-admin (requireBoardManager). Content only: the
+// AI key/model, mapping, membership, retag and delete stay admin-only.
+app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const b = req.board;
+  res.json({
+    id: b.id,
+    name: b.name,
+    facets: b.facets,
+    context: b.context,
+    ai_reasoning: b.ai_reasoning !== false,
+    ai_research: b.ai_research === true,
+    auto_tag: b.auto_tag !== false,
+    auto_tag_periodic: !!b.auto_tag_periodic,
+    auto_tag_every_min: b.auto_tag_every_min || 1440,
+    auto_tag_skip_weekends: !!b.auto_tag_skip_weekends,
+  });
+}));
+
+app.patch("/api/boards/:id", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const prev = req.board;
+  const { update, error, sweep } = buildBoardContentUpdate(req.body, prev);
+  if (error) return res.status(400).json({ error });
+  if (Object.keys(update).length > 0) await updateBoard(db, prev.id, update);
+  if (sweep) {
+    const n = await queueUntagged(db, prev.id);
+    if (n) console.log(`board ${prev.id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
+  }
+  invalidateBoardCache(prev.id);
+  res.json({ ok: true });
 }));
 
 app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
@@ -370,10 +418,56 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
         held_count: stats[b.id]?.h || 0,
         ai_usage: usage[b.id] || null,
         memberIds: await getBoardMemberIds(db, b.id),
+        adminIds: await getBoardAdminIds(db, b.id),
       }))
     )
   );
 }));
+
+// The content-editable board fields shared by the admin PATCH and the
+// board-manager PATCH: name, context, facets, the reasoning/research toggles,
+// and the auto-tag schedule (with the timer bookkeeping). Returns
+// { update, error, sweep } — error is a string when the body is invalid, sweep
+// is true when auto-tagging transitions off→on (caller queues untagged items).
+function buildBoardContentUpdate(body = {}, prev) {
+  body = body || {};
+  const update = {};
+  if (body.name !== undefined) update.name = String(body.name).trim();
+  if (body.facets !== undefined) {
+    if (!Array.isArray(body.facets)) return { error: "facets must be an array" };
+    update.facets = body.facets;
+  }
+  if (body.context !== undefined) update.context = String(body.context);
+  if (body.ai_reasoning !== undefined) update.aiReasoning = !!body.ai_reasoning;
+  if (body.ai_research !== undefined) update.aiResearch = !!body.ai_research;
+  if (body.auto_tag !== undefined) update.autoTag = !!body.auto_tag;
+  if (body.auto_tag_periodic !== undefined) update.autoTagPeriodic = !!body.auto_tag_periodic;
+  if (body.auto_tag_every_min !== undefined) {
+    const m = parseEveryMin(body.auto_tag_every_min);
+    if (m === null) return { error: "invalid auto_tag_every_min" };
+    update.autoTagEveryMin = m;
+  }
+  if (body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!body.auto_tag_skip_weekends;
+
+  // Schedule bookkeeping: (re)arm the timer when the schedule turns on or
+  // changes shape, disarm it when it turns off.
+  const eff = {
+    autoTag: update.autoTag ?? prev.auto_tag,
+    periodic: update.autoTagPeriodic ?? prev.auto_tag_periodic,
+    everyMin: update.autoTagEveryMin ?? prev.auto_tag_every_min,
+    skipWeekends: update.autoTagSkipWeekends ?? prev.auto_tag_skip_weekends,
+  };
+  const wasScheduled = prev.auto_tag && prev.auto_tag_periodic;
+  const isScheduled = eff.autoTag && eff.periodic;
+  const shapeChanged = eff.everyMin !== prev.auto_tag_every_min || eff.skipWeekends !== prev.auto_tag_skip_weekends;
+  if (isScheduled && (!wasScheduled || shapeChanged)) {
+    update.autoTagNextRunAt = nextAutoTagRun(Date.now(), eff.everyMin, eff.skipWeekends);
+  } else if (!isScheduled && prev.auto_tag_next_run_at !== null) {
+    update.autoTagNextRunAt = null;
+  }
+
+  return { update, error: null, sweep: eff.autoTag && !prev.auto_tag };
+}
 
 // Clamp a requested auto-tag interval to something sane; null when unparsable.
 function parseEveryMin(v) {
@@ -457,15 +551,10 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const id = req.params.id;
   const prev = await getBoard(db, id);
   if (!prev) return res.status(404).json({ error: "not found" });
-  const update = {};
-  if (req.body && req.body.name !== undefined) update.name = String(req.body.name).trim();
-  if (req.body && req.body.facets !== undefined) {
-    if (!Array.isArray(req.body.facets)) return res.status(400).json({ error: "facets must be an array" });
-    update.facets = req.body.facets;
-  }
-  if (req.body && req.body.context !== undefined) update.context = String(req.body.context);
-  if (req.body && req.body.ai_reasoning !== undefined) update.aiReasoning = !!req.body.ai_reasoning;
-  if (req.body && req.body.ai_research !== undefined) update.aiResearch = !!req.body.ai_research;
+  const { update, error, sweep } = buildBoardContentUpdate(req.body, prev);
+  if (error) return res.status(400).json({ error });
+
+  // Admin-only fields, layered on top of the shared content set.
   if (req.body && req.body.ai_key_id !== undefined) {
     if (req.body.ai_key_id === null) {
       update.aiKeyId = null;
@@ -479,14 +568,6 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   if (req.body && req.body.ai_model !== undefined && update.aiKeyId !== null) {
     update.aiModel = req.body.ai_model ? String(req.body.ai_model) : null;
   }
-  if (req.body && req.body.auto_tag !== undefined) update.autoTag = !!req.body.auto_tag;
-  if (req.body && req.body.auto_tag_periodic !== undefined) update.autoTagPeriodic = !!req.body.auto_tag_periodic;
-  if (req.body && req.body.auto_tag_every_min !== undefined) {
-    const m = parseEveryMin(req.body.auto_tag_every_min);
-    if (m === null) return res.status(400).json({ error: "invalid auto_tag_every_min" });
-    update.autoTagEveryMin = m;
-  }
-  if (req.body && req.body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!req.body.auto_tag_skip_weekends;
   if (req.body && req.body.mapping !== undefined) {
     if (req.body.mapping === null) {
       update.mapping = null;
@@ -499,35 +580,19 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
     }
   }
 
-  // Schedule bookkeeping: (re)arm the timer when the schedule turns on or
-  // changes shape, disarm it when it turns off.
-  const eff = {
-    autoTag: update.autoTag ?? prev.auto_tag,
-    periodic: update.autoTagPeriodic ?? prev.auto_tag_periodic,
-    everyMin: update.autoTagEveryMin ?? prev.auto_tag_every_min,
-    skipWeekends: update.autoTagSkipWeekends ?? prev.auto_tag_skip_weekends,
-  };
-  const wasScheduled = prev.auto_tag && prev.auto_tag_periodic;
-  const isScheduled = eff.autoTag && eff.periodic;
-  const shapeChanged = eff.everyMin !== prev.auto_tag_every_min || eff.skipWeekends !== prev.auto_tag_skip_weekends;
-  if (isScheduled && (!wasScheduled || shapeChanged)) {
-    update.autoTagNextRunAt = nextAutoTagRun(Date.now(), eff.everyMin, eff.skipWeekends);
-  } else if (!isScheduled && prev.auto_tag_next_run_at !== null) {
-    update.autoTagNextRunAt = null;
-  }
-
   if (Object.keys(update).length > 0) await updateBoard(db, id, update);
 
   // The moment auto-tagging comes back on, sweep the board: queue everything
   // untagged — held uploads, AI-undecided, failed. Turning it off queues
   // nothing — uploads pile up as 'held', untagged, until tagging returns.
-  if (eff.autoTag && !prev.auto_tag) {
+  if (sweep) {
     const n = await queueUntagged(db, id);
     if (n) console.log(`board ${id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
   }
 
   if (req.body && Array.isArray(req.body.memberIds)) {
-    await setBoardMembers(db, id, req.body.memberIds.map(Number).filter(Boolean));
+    const adminIds = Array.isArray(req.body.adminIds) ? req.body.adminIds.map(Number).filter(Boolean) : [];
+    await setBoardMembers(db, id, req.body.memberIds.map(Number).filter(Boolean), adminIds);
   }
   invalidateBoardCache(id);
   res.json({ ok: true });

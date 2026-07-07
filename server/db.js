@@ -697,13 +697,26 @@ export async function getBoardMemberIds(db, boardId) {
   return rows.map((r) => r.user_id);
 }
 
-export async function setBoardMembers(db, boardId, userIds) {
+// User ids that are board-admins (role='admin') on this board — a subset of the
+// members. Global admins aren't listed here; they manage every board implicitly.
+export async function getBoardAdminIds(db, boardId) {
+  const { rows } = await db.query(
+    "SELECT user_id FROM board_members WHERE board_id=$1 AND role='admin'",
+    [boardId]
+  );
+  return rows.map((r) => r.user_id);
+}
+
+// Replace a board's membership. adminIds get role='admin' (only if also members);
+// everyone else is a plain 'member'. adminIds defaults to none.
+export async function setBoardMembers(db, boardId, userIds, adminIds = []) {
+  const admins = new Set(adminIds.map(Number));
   await withTx(db, async (client) => {
     await client.query("DELETE FROM board_members WHERE board_id=$1", [boardId]);
     for (const uid of userIds) {
       await client.query(
-        "INSERT INTO board_members (board_id, user_id, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        [boardId, uid, Date.now()]
+        "INSERT INTO board_members (board_id, user_id, role, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        [boardId, uid, admins.has(Number(uid)) ? "admin" : "member", Date.now()]
       );
     }
   });
@@ -716,6 +729,18 @@ export async function canAccessBoard(db, boardId, user) {
     boardId,
     user.id,
   ]);
+  return rows.length > 0;
+}
+
+// May this user edit the board's content? Global admins always; otherwise a
+// board-admin (board_members.role='admin'). Read side of the board-manager routes.
+export async function canManageBoard(db, boardId, user) {
+  if (!user) return false;
+  if (user.is_admin) return true;
+  const { rows } = await db.query(
+    "SELECT 1 FROM board_members WHERE board_id=$1 AND user_id=$2 AND role='admin'",
+    [boardId, user.id]
+  );
   return rows.length > 0;
 }
 

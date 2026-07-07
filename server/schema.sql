@@ -67,12 +67,17 @@ ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_next_run_at BIGINT;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS mapping JSONB;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS gather_every_min INTEGER;
 
+-- role: 'member' (view only) | 'admin' (may edit this board's content from the
+-- gallery — name/context/facets/toggles/schedule; not the AI key, retag, or
+-- delete). Global users.is_admin outranks this and needs no row here.
 CREATE TABLE IF NOT EXISTS board_members (
   board_id   TEXT   NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
   user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role       TEXT   NOT NULL DEFAULT 'member',
   created_at BIGINT NOT NULL,
   PRIMARY KEY (board_id, user_id)
 );
+ALTER TABLE board_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member';
 CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
 
 -- status: held -> pending_extract -> extracting -> pending -> processing -> tagged | failed
