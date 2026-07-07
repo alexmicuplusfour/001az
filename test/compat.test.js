@@ -52,7 +52,7 @@ test("GLM quirks: auto tool_choice, no strict, thinking disabled, legacy max_tok
 
 test("custom tool name flows into tools[] for every compat provider", () => {
   const tool = { name: "record_fields", description: "Record extracted fields." };
-  for (const provider of ["openai", "gemini", "glm"]) {
+  for (const provider of ["openai", "gemini", "glm", "openrouter"]) {
     const r = compatRequest({ provider, model: "m", systemText: "s", schema, parts, tool });
     assert.equal(r.tools[0].function.name, "record_fields");
     // GLM forces auto regardless of tool; the others force the named function

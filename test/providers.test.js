@@ -8,7 +8,7 @@ import { startServer, adminSession, req } from "./helpers.js";
 import { PROVIDERS, providerCatalog } from "../server/providers.js";
 
 test("every descriptor is well-formed and self-named", () => {
-  assert.deepEqual(Object.keys(PROVIDERS), ["anthropic", "openai", "gemini", "glm"]);
+  assert.deepEqual(Object.keys(PROVIDERS), ["anthropic", "openai", "gemini", "glm", "openrouter"]);
   for (const name of Object.keys(PROVIDERS)) {
     const d = PROVIDERS[name];
     assert.equal(d.name, name, `${name}: self-reference stamped`);
@@ -34,10 +34,15 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
   assert.deepEqual(PROVIDERS.glm.compat, {
     maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion",
   });
+  // OpenRouter fills a new cell: forces the tool call like openai but skips
+  // strict (backends vary), max_tokens, completion key-test (no per-model GET)
+  assert.deepEqual(PROVIDERS.openrouter.compat, {
+    maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion",
+  });
   // Anthropic is the only research-capable provider and has no compat block
   assert.equal(PROVIDERS.anthropic.research, true);
   assert.equal(PROVIDERS.anthropic.compat, undefined);
-  for (const name of ["openai", "gemini", "glm"]) assert.equal(PROVIDERS[name].research, false);
+  for (const name of ["openai", "gemini", "glm", "openrouter"]) assert.equal(PROVIDERS[name].research, false);
 });
 
 test("defaults and embed capability read straight off the descriptor", () => {

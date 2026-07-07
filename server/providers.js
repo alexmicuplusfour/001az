@@ -278,7 +278,28 @@ const glm = {
   embeds: null,
 };
 
-export const PROVIDERS = { anthropic, openai, gemini, glm };
+// OpenRouter — an OpenAI-compatible aggregator: one key, many models. Fits the
+// compat family with no new fields (bearer auth, /chat/completions, max_tokens).
+// strictTools is off because the backend models vary in strict-schema support,
+// and the key test is a one-token completion — OpenRouter has no per-model GET
+// and its ids carry a slash. Free vision models exist (`:free`), so tagging can
+// be verified at zero cost; the default is a cheap dedicated vision model.
+const openrouter = {
+  label: "OpenRouter",
+  wire: compatWire,
+  base: "https://openrouter.ai/api/v1",
+  defaultModel: "qwen/qwen3-vl-32b-instruct",
+  models: [
+    { id: "google/gemma-4-31b-it:free", note: "free" },
+    { id: "qwen/qwen3-vl-32b-instruct", note: "balanced" },
+    { id: "google/gemini-3.5-flash", note: "sharpest, most expensive" },
+  ],
+  research: false,
+  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion" },
+  embeds: null,
+};
+
+export const PROVIDERS = { anthropic, openai, gemini, glm, openrouter };
 for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
 
 // Callers reach through the registry directly: PROVIDERS[p].defaultModel for
