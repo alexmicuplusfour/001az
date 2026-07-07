@@ -1,6 +1,7 @@
 export const state = {
   boardId: null,
   boardName: null,
+  boardManage: false,   // may the current user edit this board (global or board admin)
   facets: [],
   aiReasoning: true,
   items: [],

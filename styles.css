@@ -179,6 +179,20 @@ header {
   font-weight: 600;
   font-size: 13px;
 }
+.board-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tool-btn.board-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 7px;
+  line-height: 0;
+  color: var(--text-dim);
+}
+.tool-btn.board-edit-btn svg { width: 15px; height: 15px; }
+.tool-btn.board-edit-btn:hover { color: var(--text); }
 .board-chevron {
   display: inline-flex;
   margin-left: -1px;

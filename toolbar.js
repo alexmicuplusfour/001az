@@ -7,6 +7,7 @@ import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
 import { openMappingModal } from './mapping-modal.js';
+import { openBoardModal } from './board-modal.js';
 import { openConnectorSearch } from './connector-search.js';
 
 const elToolbar = document.getElementById("toolbar");
@@ -64,6 +65,9 @@ export function renderToolbar(resultCount) {
   document.title = state.boardName ? `001az - ${state.boardName}` : "001az";
 
   if (state.boardName) {
+    // The board selector and its edit pencil are one unit — keep them tight.
+    const boardGroup = document.createElement("div");
+    boardGroup.className = "board-group";
     if (state.me && state.boards.length > 1) {
       const boardBtn = document.createElement("button");
       boardBtn.className = "tool-btn board-btn";
@@ -74,13 +78,34 @@ export function renderToolbar(resultCount) {
       chev.innerHTML = ICONS.chevron;
       boardBtn.append(nameEl, chev);
       boardBtn.addEventListener("click", () => openBoardPop(boardBtn));
-      elToolbar.appendChild(boardBtn);
+      boardGroup.appendChild(boardBtn);
     } else {
       const name = document.createElement("span");
       name.className = "board-name";
       name.textContent = state.boardName;
-      elToolbar.appendChild(name);
+      boardGroup.appendChild(name);
     }
+
+    // Board admins (global or per-board) get an inline "edit board" pencil that
+    // opens the same board editor as the admin page, content-only.
+    if (state.boardManage) {
+      const editBtn = toolBtn(ICONS.pencil, "board-edit-btn", () => openBoardModal(null, {
+        canEditAI: false,
+        boardId: state.boardId,
+        onSaved: (payload) => {
+          state.boardName = payload.name;
+          state.facets = payload.facets;
+          state.aiReasoning = payload.ai_reasoning !== false;
+          const b = state.boards.find((x) => x.id === state.boardId);
+          if (b) b.name = payload.name;
+          document.dispatchEvent(new Event('app:render'));
+        },
+      }));
+      editBtn.title = "Edit board";
+      editBtn.setAttribute("aria-label", "Edit board");
+      boardGroup.appendChild(editBtn);
+    }
+    elToolbar.appendChild(boardGroup);
   }
 
   const auth = document.createElement("div");

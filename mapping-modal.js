@@ -1,11 +1,11 @@
 import { state } from './state.js';
 import { toast } from './toast.js';
 import { openDropdown, ddRow } from './dropdown.js';
+import { createModal } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date"];
 
 let modalEl = null;
-let mousedownOnOverlay = false;
 
 export function openMappingModal() {
   if (modalEl) return; // already open
@@ -17,31 +17,12 @@ export function openMappingModal() {
   let identityHint = state.boardMapping?.identity?.hint || "";
   let inputConnector = state.boardMapping?.input?.connector || null; // set when a connector template is loaded
 
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-
-  const dialog = document.createElement("div");
-  dialog.className = "modal-dialog";
-  dialog.setAttribute("role", "dialog");
-  dialog.setAttribute("aria-modal", "true");
-  dialog.setAttribute("aria-label", "Entity mapping");
-
-  // Header
-  const header = document.createElement("div");
-  header.className = "modal-header";
-  const title = document.createElement("div");
-  title.className = "modal-title";
-  title.textContent = "Entity mapping";
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "modal-close";
-  closeBtn.setAttribute("aria-label", "Close");
-  closeBtn.textContent = "×";
-  header.append(title, closeBtn);
-
-  // Body — scrollable field list
-  const body = document.createElement("div");
-  body.className = "modal-body";
-  body.style.cssText = "display:flex;flex-direction:column;gap:12px;";
+  const { overlay, body, footer, closeBtn, close } = createModal({
+    title: "Entity mapping",
+    bodyStyle: "display:flex;flex-direction:column;gap:12px;",
+    onClose: () => { modalEl = null; },
+  });
+  modalEl = overlay;
 
   // Explanation + identity anchor
   const intro = document.createElement("div");
@@ -276,9 +257,6 @@ export function openMappingModal() {
   }
 
   // Footer
-  const footer = document.createElement("div");
-  footer.className = "modal-footer";
-
   if (isAdmin) {
     const saveBtn = document.createElement("button");
     saveBtn.className = "mm-save";
@@ -362,30 +340,6 @@ export function openMappingModal() {
       toast.error("Save failed");
     }
   }
-
-  dialog.append(header, body, footer);
-  overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-  document.body.style.overflow = "hidden";
-  modalEl = overlay;
-
-  function close() {
-    if (!modalEl) return;
-    modalEl.remove();
-    modalEl = null;
-    document.body.style.overflow = "";
-    document.removeEventListener("keydown", onKeydown);
-  }
-
-  closeBtn.addEventListener("click", close);
-
-  // Click-out: only close when the mousedown and click are both on the overlay
-  // (prevents a text-selection drag-release from dismissing the modal).
-  overlay.addEventListener("mousedown", (e) => { mousedownOnOverlay = e.target === overlay; });
-  overlay.addEventListener("click", (e) => { if (e.target === overlay && mousedownOnOverlay) close(); });
-
-  function onKeydown(e) { if (e.key === "Escape") close(); }
-  document.addEventListener("keydown", onKeydown);
 
   requestAnimationFrame(() => {
     (fieldsList.querySelector(".mm-key") || closeBtn).focus();
