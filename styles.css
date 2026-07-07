@@ -223,7 +223,7 @@ header {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-dim);
-  padding-top: 3px;
+  padding-top: 5px;
   align-self: start;
   white-space: nowrap;
 }
