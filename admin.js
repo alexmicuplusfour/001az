@@ -736,17 +736,19 @@
         aiModelSel.hidden = true;
         aiWrap.append(aiKeySel, aiModelSel);
         let aiKeys = [];
+        let aiCatalog = {}; // provider name -> catalog entry
         let aiLoaded = false; // don't send the override until the registry arrived
         const syncAiModelSel = () => {
           const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
           aiModelSel.hidden = !key;
           if (key) {
             const current = board && board.ai_key_id === key.id ? board.ai_model : null;
-            fillModelSelect(aiModelSel, key.provider, current);
+            fillModelSelect(aiModelSel, aiCatalog[key.provider], current);
           }
         };
-        api("GET", "/api/admin/ai-keys").then((keys) => {
+        Promise.all([api("GET", "/api/admin/ai-keys"), loadProviders()]).then(([keys, catalog]) => {
           aiKeys = keys;
+          aiCatalog = byName(catalog);
           const defOpt = document.createElement("option");
           defOpt.value = "";
           defOpt.textContent = "App default";
@@ -802,39 +804,20 @@
       renderBoards().catch(() => {});
 
       // --- AI Config: multi-provider key registry + app default ---
-      const PROVIDER_MODELS = {
-        anthropic: [
-          { id: "claude-haiku-4-5", note: "fast, cheapest" },
-          { id: "claude-sonnet-4-6", note: "balanced" },
-          { id: "claude-opus-4-8", note: "sharpest, most expensive" },
-        ],
-        openai: [
-          { id: "gpt-5-nano", note: "fast, cheapest" },
-          { id: "gpt-5-mini", note: "balanced" },
-          { id: "gpt-5.1", note: "sharpest, most expensive" },
-        ],
-        gemini: [
-          { id: "gemini-2.5-flash-lite", note: "fast, cheapest" },
-          { id: "gemini-2.5-flash", note: "balanced" },
-          { id: "gemini-2.5-pro", note: "sharpest, most expensive" },
-        ],
-        // Z.ai's text and vision models are separate families: glm-5.2 can't
-        // see images, so it only suits boards whose items are all text/entity.
-        glm: [
-          { id: "glm-4.6v-flash", note: "free" },
-          { id: "glm-4.6v", note: "balanced" },
-          { id: "glm-5.2", note: "sharpest, text boards only" },
-        ],
-      };
-      // Keep in sync with PROVIDER_DEFAULT_MODEL in server/providers.js.
-      const PROVIDER_DEFAULT_MODEL = { anthropic: "claude-haiku-4-5", openai: "gpt-5-mini", gemini: "gemini-2.5-flash", glm: "glm-4.6v" };
+      // The provider catalog (labels, model lists + notes, defaults,
+      // capabilities) is served from the server registry — single source of
+      // truth, no client mirror. Fetched once, cached for the page.
+      let _catalog = null;
+      const loadProviders = () => (_catalog ??= api("GET", "/api/admin/ai-providers"));
+      const byName = (list) => Object.fromEntries(list.map((p) => [p.name, p]));
 
-      // (Re)populate a <select> with the provider's models; keeps an unknown
-      // current model as an extra option instead of silently dropping it.
-      function fillModelSelect(sel, provider, current) {
+      // (Re)populate a <select> from a provider's catalog entry ({ models,
+      // defaultModel }); keeps an unknown current model as an extra option
+      // instead of silently dropping it.
+      function fillModelSelect(sel, entry, current) {
         sel.replaceChildren();
-        const models = PROVIDER_MODELS[provider] || [];
-        const selected = current || PROVIDER_DEFAULT_MODEL[provider];
+        const models = entry?.models || [];
+        const selected = current || entry?.defaultModel;
         for (const m of models) {
           const opt = document.createElement("option");
           opt.value = m.id;
@@ -855,13 +838,15 @@
         const me = await fetch("/api/me").then((r) => r.json());
         if (!me || !me.is_admin) return;
 
-        let cfg, keys;
+        let cfg, keys, catalog;
         try {
-          [cfg, keys] = await Promise.all([
+          [cfg, keys, catalog] = await Promise.all([
             api("GET", "/api/admin/ai-config"),
             api("GET", "/api/admin/ai-keys"),
+            loadProviders(),
           ]);
         } catch { return; }
+        const providers = byName(catalog);
 
         const sec = document.createElement("div");
         sec.className = "section";
@@ -936,10 +921,10 @@
         nameIn.required = true;
         const provSel = document.createElement("select");
         provSel.style.cssText = "flex:none;";
-        for (const p of ["anthropic", "openai", "gemini", "glm"]) {
+        for (const p of catalog) {
           const opt = document.createElement("option");
-          opt.value = p;
-          opt.textContent = p;
+          opt.value = p.name;
+          opt.textContent = p.name;
           provSel.appendChild(opt);
         }
         const keyIn = document.createElement("input");
@@ -1006,8 +991,8 @@
           const k = keys.find((x) => String(x.id) === keySel.value);
           return k ? k.provider : "anthropic";
         };
-        fillModelSelect(modelSel, providerOf(), cfg.model);
-        keySel.onchange = () => fillModelSelect(modelSel, providerOf(), null);
+        fillModelSelect(modelSel, providers[providerOf()], cfg.model);
+        keySel.onchange = () => fillModelSelect(modelSel, providers[providerOf()], null);
         modelRow.appendChild(modelSel);
         defSec.appendChild(modelRow);
 
@@ -1058,17 +1043,9 @@
         emSec.style.cssText = "margin-top:28px;max-width:480px;display:flex;flex-direction:column;gap:14px;";
         emSec.innerHTML = `<div><h2 style="font-size:14px;margin:0 0 2px;">Semantic search</h2><p class="sub" style="margin:0;">Free-text search that ranks a board's items by meaning, built from the tagger's reasoning and descriptions.</p></div>`;
 
-        // Keep in sync with PROVIDER_EMBED_MODELS / PROVIDER_DEFAULT_EMBED_MODEL
-        // in server/providers.js. Anthropic has no embeddings API.
-        const EMBED_MODELS = {
-          openai: [
-            { id: "text-embedding-3-small", note: "cheapest, plenty here" },
-            { id: "text-embedding-3-large", note: "sharper, ~6× cost" },
-          ],
-          gemini: [{ id: "gemini-embedding-001", note: "Gemini's embedder" }],
-        };
-        const EMBED_DEFAULT_MODEL = { openai: "text-embedding-3-small", gemini: "gemini-embedding-001" };
-        const embedKeys = keys.filter((k) => EMBED_MODELS[k.provider]);
+        // Embed models come from the catalog's `embeds` block; a provider
+        // without one (Anthropic, GLM) has no embeddings API.
+        const embedKeys = keys.filter((k) => providers[k.provider]?.embeds);
 
         if (!embedKeys.length) {
           const note = document.createElement("p");
@@ -1101,12 +1078,12 @@
           const emProviderOf = () => embedKeys.find((k) => String(k.id) === emKeySel.value)?.provider || "openai";
           const fillEmbedModels = (current) => {
             emModelSel.replaceChildren();
-            const prov = emProviderOf();
-            for (const m of EMBED_MODELS[prov]) {
+            const embeds = providers[emProviderOf()].embeds;
+            for (const m of embeds.models) {
               const opt = document.createElement("option");
               opt.value = m.id;
               opt.textContent = `${m.id} — ${m.note}`;
-              if (m.id === (current || EMBED_DEFAULT_MODEL[prov])) opt.selected = true;
+              if (m.id === (current || embeds.default)) opt.selected = true;
               emModelSel.appendChild(opt);
             }
           };

@@ -316,3 +316,20 @@ export function testKey({ provider, ...rest }) {
   const desc = PROVIDERS[provider];
   return desc.wire.testKey(desc, rest);
 }
+
+// Public catalog for the admin UI — labels, model lists (with notes), defaults,
+// and capability flags. No secrets, safe to serve. The client renders its
+// provider/model pickers from this so the catalog isn't mirrored in two places.
+export function providerCatalog() {
+  return PROVIDER_NAMES.map((name) => {
+    const p = PROVIDERS[name];
+    return {
+      name,
+      label: p.label,
+      defaultModel: p.defaultModel,
+      models: p.models,
+      research: p.research,
+      embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
+    };
+  });
+}

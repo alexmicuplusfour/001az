@@ -69,7 +69,7 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
-import { testKey, embedTexts, PROVIDER_NAMES, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
+import { testKey, embedTexts, providerCatalog, PROVIDER_NAMES, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
@@ -615,6 +615,13 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+}));
+
+// Provider catalog (labels, model lists + notes, defaults, capabilities). The
+// admin UI renders its provider/model pickers from this instead of hardcoding
+// them, so a new provider needs no client edit.
+app.get("/api/admin/ai-providers", requireAdmin, wrap(async (_req, res) => {
+  res.json(providerCatalog());
 }));
 
 app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
