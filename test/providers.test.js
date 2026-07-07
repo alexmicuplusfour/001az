@@ -1,18 +1,15 @@
 // Provider registry: descriptor integrity, the capabilities-as-data that
-// replaced the old `if (provider === …)` branches, and the derived views that
-// callers import. compat/anthropic request *shapes* are pinned separately in
-// compat.test.js / research.test.js / extraction.test.js.
+// replaced the old `if (provider === …)` branches, and the catalog callers
+// read through PROVIDERS directly. compat/anthropic request *shapes* are
+// pinned separately in compat.test.js / research.test.js / extraction.test.js.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, req } from "./helpers.js";
-import {
-  PROVIDERS, PROVIDER_NAMES, PROVIDER_DEFAULT_MODEL,
-  EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL, providerCatalog,
-} from "../server/providers.js";
+import { PROVIDERS, providerCatalog } from "../server/providers.js";
 
 test("every descriptor is well-formed and self-named", () => {
-  assert.deepEqual(PROVIDER_NAMES, ["anthropic", "openai", "gemini", "glm"]);
-  for (const name of PROVIDER_NAMES) {
+  assert.deepEqual(Object.keys(PROVIDERS), ["anthropic", "openai", "gemini", "glm"]);
+  for (const name of Object.keys(PROVIDERS)) {
     const d = PROVIDERS[name];
     assert.equal(d.name, name, `${name}: self-reference stamped`);
     assert.equal(typeof d.label, "string");
@@ -43,16 +40,17 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
   for (const name of ["openai", "gemini", "glm"]) assert.equal(PROVIDERS[name].research, false);
 });
 
-test("derived views are computed from the registry, not hand-listed", () => {
-  assert.equal(PROVIDER_DEFAULT_MODEL.glm, "glm-4.6v");
-  assert.equal(PROVIDER_DEFAULT_MODEL.anthropic, "claude-haiku-4-5");
-  // only providers with an embeds block are embeddings-capable
-  assert.deepEqual(EMBED_PROVIDERS, ["openai", "gemini"]);
+test("defaults and embed capability read straight off the descriptor", () => {
+  assert.equal(PROVIDERS.glm.defaultModel, "glm-4.6v");
+  assert.equal(PROVIDERS.anthropic.defaultModel, "claude-haiku-4-5");
+  // `embeds` is both the capability flag and the config: only openai/gemini
+  const embedNames = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds);
+  assert.deepEqual(embedNames, ["openai", "gemini"]);
   assert.equal(PROVIDERS.anthropic.embeds, null);
   assert.equal(PROVIDERS.glm.embeds, null);
-  for (const name of EMBED_PROVIDERS) {
-    const def = PROVIDER_DEFAULT_EMBED_MODEL[name];
-    assert.ok(PROVIDERS[name].embeds.models.some((m) => m.id === def), `${name}: default embed model is in its list`);
+  for (const name of embedNames) {
+    const { default: def, models } = PROVIDERS[name].embeds;
+    assert.ok(models.some((m) => m.id === def), `${name}: default embed model is in its list`);
   }
 });
 
@@ -67,7 +65,7 @@ test("wire family shared: gemini and glm ride the same compat code as openai", (
 
 test("providerCatalog exposes the UI-facing shape and leaks no internals", () => {
   const cat = providerCatalog();
-  assert.deepEqual(cat.map((p) => p.name), PROVIDER_NAMES);
+  assert.deepEqual(cat.map((p) => p.name), Object.keys(PROVIDERS));
   const glm = cat.find((p) => p.name === "glm");
   assert.equal(glm.defaultModel, "glm-4.6v");
   assert.ok(glm.models.some((m) => m.id === "glm-5.2" && /text/.test(m.note)));

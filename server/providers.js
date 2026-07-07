@@ -281,11 +281,10 @@ const glm = {
 export const PROVIDERS = { anthropic, openai, gemini, glm };
 for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
 
-// --- derived views (single source of truth = the registry above) ---
-export const PROVIDER_NAMES = Object.keys(PROVIDERS);
-export const PROVIDER_DEFAULT_MODEL = Object.fromEntries(PROVIDER_NAMES.map((n) => [n, PROVIDERS[n].defaultModel]));
-export const EMBED_PROVIDERS = PROVIDER_NAMES.filter((n) => PROVIDERS[n].embeds);
-export const PROVIDER_DEFAULT_EMBED_MODEL = Object.fromEntries(EMBED_PROVIDERS.map((n) => [n, PROVIDERS[n].embeds.default]));
+// Callers reach through the registry directly: PROVIDERS[p].defaultModel for
+// the default, PROVIDERS[p]?.embeds as the "does this provider embed" check.
+// The one place a plain list is needed (validation error messages) derives it
+// inline from Object.keys(PROVIDERS).
 
 // --- public dispatchers ---
 
@@ -304,7 +303,7 @@ export function callTagger({ provider, research = false, ...rest }) {
 }
 
 // Embed a batch of texts (semantic search). Only embeddings-capable providers
-// qualify — callers gate on EMBED_PROVIDERS before reaching here.
+// qualify — callers gate on PROVIDERS[provider].embeds before reaching here.
 export function embedTexts({ provider, ...rest }) {
   const desc = PROVIDERS[provider];
   return desc.wire.embed(desc, rest);
@@ -321,7 +320,7 @@ export function testKey({ provider, ...rest }) {
 // and capability flags. No secrets, safe to serve. The client renders its
 // provider/model pickers from this so the catalog isn't mirrored in two places.
 export function providerCatalog() {
-  return PROVIDER_NAMES.map((name) => {
+  return Object.keys(PROVIDERS).map((name) => {
     const p = PROVIDERS[name];
     return {
       name,

@@ -69,7 +69,7 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
-import { testKey, embedTexts, providerCatalog, PROVIDER_NAMES, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
+import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
@@ -589,7 +589,7 @@ app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
   const provider = req.body && req.body.provider ? String(req.body.provider) : "";
   const apiKey = (req.body && req.body.key ? String(req.body.key) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
-  if (!PROVIDER_NAMES.includes(provider)) return res.status(400).json({ error: `provider must be one of: ${PROVIDER_NAMES.join(", ")}` });
+  if (!(provider in PROVIDERS)) return res.status(400).json({ error: `provider must be one of: ${Object.keys(PROVIDERS).join(", ")}` });
   if (!apiKey) return res.status(400).json({ error: "key required" });
   const id = await createAiKey(db, name, provider, apiKey);
   console.log(`ai-key added: "${name}" (${provider})`);
@@ -657,8 +657,9 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     } else {
       const key = await getAiKey(db, Number(embedKeyId));
       if (!key) return res.status(400).json({ error: "unknown key" });
-      if (!EMBED_PROVIDERS.includes(key.provider)) {
-        return res.status(400).json({ error: `embeddings need an ${EMBED_PROVIDERS.join(" or ")} key — ${key.provider} has no embeddings API` });
+      if (!PROVIDERS[key.provider]?.embeds) {
+        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds).join(" or ");
+        return res.status(400).json({ error: `embeddings need an ${names} key — ${key.provider} has no embeddings API` });
       }
       await setSetting(db, "embed_key_id", String(key.id));
     }
@@ -669,7 +670,7 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     if (embedEnabled) {
       const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
       const key = keyId ? await getAiKey(db, keyId) : null;
-      if (!key || !EMBED_PROVIDERS.includes(key.provider)) {
+      if (!key || !PROVIDERS[key.provider]?.embeds) {
         return res.status(400).json({ error: "pick an OpenAI or Gemini key before enabling semantic search" });
       }
     }

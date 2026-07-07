@@ -20,7 +20,7 @@ import {
   setItemIdentity,
   appendItemFiles,
 } from "./db.js";
-import { callTagger, embedTexts, PROVIDER_DEFAULT_MODEL, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
+import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
@@ -29,7 +29,7 @@ export async function resolveDefaultAi(db) {
   if (defId) {
     const key = await getAiKey(db, defId);
     if (key) {
-      const model = (await getSetting(db, "model")) || PROVIDER_DEFAULT_MODEL[key.provider];
+      const model = (await getSetting(db, "model")) || PROVIDERS[key.provider].defaultModel;
       return { provider: key.provider, apiKey: key.api_key, model };
     }
   }
@@ -37,7 +37,7 @@ export async function resolveDefaultAi(db) {
     return {
       provider: "anthropic",
       apiKey: process.env.ANTHROPIC_API_KEY,
-      model: (await getSetting(db, "model")) || process.env.MODEL || PROVIDER_DEFAULT_MODEL.anthropic,
+      model: (await getSetting(db, "model")) || process.env.MODEL || PROVIDERS.anthropic.defaultModel,
     };
   }
   return null;
@@ -51,11 +51,11 @@ export async function resolveEmbedder(db) {
   const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
   if (!keyId) return null;
   const key = await getAiKey(db, keyId);
-  if (!key || !EMBED_PROVIDERS.includes(key.provider)) return null;
+  if (!key || !PROVIDERS[key.provider]?.embeds) return null;
   return {
     provider: key.provider,
     apiKey: key.api_key,
-    model: (await getSetting(db, "embed_model")) || PROVIDER_DEFAULT_EMBED_MODEL[key.provider],
+    model: (await getSetting(db, "embed_model")) || PROVIDERS[key.provider].embeds.default,
   };
 }
 
@@ -81,7 +81,7 @@ async function resolveBoardAi(db, boardEntry) {
       return {
         provider: key.provider,
         apiKey: key.api_key,
-        model: boardEntry.aiModel || PROVIDER_DEFAULT_MODEL[key.provider],
+        model: boardEntry.aiModel || PROVIDERS[key.provider].defaultModel,
       };
     }
   }
