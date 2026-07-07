@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { ICONS } from './utils.js';
+import { ICONS, refreshEntityTags } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
@@ -44,7 +44,15 @@ let lightboxList = [];
 let lightboxIndex = -1;
 let panelOpen = false;
 let reasoningReq = 0; // stale-response guard for the reasoning fetch
-let currentFileIndex = 0; // which file is shown in the main view (multi-file entities)
+let currentInstIndex = 0; // which instance is shown in the main view (multi-instance entities)
+
+// The instance on screen; entities always have at least one, but guard the
+// transient states (mid-reconcile) with the entity's own face fields.
+function selectedInst() {
+  const list = lightboxImg?.instances || [];
+  if (currentInstIndex >= list.length) currentInstIndex = 0;
+  return list[currentInstIndex] || null;
+}
 
 function renderLightboxFav() {
   if (!lightboxImg) return;
@@ -59,19 +67,81 @@ function renderLightboxCrate() {
   elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
 }
 
-// Paint the reasoning panel for img. reasoning/fields are null while the
-// fetch is in flight — tags render immediately, details fill in when it lands.
-// identityProvisional is true when the AI couldn't derive an identity.
-function paintPanel(img, reasoning, fields, identityProvisional, files) {
+// One "Fields" section: key/value rows with src badges and why-sentences.
+// Used twice — entity-level (connector-bound data, no re-extract) and
+// instance-level (AI extraction, with the Re-extract button).
+function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
+  const fieldKeys = fields && typeof fields === "object" ? Object.keys(fields) : [];
+  if (!fieldKeys.length) return null;
+  const sec = document.createElement("div");
+  sec.className = "lbp-fields";
+  const secHead = document.createElement("div");
+  secHead.className = "lbp-fields-head";
+  const secLabel = document.createElement("span");
+  secLabel.className = "lbp-fields-label";
+  secLabel.textContent = label;
+  secHead.appendChild(secLabel);
+  if (reextract) secHead.appendChild(reextract);
+  sec.appendChild(secHead);
+  for (const key of fieldKeys) {
+    const { v, why, src, kind: fieldKind } = fields[key] || {};
+    const row = document.createElement("div");
+    row.className = "lbp-field-row";
+    const kv = document.createElement("div");
+    kv.className = "lbp-field-kv";
+    const k = document.createElement("span");
+    k.className = "lbp-field-key";
+    k.textContent = key;
+    if (src) {
+      const badge = document.createElement("span");
+      badge.className = "lbp-field-src";
+      badge.textContent = src;
+      k.appendChild(badge);
+    }
+    let val;
+    const vStr = v !== null && v !== undefined ? String(v) : null;
+    if (vStr && /^https?:\/\//.test(vStr)) {
+      val = document.createElement("a");
+      val.href = vStr;
+      val.target = "_blank";
+      val.rel = "noopener noreferrer";
+      val.textContent = vStr;
+    } else if (vStr !== null && fieldKind === "number" && typeof v === "number") {
+      val = document.createElement("span");
+      val.textContent = formatFieldNumber(key, v);
+    } else {
+      val = document.createElement("span");
+      val.textContent = vStr ?? "—";
+    }
+    val.className = "lbp-field-val";
+    kv.append(k, val);
+    row.appendChild(kv);
+    if (why) {
+      const p = document.createElement("p");
+      p.className = "lbp-why";
+      p.textContent = why;
+      row.appendChild(p);
+    }
+    sec.appendChild(row);
+  }
+  return sec;
+}
+
+// Paint the Details panel: the identity zone on top (entity name, reference
+// rows, instance switcher, provisional warning, connector-bound fields), then
+// the selected instance's zone (its extracted fields, its tags + reasoning).
+// reasoning/fields are null while the per-instance fetch is in flight — tags
+// render immediately, details fill in when it lands.
+function paintPanel(img, inst, reasoning, fields) {
   // Same-origin link, so the download attribute names the saved file — the
-  // item's original name, not the hashed store name.
-  elLightboxDownload.href = fullUrl(img.name);
-  elLightboxDownload.download = img.label || img.name;
+  // instance's original name, not the hashed store name.
+  elLightboxDownload.href = fullUrl(inst?.name || img.name);
+  elLightboxDownload.download = inst?.label || inst?.name || img.label || img.name;
 
   elLightboxPanelBody.replaceChildren();
 
-  // Item reference block: whatever the item carries. Values are
-  // click-to-select for easy copying.
+  // ── identity zone ──────────────────────────────────────────────────────
+  // Entity reference block; values are click-to-select for easy copying.
   const meta = document.createElement("div");
   meta.className = "lbp-meta";
   const metaName = document.createElement("div");
@@ -79,7 +149,7 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
   metaName.textContent = img.displayLabel;
   metaName.title = img.displayLabel;
   meta.appendChild(metaName);
-  const metaRows = [["file", img.name], ["kind", img.kind || "image"], ["id", String(img.id)]];
+  const metaRows = [["file", inst?.name || img.name], ["kind", inst?.kind || img.kind || "image"], ["id", String(img.id)]];
   for (const [k, v] of metaRows) {
     const row = document.createElement("div");
     row.className = "lbp-meta-row";
@@ -93,24 +163,23 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
   }
   elLightboxPanelBody.appendChild(meta);
 
-  // Multi-file list with per-file remove (shown when entity has ≥2 files).
-  // `files` comes from the reasoning fetch (payload.files); null while loading.
-  const allFiles = Array.isArray(files) ? files : [];
-  if (allFiles.length >= 2) {
+  // Instance switcher with per-instance remove (shown when the entity has ≥2).
+  const instances = img.instances || [];
+  if (instances.length >= 2) {
     const filesSec = document.createElement("div");
     filesSec.className = "lbp-files";
     const filesLabel = document.createElement("div");
     filesLabel.className = "lbp-fields-label";
-    filesLabel.textContent = "Files";
+    filesLabel.textContent = `Instances (${instances.length})`;
     filesSec.appendChild(filesLabel);
-    allFiles.forEach((f, i) => {
+    instances.forEach((f, i) => {
       const row = document.createElement("div");
-      row.className = "lbp-file-row" + (i === currentFileIndex ? " lbp-file-active" : "");
+      row.className = "lbp-file-row" + (i === currentInstIndex ? " lbp-file-active" : "");
       const fname = document.createElement("button");
       fname.className = "lbp-file-name";
-      fname.textContent = f.original_name || f.name;
+      fname.textContent = f.label || f.name;
       fname.title = "View this file";
-      fname.addEventListener("click", (e) => { e.stopPropagation(); showFile(f, i); });
+      fname.addEventListener("click", (e) => { e.stopPropagation(); showInstance(i); });
       const rmBtn = document.createElement("button");
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
@@ -119,11 +188,16 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
         e.stopPropagation();
         rmBtn.disabled = true;
         try {
-          const r = await fetch(`/api/items/${img.id}/files/${i}`, { method: "DELETE" });
+          const r = await fetch(`/api/instances/${f.id}`, { method: "DELETE" });
           if (r.ok) {
-            img.status = (await r.json()).status;
+            img.instances = img.instances.filter((x) => x.id !== f.id);
+            refreshEntityTags(img);
+            // The face may have changed; follow the first remaining instance.
+            const face = img.instances[0];
+            if (face) { img.name = face.name; img.w = face.w; img.h = face.h; img.kind = face.kind; img.label = face.label; }
+            if (currentInstIndex >= img.instances.length) currentInstIndex = 0;
             document.dispatchEvent(new Event('app:render'));
-            renderPanel();
+            showInstance(Math.min(currentInstIndex, img.instances.length - 1));
           }
         } finally { rmBtn.disabled = false; }
       });
@@ -134,99 +208,61 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
   }
 
   // Provisional identity warning — shown when the AI couldn't derive an identity.
-  if (identityProvisional) {
+  if (img.identityProvisional) {
     const warn = document.createElement("div");
     warn.className = "lbp-provisional-warn";
     warn.textContent = "Identity not derived — AI couldn't identify this entity. Re-extract or remove the item.";
     elLightboxPanelBody.appendChild(warn);
   }
 
-  // Fields section: shown when extraction has run (fields object has keys).
-  const fieldKeys = fields && typeof fields === "object" ? Object.keys(fields) : [];
-  if (fieldKeys.length > 0) {
-    const sec = document.createElement("div");
-    sec.className = "lbp-fields";
-    const secHead = document.createElement("div");
-    secHead.className = "lbp-fields-head";
-    const secLabel = document.createElement("span");
-    secLabel.className = "lbp-fields-label";
-    secLabel.textContent = "Fields";
-    secHead.appendChild(secLabel);
-    const reextractBtn = document.createElement("button");
-    reextractBtn.className = "lbp-reextract";
-    reextractBtn.textContent = "Re-extract";
-    reextractBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      reextractBtn.disabled = true;
-      reextractBtn.textContent = "Re-extract";
-      try {
-        const r = await fetch(`/api/items/${img.id}/reextract`, { method: "POST" });
-        if (r.ok) {
-          img.status = "pending_extract";
-          reextractBtn.textContent = "Queued";
-          document.dispatchEvent(new Event('app:render'));
-          ensurePolling();
-          toast("Re-extraction queued");
-        } else {
-          reextractBtn.disabled = false;
-          toast.error("Re-extract failed");
-        }
-      } catch {
+  // Connector-bound entity fields (live data — not extraction output).
+  const entityFields = fieldsSection(img.fields);
+  if (entityFields) {
+    elLightboxPanelBody.appendChild(entityFields);
+    const d = document.createElement("hr");
+    d.className = "lbp-divider";
+    elLightboxPanelBody.appendChild(d);
+  }
+
+  // ── instance zone ──────────────────────────────────────────────────────
+  // The selected instance's extracted fields, with per-instance re-extract.
+  const reextractBtn = document.createElement("button");
+  reextractBtn.className = "lbp-reextract";
+  reextractBtn.textContent = "Re-extract";
+  reextractBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!inst) return;
+    reextractBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/instances/${inst.id}/reextract`, { method: "POST" });
+      if (r.ok) {
+        inst.status = "pending_extract";
+        img.status = "pending_extract";
+        reextractBtn.textContent = "Queued";
+        document.dispatchEvent(new Event('app:render'));
+        ensurePolling();
+        toast("Re-extraction queued");
+      } else {
         reextractBtn.disabled = false;
         toast.error("Re-extract failed");
       }
-    });
-    secHead.appendChild(reextractBtn);
-    sec.appendChild(secHead);
-    for (const key of fieldKeys) {
-      const { v, why, src, kind: fieldKind } = fields[key] || {};
-      const row = document.createElement("div");
-      row.className = "lbp-field-row";
-      const kv = document.createElement("div");
-      kv.className = "lbp-field-kv";
-      const k = document.createElement("span");
-      k.className = "lbp-field-key";
-      k.textContent = key;
-      if (src) {
-        const badge = document.createElement("span");
-        badge.className = "lbp-field-src";
-        badge.textContent = src;
-        k.appendChild(badge);
-      }
-      let val;
-      const vStr = v !== null && v !== undefined ? String(v) : null;
-      if (vStr && /^https?:\/\//.test(vStr)) {
-        val = document.createElement("a");
-        val.href = vStr;
-        val.target = "_blank";
-        val.rel = "noopener noreferrer";
-        val.textContent = vStr;
-      } else if (vStr !== null && fieldKind === "number" && typeof v === "number") {
-        val = document.createElement("span");
-        val.textContent = formatFieldNumber(key, v);
-      } else {
-        val = document.createElement("span");
-        val.textContent = vStr ?? "—";
-      }
-      val.className = "lbp-field-val";
-      kv.append(k, val);
-      row.appendChild(kv);
-      if (why) {
-        const p = document.createElement("p");
-        p.className = "lbp-why";
-        p.textContent = why;
-        row.appendChild(p);
-      }
-      sec.appendChild(row);
+    } catch {
+      reextractBtn.disabled = false;
+      toast.error("Re-extract failed");
     }
-    elLightboxPanelBody.appendChild(sec);
-    const fieldsDivider = document.createElement("hr");
-    fieldsDivider.className = "lbp-divider";
-    elLightboxPanelBody.appendChild(fieldsDivider);
+  });
+  const instFields = fieldsSection(fields, { reextract: inst ? reextractBtn : null });
+  if (instFields) {
+    elLightboxPanelBody.appendChild(instFields);
+    const d = document.createElement("hr");
+    d.className = "lbp-divider";
+    elLightboxPanelBody.appendChild(d);
   }
 
+  // The selected instance's tags + reasoning (per-instance judgment).
+  const subject = inst || img;
   const byFacet = new Map();
-  for (const t of img.tags) {
+  for (const t of subject.tags) {
     const i = t.indexOf("/");
     if (i <= 0) continue;
     const k = t.slice(0, i);
@@ -235,12 +271,12 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
   }
   const why = reasoning || {};
 
-  if (img.status === "held") {
+  if (subject.status === "held") {
     const note = document.createElement("div");
     note.className = "lbp-undecided";
     note.textContent = "Not tagged yet — this board's auto-tagging is off. Tag it by hand, or turn auto-tagging back on.";
     elLightboxPanelBody.appendChild(note);
-  } else if (img.undecided) {
+  } else if (subject.undecided) {
     const note = document.createElement("div");
     note.className = "lbp-undecided";
     note.textContent = why.fit || "The AI couldn't apply this board's facets to this item.";
@@ -291,12 +327,12 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
     elLightboxPanelBody.appendChild(row);
   }
 
-  if (!rows && !img.undecided && img.status !== "held") {
+  if (!rows && !subject.undecided && subject.status !== "held") {
     const empty = document.createElement("p");
     empty.className = "lbp-hint";
     empty.textContent = reasoning === null ? "Loading…" : "No AI tags for this item.";
     elLightboxPanelBody.appendChild(empty);
-  } else if (reasoning !== null && img.tags.length && !Object.keys(why).length) {
+  } else if (reasoning !== null && subject.tags.length && !Object.keys(why).length) {
     const hint = document.createElement("p");
     hint.className = "lbp-hint";
     hint.textContent = state.aiReasoning
@@ -309,24 +345,22 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
 async function renderPanel() {
   if (!panelOpen || !lightboxImg) return;
   const img = lightboxImg;
-  paintPanel(img, null, null, null);
+  const inst = selectedInst();
+  if (!inst) { paintPanel(img, null, {}, {}); return; }
+  paintPanel(img, inst, null, null);
   const token = ++reasoningReq;
   let reasoning = {};
   let fields = {};
-  let files = [];
-  let identityProvisional = false;
   try {
-    const r = await fetch(`/api/items/${img.id}/reasoning`);
+    const r = await fetch(`/api/instances/${inst.id}/reasoning`);
     if (r.ok) {
       const data = await r.json();
       reasoning = data.reasoning || {};
       fields = data.fields || {};
-      files = data.files || [];
-      identityProvisional = !!data.identity_provisional;
     }
   } catch { /* panel just shows tags without reasoning */ }
-  if (token !== reasoningReq || lightboxImg !== img || !panelOpen) return;
-  paintPanel(img, reasoning, fields, identityProvisional, files);
+  if (token !== reasoningReq || lightboxImg !== img || selectedInst() !== inst || !panelOpen) return;
+  paintPanel(img, inst, reasoning, fields);
 }
 
 function setPanel(open) {
@@ -346,54 +380,18 @@ function preloadFull(i) {
   }
 }
 
-// Switch the main lightbox view to a specific file object. Used when the
-// entity has multiple files and the user picks one from the Details panel.
-function showFile(file, index) {
-  currentFileIndex = index;
-  const isDoc = file.kind && file.kind !== "image";
-  elLightboxDownload.href = fullUrl(file.name);
-  elLightboxDownload.download = file.original_name || file.name;
+// Render a file-carrying thing (an instance, or the entity's face fields as
+// a fallback) into the main lightbox view. Documents render inline in a
+// same-origin frame; the frame paints progressively, so no loading spinner.
+// docx can't render in a frame; its formatted-HTML sidecar can.
+function showMedia(f) {
+  const isDoc = f.kind && f.kind !== "image";
   if (isDoc) {
     elLightboxImg.onload = null;
     elLightboxImg.removeAttribute("src");
     elLightboxImg.hidden = true;
     elLightbox.classList.remove("loading");
-    const url = fullUrl(file.kind === "docx" ? file.name + ".txt" : file.name);
-    if (elLightboxDoc.getAttribute("src") !== url) elLightboxDoc.src = url;
-    elLightboxDoc.hidden = false;
-    elLightbox.focus({ preventScroll: true });
-  } else {
-    if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
-    elLightboxImg.hidden = false;
-    elLightboxImg.style.opacity = "0";
-    elLightbox.classList.add("loading");
-    elLightboxImg.onload = () => { elLightbox.classList.remove("loading"); elLightboxImg.style.opacity = "1"; };
-    elLightboxImg.src = fullUrl(file.name);
-    if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
-      elLightbox.classList.remove("loading");
-      elLightboxImg.style.opacity = "1";
-    }
-  }
-  // Refresh the panel file list to highlight the new active file.
-  if (panelOpen) {
-    elLightboxPanelBody.querySelectorAll(".lbp-file-row").forEach((row, i) => {
-      row.classList.toggle("lbp-file-active", i === index);
-    });
-  }
-}
-
-function showLightbox() {
-  lightboxImg = lightboxList[lightboxIndex];
-  currentFileIndex = 0; // reset to first file on entity navigation
-  if (isDocItem(lightboxImg)) {
-    // Documents render inline in a same-origin frame; the frame paints
-    // progressively, so no loading spinner.
-    elLightboxImg.onload = null;
-    elLightboxImg.removeAttribute("src");
-    elLightboxImg.hidden = true;
-    elLightbox.classList.remove("loading");
-    // docx can't render in a frame; its extracted-text sidecar can.
-    const url = fullUrl(lightboxImg.kind === "docx" ? lightboxImg.name + ".txt" : lightboxImg.name);
+    const url = fullUrl(f.kind === "docx" ? f.name + ".html" : f.name);
     if (elLightboxDoc.getAttribute("src") !== url) elLightboxDoc.src = url;
     elLightboxDoc.hidden = false;
     // The embedded viewer grabs keyboard focus; keep it on the lightbox so
@@ -405,17 +403,33 @@ function showLightbox() {
     elLightboxImg.hidden = false;
     elLightboxImg.style.opacity = "0";
     elLightbox.classList.add("loading");
-    elLightboxImg.onload = () => {
-      elLightbox.classList.remove("loading");
-      elLightboxImg.style.opacity = "1";
-    };
-    elLightboxImg.src = fullUrl(lightboxImg.name);
+    elLightboxImg.onload = () => { elLightbox.classList.remove("loading"); elLightboxImg.style.opacity = "1"; };
+    elLightboxImg.src = fullUrl(f.name);
     if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
       elLightbox.classList.remove("loading");
       elLightboxImg.style.opacity = "1";
     }
-    elLightboxImg.alt = lightboxImg.tags.length ? lightboxImg.tags.join(", ") : lightboxImg.name;
+    elLightboxImg.alt = f.tags?.length ? f.tags.join(", ") : f.name;
   }
+}
+
+// Switch the main lightbox view to another instance of the current entity
+// (picked from the Details panel's file switcher). The panel re-renders so
+// its fields/tags zone follows the selection.
+function showInstance(index) {
+  currentInstIndex = index;
+  const inst = selectedInst();
+  if (!inst) return;
+  elLightboxDownload.href = fullUrl(inst.name);
+  elLightboxDownload.download = inst.label || inst.name;
+  showMedia(inst);
+  if (panelOpen) renderPanel();
+}
+
+function showLightbox() {
+  lightboxImg = lightboxList[lightboxIndex];
+  currentInstIndex = 0; // reset to the face instance on entity navigation
+  showMedia(selectedInst() || lightboxImg);
   if (state.me) {
     renderLightboxFav();
     elLightboxFav.hidden = false;

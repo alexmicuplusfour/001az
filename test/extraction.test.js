@@ -120,8 +120,10 @@ async function uploadTxt(boardId) {
   });
   return res.json();
 }
-async function itemStatus(id) {
-  const { rows } = await db.query("SELECT status, payload FROM items WHERE id=$1", [id]);
+// Upload rows carry the entity id as `id`; the items row (queue state,
+// stamped mapping) is the instance — instances[0].id in the response.
+async function itemStatus(uploadedRow) {
+  const { rows } = await db.query("SELECT status, payload FROM items WHERE id=$1", [uploadedRow.instances[0].id]);
   return rows[0];
 }
 
@@ -184,9 +186,13 @@ test("ingest: mapped board → pending_extract + payload.mapping stamped", async
   assert.equal(uploaded.length, 1);
   assert.equal(uploaded[0].status, "pending_extract");
 
-  const row = await itemStatus(uploaded[0].id);
+  const row = await itemStatus(uploaded[0]);
   assert.equal(row.status, "pending_extract");
   assert.deepEqual(row.payload.mapping, MAPPING);
+
+  // The upload also created the entity shell, provisionally keyed by the file.
+  const { rows: [ent] } = await db.query("SELECT identity FROM entities WHERE id=$1", [uploaded[0].id]);
+  assert.equal(ent.identity, uploaded[0].name);
 });
 
 test("ingest: plain board → pending, no payload.mapping", async () => {
@@ -195,7 +201,7 @@ test("ingest: plain board → pending, no payload.mapping", async () => {
   const { uploaded } = await uploadTxt(boardId);
   assert.equal(uploaded[0].status, "pending");
 
-  const row = await itemStatus(uploaded[0].id);
+  const row = await itemStatus(uploaded[0]);
   assert.equal(row.status, "pending");
   assert.equal(row.payload.mapping, undefined);
 });
@@ -207,7 +213,7 @@ test("ingest: mapped board + auto_tag off → held, mapping still stamped", asyn
   const { uploaded } = await uploadTxt(board.id);
   assert.equal(uploaded[0].status, "held");
 
-  const row = await itemStatus(uploaded[0].id);
+  const row = await itemStatus(uploaded[0]);
   assert.deepEqual(row.payload.mapping, MAPPING);
 });
 
@@ -232,7 +238,7 @@ test("releaseHeld: mapped held item → pending_extract; plain held item → pen
   await req(base, "POST", `/api/admin/boards/${mappedBoard.id}/tag-held`,  { sid: admin.sid });
   await req(base, "POST", `/api/admin/boards/${plainBoardId}/tag-held`, { sid: admin.sid });
 
-  const { rows: [mapped] } = await db.query("SELECT status FROM items WHERE id=$1", [mappedItem.id]);
+  const { rows: [mapped] } = await db.query("SELECT status FROM items WHERE id=$1", [mappedItem.instances[0].id]);
   const { rows: [plain]  } = await db.query("SELECT status FROM items WHERE id=$1", [plainId]);
   assert.equal(mapped.status, "pending_extract");
   assert.equal(plain.status,  "pending");
@@ -240,27 +246,28 @@ test("releaseHeld: mapped held item → pending_extract; plain held item → pen
 
 // ── reextract endpoint ───────────────────────────────────────────────────────
 
-test("reextract: item with stamped mapping resets to pending_extract", async () => {
+test("reextract: instance with stamped mapping resets to pending_extract", async () => {
   const { json: board } = await createBoard("reextract-ok");
   await patchBoard(board.id, { mapping: MAPPING });
   const { uploaded: [item] } = await uploadTxt(board.id);
+  const instId = item.instances[0].id;
 
   // Force to tagged so the status change is unambiguous.
-  await db.query("UPDATE items SET status='tagged' WHERE id=$1", [item.id]);
+  await db.query("UPDATE items SET status='tagged' WHERE id=$1", [instId]);
 
-  const r = await req(base, "POST", `/api/items/${item.id}/reextract`, { sid: admin.sid });
+  const r = await req(base, "POST", `/api/instances/${instId}/reextract`, { sid: admin.sid });
   assert.equal(r.status, 200);
   assert.equal(r.json.status, "pending_extract");
 
-  const { rows } = await db.query("SELECT status FROM items WHERE id=$1", [item.id]);
+  const { rows } = await db.query("SELECT status FROM items WHERE id=$1", [instId]);
   assert.equal(rows[0].status, "pending_extract");
 });
 
-test("reextract: item without mapping → 409", async () => {
+test("reextract: instance without mapping → 409", async () => {
   const boardId = await seedBoard(db, "reextract-nomapping");
   const { uploaded: [item] } = await uploadTxt(boardId);
 
-  const r = await req(base, "POST", `/api/items/${item.id}/reextract`, { sid: admin.sid });
+  const r = await req(base, "POST", `/api/instances/${item.instances[0].id}/reextract`, { sid: admin.sid });
   assert.equal(r.status, 409);
 });
 
@@ -279,7 +286,7 @@ test("reasoning endpoint returns payload.fields alongside tag_reasoning", async 
     [JSON.stringify({ fit: "match" }), id]
   );
 
-  const r = await req(base, "GET", `/api/items/${id}/reasoning`, { sid: admin.sid });
+  const r = await req(base, "GET", `/api/instances/${id}/reasoning`, { sid: admin.sid });
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.reasoning, { fit: "match" });
   assert.deepEqual(r.json.fields, fields);

@@ -15,6 +15,7 @@ import {
   createSession,
   createBoard,
   setBoardMembers,
+  createEntity,
   insertItem,
 } from "../server/db.js";
 
@@ -85,14 +86,19 @@ export async function seedBoard(db, name, memberIds = []) {
   return id;
 }
 
+// One entity + one instance, the shape every upload takes. `id` is the
+// entity id (what cards, hearts, crates and the entity routes speak);
+// `instanceId` is the items row (tags, reasoning, queue state).
 export async function seedItem(db, boardId, filename = crypto.randomBytes(6).toString("hex") + ".png") {
-  const id = await insertItem(
+  const id = await createEntity(db, boardId, { identity: filename });
+  const instanceId = await insertItem(
     db,
     boardId,
     { identity: filename, files: [{ name: filename, original_name: filename, w: 10, h: 10 }], fields: {} },
-    "tagged"
+    "tagged",
+    id
   );
-  return { id, filename };
+  return { id, instanceId, filename };
 }
 
 // --- request helper ---

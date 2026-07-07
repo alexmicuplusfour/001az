@@ -4,7 +4,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, req } from "./helpers.js";
-import { insertItem } from "../server/db.js";
+import { createEntity } from "../server/db.js";
 import { manifest } from "../server/connectors/coingecko.js";
 
 // ─── pure: connector manifest shape ──────────────────────────────────────────
@@ -148,14 +148,20 @@ test("POST /api/boards/:id/entities: creates connector entity with bound fields"
     assert.equal(r.json.symbol, "BTC");
     assert.equal(r.json.kind, "connector");
 
-    // Verify DB payload shape.
-    const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [r.json.id]);
-    assert.equal(rows[0].status, "pending"); // straight to tag leg
-    assert.deepEqual(Object.keys(rows[0].payload.fields).sort(), ["change_24h", "market_cap", "price", "url"]);
-    assert.equal(rows[0].payload.fields.price.src, "coingecko");
-    assert.equal(rows[0].payload.fields.price.kind, "number");
-    assert.equal(rows[0].payload.fields.price.v, 50000);
+    // Bound fields live on the entity row.
+    const { rows: [ent] } = await db.query("SELECT * FROM entities WHERE id=$1", [r.json.id]);
+    assert.equal(ent.identity, "bitcoin");
+    assert.equal(ent.symbol, "BTC");
+    assert.deepEqual(Object.keys(ent.fields).sort(), ["change_24h", "market_cap", "price", "url"]);
+    assert.equal(ent.fields.price.src, "coingecko");
+    assert.equal(ent.fields.price.kind, "number");
+    assert.equal(ent.fields.price.v, 50000);
+
+    // One file-less instance is the tag vehicle, queued straight to the tag leg.
+    const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [r.json.instances[0].id]);
+    assert.equal(rows[0].status, "pending");
     assert.deepEqual(rows[0].payload.files, []);
+    assert.deepEqual(rows[0].payload.fields, {});
   } finally {
     globalThis.fetch = original;
   }
@@ -165,11 +171,8 @@ test("POST /api/boards/:id/entities: 409 on duplicate identity", async () => {
   const { json: board } = await createBoard("conn-entity-dup");
   await patchBoard(board.id, { mapping: manifest.template });
 
-  // Insert an entity directly with identity "ethereum".
-  await db.query(
-    "INSERT INTO items (board_id, payload, status, created_at, updated_at) VALUES ($1,$2,'tagged',$3,$3)",
-    [board.id, JSON.stringify({ identity: "ethereum", files: [], fields: {} }), Date.now()]
-  );
+  // An entity with identity "ethereum" already holds the key on this board.
+  await createEntity(db, board.id, { identity: "ethereum" });
 
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {

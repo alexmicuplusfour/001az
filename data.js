@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { toItem } from './utils.js';
+import { toItem, toInstance } from './utils.js';
 
 // Batches of uploaded items we're waiting to see fully tagged.
 const pendingBatches = []; // [{ ids: Set<id>, n: number }]
@@ -65,16 +65,25 @@ export function reconcile(data) {
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
+      // Instances change under merges/splits/removals — take the server list
+      // wholesale (the lightbox re-resolves its selection by instance id).
+      if (Array.isArray(d.instances)) {
+        ex.instances = d.instances.map(toInstance);
+        ex.fields = d.fields || {};
+      }
+      ex.identityProvisional = !!d.identity_provisional;
       // Pick up derived identity and display name once extraction resolves them.
-      if (d.identity && d.identity !== ex.identity) {
+      if ((d.identity && d.identity !== ex.identity) || (d.display_name || null) !== ex.display_name || d.name !== ex.name) {
         ex.name = d.name;
         ex.identity = d.identity;
         ex.display_name = d.display_name || null;
         ex.displayLabel = d.display_name || (d.identity !== d.name ? d.identity : (d.label || d.name));
+        ex.kind = d.kind || ex.kind;
       }
       // Fresh uploads are created client-side without dimensions; pick them
-      // up here so their cards get the computed-height layout path.
-      if (!ex.w && d.w) { ex.w = d.w; ex.h = d.h || 0; }
+      // up here so their cards get the computed-height layout path. A merge
+      // can also swap the face file — follow the server's dimensions.
+      if (d.w && (!ex.w || ex.w !== d.w || ex.h !== d.h)) { ex.w = d.w; ex.h = d.h || 0; }
     } else {
       state.items.unshift(toItem(d));
     }

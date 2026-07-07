@@ -6,6 +6,14 @@ Prerequisite (✅ shipped 2026-07-06): the agnostic core — no image module, no
 
 **There is one kind of thing: the entity** (= the item). It has an identity, a face, files (material), fields (metadata), and — once connectors exist — live data. An image is an entity with one file and no fields; a candidate is identity + extracted fields + files; a stock is identity + bound fields + a generated face and no files at all. The Details panel is the entity view.
 
+> **Revised 2026-07-08 (`entity-instances-plan.md`, shipped):** the entity is now a
+> thin row *above* items; each items row is one **instance** — one file with its own
+> extracted fields, facet tags, and queue state. Entity-level: identity, display
+> name, connector-bound fields, hearts, crates. Instance-level: AI-extracted fields
+> and tags (scope follows the field's source). Merge/split = re-parenting instances;
+> the Details panel is two zones (identity pinned, instance swaps with the file
+> switcher).
+
 **The entity mapping says how each slot gets filled.** Per slot, the source is an AI instruction, a connector, or raw:
 
 ```js

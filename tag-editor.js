@@ -1,9 +1,12 @@
 import { state } from './state.js';
-import { ICONS } from './utils.js';
+import { ICONS, refreshEntityTags } from './utils.js';
 import { toast } from './toast.js';
 import { kindFor } from './kinds.js';
 
-export function openTagEditor(img) {
+// Tags live on instances. The grid's edit affordance targets the face
+// instance (the common case is a single-instance entity, where that's
+// everything); the lightbox passes the instance the user is looking at.
+export function openTagEditor(img, inst = img.instances?.[0]) {
   const overlay = document.createElement("div");
   overlay.className = "te-overlay";
 
@@ -41,7 +44,7 @@ export function openTagEditor(img) {
       pill.className = "te-val";
       const cb = document.createElement("input");
       cb.type = "checkbox";
-      cb.checked = img.tagSet.has(`${f.key}/${v}`);
+      cb.checked = (inst?.tagSet || img.tagSet).has(`${f.key}/${v}`);
       if (f.single) {
         cb.addEventListener("change", () => {
           if (cb.checked) {
@@ -97,17 +100,20 @@ export function openTagEditor(img) {
     saveBtn.disabled = true;
     saveBtn.textContent = "Saving…";
     try {
-      const r = await fetch(`/api/items/${img.id}/tags`, {
+      if (!inst) throw new Error();
+      const r = await fetch(`/api/instances/${inst.id}/tags`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tags }),
       });
       if (!r.ok) throw new Error();
       const { tags: saved } = await r.json();
-      img.tags = saved;
-      img.tagSet = new Set(saved);
-      img.status = "tagged";
-      img.undecided = false;
+      inst.tags = saved;
+      inst.tagSet = new Set(saved);
+      inst.status = "tagged";
+      inst.undecided = false;
+      refreshEntityTags(img);
+      if (img.instances.every((i) => i.status === "tagged" || i.status === "failed")) img.status = "tagged";
       close();
       document.dispatchEvent(new Event('app:render'));
     } catch {

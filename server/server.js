@@ -7,8 +7,12 @@ import {
   initDb,
   countItems,
   listItems,
-  deleteItem,
-  reprocessItem,
+  deleteEntity,
+  deleteInstance,
+  reprocessEntity,
+  getEntityBoard,
+  entityInstanceCount,
+  createEntity,
   cancelBoardQueue,
   seedAdmin,
   createUser,
@@ -60,7 +64,6 @@ import {
   listItemPayloads,
   updateItemPayload,
   reextractItem,
-  removeFileFromItem,
   insertItem,
 } from "./db.js";
 import {
@@ -184,9 +187,22 @@ const inviteLink = (token) => `${BASE_URL}/auth/${token}`;
 // async route goes through wrap() so a DB error becomes a 500, not a crash.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// Item-scoped routes (/api/items/:id/*): resolve the item's board and enforce
-// board access. Missing and forbidden both answer 404 so item ids can't be
-// probed across boards. Attaches req.itemId / req.itemBoardId.
+// Entity-scoped routes (/api/items/:id/*, where the id is a card = entity):
+// resolve the entity's board and enforce board access. Missing and forbidden
+// both answer 404 so ids can't be probed across boards. Attaches
+// req.entityId / req.entityBoardId.
+const requireEntityAccess = wrap(async (req, res, next) => {
+  const id = Number(req.params.id);
+  const ent = Number.isInteger(id) && id > 0 ? await getEntityBoard(db, id) : null;
+  if (!ent || !(await canAccessBoard(db, ent.board_id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  req.entityId = id;
+  req.entityBoardId = ent.board_id;
+  next();
+});
+
+// Instance-scoped routes (/api/instances/:id/*): same contract against the
+// items table. Attaches req.itemId / req.itemBoardId.
 const requireItemAccess = wrap(async (req, res, next) => {
   const id = Number(req.params.id);
   const item = Number.isInteger(id) && id > 0 ? await getItemBoard(db, id) : null;
@@ -234,15 +250,15 @@ app.post("/api/logout", wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// --- favorites (members of the item's board) ---
-app.post("/api/items/:id/favorite", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const result = await toggleFavorite(db, req.user.id, req.itemId);
+// --- favorites (members of the entity's board; hearts are entity-level) ---
+app.post("/api/items/:id/favorite", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const result = await toggleFavorite(db, req.user.id, req.entityId);
   if (!result) return res.status(404).json({ error: "not found" });
   res.json(result);
 }));
 
-app.get("/api/items/:id/hearts", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  res.json({ names: await heartNames(db, req.itemId) });
+app.get("/api/items/:id/hearts", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  res.json({ names: await heartNames(db, req.entityId) });
 }));
 
 // --- crates (any logged-in user) ---
@@ -786,14 +802,18 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   const q = String(req.query.q || "").trim().slice(0, 500);
   if (!q) return res.json({ results: [] });
   const { vectors: [qv] } = await embedTexts({ ...embedder, texts: [q] });
-  const scored = [];
+  // Vectors are per instance; results speak in entity ids (what cards are),
+  // so multiple matching instances collapse to their entity's best score.
+  const best = new Map();
   for (const row of await boardEmbeddings(db, boardId, embedder.model)) {
     const v = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
     if (v.length !== qv.length) continue; // stale dims mid-model-change
     let s = 0;
     for (let i = 0; i < v.length; i++) s += v[i] * qv[i];
-    scored.push({ id: row.id, score: s });
+    const eid = row.entity_id ?? row.id;
+    if (!best.has(eid) || best.get(eid) < s) best.set(eid, s);
   }
+  const scored = [...best].map(([id, score]) => ({ id, score }));
   scored.sort((a, b) => b.score - a.score);
   // Relative cutoff: keep everything within 0.15 of the best hit — absolute
   // cosine thresholds vary too much between models to hardcode one.
@@ -818,19 +838,19 @@ app.get("/api/logs/stream", requireAdmin, (req, res) => {
   });
 });
 
-// The AI's per-facet justification for an item's tags. Kept out of the
-// /api/items list payload — fetched lazily when the lightbox panel opens.
-app.get("/api/items/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
+// The AI's per-facet justification for an instance's tags, plus its
+// extracted fields. Kept out of the /api/items list payload — fetched lazily
+// when the lightbox panel opens (and again per instance switch).
+app.get("/api/instances/:id/reasoning", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await getItemReasoning(db, req.itemId);
   res.json({
     reasoning: row?.tag_reasoning || {},
     fields: row?.payload?.fields || {},
-    files: row?.payload?.files || [],
-    identity_provisional: !!row?.payload?.identity_provisional,
   });
 }));
 
-app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req, res) => {
+// Tags are per instance — a human call about one piece of material.
+app.patch("/api/instances/:id/tags", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const tags = req.body && Array.isArray(req.body.tags) ? req.body.tags : null;
   if (!tags) return res.status(400).json({ error: "tags array required" });
   const board = await getBoard(db, req.itemBoardId);
@@ -841,57 +861,44 @@ app.patch("/api/items/:id/tags", requireAuth, requireItemAccess, wrap(async (req
   res.json({ ok: true, tags: clean });
 }));
 
-app.delete("/api/items/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const row = await deleteItem(db, req.itemId);
-  if (!row) return res.status(404).json({ error: "not found" });
-  sources.cleanup(row.payload?.files);
-  console.log(`deleted #${req.itemId} ${row.payload?.identity || ""}`.trim());
+// Delete the whole entity: instances cascade, all their files are cleaned.
+app.delete("/api/items/:id", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const result = await deleteEntity(db, req.entityId);
+  if (!result) return res.status(404).json({ error: "not found" });
+  sources.cleanup(result.files);
+  console.log(`deleted entity #${req.entityId}`);
   res.json({ ok: true });
 }));
 
-app.post("/api/items/:id/reprocess", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  if (!(await reprocessItem(db, req.itemId))) return res.status(404).json({ error: "not found" });
-  console.log(`reprocess queued #${req.itemId}`);
+// Card-level reprocess: re-queue every instance for tagging.
+app.post("/api/items/:id/reprocess", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  if (!(await reprocessEntity(db, req.entityId))) return res.status(404).json({ error: "not found" });
+  console.log(`reprocess queued entity #${req.entityId}`);
   res.json({ ok: true, status: "pending" });
 }));
 
-// Re-run extraction for an item that already has a stamped mapping. The item
-// must have payload.mapping; items without one get a 409.
-app.post("/api/items/:id/reextract", requireAuth, requireItemAccess, wrap(async (req, res) => {
+// Re-run extraction for one instance that has a stamped mapping (409 without
+// one). Identity re-derivation may re-parent the instance — merge or split.
+app.post("/api/instances/:id/reextract", requireAuth, requireItemAccess, wrap(async (req, res) => {
   if (!(await reextractItem(db, req.itemId))) return res.status(409).json({ error: "item has no stamped mapping" });
-  console.log(`reextract queued #${req.itemId}`);
+  console.log(`reextract queued instance #${req.itemId}`);
   res.json({ ok: true, status: "pending_extract" });
 }));
 
-// Remove one file from an entity by zero-based index.
-// If this was the last file the entity is deleted entirely; otherwise the
-// entity is re-queued for extraction so its fields are re-derived.
-app.delete("/api/items/:id/files/:index", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const index = Number(req.params.index);
-  if (!Number.isInteger(index) || index < 0) return res.status(400).json({ error: "invalid file index" });
-
-  const { rows: [item] } = await db.query("SELECT payload FROM items WHERE id=$1", [req.itemId]);
+// Remove one instance from its entity (file included). The last instance
+// can't be removed this way — delete the entity instead. No re-queue needed:
+// the remaining instances own their fields and tags already.
+app.delete("/api/instances/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const { rows: [item] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [req.itemId]);
   if (!item) return res.status(404).json({ error: "not found" });
-  const files = item.payload?.files || [];
-  if (index >= files.length) return res.status(400).json({ error: "file index out of range" });
-  if (files.length === 1) return res.status(409).json({ error: "cannot remove the only file — delete the item instead" });
+  if (item.entity_id && (await entityInstanceCount(db, item.entity_id)) <= 1)
+    return res.status(409).json({ error: "cannot remove the only instance — delete the item instead" });
 
-  const removedFile = files[index];
-  const updatedPayload = await removeFileFromItem(db, req.itemId, index);
-
-  // Clean up the removed file from disk.
-  sources.cleanup([removedFile]);
-
-  // Re-queue for extraction (or plain tagging for unmapped items).
-  const hasMapping = !!(updatedPayload?.mapping?.fields?.length || updatedPayload?.mapping?.identity?.from === "ai");
-  const newStatus = hasMapping ? "pending_extract" : "pending";
-  await db.query(
-    "UPDATE items SET status=$1, attempts=0, error=NULL, updated_at=$2 WHERE id=$3",
-    [newStatus, Date.now(), req.itemId]
-  );
-
-  console.log(`file ${index} removed from item #${req.itemId} → ${newStatus}`);
-  res.json({ ok: true, status: newStatus });
+  const removed = await deleteInstance(db, req.itemId);
+  if (!removed) return res.status(404).json({ error: "not found" });
+  sources.cleanup(removed.payload?.files);
+  console.log(`instance #${req.itemId} removed from entity #${removed.entity_id}`);
+  res.json({ ok: true });
 }));
 
 // --- connector routes ---
@@ -936,26 +943,27 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
     return res.status(502).json({ error: err.message });
   }
 
-  const payload = {
-    identity: entity.identity,
-    display_name: entity.display_name,
-    symbol: entity.symbol || null,
-    files: [],
-    fields: entity.fields,
-    mapping: board.mapping,
-  };
+  // Bound fields live on the entity; one file-less instance is the tag
+  // vehicle (tags/reasoning/queue state are per instance).
   const status = board.auto_tag ? "pending" : "held";
-  let id;
+  let eid;
   try {
-    id = await insertItem(db, board.id, payload, status);
+    eid = await createEntity(db, board.id, {
+      identity: entity.identity,
+      displayName: entity.display_name,
+      symbol: entity.symbol || null,
+      fields: entity.fields,
+    });
   } catch (err) {
     if (err.code === "23505") return res.status(409).json({ error: "entity already on this board" });
     throw err;
   }
+  const payload = { identity: entity.identity, files: [], fields: {}, mapping: board.mapping };
+  const id = await insertItem(db, board.id, payload, status, eid);
 
-  console.log(`connector entity created: ${connectorName}/${entityId} → #${id} (${entity.display_name})`);
+  console.log(`connector entity created: ${connectorName}/${entityId} → #${eid} (${entity.display_name})`);
   res.json({
-    id,
+    id: eid,
     name: entity.identity,
     identity: entity.identity,
     display_name: entity.display_name,
@@ -967,6 +975,11 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
     w: null,
     h: null,
     label: null,
+    fields: entity.fields,
+    instances: [{
+      id, name: entity.identity, label: null, w: null, h: null,
+      kind: "connector", status, tags: [], undecided: false,
+    }],
   });
 }));
 

@@ -16,9 +16,14 @@ import {
   setBoardNextRun,
   itemsNeedingEmbedding,
   setItemEmbedding,
-  getItemByIdentity,
-  setItemIdentity,
-  appendItemFiles,
+  getEntity,
+  getEntityByIdentity,
+  createEntity,
+  setEntityIdentity,
+  markEntityProvisional,
+  reparentItem,
+  entityInstanceCount,
+  deleteEntityIfEmpty,
 } from "./db.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 
@@ -299,14 +304,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // Images: the thumbnail (cheap) rather than the original. PDFs: the original
   // as a document block (Anthropic-only — providers.js rejects it elsewhere).
   // Text docs: the content inline, capped.
-  async function modelInputFor(payload) {
+  async function modelInputFor(payload, entity = null) {
     const file = payload.files?.[0];
     if (!file) {
-      // Entity with no material files (connector-born): the bound-fields
-      // dossier appended by tagOne is the material; anchor it with the name.
+      // Instance with no material file (connector tag vehicle): the
+      // bound-fields dossier appended by tagOne is the material; anchor it
+      // with the entity's name.
       return [{
         kind: "text",
-        text: `The item is an entity named "${payload.display_name || payload.identity}". Tag it using the record_tags tool, judging from its extracted fields below.`,
+        text: `The item is an entity named "${entity?.display_name || entity?.identity || payload.identity}". Tag it using the record_tags tool, judging from its extracted fields below.`,
       }];
     }
     if (file.kind === "pdf") {
@@ -340,13 +346,17 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw new Error("no API key configured");
 
-    const parts = await modelInputFor(row.payload);
+    const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
+    const parts = await modelInputFor(row.payload, entity);
     // Distilled extraction results ride along as a text part so the tagger
-    // sees the structured data without re-reading the raw material.
-    const fields = row.payload.fields || {};
+    // sees the structured data without re-reading the raw material. Entity
+    // fields (connector-bound) come first, the instance's own extractions
+    // override on key collision.
+    const fields = { ...(entity?.fields || {}), ...(row.payload.fields || {}) };
     const fieldLines = Object.entries(fields)
       .filter(([, { v }]) => v !== null && v !== undefined)
       .map(([key, { v }]) => `${key}: ${v}`);
+    if (entity?.display_name) fieldLines.unshift(`entity: ${entity.display_name}`);
     if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
     const { input, usage } = await callTagger({
       provider: ai.provider,
@@ -456,18 +466,25 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
   const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
 
-  // Merge a provisional item (just extracted) into an existing entity that
-  // already holds the same derived identity. Appends files, deletes the
-  // provisional item, and re-queues the existing entity for re-extraction.
-  async function mergeIntoExisting(provisionalRow, existingId) {
-    const label = provisionalRow.payload?.identity || `item ${provisionalRow.id}`;
-    await appendItemFiles(db, existingId, provisionalRow.payload.files || []);
-    await db.query("DELETE FROM items WHERE id=$1", [provisionalRow.id]);
-    await db.query(
-      "UPDATE items SET status='pending_extract', attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
-      [Date.now(), existingId]
-    );
-    console.log(`merge: provisional #${provisionalRow.id} (${label}) merged into entity #${existingId}`);
+  // Keep the better-cased display name: an established "Maya Chen" never
+  // degrades to a re-derived "maya chen"; a cased derivation upgrades an
+  // uncased one.
+  const pickDisplayName = (existing, derived) =>
+    existing && /[A-Z]/.test(existing) && !/[A-Z]/.test(derived) ? existing : derived;
+
+  // Move an instance under the entity that already holds its derived
+  // identity, keeping the fields and tags it just earned (merge and split are
+  // the same move: re-parent, then drop the old entity if it emptied out).
+  async function reparentInto(row, target, displayName, oldEntityId) {
+    await reparentItem(db, row.id, target.id);
+    // A better-cased derivation may upgrade the winner's display name.
+    const better = pickDisplayName(target.display_name, displayName);
+    if (better !== target.display_name) await setEntityIdentity(db, target.id, target.identity, better);
+    if (await deleteEntityIfEmpty(db, oldEntityId)) {
+      console.log(`merge: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}"), empty entity #${oldEntityId} deleted`);
+    } else {
+      console.log(`split: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}")`);
+    }
   }
 
   // Run extraction for one pending_extract item. Resolves the board's AI the
@@ -512,49 +529,74 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       fields[f.key] = { v, why };
     }
 
-    // Derived identity: resolve before writing fields.
+    // Derived identity: resolve against the parent entity before advancing.
+    // The instance's fields are written either way — they're its own.
     if (mapping.identity?.from === "ai") {
+      const entity = await getEntity(db, row.entity_id);
       const rawIdentity = input.identity?.value;
-      if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
-        // AI couldn't derive an identity. Only flag provisional on brand-new
-        // items (no display_name yet). Re-extracted merged entities already have
-        // a valid identity — leave it alone.
-        const alreadyIdentified = !!row.payload.display_name && !row.payload.identity_provisional;
-        if (!alreadyIdentified) {
-          await db.query(
-            "UPDATE items SET payload = payload || '{\"identity_provisional\":true}'::jsonb, updated_at=$1 WHERE id=$2",
-            [Date.now(), row.id]
-          );
-        }
+      if (!entity) {
+        // Orphan instance (shouldn't happen) — extract what we can and move on.
         await markExtracted(db, row.id, fields);
-        console.log(`extracted #${row.id} [no identity derived${alreadyIdentified ? " — keeping existing" : " — provisional"}] [${ai.model}]`);
+        console.warn(`extracted #${row.id} [no parent entity — skipped identity resolution] [${ai.model}]`);
+      } else if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
+        // AI couldn't derive an identity. Only flag provisional on entities
+        // that were never identified (no display_name); established entities
+        // keep their identity — this instance just didn't add evidence.
+        const established = !!entity.display_name;
+        if (!established) await markEntityProvisional(db, entity.id);
+        await markExtracted(db, row.id, fields);
+        console.log(`extracted #${row.id} [no identity derived${established ? " — keeping entity identity" : " — provisional"}] [${ai.model}]`);
       } else {
-        // Normalise underscores/hyphens in the display name too so "priya_ramanathan"
-        // becomes "priya ramanathan". If the entity already has a better display name
-        // (one that has uppercase letters, meaning it was properly cased before), keep it.
+        // Normalise underscores/hyphens in the display name too so
+        // "priya_ramanathan" becomes "priya ramanathan".
         const newDisplayName = rawIdentity.trim().replace(/[-_]+/g, " ");
-        const existingDisplayName = row.payload.display_name;
-        const displayName = (existingDisplayName && /[A-Z]/.test(existingDisplayName) && !/[A-Z]/.test(newDisplayName))
-          ? existingDisplayName
-          : newDisplayName;
         const derived = normaliseIdentity(rawIdentity);
-        try {
-          await setItemIdentity(db, row.id, derived, displayName);
+        if (entity.identity === derived) {
+          // Same key — refresh the display name (preserve rule: an established
+          // cased name never degrades) and make sure the provisional flag is
+          // gone.
+          await setEntityIdentity(db, entity.id, derived, pickDisplayName(entity.display_name, newDisplayName));
           await markExtracted(db, row.id, fields);
           console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
-        } catch (err) {
-          if (err.code === "23505") {
-            // Another entity already holds this identity — merge.
-            const existing = await getItemByIdentity(db, row.board_id, derived);
-            if (existing) {
-              await mergeIntoExisting(row, existing.id);
-            } else {
-              // Race resolved by the time we looked — treat as no-collision.
-              await setItemIdentity(db, row.id, derived, displayName);
+        } else {
+          const other = await getEntityByIdentity(db, row.board_id, derived);
+          if (other) {
+            // Another entity already holds this identity — merge (or split
+            // away from a multi-instance entity): re-parent this instance.
+            await reparentInto(row, other, newDisplayName, entity.id);
+            await markExtracted(db, row.id, fields);
+          } else if ((await entityInstanceCount(db, entity.id)) <= 1) {
+            // Sole instance and nobody holds the derived key: establish a
+            // provisional entity, or rename an established one whose identity
+            // changed on re-extract — in place either way, so hearts and
+            // crate membership survive.
+            try {
+              await setEntityIdentity(db, entity.id, derived, newDisplayName);
+              await markExtracted(db, row.id, fields);
+              console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
+            } catch (err) {
+              if (err.code !== "23505") throw err;
+              // Race: the identity appeared since the lookup — merge instead.
+              const winner = await getEntityByIdentity(db, row.board_id, derived);
+              if (!winner) throw err;
+              await reparentInto(row, winner, newDisplayName, entity.id);
               await markExtracted(db, row.id, fields);
             }
           } else {
-            throw err;
+            // Split: this instance belongs to someone new; the rest of the
+            // entity stays as it is.
+            let targetId;
+            try {
+              targetId = await createEntity(db, row.board_id, { identity: derived, displayName: newDisplayName });
+            } catch (err) {
+              if (err.code !== "23505") throw err;
+              const winner = await getEntityByIdentity(db, row.board_id, derived);
+              if (!winner) throw err;
+              targetId = winner.id;
+            }
+            await reparentItem(db, row.id, targetId);
+            await markExtracted(db, row.id, fields);
+            console.log(`split: instance #${row.id} detached from entity #${entity.id} into #${targetId} ("${derived}")`);
           }
         }
       }

@@ -80,16 +80,40 @@ CREATE TABLE IF NOT EXISTS board_members (
 ALTER TABLE board_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member';
 CREATE INDEX IF NOT EXISTS idx_bm_user ON board_members(user_id);
 
+-- The entity: the singular thing a card represents — one per (board, identity).
+-- Its material lives below it as instances (items rows, one file each).
+-- identity is the per-board unique key: a normalised AI-derived value
+-- ("maya chen"), a connector id ("bitcoin"), or the stored filename while
+-- nothing better is known (raw boards keep it that way forever).
+-- fields holds connector-bound values only; AI-extracted fields are
+-- per-instance (items.payload.fields) — scope follows the field's source.
+CREATE TABLE IF NOT EXISTS entities (
+  id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  board_id             TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  identity             TEXT NOT NULL,
+  display_name         TEXT,   -- AI's original-casing output / connector name
+  symbol               TEXT,   -- connector ticker face (e.g. "BTC")
+  fields               JSONB NOT NULL DEFAULT '{}',
+  identity_provisional BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at           BIGINT NOT NULL,
+  updated_at           BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_board_identity ON entities(board_id, identity);
+CREATE INDEX IF NOT EXISTS idx_entities_board ON entities(board_id);
+
 -- status: held -> pending_extract -> extracting -> pending -> processing -> tagged | failed
 -- ('held' gates all AI spend; items with a stamped mapping go through the
 --  extract leg first, plain items skip straight to pending)
--- payload is one generic shape for every item:
+-- One items row = one INSTANCE of an entity: exactly one file (or none, for
+-- the connector tag vehicle) with its own extracted fields, tags, reasoning
+-- and queue state. payload shape:
 --   { identity, files: [{ name, original_name, w, h }], fields: {} }
--- identity is the item's per-board unique key (for uploads, the stored
--- filename), files its material, fields reserved for extraction.
+-- payload.identity is vestigial (the stored filename); the entity key lives
+-- on the parent entities row.
 CREATE TABLE IF NOT EXISTS items (
   id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   board_id      TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  entity_id     BIGINT REFERENCES entities(id) ON DELETE CASCADE,
   status        TEXT NOT NULL DEFAULT 'pending',
   tags          JSONB NOT NULL DEFAULT '[]',
   -- AI's per-facet justification: { facetKey: sentence, fit: sentence }
@@ -102,6 +126,8 @@ CREATE TABLE IF NOT EXISTS items (
   updated_at    BIGINT NOT NULL
 );
 ALTER TABLE items ADD COLUMN IF NOT EXISTS tag_reasoning JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE items ADD COLUMN IF NOT EXISTS entity_id BIGINT REFERENCES entities(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_items_entity ON items(entity_id);
 -- Semantic search: one vector per tagged item (raw Float32Array bytes) from
 -- the app-global embedding model (settings: embed_enabled/embed_key_id/
 -- embed_model). NULL = not embedded yet; a model mismatch means stale — the
@@ -111,9 +137,8 @@ ALTER TABLE items ADD COLUMN IF NOT EXISTS embedding_model TEXT;
 CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
 CREATE INDEX IF NOT EXISTS idx_items_board ON items(board_id);
--- identity is unique per board (successor of the old global UNIQUE(filename);
--- per-board is the real semantic — the same file may exist on two boards)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_items_board_identity ON items (board_id, (payload->>'identity'));
+-- identity uniqueness lives on entities (idx_entities_board_identity);
+-- the old idx_items_board_identity is dropped by initDb on live DBs.
 
 -- Judgment history: one row per tagging event (AI run or manual edit), so
 -- scheduled retags accrue a timeline instead of overwriting the only copy.
@@ -145,9 +170,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at BIGINT NOT NULL
 );
 
+-- Hearts are entity-level. item_id keeps its historic name but references
+-- entities — the initDb migration seeded entity ids from the old item ids,
+-- so existing rows re-pointed with values unchanged.
 CREATE TABLE IF NOT EXISTS favorites (
   user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  item_id    BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  item_id    BIGINT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   created_at BIGINT NOT NULL,
   PRIMARY KEY (user_id, item_id)
 );
@@ -178,9 +206,11 @@ CREATE TABLE IF NOT EXISTS filter_configs (
 );
 CREATE INDEX IF NOT EXISTS idx_filter_configs_user ON filter_configs(user_id, board_id);
 
+-- Crates hold entities (same item_id-name-references-entities convention as
+-- favorites above).
 CREATE TABLE IF NOT EXISTS crate_items (
   crate_id   BIGINT NOT NULL REFERENCES crates(id) ON DELETE CASCADE,
-  item_id    BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  item_id    BIGINT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
   created_at BIGINT NOT NULL,
   PRIMARY KEY (crate_id, item_id)
 );

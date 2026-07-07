@@ -4,6 +4,23 @@ export function isAdmin() {
   return !!(state.me && state.me.is_admin);
 }
 
+// One instance = one file with its own tags/status/fields under an entity.
+export function toInstance(i) {
+  const list = Array.isArray(i.tags) ? i.tags : [];
+  return {
+    id: i.id,
+    name: i.name,          // stored filename — used for URL construction
+    label: i.label || null,
+    w: i.w || 0,
+    h: i.h || 0,
+    kind: i.kind || "image",
+    status: i.status,
+    tags: list,
+    tagSet: new Set(list),
+    undecided: !!i.undecided,
+  };
+}
+
 export function toItem(d) {
   const list = Array.isArray(d.tags) ? d.tags : [];
   // Display label priority: original-casing AI name > derived identity >
@@ -11,14 +28,15 @@ export function toItem(d) {
   const identity = d.identity || d.name;
   const displayLabel = d.display_name || (identity !== d.name ? identity : (d.label || d.name));
   return {
-    id: d.id,
-    name: d.name,         // stored filename — used for URL construction
+    id: d.id,             // entity id — what cards, hearts and crates key on
+    name: d.name,         // face file's stored name — used for URL construction
     identity,             // entity's semantic key (derived name or stored filename)
     display_name: d.display_name || null,  // AI's original-casing output
     symbol: d.symbol || null,             // connector entities: short ticker e.g. "BTC"
     displayLabel,         // what to show as the primary human-readable title
-    status: d.status,
-    tags: list,
+    identityProvisional: !!d.identity_provisional,
+    status: d.status,     // aggregate across instances (server-computed)
+    tags: list,           // union across instances — what filtering consumes
     tagSet: new Set(list),
     undecided: !!d.undecided,
     hearts: d.hearts || 0,
@@ -28,7 +46,21 @@ export function toItem(d) {
     h: d.h || 0,
     kind: d.kind || "image",
     label: d.label || null,
+    fields: d.fields || {},  // connector-bound entity fields (per-instance fields come from the reasoning fetch)
+    instances: Array.isArray(d.instances) ? d.instances.map(toInstance) : [],
   };
+}
+
+// Recompute an entity's union tags after a per-instance tag change.
+export function refreshEntityTags(item) {
+  const tags = [];
+  const seen = new Set();
+  for (const inst of item.instances) {
+    for (const t of inst.tags) if (!seen.has(t)) { seen.add(t); tags.push(t); }
+  }
+  item.tags = tags;
+  item.tagSet = new Set(tags);
+  item.undecided = item.instances.length > 0 && item.instances.every((i) => i.undecided);
 }
 
 // An item has a mapped identity when extraction (or a connector) gave it an

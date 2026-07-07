@@ -46,7 +46,8 @@ export async function initDb(db) {
         'w', payload->'w', 'h', payload->'h'))),
       'fields', '{}'::jsonb)
     WHERE payload ? 'filename' AND NOT payload ? 'identity'`);
-  await db.query("DROP INDEX IF EXISTS idx_items_filename"); // superseded by idx_items_board_identity
+  await db.query("DROP INDEX IF EXISTS idx_items_filename"); // superseded by the entity identity index
+  await migrateItemsToEntities(db);
   // One-time migration: fold the legacy single-key setting into the ai_keys
   // registry and point the default at it.
   const legacy = await getSetting(db, "api_key");
@@ -97,6 +98,96 @@ async function migrateImagesToItems(db) {
   });
 }
 
+// One-time: hoist the entity layer out of items. Every item row becomes an
+// instance (one file, own fields/tags/queue state) under a new entities row
+// carrying identity/display_name/symbol/connector fields. Entity ids are
+// seeded from the item ids so favorites/crate_items re-point with their
+// values unchanged (and client-visible card ids stay stable). Multi-file
+// items (derived-identity merges) split into one instance per file; the
+// extra files were never individually extracted or tagged, so they queue
+// fresh. Idempotent: driven by items with entity_id IS NULL, and the split /
+// FK-re-point steps carry their own natural guards. Transactional.
+async function migrateItemsToEntities(db) {
+  await withTx(db, async (c) => {
+    const { rowCount: migrated } = await c.query(
+      `INSERT INTO entities (id, board_id, identity, display_name, symbol, fields, identity_provisional, created_at, updated_at)
+       OVERRIDING SYSTEM VALUE
+       SELECT id, board_id,
+         COALESCE(payload->>'identity', payload->'files'->0->>'name', id::text),
+         payload->>'display_name',
+         payload->>'symbol',
+         CASE WHEN jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
+              THEN COALESCE(payload->'fields','{}'::jsonb) ELSE '{}'::jsonb END,
+         COALESCE((payload->>'identity_provisional')::boolean, FALSE),
+         created_at, updated_at
+       FROM items WHERE entity_id IS NULL`
+    );
+    if (migrated) {
+      await c.query(
+        "SELECT setval(pg_get_serial_sequence('entities','id'), GREATEST((SELECT COALESCE(MAX(id),1) FROM entities), 1))"
+      );
+      // Connector vehicles (no files): their bound fields moved to the entity.
+      await c.query(
+        `UPDATE items SET payload = jsonb_set(payload, '{fields}', '{}'::jsonb)
+         WHERE entity_id IS NULL AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0`
+      );
+      // Entity-level keys leave the instance payload (they live on entities now).
+      await c.query(
+        `UPDATE items SET payload = payload - 'display_name' - 'identity_provisional' - 'symbol',
+           entity_id = id
+         WHERE entity_id IS NULL`
+      );
+      console.log(`db: migrated ${migrated} item(s) into the entity/instance model`);
+    }
+
+    // Split multi-file items: the row keeps files[0]; every extra file becomes
+    // a fresh instance under the same entity, queued for its own extraction
+    // and tagging (its data was never derived individually — see plan).
+    const { rows: multi } = await c.query(
+      "SELECT id, board_id, entity_id, status, payload, created_at FROM items WHERE jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) > 1"
+    );
+    for (const row of multi) {
+      const files = row.payload.files;
+      const mapping = row.payload.mapping;
+      for (let i = 1; i < files.length; i++) {
+        const f = files[i];
+        const payload = { identity: f.name, files: [f], fields: {}, ...(mapping ? { mapping } : {}) };
+        const status = row.status === "held" ? "held" : mapping ? "pending_extract" : "pending";
+        await c.query(
+          `INSERT INTO items (board_id, entity_id, status, payload, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [row.board_id, row.entity_id, status, JSON.stringify(payload), row.created_at, Date.now()]
+        );
+      }
+      await c.query(
+        "UPDATE items SET payload = jsonb_set(payload, '{files}', $1::jsonb), updated_at=$2 WHERE id=$3",
+        [JSON.stringify([files[0]]), Date.now(), row.id]
+      );
+    }
+    if (multi.length) console.log(`db: split ${multi.length} multi-file item(s) into per-file instances`);
+
+    // Re-point favorites / crate_items FKs from items to entities (values are
+    // unchanged — entity ids were seeded from item ids above). Constraint
+    // names vary across DB generations, so find them by what they reference.
+    const { rows: fks } = await c.query(
+      `SELECT con.conname, rel.relname AS tbl
+       FROM pg_constraint con
+       JOIN pg_class rel ON rel.oid = con.conrelid
+       JOIN pg_class ref ON ref.oid = con.confrelid
+       WHERE con.contype = 'f' AND rel.relname IN ('favorites','crate_items') AND ref.relname = 'items'`
+    );
+    for (const fk of fks) {
+      await c.query(`ALTER TABLE ${fk.tbl} DROP CONSTRAINT ${fk.conname}`);
+      await c.query(
+        `ALTER TABLE ${fk.tbl} ADD CONSTRAINT ${fk.tbl}_entity_fkey FOREIGN KEY (item_id) REFERENCES entities(id) ON DELETE CASCADE`
+      );
+    }
+
+    // Identity uniqueness now lives on entities.
+    await c.query("DROP INDEX IF EXISTS idx_items_board_identity");
+  });
+}
+
 // Run fn with a dedicated client inside BEGIN/COMMIT.
 async function withTx(db, fn) {
   const client = await db.connect();
@@ -118,18 +209,62 @@ export async function countItems(db) {
   return rows[0].c;
 }
 
+// Aggregate an entity's display status from its instances: any in-flight
+// state wins (the card shows a spinner), then failed, then held; an entity
+// whose instances are all done reads tagged. Single-instance entities (every
+// raw board) pass their status through verbatim.
+const STATUS_PRIORITY = ["extracting", "pending_extract", "processing", "pending", "failed", "held"];
+export function aggregateStatus(instances) {
+  if (!instances.length) return "tagged";
+  if (instances.length === 1) return instances[0].status;
+  for (const s of STATUS_PRIORITY) if (instances.some((i) => i.status === s)) return s;
+  return "tagged";
+}
+
+// One instance's slice of the list payload.
+function instanceEntry(r) {
+  const file = r.payload.files?.[0];
+  return {
+    id: r.id,
+    name: file?.name || r.payload.identity,
+    label: file?.original_name || null,
+    w: file?.w || null,
+    h: file?.h || null,
+    kind: file?.kind || (file ? "image" : "connector"),
+    status: r.status,
+    tags: r.tags,
+    undecided: !!r.undecided,
+  };
+}
+
+// The board listing: entities, each carrying its instances. Face fields
+// (name/w/h/kind/label) mirror the first instance so the card path needs no
+// special cases; tags at the entity level are the union across instances
+// (what filtering and facet counts consume), per-instance tags ride inside.
 export async function listItems(db, userId = null, boardId = null) {
-  const { rows } = await db.query(
-    `SELECT i.id, i.payload, i.status, i.tags, i.undecided,
-      (SELECT COUNT(*) FROM favorites f WHERE f.item_id = i.id) AS hearts,
+  const { rows: ents } = await db.query(
+    `SELECT e.id, e.identity, e.display_name, e.symbol, e.fields, e.identity_provisional, e.created_at,
+      (SELECT COUNT(*) FROM favorites f WHERE f.item_id = e.id) AS hearts,
       EXISTS(
-        SELECT 1 FROM favorites f WHERE f.item_id = i.id AND f.user_id = $1
+        SELECT 1 FROM favorites f WHERE f.item_id = e.id AND f.user_id = $1
       ) AS fav
-     FROM items i
-     WHERE ($2::text IS NULL OR i.board_id = $2)
-     ORDER BY i.created_at DESC, i.id DESC`,
+     FROM entities e
+     WHERE ($2::text IS NULL OR e.board_id = $2)
+     ORDER BY e.created_at DESC, e.id DESC`,
     [userId, boardId]
   );
+
+  const { rows: insts } = await db.query(
+    `SELECT id, entity_id, status, tags, undecided, payload FROM items
+     WHERE ($1::text IS NULL OR board_id = $1)
+     ORDER BY created_at ASC, id ASC`,
+    [boardId]
+  );
+  const byEntity = new Map();
+  for (const r of insts) {
+    if (!byEntity.has(r.entity_id)) byEntity.set(r.entity_id, []);
+    byEntity.get(r.entity_id).push(instanceEntry(r));
+  }
 
   const crateMap = new Map();
   if (userId) {
@@ -145,43 +280,50 @@ export async function listItems(db, userId = null, boardId = null) {
     }
   }
 
-  return rows.map((r) => {
-    // name = stored filename used to construct gallery/thumbnail URLs.
-    // For raw-identity items this equals payload.identity; for derived-identity
-    // items they diverge — name stays the file path, identity is the entity key.
-    const storedFile = r.payload.files?.[0]?.name || r.payload.identity;
-    const originalName = r.payload.files?.[0]?.original_name || null;
-    const identity = r.payload.identity;
+  return ents.map((e) => {
+    const instances = byEntity.get(e.id) || [];
+    const face = instances[0] || null;
+    const tags = [];
+    const seen = new Set();
+    for (const i of instances) for (const t of i.tags) if (!seen.has(t)) { seen.add(t); tags.push(t); }
     return {
-      id: r.id,
-      name: storedFile,
-      identity,
+      id: e.id,
+      // name = stored filename of the face file, used to construct gallery/
+      // thumbnail URLs; identity is the entity key — they diverge on derived
+      // boards.
+      name: face?.name || e.identity,
+      identity: e.identity,
       // AI's original-casing output ("Maya Chen") for display; absent on raw items.
-      display_name: r.payload.display_name || null,
-      status: r.status,
-      tags: r.tags,
-      undecided: !!r.undecided,
-      hearts: r.hearts,
-      favoritedByMe: !!r.fav,
-      crateIds: crateMap.get(r.id) || [],
-      w: r.payload.files?.[0]?.w || null,
-      h: r.payload.files?.[0]?.h || null,
-      // connector entities have no files; give them a "connector" kind so
-      // the client renders the symbol tile face instead of a broken image.
-      kind: r.payload.files?.[0]?.kind || (r.payload.symbol != null ? "connector" : "image"),
-      symbol: r.payload.symbol || null,
-      label: originalName,
+      display_name: e.display_name || null,
+      identity_provisional: !!e.identity_provisional,
+      status: aggregateStatus(instances),
+      tags,
+      undecided: instances.length > 0 && instances.every((i) => i.undecided),
+      hearts: e.hearts,
+      favoritedByMe: !!e.fav,
+      crateIds: crateMap.get(e.id) || [],
+      w: face?.w || null,
+      h: face?.h || null,
+      // connector entities have no files; instanceEntry marks the file-less
+      // vehicle "connector" so the client renders the symbol tile face.
+      kind: face?.kind || (e.symbol != null ? "connector" : "image"),
+      symbol: e.symbol || null,
+      label: face?.label || null,
+      // Connector-bound entity fields (AI-extracted fields are per instance).
+      fields: e.fields || {},
+      instances,
     };
   });
 }
 
 // status: 'pending' (tag now) or 'held' (wait — for the board's scheduled
-// run, or for auto-tagging to be switched back on).
-export async function insertItem(db, boardId, payload, status = "pending") {
+// run, or for auto-tagging to be switched back on). Every instance belongs
+// to an entity (createEntity first, then insert the instance under it).
+export async function insertItem(db, boardId, payload, status = "pending", entityId = null) {
   const { rows } = await db.query(
-    `INSERT INTO items (payload, status, board_id, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $4) RETURNING id`,
-    [JSON.stringify(payload || {}), status, boardId, Date.now()]
+    `INSERT INTO items (payload, status, board_id, entity_id, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
+    [JSON.stringify(payload || {}), status, boardId, entityId, Date.now()]
   );
   return rows[0].id;
 }
@@ -383,7 +525,8 @@ export async function toggleFavorite(db, userId, itemId) {
   if (exists) {
     await db.query("DELETE FROM favorites WHERE user_id=$1 AND item_id=$2", [userId, itemId]);
   } else {
-    const item = await db.query("SELECT 1 FROM items WHERE id=$1", [itemId]);
+    // Hearts are entity-level; item_id references entities (see schema.sql).
+    const item = await db.query("SELECT 1 FROM entities WHERE id=$1", [itemId]);
     if (!item.rows.length) return null;
     await db.query("INSERT INTO favorites (user_id, item_id, created_at) VALUES ($1, $2, $3)", [
       userId,
@@ -473,8 +616,8 @@ export async function toggleCrateItem(db, userId, crateId, itemId) {
   if (exists) {
     await db.query("DELETE FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId]);
   } else {
-    // A crate only holds items from its own board.
-    const item = await db.query("SELECT 1 FROM items WHERE id=$1 AND board_id=$2", [itemId, crate.rows[0].board_id]);
+    // A crate only holds entities from its own board.
+    const item = await db.query("SELECT 1 FROM entities WHERE id=$1 AND board_id=$2", [itemId, crate.rows[0].board_id]);
     if (!item.rows.length) return null;
     await db.query("INSERT INTO crate_items (crate_id, item_id, created_at) VALUES ($1, $2, $3)", [
       crateId,
@@ -814,61 +957,103 @@ export async function markExtracted(db, id, fields) {
   );
 }
 
-// --- derived identity helpers ---
+// --- entities ---
 
-// Find an existing entity by its derived (normalised) identity string.
-export async function getItemByIdentity(db, boardId, identity) {
+// Create an entity row. identity must be unique per board — a 23505 here
+// means the entity already exists (connector adds answer 409; the extract
+// leg re-parents instead). Returns the new id.
+export async function createEntity(db, boardId, { identity, displayName = null, symbol = null, fields = {}, provisional = false } = {}) {
   const { rows } = await db.query(
-    "SELECT * FROM items WHERE board_id=$1 AND payload->>'identity'=$2",
+    `INSERT INTO entities (board_id, identity, display_name, symbol, fields, identity_provisional, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`,
+    [boardId, identity, displayName, symbol, JSON.stringify(fields || {}), provisional, Date.now()]
+  );
+  return rows[0].id;
+}
+
+export async function getEntity(db, id) {
+  const { rows } = await db.query("SELECT * FROM entities WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+export async function getEntityBoard(db, id) {
+  const { rows } = await db.query("SELECT board_id FROM entities WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+// Find an entity by its (normalised) identity string.
+export async function getEntityByIdentity(db, boardId, identity) {
+  const { rows } = await db.query(
+    "SELECT * FROM entities WHERE board_id=$1 AND identity=$2",
     [boardId, identity]
   );
   return rows[0] || null;
 }
 
-// Set a derived identity on a provisional item, clearing the provisional flag.
+// Set a derived identity on an entity, clearing the provisional flag.
 // displayName preserves the AI's original casing for display; identity is the
-// normalised lowercase key. Throws 23505 on collision — caller merges instead.
-export async function setItemIdentity(db, id, identity, displayName = null) {
-  const patch = { identity, identity_provisional: false };
-  if (displayName) patch.display_name = displayName;
+// normalised lowercase key. Throws 23505 on collision — caller re-parents the
+// instance into the existing entity instead.
+export async function setEntityIdentity(db, id, identity, displayName = null) {
   await db.query(
-    `UPDATE items
-     SET payload = payload || $1::jsonb,
-         updated_at = $2
-     WHERE id = $3`,
-    [JSON.stringify(patch), Date.now(), id]
+    `UPDATE entities
+     SET identity=$1, display_name=COALESCE($2, display_name), identity_provisional=FALSE, updated_at=$3
+     WHERE id=$4`,
+    [identity, displayName, Date.now(), id]
   );
 }
 
-// Append files to an existing entity's files array (merge path).
-export async function appendItemFiles(db, targetId, files) {
-  await db.query(
-    `UPDATE items
-     SET payload = jsonb_set(payload, '{files}', payload->'files' || $1::jsonb),
-         updated_at = $2
-     WHERE id = $3`,
-    [JSON.stringify(files), Date.now(), targetId]
-  );
+// Flag an entity whose identity the AI couldn't derive (still keyed by its
+// provisional filename). Purely informational — nothing blocks on it.
+export async function markEntityProvisional(db, id) {
+  await db.query("UPDATE entities SET identity_provisional=TRUE, updated_at=$1 WHERE id=$2", [Date.now(), id]);
 }
 
-// Remove one file by zero-based index from payload.files.
-// Returns the updated payload so the caller can check if files is now empty.
-export async function removeFileFromItem(db, id, index) {
-  const { rows } = await db.query(
-    `UPDATE items
-     SET payload = jsonb_set(
-           payload, '{files}',
-           COALESCE(
-             (SELECT jsonb_agg(f ORDER BY i)
-              FROM jsonb_array_elements(payload->'files') WITH ORDINALITY t(f, i)
-              WHERE i - 1 <> $1),
-             '[]'::jsonb)),
-         updated_at = $2
-     WHERE id = $3
-     RETURNING payload`,
-    [index, Date.now(), id]
+// Move an instance under another entity (the merge/split mechanism — the
+// instance keeps its file, fields and tags).
+export async function reparentItem(db, itemId, entityId) {
+  await db.query("UPDATE items SET entity_id=$1, updated_at=$2 WHERE id=$3", [entityId, Date.now(), itemId]);
+}
+
+export async function entityInstanceCount(db, entityId) {
+  const { rows } = await db.query("SELECT COUNT(*) AS c FROM items WHERE entity_id=$1", [entityId]);
+  return Number(rows[0].c);
+}
+
+// Drop an entity that lost its last instance (post merge/split re-parent).
+// Returns true when it was actually deleted.
+export async function deleteEntityIfEmpty(db, entityId) {
+  const result = await db.query(
+    "DELETE FROM entities WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM items WHERE entity_id=$1)",
+    [entityId]
   );
-  return rows[0]?.payload || null;
+  return result.rowCount > 0;
+}
+
+// Delete an entity and (via FK cascade) all its instances. Returns the
+// instances' file entries so the caller can clean the stores.
+export async function deleteEntity(db, id) {
+  const { rows: insts } = await db.query("SELECT payload FROM items WHERE entity_id=$1", [id]);
+  const { rows } = await db.query("DELETE FROM entities WHERE id=$1 RETURNING board_id", [id]);
+  if (!rows.length) return null;
+  return { board_id: rows[0].board_id, files: insts.flatMap((r) => r.payload?.files || []) };
+}
+
+// Delete one instance row. Returns { payload, entity_id, board_id } for file
+// cleanup and last-instance checks, or null when it doesn't exist.
+export async function deleteInstance(db, id) {
+  const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload, entity_id, board_id", [id]);
+  return rows[0] || null;
+}
+
+// Re-queue every instance of an entity for tagging (the card-level
+// "reprocess" — instances are where tags live).
+export async function reprocessEntity(db, entityId) {
+  const result = await db.query(
+    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE entity_id=$2",
+    [Date.now(), entityId]
+  );
+  return result.rowCount > 0;
 }
 
 export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {
@@ -906,9 +1091,10 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 
 // Current-model vectors for one board (the search corpus). Stale vectors are
 // excluded rather than compared wrongly; they reappear once re-embedded.
+// entity_id rides along so search results can speak in card (entity) ids.
 export async function boardEmbeddings(db, boardId, model) {
   const { rows } = await db.query(
-    "SELECT id, embedding FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
+    "SELECT id, entity_id, embedding FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
     [boardId, model]
   );
   return rows;
@@ -1025,11 +1211,6 @@ export async function boardAiUsage(db) {
 
 // Delete a row; returns { payload, board_id } (the caller hands the payload's
 // files to sources.cleanup) or null if missing.
-export async function deleteItem(db, id) {
-  const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload, board_id", [id]);
-  return rows[0] || null;
-}
-
 // Pull a board's items out of the tagging queue. Items that still carry
 // their previous tags go back to 'tagged'; never-tagged ones also become
 // 'tagged' but flagged undecided — the same untagged-for-human-review state
@@ -1056,11 +1237,3 @@ export async function cancelBoardQueue(db, boardId) {
   });
 }
 
-// Reset an item back to the tagging queue. Returns true if it existed.
-export async function reprocessItem(db, id) {
-  const result = await db.query(
-    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
-    [Date.now(), id]
-  );
-  return result.rowCount > 0;
-}

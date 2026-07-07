@@ -28,33 +28,37 @@ before(async () => {
 
 after(() => srv.close());
 
-// Every item-scoped route, hit by a user with no membership on the item's board.
-// All must answer 404 (missing and forbidden are indistinguishable by design).
-const itemRoutes = (id) => [
-  ["DELETE", `/api/items/${id}`],
-  ["POST", `/api/items/${id}/reprocess`],
-  ["GET", `/api/items/${id}/hearts`],
-  ["POST", `/api/items/${id}/favorite`],
-  ["GET", `/api/items/${id}/reasoning`],
-  ["PATCH", `/api/items/${id}/tags`, { tags: [] }],
+// Every entity- and instance-scoped route, hit by a user with no membership
+// on the board. All must answer 404 (missing and forbidden are
+// indistinguishable by design). Cards/hearts/crates speak entity ids;
+// tags/reasoning/reextract speak instance ids.
+const itemRoutes = (item) => [
+  ["DELETE", `/api/items/${item.id}`],
+  ["POST", `/api/items/${item.id}/reprocess`],
+  ["GET", `/api/items/${item.id}/hearts`],
+  ["POST", `/api/items/${item.id}/favorite`],
+  ["GET", `/api/instances/${item.instanceId}/reasoning`],
+  ["PATCH", `/api/instances/${item.instanceId}/tags`, { tags: [] }],
+  ["POST", `/api/instances/${item.instanceId}/reextract`],
+  ["DELETE", `/api/instances/${item.instanceId}`],
 ];
 
 test("outsider is denied every item route on a board they can't access", async () => {
-  for (const [method, url, body] of itemRoutes(itemA.id)) {
+  for (const [method, url, body] of itemRoutes(itemA)) {
     const r = await req(base, method, url, { sid: outsider.sid, body });
     assert.equal(r.status, 404, `${method} ${url}`);
   }
 });
 
 test("member is denied item routes on a foreign board", async () => {
-  for (const [method, url, body] of itemRoutes(itemB.id)) {
+  for (const [method, url, body] of itemRoutes(itemB)) {
     const r = await req(base, method, url, { sid: member.sid, body });
     assert.equal(r.status, 404, `${method} ${url}`);
   }
 });
 
 test("unauthenticated is denied item routes", async () => {
-  for (const [method, url, body] of itemRoutes(itemA.id)) {
+  for (const [method, url, body] of itemRoutes(itemA)) {
     const r = await req(base, method, url, { body });
     assert.equal(r.status, 401, `${method} ${url}`);
   }
@@ -68,13 +72,13 @@ test("member can act on items in their own board", async () => {
   const hearts = await req(base, "GET", `/api/items/${itemA.id}/hearts`, { sid: member.sid });
   assert.equal(hearts.status, 200);
 
-  const tags = await req(base, "PATCH", `/api/items/${itemA.id}/tags`, { sid: member.sid, body: { tags: ["kind/a"] } });
+  const tags = await req(base, "PATCH", `/api/instances/${itemA.instanceId}/tags`, { sid: member.sid, body: { tags: ["kind/a"] } });
   assert.equal(tags.status, 200);
   assert.deepEqual(tags.json.tags, ["kind/a"]);
 });
 
 test("tags PATCH drops values outside the board facets", async () => {
-  const r = await req(base, "PATCH", `/api/items/${itemA.id}/tags`, {
+  const r = await req(base, "PATCH", `/api/instances/${itemA.instanceId}/tags`, {
     sid: member.sid,
     body: { tags: ["kind/a", "kind/nonsense", "bogus/x"] },
   });
@@ -83,7 +87,7 @@ test("tags PATCH drops values outside the board facets", async () => {
 });
 
 test("admin can access items on any board", async () => {
-  const r = await req(base, "GET", `/api/items/${itemB.id}/reasoning`, { sid: admin.sid });
+  const r = await req(base, "GET", `/api/instances/${itemB.instanceId}/reasoning`, { sid: admin.sid });
   assert.equal(r.status, 200);
 });
 

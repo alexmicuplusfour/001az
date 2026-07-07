@@ -97,6 +97,16 @@ try {
     )
   );
 
+  // Hoist the entity layer: one entity per item, same id, so the favorites /
+  // crate_items copies below (which reference entities) land on the right
+  // rows. Source rows are image-era — raw identity, single file.
+  await client.query(
+    `INSERT INTO entities (id, board_id, identity, created_at, updated_at)
+     OVERRIDING SYSTEM VALUE
+     SELECT id, board_id, payload->>'identity', created_at, updated_at FROM items`
+  );
+  await client.query("UPDATE items SET entity_id = id");
+
   await copy("invites", src.prepare("SELECT * FROM invites").all(), (r) =>
     client.query(
       "INSERT INTO invites (token, user_id, expires_at, used_at, permanent, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
@@ -154,7 +164,7 @@ try {
   );
 
   // Identity sequences must resume past the copied ids.
-  for (const table of ["users", "items", "crates"]) {
+  for (const table of ["users", "items", "entities", "crates"]) {
     await client.query(
       `SELECT setval(pg_get_serial_sequence('${table}','id'), GREATEST((SELECT COALESCE(MAX(id),0) FROM ${table}), 1))`
     );

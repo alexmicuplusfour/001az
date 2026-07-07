@@ -29,8 +29,10 @@ let progressCache = new Map(); // upload tempId / item id -> el
 
 // Everything cardFor bakes into the DOM that can change after creation.
 // Bulk selection isn't included: bulk.js updates card elements in place.
+// name + instance count: a merge/split can swap the face file or change the
+// stack badge without touching anything else.
 function cardSig(img) {
-  return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.displayLabel}|${img.tags.join(",")}`;
+  return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.name}|${img.instances?.length || 0}|${img.displayLabel}|${img.tags.join(",")}`;
 }
 
 function cardEl(img) {
@@ -292,6 +294,7 @@ function cardFor(img) {
   // "needs tags" treatment matches the Untagged filter's definition.
   if (img.undecided || img.status === "held" || isUntagged(img)) card.classList.add("undecided");
   // The file kind owns the face (the media); grid owns the frame + chrome.
+  // (The instance-count chip rides inside the face's title strip — kinds.js.)
   card.appendChild(kindFor(img).face(img, card, scheduleLayout));
   if (img.status === "pending" || img.status === "processing" ||
       img.status === "pending_extract" || img.status === "extracting") {

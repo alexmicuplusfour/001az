@@ -42,7 +42,8 @@ test("document ingestion", async (t) => {
     // text previews render via sharp (no poppler involved), so dims are portable
     assert.equal(u.w, 600);
     assert.equal(u.h, 760);
-    const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [u.id]);
+    // u.id is the entity; the items row is the instance.
+    const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [u.instances[0].id]);
     assert.equal(rows[0].status, "pending");
     assert.equal(rows[0].payload.identity, u.name);
     assert.equal(rows[0].payload.files[0].kind, "text");
@@ -59,7 +60,7 @@ test("document ingestion", async (t) => {
     assert.match(u.name, /\.pdf$/);
   });
 
-  await t.test("a docx ingests with extracted-text sidecar and page-peek preview", async () => {
+  await t.test("a docx ingests with text + html sidecars and page-peek preview", async () => {
     const bytes = fs.readFileSync(path.join(FIXTURES, "sample.docx"));
     const r = await uploadFiles(base, admin.sid, board, [
       ["designer.docx", bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
@@ -68,14 +69,21 @@ test("document ingestion", async (t) => {
     assert.equal(u.kind, "docx");
     assert.equal(u.label, "designer.docx");
     assert.equal(u.w, 600); // text-peek preview renders via sharp — portable
-    const { rows } = await db.query("SELECT payload FROM items WHERE id=$1", [u.id]);
+    const { rows } = await db.query("SELECT payload FROM items WHERE id=$1", [u.instances[0].id]);
     const stored = rows[0].payload.files[0].name;
+    // .txt sidecar (what the tagger reads): clean extracted text, served behind auth
     const sidecar = fs.readFileSync(path.join(galleryDir, stored + ".txt"), "utf8");
     assert.match(sidecar, /Maya Lin - Principal Product Designer/);
-    // the sidecar (what the tagger + lightbox read) is served behind auth
     const res = await fetch(`${base}/gallery/${stored}.txt`, { headers: { Cookie: `sid=${admin.sid}` } });
     assert.equal(res.status, 200);
     assert.match(await res.text(), /design systems/);
+    // .html sidecar (what the lightbox's full view reads): formatted markup, served as html
+    const html = fs.readFileSync(path.join(galleryDir, stored + ".html"), "utf8");
+    assert.match(html, /<(h\d|p|strong|ul|table)\b/); // real markup, not plaintext
+    assert.match(html, /Maya Lin - Principal Product Designer/);
+    const hres = await fetch(`${base}/gallery/${stored}.html`, { headers: { Cookie: `sid=${admin.sid}` } });
+    assert.equal(hres.status, 200);
+    assert.match(hres.headers.get("content-type") || "", /text\/html/);
   });
 
   await t.test("a zip wearing .docx that mammoth can't read is rejected", async () => {

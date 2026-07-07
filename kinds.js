@@ -9,6 +9,26 @@ import { hasIdentity } from './utils.js';
 export const thumbUrl = (name) => `thumbnails/${encodeURIComponent(name)}.webp`;
 export const fullUrl = (name) => `gallery/${encodeURIComponent(name)}`;
 
+// The title strip under a face: the display label plus, for entities with
+// several instances, a small count chip (filter-pill styling).
+function titleStrip(text, count = 0) {
+  const title = document.createElement("div");
+  title.className = "doc-title";
+  title.title = text;
+  const label = document.createElement("span");
+  label.className = "doc-title-text";
+  label.textContent = text;
+  title.appendChild(label);
+  if (count > 1) {
+    const chip = document.createElement("span");
+    chip.className = "inst-count";
+    chip.textContent = count;
+    chip.title = `${count} instances`;
+    title.appendChild(chip);
+  }
+  return title;
+}
+
 const imageKind = {
   // The face inside the card frame.
   face(item, card, layout) {
@@ -31,11 +51,7 @@ const imageKind = {
     // Mapped identity: same title strip documents carry, under the media.
     const wrap = document.createElement("div");
     wrap.className = "image-face";
-    const title = document.createElement("div");
-    title.className = "doc-title";
-    title.textContent = item.displayLabel;
-    title.title = item.displayLabel;
-    wrap.append(im, title);
+    wrap.append(im, titleStrip(item.displayLabel, item.instances?.length));
     return wrap;
   },
 
@@ -84,11 +100,7 @@ const docKind = {
       badge.textContent = (item.name.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
       wrap.appendChild(badge);
     }
-    const title = document.createElement("div");
-    title.className = "doc-title";
-    title.textContent = item.displayLabel;
-    title.title = item.displayLabel;
-    wrap.appendChild(title);
+    wrap.appendChild(titleStrip(item.displayLabel, item.instances?.length));
     card.classList.add("loaded");
     return wrap;
   },
@@ -99,10 +111,7 @@ const docKind = {
     const badge = document.createElement("div");
     badge.className = "doc-badge";
     badge.textContent = (p.name?.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
-    const title = document.createElement("div");
-    title.className = "doc-title";
-    title.textContent = p.name || "uploading";
-    wrap.append(badge, title);
+    wrap.append(badge, titleStrip(p.name || "uploading"));
     return wrap;
   },
 
@@ -129,11 +138,7 @@ const connectorKind = {
     sym.className = "connector-symbol";
     sym.textContent = item.symbol || item.identity?.slice(0, 4).toUpperCase() || "?";
     tile.appendChild(sym);
-    const title = document.createElement("div");
-    title.className = "doc-title";
-    title.textContent = item.displayLabel;
-    title.title = item.displayLabel;
-    wrap.append(tile, title);
+    wrap.append(tile, titleStrip(item.displayLabel, item.instances?.length));
     card.classList.add("loaded");
     return wrap;
   },

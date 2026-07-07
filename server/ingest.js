@@ -6,7 +6,7 @@
 import multer from "multer";
 import fs from "node:fs";
 import os from "node:os";
-import { getBoard, canAccessBoard, insertItem } from "./db.js";
+import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { requireAuth } from "./auth.js";
 
 // Backstop limits only — the client pre-filters oversized files and chunks
@@ -57,10 +57,21 @@ export function mountIngest(app, { db, sources }) {
         // Auto-tag off → held (releaseHeld routes to pending_extract when mapped).
         // Auto-tag on + mapping → pending_extract; otherwise → pending.
         const status = board.auto_tag ? (hasMapping ? "pending_extract" : "pending") : "held";
-        const id = await insertItem(db, board.id, payload, status);
+        // Every upload is born a single-instance entity, provisionally keyed
+        // by its stored filename; derived-identity extraction may later merge
+        // the instance into an existing entity (and delete this shell).
+        const entityId = await createEntity(db, board.id, { identity: file.name });
+        const id = await insertItem(db, board.id, payload, status, entityId);
+        // Response rows mirror the /api/items entity shape (id = entity id).
         uploaded.push({
-          id, name: file.name, status, tags: [],
+          id: entityId, name: file.name, status, tags: [],
           w: file.w, h: file.h, kind: file.kind, label: file.original_name,
+          identity: file.name,
+          instances: [{
+            id, name: file.name, label: file.original_name,
+            w: file.w, h: file.h, kind: file.kind,
+            status, tags: [], undecided: false,
+          }],
         });
       } catch (err) {
         console.error("upload error:", f.originalname, err.message);
