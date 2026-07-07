@@ -5,6 +5,7 @@ import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
 import { fullUrl } from './kinds.js';
+import { ensurePolling } from './data.js';
 
 const elLightbox = document.getElementById("lightbox");
 const elLightboxImg = document.getElementById("lightbox-img");
@@ -24,6 +25,7 @@ let lightboxList = [];
 let lightboxIndex = -1;
 let panelOpen = false;
 let reasoningReq = 0; // stale-response guard for the reasoning fetch
+let currentFileIndex = 0; // which file is shown in the main view (multi-file entities)
 
 function renderLightboxFav() {
   if (!lightboxImg) return;
@@ -84,10 +86,12 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
     filesSec.appendChild(filesLabel);
     allFiles.forEach((f, i) => {
       const row = document.createElement("div");
-      row.className = "lbp-file-row";
-      const fname = document.createElement("span");
+      row.className = "lbp-file-row" + (i === currentFileIndex ? " lbp-file-active" : "");
+      const fname = document.createElement("button");
       fname.className = "lbp-file-name";
       fname.textContent = f.original_name || f.name;
+      fname.title = "View this file";
+      fname.addEventListener("click", (e) => { e.stopPropagation(); showFile(f, i); });
       const rmBtn = document.createElement("button");
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
@@ -135,14 +139,22 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
     reextractBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
       reextractBtn.disabled = true;
+      reextractBtn.textContent = "Re-extract";
       try {
         const r = await fetch(`/api/items/${img.id}/reextract`, { method: "POST" });
         if (r.ok) {
           img.status = "pending_extract";
+          reextractBtn.textContent = "Queued";
           document.dispatchEvent(new Event('app:render'));
+          ensurePolling();
+          toast("Re-extraction queued");
+        } else {
+          reextractBtn.disabled = false;
+          toast.error("Re-extract failed");
         }
-      } finally {
+      } catch {
         reextractBtn.disabled = false;
+        toast.error("Re-extract failed");
       }
     });
     secHead.appendChild(reextractBtn);
@@ -156,9 +168,19 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
       const k = document.createElement("span");
       k.className = "lbp-field-key";
       k.textContent = key;
-      const val = document.createElement("span");
+      let val;
+      const vStr = v !== null && v !== undefined ? String(v) : null;
+      if (vStr && /^https?:\/\//.test(vStr)) {
+        val = document.createElement("a");
+        val.href = vStr;
+        val.target = "_blank";
+        val.rel = "noopener noreferrer";
+        val.textContent = vStr;
+      } else {
+        val = document.createElement("span");
+        val.textContent = vStr ?? "—";
+      }
       val.className = "lbp-field-val";
-      val.textContent = v !== null && v !== undefined ? String(v) : "—";
       kv.append(k, val);
       row.appendChild(kv);
       if (why) {
@@ -170,6 +192,9 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
       sec.appendChild(row);
     }
     elLightboxPanelBody.appendChild(sec);
+    const fieldsDivider = document.createElement("hr");
+    fieldsDivider.className = "lbp-divider";
+    elLightboxPanelBody.appendChild(fieldsDivider);
   }
 
   const byFacet = new Map();
@@ -293,8 +318,45 @@ function preloadFull(i) {
   }
 }
 
+// Switch the main lightbox view to a specific file object. Used when the
+// entity has multiple files and the user picks one from the Details panel.
+function showFile(file, index) {
+  currentFileIndex = index;
+  const isDoc = file.kind && file.kind !== "image";
+  elLightboxDownload.href = fullUrl(file.name);
+  elLightboxDownload.download = file.original_name || file.name;
+  if (isDoc) {
+    elLightboxImg.onload = null;
+    elLightboxImg.removeAttribute("src");
+    elLightboxImg.hidden = true;
+    elLightbox.classList.remove("loading");
+    const url = fullUrl(file.kind === "docx" ? file.name + ".txt" : file.name);
+    if (elLightboxDoc.getAttribute("src") !== url) elLightboxDoc.src = url;
+    elLightboxDoc.hidden = false;
+    elLightbox.focus({ preventScroll: true });
+  } else {
+    if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
+    elLightboxImg.hidden = false;
+    elLightboxImg.style.opacity = "0";
+    elLightbox.classList.add("loading");
+    elLightboxImg.onload = () => { elLightbox.classList.remove("loading"); elLightboxImg.style.opacity = "1"; };
+    elLightboxImg.src = fullUrl(file.name);
+    if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
+      elLightbox.classList.remove("loading");
+      elLightboxImg.style.opacity = "1";
+    }
+  }
+  // Refresh the panel file list to highlight the new active file.
+  if (panelOpen) {
+    elLightboxPanelBody.querySelectorAll(".lbp-file-row").forEach((row, i) => {
+      row.classList.toggle("lbp-file-active", i === index);
+    });
+  }
+}
+
 function showLightbox() {
   lightboxImg = lightboxList[lightboxIndex];
+  currentFileIndex = 0; // reset to first file on entity navigation
   if (isDocItem(lightboxImg)) {
     // Documents render inline in a same-origin frame; the frame paints
     // progressively, so no loading spinner.

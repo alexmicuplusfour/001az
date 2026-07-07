@@ -155,10 +155,9 @@ export async function listItems(db, userId = null, boardId = null) {
     return {
       id: r.id,
       name: storedFile,
-      // identity is the entity's semantic key — a human-readable derived name
-      // when the mapping uses AI identity, otherwise the stored filename.
-      // Prefer it over the original filename as the display label when derived.
       identity,
+      // AI's original-casing output ("Maya Chen") for display; absent on raw items.
+      display_name: r.payload.display_name || null,
       status: r.status,
       tags: r.tags,
       undecided: !!r.undecided,
@@ -799,17 +798,17 @@ export async function getItemByIdentity(db, boardId, identity) {
 }
 
 // Set a derived identity on a provisional item, clearing the provisional flag.
-// Throws a pg unique-violation error (code 23505) when another entity already
-// holds this identity — caller catches and merges instead.
-export async function setItemIdentity(db, id, identity) {
+// displayName preserves the AI's original casing for display; identity is the
+// normalised lowercase key. Throws 23505 on collision — caller merges instead.
+export async function setItemIdentity(db, id, identity, displayName = null) {
+  const patch = { identity, identity_provisional: false };
+  if (displayName) patch.display_name = displayName;
   await db.query(
     `UPDATE items
-     SET payload = payload || jsonb_build_object(
-           'identity', $1::text,
-           'identity_provisional', false),
+     SET payload = payload || $1::jsonb,
          updated_at = $2
      WHERE id = $3`,
-    [identity, Date.now(), id]
+    [JSON.stringify(patch), Date.now(), id]
   );
 }
 

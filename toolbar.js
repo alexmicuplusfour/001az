@@ -228,9 +228,18 @@ export function renderToolbar(resultCount) {
     elToolbarSub.appendChild(toolBtn(`Clear filters (${active})`, "clear", clearAll));
   }
 
-  elToolbarSub.appendChild(toolBtn(
+  // Wrap sort buttons so only the group gets margin-left:auto, not each individually.
+  const sortWrap = document.createElement("div");
+  sortWrap.className = "sort-group";
+  sortWrap.appendChild(toolBtn(
+    "A–Z",
+    "sort-btn" + (state.sortAlpha ? " active" : ""),
+    () => { state.sortAlpha = !state.sortAlpha; document.dispatchEvent(new Event('app:render')); }
+  ));
+  sortWrap.appendChild(toolBtn(
     `${ICONS.heart} Top`,
-    "sort" + (state.sortByHearts ? " active" : ""),
+    "sort-btn" + (state.sortByHearts ? " active" : ""),
     () => { state.sortByHearts = !state.sortByHearts; document.dispatchEvent(new Event('app:render')); }
   ));
+  elToolbarSub.appendChild(sortWrap);
 }

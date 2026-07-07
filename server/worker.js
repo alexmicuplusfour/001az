@@ -444,7 +444,9 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   }
 
   // Normalise a derived identity value for consistent collision detection.
-  const normaliseIdentity = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  // Underscores and hyphens are treated as word separators so the AI returning
+  // "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
+  const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
 
   // Merge a provisional item (just extracted) into an existing entity that
   // already holds the same derived identity. Appends files, deletes the
@@ -506,17 +508,30 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     if (mapping.identity?.from === "ai") {
       const rawIdentity = input.identity?.value;
       if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
-        // AI couldn't derive an identity — keep provisional filename, flag it.
-        await db.query(
-          "UPDATE items SET payload = payload || '{\"identity_provisional\":true}'::jsonb, updated_at=$1 WHERE id=$2",
-          [Date.now(), row.id]
-        );
+        // AI couldn't derive an identity. Only flag provisional on brand-new
+        // items (no display_name yet). Re-extracted merged entities already have
+        // a valid identity — leave it alone.
+        const alreadyIdentified = !!row.payload.display_name && !row.payload.identity_provisional;
+        if (!alreadyIdentified) {
+          await db.query(
+            "UPDATE items SET payload = payload || '{\"identity_provisional\":true}'::jsonb, updated_at=$1 WHERE id=$2",
+            [Date.now(), row.id]
+          );
+        }
         await markExtracted(db, row.id, fields);
-        console.log(`extracted #${row.id} [no identity derived — provisional] [${ai.model}]`);
+        console.log(`extracted #${row.id} [no identity derived${alreadyIdentified ? " — keeping existing" : " — provisional"}] [${ai.model}]`);
       } else {
+        // Normalise underscores/hyphens in the display name too so "priya_ramanathan"
+        // becomes "priya ramanathan". If the entity already has a better display name
+        // (one that has uppercase letters, meaning it was properly cased before), keep it.
+        const newDisplayName = rawIdentity.trim().replace(/[-_]+/g, " ");
+        const existingDisplayName = row.payload.display_name;
+        const displayName = (existingDisplayName && /[A-Z]/.test(existingDisplayName) && !/[A-Z]/.test(newDisplayName))
+          ? existingDisplayName
+          : newDisplayName;
         const derived = normaliseIdentity(rawIdentity);
         try {
-          await setItemIdentity(db, row.id, derived);
+          await setItemIdentity(db, row.id, derived, displayName);
           await markExtracted(db, row.id, fields);
           console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
         } catch (err) {
@@ -527,7 +542,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
               await mergeIntoExisting(row, existing.id);
             } else {
               // Race resolved by the time we looked — treat as no-collision.
-              await setItemIdentity(db, row.id, derived);
+              await setItemIdentity(db, row.id, derived, displayName);
               await markExtracted(db, row.id, fields);
             }
           } else {

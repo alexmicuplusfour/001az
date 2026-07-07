@@ -235,6 +235,10 @@ export function triggerFilePicker() {
 document.addEventListener('app:uploads-pending-tag', syncProcessingToast);
 document.addEventListener('app:uploads-tagged', syncProcessingToast);
 document.addEventListener('app:uploads-pending-changed', syncProcessingToast);
+document.addEventListener('app:item-merged', (e) => {
+  const n = e.detail?.count || 1;
+  toast(n === 1 ? "Merged into an existing entity" : `${n} files merged into existing entities`);
+});
 
 export function initUpload() {
   const elFileInput = document.getElementById("file-input");

@@ -48,7 +48,9 @@ export function inProgress() {
 }
 
 export function reconcile(data) {
+  const freshIds = new Set(data.map((d) => d.id));
   const byId = new Map(state.items.map((i) => [i.id, i]));
+
   for (const d of data) {
     const ex = byId.get(d.id);
     if (ex) {
@@ -63,11 +65,12 @@ export function reconcile(data) {
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
-      // Pick up derived identity once extraction resolves it.
+      // Pick up derived identity and display name once extraction resolves them.
       if (d.identity && d.identity !== ex.identity) {
         ex.name = d.name;
         ex.identity = d.identity;
-        ex.displayLabel = d.identity !== d.name ? d.identity : (d.label || d.name);
+        ex.display_name = d.display_name || null;
+        ex.displayLabel = d.display_name || (d.identity !== d.name ? d.identity : (d.label || d.name));
       }
       // Fresh uploads are created client-side without dimensions; pick them
       // up here so their cards get the computed-height layout path.
@@ -75,6 +78,26 @@ export function reconcile(data) {
     } else {
       state.items.unshift(toItem(d));
     }
+  }
+
+  // Remove in-flight items that disappeared from the server list — they were
+  // merged into another entity (or deleted externally). Notify so the toast
+  // can update.
+  let mergedCount = 0;
+  for (let i = pendingBatches.length - 1; i >= 0; i--) {
+    const { ids } = pendingBatches[i];
+    for (const id of [...ids]) {
+      if (!freshIds.has(id)) {
+        ids.delete(id);
+        mergedCount++;
+      }
+    }
+    if (ids.size === 0) pendingBatches.splice(i, 1);
+  }
+  if (mergedCount > 0) {
+    state.items = state.items.filter((img) => freshIds.has(img.id) || !IN_FLIGHT.has(img.status));
+    document.dispatchEvent(new CustomEvent('app:item-merged', { detail: { count: mergedCount } }));
+    document.dispatchEvent(new Event('app:uploads-pending-changed'));
   }
 
   // Check if any upload batch has finished tagging.
