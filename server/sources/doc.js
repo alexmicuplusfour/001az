@@ -2,10 +2,11 @@
 // original in the gallery store; PDFs get a page-1 preview rendered into the
 // thumbnail store via poppler (pdftoppm + sharp), so their card face rides
 // the exact same path as an image thumbnail (no poppler on the box → the doc
-// still ingests, just without a preview). docx gets its text extracted at
-// ingest (mammoth, pure JS) into a .txt sidecar next to the original — the
-// preview, the tagger, and the lightbox all read the sidecar, so docx flows
-// through the text pipeline and works on every provider, unlike PDFs.
+// still ingests, just without a preview). docx gets its content extracted at
+// ingest (mammoth, pure JS): raw text into a .txt sidecar (the tagger + the
+// card page-peek read it — clean signal, no markup, works on every provider)
+// and formatted HTML into a .html sidecar (the lightbox's full view). So docx
+// flows through the text pipeline for tagging, unlike PDFs.
 import sharp from "sharp";
 import mammoth from "mammoth";
 import fs from "node:fs";
@@ -59,13 +60,17 @@ export function docSource({ galleryDir, thumbsDir }) {
       if (kind === "docx") {
         // docx is a zip; extraction failing means it isn't really one.
         if (!buf.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return null;
-        let text;
+        let text, html;
         try {
+          // Raw text feeds the tagger + the card page-peek; formatted HTML is
+          // the lightbox's full view.
           text = (await mammoth.extractRawText({ buffer: buf })).value;
+          html = (await mammoth.convertToHtml({ buffer: buf })).value;
         } catch {
           return null;
         }
         await fs.promises.writeFile(path.join(galleryDir, filename + ".txt"), text);
+        await fs.promises.writeFile(path.join(galleryDir, filename + ".html"), docHtml(html));
         const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));
         if (dims) { entry.w = dims.w; entry.h = dims.h; }
       }
@@ -86,6 +91,24 @@ async function pdfPages(pdfPath) {
   } catch {
     return null;
   }
+}
+
+// Wrap mammoth's HTML fragment in a minimal, readable document for the
+// lightbox iframe. Rendered same-origin under the app CSP (script-src 'self',
+// object-src 'none'), which neutralizes any script/embed a crafted docx might
+// carry; the typography is inline styling (style-src allows 'unsafe-inline').
+function docHtml(fragment) {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { max-width: 720px; margin: 0 auto; padding: 48px 28px; background: #fff; color: #23232a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; }
+  h1, h2, h3, h4 { line-height: 1.25; margin: 1.4em 0 0.5em; }
+  p { margin: 0 0 0.9em; }
+  img { max-width: 100%; height: auto; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  td, th { border: 1px solid #dcdce2; padding: 6px 10px; text-align: left; vertical-align: top; }
+  a { color: #2b6cb0; }
+</style></head><body>${fragment}</body></html>`;
 }
 
 // Text files get a "page peek" face: the first lines drawn onto a white
