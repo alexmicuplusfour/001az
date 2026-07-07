@@ -25,11 +25,14 @@ function anthropicClient(apiKey) {
 }
 
 const compatHeaders = (apiKey) => ({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" });
-// A failed compat response, turned into a readable error (provider message if
-// there is one, else the status).
+// A failed compat response, turned into a readable error. OpenRouter buries
+// the useful upstream detail under error.metadata.raw and leaves error.message
+// as a generic "Provider returned error", so prefer the raw when present; other
+// providers only have message.
 async function compatError(r, label) {
   const body = await r.json().catch(() => ({}));
-  return new Error(body.error?.message || `${label} HTTP ${r.status}`);
+  const msg = body.error?.metadata?.raw || body.error?.message;
+  return new Error(msg || `${label} HTTP ${r.status}`);
 }
 
 // --- pure request builders (the test seam) ---
