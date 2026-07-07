@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { ICONS, actionBtn } from './utils.js';
+import { ICONS, actionBtn, hasIdentity } from './utils.js';
 import { openDropdown } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, isUntagged } from './filters.js';
@@ -30,7 +30,7 @@ let progressCache = new Map(); // upload tempId / item id -> el
 // Everything cardFor bakes into the DOM that can change after creation.
 // Bulk selection isn't included: bulk.js updates card elements in place.
 function cardSig(img) {
-  return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.tags.join(",")}`;
+  return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.displayLabel}|${img.tags.join(",")}`;
 }
 
 function cardEl(img) {
@@ -284,9 +284,9 @@ function cardFor(img) {
   // Lets layoutGrid compute the height (cardW / ratio) instead of measuring.
   // Only valid while the body is a pinned-ratio image and no card state adds
   // layout height (selected/undecided use outline + inner padding, which
-  // don't). Bodies with content-dependent height (doc faces carry a title
-  // strip) must leave this unset — they take the measured lane.
-  if (img.w && img.h && img.kind === "image") card.dataset.ratio = img.w / img.h;
+  // don't). Bodies with content-dependent height (doc faces and identity-titled
+  // images carry a title strip) must leave this unset — they take the measured lane.
+  if (img.w && img.h && img.kind === "image" && !hasIdentity(img)) card.dataset.ratio = img.w / img.h;
   // Anything in the grid without tags needs human attention — AI-undecided,
   // held (waiting for auto-tagging), failed, or hand-cleared — so the dotted
   // "needs tags" treatment matches the Untagged filter's definition.

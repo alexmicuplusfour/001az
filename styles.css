@@ -447,6 +447,15 @@ main#grid {
   text-overflow: ellipsis;
 }
 
+/* Image with a mapped identity: full media at its own ratio, doc-title strip
+   below. Measured layout lane, like doc faces. */
+.image-face {
+  line-height: normal;
+}
+.image-face img {
+  border-radius: 8px 8px 0 0;
+}
+
 /* Already-loaded thumbnails stay at full opacity unless the card is pending. */
 .card.loading img.loaded {
   opacity: 0.35;

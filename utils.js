@@ -31,6 +31,10 @@ export function toItem(d) {
   };
 }
 
+// An item has a mapped identity when extraction (or a connector) gave it an
+// entity key distinct from its stored filename — mirrors displayLabel priority.
+export const hasIdentity = (item) => !!(item.display_name || item.identity !== item.name);
+
 export const tag = (facet, value) => `${facet}/${value}`;
 
 export const ICONS = {

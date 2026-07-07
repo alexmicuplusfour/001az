@@ -4,6 +4,7 @@
 // images get the bare-media face, documents get preview-plus-title (the
 // title showing the display label — the stored file name is a random hex).
 import { openLightbox } from './lightbox.js';
+import { hasIdentity } from './utils.js';
 
 export const thumbUrl = (name) => `thumbnails/${encodeURIComponent(name)}.webp`;
 export const fullUrl = (name) => `gallery/${encodeURIComponent(name)}`;
@@ -26,7 +27,16 @@ const imageKind = {
     im.addEventListener("error", () => card.remove());
     im.addEventListener("load", () => { im.classList.add("loaded"); card.classList.add("loaded"); layout(); });
     if (im.complete && im.naturalWidth > 0) { im.classList.add("loaded"); card.classList.add("loaded"); }
-    return im;
+    if (!hasIdentity(item)) return im;
+    // Mapped identity: same title strip documents carry, under the media.
+    const wrap = document.createElement("div");
+    wrap.className = "image-face";
+    const title = document.createElement("div");
+    title.className = "doc-title";
+    title.textContent = item.displayLabel;
+    title.title = item.displayLabel;
+    wrap.append(im, title);
+    return wrap;
   },
 
   // Upload placeholders: the local object URL until the server row exists.
