@@ -7,6 +7,7 @@ import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
 import { openMappingModal } from './mapping-modal.js';
+import { openConnectorSearch } from './connector-search.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -86,10 +87,17 @@ export function renderToolbar(resultCount) {
   auth.className = "auth";
   if (state.me) {
     if (state.boardName) {
-      // Split button: plus keeps the file picker; chevron opens the ingestion menu.
+      // Split button: plus = file picker OR connector search (based on mapping.input);
+      // chevron always opens the ingestion menu.
+      const connectorName = state.boardMapping?.input?.connector;
       const plusWrap = document.createElement("div");
       plusWrap.className = "split-btn";
-      plusWrap.appendChild(toolBtn(ICONS.plus, "upload", () => triggerFilePicker()));
+      const plusBtn = toolBtn(ICONS.plus, "upload", null); // onClick set below
+      plusBtn.addEventListener("click", () => {
+        if (connectorName) openConnectorSearch(connectorName, plusBtn);
+        else triggerFilePicker();
+      });
+      plusWrap.appendChild(plusBtn);
       const plusMenu = document.createElement("button");
       plusMenu.className = "tool-btn split-arrow";
       plusMenu.title = "More ingestion options";

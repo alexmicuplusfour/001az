@@ -104,13 +104,12 @@ test("mapping PATCH: identity from:ai without hint → 400", async () => {
   assert.match(r.json.error, /hint/);
 });
 
-test("mapping PATCH: identity from:connector → 400", async () => {
+test("mapping PATCH: identity from:connector is now valid (connector slice shipped)", async () => {
   const { json: board } = await createBoard("id-connector");
   const r = await patchBoard(board.id, {
     mapping: { identity: { from: "connector" }, fields: [] },
   });
-  assert.equal(r.status, 400);
-  assert.match(r.json.error, /from/);
+  assert.equal(r.status, 200);
 });
 
 // ── DB helpers: getItemByIdentity / setItemIdentity ──────────────────────────

@@ -59,6 +59,7 @@ import {
   updateItemPayload,
   reextractItem,
   removeFileFromItem,
+  insertItem,
 } from "./db.js";
 import {
   attachUser,
@@ -71,6 +72,7 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDef
 import { testKey, embedTexts, PROVIDERS, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
+import { getConnector, listConnectors } from "./connectors/index.js";
 import { mountIngest } from "./ingest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -415,11 +417,19 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
 const MAPPING_KINDS = new Set(["text", "number", "url", "date"]);
 // Returns an error string when mapping is invalid, null when valid.
 function validateMapping(mapping) {
+  // Optional input slot: "files" | { connector: name }
+  if (mapping.input !== undefined && mapping.input !== "files") {
+    if (!mapping.input || typeof mapping.input !== "object" || typeof mapping.input.connector !== "string")
+      return `mapping.input must be "files" or { connector: name }`;
+    if (!getConnector(mapping.input.connector))
+      return `unknown connector: "${mapping.input.connector}"`;
+  }
   // Optional identity slot.
   if (mapping.identity !== undefined) {
     const id = mapping.identity;
     if (!id || typeof id !== "object") return "mapping.identity must be an object";
-    if (id.from !== "raw" && id.from !== "ai") return `mapping.identity.from must be "raw" or "ai"`;
+    if (id.from !== "raw" && id.from !== "ai" && id.from !== "connector")
+      return `mapping.identity.from must be "raw", "ai", or "connector"`;
     if (id.from === "ai" && (!id.hint || typeof id.hint !== "string" || !id.hint.trim()))
       return `mapping.identity.hint is required when from is "ai"`;
     if (id.hint !== undefined && (typeof id.hint !== "string" || id.hint.length > 500))
@@ -434,9 +444,11 @@ function validateMapping(mapping) {
     if (seen.has(f.key)) return `duplicate field key: ${f.key}`;
     seen.add(f.key);
     if (!MAPPING_KINDS.has(f.kind)) return `invalid kind "${f.kind}" for field "${f.key}"`;
-    if (f.from !== "ai") return `unsupported source "${f.from}" for field "${f.key}"`;
-    if (f.hint !== undefined && (typeof f.hint !== "string" || f.hint.length > 500))
+    if (f.from !== "ai" && f.from !== "connector") return `unsupported source "${f.from}" for field "${f.key}"`;
+    if (f.from === "ai" && f.hint !== undefined && (typeof f.hint !== "string" || f.hint.length > 500))
       return `hint for field "${f.key}" must be a string ≤500 chars`;
+    if (f.from === "connector" && (!f.fn || typeof f.fn !== "string"))
+      return `connector field "${f.key}" requires a fn string`;
   }
   return null;
 }
@@ -807,6 +819,82 @@ app.delete("/api/items/:id/files/:index", requireAuth, requireItemAccess, wrap(a
 
   console.log(`file ${index} removed from item #${req.itemId} → ${newStatus}`);
   res.json({ ok: true, status: newStatus });
+}));
+
+// --- connector routes ---
+
+app.get("/api/connectors", requireAuth, wrap(async (_req, res) => {
+  res.json(listConnectors());
+}));
+
+app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {
+  const connector = getConnector(req.params.name);
+  if (!connector) return res.status(404).json({ error: "unknown connector" });
+  const q = String(req.query.q || "").trim();
+  if (!q) return res.json([]);
+  try {
+    res.json(await connector.search(q));
+  } catch (err) {
+    console.error(`connector search error (${req.params.name}):`, err.message);
+    res.status(502).json({ error: err.message });
+  }
+}));
+
+// Create an entity from a connector — no file upload, fields come from the
+// connector's fetchEntity call. Goes straight to pending (tagger runs over
+// the bound fields). 409 when the identity already exists on this board.
+app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const { connector: connectorName, id: entityId } = req.body || {};
+  if (!connectorName || !entityId) return res.status(400).json({ error: "connector and id required" });
+  const inputConnector = board.mapping?.input?.connector;
+  if (inputConnector !== connectorName)
+    return res.status(400).json({ error: `this board uses the "${inputConnector || "files"}" input, not "${connectorName}"` });
+  const connector = getConnector(connectorName);
+  if (!connector) return res.status(404).json({ error: "unknown connector" });
+
+  let entity;
+  try {
+    entity = await connector.fetchEntity(entityId);
+  } catch (err) {
+    console.error(`connector fetchEntity error (${connectorName}/${entityId}):`, err.message);
+    return res.status(502).json({ error: err.message });
+  }
+
+  const payload = {
+    identity: entity.identity,
+    display_name: entity.display_name,
+    symbol: entity.symbol || null,
+    files: [],
+    fields: entity.fields,
+    mapping: board.mapping,
+  };
+  const status = board.auto_tag ? "pending" : "held";
+  let id;
+  try {
+    id = await insertItem(db, board.id, payload, status);
+  } catch (err) {
+    if (err.code === "23505") return res.status(409).json({ error: "entity already on this board" });
+    throw err;
+  }
+
+  console.log(`connector entity created: ${connectorName}/${entityId} → #${id} (${entity.display_name})`);
+  res.json({
+    id,
+    name: entity.identity,
+    identity: entity.identity,
+    display_name: entity.display_name,
+    symbol: entity.symbol || null,
+    displayLabel: entity.display_name || entity.identity,
+    status,
+    tags: [],
+    kind: "connector",
+    w: null,
+    h: null,
+    label: null,
+  });
 }));
 
 // Ingestion + item-file statics, mounted before the frontend catch-all.

@@ -107,6 +107,31 @@ const docKind = {
   },
 };
 
+// Connector entities have no files. Same card anatomy as documents —
+// face area + title strip — with a symbol tile standing in for the preview.
+const connectorKind = {
+  face(item, card) {
+    const wrap = document.createElement("div");
+    wrap.className = "doc-face";
+    const tile = document.createElement("div");
+    tile.className = "connector-face";
+    const sym = document.createElement("span");
+    sym.className = "connector-symbol";
+    sym.textContent = item.symbol || item.identity?.slice(0, 4).toUpperCase() || "?";
+    tile.appendChild(sym);
+    const title = document.createElement("div");
+    title.className = "doc-title";
+    title.textContent = item.displayLabel;
+    title.title = item.displayLabel;
+    wrap.append(tile, title);
+    card.classList.add("loaded");
+    return wrap;
+  },
+  openDetail(item) { openLightbox(item); },
+  previewUrl() { return null; },
+};
+
 export function kindFor(item) {
+  if (item?.kind === "connector") return connectorKind;
   return item?.kind && item.kind !== "image" ? docKind : imageKind;
 }

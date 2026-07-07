@@ -2,7 +2,8 @@
 
 .dropdown {
   position: fixed;
-  z-index: 400;
+  /* above modal overlays (500) — a dropdown is always the topmost transient */
+  z-index: 600;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;

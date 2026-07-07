@@ -166,7 +166,10 @@ export async function listItems(db, userId = null, boardId = null) {
       crateIds: crateMap.get(r.id) || [],
       w: r.payload.files?.[0]?.w || null,
       h: r.payload.files?.[0]?.h || null,
-      kind: r.payload.files?.[0]?.kind || "image",
+      // connector entities have no files; give them a "connector" kind so
+      // the client renders the symbol tile face instead of a broken image.
+      kind: r.payload.files?.[0]?.kind || (r.payload.symbol != null ? "connector" : "image"),
+      symbol: r.payload.symbol || null,
       label: originalName,
     };
   });
@@ -559,7 +562,7 @@ export async function deleteAiKey(db, id) {
 // schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
   "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
-  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, created_at";
+  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, created_at";
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
   const id = crypto.randomUUID();

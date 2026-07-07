@@ -300,7 +300,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // as a document block (Anthropic-only — providers.js rejects it elsewhere).
   // Text docs: the content inline, capped.
   async function modelInputFor(payload) {
-    const file = payload.files[0];
+    const file = payload.files?.[0];
+    if (!file) {
+      // Entity with no material files (connector-born): the bound-fields
+      // dossier appended by tagOne is the material; anchor it with the name.
+      return [{
+        kind: "text",
+        text: `The item is an entity named "${payload.display_name || payload.identity}". Tag it using the record_tags tool, judging from its extracted fields below.`,
+      }];
+    }
     if (file.kind === "pdf") {
       const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
       return [

@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { toast } from './toast.js';
+import { openDropdown, ddRow } from './dropdown.js';
 
 const KINDS = ["text", "number", "url", "date"];
 
@@ -14,6 +15,7 @@ export function openMappingModal() {
   let fields = (state.boardMapping?.fields || []).map((f) => ({ ...f }));
   let identityFrom = state.boardMapping?.identity?.from || "raw";
   let identityHint = state.boardMapping?.identity?.hint || "";
+  let inputConnector = state.boardMapping?.input?.connector || null; // set when a connector template is loaded
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -49,43 +51,106 @@ export function openMappingModal() {
     "Extracted values appear in the Details panel and give the tagger extra context.</p>";
   body.appendChild(intro);
 
-  // Identity row — always present; admins can switch from raw to AI-derived.
+  // Template row — top of the body, subtle. Applying a connector template
+  // rewires the whole mapping (input, identity, fields) in one click.
+  if (isAdmin) {
+    const templateRow = document.createElement("div");
+    templateRow.className = "mm-template-row";
+    const templateLabel = document.createElement("span");
+    templateLabel.className = "mm-template-label";
+    templateLabel.textContent = "Template";
+    const loadBtn = document.createElement("button");
+    loadBtn.className = "mm-template-btn";
+    loadBtn.textContent = inputConnector ? `Connector: ${inputConnector}` : "Load template…";
+    loadBtn.addEventListener("click", async () => {
+      loadBtn.disabled = true;
+      let connectors;
+      try {
+        connectors = await fetch("/api/connectors").then((r) => r.json());
+      } catch {
+        toast.error("Failed to load connectors");
+        return;
+      } finally {
+        loadBtn.disabled = false;
+      }
+      if (!connectors.length) { toast.info("No connectors available"); return; }
+      openDropdown(loadBtn, {
+        align: "start",
+        minWidth: 180,
+        build: (menuBody, { close }) => {
+          for (const c of connectors) {
+            menuBody.appendChild(ddRow({
+              label: c.label,
+              onClick: () => {
+                applyTemplate(c);
+                loadBtn.textContent = `Connector: ${c.name}`;
+                close();
+              },
+            }));
+          }
+        },
+      });
+    });
+    templateRow.append(templateLabel, loadBtn);
+    body.appendChild(templateRow);
+  }
+
+  // Identity row — always present. Raw/AI are hand-switchable; connector-bound
+  // identity renders locked with a badge, matching the connector field rows.
   const identityRow = document.createElement("div");
-  identityRow.className = "mm-row";
 
-  const idControls = document.createElement("div");
-  idControls.className = "fe-head";
+  function renderIdentityRow() {
+    const isConnectorId = identityFrom === "connector";
+    identityRow.className = "mm-row" + (isConnectorId ? " mm-row-connector" : "");
+    identityRow.replaceChildren();
 
-  const idKey = document.createElement("span");
-  idKey.className = "mm-key-locked";
-  idKey.textContent = "identity";
+    const idControls = document.createElement("div");
+    idControls.className = "fe-head";
 
-  const idSrcSel = document.createElement("select");
-  idSrcSel.disabled = !isAdmin;
-  [["raw", "filename (raw)"], ["ai", "AI instruction"]].forEach(([val, label]) => {
-    const opt = document.createElement("option");
-    opt.value = val; opt.textContent = label;
-    if (val === identityFrom) opt.selected = true;
-    idSrcSel.appendChild(opt);
-  });
+    const idKey = document.createElement("span");
+    idKey.className = "mm-key-locked";
+    idKey.textContent = "identity";
+    idControls.appendChild(idKey);
 
-  const idHintWrap = document.createElement("div");
-  idHintWrap.style.cssText = "margin-top:6px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
-  const idHint = document.createElement("textarea");
-  idHint.placeholder = "AI instruction — how to identify this entity (e.g. \"the person's full name\")";
-  idHint.rows = 2;
-  idHint.value = identityHint;
-  idHint.disabled = !isAdmin;
-  idHint.addEventListener("input", () => { identityHint = idHint.value; });
-  idHintWrap.appendChild(idHint);
+    if (isConnectorId) {
+      // Locked, badge-styled — same pattern as the connector field rows below.
+      const badge = document.createElement("span");
+      badge.className = "mm-connector-badge";
+      badge.textContent = `${inputConnector}:id`;
+      idControls.appendChild(badge);
+      identityRow.appendChild(idControls);
+      return;
+    }
 
-  idSrcSel.addEventListener("change", () => {
-    identityFrom = idSrcSel.value;
-    idHintWrap.style.display = identityFrom === "ai" ? "block" : "none";
-  });
+    const idSrcSel = document.createElement("select");
+    idSrcSel.disabled = !isAdmin;
+    [["raw", "filename (raw)"], ["ai", "AI instruction"]].forEach(([val, label]) => {
+      const opt = document.createElement("option");
+      opt.value = val; opt.textContent = label;
+      if (val === identityFrom) opt.selected = true;
+      idSrcSel.appendChild(opt);
+    });
+    idControls.appendChild(idSrcSel);
 
-  idControls.append(idKey, idSrcSel);
-  identityRow.append(idControls, idHintWrap);
+    const idHintWrap = document.createElement("div");
+    idHintWrap.style.cssText = "margin-top:6px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
+    const idHint = document.createElement("textarea");
+    idHint.placeholder = "AI instruction — how to identify this entity (e.g. \"the person's full name\")";
+    idHint.rows = 2;
+    idHint.value = identityHint;
+    idHint.disabled = !isAdmin;
+    idHint.addEventListener("input", () => { identityHint = idHint.value; });
+    idHintWrap.appendChild(idHint);
+
+    idSrcSel.addEventListener("change", () => {
+      identityFrom = idSrcSel.value;
+      idHintWrap.style.display = identityFrom === "ai" ? "block" : "none";
+    });
+
+    identityRow.append(idControls, idHintWrap);
+  }
+
+  renderIdentityRow();
   body.appendChild(identityRow);
 
   // Section header for user-defined fields
@@ -113,12 +178,30 @@ export function openMappingModal() {
 
   function makeRow(f, i) {
     const row = document.createElement("div");
-    row.className = "mm-row";
+    const isConnectorField = f.from === "connector";
+    row.className = "mm-row" + (isConnectorField ? " mm-row-connector" : "");
 
-    // Controls line: key · kind · source · remove
     const controls = document.createElement("div");
     controls.className = "fe-head";
 
+    if (isConnectorField) {
+      // Locked connector field: key label + connector badge, no editing.
+      const keyLabel = document.createElement("span");
+      keyLabel.className = "mm-key-locked";
+      keyLabel.style.fontFamily = "monospace";
+      keyLabel.textContent = f.key;
+      const badge = document.createElement("span");
+      badge.className = "mm-connector-badge";
+      badge.textContent = `${inputConnector}:${f.fn}`;
+      const kindLabel = document.createElement("span");
+      kindLabel.className = "mm-locked-badge";
+      kindLabel.textContent = f.kind;
+      controls.append(keyLabel, badge, kindLabel);
+      row.appendChild(controls);
+      return row;
+    }
+
+    // AI field row — editable.
     const keyInput = document.createElement("input");
     keyInput.type = "text";
     keyInput.className = "mm-key";
@@ -143,18 +226,14 @@ export function openMappingModal() {
     kindSel.addEventListener("change", () => { f.kind = kindSel.value; });
     if (!f.kind) f.kind = "text";
 
-    // Source: always "AI instruction" in v1; Connector option visible but disabled.
     const srcSel = document.createElement("select");
-    srcSel.className = "mm-src";  // keeps the dimmed colour for the locked "AI instruction" source
+    srcSel.className = "mm-src";
     srcSel.disabled = !isAdmin;
     const optAI = document.createElement("option");
-    optAI.value = "ai";
-    optAI.textContent = "AI instruction";
+    optAI.value = "ai"; optAI.textContent = "AI instruction";
     const optConn = document.createElement("option");
-    optConn.value = "connector";
-    optConn.textContent = "Connector";
-    optConn.disabled = true;
-    optConn.title = "Coming with live data sources";
+    optConn.value = "connector"; optConn.textContent = "Connector";
+    optConn.disabled = true; optConn.title = "Coming with live data sources";
     srcSel.append(optAI, optConn);
     srcSel.value = "ai";
 
@@ -168,7 +247,6 @@ export function openMappingModal() {
     controls.append(keyInput, kindSel, srcSel);
     if (isAdmin) controls.appendChild(removeBtn);
 
-    // Hint textarea
     const hint = document.createElement("textarea");
     hint.placeholder = "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")";
     hint.rows = 2;
@@ -203,6 +281,7 @@ export function openMappingModal() {
 
   if (isAdmin) {
     const saveBtn = document.createElement("button");
+    saveBtn.className = "mm-save";
     saveBtn.textContent = "Save";
     saveBtn.addEventListener("click", save);
     footer.append(saveBtn);
@@ -213,18 +292,28 @@ export function openMappingModal() {
     footer.appendChild(note);
   }
 
+  function applyTemplate(connector) {
+    const t = connector.template;
+    inputConnector = t.input?.connector || null;
+    identityFrom = t.identity?.from || "raw";
+    identityHint = t.identity?.hint || "";
+    fields = (t.fields || []).map((f) => ({ ...f }));
+    renderIdentityRow();
+    renderFields();
+    toast(`${connector.label} template loaded`);
+  }
+
   async function save() {
     // Flush any pending key-input blur normalizations.
     const activeKey = document.activeElement;
     if (activeKey && fieldsList.contains(activeKey)) activeKey.blur();
 
-    const valid = fields.filter((f) => f.key);
+    // Separate AI fields (need validation) from connector fields (locked, pass through).
+    const aiFields = fields.filter((f) => f.from === "ai" && f.key);
+    const connectorFields = fields.filter((f) => f.from === "connector");
     const seen = new Set();
-    for (const f of valid) {
-      if (!/^[a-z][a-z0-9_]*$/.test(f.key)) {
-        toast.error(`Invalid field key: "${f.key}"`);
-        return;
-      }
+    for (const f of aiFields) {
+      if (!/^[a-z][a-z0-9_]*$/.test(f.key)) { toast.error(`Invalid field key: "${f.key}"`); return; }
       if (seen.has(f.key)) { toast.error(`Duplicate field key: "${f.key}"`); return; }
       seen.add(f.key);
     }
@@ -235,12 +324,20 @@ export function openMappingModal() {
     }
     const identitySlot = identityFrom === "ai"
       ? { from: "ai", hint: identityHint.trim() }
-      : { from: "raw" };
-    const hasContent = valid.length > 0 || identityFrom === "ai";
+      : identityFrom === "connector"
+        ? { from: "connector" }
+        : { from: "raw" };
+
+    const allFields = [
+      ...connectorFields,
+      ...aiFields.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
+    ];
+    const hasContent = allFields.length > 0 || identityFrom !== "raw" || inputConnector;
     const mapping = hasContent
       ? {
+          ...(inputConnector ? { input: { connector: inputConnector } } : {}),
           identity: identitySlot,
-          fields: valid.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
+          fields: allFields,
         }
       : null;
 
@@ -258,6 +355,9 @@ export function openMappingModal() {
       state.boardMapping = mapping;
       toast("Mapping saved");
       close();
+      // Re-render so the toolbar picks up the new mapping — the plus button's
+      // behaviour (file picker vs connector search) depends on mapping.input.
+      document.dispatchEvent(new Event('app:render'));
     } catch {
       toast.error("Save failed");
     }
@@ -266,12 +366,14 @@ export function openMappingModal() {
   dialog.append(header, body, footer);
   overlay.appendChild(dialog);
   document.body.appendChild(overlay);
+  document.body.style.overflow = "hidden";
   modalEl = overlay;
 
   function close() {
     if (!modalEl) return;
     modalEl.remove();
     modalEl = null;
+    document.body.style.overflow = "";
     document.removeEventListener("keydown", onKeydown);
   }
 

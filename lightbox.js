@@ -7,6 +7,25 @@ import { scrollToCard } from './grid.js';
 import { fullUrl } from './kinds.js';
 import { ensurePolling } from './data.js';
 
+// Format numeric field values readably based on key conventions.
+function formatFieldNumber(key, v) {
+  if (v === null || v === undefined) return "—";
+  if (/change|pct|percent/.test(key)) {
+    return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+  }
+  if (/market_cap|volume/.test(key)) {
+    const abs = Math.abs(v);
+    if (abs >= 1e12) return "$" + (v / 1e12).toFixed(2) + "T";
+    if (abs >= 1e9)  return "$" + (v / 1e9).toFixed(2) + "B";
+    if (abs >= 1e6)  return "$" + (v / 1e6).toFixed(2) + "M";
+    return "$" + v.toLocaleString();
+  }
+  if (/price/.test(key) || v >= 1) {
+    return "$" + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return v.toPrecision(6).replace(/\.?0+$/, "");
+}
+
 const elLightbox = document.getElementById("lightbox");
 const elLightboxImg = document.getElementById("lightbox-img");
 const elLightboxDoc = document.getElementById("lightbox-doc");
@@ -160,7 +179,7 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
     secHead.appendChild(reextractBtn);
     sec.appendChild(secHead);
     for (const key of fieldKeys) {
-      const { v, why } = fields[key] || {};
+      const { v, why, src, kind: fieldKind } = fields[key] || {};
       const row = document.createElement("div");
       row.className = "lbp-field-row";
       const kv = document.createElement("div");
@@ -168,6 +187,12 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
       const k = document.createElement("span");
       k.className = "lbp-field-key";
       k.textContent = key;
+      if (src) {
+        const badge = document.createElement("span");
+        badge.className = "lbp-field-src";
+        badge.textContent = src;
+        k.appendChild(badge);
+      }
       let val;
       const vStr = v !== null && v !== undefined ? String(v) : null;
       if (vStr && /^https?:\/\//.test(vStr)) {
@@ -176,6 +201,9 @@ function paintPanel(img, reasoning, fields, identityProvisional, files) {
         val.target = "_blank";
         val.rel = "noopener noreferrer";
         val.textContent = vStr;
+      } else if (vStr !== null && fieldKind === "number" && typeof v === "number") {
+        val = document.createElement("span");
+        val.textContent = formatFieldNumber(key, v);
       } else {
         val = document.createElement("span");
         val.textContent = vStr ?? "—";

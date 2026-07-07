@@ -1595,6 +1595,126 @@ a.lbp-field-val:hover { text-decoration: underline; }
   margin: 4px 0 12px;
 }
 
+/* connector field provenance badge */
+.lbp-field-src {
+  font-size: 10px;
+  font-weight: 500;
+  color: #6b6b90;
+  background: #ededf5;
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  font-family: monospace;
+  vertical-align: middle;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* connector entity card face — the symbol tile fills the doc-face preview
+   slot (same height and top rounding as .doc-preview / .doc-badge) */
+.connector-face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  border-radius: 8px 8px 0 0;
+  background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
+}
+.connector-symbol {
+  font-size: 32px;
+  font-weight: 700;
+  color: #e0e0f0;
+  font-family: monospace;
+  letter-spacing: -0.02em;
+}
+
+/* connector search popover — result-row content inside shared dd-rows */
+.connector-searching {
+  font-size: 12px;
+  color: #7a8090;
+  padding: 10px 8px;
+}
+.connector-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.connector-result-sym {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #2a2e38;
+  font-size: 8px;
+  font-weight: 700;
+  font-family: monospace;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9aa2b0;
+  flex-shrink: 0;
+}
+.connector-result-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.connector-result-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #e0e4ea;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connector-result-sub {
+  font-size: 11px;
+  color: #7a8090;
+  font-family: monospace;
+}
+
+/* connector field row in mapping modal */
+.mm-row-connector {
+  background: #f0f0f8;
+  border-color: #d8d8e8;
+}
+.mm-connector-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4f46e5;
+  background: #ededfa;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-family: monospace;
+}
+
+/* template picker row (top of the mapping modal body) */
+.mm-template-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.mm-template-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8a8a96;
+}
+.mm-template-btn {
+  font-size: 12px;
+  padding: 5px 12px;
+  border: 1px solid #d0d0d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #3c3c50;
+  cursor: pointer;
+  font-family: inherit;
+}
+.mm-template-btn:hover { background: #f3f3f8; }
+.mm-template-btn:disabled { opacity: 0.5; cursor: default; }
+
 /* provisional identity warning */
 .lbp-provisional-warn {
   font-size: 12px;

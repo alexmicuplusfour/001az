@@ -15,6 +15,7 @@ export function toItem(d) {
     name: d.name,         // stored filename — used for URL construction
     identity,             // entity's semantic key (derived name or stored filename)
     display_name: d.display_name || null,  // AI's original-casing output
+    symbol: d.symbol || null,             // connector entities: short ticker e.g. "BTC"
     displayLabel,         // what to show as the primary human-readable title
     status: d.status,
     tags: list,

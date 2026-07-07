@@ -47,7 +47,12 @@ export function mountIngest(app, { db, sources }) {
         // Stamp the board's mapping when it has AI fields — the item carries
         // its own copy so re-extraction replays the mapping it was built with,
         // never the (potentially changed) board default.
-        const hasMapping = Array.isArray(board.mapping?.fields) && board.mapping.fields.length > 0;
+        // Only trigger extraction when the board has AI-sourced fields or
+        // AI-derived identity. Connector fields are populated at entity creation,
+        // not by the extract leg.
+        const hasMapping =
+          board.mapping?.identity?.from === "ai" ||
+          (Array.isArray(board.mapping?.fields) && board.mapping.fields.some((f) => f.from === "ai"));
         const payload = { identity: file.name, files: [file], fields: {}, ...(hasMapping ? { mapping: board.mapping } : {}) };
         // Auto-tag off → held (releaseHeld routes to pending_extract when mapped).
         // Auto-tag on + mapping → pending_extract; otherwise → pending.
