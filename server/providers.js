@@ -1,29 +1,20 @@
-// Provider plumbing for the AI tagger: the tagging call itself and key
-// validation, per provider. Prompt building, the queue, and tag validation
-// are provider-agnostic and live in worker.js.
+// Provider plumbing for the AI tagger: the tagging call, embeddings, and key
+// validation, per provider. Prompt building, the queue, and tag validation are
+// provider-agnostic and live in worker.js.
+//
+// Each provider is one descriptor in the PROVIDERS registry below: its quirks
+// are data (base URL, which max-tokens field it wants, whether it forces the
+// tool call, …), and it points at one of two `wire` families — `anthropic`
+// (SDK, tool_use blocks, server-side web_search) or `openai-compat` (plain
+// fetch to /chat/completions). The generic code reads descriptor fields; it
+// never branches on a provider name. Adding a provider is one descriptor.
 import Anthropic from "@anthropic-ai/sdk";
-
-export const PROVIDERS = ["anthropic", "openai", "gemini", "glm"];
-export const PROVIDER_DEFAULT_MODEL = {
-  anthropic: "claude-haiku-4-5",
-  openai: "gpt-5-mini",
-  gemini: "gemini-2.5-flash",
-  // Text and vision are separate families at Z.ai (glm-5.x is text-only), so
-  // the default must be a V model or image boards break.
-  glm: "glm-4.6v",
-};
-
-// Gemini and GLM (Z.ai) speak OpenAI's wire format through compatibility
-// endpoints, so all three providers share the fetch code below; only base
-// URL, label, and the request quirks in compatRequest differ.
-const COMPAT = {
-  openai: { base: "https://api.openai.com/v1", label: "OpenAI" },
-  gemini: { base: "https://generativelanguage.googleapis.com/v1beta/openai", label: "Gemini" },
-  glm: { base: "https://api.z.ai/api/paas/v4", label: "GLM" },
-};
 
 const TOOL_NAME = "record_tags";
 const TOOL_DESC = "Record the applicable taxonomy tags for this item.";
+const DEFAULT_TOOL = { name: TOOL_NAME, description: TOOL_DESC };
+// Per-item bound on web searches; each one bills on top of tokens.
+const MAX_SEARCHES = 5;
 
 // Cached Anthropic clients, keyed by API key — multiple keys can be active at
 // once (per-board overrides), and the registry holds at most a handful.
@@ -33,31 +24,20 @@ function anthropicClient(apiKey) {
   return anthropicClients.get(apiKey);
 }
 
-// Run one tagging call. `parts` is the provider-neutral user content the
-// board type built ({ kind: "image", mediaType, b64 } | { kind: "text", text });
-// each provider maps it to its own wire format here. `research` lets the
-// model use the provider's web-search tool before tagging — Anthropic only;
-// the compat providers ignore the flag and tag from the given input (OpenAI's
-// web search lives on its Responses API, not chat completions; Gemini's
-// compat layer exposes no grounding; GLM has a chat-completions web_search
-// tool that could support this later). Returns { input, usage }: the tool-call
-// input object (facet key -> selection, plus "fit") and the token usage the
-// provider reported, normalized to { input, output, cacheRead, searches }
-// — cache reads are kept out of `input` because they bill at a fraction of
-// the input rate. Throws with a readable message on any failure.
-export async function callTagger({ provider, apiKey, model, systemText, schema, parts, research = false, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
-  if (COMPAT[provider]) return compatTag({ provider, apiKey, model, systemText, schema, parts, tool });
-  return anthropicTag({ apiKey, model, systemText, schema, parts, research, tool });
+const compatHeaders = (apiKey) => ({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" });
+// A failed compat response, turned into a readable error (provider message if
+// there is one, else the status).
+async function compatError(r, label) {
+  const body = await r.json().catch(() => ({}));
+  return new Error(body.error?.message || `${label} HTTP ${r.status}`);
 }
 
-// Per-item bound on web searches; each one bills on top of tokens.
-const MAX_SEARCHES = 5;
+// --- pure request builders (the test seam) ---
 
-// Request construction, split out pure so tests can assert the shape.
-// Research relaxes tool_choice to auto — a forced tool call would block the
-// server-side web_search tool — so the model must be trusted (and validated)
-// to finish with record_tags.
-export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
+// Anthropic tool-use request. Research relaxes tool_choice to auto — a forced
+// tool call would block the server-side web_search tool — so the model must be
+// trusted (and validated downstream) to finish with record_tags.
+export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
   const content = parts.map((p) => {
     if (p.kind === "image") return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     if (p.kind === "document") return { type: "document", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
@@ -77,175 +57,262 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
   };
 }
 
-async function anthropicTag({ apiKey, model, systemText, schema, parts, research = false, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
-  const request = anthropicRequest({ model, systemText, schema, parts, research, tool });
-  let msg = await anthropicClient(apiKey).messages.create(request);
-  const usage = { input: 0, output: 0, cacheRead: 0, searches: 0 };
-  const addUsage = (u = {}) => {
-    // cache writes bill as (slightly dearer) input, so fold them in
-    usage.input += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-    usage.output += u.output_tokens || 0;
-    usage.cacheRead += u.cache_read_input_tokens || 0;
-    usage.searches += u.server_tool_use?.web_search_requests || 0;
-  };
-  addUsage(msg.usage);
-  // A search-heavy turn can come back paused mid-work; hand the partial turn
-  // back and let the model continue (bounded — beyond that, the missing
-  // tool call below turns it into a retryable failure).
-  for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
-    request.messages.push({ role: "assistant", content: msg.content });
-    msg = await anthropicClient(apiKey).messages.create(request);
-    addUsage(msg.usage);
-  }
-  const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);
-  if (!block) throw new Error(`model did not call ${tool.name}`);
-  return { input: block.input, usage };
-}
-
-// Request construction for the OpenAI-compatible providers, split out pure so
-// tests can assert the shape. A forced function call mirrors the Anthropic
-// tool shape and the same strict JSON schema works everywhere — except GLM,
-// which diverges in three places (live-verified 2026-07): its docs allow only
-// "auto" for tool_choice (the user-turn instruction plus the missing-call
-// throw below carry the forcing), `strict` isn't in its function schema, and
-// thinking defaults ON and must be disabled explicitly or it spends output
-// tokens reasoning before the call.
-export function compatRequest({ provider, model, systemText, schema, parts, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
+// OpenAI-compatible chat-completions request. A forced function call mirrors
+// the Anthropic tool shape and the same strict JSON schema works — but the
+// per-provider quirks (which max-tokens field, whether the tool call is forced
+// or left auto, whether `strict` is accepted, whether thinking must be turned
+// off) are read as data from the descriptor's `compat` block, not branched on
+// the provider name. See the GLM descriptor for why each knob exists.
+export function compatRequest({ provider, model, systemText, schema, parts, tool = DEFAULT_TOOL }) {
+  const { compat } = PROVIDERS[provider];
   const content = parts.map((p) =>
     p.kind === "image"
       ? { type: "image_url", image_url: { url: `data:${p.mediaType};base64,${p.b64}` } }
       : { type: "text", text: p.text }
   );
-  const glm = provider === "glm";
   return {
     model,
-    // Only OpenAI takes the new name for this cap; Gemini's compat layer and
-    // GLM both want the legacy one.
-    ...(provider === "openai" ? { max_completion_tokens: 2048 } : { max_tokens: 2048 }),
-    ...(glm ? { thinking: { type: "disabled" } } : {}),
+    [compat.maxTokensField]: 2048,
+    ...(compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
     messages: [
       { role: "system", content: systemText },
       { role: "user", content },
     ],
-    tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: schema, ...(glm ? {} : { strict: true }) } }],
-    tool_choice: glm ? "auto" : { type: "function", function: { name: tool.name } },
+    tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: schema, ...(compat.strictTools ? { strict: true } : {}) } }],
+    tool_choice: compat.forceToolChoice ? { type: "function", function: { name: tool.name } } : "auto",
   };
 }
 
-// OpenAI-compatible providers via plain fetch — one endpoint, not worth a
-// dependency.
-async function compatTag({ provider, apiKey, model, systemText, schema, parts, tool = { name: TOOL_NAME, description: TOOL_DESC } }) {
-  const { base, label } = COMPAT[provider];
-  // Document blocks are Anthropic-only: the chat-completions compat path has
-  // no PDF input. Fail loud with the fix, rather than degrading silently.
-  if (parts.some((p) => p.kind === "document"))
-    throw new Error(`${label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
-  const r = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify(compatRequest({ provider, model, systemText, schema, parts, tool })),
-  });
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    throw new Error(body.error?.message || `${label} HTTP ${r.status}`);
-  }
-  const data = await r.json();
-  const call = data.choices?.[0]?.message?.tool_calls?.[0];
-  if (!call) throw new Error("no tool call in response");
-  const u = data.usage || {};
-  const cached = u.prompt_tokens_details?.cached_tokens || 0;
-  return {
-    input: JSON.parse(call.function.arguments),
-    usage: {
-      // prompt_tokens includes cached ones; pull those out to match Anthropic
-      input: Math.max((u.prompt_tokens || 0) - cached, 0),
-      output: u.completion_tokens || 0,
-      cacheRead: cached,
-    },
-  };
+// --- wire families ---
+// Each owns tag/testKey/embed and reads the descriptor for base URL, label,
+// and its `compat`/`research` data. `embed: null` marks a family (or provider)
+// with no embeddings API.
+
+const anthropicWire = {
+  async tag(desc, { apiKey, model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
+    const request = anthropicRequest({ model, systemText, schema, parts, research, tool });
+    let msg = await anthropicClient(apiKey).messages.create(request);
+    const usage = { input: 0, output: 0, cacheRead: 0, searches: 0 };
+    const addUsage = (u = {}) => {
+      // cache writes bill as (slightly dearer) input, so fold them in
+      usage.input += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      usage.output += u.output_tokens || 0;
+      usage.cacheRead += u.cache_read_input_tokens || 0;
+      usage.searches += u.server_tool_use?.web_search_requests || 0;
+    };
+    addUsage(msg.usage);
+    // A search-heavy turn can come back paused mid-work; hand the partial turn
+    // back and let the model continue (bounded — beyond that, the missing tool
+    // call below turns it into a retryable failure).
+    for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
+      request.messages.push({ role: "assistant", content: msg.content });
+      msg = await anthropicClient(apiKey).messages.create(request);
+      addUsage(msg.usage);
+    }
+    const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);
+    if (!block) throw new Error(`model did not call ${tool.name}`);
+    return { input: block.input, usage };
+  },
+
+  async testKey(desc, { apiKey, model }) {
+    await anthropicClient(apiKey).messages.countTokens({
+      model: model || desc.defaultModel,
+      messages: [{ role: "user", content: "hi" }],
+    });
+  },
+
+  embed: null, // Anthropic has no embeddings API
+};
+
+const compatWire = {
+  async tag(desc, { apiKey, model, systemText, schema, parts, tool = DEFAULT_TOOL }) {
+    // Document blocks are Anthropic-only: the chat-completions path has no PDF
+    // input. Fail loud with the fix, rather than degrading silently.
+    if (parts.some((p) => p.kind === "document"))
+      throw new Error(`${desc.label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
+    const r = await fetch(`${desc.base}/chat/completions`, {
+      method: "POST",
+      headers: compatHeaders(apiKey),
+      body: JSON.stringify(compatRequest({ provider: desc.name, model, systemText, schema, parts, tool })),
+    });
+    if (!r.ok) throw await compatError(r, desc.label);
+    const data = await r.json();
+    const call = data.choices?.[0]?.message?.tool_calls?.[0];
+    if (!call) throw new Error("no tool call in response");
+    const u = data.usage || {};
+    const cached = u.prompt_tokens_details?.cached_tokens || 0;
+    return {
+      input: JSON.parse(call.function.arguments),
+      usage: {
+        // prompt_tokens includes cached ones; pull those out to match Anthropic
+        input: Math.max((u.prompt_tokens || 0) - cached, 0),
+        output: u.completion_tokens || 0,
+        cacheRead: cached,
+      },
+    };
+  },
+
+  async testKey(desc, { apiKey, model }) {
+    const id = model || desc.defaultModel;
+    // "completion": a one-token chat call (for providers with no models
+    // endpoint — GLM). "models": a cheap GET on the model id. Both validate the
+    // key and surface the provider's own error message.
+    if (desc.compat.keyTest === "completion") {
+      const r = await fetch(`${desc.base}/chat/completions`, {
+        method: "POST",
+        headers: compatHeaders(apiKey),
+        body: JSON.stringify({
+          model: id,
+          [desc.compat.maxTokensField]: 1,
+          ...(desc.compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+      if (!r.ok) throw await compatError(r, desc.label);
+      return;
+    }
+    const r = await fetch(`${desc.base}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey) });
+    if (!r.ok) throw await compatError(r, desc.label);
+  },
+
+  // Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
+  // every vector L2-normalized, so similarity is a plain dot product.
+  async embed(desc, { apiKey, model, texts }) {
+    const r = await fetch(`${desc.base}/embeddings`, {
+      method: "POST",
+      headers: compatHeaders(apiKey),
+      body: JSON.stringify({ model, input: texts }),
+    });
+    if (!r.ok) throw await compatError(r, desc.label);
+    const data = await r.json();
+    const rows = (data.data || []).slice().sort((a, b) => a.index - b.index);
+    if (rows.length !== texts.length) throw new Error(`${desc.label} returned ${rows.length} embeddings for ${texts.length} inputs`);
+    const vectors = rows.map((d) => {
+      const v = Float32Array.from(d.embedding);
+      let norm = 0;
+      for (const x of v) norm += x * x;
+      norm = Math.sqrt(norm) || 1;
+      for (let i = 0; i < v.length; i++) v[i] /= norm;
+      return v;
+    });
+    return { vectors, usage: { input: data.usage?.prompt_tokens || 0, output: 0, cacheRead: 0 } };
+  },
+};
+
+// --- the registry ---
+// One descriptor per provider. `models`/`embeds.models` carry the admin catalog
+// (id + note) as the single source of truth — the admin UI is served from here.
+
+const anthropic = {
+  label: "Anthropic",
+  wire: anthropicWire,
+  defaultModel: "claude-haiku-4-5",
+  models: [
+    { id: "claude-haiku-4-5", note: "fast, cheapest" },
+    { id: "claude-sonnet-4-6", note: "balanced" },
+    { id: "claude-opus-4-8", note: "sharpest, most expensive" },
+  ],
+  research: true, // server-side web_search before tagging
+  embeds: null,
+};
+
+const openai = {
+  label: "OpenAI",
+  wire: compatWire,
+  base: "https://api.openai.com/v1",
+  defaultModel: "gpt-5-mini",
+  models: [
+    { id: "gpt-5-nano", note: "fast, cheapest" },
+    { id: "gpt-5-mini", note: "balanced" },
+    { id: "gpt-5.1", note: "sharpest, most expensive" },
+  ],
+  research: false, // web search lives on the Responses API, not chat completions
+  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
+  embeds: {
+    default: "text-embedding-3-small",
+    models: [
+      { id: "text-embedding-3-small", note: "cheapest, plenty here" },
+      { id: "text-embedding-3-large", note: "sharper, ~6× cost" },
+    ],
+  },
+};
+
+const gemini = {
+  label: "Gemini",
+  wire: compatWire,
+  base: "https://generativelanguage.googleapis.com/v1beta/openai",
+  defaultModel: "gemini-2.5-flash",
+  models: [
+    { id: "gemini-2.5-flash-lite", note: "fast, cheapest" },
+    { id: "gemini-2.5-flash", note: "balanced" },
+    { id: "gemini-2.5-pro", note: "sharpest, most expensive" },
+  ],
+  research: false, // the compat layer exposes no grounding
+  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
+  embeds: {
+    default: "gemini-embedding-001",
+    models: [{ id: "gemini-embedding-001", note: "Gemini's embedder" }],
+  },
+};
+
+// Z.ai. Text and vision are separate families (glm-5.x is text-only), so the
+// default must be a V model or image boards break; glm-5.2 is offered but
+// marked text-only. Quirks below are live-verified (2026-07): tool_choice
+// accepts only "auto" (forceToolChoice false — the user-turn instruction plus
+// the missing-call throw carry the forcing), `strict` isn't in its function
+// schema, thinking defaults ON and must be disabled or it burns output tokens,
+// and there is no /models endpoint (keyTest is a one-token completion). No
+// embeddings API on the international platform.
+const glm = {
+  label: "GLM",
+  wire: compatWire,
+  base: "https://api.z.ai/api/paas/v4",
+  defaultModel: "glm-4.6v",
+  models: [
+    { id: "glm-4.6v-flash", note: "free" },
+    { id: "glm-4.6v", note: "balanced" },
+    { id: "glm-5.2", note: "sharpest, text boards only" },
+  ],
+  research: false, // has a chat-completions web_search tool — future work
+  compat: { maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion" },
+  embeds: null,
+};
+
+export const PROVIDERS = { anthropic, openai, gemini, glm };
+for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
+
+// --- derived views (single source of truth = the registry above) ---
+export const PROVIDER_NAMES = Object.keys(PROVIDERS);
+export const PROVIDER_DEFAULT_MODEL = Object.fromEntries(PROVIDER_NAMES.map((n) => [n, PROVIDERS[n].defaultModel]));
+export const EMBED_PROVIDERS = PROVIDER_NAMES.filter((n) => PROVIDERS[n].embeds);
+export const PROVIDER_DEFAULT_EMBED_MODEL = Object.fromEntries(EMBED_PROVIDERS.map((n) => [n, PROVIDERS[n].embeds.default]));
+
+// --- public dispatchers ---
+
+// Run one tagging call. `parts` is the provider-neutral user content the source
+// built ({ kind: "image", mediaType, b64 } | { kind: "text", text } |
+// { kind: "document", … }); the wire family maps it to its own format. Research
+// (server-side web search before tagging) is honored only by providers that
+// declare it — the rest tag from the given input. Returns { input, usage }: the
+// tool-call input object (facet key -> selection, plus "fit") and token usage
+// normalized to { input, output, cacheRead, searches } — cache reads are kept
+// out of `input` because they bill at a fraction of the input rate. Throws with
+// a readable message on any failure.
+export function callTagger({ provider, research = false, ...rest }) {
+  const desc = PROVIDERS[provider];
+  return desc.wire.tag(desc, { ...rest, research: research && desc.research });
 }
 
-// --- embeddings (semantic search) ---
-// Anthropic has no embeddings API, and neither does GLM (Z.ai's international
-// platform doesn't offer one), so only OpenAI and Gemini qualify. Each
-// model's native dimension count is kept as-is; comparability
-// is guaranteed by only ever searching vectors from the current model.
-export const EMBED_PROVIDERS = ["openai", "gemini"];
-export const PROVIDER_EMBED_MODELS = {
-  openai: ["text-embedding-3-small", "text-embedding-3-large"],
-  gemini: ["gemini-embedding-001"],
-};
-export const PROVIDER_DEFAULT_EMBED_MODEL = {
-  openai: "text-embedding-3-small",
-  gemini: "gemini-embedding-001",
-};
-
-// Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
-// every vector L2-normalized, so similarity is a plain dot product.
-export async function embedTexts({ provider, apiKey, model, texts }) {
-  const { base, label } = COMPAT[provider];
-  const r = await fetch(`${base}/embeddings`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input: texts }),
-  });
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    throw new Error(body.error?.message || `${label} HTTP ${r.status}`);
-  }
-  const data = await r.json();
-  const rows = (data.data || []).slice().sort((a, b) => a.index - b.index);
-  if (rows.length !== texts.length) throw new Error(`${label} returned ${rows.length} embeddings for ${texts.length} inputs`);
-  const vectors = rows.map((d) => {
-    const v = Float32Array.from(d.embedding);
-    let norm = 0;
-    for (const x of v) norm += x * x;
-    norm = Math.sqrt(norm) || 1;
-    for (let i = 0; i < v.length; i++) v[i] /= norm;
-    return v;
-  });
-  return { vectors, usage: { input: data.usage?.prompt_tokens || 0, output: 0, cacheRead: 0 } };
+// Embed a batch of texts (semantic search). Only embeddings-capable providers
+// qualify — callers gate on EMBED_PROVIDERS before reaching here.
+export function embedTexts({ provider, ...rest }) {
+  const desc = PROVIDERS[provider];
+  return desc.wire.embed(desc, rest);
 }
 
 // Cheap key/model validation for the admin "Test" buttons. Throws with the
 // provider's error message on failure.
-export async function testKey({ provider, apiKey, model }) {
-  if (provider === "glm") {
-    // Z.ai has no models endpoint; the cheapest real probe is a one-token
-    // completion on the configured model — it validates key, model id, and
-    // account balance in one shot, with a readable message for each ("Unknown
-    // Model", "Insufficient balance… Please recharge", "Authentication Failed").
-    const { base, label } = COMPAT.glm;
-    const r = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: model || PROVIDER_DEFAULT_MODEL.glm,
-        max_tokens: 1,
-        thinking: { type: "disabled" },
-        messages: [{ role: "user", content: "hi" }],
-      }),
-    });
-    if (!r.ok) {
-      const body = await r.json().catch(() => ({}));
-      throw new Error(body.error?.message || `${label} HTTP ${r.status}`);
-    }
-    return;
-  }
-  if (COMPAT[provider]) {
-    const { base, label } = COMPAT[provider];
-    const id = model || PROVIDER_DEFAULT_MODEL[provider];
-    const r = await fetch(`${base}/models/${encodeURIComponent(id)}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!r.ok) {
-      const body = await r.json().catch(() => ({}));
-      throw new Error(body.error?.message || `${label} HTTP ${r.status}`);
-    }
-    return;
-  }
-  await anthropicClient(apiKey).messages.countTokens({
-    model: model || PROVIDER_DEFAULT_MODEL.anthropic,
-    messages: [{ role: "user", content: "hi" }],
-  });
+export function testKey({ provider, ...rest }) {
+  const desc = PROVIDERS[provider];
+  return desc.wire.testKey(desc, rest);
 }

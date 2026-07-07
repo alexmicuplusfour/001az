@@ -69,7 +69,7 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
-import { testKey, embedTexts, PROVIDERS, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
+import { testKey, embedTexts, PROVIDER_NAMES, EMBED_PROVIDERS, PROVIDER_DEFAULT_EMBED_MODEL } from "./providers.js";
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
@@ -589,7 +589,7 @@ app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
   const provider = req.body && req.body.provider ? String(req.body.provider) : "";
   const apiKey = (req.body && req.body.key ? String(req.body.key) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
-  if (!PROVIDERS.includes(provider)) return res.status(400).json({ error: `provider must be one of: ${PROVIDERS.join(", ")}` });
+  if (!PROVIDER_NAMES.includes(provider)) return res.status(400).json({ error: `provider must be one of: ${PROVIDER_NAMES.join(", ")}` });
   if (!apiKey) return res.status(400).json({ error: "key required" });
   const id = await createAiKey(db, name, provider, apiKey);
   console.log(`ai-key added: "${name}" (${provider})`);
