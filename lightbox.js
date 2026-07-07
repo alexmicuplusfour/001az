@@ -4,7 +4,7 @@ import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
-import { fullUrl } from './kinds.js';
+import { fullUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
 
 // Format numeric field values readably based on key conventions.
@@ -141,7 +141,8 @@ function paintPanel(img, inst, reasoning, fields) {
   elLightboxPanelBody.replaceChildren();
 
   // ── identity zone ──────────────────────────────────────────────────────
-  // Entity reference block; values are click-to-select for easy copying.
+  // Entity title; when the entity has several instances the switcher lives
+  // right under it — it's entity-level navigation.
   const meta = document.createElement("div");
   meta.className = "lbp-meta";
   const metaName = document.createElement("div");
@@ -149,21 +150,7 @@ function paintPanel(img, inst, reasoning, fields) {
   metaName.textContent = img.displayLabel;
   metaName.title = img.displayLabel;
   meta.appendChild(metaName);
-  const metaRows = [["file", inst?.name || img.name], ["kind", inst?.kind || img.kind || "image"], ["id", String(img.id)]];
-  for (const [k, v] of metaRows) {
-    const row = document.createElement("div");
-    row.className = "lbp-meta-row";
-    const key = document.createElement("span");
-    key.textContent = k;
-    const val = document.createElement("span");
-    val.className = "lbp-meta-val";
-    val.textContent = v;
-    row.append(key, val);
-    meta.appendChild(row);
-  }
-  elLightboxPanelBody.appendChild(meta);
 
-  // Instance switcher with per-instance remove (shown when the entity has ≥2).
   const instances = img.instances || [];
   if (instances.length >= 2) {
     const filesSec = document.createElement("div");
@@ -175,11 +162,26 @@ function paintPanel(img, inst, reasoning, fields) {
     instances.forEach((f, i) => {
       const row = document.createElement("div");
       row.className = "lbp-file-row" + (i === currentInstIndex ? " lbp-file-active" : "");
+      row.addEventListener("click", () => showInstance(i));
+      // Thumbnail when the store has one (images always; docs when a preview
+      // rendered); otherwise a mini extension badge.
+      const preview = kindFor(f).previewUrl?.(f);
+      let thumb;
+      if (preview) {
+        thumb = document.createElement("img");
+        thumb.className = "lbp-file-thumb";
+        thumb.src = preview;
+        thumb.loading = "lazy";
+        thumb.alt = "";
+      } else {
+        thumb = document.createElement("div");
+        thumb.className = "lbp-file-thumb";
+        thumb.textContent = (f.name?.match(/\.(\w+)$/)?.[1] || "?").toUpperCase();
+      }
       const fname = document.createElement("button");
       fname.className = "lbp-file-name";
       fname.textContent = f.label || f.name;
       fname.title = "View this file";
-      fname.addEventListener("click", (e) => { e.stopPropagation(); showInstance(i); });
       const rmBtn = document.createElement("button");
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
@@ -201,11 +203,12 @@ function paintPanel(img, inst, reasoning, fields) {
           }
         } finally { rmBtn.disabled = false; }
       });
-      row.append(fname, rmBtn);
+      row.append(thumb, fname, rmBtn);
       filesSec.appendChild(row);
     });
-    elLightboxPanelBody.appendChild(filesSec);
+    meta.appendChild(filesSec);
   }
+  elLightboxPanelBody.appendChild(meta);
 
   // Provisional identity warning — shown when the AI couldn't derive an identity.
   if (img.identityProvisional) {
@@ -225,6 +228,27 @@ function paintPanel(img, inst, reasoning, fields) {
   }
 
   // ── instance zone ──────────────────────────────────────────────────────
+  // The selected instance's reference rows; values are click-to-select.
+  const instMeta = document.createElement("div");
+  instMeta.className = "lbp-meta";
+  const metaRows = [
+    ["file", inst?.name || img.name],
+    ["kind", inst?.kind || img.kind || "image"],
+    ["id", String(inst?.id ?? img.id)],
+  ];
+  for (const [k, v] of metaRows) {
+    const row = document.createElement("div");
+    row.className = "lbp-meta-row";
+    const key = document.createElement("span");
+    key.textContent = k;
+    const val = document.createElement("span");
+    val.className = "lbp-meta-val";
+    val.textContent = v;
+    row.append(key, val);
+    instMeta.appendChild(row);
+  }
+  elLightboxPanelBody.appendChild(instMeta);
+
   // The selected instance's extracted fields, with per-instance re-extract.
   const reextractBtn = document.createElement("button");
   reextractBtn.className = "lbp-reextract";

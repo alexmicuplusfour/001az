@@ -89,5 +89,6 @@ Extraction history (`field_snapshots`, shaped like `tag_snapshots`) ships when f
 
 - **Ingestion modal + review** (was slice 3) — template picker per ingestion, `review` staging status, review grid, commit/discard, auto-commit toggle. Deferred until derived identity or connectors make a bad merge consequential.
 - **Replace semantics** for derived merges (v2 résumé supersedes v1) — accumulate + manual file removal until it hurts.
+- **AI reconciler** (idea 2026-07-08) — a periodic sweep over a board's `(identity, display_name)` pairs asking a model for likely duplicates / wrong merges; its write vocabulary already exists (re-parent, rename, split). Probably propose-only (review queue), not auto-act.
 - **pptx/xlsx** (mammoth-style extraction or LibreOffice), **agentic gather** (model browses material/connectors mid-call), **field-level edits with locks** (design with the override-vs-refresh rule when liveness is real), **interactive charts** (detail view someday), **PLUGIN.md + reference connector** (after finnhub proves the contract).
 - Whether boards can hide specific templates/connectors from their plus menu — add when a real board wants it.

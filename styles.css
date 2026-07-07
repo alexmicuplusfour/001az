@@ -1597,13 +1597,18 @@ a.lbp-field-val:hover { text-decoration: underline; }
 .lbp-files {
   margin-bottom: 14px;
 }
+/* the switcher lives inside the title block (entity zone) */
+.lbp-meta .lbp-files {
+  margin: 10px 0 0;
+}
 .lbp-file-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 4px 8px;
   margin: 0 -8px;
   border-radius: 6px;
+  cursor: pointer;
 }
 .lbp-file-row:hover:not(.lbp-file-active) { background: #f4f4f7; }
 .lbp-file-name {
@@ -1621,9 +1626,33 @@ a.lbp-field-val:hover { text-decoration: underline; }
 }
 .lbp-file-name:hover { color: #1a1a1f; text-decoration: underline; }
 /* the instance on screen: filled row, not just a bold name */
-.lbp-file-active { background: #ececf2; }
+.lbp-file-active { background: #ececf2; cursor: default; }
 .lbp-file-active .lbp-file-name { font-weight: 600; color: #1a1a1f; cursor: default; }
 .lbp-file-active .lbp-file-name:hover { text-decoration: none; }
+/* per-instance thumbnail (img) or mini extension badge (div) */
+.lbp-file-thumb {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  border: 1px solid #e4e4ea;
+  background: #f4f4f7;
+}
+/* the ".lightbox img" main-view rule (object-fit: contain + shadow) also
+   matches these; same specificity, so this later rule wins the crop-fill */
+.lightbox img.lbp-file-thumb {
+  object-fit: cover;
+  box-shadow: none;
+}
+div.lbp-file-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #8a8a96;
+}
 .lbp-file-remove {
   background: none;
   border: 1px solid #d0d0d8;
