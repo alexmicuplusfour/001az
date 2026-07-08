@@ -108,10 +108,15 @@ CREATE INDEX IF NOT EXISTS idx_entities_board ON entities(board_id);
 -- NULL = nothing live; the sweep only looks at non-NULL rows.
 ALTER TABLE entities ADD COLUMN IF NOT EXISTS refresh_at BIGINT;
 CREATE INDEX IF NOT EXISTS idx_entities_refresh ON entities(refresh_at) WHERE refresh_at IS NOT NULL;
+-- When the connector face (a generated chart) was last rendered (slice 5d). Its
+-- cadence (mapping.face.every) folds into refresh_at alongside the live fields.
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS face_at BIGINT;
 
--- status: held -> pending_extract -> extracting -> pending -> processing -> tagged | failed
+-- status: held -> pending_extract -> extracting -> pending_face -> facing -> pending -> processing -> tagged | failed
 -- ('held' gates all AI spend; items with a stamped mapping go through the
---  extract leg first, plain items skip straight to pending)
+--  extract leg first; connector entities with a generated-chart face go through
+--  the face leg (pending_face -> facing) so the chart exists before the first
+--  tag; plain items skip straight to pending)
 -- One items row = one INSTANCE of an entity: exactly one file (or none, for
 -- the connector tag vehicle) with its own extracted fields, tags, reasoning
 -- and queue state. payload shape:

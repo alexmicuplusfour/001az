@@ -113,3 +113,41 @@ export async function refresh(db, conn, entity, inst, mapping, now = Date.now())
   }
   return { merged, moved, next: nextRefreshAt(merged, live, now), provider: active.name };
 }
+
+// --- faces (slice 5d) ---
+
+// Produce the connector face bytes for an entity, or null when unavailable
+// (unknown producer, provider has no history, empty series) — the caller keeps
+// the symbol tile. `source` is the provider handle; re-resolve by symbol on a
+// provider switch, like refresh. Domain rendering lives in the connector's
+// `faces` map; the raw series comes from the active provider's history().
+export async function produceFace(db, conn, entity, source, faceCfg) {
+  const producer = conn.faces?.[faceCfg?.producer];
+  if (!producer) return null;
+  const { name, provider, apiKey } = await activeProvider(db, conn);
+  if (!provider.history) return null; // provider can't supply history → fall back
+  const id = name === source?.provider ? source.id : await resolveBySymbol(db, conn, entity.symbol);
+  if (id == null) return null;
+  const series = await provider.history(id, faceCfg.period, { apiKey });
+  if (!series || !series.length) return null;
+  return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
+}
+
+// The live face cadence, mirroring liveFields — { every } when the mapping's
+// face is a connector face marked live, else null.
+export const faceCadence = (mapping) => {
+  const f = mapping?.face;
+  return f && f.from === "connector" && f.live ? { every: f.every } : null;
+};
+
+// An entity's next refresh time across BOTH its live fields and its face.
+// `faceAt` is entities.face_at (null until the face is first rendered).
+export function entityRefreshAt(fields, faceAt, mapping, now = Date.now()) {
+  let next = nextRefreshAt(fields, liveFields(mapping), now);
+  const cad = faceCadence(mapping);
+  if (cad && faceAt != null) {
+    const due = faceAt + cad.every * 60000;
+    if (next === null || due < next) next = due;
+  }
+  return next;
+}

@@ -10,7 +10,7 @@ import * as runtime from "./runtime.js";
 // (search/fetchEntity/testConnection/activeProvider), so server.js is untouched
 // by the domain/runtime split — db is threaded through as the first argument.
 function bind(name, mod) {
-  const conn = { name, providers: mod.providers, defaultProvider: mod.defaultProvider, manifest: mod.manifest };
+  const conn = { name, providers: mod.providers, defaultProvider: mod.defaultProvider, manifest: mod.manifest, faces: mod.faces };
   return {
     name,
     manifest: mod.manifest,
@@ -19,6 +19,7 @@ function bind(name, mod) {
     testConnection: (db, opts) => runtime.testConnection(db, conn, opts),
     activeProvider: (db) => runtime.activeProvider(db, conn),
     refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
+    produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
   };
 }
 
@@ -38,6 +39,7 @@ export function listConnectors() {
     category: c.manifest.category || null,
     description: c.manifest.description,
     fields: c.manifest.fields,
+    faces: c.manifest.faces || [],
     template: c.manifest.template,
     providers: c.manifest.providers,
   }));

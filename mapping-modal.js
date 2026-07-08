@@ -21,7 +21,9 @@ export function openMappingModal() {
   let identityHint = state.boardMapping?.identity?.hint || "";
   let inputConnector = state.boardMapping?.input?.connector || null; // set when a connector template is loaded
   let connectorCatalog = null;   // the active connector's full field set (manifest.fields)
+  let connectorFaces = [];       // the connector's face producers (manifest.faces)
   let connectorLabel = null;
+  let faceCfg = { ...(state.boardMapping?.face || { from: "raw" }) }; // the entity's card visual
 
   const { overlay, body, footer, closeBtn, close } = createModal({
     title: "Entity mapping",
@@ -139,6 +141,66 @@ export function openMappingModal() {
 
   renderIdentityRow();
   body.appendChild(identityRow);
+
+  // Face row — connector boards only, below identity (the face is ~mandatory).
+  // Source = symbol tile (raw) or a connector face producer (e.g. price chart);
+  // a chart adds a period select and the same cadence widget as fields.
+  const faceRow = document.createElement("div");
+  body.appendChild(faceRow);
+
+  function renderFaceRow() {
+    faceRow.replaceChildren();
+    if (!inputConnector || !connectorFaces.length) { faceRow.style.display = "none"; return; }
+    faceRow.style.display = "";
+    const isProducer = faceCfg.from === "connector";
+    faceRow.className = "mm-row" + (isProducer ? " mm-row-connector" : "");
+
+    const controls = document.createElement("div");
+    controls.className = "fe-head";
+    const key = document.createElement("span");
+    key.className = "mm-key-locked";
+    key.textContent = "face";
+    controls.appendChild(key);
+
+    const srcSel = document.createElement("select");
+    srcSel.disabled = !isAdmin;
+    const tile = document.createElement("option");
+    tile.value = "raw"; tile.textContent = "Symbol tile";
+    srcSel.appendChild(tile);
+    for (const p of connectorFaces) {
+      const opt = document.createElement("option");
+      opt.value = p.name; opt.textContent = p.label;
+      srcSel.appendChild(opt);
+    }
+    srcSel.value = isProducer ? faceCfg.producer : "raw";
+    srcSel.addEventListener("change", () => {
+      if (srcSel.value === "raw") faceCfg = { from: "raw" };
+      else {
+        const p = connectorFaces.find((x) => x.name === srcSel.value);
+        const period = faceCfg.period && p.periods.includes(faceCfg.period) ? faceCfg.period
+          : p.periods.includes("1y") ? "1y" : p.periods[0];
+        faceCfg = { from: "connector", producer: p.name, period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
+      }
+      renderFaceRow();
+    });
+    controls.appendChild(srcSel);
+
+    if (isProducer) {
+      const producer = connectorFaces.find((x) => x.name === faceCfg.producer);
+      const periodSel = document.createElement("select");
+      periodSel.disabled = !isAdmin;
+      periodSel.title = "Chart range";
+      for (const per of producer?.periods || []) {
+        const opt = document.createElement("option");
+        opt.value = per; opt.textContent = per;
+        periodSel.appendChild(opt);
+      }
+      periodSel.value = faceCfg.period;
+      periodSel.addEventListener("change", () => { faceCfg.period = periodSel.value; });
+      controls.append(periodSel, livenessSelect(faceCfg, true));
+    }
+    faceRow.appendChild(controls);
+  }
 
   const fieldsList = document.createElement("div");
   fieldsList.className = "mm-fields";
@@ -323,10 +385,11 @@ export function openMappingModal() {
     }
   }
 
+  renderFaceRow();
   renderFields();
   body.appendChild(fieldsList);
   // For an already-bound board, fetch the connector's catalog so un-included
-  // fields show too (template load fills it directly).
+  // fields + face producers show too (template load fills them directly).
   if (inputConnector && !connectorCatalog) loadCatalog();
 
   if (isAdmin) {
@@ -361,7 +424,7 @@ export function openMappingModal() {
     try {
       const connectors = await fetch("/api/connectors").then((r) => r.json());
       const c = connectors.find((x) => x.name === inputConnector);
-      if (c) { connectorCatalog = c.fields || []; connectorLabel = c.label; renderFields(); }
+      if (c) { connectorCatalog = c.fields || []; connectorFaces = c.faces || []; connectorLabel = c.label; renderFields(); renderFaceRow(); }
     } catch { /* leave catalog null → the saved-fields fallback stands */ }
   }
 
@@ -372,8 +435,11 @@ export function openMappingModal() {
     identityHint = t.identity?.hint || "";
     fields = (t.fields || []).map((f) => ({ ...f }));
     connectorCatalog = connector.fields || [];
+    connectorFaces = connector.faces || [];
     connectorLabel = connector.label;
+    faceCfg = t.face ? { ...t.face } : { from: "raw" };
     renderIdentityRow();
+    renderFaceRow();
     renderFields();
     toast(`${connector.label} template loaded`);
   }
@@ -407,11 +473,15 @@ export function openMappingModal() {
       ...connectorFields.map((f) => ({ key: f.key, kind: f.kind, from: "connector", fn: f.fn, ...(f.live ? { live: true, every: f.every } : {}) })),
       ...aiFields.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
     ];
-    const hasContent = allFields.length > 0 || identityFrom !== "raw" || inputConnector;
+    const face = faceCfg.from === "connector"
+      ? { from: "connector", producer: faceCfg.producer, period: faceCfg.period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) }
+      : null;
+    const hasContent = allFields.length > 0 || identityFrom !== "raw" || inputConnector || face;
     const mapping = hasContent
       ? {
           ...(inputConnector ? { input: { connector: inputConnector } } : {}),
           identity: identitySlot,
+          ...(face ? { face } : {}),
           fields: allFields,
         }
       : null;

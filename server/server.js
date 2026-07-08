@@ -80,7 +80,7 @@ import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js"
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
-import { liveFields, nextRefreshAt } from "./connectors/runtime.js";
+import { liveFields, nextRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { mountIngest } from "./ingest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -572,6 +572,25 @@ function validateMapping(mapping) {
         return `live field "${f.key}" needs an integer "every" in minutes (1–43200)`;
     }
   }
+  // Optional face slot (slice 5d): the entity's card visual.
+  if (mapping.face !== undefined) {
+    const fc = mapping.face;
+    if (!fc || typeof fc !== "object") return "mapping.face must be an object";
+    if (fc.from !== "raw" && fc.from !== "connector") return `mapping.face.from must be "raw" or "connector"`;
+    if (fc.from === "connector") {
+      const conn = getConnector(mapping.input?.connector);
+      if (!conn) return "a connector face requires a connector input";
+      const producer = (conn.manifest.faces || []).find((p) => p.name === fc.producer);
+      if (!producer) return `unknown face producer "${fc.producer}"`;
+      if (fc.period !== undefined && !producer.periods.includes(fc.period))
+        return `invalid period "${fc.period}" for face "${fc.producer}"`;
+      if (fc.live !== undefined) {
+        if (typeof fc.live !== "boolean") return `face "live" must be a boolean`;
+        if (fc.live && (!Number.isInteger(fc.every) || fc.every < 1 || fc.every > 43200))
+          return `live face needs an integer "every" in minutes (1–43200)`;
+      }
+    }
+  }
   return null;
 }
 
@@ -613,7 +632,7 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   // A mapping change can turn fields live/idle or move their cadence — recompute
   // every entity's next refresh (empty live set clears their schedules).
   if (update.mapping !== undefined) {
-    await rescheduleEntityRefreshes(db, id, liveFields(update.mapping));
+    await rescheduleEntityRefreshes(db, id, liveFields(update.mapping), faceCadence(update.mapping));
   }
 
   // The moment auto-tagging comes back on, sweep the board: queue everything
@@ -1027,8 +1046,10 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
   }
 
   // Bound fields live on the entity; one file-less instance is the tag
-  // vehicle (tags/reasoning/queue state are per instance).
-  const status = board.auto_tag ? "pending" : "held";
+  // vehicle (tags/reasoning/queue state are per instance). A connector-face
+  // board renders the chart first (face leg) so the tagger sees it.
+  const wantsFace = board.mapping?.face?.from === "connector";
+  const status = !board.auto_tag ? "held" : wantsFace ? "pending_face" : "pending";
   let eid;
   try {
     eid = await createEntity(db, board.id, {

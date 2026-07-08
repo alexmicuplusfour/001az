@@ -297,7 +297,8 @@ function cardFor(img) {
   // (The instance-count chip rides inside the face's title strip — kinds.js.)
   card.appendChild(kindFor(img).face(img, card, scheduleLayout));
   if (img.status === "pending" || img.status === "processing" ||
-      img.status === "pending_extract" || img.status === "extracting") {
+      img.status === "pending_extract" || img.status === "extracting" ||
+      img.status === "pending_face" || img.status === "facing") {
     card.classList.add("loading");
     const sp = document.createElement("div");
     sp.className = "spinner";

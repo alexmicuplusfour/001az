@@ -1,8 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   claimNextPending,
   claimNextPendingExtract,
+  claimNextPendingFace,
+  setEntityFaceAt,
+  updateItemPayload,
   markTagged,
   markExtracted,
   failOrRequeue,
@@ -32,6 +36,7 @@ import {
 } from "./db.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 import { getConnector } from "./connectors/index.js";
+import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
@@ -306,21 +311,67 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
 // and — only when the board opts in with retag_on_refresh — re-queue the entity
 // to re-tag on a real change. Exported so the sweep and tests share one path.
 // Throws are the caller's (the sweep backs off); it never swallows.
-export async function refreshDueEntity(db, { entity, inst, board }, now = Date.now()) {
+export async function refreshDueEntity(db, { entity, inst, board }, now = Date.now(), dirs = null) {
   const conn = getConnector(board.mapping?.input?.connector);
-  if (!conn?.refresh) { await setEntityRefreshAt(db, entity.id, null); return { moved: [], requeued: false }; }
-  // Live config from the board mapping (current), not the instance's stamped one.
-  const r = await conn.refresh(db, entity, inst, board.mapping, now);
-  if (!r.merged) { await setEntityRefreshAt(db, entity.id, r.next); return { moved: [], requeued: false }; }
-  await updateEntityFields(db, entity.id, r.merged, r.next);
-  const moved = Object.keys(r.moved);
+  if (!conn?.refresh) { await setEntityRefreshAt(db, entity.id, null); return { moved: [], requeued: false, faced: false }; }
+  const mapping = board.mapping;
+  // Fields — live config from the board mapping (current), not the stamped one.
+  const r = await conn.refresh(db, entity, inst, mapping, now);
+  const fields = r.merged || entity.fields;
+  const moved = r.merged ? Object.keys(r.moved) : [];
+
+  // Face — regenerate the chart when its own cadence is due (needs the worker's
+  // dirs; the sweep passes them, unit tests may not). A rendered face uses a new
+  // filename so the immutable cache serves fresh bytes (generateFace unlinks the
+  // old). `dirs` absent → skip (fields-only path).
+  let faceAt = entity.face_at;
+  let faced = false;
+  const cad = faceCadence(mapping);
+  if (dirs && cad && faceAt != null && now - faceAt >= cad.every * 60000) {
+    const face = await generateFace(db, dirs, entity, inst, board, now);
+    if (face) { faceAt = now; faced = true; }
+  }
+
+  // One authoritative refresh_at across fields + face.
+  const nextAt = entityRefreshAt(fields, faceAt, mapping, now);
+  if (r.merged) await updateEntityFields(db, entity.id, fields, nextAt);
+  else await setEntityRefreshAt(db, entity.id, nextAt);
+
   let requeued = false;
   if (moved.length) {
     await addFieldSnapshot(db, entity.id, r.moved, r.provider, now);
     if (board.retag_on_refresh && board.auto_tag) { await requeueItemForTag(db, inst.id); requeued = true; }
     console.log(`refreshed entity #${entity.id} ${entity.identity} [${r.provider}] -> ${moved.join(", ")}${requeued ? " (retag)" : ""}`);
   }
-  return { moved, requeued };
+  if (faced) console.log(`refreshed face for entity #${entity.id} ${entity.identity}`);
+  return { moved, requeued, faced };
+}
+
+// Render + store the connector chart face for one entity, or leave the symbol
+// tile when the mapping has no connector face or the active provider can't
+// supply history. Writes the webp under the standard convention (galleryDir/
+// <name> + thumbsDir/<name>.webp), points the vehicle instance's files at it,
+// and stamps entities.face_at. Regeneration uses a NEW random name (the statics
+// cache immutably) and unlinks the old generated file. Returns the file entry
+// or null. Exported so the face leg, the sweep, and tests share one path.
+export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, board, now = Date.now()) {
+  const conn = getConnector(board.mapping?.input?.connector);
+  const faceCfg = board.mapping?.face;
+  if (!conn?.produceFace || faceCfg?.from !== "connector") return null;
+  const rendered = await conn.produceFace(db, entity, inst.payload?.source, faceCfg);
+  if (!rendered) { await setEntityFaceAt(db, entity.id, null); return null; } // no history → keep the tile
+  const name = crypto.randomBytes(16).toString("hex");
+  await fs.promises.writeFile(path.join(galleryDir, name), rendered.webp);
+  await fs.promises.writeFile(path.join(thumbsDir, name + ".webp"), rendered.webp);
+  const face = { name, kind: "image", generated: true, w: rendered.w, h: rendered.h };
+  const old = inst.payload?.files?.[0];
+  await updateItemPayload(db, inst.id, { files: [face] });
+  await setEntityFaceAt(db, entity.id, now);
+  if (old?.generated && old.name !== name) {
+    await fs.promises.unlink(path.join(galleryDir, old.name)).catch(() => {});
+    await fs.promises.unlink(path.join(thumbsDir, old.name + ".webp")).catch(() => {});
+  }
+  return face;
 }
 
 export function startWorker({ db, thumbsDir, galleryDir }) {
@@ -362,9 +413,14 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       }];
     }
     const buf = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp"));
+    // A generated connector face (e.g. a price chart) gets a chart-aware anchor
+    // so the tagger reads the trend, not a generic "image".
+    const anchor = file.generated
+      ? `This is a price chart for "${entity?.display_name || entity?.identity || payload.identity}". Tag it using the record_tags tool, judging from the chart and the extracted fields below.`
+      : "Tag this image using the record_tags tool.";
     return [
       { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
-      { kind: "text", text: "Tag this image using the record_tags tool." },
+      { kind: "text", text: anchor },
     ];
   }
 
@@ -489,7 +545,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
     for (const row of rows) {
       try {
-        await refreshDueEntity(db, row);
+        await refreshDueEntity(db, row, Date.now(), { galleryDir, thumbsDir });
       } catch (err) {
         refreshBackoffUntil = Date.now() + 60000;
         await setEntityRefreshAt(db, row.entity.id, Date.now() + 60000); // retry later, don't wedge the sweep
@@ -670,6 +726,27 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     }
   }
 
+  // Face leg: render the connector chart (if any) before the entity tags, so the
+  // tagger sees it. A missing/ungenerable face leaves the tile; either way we
+  // advance to the tag leg.
+  async function processFaceOne(row) {
+    const label = row.payload?.identity || `entity ${row.entity_id}`;
+    try {
+      const now = Date.now();
+      const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
+      const board = await getBoard(db, row.board_id);
+      if (entity && board) {
+        const face = await generateFace(db, { galleryDir, thumbsDir }, entity, { id: row.id, payload: row.payload }, board, now);
+        // Schedule the face (and any live fields) now that it exists.
+        await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : null, board.mapping, now));
+      }
+      await requeueItemForTag(db, row.id); // → pending (tag leg)
+    } catch (err) {
+      const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS, "pending_face");
+      console.warn(`face error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
+    }
+  }
+
   async function tick() {
     const recovered = await recoverStuck(db, STUCK_MS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
@@ -690,6 +767,18 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     if (extractRows.length) {
       await Promise.all(extractRows.map(processExtractOne));
       return extractRows.length;
+    }
+
+    // Face leg: render connector chart faces before those entities tag.
+    const faceRows = [];
+    while (faceRows.length < CONCURRENCY) {
+      const row = await claimNextPendingFace(db);
+      if (!row) break;
+      faceRows.push(row);
+    }
+    if (faceRows.length) {
+      await Promise.all(faceRows.map(processFaceOne));
+      return faceRows.length;
     }
 
     // Tag leg.

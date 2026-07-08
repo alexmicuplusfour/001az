@@ -11,9 +11,15 @@
 // structural layer. See slice-5b-crypto-provider-plan.md.
 import * as coingecko from "./coingecko.js";
 import * as coinmarketcap from "./coinmarketcap.js";
+import { renderChart } from "./chart.js";
 
 export const providers = { coingecko, coinmarketcap };
 export const defaultProvider = "coingecko";
+
+// Face producers — domain rendering the runtime dispatches to (like providers
+// for data). `chart` needs the active provider's history(); if it's missing the
+// face falls back to the symbol tile.
+export const faces = { chart: renderChart };
 
 export const manifest = {
   label: "Crypto",
@@ -42,4 +48,8 @@ export const manifest = {
     label: p.label,
     needsKey: !!p.needsKey,
   })),
+  // Face producers this domain can render; drives the mapping modal's face row.
+  faces: [
+    { name: "chart", label: "Price chart", periods: ["24h", "7d", "30d", "90d", "1y", "5y", "max"] },
+  ],
 };

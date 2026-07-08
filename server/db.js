@@ -73,7 +73,9 @@ async function reconcileLiveSchedules(db) {
   const { rows } = await db.query("SELECT id, mapping FROM boards WHERE mapping IS NOT NULL");
   for (const b of rows) {
     const live = (b.mapping?.fields || []).filter((f) => f.from === "connector" && f.live);
-    if (live.length) await rescheduleEntityRefreshes(db, b.id, live);
+    const fc = b.mapping?.face;
+    const faceCad = fc && fc.from === "connector" && fc.live ? { every: fc.every } : null;
+    if (live.length || faceCad) await rescheduleEntityRefreshes(db, b.id, live, faceCad);
   }
 }
 
@@ -280,7 +282,7 @@ export async function countItems(db) {
 // state wins (the card shows a spinner), then failed, then held; an entity
 // whose instances are all done reads tagged. Single-instance entities (every
 // raw board) pass their status through verbatim.
-const STATUS_PRIORITY = ["extracting", "pending_extract", "processing", "pending", "failed", "held"];
+const STATUS_PRIORITY = ["facing", "pending_face", "extracting", "pending_extract", "processing", "pending", "failed", "held"];
 export function aggregateStatus(instances) {
   if (!instances.length) return "tagged";
   if (instances.length === 1) return instances[0].status;
@@ -861,12 +863,17 @@ export async function retagBoard(db, boardId) {
 
 // --- periodic auto-tagging ---
 
-// Release a board's held items. Items with a stamped mapping enter the
-// extract leg first (pending_extract); plain items go straight to pending.
+// Release a board's held items. Connector entities awaiting a chart face enter
+// the face leg (pending_face); items with a stamped mapping enter the extract
+// leg (pending_extract); plain items go straight to pending.
 export async function releaseHeld(db, boardId) {
   const result = await db.query(
     `UPDATE items
-     SET status = CASE WHEN payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
+     SET status = CASE
+           WHEN payload->'mapping'->'face'->>'from' = 'connector'
+                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN payload ? 'mapping' THEN 'pending_extract'
+           ELSE 'pending' END,
          updated_at = $1
      WHERE board_id = $2 AND status = 'held'`,
     [Date.now(), boardId]
@@ -994,6 +1001,27 @@ export async function claimNextPending(db, hasDefaultKey = true) {
   return rows[0] || null;
 }
 
+// Atomically take the oldest pending_face item and mark it facing. Unlike the
+// tag/extract claims this needs NO AI key — rendering a chart is a data+render
+// step, not a model call — so there's no default-key gate.
+export async function claimNextPendingFace(db) {
+  const { rows } = await db.query(
+    `UPDATE items SET status='facing', updated_at=$1
+     WHERE id = (
+       SELECT id FROM items WHERE status='pending_face'
+       ORDER BY created_at ASC, id ASC LIMIT 1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING *`,
+    [Date.now()]
+  );
+  return rows[0] || null;
+}
+
+export async function setEntityFaceAt(db, id, at) {
+  await db.query("UPDATE entities SET face_at=$1, updated_at=$2 WHERE id=$3", [at, Date.now(), id]);
+}
+
 // Atomically take the oldest pending_extract item and mark it extracting.
 // Mirrors claimNextPending; the worker poll loop calls this first.
 export async function claimNextPendingExtract(db, hasDefaultKey = true) {
@@ -1116,18 +1144,17 @@ export async function deleteInstance(db, id) {
 
 // --- connector liveness (slice 5c) ---
 
-// Entities due for a live-field refresh: refresh_at set and reached. Each rides
-// with its file-less connector instance (source + stamped mapping) and its
-// board (active connector + the retag_on_refresh/auto_tag flags). Soonest-due
-// first, bounded per sweep.
+// Entities due for a live-field or face refresh: refresh_at set and reached.
+// Each rides with its connector instance — matched by `payload ? 'source'` (the
+// tag vehicle's marker; NOT file-count, since a generated face gives it a file)
+// — and its board. Soonest-due first, bounded per sweep.
 export async function dueLiveEntities(db, now, limit = 20) {
   const { rows } = await db.query(
-    `SELECT e.id AS e_id, e.identity, e.symbol, e.fields, e.refresh_at,
+    `SELECT e.id AS e_id, e.identity, e.symbol, e.fields, e.refresh_at, e.face_at,
             i.id AS i_id, i.payload AS i_payload,
             b.id AS b_id, b.mapping AS b_mapping, b.retag_on_refresh, b.auto_tag
      FROM entities e
-     JOIN items i ON i.entity_id = e.id
-       AND jsonb_array_length(COALESCE(i.payload->'files','[]'::jsonb)) = 0
+     JOIN items i ON i.entity_id = e.id AND i.payload ? 'source'
      JOIN boards b ON b.id = e.board_id
      WHERE e.refresh_at IS NOT NULL AND e.refresh_at <= $1
      ORDER BY e.refresh_at ASC
@@ -1135,7 +1162,7 @@ export async function dueLiveEntities(db, now, limit = 20) {
     [now, limit]
   );
   return rows.map((r) => ({
-    entity: { id: r.e_id, identity: r.identity, symbol: r.symbol, fields: r.fields, refresh_at: r.refresh_at },
+    entity: { id: r.e_id, identity: r.identity, symbol: r.symbol, fields: r.fields, refresh_at: r.refresh_at, face_at: r.face_at },
     inst: { id: r.i_id, payload: r.i_payload },
     board: { id: r.b_id, mapping: r.b_mapping, retag_on_refresh: r.retag_on_refresh, auto_tag: r.auto_tag },
   }));
@@ -1170,14 +1197,19 @@ export async function requeueItemForTag(db, id) {
 }
 
 // Recompute refresh_at for every entity on a board after its mapping changes
-// (a field turned live/idle, or its cadence moved). `live` is the mapping's live
-// connector fields [{ key, every }]; empty clears every entity's schedule.
-export async function rescheduleEntityRefreshes(db, boardId, live, now = Date.now()) {
-  const { rows } = await db.query("SELECT id, fields FROM entities WHERE board_id=$1", [boardId]);
+// (a field or the face turned live/idle, or a cadence moved). `live` = the
+// mapping's live connector fields [{ key, every }]; `faceCad` = { every } when
+// the face is live, else null. Empty/null both clear that term.
+export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = null, now = Date.now()) {
+  const { rows } = await db.query("SELECT id, fields, face_at FROM entities WHERE board_id=$1", [boardId]);
   for (const e of rows) {
     let next = null;
     for (const f of live) {
       const due = (e.fields?.[f.key]?.at ?? now) + f.every * 60000;
+      if (next === null || due < next) next = due;
+    }
+    if (faceCad && e.face_at != null) {
+      const due = e.face_at + faceCad.every * 60000;
       if (next === null || due < next) next = due;
     }
     await db.query("UPDATE entities SET refresh_at=$1 WHERE id=$2", [next, e.id]);
@@ -1269,14 +1301,15 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
 }
 
 // Recover items stuck mid-flight after a crash. 'processing' → 'pending';
-// 'extracting' → 'pending_extract'. Returns total recovered count.
+// 'extracting' → 'pending_extract'; 'facing' → 'pending_face'. Returns count.
 export async function recoverStuck(db, olderThanMs) {
   const cutoff = Date.now() - olderThanMs;
-  const [r1, r2] = await Promise.all([
+  const [r1, r2, r3] = await Promise.all([
     db.query("UPDATE items SET status='pending' WHERE status='processing' AND updated_at < $1", [cutoff]),
     db.query("UPDATE items SET status='pending_extract' WHERE status='extracting' AND updated_at < $1", [cutoff]),
+    db.query("UPDATE items SET status='pending_face' WHERE status='facing' AND updated_at < $1", [cutoff]),
   ]);
-  return r1.rowCount + r2.rowCount;
+  return r1.rowCount + r2.rowCount + r3.rowCount;
 }
 
 function today() {

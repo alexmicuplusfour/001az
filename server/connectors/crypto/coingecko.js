@@ -55,6 +55,25 @@ export async function fetchEntity(id, { apiKey } = {}) {
   };
 }
 
+// Price history for the chart face (slice 5d): the market_chart endpoint, whose
+// granularity CoinGecko picks from the day span (≤1d = 5-min, ≤90d = hourly,
+// else daily). Returns [{ t, price }]; the crypto connector's chart producer
+// downsamples + renders. CoinMarketCap has no free equivalent, so it omits this
+// export and the face falls back to the tile while CMC is active.
+const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365, "5y": 1825, max: "max" };
+export const periods = Object.keys(PERIOD_DAYS);
+
+export async function history(id, period, { apiKey } = {}) {
+  const days = PERIOD_DAYS[period] ?? 365;
+  const r = await fetch(
+    `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
+    { headers: cgHeaders(apiKey) }
+  );
+  if (!r.ok) throw new Error(`CoinGecko history failed: HTTP ${r.status}`);
+  const d = await r.json();
+  return (d.prices || []).map(([t, price]) => ({ t, price }));
+}
+
 // Cheap liveness ping for the admin Test button. With a key present this also
 // validates it (an invalid demo key is rejected by the API).
 export async function testConnection({ apiKey } = {}) {

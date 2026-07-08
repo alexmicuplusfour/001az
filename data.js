@@ -30,7 +30,7 @@ export function dropPendingUploadId(id) {
   document.dispatchEvent(new Event('app:uploads-pending-changed'));
 }
 
-const IN_FLIGHT = new Set(["pending", "processing", "pending_extract", "extracting"]);
+const IN_FLIGHT = new Set(["pending", "processing", "pending_extract", "extracting", "pending_face", "facing"]);
 
 function needsPoll() {
   return (
