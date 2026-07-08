@@ -913,7 +913,7 @@ app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {
   const q = String(req.query.q || "").trim();
   if (!q) return res.json([]);
   try {
-    res.json(await connector.search(q));
+    res.json(await connector.search(db, q));
   } catch (err) {
     console.error(`connector search error (${req.params.name}):`, err.message);
     res.status(502).json({ error: err.message });
@@ -937,7 +937,7 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
 
   let entity;
   try {
-    entity = await connector.fetchEntity(entityId);
+    entity = await connector.fetchEntity(db, entityId);
   } catch (err) {
     console.error(`connector fetchEntity error (${connectorName}/${entityId}):`, err.message);
     return res.status(502).json({ error: err.message });
@@ -958,7 +958,9 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
     if (err.code === "23505") return res.status(409).json({ error: "entity already on this board" });
     throw err;
   }
-  const payload = { identity: entity.identity, files: [], fields: {}, mapping: board.mapping };
+  // Provider handle rides on the tag-vehicle instance (entities has no free-
+  // form payload) for a future liveness re-fetch.
+  const payload = { identity: entity.identity, files: [], fields: {}, mapping: board.mapping, source: entity.source };
   const id = await insertItem(db, board.id, payload, status, eid);
 
   console.log(`connector entity created: ${connectorName}/${entityId} → #${eid} (${entity.display_name})`);
