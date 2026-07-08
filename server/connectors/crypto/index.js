@@ -49,7 +49,9 @@ export const manifest = {
     needsKey: !!p.needsKey,
   })),
   // Face producers this domain can render; drives the mapping modal's face row.
+  // Periods reflect what the default provider's free tier serves (CoinGecko
+  // demo caps history at 365 days).
   faces: [
-    { name: "chart", label: "Price chart", periods: ["24h", "7d", "30d", "90d", "1y", "5y", "max"] },
+    { name: "chart", label: "Price chart", periods: ["24h", "7d", "30d", "90d", "1y"] },
   ],
 };

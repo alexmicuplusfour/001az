@@ -8,6 +8,12 @@ const BASE = "https://api.coingecko.com/api/v3";
 
 export const label = "CoinGecko";
 export const needsKey = false;
+// Calls/min the runtime paces to (demo key ~30/min; keyless is stricter — the
+// 429/401-under-load backoff covers the residual). A small burst keeps the
+// sweep from spiking over the short-window limit (a rapid spike gets a transient
+// 401 from the demo tier, not just a 429).
+export const rpm = 25;
+export const burst = 3;
 
 // Optional demo key raises the rate limit; omitted → keyless public tier.
 function cgHeaders(apiKey) {
@@ -16,12 +22,22 @@ function cgHeaders(apiKey) {
   return h;
 }
 
+// A failed response as an Error carrying the status + Retry-After, so the
+// runtime's rate limiter can recognise a 429 and back off.
+function cgFail(r, what) {
+  const e = new Error(`CoinGecko ${what} failed: HTTP ${r.status}`);
+  e.status = r.status;
+  const ra = r.headers?.get?.("retry-after");
+  if (ra != null) e.retryAfter = ra;
+  return e;
+}
+
 // Up to 10 matching coins, normalised to the connector's search-hit shape.
 export async function search(query, { apiKey } = {}) {
   const r = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}`, {
     headers: cgHeaders(apiKey),
   });
-  if (!r.ok) throw new Error(`CoinGecko search failed: HTTP ${r.status}`);
+  if (!r.ok) throw cgFail(r, "search");
   const data = await r.json();
   return (data.coins || []).slice(0, 10).map((c) => ({
     id: c.id,
@@ -39,7 +55,7 @@ export async function fetchEntity(id, { apiKey } = {}) {
     `${BASE}/coins/${encodeURIComponent(id)}` +
     `?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false`;
   const r = await fetch(url, { headers: cgHeaders(apiKey) });
-  if (!r.ok) throw new Error(`CoinGecko fetch failed: HTTP ${r.status}`);
+  if (!r.ok) throw cgFail(r, "fetch");
   const d = await r.json();
   const md = d.market_data || {};
   return {
@@ -60,16 +76,19 @@ export async function fetchEntity(id, { apiKey } = {}) {
 // else daily). Returns [{ t, price }]; the crypto connector's chart producer
 // downsamples + renders. CoinMarketCap has no free equivalent, so it omits this
 // export and the face falls back to the tile while CMC is active.
-const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365, "5y": 1825, max: "max" };
+// The free/demo tier caps historical range at 365 days (366+ → 401), so only
+// these periods are offered and the day count is clamped defensively.
+const DEMO_MAX_DAYS = 365;
+const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 };
 export const periods = Object.keys(PERIOD_DAYS);
 
 export async function history(id, period, { apiKey } = {}) {
-  const days = PERIOD_DAYS[period] ?? 365;
+  const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
   const r = await fetch(
     `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
     { headers: cgHeaders(apiKey) }
   );
-  if (!r.ok) throw new Error(`CoinGecko history failed: HTTP ${r.status}`);
+  if (!r.ok) throw cgFail(r, "history");
   const d = await r.json();
   return (d.prices || []).map(([t, price]) => ({ t, price }));
 }
@@ -78,6 +97,6 @@ export async function history(id, period, { apiKey } = {}) {
 // validates it (an invalid demo key is rejected by the API).
 export async function testConnection({ apiKey } = {}) {
   const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey) });
-  if (!r.ok) throw new Error(`CoinGecko unreachable: HTTP ${r.status}`);
+  if (!r.ok) throw cgFail(r, "unreachable");
   return true;
 }

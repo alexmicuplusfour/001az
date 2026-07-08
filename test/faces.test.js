@@ -121,6 +121,57 @@ test("generateFace: no history (CMC active) leaves the tile", async () => {
   await setSetting(db, "crypto_provider", null);
 });
 
+test("a face render error does not block the field refresh (prices keep flowing)", async () => {
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-isolate" } });
+  const mapping = {
+    input: { connector: "crypto" }, identity: { from: "connector" },
+    face: { from: "connector", producer: "chart", period: "1y", live: true, every: 1 },
+    fields: [{ key: "price", kind: "number", from: "connector", fn: "price", live: true, every: 1 }],
+  };
+  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const boardRow = await getBoard(db, board.id);
+  const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin", fields: { price: { v: 100, kind: "number", at: 0 } } });
+  await db.query("UPDATE entities SET face_at=0 WHERE id=$1", [eid]); // face due
+  const instId = await insertItem(db, board.id, { identity: "btc", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coingecko", id: "bitcoin" } }, "tagged", eid);
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("market_chart")) return { ok: false, status: 500, text: async () => "", json: async () => ({}) };       // face fails
+    if (String(url).includes("coingecko.com") && String(url).includes("/coins/"))                                                    // price ok
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ id: "bitcoin", name: "Bitcoin", symbol: "btc", market_data: { current_price: { usd: 130 }, market_cap: { usd: 1e12 }, price_change_percentage_24h: 1 } }) };
+    return original(url, opts);
+  };
+  let r;
+  try {
+    const entity = await getEntity(db, eid);
+    const { rows: [inst] } = await db.query("SELECT id, payload FROM items WHERE id=$1", [instId]);
+    r = await refreshDueEntity(db, { entity, inst, board: boardRow }, 10 * 60000, { galleryDir, thumbsDir });
+  } finally { globalThis.fetch = original; }
+
+  assert.deepEqual(r.moved, ["price"]);                             // price refreshed despite the face error
+  assert.equal(r.faced, false);
+  assert.equal((await getEntity(db, eid)).fields.price.v, 130);
+});
+
+// ── rate limiter / 429 backoff ───────────────────────────────────────────────
+
+test("callProvider retries a 429 (honoring Retry-After) and surfaces other errors", async () => {
+  const fast = { rpm: 100000, burst: 100 }; // effectively unthrottled for the test
+  let calls = 0;
+  const res = await runtime.callProvider("rl-retry", fast, async () => {
+    calls++;
+    if (calls === 1) { const e = new Error("rate limited"); e.status = 429; e.retryAfter = "0"; throw e; }
+    return "ok";
+  });
+  assert.equal(res, "ok");
+  assert.equal(calls, 2); // retried once
+
+  await assert.rejects(
+    runtime.callProvider("rl-other", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
+    /boom/
+  ); // non-429 propagates immediately
+});
+
 // ── route + validation ───────────────────────────────────────────────────────
 
 test("POST entities on a chart-face board → the vehicle starts at pending_face", async () => {
@@ -203,7 +254,7 @@ test("validateMapping: face slot rules", async () => {
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
   const crypto = (face) => ({ input: { connector: "crypto" }, identity: { from: "connector" }, face, fields: [] });
 
-  assert.equal((await patch(crypto({ from: "connector", producer: "chart", period: "5y", live: true, every: 60 }))).status, 200);
+  assert.equal((await patch(crypto({ from: "connector", producer: "chart", period: "1y", live: true, every: 60 }))).status, 200);
   assert.equal((await patch(crypto({ from: "raw" }))).status, 200);
 
   let r = await patch(crypto({ from: "connector", producer: "nope", period: "1y" }));

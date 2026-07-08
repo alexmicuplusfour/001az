@@ -12,6 +12,7 @@ const MAP_TTL = 6 * 60 * 60 * 1000; // the id/symbol map barely changes
 
 export const label = "CoinMarketCap";
 export const needsKey = true;
+export const rpm = 30; // basic plan ~30/min; runtime paces + backs off on 429
 
 // GET + parse, surfacing CMC's structured error (it returns error_message both
 // on non-2xx and inline as status.error_code on a 200).
@@ -22,7 +23,11 @@ async function cmc(path, apiKey) {
   });
   const body = await r.json().catch(() => ({}));
   if (!r.ok || body?.status?.error_code) {
-    throw new Error(`CoinMarketCap: ${body?.status?.error_message || `HTTP ${r.status}`}`);
+    const e = new Error(`CoinMarketCap: ${body?.status?.error_message || `HTTP ${r.status}`}`);
+    e.status = r.status;
+    const ra = r.headers?.get?.("retry-after");
+    if (ra != null) e.retryAfter = ra;
+    throw e;
   }
   return body;
 }

@@ -39,6 +39,8 @@ export async function startServer() {
   process.env.GALLERY_DIR = galleryDir;
   process.env.THUMBS_DIR = thumbsDir;
   process.env.STATIC_DIR = tmp; // no real frontend needed for API tests
+  process.env.CONNECTOR_RPM = "1000000"; // don't rate-limit stubbed provider calls in tests
+  process.env.CONNECTOR_BURST = "1000000";
 
   // Query string cache-busts the import so repeated starts in one process each
   // get a fresh module bound to their own DATABASE_URL.

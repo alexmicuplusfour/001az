@@ -12,6 +12,55 @@ import { getSetting } from "../db.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
+// --- per-provider rate limiting + 429 backoff ---
+// A token bucket per provider keeps the sweep and backfills under each API's
+// limit instead of bursting and 429ing. Acquisition is serialized per provider
+// so concurrent callers don't all spend the same tokens; when the bucket is
+// empty a call waits for a refill. On a 429 the call is retried, honoring
+// Retry-After (bounded). rpm/burst come from the provider descriptor.
+const DEFAULT_RPM = 30, DEFAULT_BURST = 15;
+const buckets = new Map();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function acquire(key, rpm, burst) {
+  let b = buckets.get(key);
+  if (!b) { b = { tokens: burst, last: Date.now(), rpm, burst, chain: Promise.resolve() }; buckets.set(key, b); }
+  const run = b.chain.then(async () => {
+    for (;;) {
+      const now = Date.now();
+      b.tokens = Math.min(b.burst, b.tokens + ((now - b.last) / 60000) * b.rpm);
+      b.last = now;
+      if (b.tokens >= 1) { b.tokens -= 1; return; }
+      await sleep(((1 - b.tokens) / b.rpm) * 60000);
+    }
+  });
+  b.chain = run.catch(() => {}); // keep the per-provider chain alive on failure
+  return run;
+}
+
+// 429 and — for tiers like CoinGecko's demo key — 401 both signal "slow down"
+// (the key is valid; it's rate). Retry either, honoring Retry-After (bounded).
+const RATE_STATUS = new Set([429, 401]);
+async function withRetry(fn, tries = 3) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (!RATE_STATUS.has(e?.status) || i >= tries) throw e;
+      const ra = e.retryAfter != null ? Number(e.retryAfter) : null;
+      await sleep(Number.isFinite(ra) ? ra * 1000 : Math.min(30000, 500 * 2 ** i));
+    }
+  }
+}
+
+// Rate-limited + 429-retried provider call. Exported for tests. Env overrides
+// (CONNECTOR_RPM/CONNECTOR_BURST) let the test harness run unthrottled — its
+// provider calls are stubbed, so pacing would only add wall-clock delay.
+export function callProvider(name, provider, fn) {
+  const rpm = Number(process.env.CONNECTOR_RPM) || provider.rpm || DEFAULT_RPM;
+  const burst = Number(process.env.CONNECTOR_BURST) || provider.burst || DEFAULT_BURST;
+  return acquire(name, rpm, burst).then(() => withRetry(fn));
+}
+
 // Resolve the active provider + its key. An unset or unknown provider name falls
 // back to the connector's default — defaults not laws, so a stale setting never
 // breaks adds.
@@ -22,8 +71,8 @@ export async function activeProvider(db, conn) {
 }
 
 export async function search(db, conn, query) {
-  const { provider, apiKey } = await activeProvider(db, conn);
-  return provider.search(query, { apiKey });
+  const { name, provider, apiKey } = await activeProvider(db, conn);
+  return callProvider(name, provider, () => provider.search(query, { apiKey }));
 }
 
 // Assemble the connector entity from the active provider's raw values:
@@ -34,7 +83,7 @@ export async function search(db, conn, query) {
 //  - source = { provider, id } — the provider handle a future refresh re-fetches from.
 export async function fetchEntity(db, conn, id, now = Date.now()) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  const e = await provider.fetchEntity(id, { apiKey });
+  const e = await callProvider(name, provider, () => provider.fetchEntity(id, { apiKey }));
   const symbol = e.symbol || null;
   const identity = (symbol || "").toLowerCase() || e.id;
   const fields = {};
@@ -51,7 +100,7 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
   const provider = conn.providers[name];
   if (!provider.testConnection) throw new Error("provider has no connection test");
   const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, conn, name);
-  await provider.testConnection({ apiKey });
+  await callProvider(name, provider, () => provider.testConnection({ apiKey }));
   return { provider: name };
 }
 
@@ -128,7 +177,7 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
   if (!provider.history) return null; // provider can't supply history → fall back
   const id = name === source?.provider ? source.id : await resolveBySymbol(db, conn, entity.symbol);
   if (id == null) return null;
-  const series = await provider.history(id, faceCfg.period, { apiKey });
+  const series = await callProvider(name, provider, () => provider.history(id, faceCfg.period, { apiKey }));
   if (!series || !series.length) return null;
   return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
 }

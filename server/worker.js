@@ -330,10 +330,15 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
   // Regenerate when the cadence is due, OR render the first face when the entity
   // has a live face but none yet (face_at null) — so turning a face on / raising
   // its cadence backfills every existing coin instead of only the ones that
-  // happened to render already.
+  // happened to render already. A face render error is isolated: log and keep
+  // going, so it never blocks the field refresh or halts the sweep.
   if (dirs && cad && (faceAt == null || now - faceAt >= cad.every * 60000)) {
-    const face = await generateFace(db, dirs, entity, inst, board, now);
-    if (face) { faceAt = now; faced = true; }
+    try {
+      const face = await generateFace(db, dirs, entity, inst, board, now);
+      if (face) { faceAt = now; faced = true; }
+    } catch (e) {
+      console.warn(`face render failed for entity #${entity.id} ${entity.identity}: ${e.message} (keeping fields)`);
+    }
   }
 
   // One authoritative refresh_at across fields + face.
@@ -740,9 +745,12 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
       const board = await getBoard(db, row.board_id);
       if (entity && board) {
-        const face = await generateFace(db, { galleryDir, thumbsDir }, entity, { id: row.id, payload: row.payload }, board, now);
-        // Schedule the face (and any live fields) now that it exists.
-        await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : null, board.mapping, now));
+        let face = null;
+        // A face render failure isn't fatal — proceed to tag with the tile; the
+        // sweep's self-heal retries the first render later.
+        try { face = await generateFace(db, { galleryDir, thumbsDir }, entity, { id: row.id, payload: row.payload }, board, now); }
+        catch (e) { console.warn(`face render failed for #${row.entity_id} ${label}: ${e.message} (tile)`); }
+        await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : entity.face_at, board.mapping, now));
       }
       await requeueItemForTag(db, row.id); // → pending (tag leg)
     } catch (err) {
