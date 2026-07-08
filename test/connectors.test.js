@@ -5,8 +5,9 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, req } from "./helpers.js";
-import { createEntity, initDb } from "../server/db.js";
+import { createEntity, initDb, setSetting } from "../server/db.js";
 import { manifest } from "../server/connectors/crypto/index.js";
+import * as runtime from "../server/connectors/runtime.js";
 
 // ─── pure: connector manifest shape ──────────────────────────────────────────
 
@@ -52,6 +53,58 @@ async function createBoard(name, extra = {}) {
 async function patchBoard(id, body) {
   return req(base, "PATCH", `/api/admin/boards/${id}`, { sid: admin.sid, body });
 }
+
+// ── runtime: domain-agnostic dispatch (not crypto-shaped) ─────────────────────
+// Drive a throwaway connector with two in-memory providers through the shared
+// runtime the same way crypto does. Proves adding a domain needs zero runtime
+// edits: settings are namespaced by the connector's own name, keys live in
+// per-provider slots, and an unknown/unset provider falls back to the default.
+test("runtime: generic domain×provider dispatch over an arbitrary connector", async () => {
+  const calls = [];
+  const mk = (label, needsKey) => ({
+    label, needsKey,
+    async search(q, { apiKey }) { calls.push(["search", label, q, apiKey]); return [{ id: q }]; },
+    async fetchEntity(id, { apiKey }) {
+      calls.push(["fetch", label, id, apiKey]);
+      return { id, symbol: id.toUpperCase(), display_name: id, fields: { qty: { v: 1, kind: "number" } } };
+    },
+    async testConnection({ apiKey }) { calls.push(["test", label, apiKey]); return true; },
+  });
+  const acme = mk("Acme", false);
+  const globex = mk("Globex", true);
+  const conn = { name: "widgets", providers: { acme, globex }, defaultProvider: "acme", manifest: {} };
+
+  // Unset provider → the connector's own default; an unknown value falls back too.
+  assert.equal((await runtime.activeProvider(db, conn)).name, "acme");
+  await setSetting(db, "widgets_provider", "nope");
+  assert.equal((await runtime.activeProvider(db, conn)).name, "acme");
+  await setSetting(db, "widgets_provider", "globex");
+  assert.equal((await runtime.activeProvider(db, conn)).name, "globex");
+
+  // Keys live in per-provider slots (<name>_key_<provider>) and don't bleed.
+  await setSetting(db, "widgets_key_acme", "acme-key");
+  assert.equal((await runtime.activeProvider(db, conn)).apiKey, null); // active=globex, no key yet
+  await setSetting(db, "widgets_key_globex", "globex-key");
+  const active = await runtime.activeProvider(db, conn);
+  assert.equal(active.apiKey, "globex-key");
+
+  // search/fetch dispatch to the active provider with its key; the runtime
+  // derives identity from the symbol and stamps src + at on every field.
+  await runtime.search(db, conn, "gizmo");
+  const now = 1234;
+  const e = await runtime.fetchEntity(db, conn, "gizmo", now);
+  assert.equal(e.identity, "gizmo");                              // "GIZMO".toLowerCase()
+  assert.deepEqual(e.source, { provider: "globex", id: "gizmo" });
+  assert.deepEqual(e.fields.qty, { v: 1, kind: "number", src: "globex", at: now });
+  assert.ok(calls.some(([op, l, , k]) => op === "search" && l === "Globex" && k === "globex-key"));
+  assert.ok(calls.some(([op, l, , k]) => op === "fetch" && l === "Globex" && k === "globex-key"));
+
+  // testConnection honours a provider override with that provider's stored key,
+  // regardless of which one is active.
+  const t = await runtime.testConnection(db, conn, { provider: "acme" });
+  assert.equal(t.provider, "acme");
+  assert.ok(calls.some(([op, l, k]) => op === "test" && l === "Acme" && k === "acme-key"));
+});
 
 // ── validateMapping: connector extensions ────────────────────────────────────
 
