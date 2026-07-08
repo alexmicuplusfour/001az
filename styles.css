@@ -58,7 +58,12 @@ header {
   background: #fff;
   color: var(--text);
   border-radius: 6px;
-  padding: 4px 10px;
+  height: 28px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
@@ -77,6 +82,8 @@ header {
 .search-box {
   display: inline-flex;
   align-items: center;
+  height: 28px;
+  box-sizing: border-box;
   border: 1px solid #e2e2e6;
   background: #fff;
   border-radius: 6px;
@@ -341,6 +348,19 @@ main#grid {
 }
 .tool-btn.upload:hover {
   background: #000;
+}
+/* standalone caret button beside the add button — rounded all around, sat a
+   small gap away (grouped via .board-group), not fused like a split button */
+.tool-btn.plus-caret {
+  padding: 4px 5px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.tool-btn.plus-caret svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.65;
 }
 
 .card.loading {
@@ -1031,6 +1051,20 @@ a.tool-btn {
 .auth .who {
   font-size: 12px;
   color: var(--text-dim);
+}
+/* connector-template chip in the toolbar — a subtle neutral label naming the
+   board's data source */
+.mapping-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  box-sizing: border-box;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--pill-bg);
+  border-radius: 6px;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .empty {

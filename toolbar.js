@@ -115,8 +115,22 @@ export function renderToolbar(resultCount) {
       // Split button: plus = file picker OR connector search (based on mapping.input);
       // chevron always opens the ingestion menu.
       const connectorName = state.boardMapping?.input?.connector;
+
+      // A connector-backed board carries a mapping template; surface its name as
+      // a chip in front of the add button so the board's data source is legible
+      // at a glance.
+      if (connectorName) {
+        const chip = document.createElement("span");
+        chip.className = "mapping-chip";
+        chip.textContent = connectorName.charAt(0).toUpperCase() + connectorName.slice(1);
+        chip.title = `Entity mapping template: ${connectorName}`;
+        auth.appendChild(chip);
+      }
+
+      // Add button + its ingestion menu — two separate rounded buttons with a
+      // small gap, mirroring the board selector / edit-pencil pairing.
       const plusWrap = document.createElement("div");
-      plusWrap.className = "split-btn";
+      plusWrap.className = "board-group";
       const plusBtn = toolBtn(ICONS.plus, "upload", null); // onClick set below
       plusBtn.addEventListener("click", () => {
         if (connectorName) openConnectorSearch(connectorName, plusBtn);
@@ -124,7 +138,7 @@ export function renderToolbar(resultCount) {
       });
       plusWrap.appendChild(plusBtn);
       const plusMenu = document.createElement("button");
-      plusMenu.className = "tool-btn split-arrow";
+      plusMenu.className = "tool-btn plus-caret";
       plusMenu.title = "More ingestion options";
       plusMenu.setAttribute("aria-label", "More ingestion options");
       plusMenu.innerHTML = ICONS.chevron;
