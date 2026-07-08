@@ -24,8 +24,14 @@ import {
   reparentItem,
   entityInstanceCount,
   deleteEntityIfEmpty,
+  dueLiveEntities,
+  updateEntityFields,
+  setEntityRefreshAt,
+  addFieldSnapshot,
+  requeueItemForTag,
 } from "./db.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
+import { getConnector } from "./connectors/index.js";
 
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
@@ -293,6 +299,29 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
   return t;
 }
 
+// --- connector liveness (slice 5c) ---
+
+// Refresh one due entity: whole-object fetch via its connector's active provider,
+// write back only the due fields (see runtime.refresh), snapshot any movement,
+// and — only when the board opts in with retag_on_refresh — re-queue the entity
+// to re-tag on a real change. Exported so the sweep and tests share one path.
+// Throws are the caller's (the sweep backs off); it never swallows.
+export async function refreshDueEntity(db, { entity, inst, board }, now = Date.now()) {
+  const conn = getConnector(board.mapping?.input?.connector);
+  if (!conn?.refresh) { await setEntityRefreshAt(db, entity.id, null); return { moved: [], requeued: false }; }
+  const r = await conn.refresh(db, entity, inst, now);
+  if (!r.merged) { await setEntityRefreshAt(db, entity.id, r.next); return { moved: [], requeued: false }; }
+  await updateEntityFields(db, entity.id, r.merged, r.next);
+  const moved = Object.keys(r.moved);
+  let requeued = false;
+  if (moved.length) {
+    await addFieldSnapshot(db, entity.id, r.moved, r.provider, now);
+    if (board.retag_on_refresh && board.auto_tag) { await requeueItemForTag(db, inst.id); requeued = true; }
+    console.log(`refreshed entity #${entity.id} ${entity.identity} [${r.provider}] -> ${moved.join(", ")}${requeued ? " (retag)" : ""}`);
+  }
+  return { moved, requeued };
+}
+
 export function startWorker({ db, thumbsDir, galleryDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
@@ -445,6 +474,27 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     } catch (err) {
       embedBackoffUntil = Date.now() + 60000;
       console.warn(`embed error (retrying in 60s): ${err.message}`);
+    }
+  }
+
+  // Liveness sweep: refresh entities whose live connector fields are due. Same
+  // bounded-batch + backoff discipline as embedDue so a provider outage can't
+  // turn the sweep into an API hammer. The per-entity work is refreshDueEntity
+  // (module scope, exported for tests).
+  const REFRESH_BATCH = Math.max(1, Number(process.env.REFRESH_BATCH) || 20);
+  let refreshBackoffUntil = 0;
+  async function refreshDue() {
+    if (Date.now() < refreshBackoffUntil) return;
+    const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
+    for (const row of rows) {
+      try {
+        await refreshDueEntity(db, row);
+      } catch (err) {
+        refreshBackoffUntil = Date.now() + 60000;
+        await setEntityRefreshAt(db, row.entity.id, Date.now() + 60000); // retry later, don't wedge the sweep
+        console.warn(`refresh error entity #${row.entity.id} (retrying in 60s): ${err.message}`);
+        break;
+      }
     }
   }
 
@@ -624,6 +674,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
     await retagDue();
     await embedDue();
+    await refreshDue();
 
     // Boards without their own key only process when a default exists.
     const hasDefault = !!(await resolveDefaultAi(db));

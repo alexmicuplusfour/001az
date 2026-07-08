@@ -330,6 +330,7 @@ export async function openBoardModal(board, opts = {}) {
     periodic: !isNew && !!board.auto_tag_periodic,
     everyMin: (!isNew && board.auto_tag_every_min) || 1440,
     skipWeekends: !isNew && !!board.auto_tag_skip_weekends,
+    retagOnRefresh: !isNew && !!board.retag_on_refresh,
   };
   const atWrap = document.getElementById("board-modal-autotag");
   const atSub = document.createElement("div");
@@ -366,7 +367,8 @@ export async function openBoardModal(board, opts = {}) {
   );
   atSub.append(
     switchRow("Retag on a schedule", "(periodically re-tags everything in this board)", at.periodic, (on) => { at.periodic = on; syncAt(); }),
-    atSched
+    atSched,
+    switchRow("Retag on new data", "(re-tag an entity when a live connector field's value changes)", at.retagOnRefresh, (on) => { at.retagOnRefresh = on; })
   );
   atWrap.append(
     switchRow("Auto tagging", "(new uploads are tagged by the AI; off = they wait untagged until this is back on)", at.enabled, (on) => { at.enabled = on; syncAt(); }),
@@ -445,6 +447,7 @@ export async function openBoardModal(board, opts = {}) {
       auto_tag_periodic: at.periodic,
       auto_tag_every_min: at.everyMin,
       auto_tag_skip_weekends: at.skipWeekends,
+      retag_on_refresh: at.retagOnRefresh,
     };
     try {
       if (isNew) await api("POST", "/api/admin/boards", payload);

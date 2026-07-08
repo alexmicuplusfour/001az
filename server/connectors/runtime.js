@@ -54,3 +54,60 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
   await provider.testConnection({ apiKey });
   return { provider: name };
 }
+
+// --- liveness (slice 5c) ---
+
+// A mapping's live connector fields: [{ key, kind, from, fn, live, every }].
+export const liveFields = (mapping) =>
+  (mapping?.fields || []).filter((f) => f.from === "connector" && f.live);
+
+// Soonest time any live field comes due: min(field.at + every*60000), or null
+// when nothing is live. `fields` is the entity's stored field map; a field with
+// no `at` yet is treated as due now.
+export function nextRefreshAt(fields, live, now = Date.now()) {
+  let next = null;
+  for (const f of live) {
+    const due = (fields?.[f.key]?.at ?? now) + f.every * 60000;
+    if (next === null || due < next) next = due;
+  }
+  return next;
+}
+
+// Map a symbol back to a provider id under the active provider — provider ids
+// aren't portable (CoinGecko's "bitcoin" ≠ CoinMarketCap's "1"), so a refresh
+// after a provider switch re-resolves by ticker. Prefers an exact symbol match.
+export async function resolveBySymbol(db, conn, symbol) {
+  if (!symbol) return null;
+  const want = symbol.toLowerCase();
+  const hits = await search(db, conn, symbol);
+  const hit = hits.find((h) => (h.symbol || "").toLowerCase() === want) || hits[0];
+  return hit ? hit.id : null;
+}
+
+// Re-fetch one entity and return the fields to write back — only those live
+// fields whose cadence has elapsed. `inst` is the file-less connector instance
+// (carries `source` + the stamped live mapping). Whole-object fetch (one API
+// call) even when a single field is due; you can't fetch a field in isolation.
+// `at` is always bumped on a refresh (last-checked, not last-changed) so an
+// unchanged field doesn't read "due" forever. `moved` holds only value changes.
+export async function refresh(db, conn, entity, inst, now = Date.now()) {
+  const live = liveFields(inst.payload?.mapping);
+  const due = live.filter((f) => now - (entity.fields?.[f.key]?.at ?? 0) >= f.every * 60000);
+  if (!due.length) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
+
+  const src = inst.payload?.source;
+  const active = await activeProvider(db, conn);
+  const id = active.name === src?.provider ? src.id : await resolveBySymbol(db, conn, entity.symbol);
+  if (id == null) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
+  const fetched = await fetchEntity(db, conn, id, now);
+
+  const merged = { ...entity.fields };
+  const moved = {};
+  for (const f of due) {
+    const nv = fetched.fields[f.key];
+    if (!nv) continue;
+    if (merged[f.key]?.v !== nv.v) moved[f.key] = nv;
+    merged[f.key] = nv; // always rewritten so `at` advances → refresh_at recomputes
+  }
+  return { merged, moved, next: nextRefreshAt(merged, live, now), provider: active.name };
+}

@@ -65,6 +65,8 @@ import {
   updateItemPayload,
   reextractItem,
   insertItem,
+  setEntityRefreshAt,
+  rescheduleEntityRefreshes,
 } from "./db.js";
 import {
   attachUser,
@@ -78,6 +80,7 @@ import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js"
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
+import { liveFields, nextRefreshAt } from "./connectors/runtime.js";
 import { mountIngest } from "./ingest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -405,6 +408,7 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     auto_tag_periodic: !!b.auto_tag_periodic,
     auto_tag_every_min: b.auto_tag_every_min || 1440,
     auto_tag_skip_weekends: !!b.auto_tag_skip_weekends,
+    retag_on_refresh: !!b.retag_on_refresh,
   });
 }));
 
@@ -464,6 +468,7 @@ function buildBoardContentUpdate(body = {}, prev) {
     update.autoTagEveryMin = m;
   }
   if (body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!body.auto_tag_skip_weekends;
+  if (body.retag_on_refresh !== undefined) update.retagOnRefresh = !!body.retag_on_refresh;
 
   // Schedule bookkeeping: (re)arm the timer when the schedule turns on or
   // changes shape, disarm it when it turns off.
@@ -559,6 +564,13 @@ function validateMapping(mapping) {
       return `hint for field "${f.key}" must be a string ≤500 chars`;
     if (f.from === "connector" && (!f.fn || typeof f.fn !== "string"))
       return `connector field "${f.key}" requires a fn string`;
+    // Per-field liveness (slice 5c): connector fields only; `every` is minutes.
+    if (f.live !== undefined) {
+      if (typeof f.live !== "boolean") return `"live" for field "${f.key}" must be a boolean`;
+      if (f.live && f.from !== "connector") return `only connector fields can be live ("${f.key}")`;
+      if (f.live && (!Number.isInteger(f.every) || f.every < 1 || f.every > 43200))
+        return `live field "${f.key}" needs an integer "every" in minutes (1–43200)`;
+    }
   }
   return null;
 }
@@ -597,6 +609,12 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   }
 
   if (Object.keys(update).length > 0) await updateBoard(db, id, update);
+
+  // A mapping change can turn fields live/idle or move their cadence — recompute
+  // every entity's next refresh (empty live set clears their schedules).
+  if (update.mapping !== undefined) {
+    await rescheduleEntityRefreshes(db, id, liveFields(update.mapping));
+  }
 
   // The moment auto-tagging comes back on, sweep the board: queue everything
   // untagged — held uploads, AI-undecided, failed. Turning it off queues
@@ -1027,6 +1045,10 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
   // form payload) for a future liveness re-fetch.
   const payload = { identity: entity.identity, files: [], fields: {}, mapping: board.mapping, source: entity.source };
   const id = await insertItem(db, board.id, payload, status, eid);
+
+  // Schedule the first liveness refresh when the mapping has live fields.
+  const live = liveFields(board.mapping);
+  if (live.length) await setEntityRefreshAt(db, eid, nextRefreshAt(entity.fields, live));
 
   console.log(`connector entity created: ${connectorName}/${entityId} → #${eid} (${entity.display_name})`);
   res.json({

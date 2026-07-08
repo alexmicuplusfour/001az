@@ -67,6 +67,18 @@ function renderLightboxCrate() {
   elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
 }
 
+// "updated 3m ago" from a field's fetch/refresh timestamp (connector fields
+// carry `at`; live ones advance it each refresh, static ones keep the add time).
+function relTime(ms) {
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 45) return "updated just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `updated ${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `updated ${h}h ago`;
+  return `updated ${Math.round(h / 24)}d ago`;
+}
+
 // One "Fields" section: key/value rows with src badges and why-sentences.
 // Used twice — entity-level (connector-bound data, no re-extract) and
 // instance-level (AI extraction, with the Re-extract button).
@@ -84,7 +96,7 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
   if (reextract) secHead.appendChild(reextract);
   sec.appendChild(secHead);
   for (const key of fieldKeys) {
-    const { v, why, src, kind: fieldKind } = fields[key] || {};
+    const { v, why, src, kind: fieldKind, at } = fields[key] || {};
     const row = document.createElement("div");
     row.className = "lbp-field-row";
     const kv = document.createElement("div");
@@ -97,6 +109,13 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
       badge.className = "lbp-field-src";
       badge.textContent = src;
       k.appendChild(badge);
+    }
+    if (at) {
+      const t = document.createElement("span");
+      t.className = "lbp-field-at";
+      t.textContent = "· " + relTime(at);
+      t.title = new Date(at).toLocaleString();
+      k.appendChild(t);
     }
     let val;
     const vStr = v !== null && v !== undefined ? String(v) : null;

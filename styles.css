@@ -1721,6 +1721,15 @@ div.lbp-file-thumb {
   text-transform: none;
   letter-spacing: 0;
 }
+.lbp-field-at {
+  font-size: 10px;
+  color: #a0a0ad;
+  margin-left: 6px;
+  vertical-align: middle;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
 
 /* connector entity card face — the symbol tile fills the doc-face preview
    slot (same height and top rounding as .doc-preview / .doc-badge) */

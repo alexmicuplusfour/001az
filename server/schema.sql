@@ -65,7 +65,10 @@ ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_every_min INTEGER NOT NULL 
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_skip_weekends BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS auto_tag_next_run_at BIGINT;
 ALTER TABLE boards ADD COLUMN IF NOT EXISTS mapping JSONB;
-ALTER TABLE boards ADD COLUMN IF NOT EXISTS gather_every_min INTEGER;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS gather_every_min INTEGER; -- superseded by per-field mapping.fields[].every; dead
+-- opt-in: re-tag a connector entity when a live field's value moves (slice 5c).
+-- Default off — data refreshes on its own clock; tagging keeps the board's.
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS retag_on_refresh BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- role: 'member' (view only) | 'admin' (may edit this board's content from the
 -- gallery — name/context/facets/toggles/schedule; not the AI key, retag, or
@@ -100,6 +103,11 @@ CREATE TABLE IF NOT EXISTS entities (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_board_identity ON entities(board_id, identity);
 CREATE INDEX IF NOT EXISTS idx_entities_board ON entities(board_id);
+-- Per-field liveness (slice 5c): next time any live connector field is due for a
+-- refresh, = min(field.at + field.every*60000) over the mapping's live fields.
+-- NULL = nothing live; the sweep only looks at non-NULL rows.
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS refresh_at BIGINT;
+CREATE INDEX IF NOT EXISTS idx_entities_refresh ON entities(refresh_at) WHERE refresh_at IS NOT NULL;
 
 -- status: held -> pending_extract -> extracting -> pending -> processing -> tagged | failed
 -- ('held' gates all AI spend; items with a stamped mapping go through the
@@ -153,6 +161,20 @@ CREATE TABLE IF NOT EXISTS tag_snapshots (
   tagged_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_item ON tag_snapshots(item_id, tagged_at);
+
+-- Liveness history (slice 5c): one row per refresh where a connector field's
+-- value actually moved. Keyed to the entity (connector fields live on
+-- entities.fields, not the instance). `fields` holds only the moved values.
+-- A flat refresh writes nothing, so this is the movement timeline (the basis of
+-- a future price-over-time chart).
+CREATE TABLE IF NOT EXISTS field_snapshots (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  entity_id    BIGINT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  fields       JSONB  NOT NULL DEFAULT '{}',
+  source       TEXT,
+  refreshed_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_field_snapshots_entity ON field_snapshots(entity_id, refreshed_at);
 
 CREATE TABLE IF NOT EXISTS invites (
   token      TEXT PRIMARY KEY,

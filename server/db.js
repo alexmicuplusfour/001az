@@ -60,6 +60,22 @@ export async function initDb(db) {
     await setSetting(db, "api_key", null);
   }
   await migrateCoingeckoToCrypto(db);
+  await migrateStampFieldAt(db);
+}
+
+// One-time (slice 5c): connector field values predate per-field liveness and
+// lack the `at` timestamp the refresh scheduler reads. Stamp it from the
+// entity's updated_at so existing coins have a baseline. Idempotent via the
+// `? 'at'` guard; fresh installs (empty entities) no-op.
+async function migrateStampFieldAt(db) {
+  await db.query(
+    `UPDATE entities
+     SET fields = (
+       SELECT jsonb_object_agg(k, CASE WHEN v ? 'at' THEN v ELSE v || jsonb_build_object('at', updated_at) END)
+       FROM jsonb_each(fields) AS f(k, v))
+     WHERE fields <> '{}'::jsonb
+       AND EXISTS (SELECT 1 FROM jsonb_each(fields) AS e(k, v) WHERE NOT (e.v ? 'at'))`
+  );
 }
 
 // One-time (slice 5b): the `crypto` domain connector replaces the flat
@@ -742,7 +758,7 @@ export async function deleteAiKey(db, id) {
 // schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
   "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
-  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, created_at";
+  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, created_at";
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
   const id = crypto.randomUUID();
@@ -769,7 +785,7 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
@@ -785,6 +801,7 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (autoTagSkipWeekends !== undefined) { vals.push(!!autoTagSkipWeekends); sets.push(`auto_tag_skip_weekends=$${vals.length}`); }
   if (autoTagNextRunAt !== undefined) { vals.push(autoTagNextRunAt); sets.push(`auto_tag_next_run_at=$${vals.length}`); }
   if (mapping !== undefined) { vals.push(mapping === null ? null : JSON.stringify(mapping)); sets.push(`mapping=$${vals.length}`); }
+  if (retagOnRefresh !== undefined) { vals.push(!!retagOnRefresh); sets.push(`retag_on_refresh=$${vals.length}`); }
   if (!sets.length) return false;
   vals.push(id);
   const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
@@ -1081,6 +1098,76 @@ export async function deleteEntity(db, id) {
 export async function deleteInstance(db, id) {
   const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload, entity_id, board_id", [id]);
   return rows[0] || null;
+}
+
+// --- connector liveness (slice 5c) ---
+
+// Entities due for a live-field refresh: refresh_at set and reached. Each rides
+// with its file-less connector instance (source + stamped mapping) and its
+// board (active connector + the retag_on_refresh/auto_tag flags). Soonest-due
+// first, bounded per sweep.
+export async function dueLiveEntities(db, now, limit = 20) {
+  const { rows } = await db.query(
+    `SELECT e.id AS e_id, e.identity, e.symbol, e.fields, e.refresh_at,
+            i.id AS i_id, i.payload AS i_payload,
+            b.id AS b_id, b.mapping AS b_mapping, b.retag_on_refresh, b.auto_tag
+     FROM entities e
+     JOIN items i ON i.entity_id = e.id
+       AND jsonb_array_length(COALESCE(i.payload->'files','[]'::jsonb)) = 0
+     JOIN boards b ON b.id = e.board_id
+     WHERE e.refresh_at IS NOT NULL AND e.refresh_at <= $1
+     ORDER BY e.refresh_at ASC
+     LIMIT $2`,
+    [now, limit]
+  );
+  return rows.map((r) => ({
+    entity: { id: r.e_id, identity: r.identity, symbol: r.symbol, fields: r.fields, refresh_at: r.refresh_at },
+    inst: { id: r.i_id, payload: r.i_payload },
+    board: { id: r.b_id, mapping: r.b_mapping, retag_on_refresh: r.retag_on_refresh, auto_tag: r.auto_tag },
+  }));
+}
+
+// Write refreshed connector fields + the next due time, atomically.
+export async function updateEntityFields(db, id, fields, refreshAt) {
+  await db.query(
+    "UPDATE entities SET fields=$1, refresh_at=$2, updated_at=$3 WHERE id=$4",
+    [JSON.stringify(fields), refreshAt, Date.now(), id]
+  );
+}
+
+export async function setEntityRefreshAt(db, id, at) {
+  await db.query("UPDATE entities SET refresh_at=$1 WHERE id=$2", [at, id]);
+}
+
+// One movement-history row (only the fields whose value actually changed).
+export async function addFieldSnapshot(db, entityId, fields, source, at) {
+  await db.query(
+    "INSERT INTO field_snapshots (entity_id, fields, source, refreshed_at) VALUES ($1,$2,$3,$4)",
+    [entityId, JSON.stringify(fields || {}), source || null, at]
+  );
+}
+
+// Send one instance back to the tag queue (the opt-in retag-on-new-data path).
+export async function requeueItemForTag(db, id) {
+  await db.query(
+    "UPDATE items SET status='pending', attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
+    [Date.now(), id]
+  );
+}
+
+// Recompute refresh_at for every entity on a board after its mapping changes
+// (a field turned live/idle, or its cadence moved). `live` is the mapping's live
+// connector fields [{ key, every }]; empty clears every entity's schedule.
+export async function rescheduleEntityRefreshes(db, boardId, live, now = Date.now()) {
+  const { rows } = await db.query("SELECT id, fields FROM entities WHERE board_id=$1", [boardId]);
+  for (const e of rows) {
+    let next = null;
+    for (const f of live) {
+      const due = (e.fields?.[f.key]?.at ?? now) + f.every * 60000;
+      if (next === null || due < next) next = due;
+    }
+    await db.query("UPDATE entities SET refresh_at=$1 WHERE id=$2", [next, e.id]);
+  }
 }
 
 // Re-queue every instance of an entity for tagging (the card-level
