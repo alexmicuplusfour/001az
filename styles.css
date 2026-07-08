@@ -1606,19 +1606,19 @@ a.tool-btn {
 }
 .lbp-field-kv {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
 }
 .lbp-field-key {
   font-size: 12px;
   font-weight: 500;
   color: #4a4a55;
   font-family: monospace;
-  flex-shrink: 0;
 }
 .lbp-field-val {
   font-size: 13px;
   color: #1a1a1f;
+  margin-left: 1px;
 }
 a.lbp-field-val {
   color: #4f46e5;
