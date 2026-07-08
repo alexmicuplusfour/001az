@@ -309,7 +309,8 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
 export async function refreshDueEntity(db, { entity, inst, board }, now = Date.now()) {
   const conn = getConnector(board.mapping?.input?.connector);
   if (!conn?.refresh) { await setEntityRefreshAt(db, entity.id, null); return { moved: [], requeued: false }; }
-  const r = await conn.refresh(db, entity, inst, now);
+  // Live config from the board mapping (current), not the instance's stamped one.
+  const r = await conn.refresh(db, entity, inst, board.mapping, now);
   if (!r.merged) { await setEntityRefreshAt(db, entity.id, r.next); return { moved: [], requeued: false }; }
   await updateEntityFields(db, entity.id, r.merged, r.next);
   const moved = Object.keys(r.moved);

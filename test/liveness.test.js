@@ -59,7 +59,7 @@ test("runtime.refresh: rewrites only due fields, advances at, reports moved", as
   const inst = { id: 1, payload: { source: { provider: "p1", id: "x" }, mapping } };
 
   // t=90s: price (1m) due, cap (60m) not; price unchanged → no movement.
-  let r = await runtime.refresh(db, conn, { symbol: "XYZ", fields: fields0 }, inst, 90000);
+  let r = await runtime.refresh(db, conn, { symbol: "XYZ", fields: fields0 }, inst, mapping, 90000);
   assert.deepEqual(Object.keys(r.moved), []);
   assert.equal(r.merged.price.at, 90000);   // advanced (last-checked, even unchanged)
   assert.equal(r.merged.cap.at, 0);         // untouched — not due
@@ -67,7 +67,7 @@ test("runtime.refresh: rewrites only due fields, advances at, reports moved", as
 
   // price moves; next due tick writes it and reports the movement.
   price = 200;
-  r = await runtime.refresh(db, conn, { symbol: "XYZ", fields: r.merged }, inst, 150000);
+  r = await runtime.refresh(db, conn, { symbol: "XYZ", fields: r.merged }, inst, mapping, 150000);
   assert.deepEqual(Object.keys(r.moved), ["price"]);
   assert.equal(r.merged.price.v, 200);
   assert.equal(r.provider, "p1");
@@ -87,12 +87,32 @@ test("runtime.refresh: re-resolves the id by symbol after a provider switch", as
 
   const mapping = { fields: [{ key: "price", from: "connector", fn: "price", live: true, every: 1 }] };
   const inst = { id: 1, payload: { source: { provider: "p1", id: "p1-id" }, mapping } };
-  const r = await runtime.refresh(db, conn, { symbol: "ZZZ", fields: { price: { v: 9, at: 0 } } }, inst, 120000);
+  const r = await runtime.refresh(db, conn, { symbol: "ZZZ", fields: { price: { v: 9, at: 0 } } }, inst, mapping, 120000);
 
   assert.equal(r.provider, "p2");
   assert.ok(calls.some(([l, op]) => l === "p2" && op === "search"));               // re-resolved by symbol
   assert.ok(calls.some(([l, op, id]) => l === "p2" && op === "fetch" && id === "p2-id"));
   assert.ok(!calls.some(([l]) => l === "p1"));                                     // the stale provider is never touched
+});
+
+test("runtime.refresh: liveness comes from the board mapping, not the stamped one", async () => {
+  // The instance's stamped mapping (frozen at creation) has no live field; the
+  // board mapping — passed in — does. Refresh must follow the board mapping,
+  // else editing liveness never affects existing entities. (Regression: the
+  // sweep first read inst.payload.mapping and silently did nothing.)
+  const p1 = {
+    label: "P1",
+    async search() { return [{ id: "x", symbol: "XYZ" }]; },
+    async fetchEntity(id) { return { id, symbol: "XYZ", display_name: "X", fields: { price: { v: 250, kind: "number" } } }; },
+    async testConnection() { return true; },
+  };
+  const conn = { name: "boardmap", providers: { p1 }, defaultProvider: "p1", manifest: {} };
+  const stamped = { fields: [{ key: "price", from: "connector", fn: "price" }] };                       // no live
+  const boardMapping = { fields: [{ key: "price", from: "connector", fn: "price", live: true, every: 1 }] };
+  const inst = { id: 1, payload: { source: { provider: "p1", id: "x" }, mapping: stamped } };
+  const r = await runtime.refresh(db, conn, { symbol: "XYZ", fields: { price: { v: 100, at: 0 } } }, inst, boardMapping, 120000);
+  assert.deepEqual(Object.keys(r.moved), ["price"]); // board mapping drives it
+  assert.equal(r.merged.price.v, 250);
 });
 
 // ── integration: crypto board + stubbed CoinGecko ────────────────────────────
@@ -154,6 +174,15 @@ test("dueLiveEntities surfaces an entity only once refresh_at is reached", async
   await setEntityRefreshAt(db, eid, 1);
   due = await dueLiveEntities(db, Date.now(), 20);
   assert.ok(due.some((r) => r.entity.id === eid));
+});
+
+test("initDb reconciles refresh_at for entities on already-live boards", async () => {
+  const board = await createCryptoBoard("live-reconcile");
+  const { eid } = await addBitcoin(board.id, 50000);
+  await db.query("UPDATE entities SET refresh_at=NULL WHERE id=$1", [eid]); // simulate pre-deploy state
+  await initDb(db);                                                          // idempotent; reconciles schedules
+  const e = await getEntity(db, eid);
+  assert.ok(e.refresh_at !== null, "entity on a live board gets scheduled at boot");
 });
 
 test("retag_on_refresh gates the cascade: off = no re-queue, on = re-queue", async () => {

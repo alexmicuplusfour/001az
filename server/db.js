@@ -61,6 +61,20 @@ export async function initDb(db) {
   }
   await migrateCoingeckoToCrypto(db);
   await migrateStampFieldAt(db);
+  await reconcileLiveSchedules(db);
+}
+
+// Ensure every entity on a board with live connector fields has a refresh_at.
+// Covers boards configured live before this feature deployed (or before a build
+// that scheduled them) — otherwise their entities sit with refresh_at NULL and
+// the sweep never sees them until the mapping is re-saved. Idempotent: it just
+// recomputes min(field.at + every*60000), the correct next-due, each boot.
+async function reconcileLiveSchedules(db) {
+  const { rows } = await db.query("SELECT id, mapping FROM boards WHERE mapping IS NOT NULL");
+  for (const b of rows) {
+    const live = (b.mapping?.fields || []).filter((f) => f.from === "connector" && f.live);
+    if (live.length) await rescheduleEntityRefreshes(db, b.id, live);
+  }
 }
 
 // One-time (slice 5c): connector field values predate per-field liveness and

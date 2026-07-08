@@ -18,7 +18,7 @@ function bind(name, mod) {
     fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
     testConnection: (db, opts) => runtime.testConnection(db, conn, opts),
     activeProvider: (db) => runtime.activeProvider(db, conn),
-    refresh: (db, entity, inst, now) => runtime.refresh(db, conn, entity, inst, now),
+    refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
   };
 }
 

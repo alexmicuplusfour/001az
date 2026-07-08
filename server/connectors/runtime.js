@@ -85,13 +85,15 @@ export async function resolveBySymbol(db, conn, symbol) {
 }
 
 // Re-fetch one entity and return the fields to write back — only those live
-// fields whose cadence has elapsed. `inst` is the file-less connector instance
-// (carries `source` + the stamped live mapping). Whole-object fetch (one API
-// call) even when a single field is due; you can't fetch a field in isolation.
-// `at` is always bumped on a refresh (last-checked, not last-changed) so an
-// unchanged field doesn't read "due" forever. `moved` holds only value changes.
-export async function refresh(db, conn, entity, inst, now = Date.now()) {
-  const live = liveFields(inst.payload?.mapping);
+// fields whose cadence has elapsed. Live config comes from `mapping` (the board
+// mapping — the current source of truth an admin edits), NOT the instance's
+// stamped mapping, which is frozen at creation and would ignore later liveness
+// edits. `inst` carries the provider `source`. Whole-object fetch (one API call)
+// even when a single field is due; you can't fetch a field in isolation. `at` is
+// always bumped on a refresh (last-checked, not last-changed) so an unchanged
+// field doesn't read "due" forever. `moved` holds only value changes.
+export async function refresh(db, conn, entity, inst, mapping, now = Date.now()) {
+  const live = liveFields(mapping);
   const due = live.filter((f) => now - (entity.fields?.[f.key]?.at ?? 0) >= f.every * 60000);
   if (!due.length) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
 
