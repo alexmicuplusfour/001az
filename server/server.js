@@ -784,6 +784,71 @@ app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
   }
 }));
 
+// --- connector config (admin: which data provider backs each connector) ---
+// Settings keys are per connector: `${name}_provider` and `${name}_api_key`.
+// The connector's own activeProvider()/testConnection() read them, so these
+// routes stay generic across connectors.
+app.get("/api/admin/connectors", requireAdmin, wrap(async (_req, res) => {
+  const out = [];
+  for (const c of listConnectors()) {
+    const conn = getConnector(c.name);
+    // Key presence per provider (never the value) — keys live in their own
+    // per-provider slot so switching backends doesn't overwrite them.
+    const keys = {};
+    for (const p of c.providers) keys[p.name] = !!(await getSetting(db, `${c.name}_key_${p.name}`));
+    out.push({
+      name: c.name,
+      label: c.label,
+      category: c.category,
+      description: c.description,
+      providers: c.providers,
+      activeProvider: conn.activeProvider ? (await conn.activeProvider(db)).name : null,
+      keys,
+    });
+  }
+  res.json(out);
+}));
+
+app.post("/api/admin/connectors/:name", requireAdmin, wrap(async (req, res) => {
+  const conn = getConnector(req.params.name);
+  if (!conn) return res.status(404).json({ error: "unknown connector" });
+  const providers = conn.manifest.providers || [];
+  const provider = req.body?.provider ? String(req.body.provider) : "";
+  const desc = providers.find((p) => p.name === provider);
+  if (!desc) return res.status(400).json({ error: `provider must be one of: ${providers.map((p) => p.name).join(", ")}` });
+
+  const keyName = `${req.params.name}_key_${provider}`;
+  // api_key: a non-empty string sets it, an explicit "" clears it, undefined
+  // leaves the stored key alone. Validate the final state before persisting.
+  let nextKey; // undefined = leave as-is
+  if (req.body?.api_key !== undefined) nextKey = String(req.body.api_key).trim() || null;
+  const willHaveKey = nextKey !== undefined ? !!nextKey : !!(await getSetting(db, keyName));
+  if (desc.needsKey && !willHaveKey) return res.status(400).json({ error: `${desc.label} needs an API key` });
+
+  if (nextKey !== undefined) await setSetting(db, keyName, nextKey);
+  await setSetting(db, `${req.params.name}_provider`, provider);
+  console.log(`connector ${req.params.name}: provider=${provider} (key ${willHaveKey ? "set" : "none"})`);
+  res.json({ ok: true, activeProvider: provider, hasKey: willHaveKey });
+}));
+
+app.post("/api/admin/connectors/:name/test", requireAdmin, wrap(async (req, res) => {
+  const conn = getConnector(req.params.name);
+  if (!conn) return res.status(404).json({ error: "unknown connector" });
+  if (!conn.testConnection) return res.status(400).json({ error: "connector has no connection test" });
+  try {
+    // Test the provider the admin has selected, with the key they just typed
+    // (falling back to that provider's stored key) — so the toast names what
+    // they're actually configuring, not the currently-active provider.
+    const { provider } = await conn.testConnection(db, {
+      provider: req.body?.provider ? String(req.body.provider) : undefined,
+      apiKey: req.body?.api_key !== undefined ? String(req.body.api_key).trim() : undefined,
+    });
+    res.json({ ok: true, provider });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}));
+
 app.get("/api/items", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);

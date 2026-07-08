@@ -4,7 +4,7 @@
 // lowercase symbol, provenance is the provider name.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, seedUser, req } from "./helpers.js";
 import { createEntity, initDb } from "../server/db.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 
@@ -249,4 +249,140 @@ test("migration: coingecko boards + entities re-key to crypto/symbol", async () 
   await initDb(db);
   const { rows: [e2] } = await db.query("SELECT identity FROM entities WHERE id=$1", [eid]);
   assert.equal(e2.identity, "ltc");
+});
+
+// ── slice-5b Phase 2: second provider + admin connector config ────────────────
+// These mutate app-global settings (crypto_provider/crypto_api_key), so they run
+// last; earlier tests rely on the unset default (coingecko).
+
+test("crypto manifest advertises CoinMarketCap as a keyed provider", () => {
+  const cmc = manifest.providers.find((p) => p.name === "coinmarketcap");
+  assert.ok(cmc, "coinmarketcap in providers");
+  assert.equal(cmc.label, "CoinMarketCap");
+  assert.equal(cmc.needsKey, true);
+});
+
+test("GET /api/admin/connectors: shape, default provider, no key echo", async () => {
+  const r = await req(base, "GET", "/api/admin/connectors", { sid: admin.sid });
+  assert.equal(r.status, 200);
+  const cx = r.json.find((c) => c.name === "crypto");
+  assert.ok(cx);
+  assert.equal(cx.category, "finance");
+  assert.equal(cx.activeProvider, "coingecko"); // default when the setting is unset
+  assert.equal(cx.keys.coingecko, false);
+  assert.equal(cx.keys.coinmarketcap, false);
+  assert.ok(cx.providers.some((p) => p.name === "coinmarketcap" && p.needsKey));
+  assert.ok(!JSON.stringify(r.json).includes("api_key")); // presence only, never the value
+});
+
+test("GET /api/admin/connectors: requires admin", async () => {
+  const u = await seedUser(db, "member-conn@test.local");
+  const r = await req(base, "GET", "/api/admin/connectors", { sid: u.sid });
+  assert.equal(r.status, 403);
+});
+
+test("POST /api/admin/connectors: validates provider and enforces the key", async () => {
+  let r = await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "nope" } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /provider must be one of/);
+
+  // Keyed provider with no key stored → rejected.
+  r = await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "coinmarketcap" } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /needs an API key/);
+
+  // Keyed provider with a key → stored (never echoed).
+  r = await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "coinmarketcap", api_key: "cmc-test-key" } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.activeProvider, "coinmarketcap");
+  assert.equal(r.json.hasKey, true);
+
+  const g = await req(base, "GET", "/api/admin/connectors", { sid: admin.sid });
+  const cx = g.json.find((c) => c.name === "crypto");
+  assert.equal(cx.activeProvider, "coinmarketcap");
+  assert.equal(cx.keys.coinmarketcap, true);
+  assert.equal(cx.keys.coingecko, false); // per-provider slots don't bleed
+});
+
+test("POST entities via CoinMarketCap: identical canonical fields, src=coinmarketcap", async () => {
+  await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "coinmarketcap", api_key: "cmc-test-key" } });
+  const { json: board } = await createBoard("conn-cmc");
+  await patchBoard(board.id, { mapping: manifest.template });
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (url.includes("coinmarketcap.com")) {
+      return { ok: true, status: 200,
+        json: async () => ({
+          status: { error_code: 0 },
+          data: { "5426": {
+            id: 5426, name: "Solana", symbol: "SOL", slug: "solana",
+            quote: { USD: { price: 150, market_cap: 7e10, percent_change_24h: 2.3 } },
+          } },
+        }),
+        text: async () => "",
+      };
+    }
+    return original(url, opts);
+  };
+  try {
+    const r = await req(base, "POST", `/api/boards/${board.id}/entities`, {
+      sid: admin.sid, body: { connector: "crypto", id: "5426" },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.identity, "sol"); // identity is the symbol regardless of backend
+    assert.equal(r.json.symbol, "SOL");
+
+    const { rows: [ent] } = await db.query("SELECT * FROM entities WHERE id=$1", [r.json.id]);
+    // Same canonical field set as CoinGecko — the whole point of the split.
+    assert.deepEqual(Object.keys(ent.fields).sort(), ["change_24h", "market_cap", "price", "url"]);
+    assert.equal(ent.fields.price.src, "coinmarketcap"); // provenance follows the actual source
+    assert.equal(ent.fields.price.v, 150);
+    assert.equal(ent.fields.url.v, "https://coinmarketcap.com/currencies/solana/");
+
+    const { rows } = await db.query("SELECT payload FROM items WHERE id=$1", [r.json.instances[0].id]);
+    assert.deepEqual(rows[0].payload.source, { provider: "coinmarketcap", id: "5426" });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("POST connectors: CoinGecko takes an optional key; slots stay per-provider", async () => {
+  // A CoinMarketCap key is already stored (earlier test). Saving a CoinGecko
+  // key must land in its own slot without disturbing CMC's.
+  const r = await req(base, "POST", "/api/admin/connectors/crypto", {
+    sid: admin.sid, body: { provider: "coingecko", api_key: "cg-demo-key" },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.activeProvider, "coingecko"); // keyless provider switches fine, key or not
+  assert.equal(r.json.hasKey, true);
+
+  const g = await req(base, "GET", "/api/admin/connectors", { sid: admin.sid });
+  const cx = g.json.find((c) => c.name === "crypto");
+  assert.equal(cx.keys.coingecko, true);
+  assert.equal(cx.keys.coinmarketcap, true); // CMC key preserved, not clobbered
+});
+
+test("POST connectors/:name/test: honors the selected provider, not the active one", async () => {
+  // Active provider is CoinGecko here; testing CoinMarketCap must ping CMC and
+  // name it — the bug was that Test reported whatever was active/saved.
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (url.includes("coingecko.com/api/v3/ping"))
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    if (url.includes("coinmarketcap.com") && url.includes("key/info"))
+      return { ok: true, status: 200, json: async () => ({ status: { error_code: 0 }, data: {} }), text: async () => "" };
+    return original(url, opts);
+  };
+  try {
+    let r = await req(base, "POST", "/api/admin/connectors/crypto/test", { sid: admin.sid, body: { provider: "coingecko" } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.provider, "coingecko");
+
+    r = await req(base, "POST", "/api/admin/connectors/crypto/test", { sid: admin.sid, body: { provider: "coinmarketcap", api_key: "typed-key" } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.provider, "coinmarketcap");
+  } finally {
+    globalThis.fetch = original;
+  }
 });

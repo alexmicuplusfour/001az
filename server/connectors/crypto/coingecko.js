@@ -1,17 +1,25 @@
 // CoinGecko provider for the crypto connector — the default data backend.
-// No API key required for the free tier (~30 req/min). A provider answers the
-// domain's search/fetch contract and returns raw values; the connector
-// (crypto/index.js) derives identity and stamps provenance, so the provider
-// stays agnostic about its own registry name.
+// Works keyless on the public tier (~30 req/min); an optional CoinGecko demo
+// key raises those limits (sent as the x-cg-demo-api-key header). A provider
+// answers the domain's search/fetch contract and returns raw values; the
+// connector (crypto/index.js) derives identity and stamps provenance, so the
+// provider stays agnostic about its own registry name.
 const BASE = "https://api.coingecko.com/api/v3";
 
 export const label = "CoinGecko";
 export const needsKey = false;
 
+// Optional demo key raises the rate limit; omitted → keyless public tier.
+function cgHeaders(apiKey) {
+  const h = { Accept: "application/json" };
+  if (apiKey) h["x-cg-demo-api-key"] = apiKey;
+  return h;
+}
+
 // Up to 10 matching coins, normalised to the connector's search-hit shape.
 export async function search(query, { apiKey } = {}) {
   const r = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}`, {
-    headers: { Accept: "application/json" },
+    headers: cgHeaders(apiKey),
   });
   if (!r.ok) throw new Error(`CoinGecko search failed: HTTP ${r.status}`);
   const data = await r.json();
@@ -30,7 +38,7 @@ export async function fetchEntity(id, { apiKey } = {}) {
   const url =
     `${BASE}/coins/${encodeURIComponent(id)}` +
     `?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false`;
-  const r = await fetch(url, { headers: { Accept: "application/json" } });
+  const r = await fetch(url, { headers: cgHeaders(apiKey) });
   if (!r.ok) throw new Error(`CoinGecko fetch failed: HTTP ${r.status}`);
   const d = await r.json();
   const md = d.market_data || {};
@@ -47,9 +55,10 @@ export async function fetchEntity(id, { apiKey } = {}) {
   };
 }
 
-// Cheap liveness ping for the admin Test button.
+// Cheap liveness ping for the admin Test button. With a key present this also
+// validates it (an invalid demo key is rejected by the API).
 export async function testConnection({ apiKey } = {}) {
-  const r = await fetch(`${BASE}/ping`, { headers: { Accept: "application/json" } });
+  const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey) });
   if (!r.ok) throw new Error(`CoinGecko unreachable: HTTP ${r.status}`);
   return true;
 }

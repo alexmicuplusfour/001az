@@ -5,9 +5,10 @@
 import { renderMembers } from "/admin-members.js";
 import { renderBoards } from "/admin-boards.js";
 import { renderAiConfig } from "/admin-ai.js";
+import { renderConnectors } from "/admin-connectors.js";
 
 // --- Tabs ---
-const TAB_NAMES = ["members", "boards", "ai"];
+const TAB_NAMES = ["members", "boards", "ai", "connectors"];
 const tabBtns = [...document.querySelectorAll(".tab")];
 function selectTab(name) {
   tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -21,3 +22,4 @@ if (TAB_NAMES.includes(initialTab)) selectTab(initialTab);
 renderMembers().catch(() => (document.getElementById("gate").innerHTML = 'Error loading. <a href="/">Back</a>'));
 renderBoards().catch(() => {});
 renderAiConfig().catch(() => {});
+renderConnectors().catch(() => {});

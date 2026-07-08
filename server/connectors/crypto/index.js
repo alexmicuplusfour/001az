@@ -9,9 +9,10 @@
 // the template picker group siblings (Crypto, later Stocks) — it is not a
 // third structural layer. See slice-5b-crypto-provider-plan.md.
 import * as coingecko from "./coingecko.js";
+import * as coinmarketcap from "./coinmarketcap.js";
 import { getSetting } from "../../db.js";
 
-const PROVIDERS = { coingecko };
+const PROVIDERS = { coingecko, coinmarketcap };
 const DEFAULT_PROVIDER = "coingecko";
 
 export const manifest = {
@@ -42,14 +43,19 @@ export const manifest = {
   })),
 };
 
+// Keys are stored per provider (crypto_key_<provider>), so a keyed backend and
+// a keyless one don't clobber each other's slot when you switch.
+async function providerKey(db, name) {
+  return (await getSetting(db, `crypto_key_${name}`)) || null;
+}
+
 // Resolve the active provider + its key from settings. An unset or unknown
 // provider name falls back to the default — defaults not laws, so a stale
 // setting never breaks adds.
 export async function activeProvider(db) {
   const setName = await getSetting(db, "crypto_provider");
   const name = PROVIDERS[setName] ? setName : DEFAULT_PROVIDER;
-  const apiKey = (await getSetting(db, "crypto_api_key")) || null;
-  return { name, provider: PROVIDERS[name], apiKey };
+  return { name, provider: PROVIDERS[name], apiKey: await providerKey(db, name) };
 }
 
 export async function search(db, query) {
@@ -73,8 +79,15 @@ export async function fetchEntity(db, id) {
   return { identity, display_name: e.display_name, symbol, source: { provider: name, id: e.id }, fields };
 }
 
-export async function testConnection(db) {
-  const { provider, apiKey } = await activeProvider(db);
+// Test a provider's reachability. The admin UI passes the provider it has
+// selected (and, when the admin just typed one, an apiKey) so the check
+// reflects the form, not whatever happens to be active/saved. Both fall back:
+// no override → the active provider; no typed key → that provider's stored key.
+export async function testConnection(db, { provider: pOverride, apiKey: kOverride } = {}) {
+  const name = pOverride && PROVIDERS[pOverride] ? pOverride : (await activeProvider(db)).name;
+  const provider = PROVIDERS[name];
   if (!provider.testConnection) throw new Error("provider has no connection test");
-  return provider.testConnection({ apiKey });
+  const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, name);
+  await provider.testConnection({ apiKey });
+  return { provider: name };
 }
