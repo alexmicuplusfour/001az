@@ -173,6 +173,31 @@ test("refreshDueEntity regenerates a due face (new filename) and folds it into r
   } finally { restore(); }
 });
 
+test("refreshDueEntity renders the first face when a live face has none yet (face_at null)", async () => {
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-firstrender" } });
+  const mapping = {
+    input: { connector: "crypto" }, identity: { from: "connector" },
+    face: { from: "connector", producer: "chart", period: "24h", live: true, every: 5 },
+    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }], // not live
+  };
+  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const boardRow = await getBoard(db, board.id);
+  const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin", fields: { price: { v: 100, kind: "number", at: 0 } } });
+  const instId = await insertItem(db, board.id, { identity: "btc", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coingecko", id: "bitcoin" } }, "tagged", eid);
+
+  const restore = stubHistory([[0, 100], [1, 120]]);
+  try {
+    const entity = await getEntity(db, eid);
+    assert.equal(entity.face_at, null);                             // never rendered
+    const { rows: [inst] } = await db.query("SELECT id, payload FROM items WHERE id=$1", [instId]);
+    const r = await refreshDueEntity(db, { entity, inst, board: boardRow }, 10 * 60000, { galleryDir, thumbsDir });
+    assert.equal(r.faced, true);                                    // first face rendered despite null face_at
+    const { rows: [i2] } = await db.query("SELECT payload FROM items WHERE id=$1", [instId]);
+    assert.equal(i2.payload.files[0].generated, true);
+    assert.equal(Number((await getEntity(db, eid)).face_at), 10 * 60000);
+  } finally { restore(); }
+});
+
 test("validateMapping: face slot rules", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });

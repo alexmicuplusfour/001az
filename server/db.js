@@ -1208,8 +1208,10 @@ export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = nul
       const due = (e.fields?.[f.key]?.at ?? now) + f.every * 60000;
       if (next === null || due < next) next = due;
     }
-    if (faceCad && e.face_at != null) {
-      const due = e.face_at + faceCad.every * 60000;
+    if (faceCad) {
+      // A never-rendered face (face_at null) is due now, so enabling/adjusting a
+      // live face schedules every entity for its first render on the next sweep.
+      const due = e.face_at != null ? e.face_at + faceCad.every * 60000 : now;
       if (next === null || due < next) next = due;
     }
     await db.query("UPDATE entities SET refresh_at=$1 WHERE id=$2", [next, e.id]);

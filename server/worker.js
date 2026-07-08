@@ -327,7 +327,11 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
   let faceAt = entity.face_at;
   let faced = false;
   const cad = faceCadence(mapping);
-  if (dirs && cad && faceAt != null && now - faceAt >= cad.every * 60000) {
+  // Regenerate when the cadence is due, OR render the first face when the entity
+  // has a live face but none yet (face_at null) — so turning a face on / raising
+  // its cadence backfills every existing coin instead of only the ones that
+  // happened to render already.
+  if (dirs && cad && (faceAt == null || now - faceAt >= cad.every * 60000)) {
     const face = await generateFace(db, dirs, entity, inst, board, now);
     if (face) { faceAt = now; faced = true; }
   }
