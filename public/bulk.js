@@ -114,7 +114,9 @@ async function doBulkDelete() {
   const failed = imgs.length - deleted.size;
   clearBulk();
   document.dispatchEvent(new Event('app:render'));
+  // The error already implies the rest went through, so don't double-toast.
   if (failed) toast.error(`Couldn't delete ${failed} of ${imgs.length}`);
+  else toast(`Deleted ${deleted.size} item${deleted.size === 1 ? "" : "s"}`);
 }
 
 async function addAllToCrate(crateId) {

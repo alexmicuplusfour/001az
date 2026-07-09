@@ -210,16 +210,18 @@ function paintPanel(img, inst, reasoning, fields) {
         rmBtn.disabled = true;
         try {
           const r = await fetch(`/api/instances/${f.id}`, { method: "DELETE" });
-          if (r.ok) {
-            img.instances = img.instances.filter((x) => x.id !== f.id);
-            refreshEntityTags(img);
-            // The face may have changed; follow the first remaining instance.
-            const face = img.instances[0];
-            if (face) { img.name = face.name; img.w = face.w; img.h = face.h; img.kind = face.kind; img.label = face.label; }
-            if (currentInstIndex >= img.instances.length) currentInstIndex = 0;
-            document.dispatchEvent(new Event('app:render'));
-            showInstance(Math.min(currentInstIndex, img.instances.length - 1));
-          }
+          if (!r.ok) throw new Error();
+          img.instances = img.instances.filter((x) => x.id !== f.id);
+          refreshEntityTags(img);
+          // The face may have changed; follow the first remaining instance.
+          const face = img.instances[0];
+          if (face) { img.name = face.name; img.w = face.w; img.h = face.h; img.kind = face.kind; img.label = face.label; }
+          if (currentInstIndex >= img.instances.length) currentInstIndex = 0;
+          document.dispatchEvent(new Event('app:render'));
+          showInstance(Math.min(currentInstIndex, img.instances.length - 1));
+          toast("File removed");
+        } catch {
+          toast.error("Couldn't remove file");
         } finally { rmBtn.disabled = false; }
       });
       row.append(thumb, fname, rmBtn);

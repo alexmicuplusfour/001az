@@ -94,6 +94,7 @@ async function doDelete(id) {
     state.items = state.items.filter((i) => i.id !== id);
     dropPendingUploadId(id);
     document.dispatchEvent(new Event('app:render'));
+    toast("Item deleted");
   } catch {
     toast.error("Delete failed");
   }
