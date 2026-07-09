@@ -120,7 +120,7 @@ async function doReprocess(id) {
 function cardActions(img) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
-  actions.appendChild(actionBtn("redo", "reprocess", "Reprocess (re-tag with AI)", () => doReprocess(img.id)));
+  actions.appendChild(actionBtn("redo", "reprocess", "Reprocess (re-identify + re-tag)", () => doReprocess(img.id)));
   actions.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(img.id)));
   const cb = document.createElement("button");
   cb.className = "act crate";

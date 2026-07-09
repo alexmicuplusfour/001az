@@ -304,8 +304,44 @@ function paintPanel(img, inst, reasoning, fields) {
     elLightboxPanelBody.appendChild(d);
   }
 
-  // The selected instance's tags + reasoning (per-instance judgment).
+  // The selected instance's tags + reasoning (per-instance judgment), with a
+  // per-instance Retag: re-tag just this file, leaving identity/fields as-is
+  // (the tag-only counterpart to the card-level full reprocess).
   const subject = inst || img;
+  if (inst && state.me && state.facets.length) {
+    const tagsHead = document.createElement("div");
+    tagsHead.className = "lbp-fields-head";
+    const tagsLabel = document.createElement("span");
+    tagsLabel.className = "lbp-fields-label";
+    tagsLabel.textContent = "Tags";
+    tagsHead.appendChild(tagsLabel);
+    const retagBtn = document.createElement("button");
+    retagBtn.className = "lbp-reextract";
+    retagBtn.textContent = "Retag";
+    retagBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      retagBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/instances/${inst.id}/retag`, { method: "POST" });
+        if (r.ok) {
+          inst.status = "pending";
+          img.status = "pending";
+          retagBtn.textContent = "Queued";
+          document.dispatchEvent(new Event('app:render'));
+          ensurePolling();
+          toast("Retag queued");
+        } else {
+          retagBtn.disabled = false;
+          toast.error("Retag failed");
+        }
+      } catch {
+        retagBtn.disabled = false;
+        toast.error("Retag failed");
+      }
+    });
+    tagsHead.appendChild(retagBtn);
+    elLightboxPanelBody.appendChild(tagsHead);
+  }
   const byFacet = new Map();
   for (const t of subject.tags) {
     const i = t.indexOf("/");

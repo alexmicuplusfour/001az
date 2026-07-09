@@ -64,6 +64,7 @@ import {
   listItemPayloads,
   updateItemPayload,
   reextractItem,
+  retagItem,
   insertItem,
   setEntityRefreshAt,
   rescheduleEntityRefreshes,
@@ -972,11 +973,13 @@ app.delete("/api/items/:id", requireAuth, requireEntityAccess, wrap(async (req, 
   res.json({ ok: true });
 }));
 
-// Card-level reprocess: re-queue every instance for tagging.
+// Card-level reprocess: re-run the whole pipeline for every instance. Mapped
+// instances restart at extraction (re-derive identity + fields, then re-tag);
+// the rest restart at tagging.
 app.post("/api/items/:id/reprocess", requireAuth, requireEntityAccess, wrap(async (req, res) => {
   if (!(await reprocessEntity(db, req.entityId))) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued entity #${req.entityId}`);
-  res.json({ ok: true, status: "pending" });
+  res.json({ ok: true });
 }));
 
 // Re-run extraction for one instance that has a stamped mapping (409 without
@@ -985,6 +988,14 @@ app.post("/api/instances/:id/reextract", requireAuth, requireItemAccess, wrap(as
   if (!(await reextractItem(db, req.itemId))) return res.status(409).json({ error: "item has no stamped mapping" });
   console.log(`reextract queued instance #${req.itemId}`);
   res.json({ ok: true, status: "pending_extract" });
+}));
+
+// Re-tag one instance from its existing material and fields — the per-instance,
+// tag-only counterpart to the card-level reprocess. Leaves identity/fields as-is.
+app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  if (!(await retagItem(db, req.itemId))) return res.status(404).json({ error: "not found" });
+  console.log(`retag queued instance #${req.itemId}`);
+  res.json({ ok: true, status: "pending" });
 }));
 
 // Remove one instance from its entity (file included). The last instance

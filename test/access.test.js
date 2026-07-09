@@ -40,6 +40,7 @@ const itemRoutes = (item) => [
   ["GET", `/api/instances/${item.instanceId}/reasoning`],
   ["PATCH", `/api/instances/${item.instanceId}/tags`, { tags: [] }],
   ["POST", `/api/instances/${item.instanceId}/reextract`],
+  ["POST", `/api/instances/${item.instanceId}/retag`],
   ["DELETE", `/api/instances/${item.instanceId}`],
 ];
 

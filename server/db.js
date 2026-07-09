@@ -256,6 +256,18 @@ export async function reextractItem(db, id) {
   return result.rowCount > 0;
 }
 
+// Reset one instance to the tag leg — re-tag it from its existing material and
+// fields, without re-deriving identity/fields. The per-instance counterpart to
+// the card-level full reprocess (reprocessEntity); the lightbox exposes it next
+// to Re-extract since a single instance is what's in focus there.
+export async function retagItem(db, id) {
+  const result = await db.query(
+    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
+    [Date.now(), id]
+  );
+  return result.rowCount > 0;
+}
+
 // --- users / invites / sessions / favorites ---
 
 export async function seedAdmin(db, email) {
@@ -1005,11 +1017,18 @@ export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = nul
   }
 }
 
-// Re-queue every instance of an entity for tagging (the card-level
-// "reprocess" — instances are where tags live).
+// Re-run the full pipeline for every instance of an entity (the card-level
+// "reprocess"). Instances with a stamped mapping restart at the extract leg —
+// re-deriving identity + fields before re-tagging — so a wrong identity can
+// actually be corrected here; the rest restart at tagging. Tags are cleared up
+// front so the card shows a clean reprocessing state either way.
 export async function reprocessEntity(db, entityId) {
   const result = await db.query(
-    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE entity_id=$2",
+    `UPDATE items
+     SET status = CASE WHEN payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
+         tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE,
+         attempts=0, error=NULL, updated_at=$1
+     WHERE entity_id=$2`,
     [Date.now(), entityId]
   );
   return result.rowCount > 0;

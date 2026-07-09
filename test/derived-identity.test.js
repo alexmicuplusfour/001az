@@ -275,3 +275,40 @@ test("reprocess re-queues every instance of the entity", async () => {
   assert.deepEqual(rows.map((x) => x.status), ["pending", "pending"]);
   assert.ok(await reprocessEntity(db, eid));
 });
+
+test("reprocess restarts mapped instances at the extract leg, plain ones at tagging", async () => {
+  const boardId = await seedBoard(db, "reprocess-mapped");
+  const eid = await createEntity(db, boardId, { identity: "mixed", displayName: "Mixed" });
+  // Mapped instance re-derives identity + fields (pending_extract); a plain one
+  // (no stamped mapping) just re-tags (pending).
+  await seedInstance(boardId, eid, { name: "m1.png", kind: "image" }, { mapping: { identity: { from: "ai", hint: "x" }, fields: [] } });
+  await seedInstance(boardId, eid, { name: "m2.png", kind: "image" });
+
+  await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid });
+  const { rows } = await db.query("SELECT payload->'files'->0->>'name' AS name, status FROM items WHERE entity_id=$1 ORDER BY id", [eid]);
+  assert.deepEqual(rows, [
+    { name: "m1.png", status: "pending_extract" },
+    { name: "m2.png", status: "pending" },
+  ]);
+});
+
+// ── per-instance retag ───────────────────────────────────────────────────────
+
+test("retag resets one instance to the tag leg, leaving the entity identity intact", async () => {
+  const boardId = await seedBoard(db, "retag-one");
+  const eid = await createEntity(db, boardId, { identity: "volvo amazon", displayName: "Volvo Amazon" });
+  const instId = await seedInstance(boardId, eid, { name: "v1.png", kind: "image" });
+  await db.query("UPDATE items SET tags='[\"category/blue\"]'::jsonb WHERE id=$1", [instId]);
+
+  const r = await req(base, "POST", `/api/instances/${instId}/retag`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.status, "pending");
+
+  const { rows: [item] } = await db.query("SELECT status, tags FROM items WHERE id=$1", [instId]);
+  assert.equal(item.status, "pending");
+  assert.deepEqual(item.tags, []);
+  // Identity is the extract leg's job — retag must not touch it.
+  const { rows: [ent] } = await db.query("SELECT identity, display_name FROM entities WHERE id=$1", [eid]);
+  assert.equal(ent.identity, "volvo amazon");
+  assert.equal(ent.display_name, "Volvo Amazon");
+});
