@@ -81,6 +81,29 @@ async function uploadWorker() {
   maybeFinishUploads();
 }
 
+// Merge a chunk's server rows into state.items and return the ids to track as
+// pending for the processing toast. The 4s poll (data.js) can observe an entity
+// the server already committed and insert it before this response's optimistic
+// insert runs — the server commits each file mid-chunk but only replies once
+// the whole chunk is done — so we skip rows already present to keep that race
+// from double-counting them (the header/facet counts read state.items.length).
+// Exported for regression testing.
+export function mergeUploadedRows(rows) {
+  const seen = new Set(state.items.map((it) => it.id));
+  const pendingIds = [];
+  for (const row of [...rows].reverse()) {
+    // Boards with auto-tagging off hold uploads ('held') instead of queueing
+    // them — only truly pending items feed the "Processing…" watcher.
+    const rowStatus = row.status || "pending";
+    if (!seen.has(row.id)) {
+      state.items.unshift(toItem({ ...row, status: rowStatus }));
+      seen.add(row.id);
+    }
+    if (rowStatus === "pending" || rowStatus === "pending_extract") pendingIds.push(row.id);
+  }
+  return pendingIds;
+}
+
 async function uploadChunk(chunk) {
   inFlight += chunk.length;
   renderUploadStatus();
@@ -126,15 +149,7 @@ async function uploadChunk(chunk) {
   uploadStats.done += chunk.length;
   if (data) {
     const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
-    for (const row of [...rows].reverse()) {
-      // Boards with auto-tagging off hold uploads ('held') instead of
-      // queueing them — only truly pending images feed the
-      // "Processing images…" watcher.
-      const rowStatus = row.status || "pending";
-      state.items.unshift(toItem({ ...row, status: rowStatus }));
-      // Track any in-flight item (extract leg included) for the processing toast.
-      if (rowStatus === "pending" || rowStatus === "pending_extract") uploadStats.pendingIds.push(row.id);
-    }
+    uploadStats.pendingIds.push(...mergeUploadedRows(rows));
     uploadStats.uploaded += rows.length;
     for (const r of data.rejected || []) {
       uploadStats.skipped.set(r.reason, (uploadStats.skipped.get(r.reason) || 0) + 1);
