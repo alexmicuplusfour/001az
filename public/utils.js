@@ -95,10 +95,19 @@ export function actionBtn(icon, cls, title, onClick) {
   return b;
 }
 
-export function toolBtn(label, cls, onClick) {
+function appendCount(el, count) {
+  if (count == null) return;
+  const c = document.createElement("span");
+  c.className = "count";
+  c.textContent = count;
+  el.appendChild(c);
+}
+
+export function toolBtn(label, cls, onClick, count) {
   const b = document.createElement("button");
   b.className = "tool-btn" + (cls ? " " + cls : "");
   b.innerHTML = label;
+  appendCount(b, count);
   if (onClick) b.addEventListener("click", onClick);
   return b;
 }
@@ -107,12 +116,7 @@ export function pill(label, count, active, muted, onClick) {
   const b = document.createElement("button");
   b.className = "pill" + (active ? " active" : "") + (muted ? " muted" : "");
   b.textContent = label;
-  if (count != null) {
-    const c = document.createElement("span");
-    c.className = "count";
-    c.textContent = count;
-    b.appendChild(c);
-  }
+  appendCount(b, count);
   b.addEventListener("click", onClick);
   return b;
 }

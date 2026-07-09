@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { ICONS, toolBtn } from './utils.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
-import { activeCount, clearAll, toggleFiltersOrDrawer } from './filters.js';
+import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
@@ -234,7 +234,11 @@ export function renderToolbar(resultCount) {
     elToolbarSub.appendChild(toolBtn(
       `${ICONS.heart} Your favorites`,
       "fav" + (state.showFavorites ? " active" : ""),
-      () => { state.showFavorites = !state.showFavorites; document.dispatchEvent(new Event('app:render')); }
+      () => {
+        state.showFavorites = !state.showFavorites;
+        document.dispatchEvent(new Event('app:render'));
+      },
+      favoritesInContext()
     ));
 
     if (state.crates.length > 0) {

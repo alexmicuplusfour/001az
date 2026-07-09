@@ -278,7 +278,8 @@ header {
   background: var(--pill-bg);
 }
 
-.pill .count {
+.pill .count,
+.tool-btn .count {
   color: var(--text-dim);
   font-size: 11px;
   margin-left: 5px;
@@ -290,7 +291,8 @@ header {
   border-color: var(--pill-active);
 }
 
-.pill.active .count {
+.pill.active .count,
+.tool-btn.active .count {
   color: rgba(255, 255, 255, 0.7);
 }
 
@@ -1012,7 +1014,12 @@ body.bulk-mode .heart {
   align-items: center;
   gap: 5px;
 }
-.tool-btn.fav svg,
+.tool-btn.fav svg {
+  width: 13px;
+  height: 13px;
+  position: relative;
+  top: -1px;
+}
 .tool-btn.sort svg,
 .tool-btn.sort-btn svg {
   width: 13px;

@@ -165,12 +165,12 @@ function heartControl(img) {
 const { favorited, count: n } = await r.json();
       img.favoritedByMe = favorited;
       img.hearts = n;
-      if (state.showFavorites && !favorited) { document.dispatchEvent(new Event('app:render')); return; }
       wrap.classList.toggle("on", favorited);
       wrap.classList.toggle("has", n > 0);
       count.textContent = n || "";
       loaded = false;
       pop.textContent = "";
+      document.dispatchEvent(new Event('app:render'));
     } catch {
       toast.error("Couldn't update favorite");
     }

@@ -114,6 +114,12 @@ export function activeCount() {
   return n;
 }
 
+// Favorites in the current filter context — reuses taggedFiltered so the
+// count stays in sync with facet chips, search, crate, and untagged filters.
+export function favoritesInContext() {
+  return taggedFiltered().filter((img) => img.favoritedByMe).length;
+}
+
 export function toggle(facetKey, value) {
   const set = state.selected.get(facetKey) || new Set();
   if (set.has(value)) set.delete(value);
