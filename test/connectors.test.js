@@ -5,7 +5,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, req } from "./helpers.js";
-import { createEntity, initDb, setSetting } from "../server/db.js";
+import { createEntity, setSetting } from "../server/db.js";
+import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 import * as runtime from "../server/connectors/runtime.js";
 
@@ -269,7 +270,7 @@ test("POST /api/boards/:id/entities: 400 when board has no connector mapping", a
   assert.equal(r.status, 400);
 });
 
-// ── slice-5b migration (idempotent, run in initDb) ────────────────────────────
+// ── slice-5b migration (0007_coingecko_to_crypto, idempotent) ─────────────────
 
 test("migration: coingecko boards + entities re-key to crypto/symbol", async () => {
   // Seed the pre-5b shape directly (validateMapping now rejects "coingecko",
@@ -289,7 +290,7 @@ test("migration: coingecko boards + entities re-key to crypto/symbol", async () 
     [board.id, eid, JSON.stringify({ identity: "litecoin", files: [], fields: {}, mapping: cgMapping }), Date.now()]
   );
 
-  await initDb(db); // idempotent; re-applies the crypto migration over the seeded rows
+  await coingeckoToCrypto(db); // re-applies the crypto migration over the seeded rows
 
   const { rows: [b] } = await db.query("SELECT mapping FROM boards WHERE id=$1", [board.id]);
   assert.equal(b.mapping.input.connector, "crypto"); // board mapping renamed
@@ -299,7 +300,7 @@ test("migration: coingecko boards + entities re-key to crypto/symbol", async () 
   assert.deepEqual(i.payload.source, { provider: "coingecko", id: "litecoin" }); // handle captured
 
   // Idempotent: a second pass changes nothing.
-  await initDb(db);
+  await coingeckoToCrypto(db);
   const { rows: [e2] } = await db.query("SELECT identity FROM entities WHERE id=$1", [eid]);
   assert.equal(e2.identity, "ltc");
 });

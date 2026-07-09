@@ -1,6 +1,9 @@
--- Final schema, applied idempotently at startup (see initDb in db.js; live
--- DBs from before the modular-boards refactor are renamed images -> items by
--- a one-time migration there first).
+-- Migration 0001: baseline schema. The first migration in the ledger (see
+-- server/migrate.js). On a fresh database this creates the whole schema; on a
+-- database that predates the ledger it's recorded as already-applied (its tables
+-- are already present) — see the adoption step in runMigrations.
+-- Idempotent (CREATE IF NOT EXISTS / ADD COLUMN IF NOT EXISTS) so re-running is
+-- harmless; later migrations (0002+) carry the data transforms.
 -- Conventions: ms-epoch BIGINT timestamps (Date.now()), JSONB for JSON blobs,
 -- real booleans, FKs with ON DELETE CASCADE doing what db.js transactions
 -- used to do by hand under SQLite.

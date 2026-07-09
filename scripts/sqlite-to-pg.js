@@ -3,7 +3,8 @@
 // Usage:
 //   DATABASE_URL=postgres://... node scripts/sqlite-to-pg.js <path/to/data.db>
 //
-// - Applies schema.sql to the target first (idempotent), then refuses to run
+// - Runs the migration ledger against the target first (initDb → runMigrations,
+//   which on an empty target applies the baseline schema), then refuses to run
 //   if the target already has users or images (no accidental double-import).
 // - Preserves row ids verbatim (favorites/crate_images/sessions reference
 //   them), then setval()s each identity sequence.

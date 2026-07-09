@@ -1,10 +1,14 @@
 // The generic item payload ({identity, files, fields}) and the entity layer
-// above it: initDb migrates image-era payloads in place, hoists entities out
-// of items (same ids), and identity uniqueness lives on entities per board.
+// above it: migration 0004 reshapes image-era payloads in place, 0005 hoists
+// entities out of items (same ids), and identity uniqueness lives on entities
+// per board. The two migrations are exercised directly here (they run once via
+// the ledger at boot, so we call their `up` over freshly-seeded legacy rows).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, seedItem, req } from "./helpers.js";
-import { initDb, insertItem, createEntity } from "../server/db.js";
+import { insertItem, createEntity } from "../server/db.js";
+import { up as reshapeImagePayloads } from "../server/migrations/0004_image_payload_reshape.js";
+import { up as hoistEntities } from "../server/migrations/0005_items_to_entities.js";
 
 test("payload shape and identity", async (t) => {
   const { base, db, close } = await startServer();
@@ -18,7 +22,8 @@ test("payload shape and identity", async (t) => {
        VALUES ($1, 'tagged', $2, 1, 1) RETURNING id`,
       [board, JSON.stringify({ filename: "legacy.png", original_name: "cat.png", w: 12, h: 34 })]
     );
-    await initDb(db); // idempotent — the one-timers only touch legacy-shaped rows
+    await reshapeImagePayloads(db); // idempotent — only touches legacy-shaped rows
+    await hoistEntities(db);
     const { rows: after } = await db.query("SELECT payload, entity_id FROM items WHERE id=$1", [rows[0].id]);
     assert.deepEqual(after[0].payload, {
       identity: "legacy.png",
@@ -44,7 +49,7 @@ test("payload shape and identity", async (t) => {
        VALUES ($1, 'tagged', $2, 1, 1) RETURNING id`,
       [board, JSON.stringify({ identity: "maya chen", display_name: "Maya Chen", files, fields: {}, mapping })]
     );
-    await initDb(db);
+    await hoistEntities(db);
     const { rows: ents } = await db.query(
       "SELECT * FROM entities WHERE board_id=$1 AND identity='maya chen'", [board]
     );

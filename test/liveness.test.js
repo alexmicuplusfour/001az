@@ -10,6 +10,7 @@ import {
   getEntity, getBoard, createEntity, initDb,
   setSetting, setEntityRefreshAt, dueLiveEntities,
 } from "../server/db.js";
+import { up as stampFieldAt } from "../server/migrations/0008_stamp_field_at.js";
 import * as runtime from "../server/connectors/runtime.js";
 import { refreshDueEntity } from "../server/worker.js";
 
@@ -253,12 +254,12 @@ test("migration: stamps `at` on connector fields that predate liveness", async (
     fields: { price: { v: 1, kind: "number", src: "coingecko" } }, // no `at` (pre-5c)
   });
 
-  await initDb(db); // idempotent; backfills `at` from updated_at
+  await stampFieldAt(db); // backfills `at` from updated_at
   const e = await getEntity(db, eid);
   assert.ok(e.fields.price.at !== undefined && Number(e.fields.price.at) > 0);
 
   const at1 = e.fields.price.at;
-  await initDb(db); // second pass is a no-op
+  await stampFieldAt(db); // second pass is a no-op
   const e2 = await getEntity(db, eid);
   assert.equal(e2.fields.price.at, at1);
 });

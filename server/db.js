@@ -1,10 +1,6 @@
 import pg from "pg";
-import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
-import { fileURLToPath } from "node:url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { runMigrations } from "./migrate.js";
 
 // BIGINT (int8) comes back from pg as a string by default. Everything we store
 // in BIGINT is a ms epoch or a row id — both far below 2^53 — so parse to
@@ -15,52 +11,21 @@ pg.types.setTypeParser(20, Number);
 // Session ids and invite tokens are bearer credentials: the raw value goes to
 // the client (cookie / login URL) but only its SHA-256 is stored, so a DB read
 // can't be replayed as a login. Raw tokens are 48 hex chars, digests 64 — the
-// length gap drives the one-time migration in initDb.
+// length gap drives migration 0003_hash_bearer_tokens.
 const hashToken = (t) => crypto.createHash("sha256").update(String(t)).digest("hex");
 
 export function openDb(databaseUrl) {
   return new pg.Pool({ connectionString: databaseUrl, max: 5 });
 }
 
-// Apply schema.sql (idempotent CREATE IF NOT EXISTS statements).
+// Bring the schema up to date, then reconcile live-refresh schedules. The schema
+// itself — baseline plus every historical data transform — is the versioned
+// migration ledger in server/migrations (run once each, recorded in
+// schema_migrations; see runMigrations). reconcileLiveSchedules is NOT a
+// migration: it recomputes refresh_at from the current board mappings on every
+// boot, so it stays here.
 export async function initDb(db) {
-  await migrateImagesToItems(db); // must run before schema.sql (see below)
-  const sql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
-  await db.query(sql);
-  // One-time: hash any raw session ids / invite tokens left at rest (48 hex
-  // chars → 64-char SHA-256). Non-breaking — an existing cookie or login link
-  // still hashes to the stored digest. Idempotent via the length guard, so
-  // fresh installs and already-migrated DBs skip it. Postgres has sha256()
-  // built in (>= PG 11); text::bytea gives the same bytes Node hashes.
-  await db.query("UPDATE sessions SET id = encode(sha256(id::bytea), 'hex') WHERE length(id) <> 64");
-  await db.query("UPDATE invites SET token = encode(sha256(token::bytea), 'hex') WHERE length(token) <> 64");
-  await db.query("ALTER TABLE crates ADD COLUMN IF NOT EXISTS public BOOLEAN NOT NULL DEFAULT FALSE");
-  // One-time: image-era payloads ({filename, original_name, w, h}) become the
-  // generic item shape ({identity, files, fields}). Identity = the filename,
-  // which was globally unique, so the per-board unique index (schema.sql)
-  // can't collide. Idempotent via the WHERE guard; a single UPDATE is atomic.
-  await db.query(`UPDATE items SET payload = jsonb_build_object(
-      'identity', payload->>'filename',
-      'files', jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
-        'name', payload->>'filename', 'original_name', payload->>'original_name',
-        'w', payload->'w', 'h', payload->'h'))),
-      'fields', '{}'::jsonb)
-    WHERE payload ? 'filename' AND NOT payload ? 'identity'`);
-  await db.query("DROP INDEX IF EXISTS idx_items_filename"); // superseded by the entity identity index
-  await migrateItemsToEntities(db);
-  // One-time migration: fold the legacy single-key setting into the ai_keys
-  // registry and point the default at it.
-  const legacy = await getSetting(db, "api_key");
-  if (legacy) {
-    const { rows } = await db.query(
-      "INSERT INTO ai_keys (name, provider, api_key, created_at) VALUES ('Anthropic', 'anthropic', $1, $2) RETURNING id",
-      [legacy, Date.now()]
-    );
-    await setSetting(db, "default_key_id", String(rows[0].id));
-    await setSetting(db, "api_key", null);
-  }
-  await migrateCoingeckoToCrypto(db);
-  await migrateStampFieldAt(db);
+  await runMigrations(db);
   await reconcileLiveSchedules(db);
 }
 
@@ -77,184 +42,6 @@ async function reconcileLiveSchedules(db) {
     const faceCad = fc && fc.from === "connector" && fc.live ? { every: fc.every } : null;
     if (live.length || faceCad) await rescheduleEntityRefreshes(db, b.id, live, faceCad);
   }
-}
-
-// One-time (slice 5c): connector field values predate per-field liveness and
-// lack the `at` timestamp the refresh scheduler reads. Stamp it from the
-// entity's updated_at so existing coins have a baseline. Idempotent via the
-// `? 'at'` guard; fresh installs (empty entities) no-op.
-async function migrateStampFieldAt(db) {
-  await db.query(
-    `UPDATE entities
-     SET fields = (
-       SELECT jsonb_object_agg(k, CASE WHEN v ? 'at' THEN v ELSE v || jsonb_build_object('at', updated_at) END)
-       FROM jsonb_each(fields) AS f(k, v))
-     WHERE fields <> '{}'::jsonb
-       AND EXISTS (SELECT 1 FROM jsonb_each(fields) AS e(k, v) WHERE NOT (e.v ? 'at'))`
-  );
-}
-
-// One-time (slice 5b): the `crypto` domain connector replaces the flat
-// `coingecko` connector, with the provider now selected in settings.
-//  1. Board mappings rename their input connector coingecko -> crypto.
-//  2. Connector entities re-key identity from the CoinGecko id ("bitcoin") to
-//     the lowercase symbol ("btc") — portable across providers so a coin added
-//     under two backends dedupes — and stamp the provider handle onto the tag-
-//     vehicle instance for a future liveness re-fetch (captured before the
-//     identity is overwritten).
-// All guarded/idempotent; file boards never match. On a fresh install the
-// tables are empty and every statement is a no-op.
-async function migrateCoingeckoToCrypto(db) {
-  await db.query(
-    `UPDATE boards SET mapping = jsonb_set(mapping, '{input,connector}', '"crypto"')
-     WHERE mapping->'input'->>'connector' = 'coingecko'`
-  );
-  await db.query(
-    `UPDATE items i
-     SET payload = i.payload
-       || jsonb_build_object('source', jsonb_build_object('provider', 'coingecko', 'id', e.identity))
-     FROM entities e
-     WHERE i.entity_id = e.id
-       AND i.payload->'mapping'->'input'->>'connector' IN ('coingecko', 'crypto')
-       AND NOT i.payload ? 'source'
-       AND COALESCE(e.symbol, '') <> ''`
-  );
-  await db.query(
-    `UPDATE entities e
-     SET identity = lower(e.symbol)
-     WHERE COALESCE(e.symbol, '') <> ''
-       AND e.identity <> lower(e.symbol)
-       AND EXISTS (
-         SELECT 1 FROM items i WHERE i.entity_id = e.id
-           AND i.payload->'mapping'->'input'->>'connector' IN ('coingecko', 'crypto'))`
-  );
-}
-
-// One-time rename for live DBs that predate the modular-boards refactor:
-// images -> items with the image-specific columns folded into payload JSONB,
-// and the referencing tables renamed to match. Runs before schema.sql so the
-// idempotent CREATEs there don't spawn an empty items table next to a full
-// images one. Fresh installs never enter (no images table); already-migrated
-// DBs never enter (items exists). Transactional DDL makes it all-or-nothing.
-async function migrateImagesToItems(db) {
-  const { rows } = await db.query(
-    "SELECT (to_regclass('images') IS NOT NULL AND to_regclass('items') IS NULL) AS go"
-  );
-  if (!rows[0].go) return;
-  await withTx(db, async (c) => {
-    await c.query("ALTER TABLE images RENAME TO items");
-    await c.query("ALTER TABLE items ADD COLUMN payload JSONB NOT NULL DEFAULT '{}'");
-    await c.query(`UPDATE items SET payload = jsonb_strip_nulls(jsonb_build_object(
-      'filename', filename, 'original_name', original_name, 'w', thumb_w, 'h', thumb_h))`);
-    await c.query(
-      "ALTER TABLE items DROP COLUMN filename, DROP COLUMN original_name, DROP COLUMN thumb_w, DROP COLUMN thumb_h"
-    );
-    await c.query("ALTER TABLE favorites RENAME COLUMN image_id TO item_id");
-    await c.query("ALTER TABLE crate_images RENAME COLUMN image_id TO item_id");
-    await c.query("ALTER TABLE crate_images RENAME TO crate_items");
-    // tag_snapshots may not exist yet on DBs older than the snapshots deploy
-    await c.query("ALTER TABLE IF EXISTS tag_snapshots RENAME COLUMN image_id TO item_id");
-    const idx = [
-      ["idx_images_status", "idx_items_status"],
-      ["idx_images_created", "idx_items_created"],
-      ["idx_images_board", "idx_items_board"],
-      ["idx_fav_image", "idx_fav_item"],
-      ["idx_crate_images_image", "idx_crate_items_item"],
-      ["idx_snapshots_image", "idx_snapshots_item"],
-    ];
-    for (const [from, to] of idx) await c.query(`ALTER INDEX IF EXISTS ${from} RENAME TO ${to}`);
-    console.log("db: migrated images -> items (image columns folded into payload)");
-  });
-}
-
-// One-time: hoist the entity layer out of items. Every item row becomes an
-// instance (one file, own fields/tags/queue state) under a new entities row
-// carrying identity/display_name/symbol/connector fields. Entity ids are
-// seeded from the item ids so favorites/crate_items re-point with their
-// values unchanged (and client-visible card ids stay stable). Multi-file
-// items (derived-identity merges) split into one instance per file; the
-// extra files were never individually extracted or tagged, so they queue
-// fresh. Idempotent: driven by items with entity_id IS NULL, and the split /
-// FK-re-point steps carry their own natural guards. Transactional.
-async function migrateItemsToEntities(db) {
-  await withTx(db, async (c) => {
-    const { rowCount: migrated } = await c.query(
-      `INSERT INTO entities (id, board_id, identity, display_name, symbol, fields, identity_provisional, created_at, updated_at)
-       OVERRIDING SYSTEM VALUE
-       SELECT id, board_id,
-         COALESCE(payload->>'identity', payload->'files'->0->>'name', id::text),
-         payload->>'display_name',
-         payload->>'symbol',
-         CASE WHEN jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
-              THEN COALESCE(payload->'fields','{}'::jsonb) ELSE '{}'::jsonb END,
-         COALESCE((payload->>'identity_provisional')::boolean, FALSE),
-         created_at, updated_at
-       FROM items WHERE entity_id IS NULL`
-    );
-    if (migrated) {
-      await c.query(
-        "SELECT setval(pg_get_serial_sequence('entities','id'), GREATEST((SELECT COALESCE(MAX(id),1) FROM entities), 1))"
-      );
-      // Connector vehicles (no files): their bound fields moved to the entity.
-      await c.query(
-        `UPDATE items SET payload = jsonb_set(payload, '{fields}', '{}'::jsonb)
-         WHERE entity_id IS NULL AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0`
-      );
-      // Entity-level keys leave the instance payload (they live on entities now).
-      await c.query(
-        `UPDATE items SET payload = payload - 'display_name' - 'identity_provisional' - 'symbol',
-           entity_id = id
-         WHERE entity_id IS NULL`
-      );
-      console.log(`db: migrated ${migrated} item(s) into the entity/instance model`);
-    }
-
-    // Split multi-file items: the row keeps files[0]; every extra file becomes
-    // a fresh instance under the same entity, queued for its own extraction
-    // and tagging (its data was never derived individually — see plan).
-    const { rows: multi } = await c.query(
-      "SELECT id, board_id, entity_id, status, payload, created_at FROM items WHERE jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) > 1"
-    );
-    for (const row of multi) {
-      const files = row.payload.files;
-      const mapping = row.payload.mapping;
-      for (let i = 1; i < files.length; i++) {
-        const f = files[i];
-        const payload = { identity: f.name, files: [f], fields: {}, ...(mapping ? { mapping } : {}) };
-        const status = row.status === "held" ? "held" : mapping ? "pending_extract" : "pending";
-        await c.query(
-          `INSERT INTO items (board_id, entity_id, status, payload, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [row.board_id, row.entity_id, status, JSON.stringify(payload), row.created_at, Date.now()]
-        );
-      }
-      await c.query(
-        "UPDATE items SET payload = jsonb_set(payload, '{files}', $1::jsonb), updated_at=$2 WHERE id=$3",
-        [JSON.stringify([files[0]]), Date.now(), row.id]
-      );
-    }
-    if (multi.length) console.log(`db: split ${multi.length} multi-file item(s) into per-file instances`);
-
-    // Re-point favorites / crate_items FKs from items to entities (values are
-    // unchanged — entity ids were seeded from item ids above). Constraint
-    // names vary across DB generations, so find them by what they reference.
-    const { rows: fks } = await c.query(
-      `SELECT con.conname, rel.relname AS tbl
-       FROM pg_constraint con
-       JOIN pg_class rel ON rel.oid = con.conrelid
-       JOIN pg_class ref ON ref.oid = con.confrelid
-       WHERE con.contype = 'f' AND rel.relname IN ('favorites','crate_items') AND ref.relname = 'items'`
-    );
-    for (const fk of fks) {
-      await c.query(`ALTER TABLE ${fk.tbl} DROP CONSTRAINT ${fk.conname}`);
-      await c.query(
-        `ALTER TABLE ${fk.tbl} ADD CONSTRAINT ${fk.tbl}_entity_fkey FOREIGN KEY (item_id) REFERENCES entities(id) ON DELETE CASCADE`
-      );
-    }
-
-    // Identity uniqueness now lives on entities.
-    await c.query("DROP INDEX IF EXISTS idx_items_board_identity");
-  });
 }
 
 // Run fn with a dedicated client inside BEGIN/COMMIT.
@@ -446,7 +233,7 @@ export async function setItemTags(db, id, tags) {
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
 }
 
-// Append one row of judgment history (see tag_snapshots in schema.sql).
+// Append one row of judgment history (see tag_snapshots in 0001_baseline.sql).
 async function addTagSnapshot(db, itemId, source, tags, reasoning, undecided) {
   await db.query(
     "INSERT INTO tag_snapshots (item_id, source, tags, reasoning, undecided, tagged_at) VALUES ($1, $2, $3, $4, $5, $6)",
@@ -594,7 +381,7 @@ export async function toggleFavorite(db, userId, itemId) {
   if (exists) {
     await db.query("DELETE FROM favorites WHERE user_id=$1 AND item_id=$2", [userId, itemId]);
   } else {
-    // Hearts are entity-level; item_id references entities (see schema.sql).
+    // Hearts are entity-level; item_id references entities (see 0001_baseline.sql).
     const item = await db.query("SELECT 1 FROM entities WHERE id=$1", [itemId]);
     if (!item.rows.length) return null;
     await db.query("INSERT INTO favorites (user_id, item_id, created_at) VALUES ($1, $2, $3)", [
