@@ -29,5 +29,9 @@ export function createSources({ galleryDir, thumbsDir }) {
     },
 
     backfillDims: image.backfillDims,
+
+    // Release handler-owned resources (the docx extraction worker pool) on
+    // graceful shutdown. Images hold none.
+    close: () => doc.close?.(),
   };
 }

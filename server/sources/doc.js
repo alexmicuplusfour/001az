@@ -3,18 +3,21 @@
 // thumbnail store via poppler (pdftoppm + sharp), so their card face rides
 // the exact same path as an image thumbnail (no poppler on the box → the doc
 // still ingests, just without a preview). docx gets its content extracted at
-// ingest (mammoth, pure JS): raw text into a .txt sidecar (the tagger + the
-// card page-peek read it — clean signal, no markup, works on every provider)
-// and formatted HTML into a .html sidecar (the lightbox's full view). So docx
-// flows through the text pipeline for tagging, unlike PDFs.
+// ingest (mammoth): raw text into a .txt sidecar (the tagger + the card
+// page-peek read it — clean signal, no markup, works on every provider) and
+// formatted HTML into a .html sidecar (the lightbox's full view). So docx
+// flows through the text pipeline for tagging, unlike PDFs. mammoth is pure-JS
+// and CPU-bound, so the extraction runs on a worker thread (docx-pool.js) to
+// keep it off the event loop — otherwise a big document stalls every other
+// upload while it parses.
 import sharp from "sharp";
-import mammoth from "mammoth";
 import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { createDocxPool } from "./docx-pool.js";
 
 const run = promisify(execFile);
 
@@ -27,8 +30,12 @@ export const isDocName = (name) => /\.(pdf|docx|txt|md|csv)$/i.test(name || "");
 export function docSource({ galleryDir, thumbsDir }) {
   fs.mkdirSync(galleryDir, { recursive: true });
   fs.mkdirSync(thumbsDir, { recursive: true });
+  const docxPool = createDocxPool();
 
   return {
+    // Terminate the extraction workers (graceful shutdown).
+    close: () => docxPool.close(),
+
     // tmpPath -> stored original (+ pdf preview); returns the payload file
     // entry, or null when the bytes don't match the claimed type.
     async ingest(tmpPath, originalName) {
@@ -60,15 +67,13 @@ export function docSource({ galleryDir, thumbsDir }) {
       if (kind === "docx") {
         // docx is a zip; extraction failing means it isn't really one.
         if (!buf.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return null;
-        let text, html;
-        try {
-          // Raw text feeds the tagger + the card page-peek; formatted HTML is
-          // the lightbox's full view.
-          text = (await mammoth.extractRawText({ buffer: buf })).value;
-          html = (await mammoth.convertToHtml({ buffer: buf })).value;
-        } catch {
-          return null;
-        }
+        // mammoth runs on a worker thread (docx-pool) so a big document can't
+        // stall the event loop and hold up every other upload. Raw text feeds
+        // the tagger + the card page-peek; formatted HTML is the lightbox's
+        // full view. null = mammoth couldn't read it, so it isn't a real docx.
+        const extracted = await docxPool.extract(buf);
+        if (!extracted) return null;
+        const { text, html } = extracted;
         await fs.promises.writeFile(path.join(galleryDir, filename + ".txt"), text);
         await fs.promises.writeFile(path.join(galleryDir, filename + ".html"), docHtml(html));
         const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));

@@ -1154,6 +1154,7 @@ if (isMain) {
     for (const res of logClients) res.end();
     server.closeAllConnections();
     await Promise.race([drained, new Promise((r) => setTimeout(r, 5000).unref())]);
+    await sources.close?.();
     await db.end();
     process.exit(0);
   }
