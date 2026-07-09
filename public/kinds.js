@@ -29,6 +29,15 @@ function titleStrip(text, count = 0) {
   return title;
 }
 
+// Media-only region of the face — overlays (heart, select) anchor here, not
+// on the title strip below.
+function faceMedia(...nodes) {
+  const wrap = document.createElement("div");
+  wrap.className = "face-media";
+  wrap.append(...nodes);
+  return wrap;
+}
+
 const imageKind = {
   // The face inside the card frame.
   face(item, card, layout) {
@@ -47,11 +56,11 @@ const imageKind = {
     im.addEventListener("error", () => card.remove());
     im.addEventListener("load", () => { im.classList.add("loaded"); card.classList.add("loaded"); layout(); });
     if (im.complete && im.naturalWidth > 0) { im.classList.add("loaded"); card.classList.add("loaded"); }
-    if (!hasIdentity(item)) return im;
+    if (!hasIdentity(item)) return faceMedia(im);
     // Mapped identity: same title strip documents carry, under the media.
     const wrap = document.createElement("div");
     wrap.className = "image-face";
-    wrap.append(im, titleStrip(item.displayLabel, item.instances?.length));
+    wrap.append(faceMedia(im), titleStrip(item.displayLabel, item.instances?.length));
     return wrap;
   },
 
@@ -93,12 +102,12 @@ const docKind = {
       im.alt = item.displayLabel;
       im.addEventListener("load", () => { im.classList.add("loaded"); layout(); });
       preview.appendChild(im);
-      wrap.appendChild(preview);
+      wrap.appendChild(faceMedia(preview));
     } else {
       const badge = document.createElement("div");
       badge.className = "doc-badge";
       badge.textContent = (item.name.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
-      wrap.appendChild(badge);
+      wrap.appendChild(faceMedia(badge));
     }
     wrap.appendChild(titleStrip(item.displayLabel, item.instances?.length));
     card.classList.add("loaded");
@@ -138,7 +147,7 @@ const connectorKind = {
     sym.className = "connector-symbol";
     sym.textContent = item.symbol || item.identity?.slice(0, 4).toUpperCase() || "?";
     tile.appendChild(sym);
-    wrap.append(tile, titleStrip(item.displayLabel, item.instances?.length));
+    wrap.append(faceMedia(tile), titleStrip(item.displayLabel, item.instances?.length));
     card.classList.add("loaded");
     return wrap;
   },

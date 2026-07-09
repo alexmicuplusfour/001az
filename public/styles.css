@@ -431,6 +431,13 @@ main#grid {
    fading into the title strip) or an extension badge, plus the original
    filename as the card title. These cards take the grid's measured layout
    lane (no dataset.ratio). */
+/* Media region of a card face — heart + select anchor here, above any title strip. */
+.face-media {
+  position: relative;
+  display: block;
+  line-height: 0;
+}
+
 .doc-face {
   line-height: normal;
 }
@@ -557,6 +564,23 @@ body.bulk-mode .card.loaded .sel-cb {
   background: #111;
   box-shadow: none;
   color: #fff;
+}
+/* Soft corner vignette under the select control when chosen */
+.card.selected .face-media::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 88px;
+  height: 88px;
+  background: radial-gradient(
+    ellipse 88px 88px at 100% 100%,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(255, 255, 255, 0.55) 38%,
+    rgba(255, 255, 255, 0) 72%
+  );
+  pointer-events: none;
+  z-index: 2;
 }
 /* AI couldn't confidently place the image in this board's taxonomy —
    same inset effect as bulk selection, but with a dotted outline */

@@ -280,6 +280,10 @@ export function scrollToCard(img) {
   if (card) card.scrollIntoView({ behavior: "instant", block: "center" });
 }
 
+function faceOverlay(card) {
+  return card.querySelector(".face-media") || card;
+}
+
 function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
@@ -317,17 +321,17 @@ function cardFor(img) {
     cb.innerHTML = ICONS.check;
     cb.setAttribute("aria-pressed", String(state.bulkSelected.has(img.id)));
     cb.addEventListener("click", (e) => { e.stopPropagation(); toggleBulkSelect(img, card); });
-    card.appendChild(cb);
+    faceOverlay(card).appendChild(cb);
     if (state.bulkSelected.has(img.id)) card.classList.add("selected");
   }
 
-  if (state.me && (img.hearts > 0 || img.favoritedByMe)) card.appendChild(heartControl(img));
+  if (state.me && (img.hearts > 0 || img.favoritedByMe)) faceOverlay(card).appendChild(heartControl(img));
 
   card.addEventListener("pointerenter", () => {
     if (state.bulkSelected.size) return;
     if (state.me && !card.querySelector(".card-actions")) card.appendChild(cardActions(img));
     if (!card.querySelector(".tag-chip")) card.appendChild(tagChip(img));
-    if (state.me && !card.querySelector(".heart")) card.appendChild(heartControl(img));
+    if (state.me && !card.querySelector(".heart")) faceOverlay(card).appendChild(heartControl(img));
   });
   card.addEventListener("pointerleave", () => {
     if (card.classList.contains("pop-open")) return;
