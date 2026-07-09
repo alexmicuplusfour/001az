@@ -67,6 +67,13 @@ function renderLightboxCrate() {
   elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
 }
 
+// The info button carries an instance-count badge when the entity is multi-file,
+// so the "this has more inside" cue is visible without opening the panel.
+function renderLightboxInfo() {
+  const n = lightboxImg?.instances?.length || 0;
+  elLightboxInfo.innerHTML = n >= 2 ? `${ICONS.info}<span>${n}</span>` : ICONS.info;
+}
+
 // "updated 3m ago" from a field's fetch/refresh timestamp (connector fields
 // carry `at`; live ones advance it each refresh, static ones keep the add time).
 function relTime(ms) {
@@ -504,6 +511,7 @@ function showInstance(index) {
   elLightboxDownload.href = fullUrl(inst.name);
   elLightboxDownload.download = inst.label || inst.name;
   showMedia(inst);
+  renderLightboxInfo(); // instance count may have changed (e.g. after a removal)
   if (panelOpen) renderPanel();
 }
 
@@ -520,6 +528,7 @@ function showLightbox() {
     elLightboxFav.hidden = true;
     elLightboxCrate.hidden = true;
   }
+  renderLightboxInfo();
   elLightboxCount.textContent =
     lightboxList.length > 1 ? `${lightboxIndex + 1} / ${lightboxList.length}` : "";
   if (panelOpen) renderPanel();
