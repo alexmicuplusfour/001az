@@ -32,6 +32,3 @@ Caddyfile
 # personal local-only files (also gitignored)
 ui-redesign-taxonomy.md
 tags.json
-populate.js
-serve.js
-clear-tags.js

@@ -90,7 +90,7 @@ const PORT = Number(process.env.PORT || 3001);
 const HOST = process.env.HOST || "127.0.0.1";
 const DATABASE_URL =
   process.env.DATABASE_URL || "postgres://gallery:gallery@127.0.0.1:5433/gallery"; // local compose default
-const STATIC_DIR = process.env.STATIC_DIR || ROOT; // local dev only; prod uses Caddy
+const STATIC_DIR = process.env.STATIC_DIR || path.join(ROOT, "public"); // frontend assets; the app serves them in every env (Caddy just proxies)
 const GALLERY_DIR = process.env.GALLERY_DIR || path.join(ROOT, "gallery");
 const THUMBS_DIR = process.env.THUMBS_DIR || path.join(ROOT, "thumbnails");
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;

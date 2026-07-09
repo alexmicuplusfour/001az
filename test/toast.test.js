@@ -30,7 +30,7 @@ function elem(tag) {
 
 const body = elem("body");
 globalThis.document = { body, createElement: elem };
-const { toast } = await import("../toast.js");
+const { toast } = await import("../public/toast.js");
 const wrap = body.children[0]; // #toast-wrap, created on import
 
 function onScreen() {

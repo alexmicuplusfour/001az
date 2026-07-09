@@ -1,5 +1,5 @@
 # API + frontend in one image: express serves the static files (STATIC_DIR
-# defaults to the repo root baked in below); Caddy in front does TLS and proxying.
+# defaults to ./public baked in below); Caddy in front does TLS and proxying.
 FROM node:22-slim
 
 # poppler renders PDF page-1 previews (pdftoppm/pdfinfo in sources/doc.js);
