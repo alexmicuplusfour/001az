@@ -54,7 +54,7 @@ function openBoardPop(anchorEl) {
       btn.innerHTML = ICONS.plus + "<span>New board</span>";
       btn.addEventListener("click", () => {
         close();
-        openBoardModal(null, { canEditAI: true, onSaved: () => location.reload() });
+        openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}`; } });
       });
       foot.appendChild(btn);
     } : undefined,

@@ -450,11 +450,12 @@ export async function openBoardModal(board, opts = {}) {
       retag_on_refresh: at.retagOnRefresh,
     };
     try {
-      if (isNew) await api("POST", "/api/admin/boards", payload);
+      let saved = payload;
+      if (isNew) saved = await api("POST", "/api/admin/boards", payload);
       else if (canEditAI) await api("PATCH", `/api/admin/boards/${board.id}`, payload);
       else await api("PATCH", `/api/boards/${board.id}`, payload);
       close();
-      onSaved?.(payload);
+      onSaved?.(saved);
       toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);
     } catch (err) { toast.error(err.message); }
   };
