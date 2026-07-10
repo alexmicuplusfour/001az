@@ -42,6 +42,7 @@ export function toItem(d) {
     hearts: d.hearts || 0,
     favoritedByMe: !!d.favoritedByMe,
     crateIds: new Set(Array.isArray(d.crateIds) ? d.crateIds : []),
+    uploadedBy: d.uploadedBy || null,
     w: d.w || 0,
     h: d.h || 0,
     kind: d.kind || "image",

@@ -60,13 +60,14 @@ export function mountIngest(app, { db, sources }) {
         // Every upload is born a single-instance entity, provisionally keyed
         // by its stored filename; derived-identity extraction may later merge
         // the instance into an existing entity (and delete this shell).
-        const entityId = await createEntity(db, board.id, { identity: file.name });
+        const entityId = await createEntity(db, board.id, { identity: file.name, uploadedBy: req.user.id });
         const id = await insertItem(db, board.id, payload, status, entityId);
         // Response rows mirror the /api/items entity shape (id = entity id).
         uploaded.push({
           id: entityId, name: file.name, status, tags: [],
           w: file.w, h: file.h, kind: file.kind, label: file.original_name,
           identity: file.name,
+          uploadedBy: { id: req.user.id, name: req.user.name || null, email: req.user.email },
           instances: [{
             id, name: file.name, label: file.original_name,
             w: file.w, h: file.h, kind: file.kind,

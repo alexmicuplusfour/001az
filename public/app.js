@@ -38,6 +38,8 @@ async function main() {
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
   state.selected = decodeSelected(params.get("f")); // shareable filtered links
+  const uParam = params.get("u");
+  state.selectedUploaderIds = new Set(uParam ? uParam.split(",").map(Number).filter(Boolean) : []);
 
   if (!state.boardId) {
     const accessible = await fetch("/api/boards", { cache: "no-store" })

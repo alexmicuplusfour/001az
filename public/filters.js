@@ -11,7 +11,7 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.boardId, state.searchResults ? state.searchQuery : ""]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.boardId, state.searchResults ? state.searchQuery : "", [...state.selectedUploaderIds].sort()]);
 }
 
 function matchesExcept(img, exceptKey) {
@@ -57,6 +57,7 @@ export function taggedFiltered() {
       (!state.showUntagged || isUntagged(img)) &&
       (!state.showFavorites || img.favoritedByMe) &&
       (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId)) &&
+      (state.selectedUploaderIds.size === 0 || (img.uploadedBy && state.selectedUploaderIds.has(img.uploadedBy.id))) &&
       matchesExcept(img, null)
   );
   // Sort precedence: search similarity > hearts > alpha > server order (newest first).
@@ -83,12 +84,18 @@ function computeFacetStats() {
   let activeInContext = 0;
   let totalQueued = 0;
   let queuedInContext = 0;
+  const uploaderTotals = new Map(); // uploaderId -> total count
+  const uploaderCounts = new Map(); // uploaderId -> context count (uploader filter excluded)
 
   for (const img of state.items) {
     for (const t of img.tags) {
       totals.set(t, (totals.get(t) || 0) + 1);
       const slash = t.indexOf("/");
       if (slash > 0) facetsWithData.add(t.slice(0, slash));
+    }
+
+    if (img.uploadedBy) {
+      uploaderTotals.set(img.uploadedBy.id, (uploaderTotals.get(img.uploadedBy.id) || 0) + 1);
     }
 
     // How many active facets does this item fail? It counts toward a
@@ -104,10 +111,15 @@ function computeFacetStats() {
       if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
 
-    const inContext =
-      fails === 0 &&
-      (!state.showFavorites || img.favoritedByMe) &&
-      (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId));
+    const passesUploader = state.selectedUploaderIds.size === 0 || (img.uploadedBy && state.selectedUploaderIds.has(img.uploadedBy.id));
+    const baseContext = fails === 0 && (!state.showFavorites || img.favoritedByMe) && (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId));
+
+    // Uploader pill context: base context but NOT gated on uploader filter (so all uploaders stay visible)
+    if (img.uploadedBy && baseContext) {
+      uploaderCounts.set(img.uploadedBy.id, (uploaderCounts.get(img.uploadedBy.id) || 0) + 1);
+    }
+
+    const inContext = baseContext && passesUploader;
 
     if (isTagged(img) && isUntagged(img)) {
       totalUntagged++;
@@ -134,6 +146,7 @@ function computeFacetStats() {
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
+    uploaderTotals, uploaderCounts,
   };
 }
 
@@ -143,6 +156,7 @@ export function activeCount() {
   if (state.showUntagged) n++;
   if (state.showProcessing) n++;
   if (state.showUnprocessed) n++;
+  n += state.selectedUploaderIds.size;
   return n;
 }
 
@@ -160,11 +174,18 @@ export function toggle(facetKey, value) {
   document.dispatchEvent(new Event('app:render'));
 }
 
+export function toggleUploader(uid) {
+  if (state.selectedUploaderIds.has(uid)) state.selectedUploaderIds.delete(uid);
+  else state.selectedUploaderIds.add(uid);
+  document.dispatchEvent(new Event('app:render'));
+}
+
 export function clearAll() {
   state.selected = new Map();
   state.showUntagged = false;
   state.showProcessing = false;
   state.showUnprocessed = false;
+  state.selectedUploaderIds = new Set();
   document.dispatchEvent(new Event('app:render'));
 }
 
@@ -238,6 +259,9 @@ export function syncFiltersToUrl() {
   const f = encodeSelected();
   if (f) url.searchParams.set("f", f);
   else url.searchParams.delete("f");
+  const u = [...state.selectedUploaderIds].sort().join(",");
+  if (u) url.searchParams.set("u", u);
+  else url.searchParams.delete("u");
   const next = url.pathname + url.search;
   if (next !== location.pathname + location.search) history.replaceState(null, "", next);
 }
@@ -249,6 +273,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
+    uploaderTotals, uploaderCounts,
   } = stats;
   // The status row: Untagged plus the two queue pills (Processing = actively
   // worked, Unprocessed = waiting in line). Each shows only while it has items
@@ -275,6 +300,29 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     row.appendChild(pills);
     container.appendChild(row);
   }
+  // Uploader row — only when there are 2+ distinct uploaders in the board.
+  if (uploaderTotals.size >= 2 || state.selectedUploaderIds.size > 0) {
+    const uploaderItems = [...uploaderTotals.entries()].sort((a, b) => b[1] - a[1]);
+    const row = document.createElement("div");
+    row.className = "facet";
+    const label = document.createElement("div");
+    label.className = "facet-label";
+    label.textContent = "UPLOADED BY";
+    row.appendChild(label);
+    const pills = document.createElement("div");
+    pills.className = "pills";
+    for (const [uid, total] of uploaderItems) {
+      const active = state.selectedUploaderIds.has(uid);
+      const ctxCount = uploaderCounts.get(uid) || 0;
+      if (total === 0 && !active) continue;
+      const uploader = state.items.find((img) => img.uploadedBy?.id === uid)?.uploadedBy;
+      const name = uploader ? (uploader.name || uploader.email) : String(uid);
+      pills.appendChild(pill(name, ctxCount, active, !active && ctxCount === 0, () => toggleUploader(uid)));
+    }
+    row.appendChild(pills);
+    container.appendChild(row);
+  }
+
   for (const facet of state.facets) {
     const sel = state.selected.get(facet.key) || new Set();
     if (!facetsWithData.has(facet.key) && sel.size === 0) continue;

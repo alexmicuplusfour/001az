@@ -100,11 +100,13 @@ function instanceEntry(r) {
 export async function listItems(db, userId = null, boardId = null) {
   const { rows: ents } = await db.query(
     `SELECT e.id, e.identity, e.display_name, e.symbol, e.fields, e.identity_provisional, e.created_at,
+      e.uploaded_by AS uploader_id, u.name AS uploader_name, u.email AS uploader_email,
       (SELECT COUNT(*) FROM favorites f WHERE f.item_id = e.id) AS hearts,
       EXISTS(
         SELECT 1 FROM favorites f WHERE f.item_id = e.id AND f.user_id = $1
       ) AS fav
      FROM entities e
+     LEFT JOIN users u ON u.id = e.uploaded_by
      WHERE ($2::text IS NULL OR e.board_id = $2)
      ORDER BY e.created_at DESC, e.id DESC`,
     [userId, boardId]
@@ -158,6 +160,7 @@ export async function listItems(db, userId = null, boardId = null) {
       hearts: e.hearts,
       favoritedByMe: !!e.fav,
       crateIds: crateMap.get(e.id) || [],
+      uploadedBy: e.uploader_id ? { id: e.uploader_id, name: e.uploader_name || null, email: e.uploader_email } : null,
       w: face?.w || null,
       h: face?.h || null,
       // connector entities have no files; instanceEntry marks the file-less
@@ -857,11 +860,11 @@ export async function markExtracted(db, id, fields) {
 // Create an entity row. identity must be unique per board — a 23505 here
 // means the entity already exists (connector adds answer 409; the extract
 // leg re-parents instead). Returns the new id.
-export async function createEntity(db, boardId, { identity, displayName = null, symbol = null, fields = {}, provisional = false } = {}) {
+export async function createEntity(db, boardId, { identity, displayName = null, symbol = null, fields = {}, provisional = false, uploadedBy = null } = {}) {
   const { rows } = await db.query(
-    `INSERT INTO entities (board_id, identity, display_name, symbol, fields, identity_provisional, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`,
-    [boardId, identity, displayName, symbol, JSON.stringify(fields || {}), provisional, Date.now()]
+    `INSERT INTO entities (board_id, identity, display_name, symbol, fields, identity_provisional, uploaded_by, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) RETURNING id`,
+    [boardId, identity, displayName, symbol, JSON.stringify(fields || {}), provisional, uploadedBy, Date.now()]
   );
   return rows[0].id;
 }

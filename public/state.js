@@ -15,6 +15,7 @@ export const state = {
   crates: [],
   filterConfigs: [],
   selectedCrateId: null,
+  selectedUploaderIds: new Set(),
   showFavorites: false,
   showUntagged: false,
   showProcessing: false,   // status pill: actively worked (processing/extracting/facing)
