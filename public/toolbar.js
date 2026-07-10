@@ -47,6 +47,17 @@ function openBoardPop(anchorEl) {
         }));
       }
     },
+    footer: state.me?.is_admin ? (foot, { close }) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tp-edit";
+      btn.innerHTML = ICONS.plus + "<span>New board</span>";
+      btn.addEventListener("click", () => {
+        close();
+        openBoardModal(null, { canEditAI: true, onSaved: () => location.reload() });
+      });
+      foot.appendChild(btn);
+    } : undefined,
   });
 }
 
