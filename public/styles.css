@@ -311,13 +311,17 @@ main#grid {
   border-radius: 8px;
   background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
   background-size: 200% 100%;
-  animation: card-shimmer 1.4s ease-in-out infinite;
   cursor: zoom-in;
   display: block;
   line-height: 0;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.06);
   transition: box-shadow 0.15s, transform 0.15s;
 }
+
+/* The skeleton gradient is deliberately static: an animated shimmer forces
+   style/paint/raster work every frame for every visible unloaded card, and a
+   drain keeps cards in that state for its whole duration. The spinner is the
+   "working" signal. */
 
 .card:hover {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
@@ -326,13 +330,7 @@ main#grid {
 }
 
 .card.loaded {
-  animation: none;
   background: #fafafa;
-}
-
-@keyframes card-shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
 }
 
 .tool-btn.upload {
@@ -381,12 +379,41 @@ main#grid {
   border: 3px solid rgba(0, 0, 0, 0.15);
   border-top-color: rgba(0, 0, 0, 0.55);
   border-radius: 50%;
+}
+/* Spinners run only near the viewport (grid.js toggles .onstage) — the lane
+   budget keeps the simultaneous count small, so smooth rotation is affordable
+   now that the shimmer (the per-frame paint cost) is gone. */
+.card.loading.onstage .spinner {
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* The processing lane's tail: "+N processing…" for everything past the
+   lane budget. Clickable — it opens the queue via the status pills. */
+.card.lane-more {
+  height: 250px;
+  animation: none;
+  background: #fafafa;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  line-height: 1.2;
+}
+.lane-more-count {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text);
+}
+.lane-more-label {
+  font-size: 12px;
+  color: var(--text-dim);
 }
 
 #drop-overlay {
@@ -523,9 +550,11 @@ main#grid {
   opacity: 0.35;
 }
 
+/* In-flight cards keep the skeleton gradient even once their thumb loads
+   (.loaded flips the background to flat otherwise); static on purpose — see
+   the .card comment. */
 .card.loading,
 .card.loading.loaded {
-  animation: card-shimmer 1.4s ease-in-out infinite;
   background: linear-gradient(90deg, #f0f0f0 25%, #e8e8e8 50%, #f0f0f0 75%);
   background-size: 200% 100%;
 }

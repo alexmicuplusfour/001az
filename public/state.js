@@ -17,6 +17,8 @@ export const state = {
   selectedCrateId: null,
   showFavorites: false,
   showUntagged: false,
+  showProcessing: false,   // status pill: actively worked (processing/extracting/facing)
+  showUnprocessed: false,  // status pill: queued, not started (pending*)
   sortByHearts: false,
   sortAlpha: false,
   // semantic search: server-enabled flag, the input's draft text, the last

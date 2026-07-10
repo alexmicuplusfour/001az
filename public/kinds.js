@@ -54,7 +54,14 @@ const imageKind = {
     }
     im.alt = item.tags.length ? item.tags.join(", ") : item.name;
     im.addEventListener("error", () => card.remove());
-    im.addEventListener("load", () => { im.classList.add("loaded"); card.classList.add("loaded"); layout(); });
+    im.addEventListener("load", () => {
+      im.classList.add("loaded");
+      card.classList.add("loaded");
+      // Ratio-stamped cards already have their exact height — the loaded
+      // bytes can't move the masonry. Skipping the relayout matters when a
+      // fresh board view trickles in hundreds of lazy thumbnails.
+      if (!card.dataset.ratio) layout();
+    });
     if (im.complete && im.naturalWidth > 0) { im.classList.add("loaded"); card.classList.add("loaded"); }
     if (!hasIdentity(item)) return faceMedia(im);
     // Mapped identity: same title strip documents carry, under the media.
@@ -70,7 +77,10 @@ const imageKind = {
     im.src = p.objURL || thumbUrl(p.name);
     im.alt = p.name || "uploading";
     im.addEventListener("error", () => card.remove());
-    im.addEventListener("load", () => layout());
+    // 'loaded' stops the card shimmer — an infinite background animation that
+    // repaints every frame; the dimmed image + spinner already say "working".
+    im.addEventListener("load", () => { card.classList.add("loaded"); layout(); });
+    if (im.complete && im.naturalWidth > 0) card.classList.add("loaded");
     return im;
   },
 
@@ -114,13 +124,15 @@ const docKind = {
     return wrap;
   },
 
-  progressFace(p) {
+  progressFace(p, card) {
     const wrap = document.createElement("div");
     wrap.className = "doc-face";
     const badge = document.createElement("div");
     badge.className = "doc-badge";
     badge.textContent = (p.name?.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
     wrap.append(badge, titleStrip(p.name || "uploading"));
+    // Badge face is ready at creation — no shimmer needed (see imageKind).
+    card.classList.add("loaded");
     return wrap;
   },
 

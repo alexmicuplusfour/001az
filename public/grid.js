@@ -27,6 +27,15 @@ let lastFilterKey = "";
 let cardCache = new Map();     // item id -> { el, sig }
 let progressCache = new Map(); // upload tempId / item id -> el
 
+// Spinners run only while their card is near the viewport (.onstage) — a
+// scrolled queue view mounts hundreds of cards, and hundreds of infinite
+// animations grind the tab even when each is cheap. Cards are observed at
+// creation; every path that drops a card must unobserve it, or the
+// observer's strong refs leak recreated cards across status churn.
+const stageObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) e.target.classList.toggle("onstage", e.isIntersecting);
+}, { rootMargin: "300px 0px" });
+
 // Everything cardFor bakes into the DOM that can change after creation.
 // Bulk selection isn't included: bulk.js updates card elements in place.
 // name + instance count: a merge/split can swap the face file or change the
@@ -41,6 +50,7 @@ function cardEl(img) {
   // isConnected: a card that removed itself (broken image) must not be
   // resurrected from the cache — recreate so the error path runs again.
   if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
+  if (hit) stageObserver.unobserve(hit.el);
   const el = cardFor(img);
   cardCache.set(img.id, { el, sig });
   return el;
@@ -237,6 +247,42 @@ function tagChip(img) {
   return chip;
 }
 
+// Two rows' worth of progress cards — under this, a drop behaves exactly as
+// before; past it, the lane truncates and the tail card carries the count.
+function laneBudget() {
+  const cols = Math.max(1, Math.floor((elGrid.clientWidth + GAP) / (COL_MIN + GAP)));
+  return Math.max(4, cols * 2);
+}
+
+// The lane's tail: "+N processing…" standing in for everything past the
+// budget. One cached element whose count updates in place, so poll ticks
+// where nothing else changed keep the DOM-untouched fast path.
+let laneMoreCard = null;
+function laneMore(count) {
+  if (!laneMoreCard) {
+    laneMoreCard = document.createElement("div");
+    laneMoreCard.className = "card lane-more";
+    laneMoreCard.title = "Show the whole queue";
+    const n = document.createElement("div");
+    n.className = "lane-more-count";
+    const label = document.createElement("div");
+    label.className = "lane-more-label";
+    label.textContent = "processing…";
+    laneMoreCard.append(n, label);
+    laneMoreCard.addEventListener("click", () => {
+      // "Show me the queue" — active facet pills would exclude the tagless
+      // queue items, so clear them rather than landing on an empty grid.
+      state.selected = new Map();
+      state.showUntagged = false;
+      state.showProcessing = true;
+      state.showUnprocessed = true;
+      document.dispatchEvent(new Event('app:render'));
+    });
+  }
+  laneMoreCard.querySelector(".lane-more-count").textContent = `+${count}`;
+  return laneMoreCard;
+}
+
 function progressCard(p) {
   const card = document.createElement("div");
   card.className = "card loading";
@@ -251,6 +297,7 @@ function progressCard(p) {
     acts.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(p.id)));
     card.appendChild(acts);
   }
+  stageObserver.observe(card);
   return card;
 }
 
@@ -337,6 +384,7 @@ function cardFor(img) {
     if (card.classList.contains("pop-open")) return;
     teardownCardHover(card);
   });
+  stageObserver.observe(card);
   return card;
 }
 
@@ -349,15 +397,21 @@ export function renderGrid(key, progressItems, items) {
   const children = [];
 
   const nextProgress = new Map();
-  for (const p of progressItems) {
+  const budget = laneBudget();
+  for (const p of progressItems.slice(0, budget)) {
     const k = p.tempId != null ? `u${p.tempId}` : p.id;
     const el = progressCache.get(k) || progressCard(p);
     nextProgress.set(k, el);
     children.push(el);
   }
+  for (const [k, el] of progressCache) {
+    if (!nextProgress.has(k)) stageObserver.unobserve(el);
+  }
   progressCache = nextProgress;
+  if (progressItems.length > budget) children.push(laneMore(progressItems.length - budget));
 
   if (!items.length && !progressItems.length) {
+    for (const { el } of cardCache.values()) stageObserver.unobserve(el);
     cardCache = new Map();
     const e = document.createElement("div");
     e.className = "empty";
@@ -370,8 +424,11 @@ export function renderGrid(key, progressItems, items) {
 
   // Prune cards that fell out of view or were deleted.
   const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
-  for (const id of cardCache.keys()) {
-    if (!keep.has(id)) cardCache.delete(id);
+  for (const [id, { el }] of cardCache) {
+    if (!keep.has(id)) {
+      stageObserver.unobserve(el);
+      cardCache.delete(id);
+    }
   }
 
   // Nothing changed (the common poll tick) — leave the DOM alone.

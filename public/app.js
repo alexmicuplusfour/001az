@@ -15,7 +15,10 @@ function render() {
   const tagged = taggedFiltered();
   renderToolbar(tagged.length);
   renderFacets();
-  renderGrid(key, inProgress(), tagged);
+  // With a status pill on, the grid *is* the queue — a lane on top would
+  // just duplicate the same items.
+  const laneHidden = state.showProcessing || state.showUnprocessed;
+  renderGrid(key, laneHidden ? [] : inProgress(), tagged);
   syncFiltersToUrl();
   requestAnimationFrame(() => {
     layoutGrid();

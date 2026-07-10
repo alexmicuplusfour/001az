@@ -30,7 +30,11 @@ export function dropPendingUploadId(id) {
   document.dispatchEvent(new Event('app:uploads-pending-changed'));
 }
 
-const IN_FLIGHT = new Set(["pending", "processing", "pending_extract", "extracting", "pending_face", "facing"]);
+// The in-flight queue split by aliveness: ACTIVE items are being worked right
+// now, QUEUED ones are waiting in line. The status filter pills mirror this.
+export const ACTIVE = new Set(["processing", "extracting", "facing"]);
+export const QUEUED = new Set(["pending", "pending_extract", "pending_face"]);
+const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 
 function needsPoll() {
   return (
@@ -40,10 +44,14 @@ function needsPoll() {
 }
 
 // First-time tags (no tags yet) show at the top; retags stay in the grid.
+// Ordered by aliveness — upload placeholders, then actively-worked items,
+// then the waiting queue — so the grid's budgeted lane shows real work first.
 export function inProgress() {
+  const mine = state.items.filter((img) => IN_FLIGHT.has(img.status) && !img.tags.length);
   return [
     ...state.uploading,
-    ...state.items.filter((img) => IN_FLIGHT.has(img.status) && !img.tags.length),
+    ...mine.filter((img) => ACTIVE.has(img.status)),
+    ...mine.filter((img) => QUEUED.has(img.status)),
   ];
 }
 

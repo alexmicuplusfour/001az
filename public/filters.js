@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { tag, pill } from './utils.js';
+import { ACTIVE, QUEUED } from './data.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -10,7 +11,7 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.boardId, state.searchResults ? state.searchQuery : ""]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.boardId, state.searchResults ? state.searchQuery : ""]);
 }
 
 function matchesExcept(img, exceptKey) {
@@ -36,10 +37,22 @@ export function isUntagged(img) {
   return img.tags.length === 0;
 }
 
+// Status pills OR together (an item has exactly one status), the same way
+// values within a facet do. With none active, the usual isTagged gate keeps
+// in-flight items out of the grid — the progress lane is their home.
+function statusFilter() {
+  const sets = [];
+  if (state.showProcessing) sets.push(ACTIVE);
+  if (state.showUnprocessed) sets.push(QUEUED);
+  if (!sets.length) return isTagged;
+  return (img) => sets.some((s) => s.has(img.status));
+}
+
 export function taggedFiltered() {
+  const statusOk = statusFilter();
   const list = state.items.filter(
     (img) =>
-      isTagged(img) &&
+      statusOk(img) &&
       (state.searchResults == null || state.searchResults.has(img.id)) &&
       (!state.showUntagged || isUntagged(img)) &&
       (!state.showFavorites || img.favoritedByMe) &&
@@ -66,6 +79,10 @@ function computeFacetStats() {
   const facetsWithData = new Set();
   let totalUntagged = 0;
   let untaggedInContext = 0;
+  let totalActive = 0;
+  let activeInContext = 0;
+  let totalQueued = 0;
+  let queuedInContext = 0;
 
   for (const img of state.items) {
     for (const t of img.tags) {
@@ -87,13 +104,21 @@ function computeFacetStats() {
       if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
 
+    const inContext =
+      fails === 0 &&
+      (!state.showFavorites || img.favoritedByMe) &&
+      (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId));
+
     if (isTagged(img) && isUntagged(img)) {
       totalUntagged++;
-      if (
-        fails === 0 &&
-        (!state.showFavorites || img.favoritedByMe) &&
-        (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId))
-      ) untaggedInContext++;
+      if (inContext) untaggedInContext++;
+    }
+    if (ACTIVE.has(img.status)) {
+      totalActive++;
+      if (inContext) activeInContext++;
+    } else if (QUEUED.has(img.status)) {
+      totalQueued++;
+      if (inContext) queuedInContext++;
     }
 
     if (fails > 1) continue;
@@ -104,13 +129,20 @@ function computeFacetStats() {
       counts.set(t, (counts.get(t) || 0) + 1);
     }
   }
-  return { totals, counts, facetsWithData, totalUntagged, untaggedInContext };
+  return {
+    totals, counts, facetsWithData,
+    totalUntagged, untaggedInContext,
+    totalActive, activeInContext,
+    totalQueued, queuedInContext,
+  };
 }
 
 export function activeCount() {
   let n = 0;
   for (const values of state.selected.values()) n += values.size;
   if (state.showUntagged) n++;
+  if (state.showProcessing) n++;
+  if (state.showUnprocessed) n++;
   return n;
 }
 
@@ -131,11 +163,13 @@ export function toggle(facetKey, value) {
 export function clearAll() {
   state.selected = new Map();
   state.showUntagged = false;
+  state.showProcessing = false;
+  state.showUnprocessed = false;
   document.dispatchEvent(new Event('app:render'));
 }
 
-function toggleUntagged() {
-  state.showUntagged = !state.showUntagged;
+function toggleFlag(flag) {
+  state[flag] = !state[flag];
   document.dispatchEvent(new Event('app:render'));
 }
 
@@ -210,8 +244,21 @@ export function syncFiltersToUrl() {
 
 export function renderFacetsInto(container, stats = computeFacetStats()) {
   container.replaceChildren();
-  const { totals, counts, facetsWithData, totalUntagged, untaggedInContext } = stats;
-  if (totalUntagged > 0 || state.showUntagged) {
+  const {
+    totals, counts, facetsWithData,
+    totalUntagged, untaggedInContext,
+    totalActive, activeInContext,
+    totalQueued, queuedInContext,
+  } = stats;
+  // The status row: Untagged plus the two queue pills (Processing = actively
+  // worked, Unprocessed = waiting in line). Each shows only while it has items
+  // or is switched on, so the row disappears entirely on a quiet board.
+  const statusPills = [
+    ["Untagged", totalUntagged, untaggedInContext, "showUntagged"],
+    ["Processing", totalActive, activeInContext, "showProcessing"],
+    ["Unprocessed", totalQueued, queuedInContext, "showUnprocessed"],
+  ].filter(([, total, , flag]) => total > 0 || state[flag]);
+  if (statusPills.length) {
     const row = document.createElement("div");
     row.className = "facet facet-untagged";
     const spacer = document.createElement("div");
@@ -220,9 +267,11 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     row.appendChild(spacer);
     const pills = document.createElement("div");
     pills.className = "pills";
-    pills.appendChild(
-      pill("Untagged", untaggedInContext, state.showUntagged, !state.showUntagged && untaggedInContext === 0, toggleUntagged)
-    );
+    for (const [label, , ctx, flag] of statusPills) {
+      pills.appendChild(
+        pill(label, ctx, state[flag], !state[flag] && ctx === 0, () => toggleFlag(flag))
+      );
+    }
     row.appendChild(pills);
     container.appendChild(row);
   }
