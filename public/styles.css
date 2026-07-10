@@ -1506,7 +1506,7 @@ a.tool-btn {
   left: 0;
   bottom: 0;
   width: 340px;
-  max-width: calc(100vw - 48px);
+  max-width: 70vw;
   background: #fff;
   z-index: 31;
   display: flex;
@@ -1519,6 +1519,12 @@ a.tool-btn {
 
 .filter-drawer.is-open .filter-drawer-panel {
   transform: translateX(0);
+}
+
+@media (min-width: 641px) {
+  .filter-drawer-panel {
+    width: 500px;
+  }
 }
 
 .filter-drawer-head {

@@ -93,7 +93,7 @@ export async function renderAiConfig() {
   nameIn.required = true;
   const provSel = document.createElement("select");
   provSel.style.cssText = "flex:none;";
-  for (const p of catalog) {
+  for (const p of catalog.filter((p) => !p.keyless)) {
     const opt = document.createElement("option");
     opt.value = p.name;
     opt.textContent = p.name;
@@ -215,115 +215,124 @@ export async function renderAiConfig() {
   emSec.style.cssText = "margin-top:28px;max-width:480px;display:flex;flex-direction:column;gap:14px;";
   emSec.innerHTML = `<div><h2 style="font-size:14px;margin:0 0 2px;">Semantic search</h2><p class="sub" style="margin:0;">Free-text search that ranks a board's items by meaning, built from the tagger's reasoning and descriptions.</p></div>`;
 
-  // Embed models come from the catalog's `embeds` block; a provider
-  // without one (Anthropic, GLM) has no embeddings API.
   const embedKeys = keys.filter((k) => providers[k.provider]?.embeds);
+  let embedOn = !!cfg.embed?.enabled;
 
-  if (!embedKeys.length) {
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.style.margin = "0";
-    note.textContent = "Needs an OpenAI or Gemini API key for embeddings — Anthropic doesn't offer an embeddings API. Add one above to configure this.";
-    emSec.appendChild(note);
-  } else {
-    let embedOn = !!cfg.embed?.enabled;
-
-    const emKeyRow = document.createElement("div");
-    emKeyRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Embeddings key</label>`;
-    const emKeySel = document.createElement("select");
-    emKeySel.style.cssText = "width:100%;";
+  // Provider selector: local (always first, no key needed) then API key options.
+  const emProvRow = document.createElement("div");
+  emProvRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Embedding provider</label>`;
+  const emProvSel = document.createElement("select");
+  emProvSel.style.cssText = "width:100%;";
+  const localOpt = document.createElement("option");
+  localOpt.value = "local";
+  localOpt.textContent = "Local — Xenova/bge-small-en-v1.5 · runs on-server, no key needed";
+  emProvSel.appendChild(localOpt);
+  if (embedKeys.length) {
+    const sep = document.createElement("option");
+    sep.disabled = true;
+    sep.textContent = "──────────────────";
+    emProvSel.appendChild(sep);
     for (const k of embedKeys) {
       const opt = document.createElement("option");
       opt.value = String(k.id);
       opt.textContent = `${k.name} — ${k.provider}`;
-      emKeySel.appendChild(opt);
+      emProvSel.appendChild(opt);
     }
-    if (cfg.embed?.keyId && embedKeys.find((k) => k.id === cfg.embed.keyId)) {
-      emKeySel.value = String(cfg.embed.keyId);
-    }
-    emKeyRow.appendChild(emKeySel);
-
-    const emModelRow = document.createElement("div");
-    emModelRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Embedding model</label>`;
-    const emModelSel = document.createElement("select");
-    emModelSel.style.cssText = "width:100%;";
-    const emProviderOf = () => embedKeys.find((k) => String(k.id) === emKeySel.value)?.provider || "openai";
-    const fillEmbedModels = (current) => {
-      emModelSel.replaceChildren();
-      const embeds = providers[emProviderOf()].embeds;
-      for (const m of embeds.models) {
-        const opt = document.createElement("option");
-        opt.value = m.id;
-        opt.textContent = `${m.id} — ${m.note}`;
-        if (m.id === (current || embeds.default)) opt.selected = true;
-        emModelSel.appendChild(opt);
-      }
-    };
-    fillEmbedModels(cfg.embed?.model);
-    emKeySel.onchange = () => fillEmbedModels(null);
-    emModelRow.appendChild(emModelSel);
-
-    const emSwitch = switchRow("Enable semantic search", "(items are embedded in the background; a search box appears on boards)", embedOn, (on) => { embedOn = on; });
-
-    const emStatus = document.createElement("p");
-    emStatus.className = "muted";
-    emStatus.style.margin = "0";
-    if (cfg.embed?.enabled) {
-      const { embedded, tagged } = cfg.embed.stats || {};
-      emStatus.textContent =
-        tagged && embedded < tagged
-          ? `${embedded} of ${tagged} tagged items embedded — the rest backfill in the background.`
-          : `All ${tagged || 0} tagged items embedded.`;
-    }
-
-    const emActions = document.createElement("div");
-    emActions.style.cssText = "display:flex;gap:8px;align-items:center;";
-    const emSave = document.createElement("button");
-    emSave.textContent = "Save";
-    emSave.onclick = async () => {
-      emSave.disabled = true;
-      emSave.textContent = "Saving…";
-      const changingModel = cfg.embed?.enabled && cfg.embed?.model && cfg.embed.model !== emModelSel.value;
-      if (changingModel && !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) {
-        emSave.disabled = false;
-        emSave.textContent = "Save";
-        return;
-      }
-      try {
-        await api("POST", "/api/admin/ai-config", {
-          embedKeyId: Number(emKeySel.value),
-          embedModel: emModelSel.value,
-          embedEnabled: embedOn,
-        });
-        toast("Semantic search settings saved");
-        await renderAiConfig();
-      } catch (err) {
-        toast.error(err.message);
-        emSave.disabled = false;
-        emSave.textContent = "Save";
-      }
-    };
-    const emTest = document.createElement("button");
-    emTest.className = "ghost";
-    emTest.textContent = "Test";
-    emTest.onclick = async () => {
-      emTest.disabled = true;
-      emTest.textContent = "Testing…";
-      try {
-        const { model: m, provider: p } = await api("POST", "/api/admin/ai-config/embed-test");
-        toast(`✓ ${p}/${m} reachable`);
-      } catch (err) {
-        toast.error(err.message);
-      } finally {
-        emTest.disabled = false;
-        emTest.textContent = "Test";
-      }
-    };
-    emActions.append(emSave, emTest);
-
-    emSec.append(emKeyRow, emModelRow, emSwitch, emActions);
-    if (emStatus.textContent) emSec.appendChild(emStatus);
   }
+  const initSel = cfg.embed?.provider === "local" ? "local"
+    : cfg.embed?.keyId && embedKeys.find((k) => k.id === cfg.embed.keyId) ? String(cfg.embed.keyId)
+    : "local";
+  emProvSel.value = initSel;
+  emProvRow.appendChild(emProvSel);
+
+  // Model selector — only shown for API key providers.
+  const emModelRow = document.createElement("div");
+  emModelRow.innerHTML = `<label style="display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;">Embedding model</label>`;
+  const emModelSel = document.createElement("select");
+  emModelSel.style.cssText = "width:100%;";
+  const emProviderOf = () => embedKeys.find((k) => String(k.id) === emProvSel.value)?.provider || "openai";
+  const fillEmbedModels = (current) => {
+    emModelSel.replaceChildren();
+    const embeds = providers[emProviderOf()]?.embeds;
+    if (!embeds) return;
+    for (const m of embeds.models) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = `${m.id} — ${m.note}`;
+      if (m.id === (current || embeds.default)) opt.selected = true;
+      emModelSel.appendChild(opt);
+    }
+  };
+  const updateModelRow = () => {
+    const isLocal = emProvSel.value === "local";
+    emModelRow.style.display = isLocal ? "none" : "";
+    if (!isLocal) fillEmbedModels(null);
+  };
+  if (emProvSel.value !== "local") fillEmbedModels(cfg.embed?.model);
+  updateModelRow();
+  emProvSel.onchange = updateModelRow;
+  emModelRow.appendChild(emModelSel);
+
+  const emSwitch = switchRow("Enable semantic search", "(items are embedded in the background; a search box appears on boards)", embedOn, (on) => { embedOn = on; });
+
+  const emStatus = document.createElement("p");
+  emStatus.className = "muted";
+  emStatus.style.margin = "0";
+  if (cfg.embed?.enabled) {
+    const { embedded, tagged } = cfg.embed.stats || {};
+    emStatus.textContent =
+      tagged && embedded < tagged
+        ? `${embedded} of ${tagged} tagged items embedded — the rest backfill in the background.`
+        : `All ${tagged || 0} tagged items embedded.`;
+  }
+
+  const emActions = document.createElement("div");
+  emActions.style.cssText = "display:flex;gap:8px;align-items:center;";
+  const emSave = document.createElement("button");
+  emSave.textContent = "Save";
+  emSave.onclick = async () => {
+    emSave.disabled = true;
+    emSave.textContent = "Saving…";
+    const isLocal = emProvSel.value === "local";
+    const changingModel = !isLocal && cfg.embed?.enabled && cfg.embed?.model && cfg.embed.model !== emModelSel.value;
+    if (changingModel && !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) {
+      emSave.disabled = false;
+      emSave.textContent = "Save";
+      return;
+    }
+    try {
+      await api("POST", "/api/admin/ai-config", isLocal
+        ? { embedProvider: "local", embedEnabled: embedOn }
+        : { embedProvider: null, embedKeyId: Number(emProvSel.value), embedModel: emModelSel.value, embedEnabled: embedOn }
+      );
+      toast("Semantic search settings saved");
+      await renderAiConfig();
+    } catch (err) {
+      toast.error(err.message);
+      emSave.disabled = false;
+      emSave.textContent = "Save";
+    }
+  };
+  const emTest = document.createElement("button");
+  emTest.className = "ghost";
+  emTest.textContent = "Test";
+  emTest.onclick = async () => {
+    emTest.disabled = true;
+    emTest.textContent = "Testing…";
+    try {
+      const { model: m, provider: p } = await api("POST", "/api/admin/ai-config/embed-test");
+      toast(`✓ ${p}/${m} reachable`);
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      emTest.disabled = false;
+      emTest.textContent = "Test";
+    }
+  };
+  emActions.append(emSave, emTest);
+
+  emSec.append(emProvRow, emModelRow, emSwitch, emActions);
+  if (emStatus.textContent) emSec.appendChild(emStatus);
   sec.appendChild(emSec);
 
   document.getElementById("ai-config-content").replaceChildren(sec);

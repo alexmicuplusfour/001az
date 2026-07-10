@@ -19,8 +19,16 @@ RUN npm ci --omit=dev
 COPY . .
 
 # Server-owned state (uploads + thumbnails) lives on a volume at /data.
-RUN mkdir -p /data/gallery /data/thumbnails && chown -R node:node /data
+# The transformers cache dir must be node-owned before we switch users so the
+# pre-download (and runtime writes) succeed without permission errors.
+RUN mkdir -p /data/gallery /data/thumbnails && chown -R node:node /data \
+  && mkdir -p /app/node_modules/@huggingface/transformers/.cache \
+  && chown -R node:node /app/node_modules/@huggingface/transformers
 USER node
+
+# Pre-download the local embedding model so the first embed sweep isn't blocked
+# by a ~90 MB network fetch at runtime.
+RUN node -e "import('@huggingface/transformers').then(({pipeline})=>pipeline('feature-extraction','Xenova/bge-small-en-v1.5',{dtype:'q8'}).then(()=>process.exit(0)))"
 
 ENV HOST=0.0.0.0 \
     PORT=3001 \

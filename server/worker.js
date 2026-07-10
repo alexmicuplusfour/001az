@@ -59,11 +59,16 @@ export async function resolveDefaultAi(db) {
   return null;
 }
 
-// The app-global embedder for semantic search: enabled flag + designated key
-// (must be an embeddings-capable provider — Anthropic has no embeddings API).
-// Returns { provider, apiKey, model } or null when off/misconfigured.
+// The app-global embedder for semantic search: enabled flag + provider choice.
+// 'local' uses the on-server ONNX model (no key); otherwise a stored API key
+// is looked up. Returns { provider, apiKey, model } or null when off/missing.
 export async function resolveEmbedder(db) {
   if ((await getSetting(db, "embed_enabled")) !== "1") return null;
+  const embedProvider = await getSetting(db, "embed_provider");
+  if (embedProvider === "local") {
+    return { provider: "local", apiKey: null, model: PROVIDERS.local.embeds.default };
+  }
+  // Key-based path (backward compat: embed_provider null + embed_key_id set).
   const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
   if (!keyId) return null;
   const key = await getAiKey(db, keyId);

@@ -10,6 +10,25 @@
 // never branches on a provider name. Adding a provider is one descriptor.
 import Anthropic from "@anthropic-ai/sdk";
 
+// Local embedding via @huggingface/transformers (ONNX, in-process). The
+// pipeline is lazy-loaded on first call and the Promise is cached so concurrent
+// callers all await the same initialisation without double-loading.
+const LOCAL_EMBED_MODEL = "Xenova/bge-small-en-v1.5";
+let _localPipeline = null;
+async function localEmbed({ texts }) {
+  if (!_localPipeline) {
+    const { pipeline } = await import("@huggingface/transformers");
+    _localPipeline = pipeline("feature-extraction", LOCAL_EMBED_MODEL, { dtype: "q8" });
+  }
+  const pipe = await _localPipeline;
+  const vectors = [];
+  for (const text of texts) {
+    const out = await pipe(text, { pooling: "mean", normalize: true });
+    vectors.push(new Float32Array(out.data));
+  }
+  return { vectors, usage: { input: 0, output: 0, cacheRead: 0 } };
+}
+
 const TOOL_NAME = "record_tags";
 const TOOL_DESC = "Record the applicable taxonomy tags for this item.";
 const DEFAULT_TOOL = { name: TOOL_NAME, description: TOOL_DESC };
@@ -281,6 +300,22 @@ const glm = {
   embeds: null,
 };
 
+// Local embedding-only provider: no API key, no tagger capability. The wire
+// and models fields are intentionally empty; `keyless` marks it as something
+// that must never appear in the API key registration form.
+const local = {
+  label: "Local",
+  wire: null,
+  defaultModel: null,
+  models: [],
+  research: false,
+  keyless: true,
+  embeds: {
+    default: LOCAL_EMBED_MODEL,
+    models: [{ id: LOCAL_EMBED_MODEL, note: "runs on-server · no API key" }],
+  },
+};
+
 // OpenRouter — an OpenAI-compatible aggregator: one key, many models. Fits the
 // compat family with no new fields (bearer auth, /chat/completions, max_tokens).
 // strictTools is off because the backend models vary in strict-schema support,
@@ -302,7 +337,7 @@ const openrouter = {
   embeds: null,
 };
 
-export const PROVIDERS = { anthropic, openai, gemini, glm, openrouter };
+export const PROVIDERS = { local, anthropic, openai, gemini, glm, openrouter };
 for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
 
 // Callers reach through the registry directly: PROVIDERS[p].defaultModel for
@@ -329,6 +364,7 @@ export function callTagger({ provider, research = false, ...rest }) {
 // Embed a batch of texts (semantic search). Only embeddings-capable providers
 // qualify — callers gate on PROVIDERS[provider].embeds before reaching here.
 export function embedTexts({ provider, ...rest }) {
+  if (provider === "local") return localEmbed(rest);
   const desc = PROVIDERS[provider];
   return desc.wire.embed(desc, rest);
 }
@@ -352,6 +388,7 @@ export function providerCatalog() {
       defaultModel: p.defaultModel,
       models: p.models,
       research: p.research,
+      keyless: !!p.keyless,
       embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
     };
   });

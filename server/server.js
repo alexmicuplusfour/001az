@@ -749,6 +749,7 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
   const embedder = await resolveEmbedder(db);
   const embed = {
     enabled: (await getSetting(db, "embed_enabled")) === "1",
+    provider: (await getSetting(db, "embed_provider")) || null,
     keyId: Number(await getSetting(db, "embed_key_id")) || null,
     model: (await getSetting(db, "embed_model")) || null,
     // Backfill progress against the model actually in effect (settings or
@@ -759,7 +760,7 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
 }));
 
 app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel } = req.body || {};
+  const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel, embedProvider } = req.body || {};
   if (defaultKeyId !== undefined) {
     if (defaultKeyId === null) {
       await setSetting(db, "default_key_id", null);
@@ -770,14 +771,25 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     }
   }
   if (model !== undefined) await setSetting(db, "model", model || null);
-  if (embedKeyId !== undefined) {
+  // Explicit provider selection: 'local' (keyless) or null (key-based).
+  if (embedProvider !== undefined) {
+    if (embedProvider === "local") {
+      await setSetting(db, "embed_provider", "local");
+      await setSetting(db, "embed_key_id", null);
+      await setSetting(db, "embed_model", null);
+    } else {
+      await setSetting(db, "embed_provider", null);
+    }
+  }
+  // Key-based path (skipped when embedProvider === 'local').
+  if (embedKeyId !== undefined && embedProvider !== "local") {
     if (embedKeyId === null) {
       await setSetting(db, "embed_key_id", null);
     } else {
       const key = await getAiKey(db, Number(embedKeyId));
       if (!key) return res.status(400).json({ error: "unknown key" });
       if (!PROVIDERS[key.provider]?.embeds) {
-        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds).join(" or ");
+        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds && !PROVIDERS[n].keyless).join(" or ");
         return res.status(400).json({ error: `embeddings need an ${names} key — ${key.provider} has no embeddings API` });
       }
       await setSetting(db, "embed_key_id", String(key.id));
@@ -785,12 +797,15 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
   }
   if (embedModel !== undefined) await setSetting(db, "embed_model", embedModel || null);
   if (embedEnabled !== undefined) {
-    // embedKeyId was applied above, so this validates the final state.
     if (embedEnabled) {
-      const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
-      const key = keyId ? await getAiKey(db, keyId) : null;
-      if (!key || !PROVIDERS[key.provider]?.embeds) {
-        return res.status(400).json({ error: "pick an OpenAI or Gemini key before enabling semantic search" });
+      // Validate final state: local is always valid; key-based needs a good key.
+      const ep = await getSetting(db, "embed_provider");
+      if (ep !== "local") {
+        const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
+        const key = keyId ? await getAiKey(db, keyId) : null;
+        if (!key || !PROVIDERS[key.provider]?.embeds) {
+          return res.status(400).json({ error: "pick Local, OpenAI, or Gemini before enabling semantic search" });
+        }
       }
     }
     await setSetting(db, "embed_enabled", embedEnabled ? "1" : null);

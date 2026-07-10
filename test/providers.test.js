@@ -8,17 +8,17 @@ import { startServer, adminSession, req } from "./helpers.js";
 import { PROVIDERS, providerCatalog } from "../server/providers.js";
 
 test("every descriptor is well-formed and self-named", () => {
-  assert.deepEqual(Object.keys(PROVIDERS), ["anthropic", "openai", "gemini", "glm", "openrouter"]);
+  assert.deepEqual(Object.keys(PROVIDERS), ["local", "anthropic", "openai", "gemini", "glm", "openrouter"]);
   for (const name of Object.keys(PROVIDERS)) {
     const d = PROVIDERS[name];
     assert.equal(d.name, name, `${name}: self-reference stamped`);
     assert.equal(typeof d.label, "string");
+    assert.equal(typeof d.research, "boolean");
+    if (d.keyless) continue; // local: no wire, no tagger models — embed-only
     assert.ok(d.wire && typeof d.wire.tag === "function", `${name}: has a wire family`);
     assert.ok(Array.isArray(d.models) && d.models.length, `${name}: has a model catalog`);
     for (const m of d.models) assert.equal(typeof m.note, "string", `${name}/${m.id}: note is a string`);
-    // the default is always offered in the catalog
     assert.ok(d.models.some((m) => m.id === d.defaultModel), `${name}: default ${d.defaultModel} is in models`);
-    assert.equal(typeof d.research, "boolean");
   }
 });
 
@@ -48,9 +48,9 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
 test("defaults and embed capability read straight off the descriptor", () => {
   assert.equal(PROVIDERS.glm.defaultModel, "glm-4.6v");
   assert.equal(PROVIDERS.anthropic.defaultModel, "claude-haiku-4-5");
-  // `embeds` is both the capability flag and the config: only openai/gemini
+  // `embeds` is both the capability flag and the config: local + openai + gemini
   const embedNames = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds);
-  assert.deepEqual(embedNames, ["openai", "gemini"]);
+  assert.deepEqual(embedNames, ["local", "openai", "gemini"]);
   assert.equal(PROVIDERS.anthropic.embeds, null);
   assert.equal(PROVIDERS.glm.embeds, null);
   for (const name of embedNames) {
