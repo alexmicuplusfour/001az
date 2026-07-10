@@ -90,7 +90,7 @@ export function renderToolbar(resultCount) {
     // opens the same board editor as the admin page, content-only.
     if (state.boardManage) {
       const editBtn = toolBtn(ICONS.pencil, "board-edit-btn", () => openBoardModal(null, {
-        canEditAI: false,
+        canEditAI: !!state.me?.is_admin,
         boardId: state.boardId,
         onSaved: (payload) => {
           state.boardName = payload.name;
