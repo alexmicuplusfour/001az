@@ -9,6 +9,8 @@ import { createEntity, setSetting } from "../server/db.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 import * as runtime from "../server/connectors/runtime.js";
+import * as coingecko from "../server/connectors/crypto/coingecko.js";
+import * as coinmarketcap from "../server/connectors/crypto/coinmarketcap.js";
 
 // ─── pure: connector manifest shape ──────────────────────────────────────────
 
@@ -268,6 +270,192 @@ test("POST /api/boards/:id/entities: 400 when board has no connector mapping", a
     body: { connector: "crypto", id: "bitcoin" },
   });
   assert.equal(r.status, 400);
+});
+
+// ── browse-and-add: the agnostic ingestion contract ──────────────────────────
+
+test("crypto manifest + /api/connectors expose the browse descriptor", async () => {
+  assert.ok(manifest.browse);
+  assert.ok(manifest.browse.columns.length && manifest.browse.sorts.length);
+  assert.ok(manifest.browse.columns.every((c) => c.key && c.label && c.kind));
+  assert.ok(manifest.browse.sorts.every((s) => s.key && s.label));
+
+  const r = await req(base, "GET", "/api/connectors", { sid: admin.sid });
+  const cg = r.json.find((c) => c.name === "crypto");
+  assert.ok(cg.browse, "browse descriptor served to the client");
+  assert.deepEqual(cg.browse.columns.map((c) => c.key), manifest.browse.columns.map((c) => c.key));
+});
+
+test("runtime.list: dispatches with opts + key; a provider without list() yields []", async () => {
+  const seen = [];
+  const withList = {
+    label: "WL",
+    async list(opts, { apiKey }) { seen.push([opts, apiKey]); return [{ id: "a", symbol: "A", label: "Ay", values: { x: 1 } }]; },
+    async search() { return []; }, async fetchEntity() { return {}; },
+  };
+  const conn = { name: "listconn", providers: { withList }, defaultProvider: "withList", manifest: {} };
+  await setSetting(db, "listconn_key_withList", "K");
+  const rows = await runtime.list(db, conn, { sort: "x", order: "desc", page: 1, pageSize: 5, query: "" });
+  assert.deepEqual(rows, [{ id: "a", symbol: "A", label: "Ay", values: { x: 1 } }]);
+  assert.equal(seen[0][1], "K");        // apiKey threaded
+  assert.equal(seen[0][0].sort, "x");
+
+  const noList = { label: "NL", async search() { return []; }, async fetchEntity() { return {}; } };
+  const conn2 = { name: "nolistconn", providers: { noList }, defaultProvider: "noList", manifest: {} };
+  assert.deepEqual(await runtime.list(db, conn2, {}), []); // no list() → graceful empty
+});
+
+test("coingecko.list: normalizes market rows and maps sort→order", async () => {
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push(String(url));
+    if (String(url).includes("/coins/markets")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ([
+        { id: "bitcoin", symbol: "btc", name: "Bitcoin", current_price: 65000, market_cap: 1.2e12, total_volume: 3e10, market_cap_rank: 1, price_change_percentage_24h: -1.5 },
+      ]) };
+    }
+    return original(url, opts);
+  };
+  try {
+    const rows = await coingecko.list({ sort: "market_cap", order: "desc", page: 1, pageSize: 50 });
+    assert.deepEqual(rows[0], {
+      id: "bitcoin", symbol: "BTC", label: "Bitcoin",
+      values: { rank: 1, name: "Bitcoin", price: 65000, change_24h: -1.5, market_cap: 1.2e12, volume: 3e10 },
+    });
+    assert.ok(seen.some((u) => u.includes("order=market_cap_desc")));
+
+    seen.length = 0;
+    await coingecko.list({ sort: "volume", order: "asc", page: 1, pageSize: 50 });
+    assert.ok(seen.some((u) => u.includes("order=volume_asc")));
+
+    seen.length = 0;
+    await coingecko.list({ sort: "price", order: "desc", page: 1, pageSize: 50 }); // unsupported → default
+    assert.ok(seen.some((u) => u.includes("order=market_cap_desc")));
+  } finally { globalThis.fetch = original; }
+});
+
+test("coingecko.list: a text query bridges /search → /coins/markets?ids", async () => {
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push(String(url));
+    if (String(url).includes("/search?query=")) return { ok: true, status: 200, text: async () => "", json: async () => ({ coins: [{ id: "bitcoin" }, { id: "bitcoin-cash" }] }) };
+    if (String(url).includes("/coins/markets")) return { ok: true, status: 200, text: async () => "", json: async () => ([{ id: "bitcoin", symbol: "btc", name: "Bitcoin", current_price: 1, market_cap: 2, total_volume: 3, market_cap_rank: 1, price_change_percentage_24h: 0 }]) };
+    return original(url, opts);
+  };
+  try {
+    const rows = await coingecko.list({ query: "bit", pageSize: 50 });
+    assert.ok(seen.some((u) => u.includes("/search?query=")));
+    assert.ok(seen.some((u) => u.includes("ids=bitcoin")));
+    assert.equal(rows[0].symbol, "BTC");
+  } finally { globalThis.fetch = original; }
+});
+
+test("coinmarketcap.list: normalizes rows and maps sort field", async () => {
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push(String(url));
+    if (String(url).includes("/listings/latest")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ status: { error_code: 0 }, data: [
+        { id: 1, name: "Bitcoin", symbol: "BTC", cmc_rank: 1, quote: { USD: { price: 65000, market_cap: 1.2e12, volume_24h: 3e10, percent_change_24h: -1.5 } } },
+      ] }) };
+    }
+    return original(url, opts);
+  };
+  try {
+    const rows = await coinmarketcap.list({ sort: "volume", order: "desc", page: 1, pageSize: 50 }, { apiKey: "k" });
+    assert.deepEqual(rows[0], {
+      id: "1", symbol: "BTC", label: "Bitcoin",
+      values: { rank: 1, name: "Bitcoin", price: 65000, change_24h: -1.5, market_cap: 1.2e12, volume: 3e10 },
+    });
+    assert.ok(seen.some((u) => u.includes("sort=volume_24h")));
+  } finally { globalThis.fetch = original; }
+});
+
+test("GET /api/boards/:id/connector-list: rows, on_board flag, 502, auth", async () => {
+  const { json: board } = await createBoard("conn-browse");
+  await patchBoard(board.id, { mapping: manifest.template });
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("/coins/markets")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ([
+        { id: "bitcoin", symbol: "btc", name: "Bitcoin", current_price: 65000, market_cap: 1.2e12, total_volume: 3e10, market_cap_rank: 1, price_change_percentage_24h: -1.5 },
+        { id: "ethereum", symbol: "eth", name: "Ethereum", current_price: 3000, market_cap: 4e11, total_volume: 1e10, market_cap_rank: 2, price_change_percentage_24h: 1.2 },
+      ]) };
+    }
+    return original(url, opts);
+  };
+  try {
+    let r = await req(base, "GET", `/api/boards/${board.id}/connector-list`); // no session
+    assert.equal(r.status, 401);
+
+    r = await req(base, "GET", `/api/boards/${board.id}/connector-list?sort=market_cap`, { sid: admin.sid });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.rows.length, 2);
+    assert.equal(r.json.hasMore, false);
+    assert.deepEqual(Object.keys(r.json.rows[0].values).sort(), ["change_24h", "market_cap", "name", "price", "rank", "volume"]);
+    assert.equal(r.json.rows.every((x) => x.on_board === false), true);
+
+    // an existing entity marks only its own row
+    await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin" });
+    r = await req(base, "GET", `/api/boards/${board.id}/connector-list?sort=market_cap`, { sid: admin.sid });
+    assert.equal(r.json.rows.find((x) => x.symbol === "BTC").on_board, true);
+    assert.equal(r.json.rows.find((x) => x.symbol === "ETH").on_board, false);
+  } finally { globalThis.fetch = original; }
+
+  // provider error → 502
+  const orig2 = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("/coins/markets")) return { ok: false, status: 500, text: async () => "", json: async () => ({}) };
+    return orig2(url, opts);
+  };
+  try {
+    const r = await req(base, "GET", `/api/boards/${board.id}/connector-list`, { sid: admin.sid });
+    assert.equal(r.status, 502);
+  } finally { globalThis.fetch = orig2; }
+});
+
+test("GET /api/boards/:id/connector-list: 400 when the board has no connector input", async () => {
+  const { json: board } = await createBoard("conn-browse-nomap");
+  const r = await req(base, "GET", `/api/boards/${board.id}/connector-list`, { sid: admin.sid });
+  assert.equal(r.status, 400);
+});
+
+test("POST /api/boards/:id/entities/bulk: adds many, skips duplicates, caps, mismatch", async () => {
+  const { json: board } = await createBoard("conn-bulk");
+  await patchBoard(board.id, { mapping: manifest.template });
+
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.includes("coingecko.com") && u.includes("/coins/") && !u.includes("markets")) {
+      const id = u.match(/\/coins\/([^?]+)/)[1];
+      const map = { bitcoin: { symbol: "btc", name: "Bitcoin", price: 65000 }, ethereum: { symbol: "eth", name: "Ethereum", price: 3000 } };
+      const m = map[id] || { symbol: id, name: id, price: 1 };
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ id, name: m.name, symbol: m.symbol, market_data: { current_price: { usd: m.price }, market_cap: { usd: 1e11 }, price_change_percentage_24h: 0 } }) };
+    }
+    return original(url, opts);
+  };
+  try {
+    let r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: ["bitcoin", "ethereum"] } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.added.length, 2);
+    assert.equal(r.json.skipped.length, 0);
+
+    r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: ["bitcoin"] } });
+    assert.equal(r.json.added.length, 0);
+    assert.deepEqual(r.json.skipped, [{ id: "bitcoin", reason: "duplicate" }]);
+
+    r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: Array.from({ length: 101 }, (_, i) => String(i)) } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /at most/);
+
+    r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "stocks", ids: ["x"] } });
+    assert.equal(r.status, 400);
+  } finally { globalThis.fetch = original; }
 });
 
 // ── slice-5b migration (0007_coingecko_to_crypto, idempotent) ─────────────────

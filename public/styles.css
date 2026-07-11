@@ -1862,52 +1862,6 @@ div.lbp-file-thumb {
   letter-spacing: -0.02em;
 }
 
-/* connector search popover — result-row content inside shared dd-rows */
-.connector-searching {
-  font-size: 12px;
-  color: #7a8090;
-  padding: 10px 8px;
-}
-.connector-result {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-.connector-result-sym {
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: #2a2e38;
-  font-size: 8px;
-  font-weight: 700;
-  font-family: monospace;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #9aa2b0;
-  flex-shrink: 0;
-}
-.connector-result-info {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.connector-result-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: #e0e4ea;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.connector-result-sub {
-  font-size: 11px;
-  color: #7a8090;
-  font-family: monospace;
-}
-
 /* connector field row in mapping modal */
 .mm-row-connector {
   background: #f0f0f8;

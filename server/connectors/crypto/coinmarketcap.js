@@ -90,6 +90,54 @@ export async function fetchEntity(id, { apiKey } = {}) {
   };
 }
 
+// Browse-and-add (the ingestion modal): the same canonical columns as CoinGecko,
+// assembled from CMC's endpoints. A plain browse uses /listings/latest (sorted +
+// paginated server-side, all four domain sorts native). A text query filters the
+// cached id/symbol map locally, then /quotes/latest fills the columns for those
+// ids — same row shape either way. Row = { id, symbol, label, values }.
+const SORT_FIELD = { market_cap: "market_cap", volume: "volume_24h", price: "price", name: "name" };
+
+function quoteRow(d) {
+  const usd = d.quote?.USD || {};
+  return {
+    id: String(d.id),
+    symbol: (d.symbol || "").toUpperCase(),
+    label: d.name,
+    values: {
+      rank:       d.cmc_rank ?? null,
+      name:       d.name,
+      price:      usd.price ?? null,
+      change_24h: usd.percent_change_24h ?? null,
+      market_cap: usd.market_cap ?? null,
+      volume:     usd.volume_24h ?? null,
+    },
+  };
+}
+
+export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey } = {}) {
+  const dir = order === "asc" ? "asc" : "desc";
+
+  if (query && query.trim()) {
+    const q = query.trim().toLowerCase();
+    const ids = (await coinMap(apiKey))
+      .filter((c) => (c.symbol || "").toLowerCase().includes(q) || (c.name || "").toLowerCase().includes(q))
+      .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9))
+      .slice(0, pageSize)
+      .map((c) => c.id);
+    if (!ids.length) return [];
+    const body = await cmc(`/v2/cryptocurrency/quotes/latest?id=${ids.join(",")}&convert=USD`, apiKey);
+    return ids.map((id) => body.data?.[id]).filter(Boolean).map(quoteRow);
+  }
+
+  const field = SORT_FIELD[sort] || SORT_FIELD.market_cap;
+  const start = (page - 1) * pageSize + 1;
+  const body = await cmc(
+    `/v1/cryptocurrency/listings/latest?start=${start}&limit=${pageSize}&sort=${field}&sort_dir=${dir}&convert=USD`,
+    apiKey
+  );
+  return (body.data || []).map(quoteRow);
+}
+
 // Cheap authenticated ping for the admin Test button.
 export async function testConnection({ apiKey } = {}) {
   await cmc(`/v1/key/info`, apiKey);

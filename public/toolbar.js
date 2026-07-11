@@ -8,7 +8,7 @@ import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
 import { openMappingModal } from './mapping-modal.js';
 import { openBoardModal } from './board-modal.js';
-import { openConnectorSearch } from './connector-search.js';
+import { openConnectorBrowse } from './connector-browse.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -152,7 +152,7 @@ export function renderToolbar(resultCount) {
       plusWrap.className = "board-group";
       const plusBtn = toolBtn(ICONS.plus, "upload", null); // onClick set below
       plusBtn.addEventListener("click", () => {
-        if (connectorName) openConnectorSearch(connectorName, plusBtn);
+        if (connectorName) openConnectorBrowse(connectorName);
         else triggerFilePicker();
       });
       plusWrap.appendChild(plusBtn);

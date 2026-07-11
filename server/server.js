@@ -68,6 +68,7 @@ import {
   insertItem,
   setEntityRefreshAt,
   rescheduleEntityRefreshes,
+  boardEntityIdentities,
   getBoardTokenTotal,
 } from "./db.js";
 import {
@@ -1053,28 +1054,15 @@ app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {
   }
 }));
 
-// Create an entity from a connector — no file upload, fields come from the
-// connector's fetchEntity call. Goes straight to pending (tagger runs over
-// the bound fields). 409 when the identity already exists on this board.
-app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
-  const board = await getBoard(db, req.params.id);
-  if (!board || !(await canAccessBoard(db, board.id, req.user)))
-    return res.status(404).json({ error: "not found" });
-  const { connector: connectorName, id: entityId } = req.body || {};
-  if (!connectorName || !entityId) return res.status(400).json({ error: "connector and id required" });
-  const inputConnector = board.mapping?.input?.connector;
-  if (inputConnector !== connectorName)
-    return res.status(400).json({ error: `this board uses the "${inputConnector || "files"}" input, not "${connectorName}"` });
-  const connector = getConnector(connectorName);
-  if (!connector) return res.status(404).json({ error: "unknown connector" });
-
+// Create one connector entity + its file-less tag-vehicle instance and return
+// the client row. Shared by the single add and the bulk add. Throws a tagged
+// error on the two recoverable cases so callers can map them: `.duplicate` for a
+// 23505 (identity already on the board), `.provider` for a fetch/provider error.
+async function addConnectorEntity(board, connector, connectorName, entityId) {
   let entity;
   try {
     entity = await connector.fetchEntity(db, entityId);
-  } catch (err) {
-    console.error(`connector fetchEntity error (${connectorName}/${entityId}):`, err.message);
-    return res.status(502).json({ error: err.message });
-  }
+  } catch (err) { err.provider = true; throw err; }
 
   // Bound fields live on the entity; one file-less instance is the tag
   // vehicle (tags/reasoning/queue state are per instance). A connector-face
@@ -1090,7 +1078,7 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
       fields: entity.fields,
     });
   } catch (err) {
-    if (err.code === "23505") return res.status(409).json({ error: "entity already on this board" });
+    if (err.code === "23505") { const e = new Error("entity already on this board"); e.duplicate = true; throw e; }
     throw err;
   }
   // Provider handle rides on the tag-vehicle instance (entities has no free-
@@ -1103,7 +1091,7 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
   if (live.length) await setEntityRefreshAt(db, eid, nextRefreshAt(entity.fields, live));
 
   console.log(`connector entity created: ${connectorName}/${entityId} → #${eid} (${entity.display_name})`);
-  res.json({
+  return {
     id: eid,
     name: entity.identity,
     identity: entity.identity,
@@ -1121,7 +1109,100 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
       id, name: entity.identity, label: null, w: null, h: null,
       kind: "connector", status, tags: [], undecided: false,
     }],
-  });
+  };
+}
+
+// Create an entity from a connector — no file upload, fields come from the
+// connector's fetchEntity call. Goes straight to pending (tagger runs over
+// the bound fields). 409 when the identity already exists on this board.
+app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const { connector: connectorName, id: entityId } = req.body || {};
+  if (!connectorName || !entityId) return res.status(400).json({ error: "connector and id required" });
+  const inputConnector = board.mapping?.input?.connector;
+  if (inputConnector !== connectorName)
+    return res.status(400).json({ error: `this board uses the "${inputConnector || "files"}" input, not "${connectorName}"` });
+  const connector = getConnector(connectorName);
+  if (!connector) return res.status(404).json({ error: "unknown connector" });
+
+  try {
+    res.json(await addConnectorEntity(board, connector, connectorName, entityId));
+  } catch (err) {
+    if (err.duplicate) return res.status(409).json({ error: err.message });
+    if (err.provider) {
+      console.error(`connector fetchEntity error (${connectorName}/${entityId}):`, err.message);
+      return res.status(502).json({ error: err.message });
+    }
+    throw err;
+  }
+}));
+
+// Bulk add from the browse modal — same per-entity path, tolerant per id:
+// duplicates and provider errors land in `skipped` rather than failing the batch.
+const BULK_ADD_MAX = 100;
+app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const { connector: connectorName, ids } = req.body || {};
+  if (!connectorName || !Array.isArray(ids) || !ids.length)
+    return res.status(400).json({ error: "connector and a non-empty ids array required" });
+  if (ids.length > BULK_ADD_MAX) return res.status(400).json({ error: `at most ${BULK_ADD_MAX} at a time` });
+  const inputConnector = board.mapping?.input?.connector;
+  if (inputConnector !== connectorName)
+    return res.status(400).json({ error: `this board uses the "${inputConnector || "files"}" input, not "${connectorName}"` });
+  const connector = getConnector(connectorName);
+  if (!connector) return res.status(404).json({ error: "unknown connector" });
+
+  const added = [], skipped = [];
+  for (const entityId of ids) {
+    try {
+      added.push(await addConnectorEntity(board, connector, connectorName, String(entityId)));
+    } catch (err) {
+      if (err.duplicate) { skipped.push({ id: entityId, reason: "duplicate" }); continue; }
+      console.error(`bulk add error (${connectorName}/${entityId}):`, err.message);
+      skipped.push({ id: entityId, reason: err.message });
+    }
+  }
+  res.json({ added, skipped });
+}));
+
+// Browse a connector board's catalog for the ingestion modal: a sorted,
+// paginated page of rows carrying the domain's columns, each flagged on_board
+// when its identity is already here. The connector is derived from the board's
+// mapping (ACL + connector in one place). 502 on a provider error, like search.
+const BROWSE_PAGE_MAX = 100;
+app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const connectorName = board.mapping?.input?.connector;
+  const connector = connectorName ? getConnector(connectorName) : null;
+  if (!connector) return res.status(400).json({ error: "this board has no connector input" });
+  const browse = connector.manifest.browse || {};
+
+  const pageSize = Math.min(BROWSE_PAGE_MAX, Math.max(1, Number(req.query.pageSize) || browse.pageSize || 50));
+  const opts = {
+    sort: req.query.sort ? String(req.query.sort) : browse.defaultSort,
+    order: req.query.order === "asc" ? "asc" : "desc",
+    page: Math.max(1, Number(req.query.page) || 1),
+    pageSize,
+    query: req.query.q ? String(req.query.q) : "",
+  };
+  let rows;
+  try {
+    rows = await connector.list(db, opts);
+  } catch (err) {
+    console.error(`connector list error (${connectorName}):`, err.message);
+    return res.status(502).json({ error: err.message });
+  }
+  // on_board mirrors runtime.fetchEntity's identity derivation (lowercase symbol,
+  // falling back to the provider id).
+  const onBoard = await boardEntityIdentities(db, board.id);
+  const marked = rows.map((r) => ({ ...r, on_board: onBoard.has((r.symbol || "").toLowerCase() || r.id) }));
+  res.json({ rows: marked, page: opts.page, hasMore: rows.length >= pageSize });
 }));
 
 // Ingestion + item-file statics, mounted before the frontend catch-all.

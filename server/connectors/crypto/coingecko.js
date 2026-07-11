@@ -93,6 +93,57 @@ export async function history(id, period, { apiKey } = {}) {
   return (d.prices || []).map(([t, price]) => ({ t, price }));
 }
 
+// Browse-and-add (the ingestion modal): a sorted, paginated page of coins with
+// the domain's canonical columns. The /coins/markets endpoint returns market
+// data already sorted by the `order` param; a text query bridges through /search
+// (ids only) then re-fetches those ids' market rows so the columns match. Each
+// row is { id, symbol, label, values: {<column key>: value} }.
+const SORT_ORDER = {
+  market_cap: (desc) => (desc ? "market_cap_desc" : "market_cap_asc"),
+  volume:     (desc) => (desc ? "volume_desc" : "volume_asc"),
+  name:       (desc) => (desc ? "id_desc" : "id_asc"), // no name sort; id ≈ alphabetical
+  // `price` isn't a /coins/markets order → falls through to the default below.
+};
+
+function marketRow(c) {
+  return {
+    id: c.id,
+    symbol: (c.symbol || "").toUpperCase(),
+    label: c.name,
+    values: {
+      rank:       c.market_cap_rank ?? null,
+      name:       c.name,
+      price:      c.current_price ?? null,
+      change_24h: c.price_change_percentage_24h ?? null,
+      market_cap: c.market_cap ?? null,
+      volume:     c.total_volume ?? null,
+    },
+  };
+}
+
+export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey } = {}) {
+  const desc = order !== "asc";
+  const common = `vs_currency=usd&price_change_percentage=24h`;
+
+  if (query && query.trim()) {
+    const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey) });
+    if (!sr.ok) throw cgFail(sr, "search");
+    const ids = ((await sr.json()).coins || []).slice(0, pageSize).map((c) => c.id);
+    if (!ids.length) return [];
+    const r = await fetch(`${BASE}/coins/markets?${common}&ids=${ids.map(encodeURIComponent).join(",")}`, { headers: cgHeaders(apiKey) });
+    if (!r.ok) throw cgFail(r, "list");
+    return (await r.json()).map(marketRow);
+  }
+
+  const orderParam = (SORT_ORDER[sort] || SORT_ORDER.market_cap)(desc);
+  const r = await fetch(
+    `${BASE}/coins/markets?${common}&order=${orderParam}&per_page=${pageSize}&page=${page}`,
+    { headers: cgHeaders(apiKey) }
+  );
+  if (!r.ok) throw cgFail(r, "list");
+  return (await r.json()).map(marketRow);
+}
+
 // Cheap liveness ping for the admin Test button. With a key present this also
 // validates it (an invalid demo key is rejected by the API).
 export async function testConnection({ apiKey } = {}) {

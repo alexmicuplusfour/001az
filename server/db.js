@@ -888,6 +888,13 @@ export async function getEntityByIdentity(db, boardId, identity) {
   return rows[0] || null;
 }
 
+// The set of entity identities already on a board — for marking connector rows
+// as already added in the browse modal.
+export async function boardEntityIdentities(db, boardId) {
+  const { rows } = await db.query("SELECT identity FROM entities WHERE board_id=$1", [boardId]);
+  return new Set(rows.map((r) => r.identity));
+}
+
 // Set a derived identity on an entity, clearing the provisional flag.
 // displayName preserves the AI's original casing for display; identity is the
 // normalised lowercase key. Throws 23505 on collision — caller re-parents the

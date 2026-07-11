@@ -75,6 +75,16 @@ export async function search(db, conn, query) {
   return callProvider(name, provider, () => provider.search(query, { apiKey }));
 }
 
+// Browse a sorted, paginated page of the domain's catalog for the ingestion
+// modal. `opts` = { sort, order, page, pageSize, query }. A provider that can't
+// browse (no list()) yields [] — the modal degrades to "not supported", like a
+// missing history()/face producer.
+export async function list(db, conn, opts) {
+  const { name, provider, apiKey } = await activeProvider(db, conn);
+  if (!provider.list) return [];
+  return callProvider(name, provider, () => provider.list(opts, { apiKey }));
+}
+
 // Assemble the connector entity from the active provider's raw values:
 //  - identity = lowercase symbol (portable across providers; dedupes the same
 //    asset added under two backends), falling back to the provider id;

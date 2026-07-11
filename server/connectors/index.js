@@ -15,6 +15,7 @@ function bind(name, mod) {
     name,
     manifest: mod.manifest,
     search: (db, q) => runtime.search(db, conn, q),
+    list: (db, opts) => runtime.list(db, conn, opts),
     fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
     testConnection: (db, opts) => runtime.testConnection(db, conn, opts),
     activeProvider: (db) => runtime.activeProvider(db, conn),
@@ -40,6 +41,7 @@ export function listConnectors() {
     description: c.manifest.description,
     fields: c.manifest.fields,
     faces: c.manifest.faces || [],
+    browse: c.manifest.browse || null,
     template: c.manifest.template,
     providers: c.manifest.providers,
   }));

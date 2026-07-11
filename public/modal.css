@@ -243,3 +243,93 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   background: #fff;
 }
 .mm-live:disabled { color: #b0b0ba; background: #f0f0f4; }
+
+/* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
+#connector-browse .modal-dialog { width: min(760px, 94vw); }
+#connector-browse .modal-body { min-height: 0; } /* let .cb-scroll own the scroll */
+.cb-controls { display: flex; gap: 8px; align-items: center; }
+.cb-search {
+  flex: 1;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+  border: 1px solid #d8d8e0;
+  border-radius: 7px;
+}
+.cb-sort {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 8px;
+  border: 1px solid #d8d8e0;
+  border-radius: 7px;
+  background: #fff;
+}
+.cb-order {
+  font: inherit;
+  font-size: 12px;
+  padding: 7px 10px;
+  border: 1px solid #d8d8e0;
+  border-radius: 7px;
+  background: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cb-order:hover { background: #f4f4f7; }
+
+.cb-scroll { flex: 1; overflow-y: auto; min-height: 200px; }
+.cb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cb-table thead th {
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 1;
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: #8a8a96;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid #eee;
+}
+.cb-table td { padding: 7px 8px; border-bottom: 1px solid #f2f2f5; vertical-align: middle; }
+.cb-table tbody tr:hover { background: #fafafc; }
+.cb-end { text-align: right; }
+.cb-col-sel { width: 28px; text-align: center; }
+.cb-col-add { width: 84px; text-align: right; }
+
+.cb-primary-name { font-weight: 600; color: #1a1a24; }
+.cb-primary-sym { margin-left: 6px; font-size: 11px; color: #9a9aa6; }
+.cb-up { color: #16a34a; }
+.cb-down { color: #dc2626; }
+
+.cb-add {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px solid #d3d3dc;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+.cb-add:hover { background: #111; color: #fff; border-color: #111; }
+.cb-add:disabled { opacity: .55; cursor: default; }
+.cb-on-board { font-size: 11px; color: #9a9aa6; }
+
+.cb-note { padding: 12px 8px; color: #8a8a96; font-size: 13px; text-align: center; }
+.cb-more {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  font: inherit;
+  font-size: 13px;
+  padding: 9px;
+  border: 1px solid #e2e2e8;
+  border-radius: 7px;
+  background: #f7f7f9;
+  cursor: pointer;
+}
+.cb-more:hover { background: #efeff3; }
+.cb-more:disabled { opacity: .6; cursor: default; }
+
+.modal-footer button:disabled { opacity: .5; cursor: default; }

@@ -54,4 +54,27 @@ export const manifest = {
   faces: [
     { name: "chart", label: "Price chart", periods: ["24h", "7d", "30d", "90d", "1y"] },
   ],
+  // Browse-and-add: the columns the ingestion modal shows and the sort keys it
+  // offers. Domain-level and canonical — every provider's list() fills the same
+  // column keys and maps these sort keys to its own API (falling back to its
+  // default for any it can't honor). `kind` drives agnostic client formatting
+  // (usd/percent/number/text); `primary` pairs the name with its symbol.
+  browse: {
+    columns: [
+      { key: "rank",       label: "#",       kind: "number", width: 40 },
+      { key: "name",       label: "Name",    kind: "text", primary: true },
+      { key: "price",      label: "Price",   kind: "usd" },
+      { key: "change_24h", label: "24h",     kind: "percent" },
+      { key: "market_cap", label: "Mkt cap", kind: "usd" },
+      { key: "volume",     label: "Volume",  kind: "usd" },
+    ],
+    sorts: [
+      { key: "market_cap", label: "Market cap" },
+      { key: "volume",     label: "Volume" },
+      { key: "price",      label: "Price" },
+      { key: "name",       label: "Name" },
+    ],
+    defaultSort: "market_cap",
+    pageSize: 50,
+  },
 };
