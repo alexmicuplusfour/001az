@@ -32,6 +32,7 @@ import {
   updateEntityFields,
   setEntityRefreshAt,
   addFieldSnapshot,
+  pruneFieldSnapshots,
   requeueItemForTag,
 } from "./db.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
@@ -312,9 +313,11 @@ export function nextAutoTagRun(from, everyMin, skipWeekends) {
 // --- connector liveness (slice 5c) ---
 
 // Refresh one due entity: whole-object fetch via its connector's active provider,
-// write back only the due fields (see runtime.refresh), snapshot any movement,
-// and — only when the board opts in with retag_on_refresh — re-queue the entity
-// to re-tag on a real change. Exported so the sweep and tests share one path.
+// write back only the due fields (see runtime.refresh), and — only when the
+// board opts in with retag_on_refresh — snapshot the movement and re-queue the
+// entity to re-tag on a real change. Movement history rides the retag opt-in:
+// a plain live board just updates in place (a 1-min live price would otherwise
+// write ~1440 unread rows/day). Exported so the sweep and tests share one path.
 // Throws are the caller's (the sweep backs off); it never swallows.
 export async function refreshDueEntity(db, { entity, inst, board }, now = Date.now(), dirs = null) {
   const conn = getConnector(board.mapping?.input?.connector);
@@ -353,7 +356,7 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
 
   let requeued = false;
   if (moved.length) {
-    await addFieldSnapshot(db, entity.id, r.moved, r.provider, now);
+    if (board.retag_on_refresh) await addFieldSnapshot(db, entity.id, r.moved, r.provider, now);
     if (board.retag_on_refresh && board.auto_tag) { await requeueItemForTag(db, inst.id); requeued = true; }
     console.log(`refreshed entity #${entity.id} ${entity.identity} [${r.provider}] -> ${moved.join(", ")}${requeued ? " (retag)" : ""}`);
   }
@@ -554,6 +557,19 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // (module scope, exported for tests).
   const REFRESH_BATCH = Math.max(1, Number(process.env.REFRESH_BATCH) || 20);
   let refreshBackoffUntil = 0;
+
+  // Movement-history retention: field_snapshots older than this are dropped.
+  // 0 disables the prune (keep forever). Checked hourly, not per tick — the
+  // DELETE is cheap but there's no point running it every 3s.
+  const SNAPSHOT_RETENTION_DAYS = Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 90);
+  let nextPruneAt = 0;
+  async function pruneSnapshots() {
+    if (!SNAPSHOT_RETENTION_DAYS || Date.now() < nextPruneAt) return;
+    nextPruneAt = Date.now() + 3600000;
+    const n = await pruneFieldSnapshots(db, Date.now() - SNAPSHOT_RETENTION_DAYS * 86400000);
+    if (n) console.log(`pruned ${n} field snapshot(s) older than ${SNAPSHOT_RETENTION_DAYS}d`);
+  }
+
   async function refreshDue() {
     if (Date.now() < refreshBackoffUntil) return;
     const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
@@ -770,6 +786,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     await retagDue();
     await embedDue();
     await refreshDue();
+    await pruneSnapshots();
 
     // Boards without their own key only process when a default exists.
     const hasDefault = !!(await resolveDefaultAi(db));

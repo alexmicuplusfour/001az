@@ -990,6 +990,13 @@ export async function addFieldSnapshot(db, entityId, fields, source, at) {
   );
 }
 
+// Drop movement history older than the cutoff (the worker's retention prune).
+// Returns the number of rows removed.
+export async function pruneFieldSnapshots(db, cutoff) {
+  const { rowCount } = await db.query("DELETE FROM field_snapshots WHERE refreshed_at < $1", [cutoff]);
+  return rowCount;
+}
+
 // Send one instance back to the tag queue (the opt-in retag-on-new-data path).
 export async function requeueItemForTag(db, id) {
   await db.query(

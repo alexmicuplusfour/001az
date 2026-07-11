@@ -9,6 +9,7 @@ import { startServer, adminSession, req } from "./helpers.js";
 import {
   getEntity, getBoard, createEntity, initDb,
   setSetting, setEntityRefreshAt, dueLiveEntities,
+  addFieldSnapshot, pruneFieldSnapshots,
 } from "../server/db.js";
 import { up as stampFieldAt } from "../server/migrations/0008_stamp_field_at.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -186,7 +187,7 @@ test("initDb reconciles refresh_at for entities on already-live boards", async (
   assert.ok(e.refresh_at !== null, "entity on a live board gets scheduled at boot");
 });
 
-test("retag_on_refresh gates the cascade: off = no re-queue, on = re-queue", async () => {
+test("retag_on_refresh gates the cascade AND the movement snapshot", async () => {
   for (const retag of [false, true]) {
     const board = await createCryptoBoard(`live-cascade-${retag}`);
     if (retag) await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { retag_on_refresh: true } });
@@ -211,10 +212,24 @@ test("retag_on_refresh gates the cascade: off = no re-queue, on = re-queue", asy
     const { rows: [i2] } = await db.query("SELECT status FROM items WHERE id=$1", [instId]);
     assert.equal(i2.status, retag ? "pending" : "tagged");
 
+    // Movement history rides the retag opt-in: plain live boards write none.
     const { rows: snaps } = await db.query("SELECT fields FROM field_snapshots WHERE entity_id=$1", [eid]);
-    assert.equal(snaps.length, 1);                   // one movement row
-    assert.ok(snaps[0].fields.price);
+    assert.equal(snaps.length, retag ? 1 : 0);
+    if (retag) assert.ok(snaps[0].fields.price);
   }
+});
+
+test("pruneFieldSnapshots drops rows older than the cutoff, keeps the rest", async () => {
+  const board = await createCryptoBoard("live-prune");
+  const { eid } = await addBitcoin(board.id, 50000);
+  const now = Date.now();
+  await addFieldSnapshot(db, eid, { price: { v: 1 } }, "coingecko", now - 91 * 86400000);
+  await addFieldSnapshot(db, eid, { price: { v: 2 } }, "coingecko", now - 1000);
+  const pruned = await pruneFieldSnapshots(db, now - 90 * 86400000);
+  assert.equal(pruned, 1);
+  const { rows } = await db.query("SELECT fields FROM field_snapshots WHERE entity_id=$1", [eid]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].fields.price.v, 2);
 });
 
 test("retag_on_refresh round-trips through board settings", async () => {
