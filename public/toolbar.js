@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { ICONS, toolBtn } from './utils.js';
+import { ICONS, toolBtn, formatTokens } from './utils.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
@@ -115,6 +115,14 @@ export function renderToolbar(resultCount) {
       editBtn.title = "Edit board";
       editBtn.setAttribute("aria-label", "Edit board");
       boardGroup.appendChild(editBtn);
+
+      if (state.boardTokens > 0) {
+        const tokenChip = document.createElement("span");
+        tokenChip.className = "token-chip";
+        tokenChip.innerHTML = ICONS.coin + formatTokens(state.boardTokens);
+        tokenChip.title = `${state.boardTokens.toLocaleString()} tokens used (AI tagging)`;
+        boardGroup.appendChild(tokenChip);
+      }
     }
     elToolbar.appendChild(boardGroup);
   }

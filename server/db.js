@@ -1191,6 +1191,15 @@ export async function boardAiUsage(db) {
   return out;
 }
 
+// Total (input + output) tokens consumed by AI tagging for a single board.
+export async function getBoardTokenTotal(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total FROM ai_board_usage WHERE board_id=$1`,
+    [boardId]
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
 // Delete a row; returns { payload, board_id } (the caller hands the payload's
 // files to sources.cleanup) or null if missing.
 // Pull a board's items out of the tagging queue. Items that still carry

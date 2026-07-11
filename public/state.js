@@ -25,6 +25,7 @@ export const state = {
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,
+  boardTokens: null,
   searchAvailable: false,
   searchDraft: "",
   searchQuery: "",

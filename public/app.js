@@ -76,6 +76,7 @@ async function main() {
   state.boardManage = boardData ? !!boardData.manage : false;
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
   state.boardMapping = boardData?.mapping || null;
+  state.boardTokens = boardData?.token_total ?? null;
   state.searchAvailable = !!boardData?.search;
   state.me = meData;
   state.items = itemsData.map(toItem);

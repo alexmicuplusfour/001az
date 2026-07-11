@@ -68,6 +68,7 @@ import {
   insertItem,
   setEntityRefreshAt,
   rescheduleEntityRefreshes,
+  getBoardTokenTotal,
 } from "./db.js";
 import {
   attachUser,
@@ -379,6 +380,11 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
   if (!board || !(await canAccessBoard(db, board.id, req.user)))
     return res.status(404).json({ error: "not found" });
+  const [canManage, tokenTotal, embeddingOk] = await Promise.all([
+    canManageBoard(db, board.id, req.user),
+    getBoardTokenTotal(db, board.id),
+    resolveEmbedder(db).then(Boolean),
+  ]);
   res.json({
     id: board.id,
     name: board.name,
@@ -386,10 +392,9 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     context: board.context,
     ai_reasoning: board.ai_reasoning !== false,
     mapping: board.mapping || null,
-    // tells the client whether to show the semantic search box
-    search: !!(await resolveEmbedder(db)),
-    // tells the gallery whether to show the "edit board" pencil
-    manage: await canManageBoard(db, board.id, req.user),
+    search: embeddingOk,
+    manage: canManage,
+    token_total: tokenTotal,
   });
 }));
 
