@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { toast } from './toast.js';
 import { openDropdown, ddRow } from './dropdown.js';
 import { createModal } from './modal.js';
+import { ICONS } from './utils.js';
 
 const KINDS = ["text", "number", "url", "date"];
 // Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
@@ -207,12 +208,21 @@ export function openMappingModal() {
 
   // A liveness cadence select bound to a field object's live/every. Off (0)
   // clears them. Identity has no liveness (it's the stable key), so it never
-  // gets one of these.
+  // gets one of these. The refresh glyph in front labels what the select does:
+  // this is a re-fetch cadence, not just another dropdown.
   function livenessSelect(f, enabled) {
+    const wrap = document.createElement("span");
+    wrap.className = "mm-live-wrap";
+    wrap.title = "How often this field refreshes in the app";
+
+    const icon = document.createElement("span");
+    icon.className = "mm-live-icon";
+    icon.innerHTML = ICONS.redo;
+
     const sel = document.createElement("select");
     sel.className = "mm-live";
     sel.disabled = !isAdmin || !enabled;
-    sel.title = "How often this field refreshes in the app";
+    if (sel.disabled) wrap.classList.add("disabled");
     for (const [min, label] of CADENCES) {
       const opt = document.createElement("option");
       opt.value = String(min);
@@ -226,7 +236,8 @@ export function openMappingModal() {
       if (every > 0) { f.live = true; f.every = every; }
       else { delete f.live; delete f.every; }
     });
-    return sel;
+    wrap.append(icon, sel);
+    return wrap;
   }
 
   // One catalog field: include checkbox + locked identity (key/badge/kind) +
