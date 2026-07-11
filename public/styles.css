@@ -24,6 +24,15 @@ body {
   font: 14px/1.4 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
+/* Column layout so the grid can stretch to the bottom of the viewport.
+   Out-of-flow siblings (lightbox, drawer, toasts) are unaffected. */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
 header {
   position: sticky;
   top: 0;
@@ -220,7 +229,7 @@ header {
   column-gap: 10px;
   row-gap: 6px;
   padding: 12px 24px 14px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  background-color: #f7f8fa;
   overflow: hidden;
   max-height: 800px;
   opacity: 1;
@@ -304,6 +313,10 @@ main#grid {
   padding: 20px 24px 60px;
   position: relative;
   min-height: 100px;
+  background-color: #f7f8fa;
+  /* The masonry code sets an inline content height; grow-only flex lets the
+     grid stretch past it to the viewport bottom without ever shrinking it. */
+  flex: 1 0 auto;
 }
 
 .card {
