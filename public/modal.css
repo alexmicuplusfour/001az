@@ -256,7 +256,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
-#connector-browse .modal-dialog { width: min(760px, 94vw); }
+#connector-browse .modal-dialog { width: min(900px, 94vw); }
 #connector-browse .modal-body { min-height: 0; } /* let .cb-scroll own the scroll */
 .cb-controls { display: flex; gap: 8px; align-items: center; }
 .cb-search {
@@ -305,6 +305,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 .cb-table td { padding: 7px 8px; border-bottom: 1px solid #f2f2f5; vertical-align: middle; }
 .cb-table tbody tr:hover { background: #fafafc; }
+/* addable rows act as one big checkbox — click anywhere but the Add button */
+.cb-table tbody tr.cb-selectable { cursor: pointer; }
 .cb-end { text-align: right; }
 .cb-col-sel { width: 28px; text-align: center; }
 .cb-col-add { width: 84px; text-align: right; }

@@ -177,6 +177,20 @@ export function openConnectorBrowse(connectorName) {
     const ctx = { data, tr, cb, addCell: addTd };
     renderAddCell(ctx);
     tr.appendChild(addTd);
+
+    // Clicking anywhere on an addable row toggles its checkbox — except on the
+    // interactive controls themselves (the checkbox toggles natively, the Add
+    // button adds). Route through the checkbox's own change handler so selection
+    // state stays single-sourced.
+    if (!data.on_board) {
+      tr.classList.add("cb-selectable");
+      tr.addEventListener("click", (e) => {
+        if (data.on_board || e.target.closest("input, button, a")) return;
+        cb.checked = !cb.checked;
+        cb.dispatchEvent(new Event("change"));
+      });
+    }
+
     rowCtx.set(data.id, ctx);
     return tr;
   }
@@ -205,6 +219,7 @@ export function openConnectorBrowse(connectorName) {
     ctx.data.on_board = true;
     ctx.cb.checked = false;
     ctx.cb.disabled = true;
+    ctx.tr.classList.remove("cb-selectable"); // no longer a click target
     selected.delete(id);
     renderAddCell(ctx);
   }
