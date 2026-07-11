@@ -1,6 +1,6 @@
 // Financial Modeling Prep provider for the stocks connector. V1 deliberately
 // targets actively traded US equities in USD. FMP's stable API supplies search,
-// screening, quotes, company profiles, and adjusted EOD history.
+// screening, quotes, company profiles, and end-of-day price history.
 const BASE = "https://financialmodelingprep.com/stable";
 const PROFILE_TTL = 6 * 60 * 60 * 1000;
 const BROWSE_TTL = 5 * 60 * 1000;
@@ -9,9 +9,14 @@ const US_EXCHANGE = /NASDAQ|NYSE|AMEX/i;
 
 export const label = "Financial Modeling Prep";
 export const needsKey = true;
-// A cold entity fetch uses quote + profile + ratios; keep runtime calls conservative
-// against FMP's lowest paid tier (300 HTTP requests/minute).
-export const rpm = 80;
+// The runtime's token bucket paces *logical* connector calls, but FMP meters raw
+// HTTP requests and a cold fetchEntity fans out to three (quote + profile +
+// ratios). profile/ratios are cached (PROFILE_TTL), so a warm refresh sweep is
+// ~1 request/entity while a cold bulk add is up to 3 — rpm 60 keeps even the cold
+// case (~180 req/min) under FMP's 300/min paid-tier ceiling with headroom for
+// history/face calls. (Free-tier *daily* quotas are a separate limit this
+// per-minute bucket doesn't model.)
+export const rpm = 60;
 export const burst = 2;
 
 function fail(message, status) {
@@ -55,13 +60,17 @@ export async function search(query, { apiKey } = {}) {
   const q = String(query || "").trim();
   if (!q) return [];
   // FMP splits ticker and company-name lookup into separate endpoints. Merge
-  // both so one connector search box behaves naturally for either input.
-  const [symbolRows, nameRows] = await Promise.all([
+  // both so one connector search box behaves naturally for either input — and
+  // tolerate one being unavailable (tier-gated / rate-limited) rather than
+  // failing the whole search; only a total failure (both rejected) propagates.
+  const [symRes, nameRes] = await Promise.allSettled([
     fmp("search-symbol", { query: q, limit: 25 }, apiKey),
     fmp("search-name", { query: q, limit: 25 }, apiKey),
   ]);
+  if (symRes.status === "rejected" && nameRes.status === "rejected") throw symRes.reason;
+  const rowsOf = (res) => (res.status === "fulfilled" && Array.isArray(res.value) ? res.value : []);
   const unique = new Map();
-  for (const row of [...(Array.isArray(symbolRows) ? symbolRows : []), ...(Array.isArray(nameRows) ? nameRows : [])]) {
+  for (const row of [...rowsOf(symRes), ...rowsOf(nameRes)]) {
     const symbol = symbolOf(row);
     if (symbol && !unique.has(symbol)) unique.set(symbol, row);
   }
@@ -104,13 +113,21 @@ function number(value) {
 export async function fetchEntity(id, { apiKey } = {}) {
   const requested = String(id || "").trim().toUpperCase();
   if (!requested) throw fail("symbol is required");
-  const [quotes, profile, ratios] = await Promise.all([
+  // quote is the required core (price / market cap / volume / change). profile
+  // and ratios are enrichment — a tier that gates or rate-limits them shouldn't
+  // sink the add, so they degrade to null while quote still yields an entity. A
+  // quote failure keeps its status (via allSettled's reason) so the runtime can
+  // still recognise and retry a 429.
+  const [quoteRes, profileRes, ratiosRes] = await Promise.allSettled([
     fmp("quote", { symbol: requested }, apiKey),
     profileFor(requested, apiKey),
     ratiosFor(requested, apiKey),
   ]);
-  const quote = Array.isArray(quotes) ? quotes[0] : null;
+  if (quoteRes.status === "rejected") throw quoteRes.reason;
+  const quote = Array.isArray(quoteRes.value) ? quoteRes.value[0] : null;
   if (!quote) throw fail(`no quote for ${requested}`);
+  const profile = profileRes.status === "fulfilled" ? profileRes.value : null;
+  const ratios = ratiosRes.status === "fulfilled" ? ratiosRes.value : null;
 
   const symbol = symbolOf(quote) || symbolOf(profile) || requested;
   const change = quote.changePercentage ?? quote.changesPercentage ?? profile?.changePercentage ?? profile?.changesPercentage;
@@ -139,21 +156,24 @@ export async function fetchEntity(id, { apiKey } = {}) {
   };
 }
 
-function browseRow(base, quote) {
-  const symbol = symbolOf(quote) || symbolOf(base);
-  const name = quote?.name || base?.companyName || base?.name || symbol;
+// Browse row from a screener row. The screener carries name / price / market
+// cap / volume / sector / exchange but no intraday change — so `change_1d` is
+// deliberately absent here (and from browse.columns); boards still get it live
+// from the quote-fed field refresh.
+function browseRow(row) {
+  const symbol = symbolOf(row);
+  const name = row?.companyName || row?.name || symbol;
   return {
     id: symbol,
     symbol,
     label: name,
     values: {
       name,
-      price: number(quote?.price ?? base?.price),
-      change_1d: number(quote?.changePercentage ?? quote?.changesPercentage ?? base?.changePercentage),
-      market_cap: number(quote?.marketCap ?? base?.marketCap),
-      volume: number(quote?.volume ?? base?.volume),
-      sector: base?.sector || null,
-      exchange: exchangeOf(quote) || exchangeOf(base) || null,
+      price: number(row?.price),
+      market_cap: number(row?.marketCap),
+      volume: number(row?.volume),
+      sector: row?.sector || null,
+      exchange: exchangeOf(row) || null,
     },
   };
 }
@@ -191,15 +211,26 @@ async function stockUniverse(apiKey) {
 export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey } = {}) {
   const size = Math.max(1, Math.min(100, Number(pageSize) || 50));
   const pageNo = Math.max(1, Number(page) || 1);
+  const universe = await stockUniverse(apiKey);
 
-  if (query && String(query).trim()) {
-    const hits = await search(query, { apiKey });
-    return hits.slice(0, size).map((hit) => browseRow(hit, null));
-  }
+  // A query filters the same screened universe rather than routing through
+  // search(): the screener rows already carry name / price / market cap /
+  // volume / sector / exchange, so the browse columns stay populated (a bare
+  // search hit has only the symbol) and it costs no extra request. Trade-off:
+  // matches are limited to the actively-traded US universe (MAX_BROWSE_ROWS by
+  // market cap); an exact ticker outside it won't appear here.
+  const q = query && String(query).trim().toLowerCase();
+  const base = q
+    ? universe.filter(
+        (row) =>
+          symbolOf(row).toLowerCase().includes(q) ||
+          String(row?.companyName || "").toLowerCase().includes(q)
+      )
+    : universe;
 
-  const sorted = sortRows(await stockUniverse(apiKey), sort, order);
+  const sorted = sortRows(base, sort, order);
   const pageRows = sorted.slice((pageNo - 1) * size, pageNo * size);
-  return pageRows.map((row) => browseRow(row, null));
+  return pageRows.map(browseRow);
 }
 
 const PERIOD_DAYS = { "7d": 7, "30d": 30, "90d": 90, "1y": 365, "5y": 5 * 365 };
@@ -215,10 +246,12 @@ export async function history(id, period, { apiKey } = {}) {
     from: from.toISOString().slice(0, 10),
     to: to.toISOString().slice(0, 10),
   }, apiKey);
+  // The stable EOD endpoint returns an (unadjusted) `close` per day — no
+  // adjusted-close field — so the chart plots the raw close.
   return (Array.isArray(rows) ? rows : [])
     .map((row) => ({
       t: Date.parse(`${row.date}T00:00:00Z`),
-      price: number(row.adjustedClose ?? row.adjClose ?? row.close),
+      price: number(row.close),
     }))
     .filter((row) => Number.isFinite(row.t) && Number.isFinite(row.price))
     .sort((a, b) => a.t - b.t);

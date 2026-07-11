@@ -55,10 +55,12 @@ export const manifest = {
     },
   ],
   browse: {
+    // No "Day" (change_1d) column: the screener that backs browse has no
+    // intraday change, so it would always render blank. The field still exists
+    // on the board, fed live by the quote refresh.
     columns: [
       { key: "name",       label: "Name",    kind: "text", primary: true },
       { key: "price",      label: "Price",   kind: "usd" },
-      { key: "change_1d",  label: "Day",     kind: "percent" },
       { key: "market_cap", label: "Mkt cap", kind: "usd" },
       { key: "volume",     label: "Volume",  kind: "number" },
       { key: "sector",     label: "Sector",  kind: "text" },

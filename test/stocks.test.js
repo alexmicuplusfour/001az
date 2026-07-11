@@ -33,10 +33,11 @@ test("FMP search: normalizes symbols and keeps US USD listings", async () => {
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
+    // Real /stable/search-* rows: symbol, name, currency, exchange (short form).
     return response([
-      { symbol: "aapl", name: "Apple Inc.", currency: "USD", exchangeShortName: "NASDAQ" },
-      { symbol: "SHOP.TO", name: "Shopify", currency: "CAD", exchangeShortName: "TSX" },
-      { symbol: "ACME", name: "Acme OTC", currency: "USD", exchangeShortName: "OTC" },
+      { symbol: "aapl", name: "Apple Inc.", currency: "USD", exchange: "NASDAQ" },
+      { symbol: "SHOP.TO", name: "Shopify", currency: "CAD", exchange: "TSX" },
+      { symbol: "ACME", name: "Acme OTC", currency: "USD", exchange: "OTC" },
     ]);
   };
   try {
@@ -99,16 +100,18 @@ test("FMP fetchEntity: combines quote and profile into canonical stock fields", 
   }
 });
 
-test("FMP list: screens US stocks, sorts, and paginates without premium batch APIs", async () => {
+test("FMP list: screens US stocks, sorts, paginates, and filters a query against the cached universe", async () => {
   const original = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     const u = String(url);
     seen.push(u);
+    // Real /stable/company-screener rows: exchangeShortName + a full exchange
+    // name, and no intraday change field.
     if (u.includes("/company-screener?")) return response([
-      { symbol: "SMALL", companyName: "Small Co.", marketCap: 10, price: 2, changePercentage: 0.5, volume: 20, sector: "Energy", exchange: "NYSE" },
-      { symbol: "BIG", companyName: "Big Co.", marketCap: 100, price: 20, changePercentage: 2, volume: 200, sector: "Technology", exchange: "NASDAQ" },
-      { symbol: "MID", companyName: "Mid Co.", marketCap: 50, price: 10, changePercentage: -1, volume: 100, sector: "Healthcare", exchange: "NYSE" },
+      { symbol: "SMALL", companyName: "Small Co.", marketCap: 10, price: 2, volume: 20, sector: "Energy", exchangeShortName: "NYSE", exchange: "New York Stock Exchange" },
+      { symbol: "BIG", companyName: "Big Co.", marketCap: 100, price: 20, volume: 200, sector: "Technology", exchangeShortName: "NASDAQ", exchange: "NASDAQ Global Select" },
+      { symbol: "MID", companyName: "Mid Co.", marketCap: 50, price: 10, volume: 100, sector: "Healthcare", exchangeShortName: "NYSE", exchange: "New York Stock Exchange" },
     ]);
     throw new Error(`unexpected URL ${u}`);
   };
@@ -119,10 +122,19 @@ test("FMP list: screens US stocks, sorts, and paginates without premium batch AP
     );
     assert.deepEqual(rows.map((row) => row.symbol), ["BIG", "MID"]);
     assert.equal(rows[0].values.price, 20);
-    assert.equal(rows[0].values.change_1d, 2);
     assert.equal(rows[0].values.sector, "Technology");
+    assert.equal(rows[0].values.exchange, "NASDAQ"); // short form, not the full name
+    assert.equal(rows[0].label, "Big Co."); // company name, never the ticker
     assert.ok(seen.some((u) => u.includes("country=US") && u.includes("isEtf=false")));
-    assert.equal(seen.length, 1);
+
+    // A query filters the same universe (full columns, no per-symbol request) and
+    // reuses the cache — no extra screener call.
+    const before = seen.length;
+    const hits = await fmp.list({ query: "big" }, { apiKey: "test-key" });
+    assert.deepEqual(hits.map((row) => row.symbol), ["BIG"]);
+    assert.equal(hits[0].label, "Big Co.");
+    assert.equal(hits[0].values.price, 20);
+    assert.equal(seen.length, before, "query reuses the cached universe");
   } finally {
     globalThis.fetch = original;
   }
@@ -136,9 +148,10 @@ test("FMP history: requests an EOD range and returns chronological chart points"
     assert.match(u, /symbol=AAPL/);
     assert.match(u, /from=\d{4}-\d{2}-\d{2}/);
     assert.match(u, /to=\d{4}-\d{2}-\d{2}/);
+    // Real /stable EOD rows carry `close` (unadjusted); no adjusted-close field.
     return response([
       { date: "2026-07-10", close: 210 },
-      { date: "2026-07-09", adjustedClose: 205 },
+      { date: "2026-07-09", close: 205 },
     ]);
   };
   try {
