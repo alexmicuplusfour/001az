@@ -22,8 +22,10 @@ export function openMappingModal() {
   let identityHint = state.boardMapping?.identity?.hint || "";
   let inputConnector = state.boardMapping?.input?.connector || null; // set when a connector template is loaded
   let connectorCatalog = null;   // the active connector's full field set (manifest.fields)
-  let connectorFaces = [];       // the connector's face producers (manifest.faces)
+  let connectorFaces = [];       // the connector's face producers (with per-provider availability)
   let connectorLabel = null;
+  let connectorProviders = [];   // [{ name, label, needsKey }] — for naming providers in hints
+  let connectorActiveProvider = null; // the backend currently resolving this connector
   let faceCfg = { ...(state.boardMapping?.face || { from: "raw" }) }; // the entity's card visual
 
   const { overlay, body, footer, closeBtn, close } = createModal({
@@ -201,6 +203,25 @@ export function openMappingModal() {
       controls.append(periodSel, livenessSelect(faceCfg, true));
     }
     faceRow.appendChild(controls);
+
+    // Warn when the chosen face can't be rendered by the connector's active
+    // provider — cards silently fall back to the tile otherwise. Name the
+    // provider and, if any others can render it, point the way to switch.
+    if (isProducer) {
+      const producer = connectorFaces.find((x) => x.name === faceCfg.producer);
+      if (producer && producer.available === false) {
+        const activeLabel = connectorProviders.find((p) => p.name === connectorActiveProvider)?.label || connectorActiveProvider || "The active provider";
+        const capable = (producer.supportedBy || [])
+          .filter((n) => n !== connectorActiveProvider)
+          .map((n) => connectorProviders.find((p) => p.name === n)?.label || n);
+        const hint = document.createElement("div");
+        hint.className = "mm-face-hint";
+        hint.textContent =
+          `${activeLabel} can’t render this face — cards will show the symbol tile instead.` +
+          (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Connectors to enable it.` : "");
+        faceRow.appendChild(hint);
+      }
+    }
   }
 
   const fieldsList = document.createElement("div");
@@ -435,7 +456,15 @@ export function openMappingModal() {
     try {
       const connectors = await fetch("/api/connectors").then((r) => r.json());
       const c = connectors.find((x) => x.name === inputConnector);
-      if (c) { connectorCatalog = c.fields || []; connectorFaces = c.faces || []; connectorLabel = c.label; renderFields(); renderFaceRow(); }
+      if (c) {
+        connectorCatalog = c.fields || [];
+        connectorFaces = c.faces || [];
+        connectorLabel = c.label;
+        connectorProviders = c.providers || [];
+        connectorActiveProvider = c.activeProvider || null;
+        renderFields();
+        renderFaceRow();
+      }
     } catch { /* leave catalog null → the saved-fields fallback stands */ }
   }
 
@@ -448,6 +477,8 @@ export function openMappingModal() {
     connectorCatalog = connector.fields || [];
     connectorFaces = connector.faces || [];
     connectorLabel = connector.label;
+    connectorProviders = connector.providers || [];
+    connectorActiveProvider = connector.activeProvider || null;
     faceCfg = t.face ? { ...t.face } : { from: "raw" };
     renderIdentityRow();
     renderFaceRow();

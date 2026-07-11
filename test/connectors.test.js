@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, req } from "./helpers.js";
-import { createEntity, setSetting } from "../server/db.js";
+import { createEntity, setSetting, getSetting } from "../server/db.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -284,6 +284,29 @@ test("crypto manifest + /api/connectors expose the browse descriptor", async () 
   const cg = r.json.find((c) => c.name === "crypto");
   assert.ok(cg.browse, "browse descriptor served to the client");
   assert.deepEqual(cg.browse.columns.map((c) => c.key), manifest.browse.columns.map((c) => c.key));
+});
+
+test("GET /api/connectors: face availability follows the active provider's capabilities", async () => {
+  const prev = await getSetting(db, "crypto_provider");
+  try {
+    // CoinGecko (has history) → chart face available; CMC (no history) → not.
+    await setSetting(db, "crypto_provider", "coingecko");
+    let r = await req(base, "GET", "/api/connectors", { sid: admin.sid });
+    let cg = r.json.find((c) => c.name === "crypto");
+    assert.equal(cg.activeProvider, "coingecko");
+    let chart = cg.faces.find((f) => f.name === "chart");
+    assert.equal(chart.available, true);
+    assert.deepEqual(chart.supportedBy, ["coingecko"]); // only the history-capable provider
+
+    await setSetting(db, "crypto_provider", "coinmarketcap");
+    r = await req(base, "GET", "/api/connectors", { sid: admin.sid });
+    cg = r.json.find((c) => c.name === "crypto");
+    assert.equal(cg.activeProvider, "coinmarketcap");
+    chart = cg.faces.find((f) => f.name === "chart");
+    assert.equal(chart.available, false); // CMC has no history() → tile fallback
+  } finally {
+    await setSetting(db, "crypto_provider", prev);
+  }
 });
 
 test("runtime.list: dispatches with opts + key; a provider without list() yields []", async () => {

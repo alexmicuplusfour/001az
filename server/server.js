@@ -1038,7 +1038,16 @@ app.delete("/api/instances/:id", requireAuth, requireItemAccess, wrap(async (req
 // --- connector routes ---
 
 app.get("/api/connectors", requireAuth, wrap(async (_req, res) => {
-  res.json(listConnectors());
+  // Enrich each connector with its active provider and per-face availability so
+  // the mapping modal can warn when a configured face can't be rendered by the
+  // current backend (e.g. a chart face while CoinMarketCap — no history — is active).
+  const out = [];
+  for (const c of listConnectors()) {
+    const conn = getConnector(c.name);
+    const activeProvider = conn.activeProvider ? (await conn.activeProvider(db)).name : null;
+    out.push({ ...c, activeProvider, faces: conn.renderableFaces ? conn.renderableFaces(activeProvider) : c.faces });
+  }
+  res.json(out);
 }));
 
 app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {

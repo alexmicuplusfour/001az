@@ -51,8 +51,10 @@ export const manifest = {
   // Face producers this domain can render; drives the mapping modal's face row.
   // Periods reflect what the default provider's free tier serves (CoinGecko
   // demo caps history at 365 days).
+  // `requires` names the provider method a producer needs; a provider that
+  // lacks it can't render this face (CoinMarketCap has no history() → tile).
   faces: [
-    { name: "chart", label: "Price chart", periods: ["24h", "7d", "30d", "90d", "1y"] },
+    { name: "chart", label: "Price chart", periods: ["24h", "7d", "30d", "90d", "1y"], requires: "history" },
   ],
   // Browse-and-add: the columns the ingestion modal shows and the sort keys it
   // offers. Domain-level and canonical — every provider's list() fills the same

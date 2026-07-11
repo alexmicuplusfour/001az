@@ -21,6 +21,16 @@ function bind(name, mod) {
     activeProvider: (db) => runtime.activeProvider(db, conn),
     refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
     produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
+    // Annotate the declared face producers for a given provider: `available`
+    // = that provider can render it (exports the method named by `requires`),
+    // `supportedBy` = every provider that can. A producer with no `requires`
+    // is always available. Drives the mapping modal's "can't render" hint.
+    renderableFaces: (providerName) =>
+      (mod.manifest.faces || []).map((f) => ({
+        ...f,
+        available: !f.requires || !!conn.providers[providerName]?.[f.requires],
+        supportedBy: Object.keys(conn.providers).filter((n) => !f.requires || !!conn.providers[n]?.[f.requires]),
+      })),
   };
 }
 
