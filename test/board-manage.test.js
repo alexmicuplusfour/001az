@@ -64,6 +64,24 @@ test("board-manager PATCH is content-only: name applies, ai_key_id is ignored", 
   assert.equal(Number(row.ai_key_id), Number(keyId)); // key untouched by the content-only route
 });
 
+test("settings exposes the AI override only to global admins", async () => {
+  const keyId = await createAiKey(db, "gallery-key", "anthropic", "sk-ant-gallery");
+  const model = "claude-test";
+  const updated = await req(base, "PATCH", `/api/admin/boards/${board}`, {
+    sid: admin.sid,
+    body: { ai_key_id: keyId, ai_model: model },
+  });
+  assert.equal(updated.status, 200);
+
+  const asAdmin = await req(base, "GET", `/api/boards/${board}/settings`, { sid: admin.sid });
+  assert.equal(Number(asAdmin.json.ai_key_id), Number(keyId));
+  assert.equal(asAdmin.json.ai_model, model);
+
+  const asBoardAdmin = await req(base, "GET", `/api/boards/${board}/settings`, { sid: boardAdmin.sid });
+  assert.equal("ai_key_id" in asBoardAdmin.json, false);
+  assert.equal("ai_model" in asBoardAdmin.json, false);
+});
+
 test("board-admins cannot reach the admin board routes", async () => {
   const r = await req(base, "PATCH", `/api/admin/boards/${board}`, { sid: boardAdmin.sid, body: { name: "hax" } });
   assert.equal(r.status, 403);

@@ -400,8 +400,8 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
 }));
 
 // Board-manager content editing — the gallery's "edit board" modal. A global
-// admin or this board's board-admin (requireBoardManager). Content only: the
-// AI key/model, mapping, membership, retag and delete stay admin-only.
+// admin or this board's board-admin (requireBoardManager). Content only for
+// board-admins; global admins also receive the AI override used by this modal.
 app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async (req, res) => {
   const b = req.board;
   res.json({
@@ -416,6 +416,10 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     auto_tag_every_min: b.auto_tag_every_min || 1440,
     auto_tag_skip_weekends: !!b.auto_tag_skip_weekends,
     retag_on_refresh: !!b.retag_on_refresh,
+    ...(req.user.is_admin ? {
+      ai_key_id: b.ai_key_id ?? null,
+      ai_model: b.ai_model ?? null,
+    } : {}),
   });
 }));
 
