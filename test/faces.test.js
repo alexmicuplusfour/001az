@@ -55,6 +55,19 @@ test("produceFace: gated on the provider having history and a known producer", a
   await setSetting(db, "facetest_provider", "withHist");
 });
 
+// ── pure: entityRefreshAt keeps a face-only board on the sweep ───────────────
+
+test("entityRefreshAt: a live face schedules at cadence even before/without a render", () => {
+  const mapping = { fields: [], face: { from: "connector", producer: "chart", live: true, every: 5 } };
+  // faceAt null (render unavailable / not yet done) → retry one cadence out,
+  // NOT null — otherwise a face-only board falls off the sweep entirely.
+  assert.equal(runtime.entityRefreshAt({}, null, mapping, 1000), 1000 + 5 * 60000);
+  // A rendered face schedules one cadence after its render time.
+  assert.equal(runtime.entityRefreshAt({}, 2000, mapping, 9000), 2000 + 5 * 60000);
+  // No live face and no live fields → genuinely nothing to schedule.
+  assert.equal(runtime.entityRefreshAt({}, null, { fields: [] }, 1000), null);
+});
+
 // ── integration: the crypto chart via generateFace (stubbed CoinGecko) ───────
 
 function stubHistory(prices) {
@@ -151,6 +164,30 @@ test("a face render error does not block the field refresh (prices keep flowing)
   assert.deepEqual(r.moved, ["price"]);                             // price refreshed despite the face error
   assert.equal(r.faced, false);
   assert.equal((await getEntity(db, eid)).fields.price.v, 130);
+});
+
+test("refreshDueEntity: a face-only board stays scheduled when the render is unavailable (CMC)", async () => {
+  await setSetting(db, "crypto_provider", "coinmarketcap"); // no history() → face can't render
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-only-cmc" } });
+  const mapping = {
+    input: { connector: "crypto" }, identity: { from: "connector" },
+    face: { from: "connector", producer: "chart", period: "1y", live: true, every: 1 },
+    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }], // NOT live → face is the only live term
+  };
+  assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
+  const boardRow = await getBoard(db, board.id);
+  const eid = await createEntity(db, board.id, { identity: "eth", symbol: "ETH", displayName: "Ethereum", fields: { price: { v: 100, kind: "number", at: 0 } } });
+  const instId = await insertItem(db, board.id, { identity: "eth", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coinmarketcap", id: "1027" } }, "tagged", eid);
+
+  const entity = await getEntity(db, eid);
+  const { rows: [inst] } = await db.query("SELECT id, payload FROM items WHERE id=$1", [instId]);
+  const now = 10 * 60000;
+  const r = await refreshDueEntity(db, { entity, inst, board: boardRow }, now, { galleryDir, thumbsDir });
+  assert.equal(r.faced, false);                                       // CMC couldn't render
+  const e2 = await getEntity(db, eid);
+  assert.equal(e2.face_at, null);                                     // still no face
+  assert.equal(Number(e2.refresh_at), now + 60000);                  // but retried one cadence out, not dormant
+  await setSetting(db, "crypto_provider", null);
 });
 
 // ── rate limiter / 429 backoff ───────────────────────────────────────────────

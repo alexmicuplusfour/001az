@@ -343,7 +343,11 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
   if (dirs && cad && (faceAt == null || now - faceAt >= cad.every * 60000)) {
     try {
       const face = await generateFace(db, dirs, entity, inst, board, now);
-      if (face) { faceAt = now; faced = true; }
+      // Success → face_at advances to now; an unavailable render returns null
+      // and generateFace resets face_at to null, so mirror that locally (a throw
+      // is transient and leaves the stored face_at intact — keep the old value).
+      faceAt = face ? now : null;
+      faced = !!face;
     } catch (e) {
       console.warn(`face render failed for entity #${entity.id} ${entity.identity}: ${e.message} (keeping fields)`);
     }

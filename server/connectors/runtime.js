@@ -190,12 +190,19 @@ export const faceCadence = (mapping) => {
 };
 
 // An entity's next refresh time across BOTH its live fields and its face.
-// `faceAt` is entities.face_at (null until the face is first rendered).
+// `faceAt` is entities.face_at (null until the face is first rendered). This
+// runs right after a render attempt, so a still-null faceAt here means the
+// render was unavailable (e.g. the active provider has no history) — retry one
+// cadence out rather than dropping the term, else a face-only board with no
+// live fields would get refresh_at null and fall off the sweep until the next
+// boot/mapping-save. The retry is a cheap no-op while the provider can't render.
+// (First-render urgency is separate: rescheduleEntityRefreshes/boot reconcile
+// treat a null faceAt as due-now, so enabling a face still backfills at once.)
 export function entityRefreshAt(fields, faceAt, mapping, now = Date.now()) {
   let next = nextRefreshAt(fields, liveFields(mapping), now);
   const cad = faceCadence(mapping);
-  if (cad && faceAt != null) {
-    const due = faceAt + cad.every * 60000;
+  if (cad) {
+    const due = (faceAt ?? now) + cad.every * 60000;
     if (next === null || due < next) next = due;
   }
   return next;
