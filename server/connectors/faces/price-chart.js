@@ -1,8 +1,6 @@
-// Crypto face producer — renders a price-history series to a dark card-face
-// chart (SVG → webp via sharp, same mechanic as the doc/text previews), with
-// the ticker + name baked in so it stays legible at card size and doubles as
-// the tagger's visual input. Domain rendering lives here; the raw series comes
-// from the active provider's history() (data backend). See slice-5d.
+// Shared connector face producer — renders a price-history series to a card
+// face (SVG → webp), with the ticker + name baked in so it stays legible at
+// card size and can double as visual input for the tagger.
 import sharp from "sharp";
 
 // White face; the line spans the full width (no lateral padding), small vertical

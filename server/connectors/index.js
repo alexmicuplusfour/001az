@@ -3,6 +3,7 @@
 // supplies the shared domain×provider dispatch. Explicit imports, no dynamic
 // loading. Adding a domain is one import + one map entry — no runtime edits.
 import * as crypto from "./crypto/index.js";
+import * as stocks from "./stocks/index.js";
 import * as runtime from "./runtime.js";
 
 // Compose a data-only connector module with the runtime dispatch. The returned
@@ -34,7 +35,10 @@ function bind(name, mod) {
   };
 }
 
-const CONNECTORS = { crypto: bind("crypto", crypto) };
+const CONNECTORS = {
+  crypto: bind("crypto", crypto),
+  stocks: bind("stocks", stocks),
+};
 
 export function getConnector(name) {
   return CONNECTORS[name] || null;

@@ -74,16 +74,16 @@ function renderLightboxInfo() {
   elLightboxInfo.innerHTML = n >= 2 ? `${ICONS.info}<span>${n}</span>` : ICONS.info;
 }
 
-// "updated 3m ago" from a field's fetch/refresh timestamp (connector fields
-// carry `at`; live ones advance it each refresh, static ones keep the add time).
+// Relative age from a field's fetch/refresh timestamp (connector fields carry
+// `at`; live ones advance it each refresh, static ones keep the add time).
 function relTime(ms) {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 45) return "updated just now";
+  if (s < 45) return "just now";
   const m = Math.round(s / 60);
-  if (m < 60) return `updated ${m}m ago`;
+  if (m < 60) return `${m}m ago`;
   const h = Math.round(m / 60);
-  if (h < 24) return `updated ${h}h ago`;
-  return `updated ${Math.round(h / 24)}d ago`;
+  if (h < 24) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
 }
 
 // One "Fields" section: key/value rows with src badges and why-sentences.
@@ -110,18 +110,23 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
     kv.className = "lbp-field-kv";
     const k = document.createElement("span");
     k.className = "lbp-field-key";
-    k.textContent = key;
+    const keyMain = document.createElement("span");
+    keyMain.className = "lbp-field-key-main";
+    keyMain.textContent = key;
     if (src) {
       const badge = document.createElement("span");
       badge.className = "lbp-field-src";
       badge.textContent = src;
-      k.appendChild(badge);
+      keyMain.appendChild(badge);
     }
+    k.appendChild(keyMain);
     if (at) {
       const t = document.createElement("span");
       t.className = "lbp-field-at";
-      t.textContent = "· " + relTime(at);
-      t.title = new Date(at).toLocaleString();
+      const age = relTime(at);
+      t.innerHTML = `${ICONS.redo}<span>${age}</span>`;
+      t.title = `Updated ${new Date(at).toLocaleString()}`;
+      t.setAttribute("aria-label", `Updated ${age}`);
       k.appendChild(t);
     }
     let val;

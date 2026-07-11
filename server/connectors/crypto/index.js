@@ -11,7 +11,7 @@
 // structural layer. See slice-5b-crypto-provider-plan.md.
 import * as coingecko from "./coingecko.js";
 import * as coinmarketcap from "./coinmarketcap.js";
-import { renderChart } from "./chart.js";
+import { renderChart } from "../faces/price-chart.js";
 
 export const providers = { coingecko, coinmarketcap };
 export const defaultProvider = "coingecko";

@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, req } from "./helpers.js";
 import { createEntity, insertItem, getEntity, getBoard, setSetting } from "../server/db.js";
-import { renderChart } from "../server/connectors/crypto/chart.js";
+import { renderChart } from "../server/connectors/faces/price-chart.js";
 import * as runtime from "../server/connectors/runtime.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
 

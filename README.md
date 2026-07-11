@@ -30,7 +30,8 @@ a live connector.
   fields and tags. Merge re-parents instances, split breaks them out, and both
   rename in place.
 - **Data connectors** — map a board's fields to a live source and they refresh
-  on their own. The first domain is **crypto** (CoinGecko / CoinMarketCap):
+  on their own. Domains include **crypto** (CoinGecko / CoinMarketCap) and
+  **US stocks** (Financial Modeling Prep):
   per-field liveness (`live` + interval) with a scheduled refresh sweep,
   field-value snapshots, an "updated *N*m ago" stamp, and generated card
   *faces* (e.g. price-history charts). The runtime is domain-agnostic — a new
