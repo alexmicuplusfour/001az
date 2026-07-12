@@ -261,7 +261,7 @@ function paintPanel(img, inst, reasoning, fields) {
   }
 
   // Connector-bound entity fields (live data — not extraction output).
-  const entityFields = fieldsSection(img.fields);
+  const entityFields = fieldsSection(img.fields, { label: "Connector fields" });
   if (entityFields) {
     elLightboxPanelBody.appendChild(entityFields);
     const d = document.createElement("hr");
@@ -317,9 +317,19 @@ function paintPanel(img, inst, reasoning, fields) {
       toast.error("Re-extract failed");
     }
   });
-  const instFields = fieldsSection(fields, { reextract: inst ? reextractBtn : null });
-  if (instFields) {
-    elLightboxPanelBody.appendChild(instFields);
+  const fileFields = {};
+  const aiFields = {};
+  for (const [key, field] of Object.entries(fields || {})) {
+    (field?.src === "file" ? fileFields : aiFields)[key] = field;
+  }
+  const fileFieldsSection = fieldsSection(fileFields, { label: "File fields" });
+  const aiFieldsSection = fieldsSection(aiFields, {
+    label: "AI-extracted fields",
+    reextract: inst ? reextractBtn : null,
+  });
+  if (fileFieldsSection || aiFieldsSection) {
+    if (fileFieldsSection) elLightboxPanelBody.appendChild(fileFieldsSection);
+    if (aiFieldsSection) elLightboxPanelBody.appendChild(aiFieldsSection);
     const d = document.createElement("hr");
     d.className = "lbp-divider";
     elLightboxPanelBody.appendChild(d);
