@@ -20,6 +20,7 @@ import {
   setBoardNextRun,
   itemsNeedingEmbedding,
   setItemEmbedding,
+  setItemEmbedError,
   getEntity,
   getEntityByIdentity,
   createEntity,
@@ -86,7 +87,11 @@ export async function resolveEmbedder(db) {
 // The text an item's search vector is built from: whole-item description,
 // then the per-facet reasoning sentences, then the tags flattened to words
 // (so exact facet vocabulary also matches). Falls back to the filename so no
-// item ever embeds an empty string.
+// item ever embeds an empty string. Capped defensively: the tightest embedder
+// input limit in the registry is Gemini's 2048 tokens, and a rejected input
+// wedges its whole batch — truncating a tail beats that (the local model
+// truncates far harder on its own). ~8k chars ≈ 2k tokens.
+const EMBED_TEXT_MAX_CHARS = 8000;
 export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
   const parts = [];
   if (reasoning.description) parts.push(reasoning.description);
@@ -94,7 +99,8 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
     if (k !== "description" && typeof v === "string" && v.trim()) parts.push(v.trim());
   }
   if (tags.length) parts.push(tags.map((t) => t.replace("/", ": ")).join("; "));
-  return parts.join("\n") || payload.files?.[0]?.original_name || payload.identity || "untitled item";
+  const text = parts.join("\n") || payload.files?.[0]?.original_name || payload.identity || "untitled item";
+  return text.slice(0, EMBED_TEXT_MAX_CHARS);
 }
 
 // A board's effective tagger: its own key (+ model) when set, else the default.
@@ -110,6 +116,15 @@ async function resolveBoardAi(db, boardEntry) {
     }
   }
   return resolveDefaultAi(db);
+}
+
+// A missing key is a configuration gap, not an item failure: the claim gate
+// normally keeps such items unclaimed, and when its race lets one through,
+// noCount tells failOrRequeue to requeue without consuming an attempt.
+function noKeyError() {
+  const e = new Error("no API key configured");
+  e.noCount = true;
+  return e;
 }
 
 // Generic fallback glosses for common design-vocabulary facet keys, used when
@@ -333,6 +348,51 @@ export function invalidateAllBoardCaches() {
   boardPromptCache.clear();
 }
 
+// Embed one batch of rows (itemsNeedingEmbedding shape), isolating poison
+// inputs. The whole batch is one API call on the happy path. When it fails
+// with a request-content 4xx — the only class that can be item-specific;
+// auth/model/rate statuses (401/403/404/408/429) and 5xx/network are the
+// caller's to back off on — each item is retried alone: lone failures are
+// marked (setItemEmbedError) and skipped by future sweeps, innocents proceed.
+// If NOTHING succeeds one-by-one, the 400 was config-shaped after all (e.g. a
+// provider that rejects a bad model as 400), so throw for the backoff instead
+// of wrongly marking a whole batch. Returns { embedded, skipped }; throws for
+// batch-level failures. Exported so the sweep and tests share one path.
+export async function embedBatch(db, embedder, rows) {
+  const call = (rs) => embedTexts({
+    provider: embedder.provider,
+    apiKey: embedder.apiKey,
+    model: embedder.model,
+    texts: rs.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
+  });
+  try {
+    const { vectors } = await call(rows);
+    for (let i = 0; i < rows.length; i++) await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
+    return { embedded: rows.length, skipped: 0 };
+  } catch (err) {
+    const s = Number(err?.status);
+    const isolatable = Number.isInteger(s) && s >= 400 && s < 500 && ![401, 403, 404, 408, 429].includes(s);
+    if (!isolatable || rows.length <= 1) throw err;
+  }
+  let embedded = 0;
+  const failures = [];
+  for (const r of rows) {
+    try {
+      const { vectors } = await call([r]);
+      await setItemEmbedding(db, r.id, vectors[0], embedder.model);
+      embedded++;
+    } catch (e) {
+      failures.push({ id: r.id, message: String(e?.message ?? e) });
+    }
+  }
+  if (!embedded) throw new Error(failures[0].message);
+  for (const f of failures) {
+    await setItemEmbedError(db, f.id, f.message);
+    console.warn(`embed: skipping item #${f.id} (${f.message}) — re-tagging retries it`);
+  }
+  return { embedded, skipped: failures.length };
+}
+
 // --- periodic retag schedule (server-local time; set TZ to move it) ---
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -548,7 +608,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     const { systemText, schema, allowed, facets } = prompt;
 
     const ai = await resolveBoardAi(db, prompt);
-    if (!ai) throw new Error("no API key configured");
+    if (!ai) throw noKeyError();
 
     const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
     const parts = await modelInputFor(row.payload, entity);
@@ -625,8 +685,9 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // Embedding sweep: (re)vectorize tagged items with no current-model vector.
   // This single path covers fresh tags (markTagged clears the vector), manual
   // edits, turning the feature on late, and model changes — one batched API
-  // call per tick. Failures back off for a minute so a bad key or outage
-  // doesn't turn the poll loop into an API hammer.
+  // call per tick (embedBatch isolates poison inputs so one bad item can't
+  // wedge the backfill). Batch-level failures back off for a minute so a bad
+  // key or outage doesn't turn the poll loop into an API hammer.
   const EMBED_BATCH = Math.max(1, Number(process.env.EMBED_BATCH) || 64);
   let embedBackoffUntil = 0;
   async function embedDue() {
@@ -636,16 +697,8 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     const rows = await itemsNeedingEmbedding(db, embedder.model, EMBED_BATCH);
     if (!rows.length) return;
     try {
-      const { vectors } = await embedTexts({
-        provider: embedder.provider,
-        apiKey: embedder.apiKey,
-        model: embedder.model,
-        texts: rows.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
-      });
-      for (let i = 0; i < rows.length; i++) {
-        await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
-      }
-      console.log(`embedded ${rows.length} item(s) [${embedder.model}]`);
+      const { embedded, skipped } = await embedBatch(db, embedder, rows);
+      console.log(`embedded ${embedded} item(s)${skipped ? `, skipped ${skipped}` : ""} [${embedder.model}]`);
     } catch (err) {
       embedBackoffUntil = Date.now() + 60000;
       console.warn(`embed error (retrying in 60s): ${err.message}`);
@@ -688,6 +741,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
 
   async function processOne(row) {
     const label = row.payload?.identity || `item ${row.id}`;
+    let result;
     try {
       // Facet-less board: nothing to tag. Complete the item instead of failing
       // it — extraction-only boards (mapping, no facets) are a supported shape.
@@ -696,13 +750,22 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
         return;
       }
-      const { tags, undecided, reasoning, usage, model } = await tagOne(row);
+      result = await tagOne(row);
+    } catch (err) {
+      const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS);
+      console.warn(`tag error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
+      return;
+    }
+    // The paid call succeeded — a write failure past this point must not
+    // requeue (that would bill a second call). Leave the row processing;
+    // recoverStuck re-queues it later if markTagged itself was the casualty.
+    try {
+      const { tags, undecided, reasoning, usage, model } = result;
       await markTagged(db, row.id, tags, undecided, reasoning);
       await bumpUsage(db, row.board_id, usage);
       console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
     } catch (err) {
-      const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS);
-      console.warn(`tag error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
+      console.warn(`post-tag write failed #${row.id} ${label}: ${err.message} (left for recovery)`);
     }
   }
 
@@ -751,7 +814,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       ? await resolveBoardAi(db, { aiKeyId: board.extract_key_id, aiModel: board.extract_model })
       : null;
     const ai = extractAi || await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
-    if (!ai) throw new Error("no API key configured");
+    if (!ai) throw noKeyError();
 
     const { systemText, schema } = buildFieldsPrompt(mapping);
     // Try text-only extraction first (works with any provider, avoids image
@@ -874,7 +937,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     try {
       await extractOne(row);
     } catch (err) {
-      const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS, "pending_extract");
+      const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_extract");
       console.warn(`extract error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
     }
   }
@@ -898,13 +961,13 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       }
       await advanceFaced(db, row.id); // → pending (tag leg), or held when parked
     } catch (err) {
-      const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS, "pending_face");
+      const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_face");
       console.warn(`face error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
     }
   }
 
   async function tick() {
-    const recovered = await recoverStuck(db, STUCK_MS);
+    const recovered = await recoverStuck(db, STUCK_MS, MAX_ATTEMPTS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
     await retagDue();
     await embedDue();
@@ -979,7 +1042,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     } else {
       console.log(`AI tagging worker started (no default key — only boards with their own key will tag, ${CONCURRENCY} concurrent).`);
     }
-  });
+  }).catch((e) => console.warn(`worker: default-AI probe failed at start: ${e.message}`)); // log-only — an unhandled rejection here would crash the boot
   // Stop claiming immediately; the returned promise resolves once the
   // in-flight tick (if any) has finished, so callers can drain before exit.
   return () => {

@@ -251,7 +251,7 @@ export async function setItemTags(db, id, tags) {
     if (b.size !== a.size || [...b].some((v) => !a.has(v))) delete reasoning[key];
   }
   await db.query(
-    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, embedding=NULL, embedding_model=NULL, updated_at=$3 WHERE id=$4",
+    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$3 WHERE id=$4",
     [JSON.stringify(tags), JSON.stringify(reasoning), Date.now(), id]
   );
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
@@ -301,7 +301,7 @@ export async function reextractItem(db, id) {
     `UPDATE items
      SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park'
                         ELSE jsonb_set(payload - 'park', '{mapping}', $3::jsonb) END,
-         status='pending_extract', attempts=0, error=NULL, updated_at=$1
+         status='pending_extract', attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE id=$2 AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')`,
     [Date.now(), id, current]
   );
@@ -314,7 +314,7 @@ export async function reextractItem(db, id) {
 // to Re-extract since a single instance is what's in focus there.
 export async function retagItem(db, id) {
   const result = await db.query(
-    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
+    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2",
     [Date.now(), id]
   );
   return result.rowCount > 0;
@@ -706,12 +706,34 @@ export async function boardItemStats(db) {
   return Object.fromEntries(rows.map((r) => [r.board_id, { c: r.c, p: r.p, h: r.h }]));
 }
 
-// Queue every non-pending item in a board for retagging (held ones included —
-// retag is an explicit "tag now"). Returns the count.
+// Queue a board's settled items for a fresh tagging pass (held ones included —
+// retag is an explicit "tag now"). Returns the count. Only terminal states are
+// touched: items still in the pipeline (pending_extract/extracting/
+// pending_face/facing/processing) already end in the tag leg when their legs
+// finish, so flipping them here would only skip their definition legs and tag
+// them with no fields, identity or face. Touched items resume the RIGHT leg,
+// with the same routing as releaseHeld: an unfaced connector vehicle re-enters
+// the face leg (another shot at the chart), anything already extracted goes
+// straight to tagging, anything not yet extracted — a failed extraction, or a
+// tagged item that never got its definition — re-enters the extract leg. Held
+// items with no stamp adopt the current board mapping (the board may have
+// gained one since they were uploaded); other unstamped items stay tag-only,
+// so retag never turns into a surprise extraction sweep over a whole board.
 export async function retagBoard(db, boardId) {
+  const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
-    "UPDATE items SET status='pending', attempts=0, error=NULL, updated_at=$1 WHERE board_id=$2 AND status != 'pending'",
-    [Date.now(), boardId]
+    `UPDATE items
+     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
+                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
+         status = CASE
+           WHEN payload->'mapping'->'face'->>'from' = 'connector'
+                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN payload ? 'extracted_at' THEN 'pending'
+           WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
+           ELSE 'pending' END,
+         attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+     WHERE board_id=$2 AND status IN ('tagged','failed','held')`,
+    [Date.now(), boardId, current]
   );
   return result.rowCount;
 }
@@ -746,10 +768,11 @@ export async function releaseHeld(db, boardId) {
 // Queue everything untagged in a board: held uploads, AI-undecided items,
 // and failed ones (fresh attempts). Fired when auto-tagging turns on — the
 // point of the board is tags, so nothing untagged is left behind. In-flight
-// ('processing') and human-tagged items are untouched. Held items route
-// through the face/extract legs exactly like releaseHeld (already-extracted
-// ones go straight to tagging, unstamped ones adopt the board mapping);
-// failed/tagged-empty items go straight to the tag leg.
+// ('processing') and human-tagged items are untouched. Everything routes
+// through the face/extract legs exactly like releaseHeld/retagBoard:
+// already-extracted items go straight to tagging, ones whose definition never
+// ran — including an extraction that FAILED — resume the extract leg, and
+// unstamped held items adopt the board mapping.
 export async function queueUntagged(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
@@ -757,13 +780,12 @@ export async function queueUntagged(db, boardId) {
      SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
-           WHEN status <> 'held' THEN 'pending'
            WHEN payload->'mapping'->'face'->>'from' = 'connector'
                 AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
-           WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
+           WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
            ELSE 'pending' END,
-         attempts=0, error=NULL, updated_at=$1
+         attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE board_id=$2 AND status IN ('held','tagged','failed') AND tags='[]'::jsonb`,
     [Date.now(), boardId, current]
   );
@@ -862,12 +884,15 @@ export async function setSetting(db, key, value) {
 // keeps concurrent claimers (or a second worker) from grabbing the same row.
 // When no default key is configured, boards without their own key are skipped —
 // their items stay pending until a key appears (never failed for a missing key).
+// Rows whose retry_at is still in the future (a spaced transient retry) are
+// skipped; every requeue path that wants an immediate run clears retry_at.
 export async function claimNextPending(db, hasDefaultKey = true) {
   const { rows } = await db.query(
     `UPDATE items SET status='processing', updated_at=$1
      WHERE id = (
        SELECT i.id FROM items i JOIN boards b ON b.id = i.board_id
        WHERE i.status='pending' AND (b.ai_key_id IS NOT NULL OR $2)
+         AND (i.retry_at IS NULL OR i.retry_at <= $1)
        ORDER BY i.created_at ASC, i.id ASC LIMIT 1
        FOR UPDATE OF i SKIP LOCKED
      )
@@ -885,6 +910,7 @@ export async function claimNextPendingFace(db) {
     `UPDATE items SET status='facing', updated_at=$1
      WHERE id = (
        SELECT id FROM items WHERE status='pending_face'
+         AND (retry_at IS NULL OR retry_at <= $1)
        ORDER BY created_at ASC, id ASC LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
@@ -906,6 +932,7 @@ export async function claimNextPendingExtract(db, hasDefaultKey = true) {
      WHERE id = (
        SELECT i.id FROM items i JOIN boards b ON b.id = i.board_id
        WHERE i.status='pending_extract' AND (b.ai_key_id IS NOT NULL OR $2)
+         AND (i.retry_at IS NULL OR i.retry_at <= $1)
        ORDER BY i.created_at ASC, i.id ASC LIMIT 1
        FOR UPDATE OF i SKIP LOCKED
      )
@@ -933,6 +960,7 @@ export async function markExtracted(db, id, fields) {
                        THEN 'held' ELSE 'pending' END,
          attempts = 0,
          error = NULL,
+         retry_at = NULL,
          updated_at = $2
      WHERE id = $3`,
     [JSON.stringify(fields || {}), Date.now(), id]
@@ -953,6 +981,7 @@ export async function advanceFaced(db, id) {
                        THEN 'held' ELSE 'pending' END,
          attempts = 0,
          error = NULL,
+         retry_at = NULL,
          updated_at = $1
      WHERE id = $2`,
     [Date.now(), id]
@@ -1111,7 +1140,7 @@ export async function pruneFieldSnapshots(db, cutoff) {
 // Send one instance back to the tag queue (the opt-in retag-on-new-data path).
 export async function requeueItemForTag(db, id) {
   await db.query(
-    "UPDATE items SET status='pending', attempts=0, error=NULL, updated_at=$1 WHERE id=$2",
+    "UPDATE items SET status='pending', attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2",
     [Date.now(), id]
   );
 }
@@ -1158,9 +1187,15 @@ export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = nul
 // Re-run the full pipeline for every instance of an entity (the card-level
 // "reprocess"). User-initiated, so the CURRENT board mapping is re-stamped and
 // applied — a mapping edited after upload (or added to a board that had none)
-// actually takes effect here; instances restart at the extract leg when there
-// is AI work (current or stamped), else at tagging. Tags are cleared up front
-// so the card shows a clean reprocessing state either way.
+// actually takes effect here; connector vehicles restart at the face leg (the
+// chart is part of the definition, and this is the only manual path that can
+// re-render a non-live face — e.g. after a period change), other instances at
+// the extract leg when there is AI work (current or stamped), else at tagging.
+// Tags are cleared up front so the card shows a clean reprocessing state
+// either way. The face check reads the mapping that will apply ($3 when
+// re-stamped, else the stamp — $3 is null for connector-only mappings, which
+// carry no AI work); a vehicle is zero-files (unrendered) or generated-file
+// (rendered chart), never a user upload.
 export async function reprocessEntity(db, entityId) {
   const { rows } = await db.query(
     "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
@@ -1172,9 +1207,14 @@ export async function reprocessEntity(db, entityId) {
     `UPDATE items
      SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park'
                         ELSE jsonb_set(payload - 'park', '{mapping}', $3::jsonb) END,
-         status = CASE WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
+         status = CASE
+           WHEN COALESCE($3::jsonb, payload->'mapping')->'face'->>'from' = 'connector'
+                AND (jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
+                     OR payload->'files'->0->>'generated' = 'true') THEN 'pending_face'
+           WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract'
+           ELSE 'pending' END,
          tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE,
-         attempts=0, error=NULL, updated_at=$1
+         attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE entity_id=$2`,
     [Date.now(), entityId, current]
   );
@@ -1185,7 +1225,7 @@ export async function markTagged(db, id, tags, undecided = false, reasoning = {}
   // Clearing the vector marks the item for the embedding sweep — the text it
   // was embedded from just changed.
   await db.query(
-    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, embedding=NULL, embedding_model=NULL, updated_at=$4 WHERE id=$5",
+    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, retry_at=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5",
     [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), Date.now(), id]
   );
   await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
@@ -1194,20 +1234,29 @@ export async function markTagged(db, id, tags, undecided = false, reasoning = {}
 // --- semantic search embeddings ---
 
 export async function setItemEmbedding(db, id, vector, model) {
-  await db.query("UPDATE items SET embedding=$1, embedding_model=$2 WHERE id=$3", [
+  await db.query("UPDATE items SET embedding=$1, embedding_model=$2, embed_error=NULL WHERE id=$3", [
     Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength),
     model,
     id,
   ]);
 }
 
+// Mark an item the embedder rejected on its own (a poison input): the sweep
+// skips it so one bad item can't wedge the whole backfill. Cleared wherever
+// the embed text changes (markTagged, setItemTags) and on a later success.
+export async function setItemEmbedError(db, id, message) {
+  await db.query("UPDATE items SET embed_error=$1 WHERE id=$2", [String(message).slice(0, 500), id]);
+}
+
 // Tagged items whose vector is missing or from another model — the embedding
 // sweep's work queue. Newest first so fresh uploads become searchable before
-// a long backfill finishes.
+// a long backfill finishes. Items whose text the embedder rejected
+// (embed_error) are skipped until fresh tags give them new text.
 export async function itemsNeedingEmbedding(db, model, limit) {
   const { rows } = await db.query(
     `SELECT id, tags, tag_reasoning, payload FROM items
-     WHERE status='tagged' AND (embedding IS NULL OR embedding_model IS DISTINCT FROM $1)
+     WHERE status='tagged' AND embed_error IS NULL
+       AND (embedding IS NULL OR embedding_model IS DISTINCT FROM $1)
      ORDER BY updated_at DESC, id DESC LIMIT $2`,
     [model, limit]
   );
@@ -1225,46 +1274,96 @@ export async function boardEmbeddings(db, boardId, model) {
   return rows;
 }
 
-// Backfill progress for the admin panel: how many tagged items exist and how
-// many already carry a current-model vector.
+// Backfill progress for the admin panel: how many tagged items exist, how
+// many already carry a current-model vector, and how many were skipped after
+// the embedder rejected their text (so a stuck count has a visible why).
 export async function embeddingStats(db, model) {
   const { rows } = await db.query(
     `SELECT COUNT(*) FILTER (WHERE status='tagged') AS tagged,
-            COUNT(*) FILTER (WHERE status='tagged' AND embedding IS NOT NULL AND embedding_model=$1) AS embedded
+            COUNT(*) FILTER (WHERE status='tagged' AND embedding IS NOT NULL AND embedding_model=$1) AS embedded,
+            COUNT(*) FILTER (WHERE status='tagged' AND embed_error IS NOT NULL) AS failed
      FROM items`,
     [model]
   );
-  return { tagged: Number(rows[0].tagged), embedded: Number(rows[0].embedded) };
+  return { tagged: Number(rows[0].tagged), embedded: Number(rows[0].embedded), failed: Number(rows[0].failed) };
 }
 
-// Increment attempts; mark failed once attempts reach maxAttempts, else
-// requeue. requeueStatus controls which queue the item returns to
-// ('pending' for the tag leg, 'pending_extract' for the extract leg).
+// Route a failed work attempt by what the error says. Three classes:
+//  - permanent (HTTP 4xx except 408/429 — bad request, bad key, too large):
+//    fail on the FIRST attempt; repeating the same rejected call just repeats
+//    the rejection. Providers stamp err.status (compatError / the Anthropic
+//    SDK); no status means we can't prove it's permanent, so we retry.
+//  - transient (429/408/5xx, network errors, model whims — anything else):
+//    requeue with a spaced retry_at (1m, 5m, then 15m — honoring a longer
+//    Retry-After when the provider sent one) so the attempts outlast a
+//    rate-limit window or an outage instead of burning within seconds, and
+//    with TRANSIENT_EXTRA headroom over maxAttempts.
+//  - configuration gaps (err.noCount, e.g. "no API key configured"): requeue
+//    without consuming an attempt at all — the claim gate promises a missing
+//    key never fails an item, and this closes its race.
+// requeueStatus controls which queue the item returns to ('pending' for the
+// tag leg, 'pending_extract' / 'pending_face' for the definition legs).
 // Returns true if the item was failed.
+const RETRY_BACKOFF_MS = [60000, 300000, 900000];
+const TRANSIENT_EXTRA = 2;
 export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = "pending") {
+  const httpStatus = Number(error?.status);
+  const permanent =
+    Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus < 500 &&
+    httpStatus !== 408 && httpStatus !== 429;
+  const noCount = error?.noCount === true;
   const { rows } = await db.query("SELECT attempts FROM items WHERE id=$1", [id]);
-  const attempts = (rows.length ? rows[0].attempts : 0) + 1;
-  const status = attempts >= maxAttempts ? "failed" : requeueStatus;
-  await db.query("UPDATE items SET status=$1, attempts=$2, error=$3, updated_at=$4 WHERE id=$5", [
-    status,
-    attempts,
-    String(error).slice(0, 500),
-    Date.now(),
-    id,
-  ]);
-  return status === "failed";
+  const attempts = (rows.length ? rows[0].attempts : 0) + (noCount ? 0 : 1);
+  const failed = !noCount && (permanent || attempts >= maxAttempts + TRANSIENT_EXTRA);
+  const backoff = noCount
+    ? RETRY_BACKOFF_MS[0]
+    : RETRY_BACKOFF_MS[Math.min(Math.max(attempts - 1, 0), RETRY_BACKOFF_MS.length - 1)];
+  const ra = Number(error?.retryAfter);
+  const wait = Math.max(backoff, Number.isFinite(ra) ? Math.min(ra * 1000, 3600000) : 0);
+  await db.query(
+    "UPDATE items SET status=$1, attempts=$2, error=$3, retry_at=$4, updated_at=$5 WHERE id=$6",
+    [
+      failed ? "failed" : requeueStatus,
+      attempts,
+      String(error?.message ?? error).slice(0, 500),
+      failed ? null : Date.now() + wait,
+      Date.now(),
+      id,
+    ]
+  );
+  return failed;
 }
 
-// Recover items stuck mid-flight after a crash. 'processing' → 'pending';
-// 'extracting' → 'pending_extract'; 'facing' → 'pending_face'. Returns count.
-export async function recoverStuck(db, olderThanMs) {
-  const cutoff = Date.now() - olderThanMs;
-  const [r1, r2, r3] = await Promise.all([
-    db.query("UPDATE items SET status='pending' WHERE status='processing' AND updated_at < $1", [cutoff]),
-    db.query("UPDATE items SET status='pending_extract' WHERE status='extracting' AND updated_at < $1", [cutoff]),
-    db.query("UPDATE items SET status='pending_face' WHERE status='facing' AND updated_at < $1", [cutoff]),
-  ]);
-  return r1.rowCount + r2.rowCount + r3.rowCount;
+// Recover items stranded mid-flight ('processing'/'extracting'/'facing') by a
+// crash or a shutdown that outlived the 5s drain. Each recovery counts as an
+// attempt — an interruption is evidence — and requeues to its own leg with
+// the same spaced retry_at as transient failures, so a crash-looping poison
+// item stops re-leading the FIFO on every boot and, at the transient ceiling,
+// actually fails. Nothing else can fail it: claims don't check attempts, and
+// failOrRequeue only ever sees CAUGHT errors — a crash reaches neither. The
+// ceiling's headroom means an innocent item must straddle maxAttempts+2
+// separate interruptions (deploys included) before it could be wrongly
+// failed. Returns the number of rows touched.
+export async function recoverStuck(db, olderThanMs, maxAttempts = 3) {
+  const now = Date.now();
+  const [b0, b1, b2] = RETRY_BACKOFF_MS;
+  const { rowCount } = await db.query(
+    `UPDATE items SET
+       attempts = attempts + 1,
+       status = CASE
+         WHEN attempts + 1 >= $2 THEN 'failed'
+         WHEN status = 'extracting' THEN 'pending_extract'
+         WHEN status = 'facing' THEN 'pending_face'
+         ELSE 'pending' END,
+       error = CASE WHEN attempts + 1 >= $2
+                    THEN 'interrupted mid-flight repeatedly (crash or shutdown)' ELSE error END,
+       retry_at = CASE WHEN attempts + 1 >= $2 THEN NULL
+                       ELSE $3::bigint + (CASE LEAST(attempts, 2) WHEN 0 THEN ${b0} WHEN 1 THEN ${b1} ELSE ${b2} END) END,
+       updated_at = $3
+     WHERE status IN ('processing','extracting','facing') AND updated_at < $1`,
+    [now - olderThanMs, maxAttempts + TRANSIENT_EXTRA, now]
+  );
+  return rowCount;
 }
 
 function today() {

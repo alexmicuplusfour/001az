@@ -386,6 +386,95 @@ test("auto-tag-on sweep: un-extracted held mapped items route through the extrac
   assert.equal(row.status, "pending_extract");
 });
 
+test("auto-tag-on sweep: a FAILED extraction resumes the extract leg, not the tag leg", async () => {
+  const { json: board } = await createBoard("sweep-failed-extract", { auto_tag: false });
+  const insert = async (payload) => {
+    const { rows: [{ id }] } = await db.query(
+      `INSERT INTO items (board_id, payload, status, created_at, updated_at)
+       VALUES ($1, $2, 'failed', $3, $3) RETURNING id`,
+      [board.id, JSON.stringify(payload), Date.now()]
+    );
+    return id;
+  };
+  const failedExtract = await insert({ identity: "fe.txt", files: [], fields: {}, mapping: MAPPING });
+  const failedTag     = await insert({ identity: "ft.txt", files: [], fields: {}, mapping: MAPPING, extracted_at: 1 });
+
+  await patchBoard(board.id, { auto_tag: true });
+  const status = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0].status;
+  assert.equal(await status(failedExtract), "pending_extract", "definition never ran — re-extract");
+  assert.equal(await status(failedTag), "pending", "already extracted — straight to tagging");
+});
+
+// ── retagBoard routing ───────────────────────────────────────────────────────
+// Retag only touches settled items (tagged/failed/held) — in-pipeline items
+// already end in the tag leg when their legs finish, and flipping them would
+// skip extraction/face entirely. Settled items resume the right leg, with the
+// same routing as releaseHeld.
+
+test("retag: leaves in-pipeline items alone, routes settled items to the right leg", async () => {
+  const { json: board } = await createBoard("retag-routing");
+  await patchBoard(board.id, { mapping: MAPPING });
+  const FACE_MAPPING = {
+    input: { connector: "crypto" },
+    identity: { from: "connector" },
+    face: { from: "connector", producer: "chart", period: "1y" },
+    fields: [],
+  };
+  const insert = async (status, payload) => {
+    const { rows: [{ id }] } = await db.query(
+      `INSERT INTO items (board_id, payload, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $4) RETURNING id`,
+      [board.id, JSON.stringify(payload), status, Date.now()]
+    );
+    return id;
+  };
+
+  // In-pipeline: a retag firing mid-upload must not yank these out of their legs.
+  const midExtractQ = await insert("pending_extract", { identity: "a", files: [], fields: {}, mapping: MAPPING });
+  const midExtract  = await insert("extracting",      { identity: "b", files: [], fields: {}, mapping: MAPPING });
+  const midFaceQ    = await insert("pending_face",    { identity: "c", files: [], fields: {}, mapping: FACE_MAPPING });
+  const midFace     = await insert("facing",          { identity: "d", files: [], fields: {}, mapping: FACE_MAPPING });
+  const midTag      = await insert("processing",      { identity: "e", files: [], fields: {} });
+
+  // Settled: routed per definition state.
+  const taggedDone    = await insert("tagged", { identity: "f", files: [], fields: {}, mapping: MAPPING, extracted_at: 1 });
+  const taggedNoDef   = await insert("tagged", { identity: "g", files: [], fields: {}, mapping: MAPPING }); // stamped but never extracted — heals
+  const failedExtract = await insert("failed", { identity: "h", files: [], fields: {}, mapping: MAPPING });
+  const failedTag     = await insert("failed", { identity: "i", files: [], fields: {}, mapping: MAPPING, extracted_at: 1 });
+  const bareVehicle   = await insert("tagged", { identity: "j", files: [], fields: {}, mapping: FACE_MAPPING, extracted_at: 1, source: { provider: "coingecko", id: "j" } });
+  const plainTagged   = await insert("tagged", { identity: "k", files: [], fields: {} }); // unstamped + tagged: stays tag-only, no adoption
+
+  const r = await req(base, "POST", `/api/admin/boards/${board.id}/retag`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.queued, 6, "only the settled items count");
+
+  const status = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0].status;
+  assert.equal(await status(midExtractQ), "pending_extract");
+  assert.equal(await status(midExtract),  "extracting");
+  assert.equal(await status(midFaceQ),    "pending_face");
+  assert.equal(await status(midFace),     "facing");
+  assert.equal(await status(midTag),      "processing");
+
+  assert.equal(await status(taggedDone),    "pending", "already extracted — never pays a second extraction");
+  assert.equal(await status(taggedNoDef),   "pending_extract", "definition never ran — retag heals it");
+  assert.equal(await status(failedExtract), "pending_extract", "an extraction failure resumes in the extract leg");
+  assert.equal(await status(failedTag),     "pending");
+  assert.equal(await status(bareVehicle),   "pending_face", "an unrendered vehicle gets another shot at the chart");
+  assert.equal(await status(plainTagged),   "pending");
+});
+
+test("retag: held unstamped item adopts the board mapping gained since upload", async () => {
+  const { json: board } = await createBoard("retag-adopt", { auto_tag: false });
+  const { uploaded: [item] } = await uploadTxt(board.id); // held, unmapped at upload
+  assert.equal(item.status, "held");
+  await patchBoard(board.id, { mapping: MAPPING });
+
+  await req(base, "POST", `/api/admin/boards/${board.id}/retag`, { sid: admin.sid });
+  const row = await itemStatus(item);
+  assert.equal(row.status, "pending_extract");
+  assert.deepEqual(row.payload.mapping, MAPPING);
+});
+
 // ── reasoning endpoint carries fields ────────────────────────────────────────
 
 test("reasoning endpoint returns payload.fields alongside tag_reasoning", async () => {

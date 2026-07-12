@@ -864,7 +864,7 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
     model: (await getSetting(db, "embed_model")) || null,
     // Backfill progress against the model actually in effect (settings or
     // the provider default); zeros when not configured.
-    stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0 },
+    stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
   };
   res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed });
 }));

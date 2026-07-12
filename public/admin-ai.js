@@ -279,11 +279,16 @@ export async function renderAiConfig() {
   emStatus.className = "muted";
   emStatus.style.margin = "0";
   if (cfg.embed?.enabled) {
-    const { embedded, tagged } = cfg.embed.stats || {};
+    const { embedded, tagged, failed } = cfg.embed.stats || {};
+    // "the rest backfill" is only honest for items still in the queue —
+    // skipped ones (the embedder rejected their text) won't retry on their
+    // own, so they get their own sentence instead of reading as stuck.
+    const remaining = (tagged || 0) - (embedded || 0) - (failed || 0);
     emStatus.textContent =
       tagged && embedded < tagged
-        ? `${embedded} of ${tagged} tagged items embedded — the rest backfill in the background.`
+        ? `${embedded} of ${tagged} tagged items embedded${remaining > 0 ? " — the rest backfill in the background" : ""}.`
         : `All ${tagged || 0} tagged items embedded.`;
+    if (failed) emStatus.textContent += ` ${failed} skipped after embedding errors — re-tagging retries them.`;
   }
 
   const emActions = document.createElement("div");

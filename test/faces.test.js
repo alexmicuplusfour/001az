@@ -249,6 +249,28 @@ test("POST entities with auto-tag off → face leg anyway, parked", async () => 
   } finally { globalThis.fetch = original; }
 });
 
+test("reprocess: a connector vehicle restarts at the face leg (rendered or not)", async () => {
+  // The chart is part of the definition — the card-level "full pipeline"
+  // reprocess must re-enter the face leg, not skip to extract/tag. This is
+  // also the only manual re-render path for a non-live face.
+  const board = await faceBoard("face-reprocess");
+  const { mapping } = await getBoard(db, board.id);
+
+  // Unrendered vehicle (zero files — e.g. the provider had no history).
+  const eid1 = await createEntity(db, board.id, { identity: "rp1", displayName: "RP1" });
+  const bare = await insertItem(db, board.id, { identity: "rp1", files: [], fields: {}, mapping, extracted_at: 1, source: { provider: "coingecko", id: "rp1" } }, "tagged", eid1);
+  // Rendered vehicle (generated chart file).
+  const eid2 = await createEntity(db, board.id, { identity: "rp2", displayName: "RP2" });
+  const rendered = await insertItem(db, board.id, { identity: "rp2", files: [{ name: "x", kind: "image", generated: true }], fields: {}, mapping, extracted_at: 1, source: { provider: "coingecko", id: "rp2" } }, "tagged", eid2);
+
+  for (const eid of [eid1, eid2]) {
+    assert.equal((await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid })).status, 200);
+  }
+  const status = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0].status;
+  assert.equal(await status(bare), "pending_face");
+  assert.equal(await status(rendered), "pending_face");
+});
+
 test("advanceFaced: parked item returns to held; unparked flows to tagging", async () => {
   const board = await faceBoard("face-park");
   await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { auto_tag: false } });
