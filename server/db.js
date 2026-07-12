@@ -556,7 +556,7 @@ export async function deleteFilterConfig(db, userId, id) {
 export async function listAiKeys(db) {
   const { rows } = await db.query(
     `SELECT k.id, k.name, k.provider, k.api_key, k.created_at,
-      (SELECT COUNT(*) FROM boards b WHERE b.ai_key_id = k.id) AS boards_using
+      (SELECT COUNT(*) FROM boards b WHERE b.ai_key_id = k.id OR b.extract_key_id = k.id) AS boards_using
      FROM ai_keys k ORDER BY k.created_at ASC`
   );
   return rows;
@@ -580,6 +580,7 @@ export async function createAiKey(db, name, provider, apiKey) {
 // the settings pointer too.
 export async function deleteAiKey(db, id) {
   await db.query("UPDATE boards SET ai_model=NULL WHERE ai_key_id=$1", [id]);
+  await db.query("UPDATE boards SET extract_model=NULL WHERE extract_key_id=$1", [id]);
   const result = await db.query("DELETE FROM ai_keys WHERE id=$1", [id]);
   if (result.rowCount > 0 && Number(await getSetting(db, "default_key_id")) === id) {
     await setSetting(db, "default_key_id", null);
@@ -597,6 +598,7 @@ export async function deleteAiKey(db, id) {
 // schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
   "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
+  "extract_key_id, extract_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, created_at";
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
@@ -624,7 +626,7 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, extractKeyId, extractModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
@@ -634,6 +636,8 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (aiResearch !== undefined) { vals.push(!!aiResearch); sets.push(`ai_research=$${vals.length}`); }
   if (aiKeyId !== undefined) { vals.push(aiKeyId); sets.push(`ai_key_id=$${vals.length}`); }
   if (aiModel !== undefined) { vals.push(aiModel); sets.push(`ai_model=$${vals.length}`); }
+  if (extractKeyId !== undefined) { vals.push(extractKeyId); sets.push(`extract_key_id=$${vals.length}`); }
+  if (extractModel !== undefined) { vals.push(extractModel); sets.push(`extract_model=$${vals.length}`); }
   if (autoTag !== undefined) { vals.push(!!autoTag); sets.push(`auto_tag=$${vals.length}`); }
   if (autoTagPeriodic !== undefined) { vals.push(!!autoTagPeriodic); sets.push(`auto_tag_periodic=$${vals.length}`); }
   if (autoTagEveryMin !== undefined) { vals.push(autoTagEveryMin); sets.push(`auto_tag_every_min=$${vals.length}`); }

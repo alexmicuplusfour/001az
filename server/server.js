@@ -431,6 +431,8 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     ...(req.user.is_admin ? {
       ai_key_id: b.ai_key_id ?? null,
       ai_model: b.ai_model ?? null,
+      extract_key_id: b.extract_key_id ?? null,
+      extract_model: b.extract_model ?? null,
     } : {}),
   });
 }));
@@ -702,6 +704,19 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   }
   if (req.body && req.body.ai_model !== undefined && update.aiKeyId !== null) {
     update.aiModel = req.body.ai_model ? String(req.body.ai_model) : null;
+  }
+  if (req.body && req.body.extract_key_id !== undefined) {
+    if (req.body.extract_key_id === null) {
+      update.extractKeyId = null;
+      update.extractModel = null;
+    } else {
+      const keyId = Number(req.body.extract_key_id);
+      if (!(await getAiKey(db, keyId))) return res.status(400).json({ error: "unknown extract_key_id" });
+      update.extractKeyId = keyId;
+    }
+  }
+  if (req.body && req.body.extract_model !== undefined && update.extractKeyId !== null) {
+    update.extractModel = req.body.extract_model ? String(req.body.extract_model) : null;
   }
   if (req.body && req.body.mapping !== undefined) {
     if (req.body.mapping === null) {

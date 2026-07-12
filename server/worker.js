@@ -212,6 +212,31 @@ Return your answer only by calling the record_tags tool.`;
   return { systemText, schema };
 }
 
+// Convert mammoth HTML to extraction-friendly markdown. Preserves headings,
+// bold, and — crucially — hyperlinks (<a href>) as [label](url) so linked
+// labels (portfolio, LinkedIn) carry their URLs into the extraction prompt.
+export function htmlToMarkdown(html) {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<head[^>]*>[\s\S]*?<\/head>/gi, "")
+    .replace(/<a\s+(?:[^>]*?\s+)?href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_, href, inner) => {
+      const label = inner.replace(/<[^>]+>/g, "").trim();
+      return label ? `[${label}](${href})` : href;
+    })
+    .replace(/<h1[^>]*>/gi, "\n## ").replace(/<\/h1>/gi, "\n")
+    .replace(/<h2[^>]*>/gi, "\n### ").replace(/<\/h2>/gi, "\n")
+    .replace(/<h3[^>]*>/gi, "\n### ").replace(/<\/h3>/gi, "\n")
+    .replace(/<(strong|b)[^>]*>/gi, "**").replace(/<\/(strong|b)>/gi, "**")
+    .replace(/<li[^>]*>/gi, "\n- ").replace(/<\/li>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n").replace(/<\/div>/gi, "\n").replace(/<\/tr>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 // Build the extraction prompt + strict schema for a mapping's AI fields.
 // Pure function — no cache needed (extraction runs once per item; mappings
 // vary per item so a board-level cache wouldn't help).
@@ -405,10 +430,41 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   const CONCURRENCY = Math.max(1, Number(process.env.TAG_CONCURRENCY) || 4);
   const TEXT_DOC_MAX_CHARS = 50000; // ~12k tokens; plenty for tagging judgment
 
+  // Every document kind resolves to text the same way — pdf via the PyMuPDF
+  // sidecar (structured markdown, links preserved), docx via its html sidecar
+  // (htmlToMarkdown; .txt fallback), text files raw. Empty string when nothing
+  // is readable — the caller decides the fallback.
+  const EXTRACTOR_URL = process.env.EXTRACTOR_URL || "http://extractor:3002";
+  async function documentTextFor(file) {
+    if (file.kind === "pdf") {
+      try {
+        const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+        const res = await fetch(`${EXTRACTOR_URL}/extract`, {
+          method: "POST",
+          headers: { "Content-Type": "application/pdf" },
+          body: buf,
+        });
+        if (res.ok) return (await res.json()).markdown || "";
+      } catch { /* extractor unavailable */ }
+      return "";
+    }
+    if (file.kind === "docx") {
+      const html = await fs.promises.readFile(path.join(galleryDir, file.name + ".html"), "utf8").catch(() => "");
+      if (html) return htmlToMarkdown(html);
+      return fs.promises.readFile(path.join(galleryDir, file.name + ".txt"), "utf8").catch(() => "");
+    }
+    if (file.kind === "text") {
+      return fs.promises.readFile(path.join(galleryDir, file.name), "utf8").catch(() => "");
+    }
+    return "";
+  }
+
   // What the model sees for an item: parts built from its files by kind.
-  // Images: the thumbnail (cheap) rather than the original. PDFs: the original
-  // as a document block (Anthropic-only — providers.js rejects it elsewhere).
-  // Text docs: the content inline, capped.
+  // Images: the thumbnail (cheap) rather than the original. Documents: their
+  // extracted text (documentTextFor), so every provider can tag them; PDFs
+  // additionally carry their page-1 thumbnail so visual/style facets keep
+  // their signal, and fall back to an Anthropic-only document block when the
+  // extractor is unreachable.
   async function modelInputFor(payload, entity = null) {
     const file = payload.files?.[0];
     if (!file) {
@@ -421,6 +477,23 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       }];
     }
     if (file.kind === "pdf") {
+      const text = await documentTextFor(file);
+      if (text.trim()) {
+        // Page-1 preview rides along so visual/style facets keep their signal;
+        // the thumbnail is a fraction of the tokens of per-page PDF billing.
+        const parts = [];
+        const thumb = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp")).catch(() => null);
+        if (thumb) parts.push({ kind: "image", mediaType: "image/webp", b64: thumb.toString("base64") });
+        parts.push({
+          kind: "text",
+          text: `The item is the following document ("${file.original_name}")` +
+            (thumb ? ", shown above as a first-page preview" : "") +
+            `:\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
+        });
+        return parts;
+      }
+      // Extractor unreachable — fall back to the whole PDF as a document
+      // block (Anthropic-only; providers.js rejects it elsewhere).
       const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
       return [
         { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
@@ -428,9 +501,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       ];
     }
     if (file.kind === "text" || file.kind === "docx") {
-      // docx reads its ingest-time text sidecar (mammoth extraction).
-      const src = file.kind === "docx" ? file.name + ".txt" : file.name;
-      const text = await fs.promises.readFile(path.join(galleryDir, src), "utf8");
+      const text = await documentTextFor(file);
       return [{
         kind: "text",
         text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
@@ -446,6 +517,21 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
       { kind: "text", text: anchor },
     ];
+  }
+
+  // Text-only input for the extraction leg — all doc types go through the
+  // same documentTextFor path so extraction works with any provider (document
+  // blocks are Anthropic-only) and never pays image tokens. null = no text
+  // (image file, or extractor down) — the caller falls back to modelInputFor.
+  async function modelInputForExtract(payload) {
+    const file = payload.files?.[0];
+    if (!file) return null; // connector entity with no file — nothing to extract
+    const text = await documentTextFor(file);
+    if (!text.trim()) return null;
+    return [{
+      kind: "text",
+      text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nExtract the requested fields using the record_fields tool.`,
+    }];
   }
 
   async function tagOne(row) {
@@ -643,11 +729,20 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       return;
     }
     const board = await getBoard(db, row.board_id);
-    const ai = await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
+    // Extraction uses its own provider override when set; otherwise falls back
+    // to the board's tagging provider. Either way, the input is text-only (via
+    // modelInputForExtract) so extraction works with any provider.
+    const extractAi = board?.extract_key_id
+      ? await resolveBoardAi(db, { aiKeyId: board.extract_key_id, aiModel: board.extract_model })
+      : null;
+    const ai = extractAi || await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
     if (!ai) throw new Error("no API key configured");
 
     const { systemText, schema } = buildFieldsPrompt(mapping);
-    const parts = await modelInputFor(row.payload);
+    // Try text-only extraction first (works with any provider, avoids image
+    // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
+    // files (images, connector entities) where there is no text sidecar.
+    const parts = await modelInputForExtract(row.payload) ?? await modelInputFor(row.payload);
     const { input, usage } = await callTagger({
       provider: ai.provider,
       apiKey: ai.apiKey,

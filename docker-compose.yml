@@ -16,6 +16,10 @@ services:
     depends_on:
       - app
 
+  extractor:
+    build: ./extractor
+    restart: unless-stopped
+
   app:
     build: .
     restart: unless-stopped
@@ -27,6 +31,7 @@ services:
       MODEL: ${MODEL:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-1}
       SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:-90}
+      EXTRACTOR_URL: http://extractor:3002
       # scheduled auto-tagging (weekend detection, run times) uses server-local time
       TZ: ${TZ:-UTC}
     volumes:
@@ -34,6 +39,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      extractor:
+        condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s

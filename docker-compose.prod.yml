@@ -4,6 +4,11 @@
 # The app image is built locally and shipped with `docker save`/`docker load`;
 # APP_TAG is pinned in /opt/001az/.env by the deploy script.
 services:
+  extractor:
+    image: 001az-extractor:${APP_TAG:-latest}
+    build: !reset null
+    pull_policy: never
+
   app:
     image: 001az-app:${APP_TAG:-latest}
     build: !reset null

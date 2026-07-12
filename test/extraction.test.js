@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
-import { buildFieldsPrompt } from "../server/worker.js";
+import { buildFieldsPrompt, htmlToMarkdown } from "../server/worker.js";
 import { anthropicRequest } from "../server/providers.js";
 
 // ─── pure: buildFieldsPrompt ─────────────────────────────────────────────────
@@ -290,4 +290,36 @@ test("reasoning endpoint returns payload.fields alongside tag_reasoning", async 
   assert.equal(r.status, 200);
   assert.deepEqual(r.json.reasoning, { fit: "match" });
   assert.deepEqual(r.json.fields, fields);
+});
+
+// ── pure: htmlToMarkdown (docx extraction input) ─────────────────────────────
+
+test("htmlToMarkdown: hyperlinks become [label](url) — the whole point", () => {
+  const md = htmlToMarkdown(
+    `<p>Portfolio: <a href="https://dribbble.com/jordan">Dribbble</a> · ` +
+    `<a href="https://linkedin.com/in/jordan"><strong>LinkedIn</strong></a></p>`
+  );
+  assert.ok(md.includes("[Dribbble](https://dribbble.com/jordan)"));
+  // nested tags inside the anchor are stripped from the label, URL kept
+  assert.ok(md.includes("[LinkedIn](https://linkedin.com/in/jordan)"));
+});
+
+test("htmlToMarkdown: anchor with empty label degrades to the bare URL", () => {
+  const md = htmlToMarkdown(`<a href="https://example.com"><img src="x.png"></a>`);
+  assert.equal(md, "https://example.com");
+});
+
+test("htmlToMarkdown: headings, bold, lists, entities; style/head stripped", () => {
+  const md = htmlToMarkdown(
+    `<head><meta charset="utf-8"></head><style>body{color:red}</style>` +
+    `<h1>Jane Doe</h1><h2>Experience</h2>` +
+    `<p><strong>Designer</strong> at Acme &amp; Co</p>` +
+    `<ul><li>Shipped v1</li><li>Led research</li></ul>`
+  );
+  assert.ok(md.includes("## Jane Doe"));
+  assert.ok(md.includes("### Experience"));
+  assert.ok(md.includes("**Designer** at Acme & Co"));
+  assert.ok(md.includes("- Shipped v1"));
+  assert.ok(!md.includes("color:red"));
+  assert.ok(!md.includes("charset"));
 });

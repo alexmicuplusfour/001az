@@ -3,6 +3,7 @@ import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { createModal } from './modal.js';
 import { ICONS } from './utils.js';
+import { loadProviders, byName, fillModelSelect } from './board-modal.js';
 
 const KINDS = ["text", "number", "url", "date"];
 // Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
@@ -28,6 +29,15 @@ export function openMappingModal() {
   let connectorProviders = [];   // [{ name, label, needsKey }] — for naming providers in hints
   let connectorActiveProvider = null; // the backend currently resolving this connector
   let faceCfg = { ...(state.boardMapping?.face || { from: "raw" }) }; // the entity's card visual
+
+  // Extraction provider — loaded from /api/boards/:id/settings (admin only).
+  // extractLoaded gates the save payload: until the fetch lands, the PATCH
+  // omits extract fields so a quick Save can't wipe a stored override.
+  let extractKeyId = null;
+  let extractModel = null;
+  let extractKeySel = null;
+  let extractModelSel = null;
+  let extractLoaded = false;
 
   const { overlay, body, footer, closeBtn, close } = createModal({
     title: "Entity mapping",
@@ -580,6 +590,72 @@ export function openMappingModal() {
     body.appendChild(addBtn);
   }
 
+  // Extraction provider (admin only) — subordinate to the AI fields section,
+  // rendered as a compact labeled row rather than a peer section.
+  if (isAdmin) {
+    const extractRow = document.createElement("div");
+    extractRow.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:8px;";
+    const extractLabel = document.createElement("span");
+    extractLabel.style.cssText = "font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8a8a92;white-space:nowrap;";
+    extractLabel.textContent = "Extraction provider";
+    extractKeySel = document.createElement("select");
+    extractKeySel.style.cssText = "flex:1;min-width:0;font-size:13px;";
+    extractKeySel.disabled = true;
+    extractModelSel = document.createElement("select");
+    extractModelSel.style.cssText = "flex:1;min-width:0;font-size:13px;";
+    extractModelSel.hidden = true;
+    extractRow.append(extractLabel, extractKeySel, extractModelSel);
+    body.appendChild(extractRow);
+
+    // Load keys + provider catalog, then populate selects.
+    let aiKeys = [];
+    let aiCatalog = {};
+    const syncExtractModel = () => {
+      const key = aiKeys.find((k) => String(k.id) === extractKeySel.value);
+      extractModelSel.hidden = !key;
+      if (key) {
+        fillModelSelect(extractModelSel, aiCatalog[key.provider], key.id === extractKeyId ? extractModel : null);
+      }
+    };
+    Promise.all([
+      fetch("/api/admin/ai-keys").then((r) => r.json()),
+      loadProviders(),
+      fetch(`/api/boards/${state.boardId}/settings`).then((r) => r.ok ? r.json() : {}),
+    ]).then(([keys, catalog, settings]) => {
+      aiKeys = keys;
+      aiCatalog = byName(catalog);
+      extractKeyId = settings.extract_key_id ?? null;
+      extractModel = settings.extract_model ?? null;
+      const defOpt = document.createElement("option");
+      defOpt.value = "";
+      defOpt.textContent = "Board default";
+      extractKeySel.appendChild(defOpt);
+      for (const k of keys) {
+        const opt = document.createElement("option");
+        opt.value = String(k.id);
+        opt.textContent = `${k.name} — ${k.provider}`;
+        extractKeySel.appendChild(opt);
+      }
+      if (extractKeyId && keys.find((k) => k.id === extractKeyId)) {
+        extractKeySel.value = String(extractKeyId);
+      } else if (extractKeyId) {
+        // Stored key no longer exists — treat as board default rather than
+        // sending a dead id back on save.
+        extractKeyId = null;
+        extractModel = null;
+      }
+      extractKeySel.disabled = false;
+      extractKeySel.addEventListener("change", () => {
+        extractKeyId = extractKeySel.value ? Number(extractKeySel.value) : null;
+        extractModel = null;
+        syncExtractModel();
+      });
+      extractModelSel.addEventListener("change", () => { extractModel = extractModelSel.value || null; });
+      syncExtractModel();
+      extractLoaded = true;
+    }).catch(() => {});
+  }
+
   // Footer
   if (isAdmin) {
     const saveBtn = document.createElement("button");
@@ -684,7 +760,13 @@ export function openMappingModal() {
       const r = await fetch(`/api/admin/boards/${state.boardId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mapping }),
+        body: JSON.stringify({
+          mapping,
+          ...(extractLoaded ? {
+            extract_key_id: extractKeyId ?? null,
+            extract_model: extractKeyId ? (extractModel || null) : null,
+          } : {}),
+        }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
