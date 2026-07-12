@@ -401,6 +401,15 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
   });
 }));
 
+// Just the token total — polled by the live token chip while tagging runs, so
+// the count ticks up without re-fetching the whole board payload.
+app.get("/api/boards/:id/tokens", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  res.json({ token_total: await getBoardTokenTotal(db, board.id) });
+}));
+
 // Board-manager content editing — the gallery's "edit board" modal. A global
 // admin or this board's board-admin (requireBoardManager). Content only for
 // board-admins; global admins also receive the AI override used by this modal.

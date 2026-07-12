@@ -132,16 +132,34 @@ export function reconcile(data) {
   }
 }
 
+// Tokens only accrue while items are being tagged — exactly when we're already
+// polling — so we refresh the board's running total on the same cadence and let
+// the toolbar's odometer roll to the new value.
+async function refreshTokens() {
+  if (!state.boardId) return;
+  try {
+    const r = await fetch(`/api/boards/${state.boardId}/tokens`, { cache: "no-store" });
+    if (!r.ok) return;
+    const { token_total } = await r.json();
+    if (typeof token_total === 'number') state.boardTokens = token_total;
+  } catch { /* leave the last known total */ }
+}
+
 let polling = false;
 
 async function pollTick() {
   if (!needsPoll()) {
     polling = false;
+    // The last item's tokens land just after its status flips to tagged, so
+    // catch that final bump once the queue has drained.
+    await refreshTokens();
+    document.dispatchEvent(new Event('app:render'));
     return;
   }
   try {
     const data = await fetch(`/api/items?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json());
     reconcile(data);
+    await refreshTokens();
     document.dispatchEvent(new Event('app:render'));
   } catch {
     /* keep polling */

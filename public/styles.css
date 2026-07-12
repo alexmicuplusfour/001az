@@ -1159,6 +1159,37 @@ a.tool-btn {
   flex-shrink: 0;
 }
 
+/* Live rolling token count. Each digit lives in a 1em-tall window; on change a
+   two-row ribbon (old over new) slides up so the old glyph exits the top and
+   the new one rises into place. Tabular figures keep the columns from jittering. */
+.odo {
+  display: inline-flex;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.odo-col {
+  display: inline-block;
+  height: 1em;
+  overflow: hidden;
+}
+.odo-sep {
+  display: inline-block;
+}
+.odo-roll {
+  display: flex;
+  flex-direction: column;
+  transform: translateY(0);
+}
+.odo-roll.rolling {
+  transform: translateY(-1em);
+  transition: transform 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.odo-roll > span {
+  height: 1em;
+  line-height: 1em;
+}
+
 .empty {
   color: var(--text-dim);
   padding: 40px 24px;

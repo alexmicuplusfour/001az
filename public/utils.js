@@ -97,10 +97,11 @@ export function actionBtn(icon, cls, title, onClick) {
   return b;
 }
 
+// Always render in whole thousands ("525k", "1,247k") — never rolling up to
+// "M". A single tagging pass moves the count by a few thousand tokens, so the
+// last digit has to live at the 1k level for the live odometer to visibly tick.
 export function formatTokens(n) {
-  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${+(n / 1_000).toFixed(1)}k`;
-  return String(n);
+  return `${Math.round(n / 1000).toLocaleString()}k`;
 }
 
 function appendCount(el, count) {

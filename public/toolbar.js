@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { ICONS, toolBtn, formatTokens } from './utils.js';
+import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
@@ -12,6 +13,10 @@ import { openConnectorBrowse } from './connector-browse.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
+
+// The live token counter persists across toolbar rebuilds so it can roll from
+// the previous value to the new one as tagging ticks the total up.
+let tokenOdo = null;
 
 function openUserMenu(anchorEl) {
   openDropdown(anchorEl, {
@@ -117,11 +122,16 @@ export function renderToolbar(resultCount) {
       boardGroup.appendChild(editBtn);
 
       if (state.boardTokens > 0) {
+        if (!tokenOdo) tokenOdo = new Odometer(formatTokens(state.boardTokens));
         const tokenChip = document.createElement("span");
         tokenChip.className = "token-chip";
-        tokenChip.innerHTML = ICONS.coin + formatTokens(state.boardTokens);
+        tokenChip.innerHTML = ICONS.coin;
+        tokenChip.appendChild(tokenOdo.el);
         tokenChip.title = `${state.boardTokens.toLocaleString()} tokens used (AI tagging)`;
         boardGroup.appendChild(tokenChip);
+        // Re-append then set: if the value grew since the last render, the
+        // changed digits roll; if not, this is a no-op.
+        tokenOdo.set(formatTokens(state.boardTokens));
       }
     }
     elToolbar.appendChild(boardGroup);
