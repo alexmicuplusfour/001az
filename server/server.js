@@ -9,6 +9,7 @@ import {
   listItems,
   deleteEntity,
   deleteInstance,
+  deleteEntityIfEmpty,
   reprocessEntity,
   getEntityBoard,
   entityInstanceCount,
@@ -1134,6 +1135,10 @@ app.delete("/api/instances/:id", requireAuth, requireItemAccess, wrap(async (req
 
   const removed = await deleteInstance(db, req.itemId);
   if (!removed) return res.status(404).json({ error: "not found" });
+  // Race heal: two concurrent deletes of the last two instances both pass the
+  // count guard above — if that emptied the entity, drop it rather than leave
+  // a ghost card (the atomic emptiness check makes this a no-op otherwise).
+  if (removed.entity_id) await deleteEntityIfEmpty(db, removed.entity_id);
   sources.cleanup(removed.payload?.files);
   console.log(`instance #${req.itemId} removed from entity #${removed.entity_id}`);
   res.json({ ok: true });

@@ -513,12 +513,88 @@ there's a live single-process bug, and it's the fourth sibling of the #1 family:
    reintroduces the re-claim window in-process, so decoupling must keep
    recoverStuck in the claim loop's flight (or bring the claim token forward).
 
-### 8. `reparentInto` isn't transactional and `items.entity_id` is `ON DELETE CASCADE`
+### 8. `reparentInto` isn't transactional and `items.entity_id` is `ON DELETE CASCADE` — FIXED
+**Status: fixed (local) as designed. 227 tests green (4 new).** Shipped: new db.js
+`reparentInstance` wraps re-parent + display-name + delete-if-empty in one tx
+(worker's `reparentInto` now calls it — fixes ghost-entity-on-crash and the EPQ
+corner); `deleteEntity` rebuilt lock-first inside a tx (`SELECT … FOR UPDATE` before
+the payload read — the cascade can no longer eat a merge-in whose files were never
+listed); `deleteBoard` gained the same one-line lock in its existing tx; the
+`deleteInstance` route heals the TOCTOU ghost with a post-delete
+`deleteEntityIfEmpty`. The lock mechanism is pinned by an integration test: a held
+`FOR UPDATE` provably blocks a concurrent `reparentItem`, which then fails 23503
+(the retry-heal path) instead of being cascade-eaten. Ingest's unlink-on-insert-
+error remains note-only. Original analysis kept below.
+
 worker.js ~719 does `reparentItem` then `deleteEntityIfEmpty` as separate autocommit
 statements. If a concurrent path deletes the *target* entity in the window (its own last
 instance just re-parented away), the cascade eats the freshly re-parented instance —
 row and file vanish silently. Window is one statement wide with today's single worker,
 so theoretical-ish, but nothing structural prevents it. Wrap reparent+delete in a tx.
+
+Verified in depth; the entry's own scenario mostly CAN'T happen, and the real loss
+window lives in the delete routes instead:
+
+- **CORRECTED — worker-vs-worker self-heals:** concurrent extract flows DO
+  interleave in-process (the batch is `Promise.all` of up to 4 `extractOne`s), but
+  the dangerous interleavings resolve safely: `deleteEntityIfEmpty` is one atomic
+  statement whose `NOT EXISTS` guard sees a merge-in that landed first (no delete),
+  and a merge-in that lands after the delete hits a clean FK 23503 (`entity_id`
+  references a gone row) → `extractOne` throws → `failOrRequeue` (transient) →
+  the retry re-derives, finds no holder, creates a fresh entity. Converges, no
+  loss. Same for two instances leaving one entity (second `deleteEntityIfEmpty`
+  is a rowCount-0 no-op). One murky corner remains — Postgres's qual re-evaluation
+  when the DELETE waits out a concurrent reparent's FK lock (EvalPlanQual doesn't
+  re-run subplans against a fresh snapshot) — sub-millisecond alignment, and the
+  tx wrap makes it moot rather than worth reasoning about.
+- **The REAL window is `deleteEntity` (db.js ~1073), and it doesn't self-heal:**
+  SELECT payloads → DELETE entity (cascade) as two autocommit statements. A
+  merge-in landing between them: the cascade eats the freshly re-parented row and
+  its files were never in the cleanup list. Correction to the entry: the ROW
+  vanishes, the FILES don't — they orphan on disk, unreferenced by any item, which
+  on a résumé board means sensitive files lingering in /gallery. Trigger is
+  ordinary: user deletes a card while an upload batch is extracting into it.
+- **`deleteBoard` (~684) is the instructive sibling: it's ALREADY tx-wrapped, and
+  the tx doesn't close the window.** READ COMMITTED: the payload SELECT's snapshot
+  misses an item that a concurrent ingest/reparent commits a moment later; the
+  DELETE's cascade still eats it → orphan file. Transactionality was the wrong
+  lens — the fix is lock ordering, not atomicity: the entity/board row must be
+  locked (`FOR UPDATE`) BEFORE the payload read, so any FK reference attempt
+  (`FOR KEY SHARE`) blocks until the delete commits and then fails cleanly into
+  the retry-heal path. Note children-first delete does NOT work: deleting the
+  items rows doesn't stop a new reparent from referencing the still-live entity
+  row before the entity DELETE lands.
+- **NEW — `deleteInstance`'s last-instance guard is TOCTOU** (server.js ~1129):
+  `entityInstanceCount <= 1 → 409` is a separate read; two concurrent deletes of
+  an entity's two remaining instances both count 2, both delete, and the entity is
+  left EMPTY — a ghost card the route's own 409 exists to prevent, and nothing
+  sweeps empty entities. (The route never calls `deleteEntityIfEmpty` — by design,
+  but that design assumed the guard holds.)
+- **What the entry's tx wrap actually buys:** a crash/kill between `reparentItem`
+  and `deleteEntityIfEmpty` leaves an empty ghost entity (no data loss — the
+  instance moved first). Worth having, but it fixes the ghost, not the cascade.
+  `reparentInto` is three statements (reparent, display-name update, delete-if-
+  empty) — wrap all three.
+- **Bounded blast radius, verified:** hearts/crate memberships cascade with a
+  deleted empty entity — that's the entity-instances design (merge keeps the
+  target's hearts), not new damage. `withTx` already exists (~48).
+
+**Fix design:**
+1. `reparentInto` → `withTx` (all three statements). Fixes ghost-on-crash,
+   erases the EvalPlanQual corner.
+2. `deleteEntity` → tx with lock-first: `SELECT 1 FROM entities WHERE id=$1 FOR
+   UPDATE` → SELECT payloads → DELETE. A concurrent merge-in either committed
+   before the lock (its files make the cleanup list) or blocks on the FK lock,
+   fails 23503 after commit, and heals via the extract retry.
+3. `deleteBoard`: add the same lock-first line (`SELECT 1 FROM boards WHERE id=$1
+   FOR UPDATE`) before its payload SELECT — one line into the existing tx.
+4. `deleteInstance`: keep the 409 guard for the sequential case, add
+   `deleteEntityIfEmpty` after the delete as the race heal (atomic guard makes it
+   idempotent; a raced-empty entity gets cleaned instead of ghosting).
+5. Adjacent note-only: ingest writes the file to disk before the row insert — a
+   board/entity delete racing an upload can orphan the file via ingest's own FK
+   failure path; unlink-on-insert-error in ingest.js would close it. Separate,
+   small, not #8's core.
 
 ### 9. `tag_snapshots` grows forever
 `markTagged` appends a snapshot on every tagging (db.js ~1191). `field_snapshots` got a

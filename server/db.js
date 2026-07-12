@@ -683,6 +683,12 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
 // sources.cleanup), or null if the board doesn't exist. Rows cascade via FKs.
 export async function deleteBoard(db, id) {
   return withTx(db, async (client) => {
+    // Lock first: the tx alone doesn't stop a concurrent ingest/reparent from
+    // slipping an item between the payload read and the cascade (orphaning its
+    // file). FK references take FOR KEY SHARE on this row, so they block here
+    // and fail cleanly once the delete commits.
+    const locked = await client.query("SELECT 1 FROM boards WHERE id=$1 FOR UPDATE", [id]);
+    if (!locked.rows.length) return null;
     const items = await client.query("SELECT payload FROM items WHERE board_id=$1", [id]);
     const result = await client.query("DELETE FROM boards WHERE id=$1", [id]);
     if (result.rowCount === 0) return null;
@@ -1068,13 +1074,37 @@ export async function deleteEntityIfEmpty(db, entityId) {
   return result.rowCount > 0;
 }
 
+// Move an instance under another entity and drop the old entity if it emptied
+// out — one transaction, so a crash between the statements can't leave a ghost
+// empty entity behind, and the emptiness check observes the re-parent it
+// follows. The latest derivation wins the target's display name. Returns true
+// when the old entity was deleted (merge emptied it) — false means it kept
+// instances (split).
+export async function reparentInstance(db, itemId, target, displayName, oldEntityId) {
+  return withTx(db, async (client) => {
+    await reparentItem(client, itemId, target.id);
+    if (displayName !== target.display_name) await setEntityIdentity(client, target.id, target.identity, displayName);
+    return deleteEntityIfEmpty(client, oldEntityId);
+  });
+}
+
 // Delete an entity and (via FK cascade) all its instances. Returns the
-// instances' file entries so the caller can clean the stores.
+// instances' file entries so the caller can clean the stores. The row is
+// locked BEFORE the payload read: a concurrent merge-in takes FOR KEY SHARE on
+// this row to reference it, so it either committed first (its files make the
+// cleanup list) or blocks on the lock, fails its FK check once the delete
+// commits, and heals via the extract retry. Without the lock the cascade can
+// eat a freshly re-parented instance whose files were never read — row lost,
+// files orphaned on disk.
 export async function deleteEntity(db, id) {
-  const { rows: insts } = await db.query("SELECT payload FROM items WHERE entity_id=$1", [id]);
-  const { rows } = await db.query("DELETE FROM entities WHERE id=$1 RETURNING board_id", [id]);
-  if (!rows.length) return null;
-  return { board_id: rows[0].board_id, files: insts.flatMap((r) => r.payload?.files || []) };
+  return withTx(db, async (client) => {
+    const locked = await client.query("SELECT 1 FROM entities WHERE id=$1 FOR UPDATE", [id]);
+    if (!locked.rows.length) return null;
+    const { rows: insts } = await client.query("SELECT payload FROM items WHERE entity_id=$1", [id]);
+    const { rows } = await client.query("DELETE FROM entities WHERE id=$1 RETURNING board_id", [id]);
+    if (!rows.length) return null;
+    return { board_id: rows[0].board_id, files: insts.flatMap((r) => r.payload?.files || []) };
+  });
 }
 
 // Delete one instance row. Returns { payload, entity_id, board_id } for file

@@ -15,6 +15,7 @@ import {
   setEntityIdentity,
   markEntityProvisional,
   reparentItem,
+  reparentInstance,
   entityInstanceCount,
   deleteEntityIfEmpty,
   deleteEntity,
@@ -251,6 +252,92 @@ test("entity delete removes all instances and reports their files", async () => 
   assert.deepEqual(result.files.map((f) => f.name).sort(), ["f1.png", "f2.png"]);
   const { rows } = await db.query("SELECT 1 FROM items WHERE entity_id=$1", [eid]);
   assert.equal(rows.length, 0);
+
+  assert.equal(await deleteEntity(db, eid), null, "already gone → null");
+});
+
+// ── reparentInstance: the transactional merge/split move ─────────────────────
+
+test("reparentInstance: merge empties the old entity, deletes it, and wins the display name", async () => {
+  const boardId = await seedBoard(db, "reparent-tx-merge");
+  const winner = await createEntity(db, boardId, { identity: "amara diallo", displayName: "amara diallo" });
+  await seedInstance(boardId, winner, { name: "w.pdf", kind: "pdf" });
+  const provisional = await createEntity(db, boardId, { identity: "upload9.pdf" });
+  const instId = await seedInstance(boardId, provisional, { name: "n.pdf", kind: "pdf" });
+
+  const merged = await reparentInstance(db, instId, await getEntity(db, winner), "Amara Diallo", provisional);
+  assert.equal(merged, true, "old entity emptied → merge");
+  assert.equal(await getEntity(db, provisional), null);
+  assert.equal((await getEntity(db, winner)).display_name, "Amara Diallo", "latest derivation wins");
+  const { rows: [row] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [instId]);
+  assert.equal(row.entity_id, winner);
+});
+
+test("reparentInstance: split leaves the old entity standing and reports false", async () => {
+  const boardId = await seedBoard(db, "reparent-tx-split");
+  const old = await createEntity(db, boardId, { identity: "pile", displayName: "Pile" });
+  await seedInstance(boardId, old, { name: "s1.png", kind: "image" });
+  const instId = await seedInstance(boardId, old, { name: "s2.png", kind: "image" });
+  const target = await createEntity(db, boardId, { identity: "solo", displayName: "Solo" });
+
+  const merged = await reparentInstance(db, instId, await getEntity(db, target), "Solo", old);
+  assert.equal(merged, false, "old entity kept an instance → split");
+  assert.ok(await getEntity(db, old));
+  assert.equal(await entityInstanceCount(db, target), 1);
+});
+
+test("reparentInstance: rolls back whole when the re-parent fails", async () => {
+  const boardId = await seedBoard(db, "reparent-tx-rollback");
+  const old = await createEntity(db, boardId, { identity: "keeper", displayName: "Keeper" });
+  const instId = await seedInstance(boardId, old, { name: "k.png", kind: "image" });
+
+  await assert.rejects(
+    reparentInstance(db, instId, { id: 999999999, identity: "ghost", display_name: "Ghost" }, "Ghost", old),
+    (e) => e.code === "23503"
+  );
+  const { rows: [row] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [instId]);
+  assert.equal(row.entity_id, old, "instance untouched after rollback");
+  assert.ok(await getEntity(db, old), "old entity untouched after rollback");
+});
+
+// ── deleteEntity's lock-first vs a concurrent merge-in ───────────────────────
+
+test("deleteEntity's row lock blocks a concurrent merge-in, which fails cleanly after the delete", async () => {
+  const boardId = await seedBoard(db, "delete-lock");
+  const target = await createEntity(db, boardId, { identity: "locked", displayName: "Locked" });
+  await seedInstance(boardId, target, { name: "lk.png", kind: "image" });
+  const other = await createEntity(db, boardId, { identity: "mover", displayName: "Mover" });
+  const instId = await seedInstance(boardId, other, { name: "mv.png", kind: "image" });
+
+  // Hold the same lock deleteEntity takes first; the merge-in's FOR KEY SHARE
+  // must queue behind it and then fail its FK check — the retry-heal path —
+  // instead of slipping in and being eaten by the cascade.
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT 1 FROM entities WHERE id=$1 FOR UPDATE", [target]);
+
+    // Rejection captured as a value so the FK error can't surface as an
+    // unhandled rejection while we're still awaiting the COMMIT.
+    let settled = false;
+    const move = reparentItem(db, instId, target).then(
+      () => { settled = true; return null; },
+      (e) => { settled = true; return e; }
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(settled, false, "reparent must block behind the FOR UPDATE lock");
+
+    await client.query("DELETE FROM entities WHERE id=$1", [target]);
+    await client.query("COMMIT");
+    const err = await move;
+    assert.equal(err?.code, "23503", "clean FK failure, not a cascade-eaten row");
+  } finally {
+    await client.query("ROLLBACK").catch(() => {});
+    client.release();
+  }
+
+  const { rows: [row] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [instId]);
+  assert.equal(row.entity_id, other, "the instance survived on its old entity");
 });
 
 // ── per-instance reasoning ───────────────────────────────────────────────────

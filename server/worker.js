@@ -27,8 +27,8 @@ import {
   setEntityIdentity,
   markEntityProvisional,
   reparentItem,
+  reparentInstance,
   entityInstanceCount,
-  deleteEntityIfEmpty,
   dueLiveEntities,
   updateEntityFields,
   setEntityRefreshAt,
@@ -811,13 +811,13 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
 
   // Move an instance under the entity that already holds its derived
   // identity, keeping the fields and tags it just earned (merge and split are
-  // the same move: re-parent, then drop the old entity if it emptied out).
-  // The latest derivation wins the display name — identity can be anything
-  // (a name, a code, a date), so no cased-preference heuristics.
+  // the same move: re-parent, then drop the old entity if it emptied out —
+  // one transaction in reparentInstance, so a crash between the statements
+  // can't leave a ghost empty entity). The latest derivation wins the display
+  // name — identity can be anything (a name, a code, a date), so no
+  // cased-preference heuristics.
   async function reparentInto(row, target, displayName, oldEntityId) {
-    await reparentItem(db, row.id, target.id);
-    if (displayName !== target.display_name) await setEntityIdentity(db, target.id, target.identity, displayName);
-    if (await deleteEntityIfEmpty(db, oldEntityId)) {
+    if (await reparentInstance(db, row.id, target, displayName, oldEntityId)) {
       console.log(`merge: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}"), empty entity #${oldEntityId} deleted`);
     } else {
       console.log(`split: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}")`);
