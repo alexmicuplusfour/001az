@@ -1933,11 +1933,14 @@ div.lbp-file-thumb {
   font-family: monospace;
 }
 
-/* template picker row (top of the mapping modal body) */
+/* template picker row (very top of the mapping modal body, above the intro) */
 .mm-template-row {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #eee;
 }
 .mm-template-label {
   font-size: 11px;

@@ -46,16 +46,12 @@ export function openMappingModal() {
   });
   modalEl = overlay;
 
-  // Explanation + identity anchor
-  const intro = document.createElement("div");
-  intro.className = "mm-intro";
-  intro.innerHTML =
-    "<p>Define structured fields for each item. Connector fields come from a live " +
-    "data source; AI fields are extracted from the item's content.</p>";
-  body.appendChild(intro);
-
-  // Template row — top of the body, subtle. Applying a connector template
-  // rewires the whole mapping (input, identity, fields) in one click.
+  // Template row — very top of the body, right-aligned, divider below.
+  // Applying a connector template rewires the whole mapping (input, identity,
+  // fields) in one click — which only makes sense while the board is empty:
+  // existing items were ingested under the current input source, so once the
+  // first item lands the picker locks (no switching to a connector, no
+  // removing one that's already feeding the board).
   if (isAdmin) {
     const templateRow = document.createElement("div");
     templateRow.className = "mm-template-row";
@@ -65,7 +61,14 @@ export function openMappingModal() {
     const loadBtn = document.createElement("button");
     loadBtn.className = "mm-template-btn";
     loadBtn.textContent = inputConnector ? `Connector: ${inputConnector}` : "Load template…";
-    loadBtn.addEventListener("click", async () => {
+    if (state.items.length) {
+      loadBtn.disabled = true;
+      const why = inputConnector
+        ? "This board already has items, so its connector template can't be changed or removed. Create a new board to use a different template."
+        : "This board already has items, so a template can't be applied — its items came from file uploads. Create a new board to start from a template.";
+      loadBtn.title = why;
+      templateRow.title = why;
+    } else loadBtn.addEventListener("click", async () => {
       loadBtn.disabled = true;
       let connectors;
       try {
@@ -97,6 +100,14 @@ export function openMappingModal() {
     templateRow.append(templateLabel, loadBtn);
     body.appendChild(templateRow);
   }
+
+  // Explanation + identity anchor
+  const intro = document.createElement("div");
+  intro.className = "mm-intro";
+  intro.innerHTML =
+    "<p>Define structured fields for each item. Connector fields come from a live " +
+    "data source; AI fields are extracted from the item's content.</p>";
+  body.appendChild(intro);
 
   // Identity row — always present. Raw/AI are hand-switchable; connector-bound
   // identity renders locked with a badge, matching the connector field rows.
