@@ -69,8 +69,13 @@ cd $remoteDir
 grep -q '^APP_TAG=' .env && sed -i 's/^APP_TAG=.*/APP_TAG=$tag/' .env || echo 'APP_TAG=$tag' >> .env
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait app db extractor
 docker image prune -f >/dev/null
-docker images 001az-app --format '{{.Tag}}' | tail -n +4 | xargs -r -I{} docker rmi 001az-app:{}
-docker images 001az-extractor --format '{{.Tag}}' | tail -n +4 | xargs -r -I{} docker rmi 001az-extractor:{}
+# Tags embed yyyyMMdd-HHmmss, so lexical sort -r = newest first. Do NOT trust
+# docker images' own ordering: it sorts by image creation time, and fully
+# cache-hit rebuilds (e.g. the extractor) all share one timestamp, making the
+# order arbitrary — it once put the just-deployed tag in the "old" tail.
+# Cleanup is best-effort; an in-use image must not fail the deploy.
+docker images 001az-app --format '{{.Tag}}' | sort -r | tail -n +4 | xargs -r -I{} docker rmi 001az-app:{} || true
+docker images 001az-extractor --format '{{.Tag}}' | sort -r | tail -n +4 | xargs -r -I{} docker rmi 001az-extractor:{} || true
 echo '--- health ---'
 curl -sf http://127.0.0.1:3001/api/health && echo
 "@
