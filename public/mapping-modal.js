@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { toast } from './toast.js';
-import { openDropdown, ddRow } from './dropdown.js';
+import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { createModal } from './modal.js';
 import { ICONS } from './utils.js';
 
@@ -22,6 +22,7 @@ export function openMappingModal() {
   let identityHint = state.boardMapping?.identity?.hint || "";
   let inputConnector = state.boardMapping?.input?.connector || null; // set when a connector template is loaded
   let connectorCatalog = null;   // the active connector's full field set (manifest.fields)
+  let fileFieldCatalog = null;   // file-metadata field catalog (server/media) — file boards only
   let connectorFaces = [];       // the connector's face producers (with per-provider availability)
   let connectorLabel = null;
   let connectorProviders = [];   // [{ name, label, needsKey }] — for naming providers in hints
@@ -304,6 +305,118 @@ export function openMappingModal() {
     return row;
   }
 
+  // One INCLUDED file-metadata field (server/media): a locked row matching the
+  // connector rows — checkbox (checked; uncheck removes) + key + file:<fn> chip
+  // + kind. No liveness (files are immutable). Un-included fields aren't listed
+  // here; they're added from the "+ Add file field" menu, so the catalog isn't
+  // a wall of rows by default.
+  function makeFileCatalogRow(cat) {
+    const inc = fields.find((f) => f.from === "file" && f.key === cat.key);
+    const row = document.createElement("div");
+    row.className = "mm-row mm-row-connector";
+    const controls = document.createElement("div");
+    controls.className = "fe-head";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!inc;
+    cb.disabled = !isAdmin;
+    cb.title = "Remove this field";
+    cb.addEventListener("change", () => {
+      if (cb.checked) {
+        if (!inc) fields.push({ key: cat.key, kind: cat.kind, from: "file", fn: cat.fn });
+      } else {
+        const idx = fields.findIndex((f) => f.from === "file" && f.key === cat.key);
+        if (idx >= 0) fields.splice(idx, 1);
+      }
+      renderFields();
+    });
+
+    const keyLabel = document.createElement("span");
+    keyLabel.className = "mm-key-locked";
+    keyLabel.style.fontFamily = "monospace";
+    keyLabel.textContent = cat.key;
+
+    const badge = document.createElement("span");
+    badge.className = "mm-connector-badge";
+    badge.textContent = `file:${cat.fn}`;
+
+    const kindLabel = document.createElement("span");
+    kindLabel.className = "mm-locked-badge";
+    kindLabel.textContent = cat.kind;
+
+    controls.append(cb, keyLabel, badge, kindLabel);
+    row.appendChild(controls);
+    // A caveat some fields carry (e.g. `created` is null for browser uploads).
+    if (cat.note) {
+      const note = document.createElement("div");
+      note.className = "mm-face-hint";
+      note.textContent = cat.note;
+      row.appendChild(note);
+    }
+    return row;
+  }
+
+  // "+ Add file field" — opens a menu of the not-yet-included catalog fields,
+  // grouped by applicability (All files / Images / Documents). Keeps the modal
+  // compact: only chosen file fields render as rows above.
+  function fileMenuLabel(cat) {
+    const wrap = document.createElement("span");
+    wrap.className = "dd-label";
+    wrap.style.cssText = "display:flex;align-items:center;gap:8px;";
+    const key = document.createElement("span");
+    key.style.fontFamily = "monospace";
+    key.textContent = cat.key;
+    const kind = document.createElement("span");
+    kind.className = "mm-locked-badge";
+    kind.textContent = cat.kind;
+    wrap.append(key, kind);
+    return wrap;
+  }
+
+  function openAddFileFieldMenu(anchor) {
+    const included = new Set(fields.filter((f) => f.from === "file").map((f) => f.fn));
+    const available = (fileFieldCatalog || []).filter((c) => !included.has(c.fn));
+    if (!available.length) { toast.info("All file fields added"); return; }
+    openDropdown(anchor, {
+      align: "start",
+      minWidth: 240,
+      build: (menuBody, { close }) => {
+        const groups = [];
+        for (const c of available) {
+          let g = groups.find((x) => x.name === c.group);
+          if (!g) { g = { name: c.group, items: [] }; groups.push(g); }
+          g.items.push(c);
+        }
+        groups.forEach((g, gi) => {
+          if (gi > 0) menuBody.appendChild(ddSep());
+          const h = document.createElement("div");
+          h.style.cssText = "padding:6px 12px 2px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a8a92;";
+          h.textContent = g.name;
+          menuBody.appendChild(h);
+          for (const c of g.items) {
+            menuBody.appendChild(ddRow({
+              labelEl: fileMenuLabel(c),
+              onClick: () => {
+                fields.push({ key: c.key, kind: c.kind, from: "file", fn: c.fn });
+                close();
+                renderFields();
+              },
+            }));
+          }
+        });
+      },
+    });
+  }
+
+  function makeAddFileFieldBtn() {
+    const btn = document.createElement("button");
+    btn.className = "fe-add-facet";
+    btn.textContent = "+ Add file field";
+    btn.addEventListener("click", () => openAddFileFieldMenu(btn));
+    return btn;
+  }
+
   // AI field row — editable key/kind/hint, removable.
   function makeAiRow(f) {
     const row = document.createElement("div");
@@ -404,6 +517,32 @@ export function openMappingModal() {
       }
     }
 
+    // File fields — file boards only. Only the INCLUDED fields render as rows
+    // (with a file:<fn> chip, matching the connector rows); "+ Add file field"
+    // reveals the rest, so the ~15-field catalog isn't a wall of rows.
+    if (!inputConnector) {
+      fieldsList.appendChild(sectionTitle("File fields"));
+      const includedFile = fields.filter((f) => f.from === "file");
+      for (const f of includedFile) {
+        const cat = (fileFieldCatalog || []).find((c) => c.fn === f.fn) || { key: f.key, fn: f.fn, kind: f.kind };
+        fieldsList.appendChild(makeFileCatalogRow(cat));
+      }
+      if (!fileFieldCatalog) {
+        // Catalog still loading: show a line only when there's nothing to list.
+        if (!includedFile.length) {
+          const p = document.createElement("p");
+          p.className = "mm-empty"; p.textContent = "Loading file fields…";
+          fieldsList.appendChild(p);
+        }
+      } else if (isAdmin) {
+        fieldsList.appendChild(makeAddFileFieldBtn());
+      } else if (!includedFile.length) {
+        const p = document.createElement("p");
+        p.className = "mm-empty"; p.textContent = "No file fields.";
+        fieldsList.appendChild(p);
+      }
+    }
+
     // AI fields.
     const aiFields = fields.filter((f) => f.from === "ai");
     fieldsList.appendChild(sectionTitle("AI-extracted fields"));
@@ -423,13 +562,16 @@ export function openMappingModal() {
   // For an already-bound board, fetch the connector's catalog so un-included
   // fields + face producers show too (template load fills them directly).
   if (inputConnector && !connectorCatalog) loadCatalog();
+  // File boards: fetch the media field catalog so the "File fields" section can
+  // offer every addable field (already-included ones render checked).
+  if (!inputConnector) loadFileFields();
 
   if (isAdmin) {
     const addBtn = document.createElement("button");
     addBtn.className = "fe-add-facet";
     addBtn.textContent = "+ Add AI field";
     addBtn.addEventListener("click", () => {
-      if (fields.length >= 12) { toast.info("Maximum 12 fields"); return; }
+      if (fields.filter((f) => f.from === "ai").length >= 12) { toast.info("Maximum 12 AI fields"); return; }
       fields.push({ key: "", kind: "text", from: "ai", hint: "" });
       renderFields();
       const rows = fieldsList.querySelectorAll(".mm-key");
@@ -468,6 +610,14 @@ export function openMappingModal() {
     } catch { /* leave catalog null → the saved-fields fallback stands */ }
   }
 
+  async function loadFileFields() {
+    if (fileFieldCatalog) return;
+    try {
+      fileFieldCatalog = await fetch("/api/file-fields").then((r) => r.json());
+      renderFields();
+    } catch { /* leave null → the "Loading…" line stands, AI section still works */ }
+  }
+
   function applyTemplate(connector) {
     const t = connector.template;
     inputConnector = t.input?.connector || null;
@@ -491,9 +641,10 @@ export function openMappingModal() {
     const activeKey = document.activeElement;
     if (activeKey && fieldsList.contains(activeKey)) activeKey.blur();
 
-    // Separate AI fields (need validation) from connector fields (locked, pass through).
+    // Separate AI fields (need validation) from connector + file fields (locked, pass through).
     const aiFields = fields.filter((f) => f.from === "ai" && f.key);
     const connectorFields = fields.filter((f) => f.from === "connector");
+    const fileFields = fields.filter((f) => f.from === "file");
     const seen = new Set();
     for (const f of aiFields) {
       if (!/^[a-z][a-z0-9_]*$/.test(f.key)) { toast.error(`Invalid field key: "${f.key}"`); return; }
@@ -513,6 +664,7 @@ export function openMappingModal() {
 
     const allFields = [
       ...connectorFields.map((f) => ({ key: f.key, kind: f.kind, from: "connector", fn: f.fn, ...(f.live ? { live: true, every: f.every } : {}) })),
+      ...fileFields.map((f) => ({ key: f.key, kind: f.kind, from: "file", fn: f.fn })),
       ...aiFields.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
     ];
     const face = faceCfg.from === "connector"

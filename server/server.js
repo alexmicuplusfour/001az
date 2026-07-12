@@ -62,6 +62,7 @@ import {
   embeddingStats,
   boardEmbeddings,
   listItemPayloads,
+  boardItemPayloads,
   updateItemPayload,
   reextractItem,
   retagItem,
@@ -84,6 +85,7 @@ import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { liveFields, nextRefreshAt, faceCadence } from "./connectors/runtime.js";
+import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { mountIngest } from "./ingest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -562,7 +564,11 @@ function validateMapping(mapping) {
       return `mapping.identity.hint must be a string ≤500 chars`;
   }
   if (!Array.isArray(mapping.fields)) return "mapping.fields must be an array";
-  if (mapping.fields.length > 12) return "mapping.fields may have at most 12 entries";
+  // The cap is on AI fields only — they generate the extraction schema. Connector
+  // and file fields are deterministic (bounded by their catalogs) and excluded
+  // from the record_fields tool, so they don't count against it.
+  if (mapping.fields.filter((f) => f.from === "ai").length > 12)
+    return "mapping may have at most 12 AI fields";
   const seen = new Set();
   for (const f of mapping.fields) {
     if (!f.key || typeof f.key !== "string" || !/^[a-z][a-z0-9_]*$/.test(f.key))
@@ -570,11 +576,22 @@ function validateMapping(mapping) {
     if (seen.has(f.key)) return `duplicate field key: ${f.key}`;
     seen.add(f.key);
     if (!MAPPING_KINDS.has(f.kind)) return `invalid kind "${f.kind}" for field "${f.key}"`;
-    if (f.from !== "ai" && f.from !== "connector") return `unsupported source "${f.from}" for field "${f.key}"`;
+    if (f.from !== "ai" && f.from !== "connector" && f.from !== "file")
+      return `unsupported source "${f.from}" for field "${f.key}"`;
     if (f.from === "ai" && f.hint !== undefined && (typeof f.hint !== "string" || f.hint.length > 500))
       return `hint for field "${f.key}" must be a string ≤500 chars`;
     if (f.from === "connector" && (!f.fn || typeof f.fn !== "string"))
       return `connector field "${f.key}" requires a fn string`;
+    // File fields (from:"file"): a deterministic media-metadata projection.
+    // Only on file boards (no connector input), fn must be a known media field,
+    // and its kind must match the catalog descriptor.
+    if (f.from === "file") {
+      if (mapping.input && mapping.input !== "files")
+        return `file field "${f.key}" is only valid on a files board`;
+      const desc = f.fn ? getMediaField(f.fn) : null;
+      if (!desc) return `unknown file field fn "${f.fn}" for "${f.key}"`;
+      if (f.kind !== desc.kind) return `file field "${f.key}" must have kind "${desc.kind}"`;
+    }
     // Per-field liveness (slice 5c): connector fields only; `every` is minutes.
     if (f.live !== undefined) {
       if (typeof f.live !== "boolean") return `"live" for field "${f.key}" must be a boolean`;
@@ -603,6 +620,40 @@ function validateMapping(mapping) {
     }
   }
   return null;
+}
+
+// Re-project file-metadata fields (server/media) over a board's existing
+// instances after its file-field set changes: strip the previously-projected
+// file fields, add the current ones, leave AI fields alone. Pure projection of
+// each stored payload entry — no file is re-opened. Writes only on a real change.
+async function backfillFileFields(boardId, mapping) {
+  const mappingFields = (mapping && mapping.fields) || [];
+  const wantsFileFields = mappingFields.some((f) => f.from === "file");
+  for (const it of await boardItemPayloads(db, boardId)) {
+    let entry = it.payload?.files?.[0];
+    if (!entry) continue; // fileless (connector tag vehicle) — nothing to project
+    // Legacy entries (uploaded before file fields) carry no size/meta; re-derive
+    // once from the stored file (header-only reads) so their file fields aren't
+    // all null. The enriched entry is persisted, so the cost is paid once. `added`
+    // falls back to the item's created_at (modified/created were never captured).
+    let enrichedEntry = false;
+    if (wantsFileFields && entry.meta === undefined) {
+      const m = await sources.metaFor(entry);
+      entry = { ...entry, size: m?.size ?? null, meta: m?.meta || {}, addedAt: entry.addedAt ?? it.created_at ?? null };
+      enrichedEntry = true;
+    }
+    const existing = it.payload?.fields || {};
+    const kept = {};
+    for (const [k, v] of Object.entries(existing)) if (v?.src !== "file") kept[k] = v;
+    const merged = { ...kept, ...extractFileFields(entry, mappingFields) };
+    if (enrichedEntry) {
+      const files = [...it.payload.files];
+      files[0] = entry;
+      await updateItemPayload(db, it.id, { files, fields: merged });
+    } else if (JSON.stringify(merged) !== JSON.stringify(existing)) {
+      await updateItemPayload(db, it.id, { fields: merged });
+    }
+  }
 }
 
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
@@ -644,6 +695,11 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   // every entity's next refresh (empty live set clears their schedules).
   if (update.mapping !== undefined) {
     await rescheduleEntityRefreshes(db, id, liveFields(update.mapping), faceCadence(update.mapping));
+    // File-field set changed → re-project deterministic metadata for existing
+    // instances (add/remove file fields in place; AI fields untouched). Only for
+    // file boards; connector items have no file entry so they'd no-op anyway.
+    const m = update.mapping;
+    if (m === null || !m.input || m.input === "files") await backfillFileFields(id, m);
   }
 
   // The moment auto-tagging comes back on, sweep the board: queue everything
@@ -1052,6 +1108,12 @@ app.get("/api/connectors", requireAuth, wrap(async (_req, res) => {
     out.push({ ...c, activeProvider, faces: conn.renderableFaces ? conn.renderableFaces(activeProvider) : c.faces });
   }
   res.json(out);
+}));
+
+// The file-metadata field catalog (server/media) for the mapping modal's "File
+// fields" section — static descriptors, no db, like a connector manifest.
+app.get("/api/file-fields", requireAuth, wrap(async (_req, res) => {
+  res.json(mediaCatalog());
 }));
 
 app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {

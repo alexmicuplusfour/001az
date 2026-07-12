@@ -30,6 +30,14 @@ export function createSources({ galleryDir, thumbsDir }) {
 
     backfillDims: image.backfillDims,
 
+    // Re-derive size + kind-specific metadata for a legacy file entry from disk
+    // (file-field backfill). Dispatch by kind — image handler owns images,
+    // everything else is a doc. Returns { size, meta } or null.
+    metaFor(entry) {
+      if (!entry || !entry.name) return Promise.resolve(null);
+      return ((entry.kind || "image") === "image" ? image : doc).metaFor(entry);
+    },
+
     // Release handler-owned resources (the docx extraction worker pool) on
     // graceful shutdown. Images hold none.
     close: () => doc.close?.(),

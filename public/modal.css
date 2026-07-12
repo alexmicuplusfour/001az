@@ -63,7 +63,7 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .07em;
-  color: #9aa0aa;
+  color: var(--text, #111);
   margin-bottom: 12px;
 }
 
@@ -209,6 +209,15 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+/* Section titles are siblings in the gap:12 column above. The shared rule's
+   margin-bottom stacks on that gap, so a heading ends up ~12px below the prior
+   section but ~24px above its own content — drifting toward the wrong group.
+   Here, pull it away from the section above (incl. the identity/face block over
+   the first heading) and tighten it to its own content below. */
+.mm-fields .modal-section-title {
+  margin-top: 10px;
+  margin-bottom: 0;
 }
 .mm-row {
   background: #f7f7fa;

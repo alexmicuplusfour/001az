@@ -36,6 +36,24 @@ export function docSource({ galleryDir, thumbsDir }) {
     // Terminate the extraction workers (graceful shutdown).
     close: () => docxPool.close(),
 
+    // Re-derive size + doc metadata for a legacy entry (uploaded before file
+    // fields) from the stored file: pdfinfo for pdfs (cheap, header/xref only),
+    // the extracted-text sidecar for docx, the file itself for text. Returns
+    // { size, meta } or null when unreadable.
+    async metaFor(entry) {
+      try {
+        const p = path.join(galleryDir, entry.name);
+        const stat = await fs.promises.stat(p);
+        let meta = {};
+        if (entry.kind === "pdf") meta = await pdfInfo(p);
+        else if (entry.kind === "text") meta = textCounts(await fs.promises.readFile(p, "utf8"));
+        else if (entry.kind === "docx") meta = textCounts(await fs.promises.readFile(p + ".txt", "utf8").catch(() => ""));
+        return { size: stat.size, meta };
+      } catch {
+        return null;
+      }
+    },
+
     // tmpPath -> stored original (+ pdf preview); returns the payload file
     // entry, or null when the bytes don't match the claimed type.
     async ingest(tmpPath, originalName) {
@@ -48,20 +66,25 @@ export function docSource({ galleryDir, thumbsDir }) {
       if (kind === "text" && buf.subarray(0, 8192).includes(0)) return null;
 
       const filename = `${crypto.randomBytes(8).toString("hex")}.${ext}`;
-      const entry = { name: filename, original_name: originalName || filename, kind };
+      // size + meta feed the document file fields (server/media); meta is filled
+      // per kind below from work this handler already does (pdfinfo, text extract).
+      const entry = { name: filename, original_name: originalName || filename, kind, size: buf.length, meta: {} };
 
       if (kind === "pdf") {
-        const pages = await pdfPages(tmpPath);
+        const { pages, title } = await pdfInfo(tmpPath);
         if (pages != null && pages > PDF_MAX_PAGES) {
           const err = new Error(`PDF too long (max ${PDF_MAX_PAGES} pages)`);
           err.reason = err.message;
           throw err;
         }
+        entry.meta = { pages, title };
         const dims = await renderPdfPreview(tmpPath, path.join(thumbsDir, filename + ".webp"));
         if (dims) { entry.w = dims.w; entry.h = dims.h; }
       }
       if (kind === "text") {
-        const dims = await renderTextPreview(buf.toString("utf8"), path.join(thumbsDir, filename + ".webp"));
+        const text = buf.toString("utf8");
+        entry.meta = textCounts(text);
+        const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));
         if (dims) { entry.w = dims.w; entry.h = dims.h; }
       }
       if (kind === "docx") {
@@ -74,6 +97,7 @@ export function docSource({ galleryDir, thumbsDir }) {
         const extracted = await docxPool.extract(buf);
         if (!extracted) return null;
         const { text, html } = extracted;
+        entry.meta = textCounts(text);
         await fs.promises.writeFile(path.join(galleryDir, filename + ".txt"), text);
         await fs.promises.writeFile(path.join(galleryDir, filename + ".html"), docHtml(html));
         const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));
@@ -86,16 +110,28 @@ export function docSource({ galleryDir, thumbsDir }) {
   };
 }
 
-// Page count via poppler's pdfinfo; null when poppler isn't installed (or the
-// count can't be read) — the API's own limit is the backstop then.
-async function pdfPages(pdfPath) {
+// Page count + title via poppler's pdfinfo; nulls when poppler isn't installed
+// (or a line can't be read). `pages` also backstops the page cap — the API's
+// own limit is the fallback when poppler is absent.
+async function pdfInfo(pdfPath) {
   try {
     const { stdout } = await run("pdfinfo", [pdfPath]);
-    const m = stdout.match(/^Pages:\s+(\d+)/m);
-    return m ? Number(m[1]) : null;
+    const pages = stdout.match(/^Pages:\s+(\d+)/m);
+    const title = stdout.match(/^Title:\s+(.+?)\s*$/m);
+    return { pages: pages ? Number(pages[1]) : null, title: title ? title[1] : null };
   } catch {
-    return null;
+    return { pages: null, title: null };
   }
+}
+
+// Word + line counts for text-bearing documents (txt/md/csv and docx's
+// extracted text). Pure — the handler already has the string in memory.
+function textCounts(text) {
+  const s = text || "";
+  return {
+    word_count: (s.match(/\S+/g) || []).length,
+    line_count: s ? s.split(/\r\n|\r|\n/).length : 0,
+  };
 }
 
 // Wrap mammoth's HTML fragment in a minimal, readable document for the

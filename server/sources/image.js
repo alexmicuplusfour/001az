@@ -13,6 +13,16 @@ const SVG_RASTER_WIDTH = 2000; // SVG uploads are rasterized to WebP at this wid
 const MAX_PIXELS = 40e6; // decode cap: a 40MP image is ~160 MB of raw pixels
 const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };
 
+// The original-resolution metadata surfaced for image file fields (server/media).
+// Shared by ingest (from the decoded buffer) and metaFor (from the stored file).
+const pickImageMeta = (m) => ({
+  width: m.width ?? null,
+  height: m.height ?? null,
+  format: m.format || null,
+  space: m.space || null,
+  hasAlpha: m.hasAlpha ?? null,
+});
+
 export function imageSource({ galleryDir, thumbsDir }) {
   fs.mkdirSync(galleryDir, { recursive: true });
   fs.mkdirSync(thumbsDir, { recursive: true });
@@ -68,8 +78,30 @@ export function imageSource({ galleryDir, thumbsDir }) {
           kind: "image",
           w: thumbInfo.width,
           h: thumbInfo.height,
+          // Stored-file size + original-resolution metadata for file fields
+          // (server/media). meta.width/height are the source pixels — distinct
+          // from w/h, which are the thumbnail's.
+          size: buf.length,
+          meta: pickImageMeta(meta),
         };
       });
+    },
+
+    // Re-derive size + original resolution for a legacy entry (uploaded before
+    // file fields) from the stored file. sharp.metadata() reads the header only —
+    // no full pixel decode — so this is cheap even on the small box. Returns
+    // { size, meta } or null when the file can't be read.
+    async metaFor(entry) {
+      try {
+        const p = path.join(galleryDir, entry.name);
+        const [stat, m] = await Promise.all([
+          fs.promises.stat(p),
+          sharp(p, { pages: 1, limitInputPixels: MAX_PIXELS }).metadata(),
+        ]);
+        return { size: stat.size, meta: pickImageMeta(m) };
+      } catch {
+        return null;
+      }
     },
 
     // Legacy: items uploaded before thumb dimensions were stored. Image kind

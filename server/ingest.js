@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { extractFileFields } from "./media/index.js";
 
 // Backstop limits only — the client pre-filters oversized files and chunks
 // large drops (see UPLOAD_* in app.js; keep UPLOAD_MAX_BYTES in sync). If
@@ -35,15 +36,33 @@ export function mountIngest(app, { db, sources }) {
       return res.status(400).json({ error: "valid board required" });
     }
 
+    const now = Date.now();
+    // Per-file original modified time, sent by the client (File.lastModified),
+    // aligned to req.files order. Absent → null (the `modified` file field stays
+    // empty; the web platform exposes no creation date either).
+    const lastModifieds = [].concat((req.body && req.body.lastModified) || []);
+
     const uploaded = [];
     const rejected = [];
+    let fileIdx = -1;
     for (const f of req.files || []) {
+      fileIdx++;
       try {
         const file = await sources.forUpload(f.originalname).ingest(f.path, f.originalname);
         if (!file) {
           rejected.push({ name: f.originalname, reason: "unsupported file type" });
           continue;
         }
+        // Stamp the date timestamps onto the stored entry so file-field values
+        // (server/media) are a self-contained projection of payload.files —
+        // recomputable at extract/backfill without re-opening the file.
+        const lm = Number(lastModifieds[fileIdx]);
+        file.addedAt = now;
+        file.modifiedAt = Number.isFinite(lm) && lm > 0 ? lm : null;
+        file.createdAt = null; // unavailable for browser uploads
+        // Deterministic file-metadata fields land now (no AI, no API), independent
+        // of the AI mapping/auto-tag gate below.
+        const fileFields = extractFileFields(file, board.mapping?.fields);
         // Stamp the board's mapping when it has AI fields — the item carries
         // its own copy so re-extraction replays the mapping it was built with,
         // never the (potentially changed) board default.
@@ -53,7 +72,7 @@ export function mountIngest(app, { db, sources }) {
         const hasMapping =
           board.mapping?.identity?.from === "ai" ||
           (Array.isArray(board.mapping?.fields) && board.mapping.fields.some((f) => f.from === "ai"));
-        const payload = { identity: file.name, files: [file], fields: {}, ...(hasMapping ? { mapping: board.mapping } : {}) };
+        const payload = { identity: file.name, files: [file], fields: fileFields, ...(hasMapping ? { mapping: board.mapping } : {}) };
         // Auto-tag off → held (releaseHeld routes to pending_extract when mapped).
         // Auto-tag on + mapping → pending_extract; otherwise → pending.
         const status = board.auto_tag ? (hasMapping ? "pending_extract" : "pending") : "held";

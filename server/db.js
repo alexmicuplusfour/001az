@@ -198,6 +198,14 @@ export async function listItemPayloads(db) {
   return rows;
 }
 
+// One board's item payloads — used to backfill file-metadata fields when a
+// board's file-field set changes (server/media projection over stored entries).
+// created_at rides along so a legacy entry can source its `added` date from it.
+export async function boardItemPayloads(db, boardId) {
+  const { rows } = await db.query("SELECT id, payload, created_at FROM items WHERE board_id=$1 ORDER BY id", [boardId]);
+  return rows;
+}
+
 export async function getItemBoard(db, id) {
   const { rows } = await db.query("SELECT board_id FROM items WHERE id=$1", [id]);
   return rows[0] || null;

@@ -1906,7 +1906,7 @@ div.lbp-file-thumb {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #8a8a96;
+  color: var(--text, #111);
 }
 .mm-template-btn {
   font-size: 12px;

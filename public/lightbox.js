@@ -13,6 +13,15 @@ function formatFieldNumber(key, v) {
   if (/change|pct|percent/.test(key)) {
     return (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
   }
+  // File-metadata fields (server/media) — plain magnitudes, not currency.
+  if (key === "file_size") {
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    let n = v, i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + u[i];
+  }
+  if (key === "megapixels") return v + " MP";
+  if (/^(width|height|pages|word_count|line_count)$/.test(key)) return v.toLocaleString();
   if (/market_cap|volume/.test(key)) {
     const abs = Math.abs(v);
     if (abs >= 1e12) return "$" + (v / 1e12).toFixed(2) + "T";

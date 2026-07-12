@@ -119,7 +119,13 @@ async function uploadChunk(chunk) {
   document.dispatchEvent(new Event('app:render'));
 
   const fd = new FormData();
-  for (const f of chunk) fd.append("files", f);
+  // Interleave each file with its original modified time (File.lastModified);
+  // multer keeps both same-named field arrays in order, so the server aligns
+  // lastModified[i] to files[i] for the `modified` file-metadata field.
+  for (const f of chunk) {
+    fd.append("files", f);
+    fd.append("lastModified", String(f.lastModified || ""));
+  }
 
   let data = null;
   let failReason = "network error";

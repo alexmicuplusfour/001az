@@ -38,6 +38,7 @@ import {
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
+import { extractFileFields } from "./media/index.js";
 
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
@@ -215,7 +216,9 @@ Return your answer only by calling the record_tags tool.`;
 // Pure function — no cache needed (extraction runs once per item; mappings
 // vary per item so a board-level cache wouldn't help).
 export function buildFieldsPrompt(mapping) {
-  const fields = (mapping && mapping.fields) || [];
+  // Only AI fields are extracted here; file fields (from:"file") are projected
+  // deterministically from the stored entry, connector fields come from the source.
+  const fields = ((mapping && mapping.fields) || []).filter((f) => f.from === "ai");
   const hasDerivedIdentity = mapping?.identity?.from === "ai";
   const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.hint || f.key}`);
 
@@ -655,9 +658,14 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       tool: { name: "record_fields", description: "Record the extracted fields for this item." },
     });
 
-    // Lenient-validate each field: wrong type → null (keep the why sentence).
-    const fields = {};
-    for (const f of (mapping.fields || [])) {
+    // Seed with the deterministic file fields projected from the stored entry,
+    // so the payload.fields write below (markExtracted replaces the map) doesn't
+    // drop them. Projected from the CURRENT board mapping (like the backfill), so
+    // a file-field edit during the pending window still lands; the stamped mapping
+    // only governs AI replay. Keys are unique, so AI fields never collide.
+    const fields = extractFileFields(row.payload.files?.[0], board?.mapping?.fields || mapping.fields);
+    // Lenient-validate each AI field: wrong type → null (keep the why sentence).
+    for (const f of (mapping.fields || []).filter((f) => f.from === "ai")) {
       const entry = input[f.key];
       if (!entry) continue;
       const why = typeof entry.why === "string" ? entry.why.trim() : "";
