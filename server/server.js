@@ -64,6 +64,7 @@ import {
   listItemPayloads,
   boardItemPayloads,
   updateItemPayload,
+  updateItemPayloads,
   reextractItem,
   retagItem,
   insertItem,
@@ -638,16 +639,29 @@ function validateMapping(mapping) {
 async function backfillFileFields(boardId, mapping) {
   const mappingFields = (mapping && mapping.fields) || [];
   const wantsFileFields = mappingFields.some((f) => f.from === "file");
-  for (const it of await boardItemPayloads(db, boardId)) {
+  const items = await boardItemPayloads(db, boardId);
+
+  // Legacy entries (uploaded before file fields) carry no size/meta; re-derive it
+  // once from the stored file (header-only reads) so their file fields aren't all
+  // null. The reads are independent, so run them concurrently rather than one at a
+  // time — this is the bulk of the wait on a board's first file-field save.
+  const needsEnrich = items.map((it) => {
+    const entry = it.payload?.files?.[0];
+    return wantsFileFields && !!entry && entry.meta === undefined;
+  });
+  const metas = await Promise.all(items.map((it, i) =>
+    needsEnrich[i] ? sources.metaFor(it.payload.files[0]) : null
+  ));
+
+  const patches = []; // [{ id, patch }] — flushed in a single bulk write below.
+  items.forEach((it, i) => {
     let entry = it.payload?.files?.[0];
-    if (!entry) continue; // fileless (connector tag vehicle) — nothing to project
-    // Legacy entries (uploaded before file fields) carry no size/meta; re-derive
-    // once from the stored file (header-only reads) so their file fields aren't
-    // all null. The enriched entry is persisted, so the cost is paid once. `added`
+    if (!entry) return; // fileless (connector tag vehicle) — nothing to project
+    // The enriched entry is persisted, so the header read is paid once. `added`
     // falls back to the item's created_at (modified/created were never captured).
     let enrichedEntry = false;
-    if (wantsFileFields && entry.meta === undefined) {
-      const m = await sources.metaFor(entry);
+    if (needsEnrich[i]) {
+      const m = metas[i];
       entry = { ...entry, size: m?.size ?? null, meta: m?.meta || {}, addedAt: entry.addedAt ?? it.created_at ?? null };
       enrichedEntry = true;
     }
@@ -658,11 +672,14 @@ async function backfillFileFields(boardId, mapping) {
     if (enrichedEntry) {
       const files = [...it.payload.files];
       files[0] = entry;
-      await updateItemPayload(db, it.id, { files, fields: merged });
+      patches.push({ id: it.id, patch: { files, fields: merged } });
     } else if (JSON.stringify(merged) !== JSON.stringify(existing)) {
-      await updateItemPayload(db, it.id, { fields: merged });
+      patches.push({ id: it.id, patch: { fields: merged } });
     }
-  }
+  });
+
+  // One bulk write instead of a round-trip per changed item.
+  await updateItemPayloads(db, patches);
 }
 
 app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {

@@ -192,6 +192,19 @@ export async function updateItemPayload(db, id, patch) {
   await db.query("UPDATE items SET payload = payload || $1::jsonb WHERE id=$2", [JSON.stringify(patch || {}), id]);
 }
 
+// Bulk form of updateItemPayload: shallow-merge a per-item patch into many items
+// in a single round-trip. `patches` is [{ id, patch }]. The file-field backfill
+// uses this so a mapping change touching every item is one write, not one per row.
+export async function updateItemPayloads(db, patches) {
+  if (!patches.length) return;
+  await db.query(
+    `UPDATE items AS i SET payload = i.payload || u.patch
+     FROM jsonb_to_recordset($1::jsonb) AS u(id bigint, patch jsonb)
+     WHERE i.id = u.id`,
+    [JSON.stringify(patches)]
+  );
+}
+
 // Every item's { id, payload } (startup sweeps like the thumb-dims backfill).
 export async function listItemPayloads(db) {
   const { rows } = await db.query("SELECT id, payload FROM items ORDER BY id");
@@ -1025,7 +1038,16 @@ export async function requeueItemForTag(db, id) {
 // mapping's live connector fields [{ key, every }]; `faceCad` = { every } when
 // the face is live, else null. Empty/null both clear that term.
 export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = null, now = Date.now()) {
+  // Nothing live and no live face → every entity's next refresh is null. Clear the
+  // whole board in one statement instead of a write per entity. This is the common
+  // case on a file board, where no field can be live — so the mapping save that
+  // used to fan out N no-op writes now does a single targeted one.
+  if (!live.length && !faceCad) {
+    await db.query("UPDATE entities SET refresh_at=NULL WHERE board_id=$1 AND refresh_at IS NOT NULL", [boardId]);
+    return;
+  }
   const { rows } = await db.query("SELECT id, fields, face_at FROM entities WHERE board_id=$1", [boardId]);
+  const sched = [];
   for (const e of rows) {
     let next = null;
     for (const f of live) {
@@ -1038,8 +1060,16 @@ export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = nul
       const due = e.face_at != null ? e.face_at + faceCad.every * 60000 : now;
       if (next === null || due < next) next = due;
     }
-    await db.query("UPDATE entities SET refresh_at=$1 WHERE id=$2", [next, e.id]);
+    sched.push({ id: e.id, nx: next });
   }
+  if (!sched.length) return;
+  // One bulk write instead of a round-trip per entity.
+  await db.query(
+    `UPDATE entities AS e SET refresh_at = u.nx
+     FROM jsonb_to_recordset($1::jsonb) AS u(id bigint, nx bigint)
+     WHERE e.id = u.id`,
+    [JSON.stringify(sched)]
+  );
 }
 
 // Re-run the full pipeline for every instance of an entity (the card-level
