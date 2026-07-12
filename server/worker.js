@@ -34,6 +34,7 @@ import {
   setEntityRefreshAt,
   addFieldSnapshot,
   pruneFieldSnapshots,
+  pruneTagSnapshots,
   requeueItemForTag,
   advanceFaced,
 } from "./db.js";
@@ -747,16 +748,26 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   const REFRESH_BATCH = Math.max(1, Number(process.env.REFRESH_BATCH) || 20);
   let refreshBackoffUntil = 0;
 
-  // Movement-history retention: field_snapshots older than this are dropped.
-  // 0 disables the prune (keep forever). Checked hourly, not per tick — the
-  // DELETE is cheap but there's no point running it every 3s.
+  // Snapshot retention, checked hourly not per tick — the DELETEs are cheap
+  // but there's no point running them every 3s. 0 disables a prune (keep
+  // forever). field_snapshots (movement history) defaults to 90 days;
+  // tag_snapshots (judgment history) defaults to keep-forever — the dedupe in
+  // addTagSnapshot means every row is a real judgment change, i.e. the
+  // then-vs-now data itself, so age-pruning it is opt-in.
   const SNAPSHOT_RETENTION_DAYS = Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 90);
+  const TAG_SNAPSHOT_RETENTION_DAYS = Number(process.env.TAG_SNAPSHOT_RETENTION_DAYS ?? 0);
   let nextPruneAt = 0;
   async function pruneSnapshots() {
-    if (!SNAPSHOT_RETENTION_DAYS || Date.now() < nextPruneAt) return;
+    if ((!SNAPSHOT_RETENTION_DAYS && !TAG_SNAPSHOT_RETENTION_DAYS) || Date.now() < nextPruneAt) return;
     nextPruneAt = Date.now() + 3600000;
-    const n = await pruneFieldSnapshots(db, Date.now() - SNAPSHOT_RETENTION_DAYS * 86400000);
-    if (n) console.log(`pruned ${n} field snapshot(s) older than ${SNAPSHOT_RETENTION_DAYS}d`);
+    if (SNAPSHOT_RETENTION_DAYS) {
+      const n = await pruneFieldSnapshots(db, Date.now() - SNAPSHOT_RETENTION_DAYS * 86400000);
+      if (n) console.log(`pruned ${n} field snapshot(s) older than ${SNAPSHOT_RETENTION_DAYS}d`);
+    }
+    if (TAG_SNAPSHOT_RETENTION_DAYS) {
+      const n = await pruneTagSnapshots(db, Date.now() - TAG_SNAPSHOT_RETENTION_DAYS * 86400000);
+      if (n) console.log(`pruned ${n} tag snapshot(s) older than ${TAG_SNAPSHOT_RETENTION_DAYS}d`);
+    }
   }
 
   async function refreshDue() {

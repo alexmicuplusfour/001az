@@ -596,11 +596,77 @@ window lives in the delete routes instead:
    failure path; unlink-on-insert-error in ingest.js would close it. Separate,
    small, not #8's core.
 
-### 9. `tag_snapshots` grows forever
+### 9. `tag_snapshots` grows forever — FIXED
+**Status: fixed (local) as designed. 233 tests green (6 new in
+test/tag-snapshots.test.js).** Shipped: dedupe-on-append in `addTagSnapshot`
+(order-insensitive tags + undecided vs the item's latest snapshot; reasoning and
+source excluded) — kills the periodic-retag, retag_on_refresh, and facet-less
+empty-row growth paths at the source; `pruneTagSnapshots` backstop wired into the
+hourly prune block behind its own `TAG_SNAPSHOT_RETENTION_DAYS` knob (default 0 =
+keep forever — post-dedupe every row is a real judgment change), compose
+passthrough + .env.example entry included. Double-check additions: migration
+`0013_dedupe_tag_snapshots.sql` collapses the HISTORICAL duplicate chains the
+forward fix can't touch (keeps run heads; jsonb equality is order-sensitive =
+conservative); known-benign: the dedupe's read-then-insert isn't atomic, so the
+#7 stale-write race can still land one duplicate row — hygiene not correctness,
+and #7's fence removes the stale append. Original analysis kept below.
+
 `markTagged` appends a snapshot on every tagging (db.js ~1191). `field_snapshots` got a
 retention prune; `tag_snapshots` didn't. A live board with `retag_on_refresh` plus
 periodic retags writes one row per item per pass, unbounded. Mirror the field-snapshot
 prune.
+
+Verified in depth; the growth engine turns out to be duplicates, not the missing
+prune — and the entry's fix would delete the wrong rows:
+
+- **CONFIRMED, and then some:** two writers (`markTagged` → source 'ai',
+  `setItemTags` → source 'user', both via `addTagSnapshot`, db.js ~261), and ZERO
+  readers anywhere — server, client, scripts. The table is write-only today; its
+  schema comment states the purpose: "scheduled retags accrue a timeline instead
+  of overwriting the only copy" — the thesis-then-vs-now feature the entity-boards
+  plan wants, not yet built.
+- **SHARPENED — the discipline mismatch is the bug:** `field_snapshots` writes
+  only on MOVEMENT (`addFieldSnapshot` runs under `if (moved.length)`; its schema
+  comment: "a flat refresh writes nothing"). `tag_snapshots` writes on EVERY
+  tagging event, changed or not. The unbounded growth is overwhelmingly identical
+  rows re-recording an unchanged judgment:
+  - `retag_on_refresh` live board, 1-min cadence, volatile symbol: movement →
+    requeue → markTagged → snapshot ≈ 1,440 rows/day/item at ~0.5–2 KB each
+    (reasoning JSONB) — order of a GB/year per item;
+  - periodic `retagBoard`: one row per item per pass — a daily retag of a
+    1,000-item board is ~365k rows/year, identical for every stable item;
+  - pure junk: extraction-only (facet-less) boards — `processOne`'s no-facets
+    path calls `markTagged(id, [], false, {})`, appending an EMPTY snapshot per
+    item per pass.
+- **SHARPENED — a bare age prune is the wrong primary fix for this table:** it
+  deletes exactly what the table exists for (the long-term "then" of
+  then-vs-now) while keeping the noise — 90 days of per-minute duplicates is
+  still ~130k rows/item inside the window. The true mirror of `field_snapshots`
+  is not its prune but its write-on-change discipline.
+- Adjacent: the composite index `(item_id, tagged_at)` serves a latest-per-item
+  lookup perfectly, but neither snapshot table has an index for an age prune
+  (`WHERE …_at < cutoff` is a seq scan) — same for field_snapshots today, fine
+  at this scale, note-only.
+- #7 interplay: the fence work will make `markTagged` skip the snapshot when the
+  stamp is discarded; dedupe composes with that cleanly.
+
+**Fix design:**
+1. Dedupe-on-append in `addTagSnapshot`: fetch the item's latest snapshot (the
+   existing index fits exactly), skip the INSERT when tags (order-insensitive) +
+   `undecided` match. Reasoning is EXCLUDED from the comparison — the model
+   re-words it every call; it's presentation, not judgment. Source is excluded
+   too (a user's no-op save appends nothing). This kills all three growth paths
+   at the source and gives a snapshot the same meaning as a field snapshot: the
+   judgment CHANGED.
+2. Prune as backstop, mirroring `pruneFieldSnapshots` and wired into the same
+   hourly `pruneSnapshots` block — but its own knob (`TAG_SNAPSHOT_RETENTION_DAYS`),
+   NOT the shared 90-day one: post-dedupe the surviving rows are real judgment
+   changes, i.e. the product's data. Recommend default 0 (keep forever — growth
+   is now bounded by actual judgment churn, which is small) with the knob there
+   for ops; compose passthrough for it (the #5 lesson).
+3. Tests: dedupe (same tags reordered → skipped; undecided flip → appended;
+   changed tags → appended; facet-less empty repeat → one row total; user no-op
+   → skipped) + prune cutoff mirroring liveness.test.js's.
 
 ### 10. Queue-fairness gaps (design choices with sharp edges)
 - Extract leg's early `return` in `tick()` (worker.js ~924): a 500-file upload

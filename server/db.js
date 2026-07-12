@@ -257,8 +257,26 @@ export async function setItemTags(db, id, tags) {
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
 }
 
+// Order-insensitive tag comparison for the snapshot dedupe below.
+const sameTagSet = (a, b) => {
+  const x = [...(a || [])].sort(), y = [...(b || [])].sort();
+  return x.length === y.length && x.every((t, i) => t === y[i]);
+};
+
 // Append one row of judgment history (see tag_snapshots in 0001_baseline.sql).
+// History records CHANGES — the mirror of field_snapshots' moved-only
+// discipline: a tagging that lands the same tags and verdict as the item's
+// latest snapshot appends nothing. Reasoning is excluded from the comparison
+// (the model re-words it every call — presentation, not judgment), and so is
+// source (a user's no-op save is still a no-op). Without this, a periodic
+// retag re-records every stable item's unchanged judgment each pass, and a
+// retag_on_refresh live board writes ~1.4k identical rows per item per day.
 async function addTagSnapshot(db, itemId, source, tags, reasoning, undecided) {
+  const { rows: [last] } = await db.query(
+    "SELECT tags, undecided FROM tag_snapshots WHERE item_id=$1 ORDER BY tagged_at DESC, id DESC LIMIT 1",
+    [itemId]
+  );
+  if (last && last.undecided === undecided && sameTagSet(last.tags, tags)) return;
   await db.query(
     "INSERT INTO tag_snapshots (item_id, source, tags, reasoning, undecided, tagged_at) VALUES ($1, $2, $3, $4, $5, $6)",
     [itemId, source, JSON.stringify(tags || []), JSON.stringify(reasoning || {}), undecided, Date.now()]
@@ -1164,6 +1182,14 @@ export async function addFieldSnapshot(db, entityId, fields, source, at) {
 // Returns the number of rows removed.
 export async function pruneFieldSnapshots(db, cutoff) {
   const { rowCount } = await db.query("DELETE FROM field_snapshots WHERE refreshed_at < $1", [cutoff]);
+  return rowCount;
+}
+
+// The judgment-history counterpart. Post-dedupe every row is a real judgment
+// change (the then-vs-now data), so this backstop defaults to disabled — see
+// TAG_SNAPSHOT_RETENTION_DAYS in the worker.
+export async function pruneTagSnapshots(db, cutoff) {
+  const { rowCount } = await db.query("DELETE FROM tag_snapshots WHERE tagged_at < $1", [cutoff]);
   return rowCount;
 }
 
