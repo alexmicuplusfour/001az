@@ -245,15 +245,22 @@ export function buildFieldsPrompt(mapping) {
   // deterministically from the stored entry, connector fields come from the source.
   const fields = ((mapping && mapping.fields) || []).filter((f) => f.from === "ai");
   const hasDerivedIdentity = mapping?.identity?.from === "ai";
+  const identityHint = hasDerivedIdentity ? (mapping.identity.hint || "").trim() : "";
   const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.hint || f.key}`);
 
-  const identityNote = hasDerivedIdentity
-    ? `The identity field is the entity's unique key on this board — normalise it ` +
-      `consistently so the same entity always produces the same value.\n\n`
-    : "";
+  // Identity is just another extraction field to the model: its hint rides in
+  // the system-text field list like everyone else's, first (mirroring schema
+  // order). Framing it as "the entity's unique key" made models favour
+  // uniqueness over the user's format (echoing filenames verbatim), so that
+  // consistency guidance survives only as the fallback when no hint was given —
+  // there it's the only signal the model has, and merge/split needs same
+  // subject → same value.
+  if (hasDerivedIdentity) {
+    lines.unshift(`- identity (text): ${identityHint ||
+      "a short name for what this item is about — the same subject must always produce the same value"}`);
+  }
   const systemText =
     `You extract structured fields from items for a private research board.\n\n` +
-    identityNote +
     `For each field, first write one short sentence explaining why you chose the value ` +
     `(or why it could not be found in the material), then provide the value. ` +
     `Set the value to null when the field cannot be determined from the material.\n\n` +
@@ -268,9 +275,9 @@ export function buildFieldsPrompt(mapping) {
   if (hasDerivedIdentity) {
     properties.identity = {
       type: "object",
-      description: mapping.identity.hint,
+      description: identityHint || "A short, consistent name for what this item is about.",
       properties: {
-        why: { type: "string", description: "One short sentence: what in the material identifies this entity." },
+        why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
         value: { type: ["string", "null"] },
       },
       required: ["why", "value"],
@@ -681,6 +688,13 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   async function processOne(row) {
     const label = row.payload?.identity || `item ${row.id}`;
     try {
+      // Facet-less board: nothing to tag. Complete the item instead of failing
+      // it — extraction-only boards (mapping, no facets) are a supported shape.
+      if (!(await getBoardPrompt(db, row.board_id))) {
+        await markTagged(db, row.id, [], false, {});
+        console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
+        return;
+      }
       const { tags, undecided, reasoning, usage, model } = await tagOne(row);
       await markTagged(db, row.id, tags, undecided, reasoning);
       await bumpUsage(db, row.board_id, usage);
@@ -696,20 +710,14 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
   const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
 
-  // Keep the better-cased display name: an established "Maya Chen" never
-  // degrades to a re-derived "maya chen"; a cased derivation upgrades an
-  // uncased one.
-  const pickDisplayName = (existing, derived) =>
-    existing && /[A-Z]/.test(existing) && !/[A-Z]/.test(derived) ? existing : derived;
-
   // Move an instance under the entity that already holds its derived
   // identity, keeping the fields and tags it just earned (merge and split are
   // the same move: re-parent, then drop the old entity if it emptied out).
+  // The latest derivation wins the display name — identity can be anything
+  // (a name, a code, a date), so no cased-preference heuristics.
   async function reparentInto(row, target, displayName, oldEntityId) {
     await reparentItem(db, row.id, target.id);
-    // A better-cased derivation may upgrade the winner's display name.
-    const better = pickDisplayName(target.display_name, displayName);
-    if (better !== target.display_name) await setEntityIdentity(db, target.id, target.identity, better);
+    if (displayName !== target.display_name) await setEntityIdentity(db, target.id, target.identity, displayName);
     if (await deleteEntityIfEmpty(db, oldEntityId)) {
       console.log(`merge: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}"), empty entity #${oldEntityId} deleted`);
     } else {
@@ -791,15 +799,16 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         await markExtracted(db, row.id, fields);
         console.log(`extracted #${row.id} [no identity derived${established ? " — keeping entity identity" : " — provisional"}] [${ai.model}]`);
       } else {
-        // Normalise underscores/hyphens in the display name too so
-        // "priya_ramanathan" becomes "priya ramanathan".
-        const newDisplayName = rawIdentity.trim().replace(/[-_]+/g, " ");
+        // The display name is the model's output verbatim — identity can be
+        // anything ("INV-2026-04", "BTC-USD", a name, a date), so any cleanup
+        // heuristic mangles someone's format. Fuzzy matching lives only in the
+        // invisible collision key (normaliseIdentity).
+        const newDisplayName = rawIdentity.trim();
         const derived = normaliseIdentity(rawIdentity);
         if (entity.identity === derived) {
-          // Same key — refresh the display name (preserve rule: an established
-          // cased name never degrades) and make sure the provisional flag is
-          // gone.
-          await setEntityIdentity(db, entity.id, derived, pickDisplayName(entity.display_name, newDisplayName));
+          // Same key — refresh the display name to this derivation and make
+          // sure the provisional flag is gone.
+          await setEntityIdentity(db, entity.id, derived, newDisplayName);
           await markExtracted(db, row.id, fields);
           console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
         } else {

@@ -176,6 +176,15 @@ test("mapping PATCH: >12 fields → 400", async () => {
   assert.match(r.json.error, /12/);
 });
 
+test("mapping PATCH: field key 'identity' → 400 (reserved for the identity slot)", async () => {
+  const { json: board } = await createBoard("map-reserved");
+  const r = await patchBoard(board.id, {
+    mapping: { fields: [{ key: "identity", kind: "text", from: "ai" }] },
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /reserved/);
+});
+
 // ── ingest routing ───────────────────────────────────────────────────────────
 
 test("ingest: mapped board → pending_extract + payload.mapping stamped", async () => {
@@ -269,6 +278,77 @@ test("reextract: instance without mapping → 409", async () => {
 
   const r = await req(base, "POST", `/api/instances/${item.instances[0].id}/reextract`, { sid: admin.sid });
   assert.equal(r.status, 409);
+});
+
+// ── current board mapping adoption ───────────────────────────────────────────
+// User-initiated reprocess/re-extract apply the CURRENT board mapping; the
+// stamp an item was built with only governs automatic replay. Held items with
+// no stamp adopt the board mapping when released — the board may have gained
+// it after they were uploaded.
+
+test("reextract: unstamped instance adopts a mapping the board gained later", async () => {
+  const boardId = await seedBoard(db, "reextract-adopt");
+  const { uploaded: [item] } = await uploadTxt(boardId); // unmapped board → no stamp
+  const instId = item.instances[0].id;
+  await patchBoard(boardId, { mapping: MAPPING });
+
+  const r = await req(base, "POST", `/api/instances/${instId}/reextract`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+
+  const { rows: [row] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [instId]);
+  assert.equal(row.status, "pending_extract");
+  assert.deepEqual(row.payload.mapping, MAPPING);
+});
+
+test("reextract: re-stamps the current board mapping over a stale stamp", async () => {
+  const { json: board } = await createBoard("reextract-restamp");
+  await patchBoard(board.id, { mapping: MAPPING });
+  const { uploaded: [item] } = await uploadTxt(board.id); // stamped with MAPPING
+  const instId = item.instances[0].id;
+
+  const edited = { identity: { from: "ai", hint: "the invoice month, as Month - YYYY" }, fields: [] };
+  await patchBoard(board.id, { mapping: edited });
+  await req(base, "POST", `/api/instances/${instId}/reextract`, { sid: admin.sid });
+
+  const { rows: [row] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [instId]);
+  assert.equal(row.status, "pending_extract");
+  assert.deepEqual(row.payload.mapping, edited);
+});
+
+test("reprocess: entity adopts a board mapping added after upload", async () => {
+  const boardId = await seedBoard(db, "reprocess-adopt");
+  const { uploaded: [item] } = await uploadTxt(boardId); // no stamp
+  await patchBoard(boardId, { mapping: MAPPING });
+
+  const r = await req(base, "POST", `/api/items/${item.id}/reprocess`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+
+  const row = await itemStatus(item);
+  assert.equal(row.status, "pending_extract");
+  assert.deepEqual(row.payload.mapping, MAPPING);
+});
+
+test("releaseHeld: unstamped held item adopts the board mapping gained since upload", async () => {
+  const { json: board } = await createBoard("release-adopt", { auto_tag: false });
+  const { uploaded: [item] } = await uploadTxt(board.id); // held, unmapped at upload
+  assert.equal(item.status, "held");
+  await patchBoard(board.id, { mapping: MAPPING });
+
+  await req(base, "POST", `/api/admin/boards/${board.id}/tag-held`, { sid: admin.sid });
+  const row = await itemStatus(item);
+  assert.equal(row.status, "pending_extract");
+  assert.deepEqual(row.payload.mapping, MAPPING);
+});
+
+test("auto-tag-on sweep: held mapped items route through the extract leg", async () => {
+  const { json: board } = await createBoard("sweep-extract", { auto_tag: false });
+  await patchBoard(board.id, { mapping: MAPPING });
+  const { uploaded: [item] } = await uploadTxt(board.id);
+  assert.equal(item.status, "held");
+
+  await patchBoard(board.id, { auto_tag: true }); // flips the sweep (queueUntagged)
+  const row = await itemStatus(item);
+  assert.equal(row.status, "pending_extract");
 });
 
 // ── reasoning endpoint carries fields ────────────────────────────────────────

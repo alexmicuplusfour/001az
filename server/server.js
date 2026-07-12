@@ -586,6 +586,9 @@ function validateMapping(mapping) {
     if (!f.key || typeof f.key !== "string" || !/^[a-z][a-z0-9_]*$/.test(f.key))
       return `invalid field key: ${JSON.stringify(f.key)}`;
     if (seen.has(f.key)) return `duplicate field key: ${f.key}`;
+    // "identity" is the identity slot's key in the record_fields schema — a
+    // field with the same name would silently overwrite it there.
+    if (f.key === "identity") return `field key "identity" is reserved for the identity slot`;
     seen.add(f.key);
     if (!MAPPING_KINDS.has(f.kind)) return `invalid kind "${f.kind}" for field "${f.key}"`;
     if (f.from !== "ai" && f.from !== "connector" && f.from !== "file")

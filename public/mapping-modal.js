@@ -138,7 +138,7 @@ export function openMappingModal() {
     const idHintWrap = document.createElement("div");
     idHintWrap.style.cssText = "margin-top:6px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
     const idHint = document.createElement("textarea");
-    idHint.placeholder = "AI instruction — how to identify this entity (e.g. \"the person's full name\")";
+    idHint.placeholder = "What to extract as the item's title — any format (e.g. \"the person's full name\", \"invoice month, as Month - YYYY\")";
     idHint.rows = 2;
     idHint.value = identityHint;
     idHint.disabled = !isAdmin;

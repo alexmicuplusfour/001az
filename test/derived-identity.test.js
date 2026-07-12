@@ -43,9 +43,18 @@ test("buildFieldsPrompt: identity key injected first when mapping.identity.from 
   assert.deepEqual(id.properties.value.type, ["string", "null"]);
   assert.equal(id.description, "the person's full name");
 
-  // system text mentions identity consistency
-  assert.match(systemText, /unique key/);
-  assert.match(systemText, /same entity always produces the same value/);
+  // The user's hint is the identity instruction, listed first among the
+  // fields — with no competing "unique key" framing to override it.
+  assert.match(systemText, /- identity \(text\): the person's full name/);
+  assert.ok(systemText.indexOf("- identity") < systemText.indexOf("- role"));
+  assert.doesNotMatch(systemText, /unique key/);
+});
+
+test("buildFieldsPrompt: hint-less derived identity falls back to consistency guidance", () => {
+  const mapping = { identity: { from: "ai" }, fields: [] };
+  const { schema, systemText } = buildFieldsPrompt(mapping);
+  assert.match(systemText, /- identity \(text\): .*same subject must always produce the same value/);
+  assert.match(schema.properties.identity.description, /consistent name/);
 });
 
 test("buildFieldsPrompt: identity key absent when mapping.identity.from = 'raw'", () => {

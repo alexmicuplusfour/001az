@@ -270,12 +270,37 @@ export async function getItemReasoning(db, id) {
   return rows[0] || null;
 }
 
-// Reset an item to the extract leg so its fields are re-derived from its
-// stamped mapping. Only succeeds when the item actually has a mapping stamped.
+// The mapping to stamp for AI extraction: the given mapping when it has AI
+// work in it (derived identity or AI fields), else null. Mirrors ingest's
+// hasMapping gate.
+function aiMappingJson(mapping) {
+  const hasAi =
+    mapping?.identity?.from === "ai" ||
+    (Array.isArray(mapping?.fields) && mapping.fields.some((f) => f.from === "ai"));
+  return hasAi ? JSON.stringify(mapping) : null;
+}
+
+async function boardAiMappingJson(db, boardId) {
+  const { rows } = await db.query("SELECT mapping FROM boards WHERE id=$1", [boardId]);
+  return rows.length ? aiMappingJson(rows[0].mapping) : null;
+}
+
+// Reset an item to the extract leg. User-initiated, so the CURRENT board
+// mapping is what applies — it's re-stamped onto the instance (the stamp an
+// instance was built with only governs automatic replay, e.g. error retries).
+// A board with no AI mapping falls back to replaying the instance's stamp;
+// with neither there is nothing to extract.
 export async function reextractItem(db, id) {
+  const { rows } = await db.query(
+    "SELECT b.mapping FROM items i JOIN boards b ON b.id = i.board_id WHERE i.id=$1", [id]);
+  if (!rows.length) return false;
+  const current = aiMappingJson(rows[0].mapping);
   const result = await db.query(
-    "UPDATE items SET status='pending_extract', attempts=0, error=NULL, updated_at=$1 WHERE id=$2 AND payload ? 'mapping'",
-    [Date.now(), id]
+    `UPDATE items
+     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload ELSE jsonb_set(payload, '{mapping}', $3::jsonb) END,
+         status='pending_extract', attempts=0, error=NULL, updated_at=$1
+     WHERE id=$2 AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')`,
+    [Date.now(), id, current]
   );
   return result.rowCount > 0;
 }
@@ -691,19 +716,24 @@ export async function retagBoard(db, boardId) {
 // --- periodic auto-tagging ---
 
 // Release a board's held items. Connector entities awaiting a chart face enter
-// the face leg (pending_face); items with a stamped mapping enter the extract
-// leg (pending_extract); plain items go straight to pending.
+// the face leg (pending_face); items with AI extraction to do enter the extract
+// leg (pending_extract); plain items go straight to pending. Held items with no
+// stamp adopt the current board mapping — the board may have gained one since
+// they were uploaded, and held means nothing has been extracted yet.
 export async function releaseHeld(db, boardId) {
+  const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
     `UPDATE items
-     SET status = CASE
+     SET payload = CASE WHEN NOT (payload ? 'mapping') AND $3::jsonb IS NOT NULL
+                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
+         status = CASE
            WHEN payload->'mapping'->'face'->>'from' = 'connector'
                 AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
-           WHEN payload ? 'mapping' THEN 'pending_extract'
+           WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
            ELSE 'pending' END,
          updated_at = $1
      WHERE board_id = $2 AND status = 'held'`,
-    [Date.now(), boardId]
+    [Date.now(), boardId, current]
   );
   return result.rowCount;
 }
@@ -711,12 +741,25 @@ export async function releaseHeld(db, boardId) {
 // Queue everything untagged in a board: held uploads, AI-undecided items,
 // and failed ones (fresh attempts). Fired when auto-tagging turns on — the
 // point of the board is tags, so nothing untagged is left behind. In-flight
-// ('processing') and human-tagged items are untouched.
+// ('processing') and human-tagged items are untouched. Held items were never
+// processed at all, so they route through the face/extract legs exactly like
+// releaseHeld (adopting the board mapping when unstamped); already-processed
+// items go straight to the tag leg.
 export async function queueUntagged(db, boardId) {
+  const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
-    `UPDATE items SET status='pending', attempts=0, error=NULL, updated_at=$1
+    `UPDATE items
+     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND $3::jsonb IS NOT NULL
+                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
+         status = CASE
+           WHEN status <> 'held' THEN 'pending'
+           WHEN payload->'mapping'->'face'->>'from' = 'connector'
+                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
+           ELSE 'pending' END,
+         attempts=0, error=NULL, updated_at=$1
      WHERE board_id=$2 AND status IN ('held','tagged','failed') AND tags='[]'::jsonb`,
-    [Date.now(), boardId]
+    [Date.now(), boardId, current]
   );
   return result.rowCount;
 }
@@ -1077,18 +1120,24 @@ export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = nul
 }
 
 // Re-run the full pipeline for every instance of an entity (the card-level
-// "reprocess"). Instances with a stamped mapping restart at the extract leg —
-// re-deriving identity + fields before re-tagging — so a wrong identity can
-// actually be corrected here; the rest restart at tagging. Tags are cleared up
-// front so the card shows a clean reprocessing state either way.
+// "reprocess"). User-initiated, so the CURRENT board mapping is re-stamped and
+// applied — a mapping edited after upload (or added to a board that had none)
+// actually takes effect here; instances restart at the extract leg when there
+// is AI work (current or stamped), else at tagging. Tags are cleared up front
+// so the card shows a clean reprocessing state either way.
 export async function reprocessEntity(db, entityId) {
+  const { rows } = await db.query(
+    "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
+  if (!rows.length) return false;
+  const current = aiMappingJson(rows[0].mapping);
   const result = await db.query(
     `UPDATE items
-     SET status = CASE WHEN payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
+     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload ELSE jsonb_set(payload, '{mapping}', $3::jsonb) END,
+         status = CASE WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
          tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE,
          attempts=0, error=NULL, updated_at=$1
      WHERE entity_id=$2`,
-    [Date.now(), entityId]
+    [Date.now(), entityId, current]
   );
   return result.rowCount > 0;
 }

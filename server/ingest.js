@@ -64,8 +64,9 @@ export function mountIngest(app, { db, sources }) {
         // of the AI mapping/auto-tag gate below.
         const fileFields = extractFileFields(file, board.mapping?.fields);
         // Stamp the board's mapping when it has AI fields — the item carries
-        // its own copy so re-extraction replays the mapping it was built with,
-        // never the (potentially changed) board default.
+        // its own copy so automatic replay (error retries) re-runs the mapping
+        // it was built with; user-initiated reprocess/re-extract re-stamp from
+        // the current board mapping.
         // Only trigger extraction when the board has AI-sourced fields or
         // AI-derived identity. Connector fields are populated at entity creation,
         // not by the extract leg.
