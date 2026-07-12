@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl } from './filters.js';
-import { inProgress, reconcile, ensurePolling } from './data.js';
+import { inProgress, reconcile, ensurePolling, drainItems } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
 import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
@@ -57,7 +57,7 @@ async function main() {
       ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
       : Promise.resolve(null),
     state.boardId
-      ? fetch(`/api/items?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
+      ? fetch(`/api/items?board=${state.boardId}&limit=200`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
       : Promise.resolve([]),
     fetch("/api/me", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
     state.boardId
@@ -79,13 +79,19 @@ async function main() {
   state.boardTokens = boardData?.token_total ?? null;
   state.searchAvailable = !!boardData?.search;
   state.me = meData;
-  state.items = itemsData.map(toItem);
+  // First page ({ items, nextCursor, now }) — or a bare array from a server
+  // that predates pagination, which boots identically and skips the drain.
+  const firstPage = Array.isArray(itemsData) ? { items: itemsData, nextCursor: null, now: null } : itemsData;
+  state.items = (firstPage.items || []).map(toItem);
+  if (typeof firstPage.now === 'number') state.itemsSince = firstPage.now;
   state.crates = Array.isArray(cratesData) ? cratesData : [];
   state.filterConfigs = Array.isArray(filterConfigsData) ? filterConfigsData : [];
   initFilterConfigsUI();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   render();
   ensurePolling();
+  // Rest of the board streams in behind the first paint.
+  drainItems(firstPage.nextCursor);
 
   const loginErr = params.get("login");
   if (loginErr === "invalid") {

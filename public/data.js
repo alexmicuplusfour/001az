@@ -55,8 +55,12 @@ export function inProgress() {
   ];
 }
 
-export function reconcile(data) {
-  const freshIds = new Set(data.map((d) => d.id));
+// `presentIds` is every entity id currently on the server — used to tell
+// "absent because unchanged" apart from "absent because merged/deleted". A
+// full-list response IS that set (the default); delta responses carry only
+// changed items, so they pass the server's ids list explicitly.
+export function reconcile(data, presentIds = null) {
+  const freshIds = presentIds || new Set(data.map((d) => d.id));
   const byId = new Map(state.items.map((i) => [i.id, i]));
 
   for (const d of data) {
@@ -159,8 +163,23 @@ async function pollTick() {
     return;
   }
   try {
-    const data = await fetch(`/api/items?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.json());
-    reconcile(data);
+    // Delta poll when we have a cursor: only entities changed since the last
+    // tick, plus the board's full id list for merge/delete detection.
+    const url = state.itemsSince != null
+      ? `/api/items?board=${state.boardId}&since=${state.itemsSince}`
+      : `/api/items?board=${state.boardId}`;
+    const data = await fetch(url, { cache: "no-store" }).then((r) => r.json());
+    if (Array.isArray(data)) {
+      // Bare array = a server without delta support — full-list semantics.
+      state.itemsSince = null;
+      reconcile(data);
+    } else if (Array.isArray(data.items) && Array.isArray(data.ids)) {
+      reconcile(data.items, new Set(data.ids));
+      if (typeof data.now === 'number') state.itemsSince = data.now;
+    }
+    // Any other shape (proxy error body, partial JSON): skip the tick rather
+    // than feed reconcile an empty presentIds set — that reads as "everything
+    // merged away" and would wrongly drop in-flight items.
     await refreshTokens();
     document.dispatchEvent(new Event('app:render'));
   } catch {
@@ -173,5 +192,50 @@ export function ensurePolling() {
   if (!polling && needsPoll()) {
     polling = true;
     setTimeout(pollTick, 4000);
+  }
+}
+
+// Background-drain append: pages walk newest→oldest, so pushing each one at
+// the END keeps state.items newest-first. A delta poll may already have
+// unshifted one of these ids mid-drain — skip those.
+function appendItems(rows) {
+  const have = new Set(state.items.map((i) => i.id));
+  for (const d of rows) {
+    if (!have.has(d.id)) state.items.push(toItem(d));
+  }
+}
+
+// After a paginated boot: fetch the rest of the board page by page, rendering
+// as each lands. Board switches are full page navigations, so the only guards
+// needed are against a duplicate kick-off and (belt-and-braces) a boardId
+// swap mid-flight. A failed page gets one spaced retry, then the drain stops —
+// a partial gallery beats an empty one, and a reload resumes cleanly.
+let draining = false;
+export async function drainItems(cursor) {
+  if (!cursor || draining) return;
+  draining = true;
+  const board = state.boardId;
+  let retried = false;
+  try {
+    while (cursor && state.boardId === board) {
+      const page = await fetch(`/api/items?board=${board}&limit=500&after=${cursor}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      if (!page || !Array.isArray(page.items)) {
+        if (retried) break;
+        retried = true;
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      retried = false;
+      appendItems(page.items);
+      cursor = page.nextCursor;
+      // A late page may hold the only in-flight items — needsPoll() scans
+      // state.items, so re-arm after every append.
+      ensurePolling();
+      document.dispatchEvent(new Event('app:render'));
+    }
+  } finally {
+    draining = false;
   }
 }

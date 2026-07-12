@@ -97,26 +97,60 @@ function instanceEntry(r) {
 // (name/w/h/kind/label) mirror the first instance so the card path needs no
 // special cases; tags at the entity level are the union across instances
 // (what filtering and facet counts consume), per-instance tags ride inside.
-export async function listItems(db, userId = null, boardId = null) {
+//
+// Three modes, one query shape:
+// - no opts: the whole board (legacy full list).
+// - limit/after: one keyset page, walking (created_at DESC, id DESC); the
+//   cursor is the last row's (created_at, id) pair. Returns nextCursor while
+//   pages remain (emitted only on exactly-full pages, so an exact-multiple
+//   total costs one final empty page).
+// - since: only entities changed after the given ms stamp — their own
+//   updated_at or any of their instances'. Timestamps are BIGINT ms, so
+//   cursors round-trip exactly (see the type-parser note at the top).
+export async function listItems(db, userId = null, boardId = null, { limit = null, after = null, since = null } = {}) {
+  const params = [userId, boardId];
+  const where = ["($2::text IS NULL OR e.board_id = $2)"];
+  let tail = "";
+  if (since != null) {
+    params.push(since);
+    where.push(`(e.updated_at > $3 OR e.id IN (SELECT entity_id FROM items WHERE board_id = $2 AND updated_at > $3))`);
+  } else {
+    if (after != null) {
+      params.push(after.createdAt, after.id);
+      where.push(`(e.created_at, e.id) < ($${params.length - 1}::bigint, $${params.length}::bigint)`);
+    }
+    if (limit != null) {
+      params.push(limit);
+      tail = ` LIMIT $${params.length}`;
+    }
+  }
   const { rows: ents } = await db.query(
     `SELECT e.id, e.identity, e.display_name, e.symbol, e.fields, e.identity_provisional, e.created_at,
       e.uploaded_by AS uploader_id, u.name AS uploader_name, u.email AS uploader_email,
-      (SELECT COUNT(*) FROM favorites f WHERE f.item_id = e.id) AS hearts,
-      EXISTS(
-        SELECT 1 FROM favorites f WHERE f.item_id = e.id AND f.user_id = $1
-      ) AS fav
+      COALESCE(fh.hearts, 0) AS hearts,
+      (fme.user_id IS NOT NULL) AS fav
      FROM entities e
      LEFT JOIN users u ON u.id = e.uploaded_by
-     WHERE ($2::text IS NULL OR e.board_id = $2)
-     ORDER BY e.created_at DESC, e.id DESC`,
-    [userId, boardId]
+     LEFT JOIN (SELECT item_id, COUNT(*)::int AS hearts FROM favorites GROUP BY item_id) fh ON fh.item_id = e.id
+     LEFT JOIN favorites fme ON fme.item_id = e.id AND fme.user_id = $1
+     WHERE ${where.join(" AND ")}
+     ORDER BY e.created_at DESC, e.id DESC${tail}`,
+    params
   );
 
+  // A page/delta covers a known set of entities — fetch just their instances
+  // (an entity needs ALL of them for aggregateStatus and the face mirror).
+  // The full listing keeps the board-wide query.
+  const partial = limit != null || after != null || since != null;
   const { rows: insts } = await db.query(
-    `SELECT id, entity_id, status, tags, undecided, payload FROM items
-     WHERE ($1::text IS NULL OR board_id = $1)
-     ORDER BY created_at ASC, id ASC`,
-    [boardId]
+    partial
+      ? `SELECT id, entity_id, status, tags, undecided, payload FROM items
+         WHERE entity_id = ANY($1::bigint[])
+         ORDER BY created_at ASC, id ASC`
+      : `SELECT id, entity_id, status, tags, undecided, payload FROM items
+         WHERE ($1::text IS NULL OR board_id = $1)
+         ORDER BY created_at ASC, id ASC`,
+    [partial ? ents.map((e) => e.id) : boardId]
   );
   const byEntity = new Map();
   for (const r of insts) {
@@ -138,7 +172,7 @@ export async function listItems(db, userId = null, boardId = null) {
     }
   }
 
-  return ents.map((e) => {
+  const items = ents.map((e) => {
     const instances = byEntity.get(e.id) || [];
     const face = instances[0] || null;
     const tags = [];
@@ -173,6 +207,20 @@ export async function listItems(db, userId = null, boardId = null) {
       instances,
     };
   });
+
+  let nextCursor = null;
+  if (limit != null && ents.length === limit) {
+    const last = ents[ents.length - 1];
+    nextCursor = `${last.created_at}_${last.id}`;
+  }
+  return { items, nextCursor };
+}
+
+// All entity ids on a board, in one cheap scan — delta polls ship this so the
+// client can tell "unchanged" apart from "merged/deleted" without the full list.
+export async function listEntityIds(db, boardId) {
+  const { rows } = await db.query("SELECT id FROM entities WHERE board_id = $1", [boardId]);
+  return rows.map((r) => r.id);
 }
 
 // status: 'pending' (tag now) or 'held' (wait — for the board's scheduled
@@ -472,6 +520,9 @@ export async function toggleFavorite(db, userId, itemId) {
       Date.now(),
     ]);
   }
+  // The heart count is part of the entity's list payload — stamp it so other
+  // viewers' delta polls pick the change up.
+  await touchEntity(db, itemId);
   const { rows } = await db.query("SELECT COUNT(*) AS c FROM favorites WHERE item_id=$1", [itemId]);
   return { favorited: !exists, count: rows[0].c };
 }
@@ -563,6 +614,8 @@ export async function toggleCrateItem(db, userId, crateId, itemId) {
       Date.now(),
     ]);
   }
+  // crateIds ride in the entity's list payload — stamp for delta polls.
+  await touchEntity(db, itemId);
   const { rows } = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [crateId]);
   return { added: !exists, count: rows[0].c };
 }
@@ -1071,6 +1124,14 @@ export async function markEntityProvisional(db, id) {
   await db.query("UPDATE entities SET identity_provisional=TRUE, updated_at=$1 WHERE id=$2", [Date.now(), id]);
 }
 
+// Bump an entity's change stamp without touching anything else. For writes
+// that alter what the list shows for an entity but live in OTHER rows —
+// losing an instance, gaining/losing a heart or crate membership — so delta
+// polls (?since=) see the entity as changed.
+export async function touchEntity(db, id) {
+  await db.query("UPDATE entities SET updated_at=$1 WHERE id=$2", [Date.now(), id]);
+}
+
 // Move an instance under another entity (the merge/split mechanism — the
 // instance keeps its file, fields and tags).
 export async function reparentItem(db, itemId, entityId) {
@@ -1102,7 +1163,11 @@ export async function reparentInstance(db, itemId, target, displayName, oldEntit
   return withTx(db, async (client) => {
     await reparentItem(client, itemId, target.id);
     if (displayName !== target.display_name) await setEntityIdentity(client, target.id, target.identity, displayName);
-    return deleteEntityIfEmpty(client, oldEntityId);
+    const deleted = await deleteEntityIfEmpty(client, oldEntityId);
+    // Split: the old entity survives minus an instance — stamp it so delta
+    // polls pick up its new aggregate status/tags/face.
+    if (!deleted) await touchEntity(client, oldEntityId);
+    return deleted;
   });
 }
 
@@ -1126,9 +1191,17 @@ export async function deleteEntity(db, id) {
 }
 
 // Delete one instance row. Returns { payload, entity_id, board_id } for file
-// cleanup and last-instance checks, or null when it doesn't exist.
+// cleanup and last-instance checks, or null when it doesn't exist. The parent
+// entity's stamp bumps in the same statement — its aggregate status/tags/face
+// just changed — so delta polls see it (a no-op when the delete empties the
+// entity: the row goes away right after and the ids list covers that).
 export async function deleteInstance(db, id) {
-  const { rows } = await db.query("DELETE FROM items WHERE id=$1 RETURNING payload, entity_id, board_id", [id]);
+  const { rows } = await db.query(
+    `WITH del AS (DELETE FROM items WHERE id=$1 RETURNING payload, entity_id, board_id),
+          touch AS (UPDATE entities SET updated_at=$2 WHERE id = (SELECT entity_id FROM del))
+     SELECT payload, entity_id, board_id FROM del`,
+    [id, Date.now()]
+  );
   return rows[0] || null;
 }
 

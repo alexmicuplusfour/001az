@@ -28,6 +28,7 @@ import {
   markEntityProvisional,
   reparentItem,
   reparentInstance,
+  touchEntity,
   entityInstanceCount,
   dueLiveEntities,
   updateEntityFields,
@@ -964,6 +965,9 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
               targetId = winner.id;
             }
             await reparentItem(db, row.id, targetId);
+            // The old entity keeps its other instances here — stamp it so
+            // delta polls see its aggregate change (mirrors reparentInstance).
+            await touchEntity(db, entity.id);
             await markExtracted(db, row.id, fields);
             console.log(`split: instance #${row.id} detached from entity #${entity.id} into #${targetId} ("${derived}")`);
           }

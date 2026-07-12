@@ -5,6 +5,9 @@ export const state = {
   facets: [],
   aiReasoning: true,
   items: [],
+  // Cursor for ?since= delta polls: the server's `now` from the last items
+  // response. Null = server predates delta polling, fall back to full fetches.
+  itemsSince: null,
   uploading: [],
   selected: new Map(),
   bulkSelected: new Set(),

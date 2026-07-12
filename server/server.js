@@ -7,6 +7,7 @@ import {
   initDb,
   countItems,
   listItems,
+  listEntityIds,
   deleteEntity,
   deleteInstance,
   deleteEntityIfEmpty,
@@ -1013,10 +1014,39 @@ app.post("/api/admin/connectors/:name/test", requireAdmin, wrap(async (req, res)
   }
 }));
 
+// Three shapes from one route: no params = the whole board as a bare array
+// (legacy); ?limit/&after = one keyset page ({ items, nextCursor, now });
+// ?since=<ms> = entities changed since then plus every current entity id, for
+// merge/delete detection ({ items, ids, now }). `now` is captured BEFORE the
+// query and handed back 2s early: it becomes the client's next since-cursor,
+// and the margin (plus idempotent client reconcile) covers writes that
+// stamped just before our read but committed after it.
 app.get("/api/items", requireAuth, wrap(async (req, res) => {
   const boardId = req.query.board || null;
   if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.json([]);
-  res.json(await listItems(db, req.user.id, boardId));
+  const now = Date.now() - 2000;
+
+  if (req.query.since != null) {
+    if (!/^\d+$/.test(String(req.query.since))) return res.status(400).json({ error: "malformed since" });
+    const { items } = await listItems(db, req.user.id, boardId, { since: Number(req.query.since) });
+    return res.json({ items, ids: await listEntityIds(db, boardId), now });
+  }
+
+  if (req.query.limit != null || req.query.after != null) {
+    const parsed = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 500) : 500;
+    let after = null;
+    if (req.query.after != null) {
+      const m = /^(\d+)_(\d+)$/.exec(String(req.query.after));
+      if (!m) return res.status(400).json({ error: "malformed cursor" });
+      after = { createdAt: Number(m[1]), id: Number(m[2]) };
+    }
+    const { items, nextCursor } = await listItems(db, req.user.id, boardId, { limit, after });
+    return res.json({ items, nextCursor, now });
+  }
+
+  const { items } = await listItems(db, req.user.id, boardId);
+  res.json(items);
 }));
 
 // Semantic search: embed the query, dot-product against the board's stored
