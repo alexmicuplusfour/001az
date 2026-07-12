@@ -405,6 +405,114 @@ produces double-tagging with double billing, and a stale slow call stamping over
 fresher result. Cheap insurance: `AND status='processing'` guard (or a claim token).
 Related: `failOrRequeue` does a non-atomic read-then-write on `attempts`.
 
+Verified in depth; the frame shifts — the entry leads with the scale-out risk, but
+there's a live single-process bug, and it's the fourth sibling of the #1 family:
+
+- **CONFIRMED:** `markTagged` (db.js ~1224), `markExtracted` (~954), `advanceFaced`
+  (~975), and `failOrRequeue` (~1309) all write `WHERE id` unconditionally;
+  `failOrRequeue` additionally reads `attempts` in a separate statement.
+  `markTagged` is also two non-tx statements — a stale stamp would append a
+  `tag_snapshots` row for a result that was never current. Claims are properly
+  `FOR UPDATE SKIP LOCKED`.
+- **SHARPENED — no double-billing in today's deployment:** the single-flight tick
+  is an accidental global fence between worker actors. Claims happen only at tick
+  start, the batch is awaited before the next tick, and `recoverStuck` runs at the
+  top of the serial loop — so it only ever sees rows left by a crash/drain (or
+  processOne's deliberate left-for-recovery). Two flights on one row cannot happen
+  in-process. "Mostly self-heals" undersells it; in-process the claims never
+  collide at all.
+- **The LIVE bug is HTTP-route vs in-flight call.** The per-board paths
+  (`retagBoard`/`releaseHeld`/`queueUntagged`/`cancelBoardQueue`) all exclude
+  in-flight statuses — the #1/#2 fixes did that. The per-card/per-instance paths do
+  NOT: `reprocessEntity` (`WHERE entity_id`, no status filter at all),
+  `reextractItem`, `retagItem` (both `WHERE id` unconditional), and `setItemTags`
+  (the user tag-edit, which also sets `status='tagged'`). Any of them can flip a
+  claimed row mid-call; the unfenced stamp then silently undoes the user.
+- **Concrete failure, minutes-wide window:** user edits the identity hint, hits
+  card Reprocess while that instance's research-tagging call is in flight (minutes;
+  extractor waits up to 240 s) → the route stamps `pending_extract` + the new
+  mapping → the stale `markTagged` lands `tagged` with old-mapping output →
+  extraction never runs, and `queueUntagged` won't revisit (tags non-empty). The
+  reprocess button looks broken. A mid-flight `setItemTags` loses the user's manual
+  tags the same way. Stale `failOrRequeue` is worse: it stamps `error`/`retry_at`
+  AND re-routes to its own `requeueStatus` — a freshly re-extracted item yanked
+  from `pending_extract` back to `pending`, tag leg with no fields.
+- **The attempts race reduces to the missing fence:** every writer that resets
+  `attempts` also changes `status`, so fencing the UPDATE closes the
+  read-then-write race as a side effect. No transaction needed.
+- **Multi-process sharpened — and a limit on what fences buy:** scale-out
+  double-billing is not just possible but routine — STUCK_MS (3 min) is BELOW
+  legitimate call durations (research tagging minutes, extractor 240 s, SDK
+  retries ~30 min worst), so process A's `recoverStuck` would "recover" process
+  B's healthy in-flight rows as a matter of course: second claim, duplicate paid
+  call, flip-flopping stamps, duplicate snapshots. And a status-VALUE fence is
+  not ownership: after the requeue + re-claim the row is back in `processing`,
+  so B's stale stamp passes the fence again — it can even beat A's fresh call
+  (stale lands `tagged`, fresh stamp then discards). Fences are sound ONLY under
+  the single-flight/single-process invariant, where a stale stamp always executes
+  before any re-claim (routes flip mid-batch; the next claim is next tick, after
+  the batch — and its stale stamp — has fully settled). Multi-process correctness
+  genuinely needs the claim token/lease (plus STUCK_MS above worst-case call
+  duration for the spend). That's the real blocker list for ever scaling the app
+  container, alongside #5's deferred sweep decoupling.
+- **Adjacent:** `requeueItemForTag` (the `retag_on_refresh` cascade, ~1141) is
+  unconditional too — it can yank a `pending_extract` instance (user just
+  re-extracted a live entity) into the tag leg. Benign for pure-connector vehicles
+  (extract is a no-op passthrough), wrong when the mapping has AI fields.
+- **Adjacent (found in the double-check) — the embedding writers race the same
+  way:** `setItemEmbedding` (~1237) stamps `WHERE id` unconditionally. A user
+  `setItemTags` while the embed batch's API call is in flight clears the vector
+  for the NEW text — then the sweep's stale stamp lands a vector computed from
+  the OLD text, and the sweep never revisits (embedding non-NULL). One stale
+  search vector until the next tag edit; minor, self-correcting, and an
+  `embedding IS NULL` fence can't discriminate (both states are NULL). If ever
+  worth fixing: optimistic `AND updated_at=$asRead`. Note-only.
+- **Verified clean:** `updateItemPayload`/`updateItemPayloads` are single-statement
+  jsonb merges (`payload || $1`), so concurrent payload writers (generateFace's
+  files swap vs a reprocess mapping restamp) compose without lost updates; the
+  per-board sweeps and `cancelBoardQueue` (pending-only, both statements) exclude
+  in-flight rows; migrations and ingest inserts are out of scope.
+
+**Fix design:**
+1. Fence each advance to the in-flight status it owns, returning rowCount:
+   `markTagged … AND status='processing'`, `markExtracted … AND
+   status='extracting'`, `advanceFaced … AND status='facing'`. `markTagged`
+   appends the tag snapshot only when the UPDATE landed. Callers log "stale result
+   discarded (item re-routed mid-flight)". `bumpUsage` stays unconditional — the
+   tokens were spent either way. In `processOne`, a DISCARD is not an error:
+   don't confuse it with the left-for-recovery path (that's for markTagged
+   THROWING) — log, still bumpUsage, done. Bonus: this also silences the old
+   delete-during-tagging race (row deleted mid-call → rowCount 0 → snapshot
+   skipped, instead of the tag_snapshots FK error the logs show today).
+2. `failOrRequeue`: same fence; the in-flight status derives 1:1 from
+   `requeueStatus` (pending→processing, pending_extract→extracting,
+   pending_face→facing). rowCount 0 → return false, log only.
+3. Leave `reprocessEntity`/`reextractItem`/`retagItem`/`setItemTags` touching
+   in-flight rows ON PURPOSE — post-fence that's the mechanism by which the user
+   wins the race (their flip is what makes the stale stamp discard). Document,
+   don't "fix".
+4. One-line guard on `requeueItemForTag` (only touch tagged/failed).
+5. `recoverStuck` needs no fence — it IS the crash-recovery writer, already
+   restricted to in-flight statuses + age.
+6. Known gap the fence does NOT cover (accept, don't chase): the extract leg's
+   entity-side writes (`reparentItem`/`setEntityIdentity`/`deleteEntityIfEmpty`)
+   run BEFORE `markExtracted` — a stale extract call can still re-parent or
+   rename mid-race. Self-healing: the user-routed `pending_extract` survives the
+   discard, and the fresh extraction re-derives identity and re-merges. (The
+   transactional wrap belongs to #8.)
+7. Test churn, sized honestly: retry.test.js seeds `processing` by default BUT
+   its multi-attempt loops call `failOrRequeue` repeatedly without re-claiming —
+   after the first call the row is `pending`, so each iteration needs a status
+   reset (or a claim). embed-sweep's direct `markTagged`-on-tagged calls and
+   extraction.test.js's `markExtracted`-on-held calls need their seeded status
+   set to the in-flight one (a more honest simulation anyway); faces.test.js
+   already seeds `facing`. New tests pin the discard behavior.
+8. Unlocks: with fences in, #5's deferred sweep decoupling loses its stated
+   blocker — but note the fence-vs-ownership limit above if decoupling ever
+   makes recoverStuck run concurrently with a batch: that specific pairing
+   reintroduces the re-claim window in-process, so decoupling must keep
+   recoverStuck in the claim loop's flight (or bring the claim token forward).
+
 ### 8. `reparentInto` isn't transactional and `items.entity_id` is `ON DELETE CASCADE`
 worker.js ~719 does `reparentItem` then `deleteEntityIfEmpty` as separate autocommit
 statements. If a concurrent path deletes the *target* entity in the window (its own last
