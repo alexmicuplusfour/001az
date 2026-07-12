@@ -528,7 +528,9 @@ main#grid {
   background: #fff;
   border-top: 1px solid #eee;
   border-radius: 0 0 8px 8px;
-  line-height: normal;
+  /* Fixed line box: the strip must be the same height with or without the
+     count chip, or chipped cards break the measured masonry lane. */
+  line-height: 16px;
 }
 .doc-title-text {
   flex: 1;
@@ -541,10 +543,15 @@ main#grid {
    filter-pill styling with the secondary text color */
 .inst-count {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 16px; /* matches the .doc-title line box so the chip never grows the strip */
+  box-sizing: border-box;
   border: 1px solid #0a0a181a;
   border-radius: 999px;
-  padding: 1px 8px;
+  padding: 0 8px;
   font-size: 11px;
+  line-height: 1;
   color: var(--text-dim);
   background: #fff;
 }
