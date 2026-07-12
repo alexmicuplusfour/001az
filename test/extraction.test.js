@@ -5,6 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
+import { markExtracted } from "../server/db.js";
 import { buildFieldsPrompt, htmlToMarkdown } from "../server/worker.js";
 import { anthropicRequest } from "../server/providers.js";
 
@@ -215,42 +216,74 @@ test("ingest: plain board → pending, no payload.mapping", async () => {
   assert.equal(row.payload.mapping, undefined);
 });
 
-test("ingest: mapped board + auto_tag off → held, mapping still stamped", async () => {
+test("ingest: mapped board + auto_tag off → extract leg anyway, stamped and parked", async () => {
+  // Extraction defines the item (identity, fields); auto_tag gates only
+  // tagging — `park` makes markExtracted park the item in held afterwards.
   const { json: board } = await createBoard("map-held", { auto_tag: false });
   await patchBoard(board.id, { mapping: MAPPING });
 
   const { uploaded } = await uploadTxt(board.id);
-  assert.equal(uploaded[0].status, "held");
+  assert.equal(uploaded[0].status, "pending_extract");
 
   const row = await itemStatus(uploaded[0]);
   assert.deepEqual(row.payload.mapping, MAPPING);
+  assert.equal(row.payload.park, true);
 });
 
 // ── releaseHeld routing ──────────────────────────────────────────────────────
 
-test("releaseHeld: mapped held item → pending_extract; plain held item → pending", async () => {
-  // Mapped board with auto_tag off — upload gives held + mapping stamped.
-  const { json: mappedBoard } = await createBoard("release-mapped", { auto_tag: false });
-  await patchBoard(mappedBoard.id, { mapping: MAPPING });
-  const { uploaded: [mappedItem] } = await uploadTxt(mappedBoard.id);
-  assert.equal(mappedItem.status, "held");
+test("releaseHeld: stamped → extract leg, extracted → tag leg, plain → pending", async () => {
+  const boardId = await seedBoard(db, "release-routing");
+  const insertHeld = async (payload) => {
+    const { rows: [{ id }] } = await db.query(
+      `INSERT INTO items (board_id, payload, status, created_at, updated_at)
+       VALUES ($1, $2, 'held', $3, $3) RETURNING id`,
+      [boardId, JSON.stringify(payload), Date.now()]
+    );
+    return id;
+  };
+  const stamped   = await insertHeld({ identity: "a.txt", files: [], fields: {}, mapping: MAPPING });
+  const extracted = await insertHeld({ identity: "b.txt", files: [], fields: {}, mapping: MAPPING, extracted_at: 123 });
+  const plain     = await insertHeld({ identity: "c.txt", files: [], fields: {} });
 
-  // Plain board — insert a held item directly without payload.mapping.
-  const plainBoardId = await seedBoard(db, "release-plain");
-  const { rows: [{ id: plainId }] } = await db.query(
-    `INSERT INTO items (board_id, payload, status, created_at, updated_at)
-     VALUES ($1, $2, 'held', $3, $3) RETURNING id`,
-    [plainBoardId, JSON.stringify({ identity: "x.txt", files: [], fields: {} }), Date.now()]
-  );
+  await req(base, "POST", `/api/admin/boards/${boardId}/tag-held`, { sid: admin.sid });
 
-  // Release both boards via the tag-held endpoint.
-  await req(base, "POST", `/api/admin/boards/${mappedBoard.id}/tag-held`,  { sid: admin.sid });
-  await req(base, "POST", `/api/admin/boards/${plainBoardId}/tag-held`, { sid: admin.sid });
+  const status = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0].status;
+  assert.equal(await status(stamped),   "pending_extract");
+  assert.equal(await status(extracted), "pending", "already extracted — never pays a second extraction");
+  assert.equal(await status(plain),     "pending");
+});
 
-  const { rows: [mapped] } = await db.query("SELECT status FROM items WHERE id=$1", [mappedItem.instances[0].id]);
-  const { rows: [plain]  } = await db.query("SELECT status FROM items WHERE id=$1", [plainId]);
-  assert.equal(mapped.status, "pending_extract");
-  assert.equal(plain.status,  "pending");
+test("markExtracted: parked item returns to held, definition in hand", async () => {
+  const { json: board } = await createBoard("extract-park", { auto_tag: false });
+  await patchBoard(board.id, { mapping: MAPPING });
+  const { uploaded: [item] } = await uploadTxt(board.id); // born with park
+  const instId = item.instances[0].id;
+
+  await markExtracted(db, instId, { author: { v: "x", why: "y" } });
+  const { rows: [row] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [instId]);
+  assert.equal(row.status, "held");
+  assert.equal(row.payload.park, undefined, "park is spent once the definition legs finish");
+  assert.ok(row.payload.extracted_at > 0);
+  assert.equal(row.payload.fields.author.v, "x");
+
+  // A later release routes it to the tag leg.
+  await req(base, "POST", `/api/admin/boards/${board.id}/tag-held`, { sid: admin.sid });
+  const { rows: [after] } = await db.query("SELECT status FROM items WHERE id=$1", [instId]);
+  assert.equal(after.status, "pending");
+});
+
+test("markExtracted: without park (explicit run) flows to tagging even with auto-tag off", async () => {
+  const { json: board } = await createBoard("extract-noparkcross", { auto_tag: false });
+  await patchBoard(board.id, { mapping: MAPPING });
+  const { uploaded: [item] } = await uploadTxt(board.id);
+  const instId = item.instances[0].id;
+
+  // Simulate a release/reprocess-issued extract: those paths strip park.
+  await db.query("UPDATE items SET payload = payload - 'park' WHERE id=$1", [instId]);
+  await markExtracted(db, instId, {});
+  const { rows: [row] } = await db.query("SELECT status FROM items WHERE id=$1", [instId]);
+  assert.equal(row.status, "pending");
 });
 
 // ── reextract endpoint ───────────────────────────────────────────────────────
@@ -340,14 +373,16 @@ test("releaseHeld: unstamped held item adopts the board mapping gained since upl
   assert.deepEqual(row.payload.mapping, MAPPING);
 });
 
-test("auto-tag-on sweep: held mapped items route through the extract leg", async () => {
+test("auto-tag-on sweep: un-extracted held mapped items route through the extract leg", async () => {
   const { json: board } = await createBoard("sweep-extract", { auto_tag: false });
-  await patchBoard(board.id, { mapping: MAPPING });
-  const { uploaded: [item] } = await uploadTxt(board.id);
-  assert.equal(item.status, "held");
+  const { rows: [{ id }] } = await db.query(
+    `INSERT INTO items (board_id, payload, status, created_at, updated_at)
+     VALUES ($1, $2, 'held', $3, $3) RETURNING id`,
+    [board.id, JSON.stringify({ identity: "h.txt", files: [], fields: {}, mapping: MAPPING }), Date.now()]
+  );
 
   await patchBoard(board.id, { auto_tag: true }); // flips the sweep (queueUntagged)
-  const row = await itemStatus(item);
+  const { rows: [row] } = await db.query("SELECT status FROM items WHERE id=$1", [id]);
   assert.equal(row.status, "pending_extract");
 });
 

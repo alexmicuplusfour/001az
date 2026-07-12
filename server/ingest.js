@@ -73,10 +73,18 @@ export function mountIngest(app, { db, sources }) {
         const hasMapping =
           board.mapping?.identity?.from === "ai" ||
           (Array.isArray(board.mapping?.fields) && board.mapping.fields.some((f) => f.from === "ai"));
-        const payload = { identity: file.name, files: [file], fields: fileFields, ...(hasMapping ? { mapping: board.mapping } : {}) };
-        // Auto-tag off → held (releaseHeld routes to pending_extract when mapped).
-        // Auto-tag on + mapping → pending_extract; otherwise → pending.
-        const status = board.auto_tag ? (hasMapping ? "pending_extract" : "pending") : "held";
+        // Extraction defines the item (identity, fields), so a mapped board
+        // always enters the extract leg; auto_tag gates only tagging. With
+        // auto-tag off the item carries `park` — the extract leg finishes the
+        // definition, then parks it in held instead of flowing into tagging
+        // (markExtracted). Explicit runs (reprocess/re-extract/release) carry
+        // no park and go all the way. Unmapped: auto-tag on → pending, off → held.
+        const payload = {
+          identity: file.name, files: [file], fields: fileFields,
+          ...(hasMapping ? { mapping: board.mapping } : {}),
+          ...(hasMapping && !board.auto_tag ? { park: true } : {}),
+        };
+        const status = hasMapping ? "pending_extract" : (board.auto_tag ? "pending" : "held");
         // Every upload is born a single-instance entity, provisionally keyed
         // by its stored filename; derived-identity extraction may later merge
         // the instance into an existing entity (and delete this shell).

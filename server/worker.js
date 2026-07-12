@@ -34,6 +34,7 @@ import {
   addFieldSnapshot,
   pruneFieldSnapshots,
   requeueItemForTag,
+  advanceFaced,
 } from "./db.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 import { getConnector } from "./connectors/index.js";
@@ -731,9 +732,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // resolves collisions by merging into the existing entity instead.
   async function extractOne(row) {
     const mapping = row.payload.mapping;
-    if (!mapping?.fields?.length && mapping?.identity?.from !== "ai") {
-      // No extraction work to do — mapping is empty; advance straight to tagging.
-      await markExtracted(db, row.id, {});
+    const aiWork =
+      mapping?.identity?.from === "ai" ||
+      (Array.isArray(mapping?.fields) && mapping.fields.some((f) => f.from === "ai"));
+    if (!aiWork) {
+      // Nothing for the model to do — the mapping is empty or all its fields
+      // are connector/file-sourced (a connector vehicle's stamp lands here on
+      // release). Advance without an AI call, keeping the fields the payload
+      // already carries.
+      await markExtracted(db, row.id, row.payload.fields || {});
       return;
     }
     const board = await getBoard(db, row.board_id);
@@ -889,7 +896,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         catch (e) { console.warn(`face render failed for #${row.entity_id} ${label}: ${e.message} (tile)`); }
         await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : entity.face_at, board.mapping, now));
       }
-      await requeueItemForTag(db, row.id); // → pending (tag leg)
+      await advanceFaced(db, row.id); // → pending (tag leg), or held when parked
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err.message, MAX_ATTEMPTS, "pending_face");
       console.warn(`face error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);

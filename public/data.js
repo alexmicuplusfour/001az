@@ -117,12 +117,14 @@ export function reconcile(data) {
     document.dispatchEvent(new Event('app:uploads-pending-changed'));
   }
 
-  // Check if any upload batch has finished tagging.
+  // Check if any upload batch has finished processing. 'held' is terminal
+  // too: on an auto-tag-off board the definition legs (extract/face) run and
+  // then park the item in held — that upload is done, tagging waits by design.
   for (let i = pendingBatches.length - 1; i >= 0; i--) {
     const { ids, n } = pendingBatches[i];
     const allDone = [...ids].every((id) => {
       const img = state.items.find((m) => m.id === id);
-      return img && (img.status === 'tagged' || img.status === 'failed');
+      return img && (img.status === 'tagged' || img.status === 'failed' || img.status === 'held');
     });
     if (allDone) {
       pendingBatches.splice(i, 1);

@@ -1185,9 +1185,13 @@ async function addConnectorEntity(board, connector, connectorName, entityId) {
 
   // Bound fields live on the entity; one file-less instance is the tag
   // vehicle (tags/reasoning/queue state are per instance). A connector-face
-  // board renders the chart first (face leg) so the tagger sees it.
+  // board renders the chart first (face leg) so the tagger sees it — the face
+  // is part of the item's definition, so it renders even with auto-tag off
+  // (`park` makes the face leg park the item in held afterwards instead of
+  // flowing into tagging). Face-less connector items are definition-complete
+  // at birth: auto-tag off holds them as before.
   const wantsFace = board.mapping?.face?.from === "connector";
-  const status = !board.auto_tag ? "held" : wantsFace ? "pending_face" : "pending";
+  const status = wantsFace ? "pending_face" : board.auto_tag ? "pending" : "held";
   let eid;
   try {
     eid = await createEntity(db, board.id, {
@@ -1202,7 +1206,10 @@ async function addConnectorEntity(board, connector, connectorName, entityId) {
   }
   // Provider handle rides on the tag-vehicle instance (entities has no free-
   // form payload) for a future liveness re-fetch.
-  const payload = { identity: entity.identity, files: [], fields: {}, mapping: board.mapping, source: entity.source };
+  const payload = {
+    identity: entity.identity, files: [], fields: {}, mapping: board.mapping, source: entity.source,
+    ...(wantsFace && !board.auto_tag ? { park: true } : {}),
+  };
   const id = await insertItem(db, board.id, payload, status, eid);
 
   // Schedule the first liveness refresh when the mapping has live fields.

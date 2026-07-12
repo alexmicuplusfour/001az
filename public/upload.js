@@ -92,8 +92,10 @@ export function mergeUploadedRows(rows) {
   const seen = new Set(state.items.map((it) => it.id));
   const pendingIds = [];
   for (const row of [...rows].reverse()) {
-    // Boards with auto-tagging off hold uploads ('held') instead of queueing
-    // them — only truly pending items feed the "Processing…" watcher.
+    // Mapped boards enter the extract leg even with auto-tagging off (born
+    // pending_extract, parked in held once the definition legs finish) — the
+    // watcher tracks them through extraction and clears on held/tagged/failed.
+    // Born-held rows (unmapped board, auto-tag off) have nothing to watch.
     const rowStatus = row.status || "pending";
     if (!seen.has(row.id)) {
       state.items.unshift(toItem({ ...row, status: rowStatus }));

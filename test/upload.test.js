@@ -24,9 +24,18 @@ function elem(tag) {
     remove() {},
   };
 }
-globalThis.document = { body: elem("body"), createElement: elem, addEventListener() {} };
+// A working event bus: data.js/upload.js coordinate the processing toast via
+// document events, so the stub must actually deliver them.
+const listeners = {};
+globalThis.document = {
+  body: elem("body"),
+  createElement: elem,
+  addEventListener(type, fn) { (listeners[type] ||= []).push(fn); },
+  dispatchEvent(ev) { for (const fn of listeners[ev.type] || []) fn(ev); return true; },
+};
 
 const { mergeUploadedRows } = await import("../public/upload.js");
+const { reconcile, hasPendingUploadTags } = await import("../public/data.js");
 const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
 
@@ -49,6 +58,20 @@ test("mergeUploadedRows: fresh rows all insert; only in-flight statuses are trac
   state.items = [];
   const pending = mergeUploadedRows([row(1, "pending"), row(2, "held"), row(3, "pending_extract")]);
   assert.equal(state.items.length, 3, "all three insert into an empty grid");
-  // 'held' (auto-tag off) doesn't feed the processing watcher; the other two do.
+  // Born-held (unmapped board, auto-tag off) doesn't feed the processing
+  // watcher; the queued two do.
   assert.deepEqual(pending.slice().sort((a, b) => a - b), [1, 3]);
+});
+
+test("reconcile: uploads parked in held complete the processing watcher", () => {
+  // Auto-tag off on a mapped board: born pending_extract (tracked), extraction
+  // runs, then the items PARK in held — the toast must clear there, not wait
+  // for a tagging that deliberately never comes.
+  state.items = [];
+  mergeUploadedRows([row(21, "pending_extract"), row(22, "pending_extract")]);
+  document.dispatchEvent(new CustomEvent("app:uploads-pending-tag", { detail: { ids: new Set([21, 22]), n: 2 } }));
+  assert.equal(hasPendingUploadTags(), true, "watcher armed while the extract leg runs");
+
+  reconcile([row(21, "held"), row(22, "held")]);
+  assert.equal(hasPendingUploadTags(), false, "held = definition done — the toast clears");
 });

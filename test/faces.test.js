@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, req } from "./helpers.js";
-import { createEntity, insertItem, getEntity, getBoard, setSetting } from "../server/db.js";
+import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced } from "../server/db.js";
 import { renderChart } from "../server/connectors/faces/price-chart.js";
 import * as runtime from "../server/connectors/runtime.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
@@ -226,6 +226,48 @@ test("POST entities on a chart-face board → the vehicle starts at pending_face
     assert.equal(r.json.status, "pending_face");
     assert.equal(r.json.instances[0].status, "pending_face");
   } finally { globalThis.fetch = original; }
+});
+
+test("POST entities with auto-tag off → face leg anyway, parked", async () => {
+  // The face is part of the item's definition — it renders even when tagging
+  // is off; `park` makes the face leg park the item in held afterwards.
+  const board = await faceBoard("face-route-off");
+  await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { auto_tag: false } });
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("coingecko.com") && String(url).includes("/coins/")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ id: "ethereum", name: "Ethereum", symbol: "eth", market_data: { current_price: { usd: 3000 }, market_cap: { usd: 1e11 }, price_change_percentage_24h: 1 } }) };
+    }
+    return original(url, opts);
+  };
+  try {
+    const r = await req(base, "POST", `/api/boards/${board.id}/entities`, { sid: admin.sid, body: { connector: "crypto", id: "ethereum" } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.status, "pending_face");
+    const { rows: [row] } = await db.query("SELECT payload FROM items WHERE id=$1", [r.json.instances[0].id]);
+    assert.equal(row.payload.park, true);
+  } finally { globalThis.fetch = original; }
+});
+
+test("advanceFaced: parked item returns to held; unparked flows to tagging", async () => {
+  const board = await faceBoard("face-park");
+  await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { auto_tag: false } });
+  const { mapping } = await getBoard(db, board.id);
+
+  const eid = await createEntity(db, board.id, { identity: "prk", displayName: "PRK" });
+  const parked = await insertItem(db, board.id, { identity: "prk", files: [], fields: {}, mapping, source: { provider: "coingecko", id: "prk" }, park: true }, "facing", eid);
+  await advanceFaced(db, parked);
+  const { rows: [a] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [parked]);
+  assert.equal(a.status, "held");
+  assert.equal(a.payload.park, undefined, "park is spent once the definition legs finish");
+  assert.ok(a.payload.extracted_at > 0, "release must route to the tag leg, not re-extract");
+
+  // No park = an explicit run (release/reprocess) — tags even with auto-tag off.
+  const eid2 = await createEntity(db, board.id, { identity: "unp", displayName: "UNP" });
+  const released = await insertItem(db, board.id, { identity: "unp", files: [], fields: {}, mapping, source: { provider: "coingecko", id: "unp" } }, "facing", eid2);
+  await advanceFaced(db, released);
+  const { rows: [b] } = await db.query("SELECT status FROM items WHERE id=$1", [released]);
+  assert.equal(b.status, "pending");
 });
 
 test("refreshDueEntity regenerates a due face (new filename) and folds it into refresh_at", async () => {

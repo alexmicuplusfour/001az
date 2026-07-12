@@ -116,10 +116,13 @@ CREATE INDEX IF NOT EXISTS idx_entities_refresh ON entities(refresh_at) WHERE re
 ALTER TABLE entities ADD COLUMN IF NOT EXISTS face_at BIGINT;
 
 -- status: held -> pending_extract -> extracting -> pending_face -> facing -> pending -> processing -> tagged | failed
--- ('held' gates all AI spend; items with a stamped mapping go through the
---  extract leg first; connector entities with a generated-chart face go through
---  the face leg (pending_face -> facing) so the chart exists before the first
---  tag; plain items skip straight to pending)
+-- (the extract and face legs are the item's DEFINITION — identity, fields,
+--  card visual — and run even with auto-tagging off: payload.park, stamped at
+--  birth on auto-tag-off boards, makes them park the item in held instead of
+--  flowing into tagging, so 'held' gates only the tag leg. Items with a
+--  stamped mapping go through the extract leg first; connector entities with
+--  a generated-chart face go through the face leg so the chart exists before
+--  the first tag; plain items skip straight to pending)
 -- One items row = one INSTANCE of an entity: exactly one file (or none, for
 -- the connector tag vehicle) with its own extracted fields, tags, reasoning
 -- and queue state. payload shape:

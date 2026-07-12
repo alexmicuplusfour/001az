@@ -295,9 +295,12 @@ export async function reextractItem(db, id) {
     "SELECT b.mapping FROM items i JOIN boards b ON b.id = i.board_id WHERE i.id=$1", [id]);
   if (!rows.length) return false;
   const current = aiMappingJson(rows[0].mapping);
+  // `- 'park'`: an explicit re-extract runs the full pipeline through tagging,
+  // even on an auto-tag-off board — park only gates the automatic ingest flow.
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload ELSE jsonb_set(payload, '{mapping}', $3::jsonb) END,
+     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park'
+                        ELSE jsonb_set(payload - 'park', '{mapping}', $3::jsonb) END,
          status='pending_extract', attempts=0, error=NULL, updated_at=$1
      WHERE id=$2 AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')`,
     [Date.now(), id, current]
@@ -716,19 +719,21 @@ export async function retagBoard(db, boardId) {
 // --- periodic auto-tagging ---
 
 // Release a board's held items. Connector entities awaiting a chart face enter
-// the face leg (pending_face); items with AI extraction to do enter the extract
-// leg (pending_extract); plain items go straight to pending. Held items with no
-// stamp adopt the current board mapping — the board may have gained one since
-// they were uploaded, and held means nothing has been extracted yet.
+// the face leg (pending_face); already-extracted items (the extract leg runs
+// even with auto-tag off and parks them back in held) go straight to the tag
+// leg; items with AI extraction still to do enter the extract leg. Held items
+// with no stamp adopt the current board mapping — the board may have gained
+// one since they were uploaded.
 export async function releaseHeld(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN NOT (payload ? 'mapping') AND $3::jsonb IS NOT NULL
+     SET payload = CASE WHEN NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
            WHEN payload->'mapping'->'face'->>'from' = 'connector'
                 AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
            ELSE 'pending' END,
          updated_at = $1
@@ -741,20 +746,21 @@ export async function releaseHeld(db, boardId) {
 // Queue everything untagged in a board: held uploads, AI-undecided items,
 // and failed ones (fresh attempts). Fired when auto-tagging turns on — the
 // point of the board is tags, so nothing untagged is left behind. In-flight
-// ('processing') and human-tagged items are untouched. Held items were never
-// processed at all, so they route through the face/extract legs exactly like
-// releaseHeld (adopting the board mapping when unstamped); already-processed
-// items go straight to the tag leg.
+// ('processing') and human-tagged items are untouched. Held items route
+// through the face/extract legs exactly like releaseHeld (already-extracted
+// ones go straight to tagging, unstamped ones adopt the board mapping);
+// failed/tagged-empty items go straight to the tag leg.
 export async function queueUntagged(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND $3::jsonb IS NOT NULL
+     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
            WHEN status <> 'held' THEN 'pending'
            WHEN payload->'mapping'->'face'->>'from' = 'connector'
                 AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
            ELSE 'pending' END,
          attempts=0, error=NULL, updated_at=$1
@@ -909,17 +915,47 @@ export async function claimNextPendingExtract(db, hasDefaultKey = true) {
   return rows[0] || null;
 }
 
-// Write extracted fields into payload and advance to the tag leg.
+// Write extracted fields into payload and advance. Extraction is part of the
+// item's definition (identity, fields), so it runs regardless of auto-tagging;
+// auto_tag gates only the TAG leg. Items born on an auto-tag-off board carry
+// `park`: definition done, they return to held instead of flowing into
+// tagging. Explicit runs (reprocess/re-extract/release) carry no park and go
+// all the way — the toggle gates the automatic flow, not the user's hand.
+// The board is re-checked so a mid-flight auto-tag flip beats a stale park.
+// extracted_at records that the extract leg ran, so a later release routes
+// the item to the tag leg rather than paying for a second extraction.
 export async function markExtracted(db, id, fields) {
   await db.query(
     `UPDATE items
-     SET payload = payload || jsonb_build_object('fields', $1::jsonb),
-         status = 'pending',
+     SET payload = (payload - 'park') || jsonb_build_object('fields', $1::jsonb, 'extracted_at', $2::bigint),
+         status = CASE WHEN payload ? 'park'
+                            AND NOT (SELECT b.auto_tag FROM boards b WHERE b.id = items.board_id)
+                       THEN 'held' ELSE 'pending' END,
          attempts = 0,
          error = NULL,
          updated_at = $2
      WHERE id = $3`,
     [JSON.stringify(fields || {}), Date.now(), id]
+  );
+}
+
+// The face leg's counterpart: the chart (or tile fallback) is rendered — the
+// visual half of the item's definition — so advance with the same park rule.
+// extracted_at is stamped here too: for a connector vehicle the face IS its
+// definition leg, and the stamp is what routes a later release straight to
+// the tag leg.
+export async function advanceFaced(db, id) {
+  await db.query(
+    `UPDATE items
+     SET payload = (payload - 'park') || jsonb_build_object('extracted_at', $1::bigint),
+         status = CASE WHEN payload ? 'park'
+                            AND NOT (SELECT b.auto_tag FROM boards b WHERE b.id = items.board_id)
+                       THEN 'held' ELSE 'pending' END,
+         attempts = 0,
+         error = NULL,
+         updated_at = $1
+     WHERE id = $2`,
+    [Date.now(), id]
   );
 }
 
@@ -1130,9 +1166,12 @@ export async function reprocessEntity(db, entityId) {
     "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
   if (!rows.length) return false;
   const current = aiMappingJson(rows[0].mapping);
+  // `- 'park'`: an explicit reprocess runs the full pipeline through tagging,
+  // even on an auto-tag-off board — park only gates the automatic ingest flow.
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload ELSE jsonb_set(payload, '{mapping}', $3::jsonb) END,
+     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park'
+                        ELSE jsonb_set(payload - 'park', '{mapping}', $3::jsonb) END,
          status = CASE WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract' ELSE 'pending' END,
          tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE,
          attempts=0, error=NULL, updated_at=$1
