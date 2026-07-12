@@ -19,6 +19,9 @@ services:
   extractor:
     build: ./extractor
     restart: unless-stopped
+    environment:
+      # needs a real default: the sidecar does int() on it, empty would crash
+      OCR_MAX_PAGES: ${OCR_MAX_PAGES:-20}
 
   app:
     build: .
@@ -32,6 +35,15 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-1}
       SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:-90}
       EXTRACTOR_URL: http://extractor:3002
+      # outbound tuning — code owns the defaults (empty passes through safely);
+      # set in .env only when a provider's pace or latency demands it
+      CONNECTOR_RPM: ${CONNECTOR_RPM:-}
+      CONNECTOR_BURST: ${CONNECTOR_BURST:-}
+      CONNECTOR_TIMEOUT_MS: ${CONNECTOR_TIMEOUT_MS:-}
+      CONNECTOR_RETRY_CAP_MS: ${CONNECTOR_RETRY_CAP_MS:-}
+      AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
+      AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
+      EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
       # scheduled auto-tagging (weekend detection, run times) uses server-local time
       TZ: ${TZ:-UTC}
     volumes:

@@ -503,6 +503,11 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // (htmlToMarkdown; .txt fallback), text files raw. Empty string when nothing
   // is readable — the caller decides the fallback.
   const EXTRACTOR_URL = process.env.EXTRACTOR_URL || "http://extractor:3002";
+  // Generous by design: the sidecar is single-threaded, so with CONCURRENCY
+  // extract claims fanned in, a request can legitimately sit behind ~3 OCR
+  // jobs (~40 s+ each). A budget that doesn't cover that queue manufactures
+  // the expensive fallback below under ordinary load.
+  const EXTRACTOR_TIMEOUT_MS = Number(process.env.EXTRACTOR_TIMEOUT_MS) || 240000;
   async function documentTextFor(file) {
     if (file.kind === "pdf") {
       try {
@@ -511,9 +516,13 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
           method: "POST",
           headers: { "Content-Type": "application/pdf" },
           body: buf,
+          signal: AbortSignal.timeout(EXTRACTOR_TIMEOUT_MS),
         });
         if (res.ok) return (await res.json()).markdown || "";
-      } catch { /* extractor unavailable */ }
+        console.warn(`extractor HTTP ${res.status} for ${file.name} — falling back (Anthropic boards ship the raw PDF, billed per page)`);
+      } catch (e) {
+        console.warn(`extractor unreachable for ${file.name} (${e.message}) — falling back (Anthropic boards ship the raw PDF, billed per page)`);
+      }
       return "";
     }
     if (file.kind === "docx") {

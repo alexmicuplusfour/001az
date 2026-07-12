@@ -6,6 +6,8 @@
 // /cryptocurrency/map (the full id<->symbol<->name listing), so search fetches
 // that once (cached), then filters locally; fetchEntity does an exact quote
 // lookup by id. Same provider contract, assembled differently.
+import { providerSignal } from "../runtime.js";
+
 const BASE = "https://pro-api.coinmarketcap.com";
 const MAP_LIMIT = 5000;            // top-N by rank; covers anything searchable
 const MAP_TTL = 6 * 60 * 60 * 1000; // the id/symbol map barely changes
@@ -20,6 +22,7 @@ async function cmc(path, apiKey) {
   if (!apiKey) throw new Error("CoinMarketCap needs an API key");
   const r = await fetch(`${BASE}${path}`, {
     headers: { "X-CMC_PRO_API_KEY": apiKey, Accept: "application/json" },
+    signal: providerSignal(),
   });
   const body = await r.json().catch(() => ({}));
   if (!r.ok || body?.status?.error_code) {

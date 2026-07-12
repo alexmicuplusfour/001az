@@ -44,6 +44,14 @@ function anthropicClient(apiKey) {
 }
 
 const compatHeaders = (apiKey) => ({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" });
+// Outbound deadlines for the compat wire — raw fetch has no total bound
+// (undici caps response headers at ~5 min; a trickling body never times out),
+// and a hung call wedges the worker's single-flight tick. The Anthropic wire
+// needs none of this: the SDK defaults to a 10-min per-try timeout, and
+// research tagging legitimately runs minutes. Env-tunable, read per call.
+const chatSignal = () => AbortSignal.timeout(Number(process.env.AI_CHAT_TIMEOUT_MS) || 180000);
+const embedSignal = () => AbortSignal.timeout(Number(process.env.AI_EMBED_TIMEOUT_MS) || 60000);
+const keyTestSignal = () => AbortSignal.timeout(30000); // admin Test button — interactive, fail fast
 // A failed compat response, turned into a readable error. OpenRouter buries
 // the useful upstream detail under error.metadata.raw and leaves error.message
 // as a generic "Provider returned error", so prefer the raw when present; other
@@ -144,10 +152,12 @@ const anthropicWire = {
   },
 
   async testKey(desc, { apiKey, model }) {
+    // Same 30 s bound as the compat keyTest — interactive admin button; the
+    // SDK's 10-min default is for the tagging path, not for a click.
     await anthropicClient(apiKey).messages.countTokens({
       model: model || desc.defaultModel,
       messages: [{ role: "user", content: "hi" }],
-    });
+    }, { timeout: 30000 });
   },
 
   embed: null, // Anthropic has no embeddings API
@@ -163,6 +173,7 @@ const compatWire = {
       method: "POST",
       headers: compatHeaders(apiKey),
       body: JSON.stringify(compatRequest({ provider: desc.name, model, systemText, schema, parts, tool })),
+      signal: chatSignal(),
     });
     if (!r.ok) throw await compatError(r, desc.label);
     const data = await r.json();
@@ -196,11 +207,12 @@ const compatWire = {
           ...(desc.compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
           messages: [{ role: "user", content: "hi" }],
         }),
+        signal: keyTestSignal(),
       });
       if (!r.ok) throw await compatError(r, desc.label);
       return;
     }
-    const r = await fetch(`${desc.base}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey) });
+    const r = await fetch(`${desc.base}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
     if (!r.ok) throw await compatError(r, desc.label);
   },
 
@@ -211,6 +223,7 @@ const compatWire = {
       method: "POST",
       headers: compatHeaders(apiKey),
       body: JSON.stringify({ model, input: texts }),
+      signal: embedSignal(),
     });
     if (!r.ok) throw await compatError(r, desc.label);
     const data = await r.json();

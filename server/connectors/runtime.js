@@ -17,7 +17,10 @@ const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}
 // limit instead of bursting and 429ing. Acquisition is serialized per provider
 // so concurrent callers don't all spend the same tokens; when the bucket is
 // empty a call waits for a refill. On a 429 the call is retried, honoring
-// Retry-After (bounded). rpm/burst come from the provider descriptor.
+// Retry-After capped at 30 s — these sleeps run inside the worker's
+// single-flight tick, so a provider asking for an hour must not be taken at
+// its word; long waits belong to the queue's spaced retry_at, not here.
+// rpm/burst come from the provider descriptor.
 const DEFAULT_RPM = 30, DEFAULT_BURST = 15;
 const buckets = new Map();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -39,18 +42,27 @@ async function acquire(key, rpm, burst) {
 }
 
 // 429 and — for tiers like CoinGecko's demo key — 401 both signal "slow down"
-// (the key is valid; it's rate). Retry either, honoring Retry-After (bounded).
+// (the key is valid; it's rate). Retry either, honoring Retry-After up to the
+// cap (env-tunable so tests don't wait it out).
 const RATE_STATUS = new Set([429, 401]);
 async function withRetry(fn, tries = 3) {
+  const cap = Number(process.env.CONNECTOR_RETRY_CAP_MS) || 30000;
   for (let i = 0; ; i++) {
     try { return await fn(); }
     catch (e) {
       if (!RATE_STATUS.has(e?.status) || i >= tries) throw e;
       const ra = e.retryAfter != null ? Number(e.retryAfter) : null;
-      await sleep(Number.isFinite(ra) ? ra * 1000 : Math.min(30000, 500 * 2 ** i));
+      await sleep(Math.min(Number.isFinite(ra) ? ra * 1000 : 500 * 2 ** i, cap));
     }
   }
 }
+
+// Outbound deadline for provider HTTP calls. Node's fetch has no total bound —
+// undici caps response headers at ~5 min and a trickling body never times out —
+// and one hung connector call wedges the whole single-flight worker tick.
+// Price/search APIs answer in seconds; 15 s is generous. Env-tunable.
+export const providerSignal = () =>
+  AbortSignal.timeout(Number(process.env.CONNECTOR_TIMEOUT_MS) || 15000);
 
 // Rate-limited + 429-retried provider call. Exported for tests. Env overrides
 // (CONNECTOR_RPM/CONNECTOR_BURST) let the test harness run unthrottled — its

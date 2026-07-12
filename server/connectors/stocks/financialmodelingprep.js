@@ -1,6 +1,8 @@
 // Financial Modeling Prep provider for the stocks connector. V1 deliberately
 // targets actively traded US equities in USD. FMP's stable API supplies search,
 // screening, quotes, company profiles, and end-of-day price history.
+import { providerSignal } from "../runtime.js";
+
 const BASE = "https://financialmodelingprep.com/stable";
 const PROFILE_TTL = 6 * 60 * 60 * 1000;
 const BROWSE_TTL = 5 * 60 * 1000;
@@ -33,7 +35,7 @@ async function fmp(endpoint, params, apiKey) {
   }
   url.searchParams.set("apikey", apiKey);
 
-  const r = await fetch(url);
+  const r = await fetch(url, { signal: providerSignal() });
   const text = await r.text();
   let body;
   try { body = text ? JSON.parse(text) : null; }

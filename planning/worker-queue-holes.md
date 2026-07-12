@@ -215,17 +215,111 @@ deploy-straddler could be wrongly failed); keep the per-leg status mapping.
 Adjacent note-only: raising the 5 s drain needs compose `stop_grace_period`; the
 worker-start `.then` wants a `.catch`.
 
-### 5. No timeout on any outbound fetch + `Promise.all` batches = head-of-line blocking
-No fetch in the server has an AbortSignal — tagger calls, the extractor POST
-(worker.js ~450), all connector calls. Only bound is undici's default ~5-min headers
-timeout, plus unbounded token-bucket `acquire` and Retry-After sleeps on top. `tick()`
-awaits the whole batch and the loop is single-flight, so one hung call stalls **every
-leg and every sweep** — a 1-min live crypto price stops refreshing because one PDF is
-stuck in the single-threaded extractor (which serializes ~40 s OCR jobs; 4 concurrent
-extract claims already queue ~3 min there).
+### 5. No timeout on any outbound fetch + `Promise.all` batches = head-of-line blocking — FIXED (items 1+2)
+**Status: fixed (local) per the fix design's ship-1+2-first call. 221 tests green.**
+Shipped: `withRetry`'s Retry-After honor capped at 30 s (env `CONNECTOR_RETRY_CAP_MS`);
+`AbortSignal.timeout` on every raw fetch — connectors 15 s via a shared
+`providerSignal()` in runtime.js (env `CONNECTOR_TIMEOUT_MS`), compat chat 180 s
+(`AI_CHAT_TIMEOUT_MS`), compat embeddings 60 s (`AI_EMBED_TIMEOUT_MS`), key tests 30 s
+fixed, extractor 240 s (`EXTRACTOR_TIMEOUT_MS` — budgeted for queue-behind-3-OCR-jobs);
+plus #6's minimum: `documentTextFor` now warns on extractor non-OK/unreachable instead
+of silently falling back to the per-page-billed document block. Anthropic SDK left on
+its 10-min default (research tagging runs minutes). Deferred as designed: extractor
+capacity alignment (item 3, note-only) and sweep decoupling (item 4 — blocked on #7's
+write fences, and may be unnecessary now the max stall is minutes).
 
-**Fix shape:** `AbortSignal.timeout(...)` on every outbound fetch; consider decoupling
-the sweeps (embed/refresh/retag) from the claim batches so they can't be starved.
+Loose-ends sweep after the fix: (a) the Anthropic keyTest (`countTokens`) was riding
+the SDK's 10-min default on the same interactive admin button the compat keyTest now
+bounds at 30 s — given a per-request `{ timeout: 30000 }`; (b) compose passed NONE of
+the env knobs into the container — not the new five, and not the pre-existing
+CONNECTOR_RPM/BURST (env-tunable since the rate-limiter, unreachable in the stack) or
+the extractor's OCR_MAX_PAGES (which needs a real default in compose: `int("")`
+crashes the sidecar at boot) — all passed through now, code keeps owning the Node
+defaults (empty string falls through `Number(...) ||`); (c) verified non-issues: the
+local ONNX embedder's model is pre-baked into the image (Dockerfile pre-download), so
+no unbounded hub fetch hides inside embedDue; per-fetch signals are constructed after
+the token-bucket acquire, so pacing waits don't eat the timeout budget, and each
+withRetry attempt gets a fresh signal. Original analysis kept below.
+
+No fetch in the server has an AbortSignal — the extractor POST (worker.js ~510), all
+four compat-wire calls (providers.js chat ×2 / models probe / embeddings), every
+connector call (coingecko ×7, cmc, fmp). Only bound is undici's default ~5-min headers
+timeout, plus Retry-After sleeps on top. `tick()` awaits the whole batch and the loop
+is single-flight, so one hung call stalls **every leg and every sweep** — a 1-min live
+crypto price stops refreshing because one PDF is stuck in the single-threaded extractor.
+
+Verified in depth; one claim corrected, the bounds inventory sharpened, two new
+interactions found:
+
+- **CORRECTED — Anthropic tagger calls ARE bounded:** the SDK client is built with
+  defaults (providers.js ~42) → 10-min per-try timeout + `maxRetries: 2` built in.
+  Long (worst ~30 min) but not signal-less. The genuinely unbounded surfaces are the
+  compat wire, the extractor POST, and the connectors.
+- **Bounds inventory (undici defaults):** connect ~10 s, headersTimeout 300 s,
+  bodyTimeout 300 s — but bodyTimeout is *per-chunk idle*, so a trickling response
+  body is unbounded in total. The realistic hang quantum is 5 minutes; the truly
+  unbounded cases are slow-drip bodies and the Retry-After honor below.
+- **NEW — `withRetry`'s "(bounded)" comment is false** (runtime.js ~49): a numeric
+  Retry-After is honored verbatim (`ra * 1000`); only the exponential fallback is
+  capped at 30 s. A provider/CDN sending `Retry-After: 3600` sleeps the whole worker
+  an hour — per retry, up to 3 tries, inside `refreshDue` or the face leg. Contrast
+  `failOrRequeue`, which caps its Retry-After at 1 h (db.js ~1322). The one truly
+  unbounded sleep that's trivially reachable.
+- **NEW — the safety net lives inside the blast radius:** `recoverStuck` (#4's fix)
+  runs at the top of `tick()` — the same single flight a hung call blocks. While the
+  loop is wedged nothing recovers anything; STUCK_MS (3 min) < undici (5 min) < SDK
+  (10 min), so recovery in practice waits for the hang to resolve itself. (Flip side:
+  the single flight is also what keeps #7's unfenced writes mostly theoretical —
+  see the ordering constraint in the fix.)
+- **NEW — extractor queueing already self-inflicts pseudo-timeouts (feeds #6):** the
+  sidecar is stdlib `HTTPServer`, strictly serial (main.py ~196; kernel backlog holds
+  the queue with undici's headers clock running). 4 extract claims fan into 1 worker;
+  the 4th waits out ~3 jobs. Text-layer PDFs are sub-second, but OCR jobs run ~40 s+
+  (20-page cap × ~2 s/page) — a few heavy scans ahead and the trailing request blows
+  the 300 s headersTimeout → `documentTextFor` swallows it (worker.js ~516) → `""` →
+  Anthropic boards silently ship the whole PDF as a document block (#6's expensive
+  path); non-Anthropic boards fail the item. A naive short `AbortSignal.timeout` on
+  the extractor call makes this MORE frequent, not less.
+- **NEW — client aborts don't shed sidecar load:** `BaseHTTPRequestHandler` finishes
+  the OCR job and only hits the broken pipe on write. A timed-out extract requeues
+  (status-less abort → transient under #2) while the sidecar still chews the
+  abandoned copy — head-of-line *inside the sidecar* survives any client-side
+  timeout. That half is a capacity problem (extract fan-in vs. 1 sidecar worker),
+  not a signals problem.
+- **Sharpened — token-bucket `acquire` is bounded per-waiter, but additive:** pacing
+  sleeps run inside the serialized per-provider chain (k-th waiter ≈ k/rpm min), and
+  `refreshDue` is a *sequential* loop of up to REFRESH_BATCH=20 entities, each
+  acquiring (twice with a face). At default rpm a full healthy sweep adds tens of
+  seconds of pure pacing inside `tick()`, ahead of all claims. Not a hang — a
+  standing tax.
+- **Good news — #2's machinery already classifies timeouts right:**
+  `AbortSignal.timeout` throws a status-less TimeoutError → `failOrRequeue` treats it
+  as transient → spaced `retry_at`. No classifier work needed.
+
+Severity framing: availability/latency, not data loss — the typical stall is
+5-minute-shaped, not forever-shaped. Realistic worst cases: raw Retry-After (hour+
+freeze), trickling body (unbounded), extractor backlog (repeated 5-min stalls plus
+silent bill drift via #6).
+
+**Fix design:**
+1. Cap the Retry-After honor in `withRetry`: `Math.min(ra * 1000, 30_000)` — one
+   line, makes the comment true (`failOrRequeue` already caps at 1 h).
+2. `AbortSignal.timeout(...)` on every raw fetch, budgeted per call type: connectors
+   ~15–30 s (retries exist); compat chat ~180 s; embeddings ~60 s; extractor
+   *generous* — must cover queue-behind-3-OCR-jobs (~240 s) or it manufactures the
+   #6 fallback. Leave the Anthropic SDK's 10-min default (research tagging
+   legitimately runs minutes).
+3. Extractor capacity, note-only: either drop extract fan-in toward the sidecar's 1
+   worker, or accept queueing and budget the timeout for it. `ThreadingHTTPServer`
+   is NOT an option (PyMuPDF isn't thread-safe); multiple sidecar processes would
+   be. Fix #6's silent fallback (a log line) first either way so timeouts are
+   visible when they fire.
+4. Sweep decoupling (the bigger surgery, defer): moving recoverStuck + the sweeps to
+   their own loop ends the starvation class, but concurrent flights widen #7's
+   unfenced-write window (recoverStuck requeues a row whose original in-flight call
+   later stamps `markTagged` → double claim, double bill). **Fence writes (#7)
+   before or with any decoupling.** With per-fetch timeouts in place the max stall
+   drops to minutes — ship 1+2, measure, then decide if this is still needed.
 
 ## Worth knowing about
 

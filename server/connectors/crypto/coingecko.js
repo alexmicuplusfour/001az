@@ -4,6 +4,8 @@
 // answers the domain's search/fetch contract and returns raw values; the
 // connector (crypto/index.js) derives identity and stamps provenance, so the
 // provider stays agnostic about its own registry name.
+import { providerSignal } from "../runtime.js";
+
 const BASE = "https://api.coingecko.com/api/v3";
 
 export const label = "CoinGecko";
@@ -36,6 +38,7 @@ function cgFail(r, what) {
 export async function search(query, { apiKey } = {}) {
   const r = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}`, {
     headers: cgHeaders(apiKey),
+    signal: providerSignal(),
   });
   if (!r.ok) throw cgFail(r, "search");
   const data = await r.json();
@@ -54,7 +57,7 @@ export async function fetchEntity(id, { apiKey } = {}) {
   const url =
     `${BASE}/coins/${encodeURIComponent(id)}` +
     `?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false`;
-  const r = await fetch(url, { headers: cgHeaders(apiKey) });
+  const r = await fetch(url, { headers: cgHeaders(apiKey), signal: providerSignal() });
   if (!r.ok) throw cgFail(r, "fetch");
   const d = await r.json();
   const md = d.market_data || {};
@@ -86,7 +89,7 @@ export async function history(id, period, { apiKey } = {}) {
   const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
   const r = await fetch(
     `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
-    { headers: cgHeaders(apiKey) }
+    { headers: cgHeaders(apiKey), signal: providerSignal() }
   );
   if (!r.ok) throw cgFail(r, "history");
   const d = await r.json();
@@ -126,11 +129,11 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
   const common = `vs_currency=usd&price_change_percentage=24h`;
 
   if (query && query.trim()) {
-    const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey) });
+    const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
     if (!sr.ok) throw cgFail(sr, "search");
     const ids = ((await sr.json()).coins || []).slice(0, pageSize).map((c) => c.id);
     if (!ids.length) return [];
-    const r = await fetch(`${BASE}/coins/markets?${common}&ids=${ids.map(encodeURIComponent).join(",")}`, { headers: cgHeaders(apiKey) });
+    const r = await fetch(`${BASE}/coins/markets?${common}&ids=${ids.map(encodeURIComponent).join(",")}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
     if (!r.ok) throw cgFail(r, "list");
     return (await r.json()).map(marketRow);
   }
@@ -138,7 +141,7 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
   const orderParam = (SORT_ORDER[sort] || SORT_ORDER.market_cap)(desc);
   const r = await fetch(
     `${BASE}/coins/markets?${common}&order=${orderParam}&per_page=${pageSize}&page=${page}`,
-    { headers: cgHeaders(apiKey) }
+    { headers: cgHeaders(apiKey), signal: providerSignal() }
   );
   if (!r.ok) throw cgFail(r, "list");
   return (await r.json()).map(marketRow);
@@ -147,7 +150,7 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
 // Cheap liveness ping for the admin Test button. With a key present this also
 // validates it (an invalid demo key is rejected by the API).
 export async function testConnection({ apiKey } = {}) {
-  const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey) });
+  const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey), signal: providerSignal() });
   if (!r.ok) throw cgFail(r, "unreachable");
   return true;
 }

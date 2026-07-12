@@ -10,6 +10,7 @@ import { startServer, adminSession, req } from "./helpers.js";
 import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced } from "../server/db.js";
 import { renderChart } from "../server/connectors/faces/price-chart.js";
 import * as runtime from "../server/connectors/runtime.js";
+import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
 
 let srv, db, base, admin, galleryDir, thumbsDir;
@@ -207,6 +208,40 @@ test("callProvider retries a 429 (honoring Retry-After) and surfaces other error
     runtime.callProvider("rl-other", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
     /boom/
   ); // non-429 propagates immediately
+});
+
+test("withRetry caps a huge Retry-After instead of honoring it verbatim", async () => {
+  const fast = { rpm: 100000, burst: 100 };
+  process.env.CONNECTOR_RETRY_CAP_MS = "30";
+  try {
+    let calls = 0;
+    const t0 = Date.now();
+    const res = await runtime.callProvider("rl-cap", fast, async () => {
+      calls++;
+      if (calls === 1) { const e = new Error("rate limited"); e.status = 429; e.retryAfter = "3600"; throw e; }
+      return "ok";
+    });
+    assert.equal(res, "ok");
+    assert.equal(calls, 2);
+    assert.ok(Date.now() - t0 < 5000, "an hour of Retry-After must not be slept out inside the tick");
+  } finally {
+    delete process.env.CONNECTOR_RETRY_CAP_MS;
+  }
+});
+
+test("connector fetches carry an outbound deadline", async () => {
+  const original = globalThis.fetch;
+  let signal;
+  globalThis.fetch = async (url, opts) => {
+    signal = opts?.signal;
+    return { ok: true, status: 200, json: async () => ({ coins: [] }) };
+  };
+  try {
+    await coingecko.search("btc", {});
+  } finally {
+    globalThis.fetch = original;
+  }
+  assert.ok(signal instanceof AbortSignal, "provider fetch must pass an AbortSignal");
 });
 
 // ── route + validation ───────────────────────────────────────────────────────

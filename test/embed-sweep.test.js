@@ -4,8 +4,10 @@
 // provider is stubbed at the fetch layer (OpenAI-compat /embeddings).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { startServer, seedBoard } from "./helpers.js";
 import { itemsNeedingEmbedding, markTagged, setItemTags, embeddingStats } from "../server/db.js";
+import { PROVIDERS } from "../server/providers.js";
 import { embedBatch, embedTextFor } from "../server/worker.js";
 
 let srv, db, boardId;
@@ -127,4 +129,26 @@ test("embedTextFor: capped under the tightest provider input limit", () => {
   const text = embedTextFor([], { description: "long ".repeat(5000) }, {});
   assert.ok(text.length <= 8000);
   assert.ok(text.startsWith("long "), "truncated, not mangled");
+});
+
+// ── outbound deadline ────────────────────────────────────────────────────────
+
+test("compat embed call aborts on a hung provider instead of wedging the tick", async () => {
+  // A server that accepts the connection and never responds — the hang undici
+  // would otherwise ride out for its 5-minute headers timeout, single-flight.
+  const hung = http.createServer(() => { /* never respond */ });
+  await new Promise((r) => hung.listen(0, "127.0.0.1", r));
+  process.env.AI_EMBED_TIMEOUT_MS = "100";
+  try {
+    await assert.rejects(
+      PROVIDERS.openai.wire.embed(
+        { base: `http://127.0.0.1:${hung.address().port}`, label: "OpenAI", name: "openai" },
+        { apiKey: "k", model: "m", texts: ["a"] }
+      ),
+      /timeout|abort/i
+    );
+  } finally {
+    delete process.env.AI_EMBED_TIMEOUT_MS;
+    hung.close();
+  }
 });
