@@ -323,12 +323,79 @@ silent bill drift via #6).
 
 ## Worth knowing about
 
-### 6. Extractor downtime silently reverts PDFs to the expensive path
-`documentTextFor` swallows the fetch error and returns `""` (worker.js ~456); on an
+### 6. Extractor downtime silently reverts PDFs to the expensive path — FIXED
+**Status: fixed (local) as designed, user-approved reversal of the original
+fallback decision. 223 tests green.** `documentTextFor` lifted to module scope
+(exported for tests, `galleryDir` param — the generateFace precedent) and its
+outcomes split: extractor infra failure (unreachable / non-OK) THROWS status-less
+→ #2's classifier spaces the retries and nothing bills — which also kills the
+double-bill and double-wait (the throw propagates before extractOne's `??`
+fallback ever evaluates); `res.ok`+empty returns `""`, so the document block
+survives for genuinely textless scans only, now with a warn naming the per-page
+cost; the compat "use an Anthropic tagger" error only fires when it's true; and
+empty-text docx/text throws a permanent-shaped 422 ("has no extractable text")
+instead of tagging a blank document. Original analysis kept below.
+
+`documentTextFor` swallows the fetch error and returns `""` (worker.js ~506); on an
 Anthropic board the tag leg then quietly ships the whole PDF as a document block — the
 exact per-page billing the sidecar was built to avoid. Non-Anthropic boards fail visibly
 (by design), but on Anthropic boards there's no log line and no flag; a flaky sidecar
 just makes the bill drift up. At minimum log the fallback; consider a metric/flag.
+
+Verified in depth (the #5 fix shipped the log-line minimum — warns now fire on both
+non-OK and unreachable). The full picture is worse than the entry above:
+
+- **NEW — BOTH legs fall back, so downtime double-bills:** the entry only names the
+  tag leg, but `extractOne` does `modelInputForExtract(...) ?? modelInputFor(...)`
+  (worker.js ~832) — extractor down → the extract call ships the document block too,
+  then the tag leg ships it AGAIN. Every PDF in flight during downtime pays the
+  per-page bill twice (each page ≈ image + text tokens, ~1.5–3k/page; a 10-page PDF
+  ≈ 20–30k input tokens per call vs ~3–5k once via the text path — the 18-résumés->$1
+  bill that motivated the sidecar).
+- **NEW — the `??` fallback doubles the hang budget:** within one `extractOne`,
+  `documentTextFor` runs twice (once in `modelInputForExtract`, once inside the
+  `modelInputFor` fallback). A hung-not-down extractor costs 2×EXTRACTOR_TIMEOUT_MS
+  ≈ 8 min per item per extract attempt (plus two warn lines), and the tag leg adds
+  another 4 min — the longest stall anywhere in the system post-#5.
+- **SHARPENED — "non-Anthropic boards fail visibly" is half-true, and accidentally
+  self-healing:** `compatWire.tag` throws pre-fetch, and that error is status-less →
+  `failOrRequeue` classifies it TRANSIENT → spaced retries (1/5/15 m, +2 headroom).
+  If the extractor returns inside the window, the item recovers untouched — compat
+  boards ride out blips for free. But the eventual `items.error` says "use an
+  Anthropic tagger for this board" — blaming the provider choice when the real cause
+  was extractor downtime. Misleading on a board whose PDFs worked yesterday.
+- **The asymmetry is backwards:** Anthropic boards — the ones for which waiting is
+  free and correct — pay instantly and irreversibly; compat boards — which have no
+  alternative — get the free self-healing retry loop.
+- **Downtime is routine, not exotic:** deploy.ps1 recreates the extractor container
+  on every ship; any queued PDF in flight during that window hits the fallback. The
+  sidecar's own kernel backlog + a blown 240 s budget under OCR load (#5's analysis)
+  produce the same "" without the sidecar ever being down.
+- **Root cause — one `""` means two different things:** (a) `res.ok` + empty
+  markdown = genuinely textless document (image-only scan past the OCR cap, no text
+  layer) — the document block is the RIGHT move there (visual OCR is exactly
+  Anthropic's strength, and compat's "use an Anthropic tagger" message is then
+  accurate); (b) infra failure (non-OK / refused / timeout) — where waiting minutes
+  is strictly better than paying per page. `documentTextFor` conflates them.
+- **Side finding (adjacent):** the text/docx branches prompt the model even when the
+  text is empty — an image-only docx passes ingest (only mammoth *failure* rejects;
+  empty text writes an empty `.txt` sidecar) and gets tagged/extracted against a
+  blank document, `extracted_at` stamped, never revisited, no warn. Garbage-in with
+  no signal, extractor healthy or not.
+
+**Fix design:** make `documentTextFor` throw on infra failure (readable message,
+status-less → #2's classifier already spaces the retries; explicit reprocess clears
+`retry_at` as always) and return `""` only for `res.ok`+empty = genuine no-text.
+One change, three effects: Anthropic boards ride out blips like compat boards
+already do (no automatic spend), the double-bill AND double-wait die (the throw
+propagates before the `??` fallback evaluates), and the compat error message becomes
+truthful (it only fires for genuinely textless PDFs). Keep the document block for
+the textless case — that fallback is content-driven and correct. ⚠️ This reverses a
+deliberate design call ("document block = extractor-down fallback" was chosen so
+Anthropic boards keep working through downtime) — needs the user's sign-off: the
+trade is "PDFs tag minutes later during a blip" for "no silent per-page billing,
+ever". Optional extra: fail empty-text docx/text items visibly ("document has no
+extractable text") instead of tagging a blank.
 
 ### 7. `markTagged` / `markExtracted` are unfenced writes
 They update `WHERE id=$1` unconditionally — no check the row is still

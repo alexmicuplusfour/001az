@@ -5,10 +5,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, adminSession, seedBoard } from "./helpers.js";
 import { anthropicRequest } from "../server/providers.js";
+import { documentTextFor } from "../server/worker.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -120,4 +122,53 @@ test("document ingestion", async (t) => {
       source: { type: "base64", media_type: "application/pdf", data: "QQ==" },
     });
   });
+});
+
+// ── documentTextFor: infra failures throw, "no text" is a real answer ────────
+
+test("documentTextFor: extractor downtime throws transient; empty markdown falls through", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctext-"));
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; fs.rmSync(dir, { recursive: true, force: true }); });
+  fs.writeFileSync(path.join(dir, "a.pdf"), "%PDF-1.4 fake");
+  const pdf = { kind: "pdf", name: "a.pdf", original_name: "cv.pdf" };
+
+  // healthy: extracted markdown comes back
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ markdown: "# hi" }) });
+  assert.equal(await documentTextFor(dir, pdf), "# hi");
+
+  // healthy but textless scan: "" is a real answer (caller may document-block)
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ markdown: "" }) });
+  assert.equal(await documentTextFor(dir, pdf), "");
+
+  // extractor erring: throws STATUS-LESS so failOrRequeue spaces retries
+  // instead of the caller silently paying per-page document billing
+  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  await assert.rejects(documentTextFor(dir, pdf), (e) => /extractor failed/.test(e.message) && e.status === undefined);
+
+  // extractor unreachable (deploy blip): same shape
+  globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
+  await assert.rejects(documentTextFor(dir, pdf), (e) => /extractor unreachable/.test(e.message) && e.status === undefined);
+});
+
+test("documentTextFor: a docx/text with no extractable text fails permanent-shaped", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctext-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // image-only docx: passes ingest with an empty .txt sidecar
+  fs.writeFileSync(path.join(dir, "d.docx.txt"), "  \n");
+  await assert.rejects(
+    documentTextFor(dir, { kind: "docx", name: "d.docx", original_name: "pics.docx" }),
+    (e) => /"pics\.docx" has no extractable text/.test(e.message) && e.status === 422
+  );
+
+  fs.writeFileSync(path.join(dir, "empty.txt"), "");
+  await assert.rejects(
+    documentTextFor(dir, { kind: "text", name: "empty.txt", original_name: "empty.txt" }),
+    (e) => e.status === 422
+  );
+
+  // content still flows through untouched
+  fs.writeFileSync(path.join(dir, "u.txt"), "hello");
+  assert.equal(await documentTextFor(dir, { kind: "text", name: "u.txt", original_name: "u.txt" }), "hello");
 });

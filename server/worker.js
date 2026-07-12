@@ -491,6 +491,65 @@ export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, 
   return face;
 }
 
+// Every document kind resolves to text the same way — pdf via the PyMuPDF
+// sidecar (structured markdown, links preserved), docx via its html sidecar
+// (htmlToMarkdown; .txt fallback), text files raw. Two failure shapes, kept
+// deliberately distinct:
+//  - extractor infra failure (unreachable / non-OK) THROWS status-less →
+//    failOrRequeue spaces the retries and the item rides out the blip
+//    (deploys restart the sidecar) instead of falling back to per-page
+//    document billing;
+//  - a document with genuinely no text throws 422 (permanent — retrying won't
+//    grow text) for docx/text, but returns "" for pdf: a textless scan is the
+//    one case where the Anthropic document block is the right fallback
+//    (visual reading is what those models are for; the caller decides).
+// Exported for tests; the worker binds galleryDir at the call sites.
+const EXTRACTOR_URL = process.env.EXTRACTOR_URL || "http://extractor:3002";
+// Generous by design: the sidecar is single-threaded, so with the extract
+// claims fanned in, a request can legitimately sit behind ~3 OCR jobs
+// (~40 s+ each). A budget that doesn't cover that queue manufactures
+// spurious extractor-unreachable errors under ordinary load.
+const EXTRACTOR_TIMEOUT_MS = Number(process.env.EXTRACTOR_TIMEOUT_MS) || 240000;
+const noTextError = (file) => {
+  const e = new Error(`"${file.original_name || file.name}" has no extractable text`);
+  e.status = 422; // permanent-shaped: failOrRequeue fails it on the first attempt
+  return e;
+};
+export async function documentTextFor(galleryDir, file) {
+  if (file.kind === "pdf") {
+    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+    let res;
+    try {
+      res = await fetch(`${EXTRACTOR_URL}/extract`, {
+        method: "POST",
+        headers: { "Content-Type": "application/pdf" },
+        body: buf,
+        signal: AbortSignal.timeout(EXTRACTOR_TIMEOUT_MS),
+      });
+    } catch (e) {
+      throw new Error(`extractor unreachable (${e.message}) — will retry`);
+    }
+    if (!res.ok) throw new Error(`extractor failed (HTTP ${res.status}) — will retry`);
+    return (await res.json()).markdown || "";
+  }
+  if (file.kind === "docx") {
+    const html = await fs.promises.readFile(path.join(galleryDir, file.name + ".html"), "utf8").catch(() => "");
+    const text = html
+      ? htmlToMarkdown(html)
+      : await fs.promises.readFile(path.join(galleryDir, file.name + ".txt"), "utf8").catch(() => "");
+    // An image-only docx passes ingest with empty sidecars; tagging a blank
+    // document would only hallucinate.
+    if (!text.trim()) throw noTextError(file);
+    return text;
+  }
+  if (file.kind === "text") {
+    const text = await fs.promises.readFile(path.join(galleryDir, file.name), "utf8").catch(() => "");
+    if (!text.trim()) throw noTextError(file);
+    return text;
+  }
+  return "";
+}
+
 export function startWorker({ db, thumbsDir, galleryDir }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
@@ -498,50 +557,13 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   const CONCURRENCY = Math.max(1, Number(process.env.TAG_CONCURRENCY) || 4);
   const TEXT_DOC_MAX_CHARS = 50000; // ~12k tokens; plenty for tagging judgment
 
-  // Every document kind resolves to text the same way — pdf via the PyMuPDF
-  // sidecar (structured markdown, links preserved), docx via its html sidecar
-  // (htmlToMarkdown; .txt fallback), text files raw. Empty string when nothing
-  // is readable — the caller decides the fallback.
-  const EXTRACTOR_URL = process.env.EXTRACTOR_URL || "http://extractor:3002";
-  // Generous by design: the sidecar is single-threaded, so with CONCURRENCY
-  // extract claims fanned in, a request can legitimately sit behind ~3 OCR
-  // jobs (~40 s+ each). A budget that doesn't cover that queue manufactures
-  // the expensive fallback below under ordinary load.
-  const EXTRACTOR_TIMEOUT_MS = Number(process.env.EXTRACTOR_TIMEOUT_MS) || 240000;
-  async function documentTextFor(file) {
-    if (file.kind === "pdf") {
-      try {
-        const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-        const res = await fetch(`${EXTRACTOR_URL}/extract`, {
-          method: "POST",
-          headers: { "Content-Type": "application/pdf" },
-          body: buf,
-          signal: AbortSignal.timeout(EXTRACTOR_TIMEOUT_MS),
-        });
-        if (res.ok) return (await res.json()).markdown || "";
-        console.warn(`extractor HTTP ${res.status} for ${file.name} — falling back (Anthropic boards ship the raw PDF, billed per page)`);
-      } catch (e) {
-        console.warn(`extractor unreachable for ${file.name} (${e.message}) — falling back (Anthropic boards ship the raw PDF, billed per page)`);
-      }
-      return "";
-    }
-    if (file.kind === "docx") {
-      const html = await fs.promises.readFile(path.join(galleryDir, file.name + ".html"), "utf8").catch(() => "");
-      if (html) return htmlToMarkdown(html);
-      return fs.promises.readFile(path.join(galleryDir, file.name + ".txt"), "utf8").catch(() => "");
-    }
-    if (file.kind === "text") {
-      return fs.promises.readFile(path.join(galleryDir, file.name), "utf8").catch(() => "");
-    }
-    return "";
-  }
-
   // What the model sees for an item: parts built from its files by kind.
   // Images: the thumbnail (cheap) rather than the original. Documents: their
   // extracted text (documentTextFor), so every provider can tag them; PDFs
   // additionally carry their page-1 thumbnail so visual/style facets keep
   // their signal, and fall back to an Anthropic-only document block when the
-  // extractor is unreachable.
+  // document genuinely has no text layer (extractor DOWNTIME throws instead —
+  // the retry queue waits it out rather than paying per-page billing).
   async function modelInputFor(payload, entity = null) {
     const file = payload.files?.[0];
     if (!file) {
@@ -554,7 +576,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       }];
     }
     if (file.kind === "pdf") {
-      const text = await documentTextFor(file);
+      const text = await documentTextFor(galleryDir, file);
       if (text.trim()) {
         // Page-1 preview rides along so visual/style facets keep their signal;
         // the thumbnail is a fraction of the tokens of per-page PDF billing.
@@ -569,8 +591,11 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         });
         return parts;
       }
-      // Extractor unreachable — fall back to the whole PDF as a document
-      // block (Anthropic-only; providers.js rejects it elsewhere).
+      // Extraction succeeded but found no text: a scan with no text layer
+      // (or past the OCR cap). The whole PDF as a document block is the right
+      // fallback — visual reading is exactly what Anthropic models can do
+      // (compat providers reject document parts with a readable error).
+      console.warn(`no text layer in ${file.original_name || file.name} — sending as a document block (Anthropic-only, billed per page)`);
       const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
       return [
         { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
@@ -578,7 +603,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       ];
     }
     if (file.kind === "text" || file.kind === "docx") {
-      const text = await documentTextFor(file);
+      const text = await documentTextFor(galleryDir, file);
       return [{
         kind: "text",
         text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
@@ -599,11 +624,12 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
   // Text-only input for the extraction leg — all doc types go through the
   // same documentTextFor path so extraction works with any provider (document
   // blocks are Anthropic-only) and never pays image tokens. null = no text
-  // (image file, or extractor down) — the caller falls back to modelInputFor.
+  // (image file, or a genuinely textless pdf) — the caller falls back to
+  // modelInputFor; extractor downtime throws out of here instead.
   async function modelInputForExtract(payload) {
     const file = payload.files?.[0];
     if (!file) return null; // connector entity with no file — nothing to extract
-    const text = await documentTextFor(file);
+    const text = await documentTextFor(galleryDir, file);
     if (!text.trim()) return null;
     return [{
       kind: "text",
