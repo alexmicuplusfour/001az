@@ -32,7 +32,7 @@ globalThis.document = {
 };
 
 const { mergeUploadedRows } = await import("../public/upload.js");
-const { reconcile, hasPendingUploadTags } = await import("../public/data.js");
+const { reconcile, hasPendingUploadTags, pollDelay } = await import("../public/data.js");
 const { state } = await import("../public/state.js");
 
 const row = (id, status = "pending") => ({ id, name: `${id}.png`, label: `${id}.png`, kind: "image", status });
@@ -64,4 +64,29 @@ test("absence from the ids list still reads as merged away", () => {
   reconcile([row(42, "tagged")], new Set([42]));
   assert.deepEqual(state.items.map((i) => i.id), [42], "merged-away in-flight card is dropped");
   assert.equal(hasPendingUploadTags(), false, "batch settles: one merged, one tagged");
+});
+
+// Live boards regenerate chart faces server-side under new filenames (the old
+// webp is deleted); a tab that stops polling keeps the dead name and 404s in
+// the lightbox. The cadence decision must keep quiet live boards on a slow poll.
+test("poll cadence: fast while work is in flight, slow on a live board, off otherwise", () => {
+  state.uploading = [];
+  state.items = [{ id: 1, status: "tagged", tags: [] }];
+
+  state.boardMapping = null;
+  assert.equal(pollDelay(), 0, "settled non-live board: no poll");
+
+  state.boardMapping = { fields: [{ key: "price", from: "connector", live: true, every: 1 }] };
+  assert.equal(pollDelay(), 30000, "live connector fields: slow poll");
+
+  state.boardMapping = { fields: [], face: { from: "connector", producer: "chart", live: true, every: 60 } };
+  assert.equal(pollDelay(), 30000, "live chart face: slow poll");
+
+  state.boardMapping = { fields: [{ key: "price", from: "connector" }], face: { from: "connector", producer: "chart" } };
+  assert.equal(pollDelay(), 0, "connector but nothing live: no poll");
+
+  state.items = [{ id: 1, status: "processing", tags: [] }];
+  assert.equal(pollDelay(), 4000, "in-flight work: fast poll wins regardless of liveness");
+
+  state.boardMapping = null;
 });

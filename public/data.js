@@ -151,10 +151,36 @@ async function refreshTokens() {
   } catch { /* leave the last known total */ }
 }
 
+// A live board (connector fields or a live chart face) changes server-side on
+// its own cadence: values refresh, and chart faces regenerate under NEW
+// filenames — the old webp is deleted, since /gallery caches immutably. A tab
+// that never polls keeps pointing at the dead filename and the lightbox 404s.
+// So: in-flight work polls fast, a quiet live board polls slowly, anything
+// else not at all.
+function liveBoard() {
+  const m = state.boardMapping;
+  if (!m) return false;
+  return (m.fields || []).some((f) => f.from === "connector" && f.live) ||
+    (m.face?.from === "connector" && !!m.face.live);
+}
+
+// Exported for tests: the cadence decision in one place.
+export function pollDelay() {
+  if (needsPoll()) return 4000;
+  if (liveBoard()) return 30000;
+  return 0;
+}
+
 let polling = false;
+let pollTimer = null;
+
+function schedule(delay) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollTick, delay);
+}
 
 async function pollTick() {
-  if (!needsPoll()) {
+  if (!pollDelay()) {
     polling = false;
     // The last item's tokens land just after its status flips to tagged, so
     // catch that final bump once the queue has drained.
@@ -185,13 +211,19 @@ async function pollTick() {
   } catch {
     /* keep polling */
   }
-  setTimeout(pollTick, 4000);
+  schedule(pollDelay()); // recomputed — the queue may have settled or refilled
 }
 
 export function ensurePolling() {
-  if (!polling && needsPoll()) {
+  const delay = pollDelay();
+  if (!delay) return;
+  if (!polling) {
     polling = true;
-    setTimeout(pollTick, 4000);
+    schedule(4000);
+  } else if (delay === 4000) {
+    // Work just queued while on the slow live cadence — don't wait out the
+    // long timer.
+    schedule(4000);
   }
 }
 

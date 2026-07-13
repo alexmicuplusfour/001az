@@ -810,6 +810,17 @@ retag's by age. Revisit when 1,000-item scheduled retags are real.
   pay a `getBoard` query per item per tick, twice (processOne + extractOne paths).
 - Concurrent `generateFace` renders (face leg vs. a mapping-save backfill) can orphan a
   webp on disk — the loser's new file is never unlinked.
+  (Related but distinct, user-reported and FIXED 2026-07-13: stale tabs 404ing the
+  lightbox image on crypto/stocks boards. Root cause was NOT this orphan — the client
+  only polled while items were in flight, so a quiet live board never learned a
+  regenerated face's NEW filename after the old webp was unlinked; the card kept
+  showing the browser-cached old image while the lightbox fetched the deleted file.
+  data.js now keeps a slow 30 s delta poll on boards whose mapping has live
+  fields/face (fast 4 s while work is in flight, off otherwise — `pollDelay()`,
+  pinned in delta-reconcile.test.js); the rest of the pipe already worked:
+  `setEntityFaceAt` stamps entities.updated_at so the delta sees the swap, reconcile
+  follows `d.name`, and the grid cardSig keys on the filename. The disk-orphan race
+  itself remains note-only.)
 - In `processOne`, `bumpUsage` throwing *after* `markTagged` lands in the catch →
   `failOrRequeue` flips a successfully-tagged item back to pending → duplicate AI call.
   (FIXED as side effects: the #2 try-narrowing closed the tag leg; the extract leg's
