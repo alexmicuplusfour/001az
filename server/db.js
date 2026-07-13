@@ -1008,8 +1008,10 @@ export async function setEntityFaceAt(db, id, at) {
 // The board is re-checked so a mid-flight auto-tag flip beats a stale park.
 // extracted_at records that the extract leg ran, so a later release routes
 // the item to the tag leg rather than paying for a second extraction.
+// Value-fenced like markTagged: lands only while the row is still
+// 'extracting'; a mid-flight re-route/delete discards (returns false).
 export async function markExtracted(db, id, fields) {
-  await db.query(
+  const { rowCount } = await db.query(
     `UPDATE items
      SET payload = (payload - 'park') || jsonb_build_object('fields', $1::jsonb, 'extracted_at', $2::bigint),
          status = CASE WHEN payload ? 'park'
@@ -1019,9 +1021,10 @@ export async function markExtracted(db, id, fields) {
          error = NULL,
          retry_at = NULL,
          updated_at = $2
-     WHERE id = $3`,
+     WHERE id = $3 AND status = 'extracting'`,
     [JSON.stringify(fields || {}), Date.now(), id]
   );
+  return rowCount > 0;
 }
 
 // The face leg's counterpart: the chart (or tile fallback) is rendered — the
@@ -1029,8 +1032,9 @@ export async function markExtracted(db, id, fields) {
 // extracted_at is stamped here too: for a connector vehicle the face IS its
 // definition leg, and the stamp is what routes a later release straight to
 // the tag leg.
+// Value-fenced like its siblings: lands only while the row is still 'facing'.
 export async function advanceFaced(db, id) {
-  await db.query(
+  const { rowCount } = await db.query(
     `UPDATE items
      SET payload = (payload - 'park') || jsonb_build_object('extracted_at', $1::bigint),
          status = CASE WHEN payload ? 'park'
@@ -1040,9 +1044,10 @@ export async function advanceFaced(db, id) {
          error = NULL,
          retry_at = NULL,
          updated_at = $1
-     WHERE id = $2`,
+     WHERE id = $2 AND status = 'facing'`,
     [Date.now(), id]
   );
+  return rowCount > 0;
 }
 
 // --- entities ---
@@ -1247,11 +1252,14 @@ export async function pruneTagSnapshots(db, cutoff) {
 }
 
 // Send one instance back to the tag queue (the opt-in retag-on-new-data path).
+// Only settled items: the refresh cascade must not yank a row out of the
+// definition legs or a user's mid-flight run. Returns whether it requeued.
 export async function requeueItemForTag(db, id) {
-  await db.query(
-    "UPDATE items SET status='pending', attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2",
+  const { rowCount } = await db.query(
+    "UPDATE items SET status='pending', attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2 AND status IN ('tagged','failed')",
     [Date.now(), id]
   );
+  return rowCount > 0;
 }
 
 // Recompute refresh_at for every entity on a board after its mapping changes
@@ -1330,14 +1338,24 @@ export async function reprocessEntity(db, entityId) {
   return result.rowCount > 0;
 }
 
+// Value-fenced (`AND status='processing'`): the stamp lands only while the row
+// is still this claim's in-flight status. A per-card route (reprocess,
+// re-extract, retag, tag edit) that re-routed the row mid-call wins — the
+// stale result is discarded (returns false) and the snapshot is skipped, so
+// history never records a judgment that was never current. A row deleted
+// mid-call discards the same way instead of FK-erroring on the snapshot.
+// Sound single-process because a stale stamp always executes before any
+// re-claim (single-flight tick); across processes a value fence is NOT
+// ownership — see the worker-queue audit, hole #7.
 export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {
   // Clearing the vector marks the item for the embedding sweep — the text it
   // was embedded from just changed.
-  await db.query(
-    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, retry_at=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5",
+  const { rowCount } = await db.query(
+    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, retry_at=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5 AND status='processing'",
     [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), Date.now(), id]
   );
-  await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
+  if (rowCount) await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
+  return rowCount > 0;
 }
 
 // --- semantic search embeddings ---
@@ -1415,6 +1433,10 @@ export async function embeddingStats(db, model) {
 // Returns true if the item was failed.
 const RETRY_BACKOFF_MS = [60000, 300000, 900000];
 const TRANSIENT_EXTRA = 2;
+// Maps a leg's requeue target back to the in-flight status that leg claims
+// into — the value fence for failOrRequeue below.
+const IN_FLIGHT_FOR = { pending: "processing", pending_extract: "extracting", pending_face: "facing" };
+
 export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = "pending") {
   const httpStatus = Number(error?.status);
   const permanent =
@@ -1429,8 +1451,12 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
     : RETRY_BACKOFF_MS[Math.min(Math.max(attempts - 1, 0), RETRY_BACKOFF_MS.length - 1)];
   const ra = Number(error?.retryAfter);
   const wait = Math.max(backoff, Number.isFinite(ra) ? Math.min(ra * 1000, 3600000) : 0);
-  await db.query(
-    "UPDATE items SET status=$1, attempts=$2, error=$3, retry_at=$4, updated_at=$5 WHERE id=$6",
+  // Value-fenced: a stale failure must not stamp error/retry_at over a row the
+  // user re-routed mid-flight (their reprocess/re-extract already reset it and
+  // chose its leg). The fence also closes the attempts read-then-write race —
+  // every writer that resets attempts also moves the row out of this status.
+  const { rowCount } = await db.query(
+    "UPDATE items SET status=$1, attempts=$2, error=$3, retry_at=$4, updated_at=$5 WHERE id=$6 AND status=$7",
     [
       failed ? "failed" : requeueStatus,
       attempts,
@@ -1438,9 +1464,10 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
       failed ? null : Date.now() + wait,
       Date.now(),
       id,
+      IN_FLIGHT_FOR[requeueStatus] || "processing",
     ]
   );
-  return failed;
+  return rowCount > 0 && failed;
 }
 
 // Recover items stranded mid-flight ('processing'/'extracting'/'facing') by a

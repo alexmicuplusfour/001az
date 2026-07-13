@@ -457,7 +457,10 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
   let requeued = false;
   if (moved.length) {
     if (board.retag_on_refresh) await addFieldSnapshot(db, entity.id, r.moved, r.provider, now);
-    if (board.retag_on_refresh && board.auto_tag) { await requeueItemForTag(db, inst.id); requeued = true; }
+    // requeueItemForTag only touches settled items (tagged/failed) — an
+    // instance mid-definition or mid-flight is left alone, so requeued
+    // reflects what actually happened.
+    if (board.retag_on_refresh && board.auto_tag) requeued = await requeueItemForTag(db, inst.id);
     console.log(`refreshed entity #${entity.id} ${entity.identity} [${r.provider}] -> ${moved.join(", ")}${requeued ? " (retag)" : ""}`);
   }
   if (faced) console.log(`refreshed face for entity #${entity.id} ${entity.identity}`);
@@ -791,8 +794,8 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       // Facet-less board: nothing to tag. Complete the item instead of failing
       // it — extraction-only boards (mapping, no facets) are a supported shape.
       if (!(await getBoardPrompt(db, row.board_id))) {
-        await markTagged(db, row.id, [], false, {});
-        console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
+        if (await markTagged(db, row.id, [], false, {})) console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
+        else console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
         return;
       }
       result = await tagOne(row);
@@ -804,11 +807,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     // The paid call succeeded — a write failure past this point must not
     // requeue (that would bill a second call). Leave the row processing;
     // recoverStuck re-queues it later if markTagged itself was the casualty.
+    // A DISCARD (fence: the user re-routed the row mid-call) is not a write
+    // failure — their routing wins, the result is dropped, the tokens were
+    // spent either way so usage still counts.
     try {
       const { tags, undecided, reasoning, usage, model } = result;
-      await markTagged(db, row.id, tags, undecided, reasoning);
+      const landed = await markTagged(db, row.id, tags, undecided, reasoning);
       await bumpUsage(db, row.board_id, usage);
-      console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
+      if (landed) console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
+      else console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
     } catch (err) {
       console.warn(`post-tag write failed #${row.id} ${label}: ${err.message} (left for recovery)`);
     }
@@ -834,6 +841,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     }
   }
 
+  // Stamp the extract result; false = the fence discarded it (the row was
+  // re-routed or deleted mid-flight — the user's routing wins, and their
+  // fresh run re-derives; entity-side moves above the stamp self-heal there).
+  async function stampExtracted(row, fields) {
+    const landed = await markExtracted(db, row.id, fields);
+    if (!landed) console.warn(`stale extract result for #${row.id} discarded (re-routed or deleted mid-flight)`);
+    return landed;
+  }
+
   // Run extraction for one pending_extract item. Resolves the board's AI the
   // same way tagOne does; writes payload.fields and advances to pending so the
   // normal tag leg picks it up next. When the mapping has derived identity,
@@ -848,7 +864,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       // are connector/file-sourced (a connector vehicle's stamp lands here on
       // release). Advance without an AI call, keeping the fields the payload
       // already carries.
-      await markExtracted(db, row.id, row.payload.fields || {});
+      await stampExtracted(row, row.payload.fields || {});
       return;
     }
     const board = await getBoard(db, row.board_id);
@@ -903,7 +919,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
       const rawIdentity = input.identity?.value;
       if (!entity) {
         // Orphan instance (shouldn't happen) — extract what we can and move on.
-        await markExtracted(db, row.id, fields);
+        await stampExtracted(row, fields);
         console.warn(`extracted #${row.id} [no parent entity — skipped identity resolution] [${ai.model}]`);
       } else if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
         // AI couldn't derive an identity. Only flag provisional on entities
@@ -911,8 +927,8 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         // keep their identity — this instance just didn't add evidence.
         const established = !!entity.display_name;
         if (!established) await markEntityProvisional(db, entity.id);
-        await markExtracted(db, row.id, fields);
-        console.log(`extracted #${row.id} [no identity derived${established ? " — keeping entity identity" : " — provisional"}] [${ai.model}]`);
+        if (await stampExtracted(row, fields))
+          console.log(`extracted #${row.id} [no identity derived${established ? " — keeping entity identity" : " — provisional"}] [${ai.model}]`);
       } else {
         // The display name is the model's output verbatim — identity can be
         // anything ("INV-2026-04", "BTC-USD", a name, a date), so any cleanup
@@ -924,15 +940,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
           // Same key — refresh the display name to this derivation and make
           // sure the provisional flag is gone.
           await setEntityIdentity(db, entity.id, derived, newDisplayName);
-          await markExtracted(db, row.id, fields);
-          console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
+          if (await stampExtracted(row, fields))
+            console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
         } else {
           const other = await getEntityByIdentity(db, row.board_id, derived);
           if (other) {
             // Another entity already holds this identity — merge (or split
             // away from a multi-instance entity): re-parent this instance.
             await reparentInto(row, other, newDisplayName, entity.id);
-            await markExtracted(db, row.id, fields);
+            await stampExtracted(row, fields);
           } else if ((await entityInstanceCount(db, entity.id)) <= 1) {
             // Sole instance and nobody holds the derived key: establish a
             // provisional entity, or rename an established one whose identity
@@ -940,15 +956,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
             // crate membership survive.
             try {
               await setEntityIdentity(db, entity.id, derived, newDisplayName);
-              await markExtracted(db, row.id, fields);
-              console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
+              if (await stampExtracted(row, fields))
+                console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
             } catch (err) {
               if (err.code !== "23505") throw err;
               // Race: the identity appeared since the lookup — merge instead.
               const winner = await getEntityByIdentity(db, row.board_id, derived);
               if (!winner) throw err;
               await reparentInto(row, winner, newDisplayName, entity.id);
-              await markExtracted(db, row.id, fields);
+              await stampExtracted(row, fields);
             }
           } else {
             // Split: this instance belongs to someone new; the rest of the
@@ -966,15 +982,15 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
             // The old entity keeps its other instances here — stamp it so
             // delta polls see its aggregate change (mirrors reparentInstance).
             await touchEntity(db, entity.id);
-            await markExtracted(db, row.id, fields);
-            console.log(`split: instance #${row.id} detached from entity #${entity.id} into #${targetId} ("${derived}")`);
+            if (await stampExtracted(row, fields))
+              console.log(`split: instance #${row.id} detached from entity #${entity.id} into #${targetId} ("${derived}")`);
           }
         }
       }
     } else {
-      await markExtracted(db, row.id, fields);
       const label = row.payload?.identity || `item ${row.id}`;
-      console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
+      if (await stampExtracted(row, fields))
+        console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
     }
 
     await bumpUsage(db, row.board_id, usage);
@@ -1007,7 +1023,10 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         catch (e) { console.warn(`face render failed for #${row.entity_id} ${label}: ${e.message} (tile)`); }
         await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : entity.face_at, board.mapping, now));
       }
-      await advanceFaced(db, row.id); // → pending (tag leg), or held when parked
+      // → pending (tag leg), or held when parked; false = fence discarded a
+      // stale advance (the row was re-routed or deleted mid-render).
+      if (!(await advanceFaced(db, row.id)))
+        console.warn(`stale face advance for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_face");
       console.warn(`face error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);

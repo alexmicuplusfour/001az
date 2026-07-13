@@ -19,16 +19,23 @@ after(() => srv.close());
 const snaps = async (id) =>
   (await db.query("SELECT source, tags, undecided FROM tag_snapshots WHERE item_id=$1 ORDER BY id", [id])).rows;
 
+// markTagged is value-fenced (#7): it only lands on a claimed row, so stamp
+// the in-flight status first — an honest simulation of claim → tag.
+const tag = async (id, tags, undecided = false, reasoning = {}) => {
+  await db.query("UPDATE items SET status='processing' WHERE id=$1", [id]);
+  return markTagged(db, id, tags, undecided, reasoning);
+};
+
 test("identical re-tag appends nothing; a changed judgment appends", async () => {
   const { instanceId } = await seedItem(db, boardId);
-  await markTagged(db, instanceId, ["kind/a", "mood/b"], false, { description: "first take" });
+  await tag(instanceId, ["kind/a", "mood/b"], false, { description: "first take" });
   assert.equal((await snaps(instanceId)).length, 1);
 
   // Same tags, reordered, reasoning re-worded — not a judgment change.
-  await markTagged(db, instanceId, ["mood/b", "kind/a"], false, { description: "re-worded take" });
+  await tag(instanceId, ["mood/b", "kind/a"], false, { description: "re-worded take" });
   assert.equal((await snaps(instanceId)).length, 1, "unchanged judgment must not re-record");
 
-  await markTagged(db, instanceId, ["kind/a"], false, {});
+  await tag(instanceId, ["kind/a"], false, {});
   const rows = await snaps(instanceId);
   assert.equal(rows.length, 2, "a real change appends");
   assert.deepEqual(rows[1].tags, ["kind/a"]);
@@ -36,14 +43,14 @@ test("identical re-tag appends nothing; a changed judgment appends", async () =>
 
 test("an undecided flip is a judgment change", async () => {
   const { instanceId } = await seedItem(db, boardId);
-  await markTagged(db, instanceId, ["kind/a"], false, {});
-  await markTagged(db, instanceId, ["kind/a"], true, {});
+  await tag(instanceId, ["kind/a"], false, {});
+  await tag(instanceId, ["kind/a"], true, {});
   assert.equal((await snaps(instanceId)).length, 2);
 });
 
 test("a user's no-op save appends nothing; a user change appends as 'user'", async () => {
   const { instanceId } = await seedItem(db, boardId);
-  await markTagged(db, instanceId, ["kind/a"], false, {});
+  await tag(instanceId, ["kind/a"], false, {});
   await setItemTags(db, instanceId, ["kind/a"]);
   assert.equal((await snaps(instanceId)).length, 1, "no-op save is still a no-op");
 
@@ -56,9 +63,9 @@ test("a user's no-op save appends nothing; a user change appends as 'user'", asy
 test("facet-less taggings collapse to one empty row, not one per pass", async () => {
   const { instanceId } = await seedItem(db, boardId);
   // The extraction-only board path: markTagged(id, []) on every advance.
-  await markTagged(db, instanceId, [], false, {});
-  await markTagged(db, instanceId, [], false, {});
-  await markTagged(db, instanceId, [], false, {});
+  await tag(instanceId, [], false, {});
+  await tag(instanceId, [], false, {});
+  await tag(instanceId, [], false, {});
   assert.equal((await snaps(instanceId)).length, 1);
 });
 
@@ -92,7 +99,7 @@ test("pruneTagSnapshots drops rows older than the cutoff, keeps the rest", async
     "INSERT INTO tag_snapshots (item_id, source, tags, reasoning, undecided, tagged_at) VALUES ($1,'ai','[\"old/one\"]','{}',FALSE,$2)",
     [instanceId, now - 91 * 86400000]
   );
-  await markTagged(db, instanceId, ["new/one"], false, {});
+  await tag(instanceId, ["new/one"], false, {});
   const pruned = await pruneTagSnapshots(db, now - 90 * 86400000);
   assert.equal(pruned, 1);
   const rows = await snaps(instanceId);

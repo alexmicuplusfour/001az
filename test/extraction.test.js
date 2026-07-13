@@ -260,6 +260,8 @@ test("markExtracted: parked item returns to held, definition in hand", async () 
   const { uploaded: [item] } = await uploadTxt(board.id); // born with park
   const instId = item.instances[0].id;
 
+  // markExtracted is fenced to claimed rows — stamp the in-flight status first.
+  await db.query("UPDATE items SET status='extracting' WHERE id=$1", [instId]);
   await markExtracted(db, instId, { author: { v: "x", why: "y" } });
   const { rows: [row] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [instId]);
   assert.equal(row.status, "held");
@@ -280,7 +282,7 @@ test("markExtracted: without park (explicit run) flows to tagging even with auto
   const instId = item.instances[0].id;
 
   // Simulate a release/reprocess-issued extract: those paths strip park.
-  await db.query("UPDATE items SET payload = payload - 'park' WHERE id=$1", [instId]);
+  await db.query("UPDATE items SET payload = payload - 'park', status='extracting' WHERE id=$1", [instId]);
   await markExtracted(db, instId, {});
   const { rows: [row] } = await db.query("SELECT status FROM items WHERE id=$1", [instId]);
   assert.equal(row.status, "pending");

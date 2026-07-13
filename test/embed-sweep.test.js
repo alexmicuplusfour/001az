@@ -90,6 +90,8 @@ test("embedBatch: a poison input is isolated and marked; innocents embed; the sw
   assert.equal(stats.failed, 1);
 
   // Fresh text is a fresh chance: both re-tag paths clear the marker.
+  // (markTagged is fenced to claimed rows — stamp the in-flight status first.)
+  await db.query("UPDATE items SET status='processing' WHERE id=$1", [poison]);
   await markTagged(db, poison, ["a/b"], false, { description: "rewritten" });
   assert.equal((await row(poison)).embed_error, null);
   assert.equal((await itemsNeedingEmbedding(db, EMBEDDER.model, 64)).length, 1);

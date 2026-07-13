@@ -397,7 +397,29 @@ trade is "PDFs tag minutes later during a blip" for "no silent per-page billing,
 ever". Optional extra: fail empty-text docx/text items visibly ("document has no
 extractable text") instead of tagging a blank.
 
-### 7. `markTagged` / `markExtracted` are unfenced writes
+### 7. `markTagged` / `markExtracted` are unfenced writes — FIXED
+**Status: fixed (local) as designed. 250 tests green (5 new in
+test/fences.test.js).** Shipped: value fences on the three advances
+(`markTagged`+`AND status='processing'`, `markExtracted`+`'extracting'`,
+`advanceFaced`+`'facing'`), each returning landed/discarded; the tag snapshot
+appends only when the stamp lands (also removes #9's known-benign dedupe race
+and the delete-during-tagging FK noise); `failOrRequeue` fenced via the 1:1
+requeueStatus→in-flight map (closes its attempts read-then-write race as a side
+effect; a discard returns false); `requeueItemForTag` guarded to tagged/failed
+and its caller now reports what actually happened; worker callers log "stale …
+discarded (re-routed or deleted mid-flight)" — `stampExtracted` helper covers
+extractOne's nine sites, `bumpUsage` stays unconditional (tokens were spent).
+Per-card routes stay unfenced ON PURPOSE (that's how the user wins). Test churn
+landed as re-verified: tag-snapshots helper stamps 'processing' first,
+extraction/embed-sweep seeds set the in-flight status, retry.test.js's one loop
+resets per iteration; the new tests pin land-vs-discard for all four writers,
+the full user-wins race (claim → retagItem → stale stamp discards →
+re-claimable), and the cascade guard. Double-check bonus: the fence also closes
+#11's bumpUsage-after-landing re-bill in the EXTRACT leg (a trailing bumpUsage
+throw used to yank the landed extraction back to pending_extract via
+failOrRequeue; the fence discards that flip — the row is no longer
+'extracting'). Original analysis kept below.
+
 They update `WHERE id=$1` unconditionally — no check the row is still
 `processing`/owned by this claim. Single-process it mostly self-heals, but any second
 consumer (scaling the app container, or HTTP routes flipping statuses concurrently)
@@ -512,6 +534,40 @@ there's a live single-process bug, and it's the fourth sibling of the #1 family:
    makes recoverStuck run concurrently with a batch: that specific pairing
    reintroduces the re-claim window in-process, so decoupling must keep
    recoverStuck in the claim loop's flight (or bring the claim token forward).
+
+**Re-verified 2026-07-13 against post-#8/#9/#10 code — design unchanged, three
+interplays confirmed, churn list refreshed:**
+- **#10 (unified queue) changes nothing structural:** `claimNextWork` stamps the
+  same three in-flight statuses, so the fences map 1:1 exactly as designed;
+  recoverStuck stayed inside the single flight (the constraint held); the new
+  worker-loop test in queue.test.js flows a `facing` item through `advanceFaced`
+  with the status the fence expects — it passes unchanged and becomes a live
+  regression net for the fence work.
+- **#9 (snapshot dedupe) composes and gets a bonus:** `markTagged`'s fence makes
+  the snapshot conditional on the stamp landing, which removes #9's documented
+  known-benign race (the stale append that could slip one duplicate row past the
+  dedupe no longer happens at all).
+- **#8 (tx reparent) narrows the accepted gap:** the entity-side writes that
+  escape the fence are now themselves transactional (`reparentInstance`), so the
+  mid-race self-heal story is cleaner — a discarded stamp leaves either the old
+  parent or a consistent new one, never a half-move.
+- **Implementation notes settled:** the three advances return landed/discarded
+  (rowCount); `extractOne`'s ~9 `markExtracted` sites gate their success logs on
+  the return (mechanical); `processOne` treats a discard as success-shaped (log,
+  still `bumpUsage`) distinct from markTagged THROWING (left-for-recovery);
+  `failOrRequeue` fences via the 1:1 requeueStatus→in-flight map and returns
+  false on discard — the caller's "(requeued)" log line is cosmetically wrong in
+  that rare case, accepted.
+- **Test churn, final list:** tag-snapshots.test.js (didn't exist at analysis
+  time) has 11 `markTagged`-on-tagged calls → one local helper that stamps
+  'processing' first; embed-sweep.test.js has 1; extraction.test.js has 2
+  `markExtracted`-on-unclaimed calls → seed 'extracting'; retry.test.js needs a
+  per-iteration status reset in exactly ONE loop (line ~74) — its other five
+  failOrRequeue calls already ride the 'processing' default; faces.test.js
+  already seeds 'facing', unchanged. New tests: each fence discards on a
+  re-routed row (status/tags/attempts/error untouched, no snapshot, false
+  returned) + the user-wins integration (claim → retagItem flips → stale stamp
+  discards → item stays where the user put it).
 
 ### 8. `reparentInto` isn't transactional and `items.entity_id` is `ON DELETE CASCADE` — FIXED
 **Status: fixed (local) as designed. 227 tests green (4 new).** Shipped: new db.js
@@ -756,3 +812,7 @@ retag's by age. Revisit when 1,000-item scheduled retags are real.
   webp on disk — the loser's new file is never unlinked.
 - In `processOne`, `bumpUsage` throwing *after* `markTagged` lands in the catch →
   `failOrRequeue` flips a successfully-tagged item back to pending → duplicate AI call.
+  (FIXED as side effects: the #2 try-narrowing closed the tag leg; the extract leg's
+  analog — extractOne's trailing `bumpUsage` throw yanking a landed extraction back to
+  pending_extract for a re-bill — is closed by the #7 fence, which discards that
+  stale flip because the row is no longer 'extracting'.)

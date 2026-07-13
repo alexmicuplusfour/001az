@@ -71,7 +71,11 @@ test("429 is transient despite being 4xx, and a provider Retry-After stretches t
 test("transient failures get headroom over maxAttempts before hard-failing", async () => {
   const id = await insertItem();
   let failed;
-  for (let i = 0; i < 5; i++) failed = await failOrRequeue(db, id, new Error("upstream 502"), 3);
+  for (let i = 0; i < 5; i++) {
+    // each attempt is claim → fail; the fence needs the in-flight status back
+    await db.query("UPDATE items SET status='processing' WHERE id=$1", [id]);
+    failed = await failOrRequeue(db, id, new Error("upstream 502"), 3);
+  }
   assert.equal(failed, true, "maxAttempts 3 + 2 headroom → fails on the 5th");
   assert.equal((await row(id)).attempts, 5);
 });
