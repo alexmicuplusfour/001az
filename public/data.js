@@ -164,10 +164,12 @@ function liveBoard() {
     (m.face?.from === "connector" && !!m.face.live);
 }
 
-// Exported for tests: the cadence decision in one place.
+// Exported for tests: the cadence decision in one place. Ingestion-enabled
+// boards keep the slow poll too — the sweep admits items server-side, so a
+// quiet tab would otherwise never see them arrive.
 export function pollDelay() {
   if (needsPoll()) return 4000;
-  if (liveBoard()) return 30000;
+  if (liveBoard() || state.boardIngest) return 30000;
   return 0;
 }
 

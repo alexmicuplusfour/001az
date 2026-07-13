@@ -67,6 +67,10 @@ docker load -i /tmp/001az-app.tar && rm /tmp/001az-app.tar
 docker load -i /tmp/001az-extractor.tar && rm /tmp/001az-extractor.tar
 cd $remoteDir
 grep -q '^APP_TAG=' .env && sed -i 's/^APP_TAG=.*/APP_TAG=$tag/' .env || echo 'APP_TAG=$tag' >> .env
+# Ingestion drop root (compose binds ./ingest-root -> /data/ingest). Created
+# here with open write perms so files can land via scp/sftp as any user —
+# left to docker it appears root-owned 755 on first up.
+mkdir -p ingest-root && chmod 777 ingest-root
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait app db extractor
 docker image prune -f >/dev/null
 # Tags embed yyyyMMdd-HHmmss, so lexical sort -r = newest first. Do NOT trust

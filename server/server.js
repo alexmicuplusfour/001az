@@ -1,4 +1,5 @@
 import express from "express";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { inspect } from "node:util";
@@ -74,6 +75,8 @@ import {
   rescheduleEntityRefreshes,
   boardEntityIdentities,
   getBoardTokenTotal,
+  setIngestNextRun,
+  ingestedKeys,
 } from "./db.js";
 import {
   attachUser,
@@ -90,6 +93,8 @@ import { getConnector, listConnectors } from "./connectors/index.js";
 import { liveFields, nextRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { mountIngest } from "./ingest.js";
+import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
+import { applyFilters, applySort } from "./ingestion/filter-engine.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -401,6 +406,9 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     search: embeddingOk,
     manage: canManage,
     token_total: tokenTotal,
+    // Presence flag only — the client uses it to keep a slow delta poll alive
+    // on quiet boards so auto-ingested items appear without a reload.
+    ingest_enabled: !!(board.ingest && board.ingest.enabled !== false),
   });
 }));
 
@@ -430,6 +438,8 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     auto_tag_every_min: b.auto_tag_every_min || 1440,
     auto_tag_skip_weekends: !!b.auto_tag_skip_weekends,
     retag_on_refresh: !!b.retag_on_refresh,
+    ingest: b.ingest || null,
+    ingest_state: b.ingest_state || null,
     ...(req.user.is_admin ? {
       ai_key_id: b.ai_key_id ?? null,
       ai_model: b.ai_model ?? null,
@@ -449,6 +459,85 @@ app.patch("/api/boards/:id", requireAuth, requireBoardManager, wrap(async (req, 
     if (n) console.log(`board ${prev.id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
   }
   invalidateBoardCache(prev.id);
+  res.json({ ok: true });
+}));
+
+// --- automatic ingestion (config + preview; the worker sweep does the runs) ---
+
+// Everything the ingestion modal needs in one fetch: the adapter descriptor
+// (source schema, filter catalog, sorts, trigger modes), the saved config,
+// and the sweep-owned run status.
+app.get("/api/boards/:id/ingest", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const adapter = resolveIngestAdapter(req.board);
+  res.json({
+    available: !!adapter,
+    descriptor: adapter ? adapter.descriptor() : null,
+    config: req.board.ingest || null,
+    state: req.board.ingest_state || null,
+    root: !!process.env.INGEST_ROOT,
+  });
+}));
+
+// Subfolders under the ingestion root for the folder picker. Bounded walk
+// (depth ≤3, 200 entries) — a picker, not a filesystem browser.
+app.get("/api/ingest/folders", requireAuth, wrap(async (_req, res) => {
+  const root = process.env.INGEST_ROOT;
+  if (!root) return res.json({ root: false, folders: [] });
+  const folders = [];
+  async function walk(abs, rel, depth) {
+    if (depth > 3 || folders.length >= 200) return;
+    let entries;
+    try {
+      entries = await fs.promises.readdir(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (folders.length >= 200) return;
+      if (!e.isDirectory() || e.isSymbolicLink() || e.name.startsWith(".")) continue;
+      const relChild = rel ? `${rel}/${e.name}` : e.name;
+      folders.push(relChild);
+      await walk(path.join(abs, e.name), relChild, depth + 1);
+    }
+  }
+  await walk(root, "", 1);
+  res.json({ root: true, folders });
+}));
+
+// Dry-run a candidate config (request body, never saved): enumerate → filter
+// → sort with the shared engine. count = everything matching the filters
+// (capped: the walk stopped at the preview bound, render as "N+"); new = the
+// subset not yet in the ledger, i.e. what a run would actually consider.
+app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const adapter = resolveIngestAdapter(req.board);
+  if (!adapter) return res.status(400).json({ error: "ingestion is not available for this board" });
+  const cfg = { ...(req.body || {}), enabled: true }; // preview ignores the toggle
+  const err = validateIngest(cfg, adapter.descriptor(), { hasRoot: !!process.env.INGEST_ROOT });
+  if (err) return res.status(400).json({ error: err });
+  const PREVIEW_CAP = 1000;
+  let enumerated;
+  try {
+    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: PREVIEW_CAP });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  const catalog = adapter.descriptor().filters;
+  const matched = applySort(applyFilters(enumerated.candidates, cfg.filters, catalog), cfg.sort, catalog);
+  const known = await ingestedKeys(db, req.board.id);
+  res.json({
+    count: matched.length,
+    new: matched.filter((c) => !known.has(c.key)).length,
+    capped: !!enumerated.truncated,
+    sample: matched.slice(0, 20),
+  });
+}));
+
+// "Run now": arm the timer for the next tick. Also the only way to fire a
+// manual-trigger board.
+app.post("/api/boards/:id/ingest/run", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  if (!req.board.ingest || req.board.ingest.enabled === false)
+    return res.status(409).json({ error: "ingestion is not enabled on this board" });
+  await setIngestNextRun(db, req.board.id, Date.now());
   res.json({ ok: true });
 }));
 
@@ -496,6 +585,31 @@ function buildBoardContentUpdate(body = {}, prev) {
   }
   if (body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!body.auto_tag_skip_weekends;
   if (body.retag_on_refresh !== undefined) update.retagOnRefresh = !!body.retag_on_refresh;
+
+  // Automatic ingestion config: null clears it (and disarms the timer);
+  // an object is validated against the board's adapter descriptor. Timer
+  // bookkeeping mirrors the auto-tag block below — arm on off→on or trigger
+  // shape change (immediate first run; the sweep computes the next from the
+  // trigger), disarm on off/manual. Other config edits (filters, sort) keep
+  // the already-armed timer.
+  if (body.ingest !== undefined) {
+    if (body.ingest === null) {
+      update.ingest = null;
+      update.ingestNextRunAt = null;
+    } else {
+      const adapter = resolveIngestAdapter(prev);
+      const ingErr = validateIngest(body.ingest, adapter ? adapter.descriptor() : null, {
+        hasRoot: !!process.env.INGEST_ROOT,
+      });
+      if (ingErr) return { error: ingErr };
+      update.ingest = body.ingest;
+      const wasArmed = !!(prev.ingest && prev.ingest.enabled !== false && prev.ingest.trigger?.mode !== "manual");
+      const isArmed = body.ingest.enabled && body.ingest.trigger.mode !== "manual";
+      const trigChanged = JSON.stringify(prev.ingest?.trigger ?? null) !== JSON.stringify(body.ingest.trigger);
+      if (isArmed && (!wasArmed || trigChanged)) update.ingestNextRunAt = Date.now();
+      else if (!isArmed) update.ingestNextRunAt = null;
+    }
+  }
 
   // Schedule bookkeeping: (re)arm the timer when the schedule turns on or
   // changes shape, disarm it when it turns off.
@@ -1409,7 +1523,7 @@ if (isMain) {
   const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   });
-  const stopWorker = startWorker({ db, thumbsDir: THUMBS_DIR, galleryDir: GALLERY_DIR });
+  const stopWorker = startWorker({ db, thumbsDir: THUMBS_DIR, galleryDir: GALLERY_DIR, sources });
 
   // Graceful shutdown. In the container node is PID 1, which ignores signals
   // it has no handler for — without this, every `docker stop` waits out the

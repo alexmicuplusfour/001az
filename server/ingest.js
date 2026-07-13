@@ -19,6 +19,66 @@ const MAX_FILES = 200; // per request
 // Express 4 doesn't forward rejected promises from async handlers.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// The shared file-admission path: turn a spooled file into a stored entry and
+// a newborn entity+item, with the full birth logic (file-field projection,
+// mapping stamp, park, status routing). Used by the upload route and by
+// folder ingestion (server/ingestion/folder.js) so the two doors can never
+// drift. Never unlinks or mutates tmpPath — the caller owns the tmp lifecycle.
+// dbc: the pool or a tx client. Returns null for unsupported file types;
+// throws with err.reason for user-explainable refusals (e.g. PDF page cap).
+export async function admitFile(dbc, sources, board, tmpPath, originalName,
+  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null } = {}) {
+  let file;
+  try {
+    file = await sources.forUpload(originalName).ingest(tmpPath, originalName);
+  } catch (err) {
+    // A handler throw is a deterministic function of the file's bytes (bad
+    // decode, page cap) — retrying can't change it. Mark it so folder
+    // ingestion can ledger-and-forget instead of rescanning forever; the
+    // upload route's catch reads err.reason as before and ignores this.
+    err.unprocessable = true;
+    throw err;
+  }
+  if (!file) return null;
+  // Stamp the date timestamps onto the stored entry so file-field values
+  // (server/media) are a self-contained projection of payload.files —
+  // recomputable at extract/backfill without re-opening the file.
+  file.addedAt = addedAt;
+  file.modifiedAt = Number.isFinite(modifiedAt) && modifiedAt > 0 ? modifiedAt : null;
+  file.createdAt = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : null;
+  // Deterministic file-metadata fields land now (no AI, no API), independent
+  // of the AI mapping/auto-tag gate below.
+  const fileFields = extractFileFields(file, board.mapping?.fields);
+  // Stamp the board's mapping when it has AI fields — the item carries
+  // its own copy so automatic replay (error retries) re-runs the mapping
+  // it was built with; user-initiated reprocess/re-extract re-stamp from
+  // the current board mapping.
+  // Only trigger extraction when the board has AI-sourced fields or
+  // AI-derived identity. Connector fields are populated at entity creation,
+  // not by the extract leg.
+  const hasMapping =
+    board.mapping?.identity?.from === "ai" ||
+    (Array.isArray(board.mapping?.fields) && board.mapping.fields.some((f) => f.from === "ai"));
+  // Extraction defines the item (identity, fields), so a mapped board
+  // always enters the extract leg; auto_tag gates only tagging. With
+  // auto-tag off the item carries `park` — the extract leg finishes the
+  // definition, then parks it in held instead of flowing into tagging
+  // (markExtracted). Explicit runs (reprocess/re-extract/release) carry
+  // no park and go all the way. Unmapped: auto-tag on → pending, off → held.
+  const payload = {
+    identity: file.name, files: [file], fields: fileFields,
+    ...(hasMapping ? { mapping: board.mapping } : {}),
+    ...(hasMapping && !board.auto_tag ? { park: true } : {}),
+  };
+  const status = hasMapping ? "pending_extract" : (board.auto_tag ? "pending" : "held");
+  // Every upload is born a single-instance entity, provisionally keyed
+  // by its stored filename; derived-identity extraction may later merge
+  // the instance into an existing entity (and delete this shell).
+  const entityId = await createEntity(dbc, board.id, { identity: file.name, uploadedBy });
+  const itemId = await insertItem(dbc, board.id, payload, status, entityId);
+  return { entityId, itemId, file, status };
+}
+
 export function mountIngest(app, { db, sources }) {
   // Disk-backed upload (bounded memory; we process one file at a time).
   const upload = multer({
@@ -48,48 +108,18 @@ export function mountIngest(app, { db, sources }) {
     for (const f of req.files || []) {
       fileIdx++;
       try {
-        const file = await sources.forUpload(f.originalname).ingest(f.path, f.originalname);
-        if (!file) {
+        const lm = Number(lastModifieds[fileIdx]);
+        const admitted = await admitFile(db, sources, board, f.path, f.originalname, {
+          addedAt: now,
+          modifiedAt: lm, // admitFile null-guards non-finite/zero
+          createdAt: null, // unavailable for browser uploads
+          uploadedBy: req.user.id,
+        });
+        if (!admitted) {
           rejected.push({ name: f.originalname, reason: "unsupported file type" });
           continue;
         }
-        // Stamp the date timestamps onto the stored entry so file-field values
-        // (server/media) are a self-contained projection of payload.files —
-        // recomputable at extract/backfill without re-opening the file.
-        const lm = Number(lastModifieds[fileIdx]);
-        file.addedAt = now;
-        file.modifiedAt = Number.isFinite(lm) && lm > 0 ? lm : null;
-        file.createdAt = null; // unavailable for browser uploads
-        // Deterministic file-metadata fields land now (no AI, no API), independent
-        // of the AI mapping/auto-tag gate below.
-        const fileFields = extractFileFields(file, board.mapping?.fields);
-        // Stamp the board's mapping when it has AI fields — the item carries
-        // its own copy so automatic replay (error retries) re-runs the mapping
-        // it was built with; user-initiated reprocess/re-extract re-stamp from
-        // the current board mapping.
-        // Only trigger extraction when the board has AI-sourced fields or
-        // AI-derived identity. Connector fields are populated at entity creation,
-        // not by the extract leg.
-        const hasMapping =
-          board.mapping?.identity?.from === "ai" ||
-          (Array.isArray(board.mapping?.fields) && board.mapping.fields.some((f) => f.from === "ai"));
-        // Extraction defines the item (identity, fields), so a mapped board
-        // always enters the extract leg; auto_tag gates only tagging. With
-        // auto-tag off the item carries `park` — the extract leg finishes the
-        // definition, then parks it in held instead of flowing into tagging
-        // (markExtracted). Explicit runs (reprocess/re-extract/release) carry
-        // no park and go all the way. Unmapped: auto-tag on → pending, off → held.
-        const payload = {
-          identity: file.name, files: [file], fields: fileFields,
-          ...(hasMapping ? { mapping: board.mapping } : {}),
-          ...(hasMapping && !board.auto_tag ? { park: true } : {}),
-        };
-        const status = hasMapping ? "pending_extract" : (board.auto_tag ? "pending" : "held");
-        // Every upload is born a single-instance entity, provisionally keyed
-        // by its stored filename; derived-identity extraction may later merge
-        // the instance into an existing entity (and delete this shell).
-        const entityId = await createEntity(db, board.id, { identity: file.name, uploadedBy: req.user.id });
-        const id = await insertItem(db, board.id, payload, status, entityId);
+        const { entityId, itemId, file, status } = admitted;
         // Response rows mirror the /api/items entity shape (id = entity id).
         uploaded.push({
           id: entityId, name: file.name, status, tags: [],
@@ -97,7 +127,7 @@ export function mountIngest(app, { db, sources }) {
           identity: file.name,
           uploadedBy: { id: req.user.id, name: req.user.name || null, email: req.user.email },
           instances: [{
-            id, name: file.name, label: file.original_name,
+            id: itemId, name: file.name, label: file.original_name,
             w: file.w, h: file.h, kind: file.kind,
             status, tags: [], undecided: false,
           }],

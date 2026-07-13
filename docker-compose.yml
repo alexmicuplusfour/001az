@@ -46,10 +46,18 @@ services:
       AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
       AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
       EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
+      # automatic ingestion: watched folders live under this root (bind-mounted
+      # below — drop files into ./ingest-root on the host). The tunables are
+      # code-owned defaults; set in .env only to deviate.
+      INGEST_ROOT: /data/ingest
+      INGEST_CONTINUOUS_MS: ${INGEST_CONTINUOUS_MS:-}
+      INGEST_SETTLE_MS: ${INGEST_SETTLE_MS:-}
+      INGEST_RUN_CAP: ${INGEST_RUN_CAP:-}
       # scheduled auto-tagging (weekend detection, run times) uses server-local time
       TZ: ${TZ:-UTC}
     volumes:
       - appdata:/data
+      - ./ingest-root:/data/ingest
     depends_on:
       db:
         condition: service_healthy

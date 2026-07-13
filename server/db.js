@@ -45,7 +45,7 @@ async function reconcileLiveSchedules(db) {
 }
 
 // Run fn with a dedicated client inside BEGIN/COMMIT.
-async function withTx(db, fn) {
+export async function withTx(db, fn) {
   const client = await db.connect();
   try {
     await client.query("BEGIN");
@@ -698,7 +698,8 @@ export async function deleteAiKey(db, id) {
 const BOARD_COLS =
   "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
   "extract_key_id, extract_model, " +
-  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, created_at";
+  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, " +
+  "ingest, ingest_next_run_at, ingest_state, created_at";
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
   const id = crypto.randomUUID();
@@ -725,7 +726,7 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, extractKeyId, extractModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, extractKeyId, extractModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh, ingest, ingestNextRunAt } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
@@ -744,6 +745,9 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (autoTagNextRunAt !== undefined) { vals.push(autoTagNextRunAt); sets.push(`auto_tag_next_run_at=$${vals.length}`); }
   if (mapping !== undefined) { vals.push(mapping === null ? null : JSON.stringify(mapping)); sets.push(`mapping=$${vals.length}`); }
   if (retagOnRefresh !== undefined) { vals.push(!!retagOnRefresh); sets.push(`retag_on_refresh=$${vals.length}`); }
+  if (ingest !== undefined) { vals.push(ingest === null ? null : JSON.stringify(ingest)); sets.push(`ingest=$${vals.length}`); }
+  if (ingestNextRunAt !== undefined) { vals.push(ingestNextRunAt); sets.push(`ingest_next_run_at=$${vals.length}`); }
+  // ingest_state is deliberately absent: the sweep owns it (setIngestState).
   if (!sets.length) return false;
   vals.push(id);
   const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
@@ -881,6 +885,47 @@ export async function dueBoards(db, now) {
 
 export async function setBoardNextRun(db, boardId, ts) {
   await db.query("UPDATE boards SET auto_tag_next_run_at=$1 WHERE id=$2", [ts, boardId]);
+}
+
+// --- automatic ingestion ---
+
+// Boards whose ingestion run time has arrived. Full rows: the sweep needs the
+// mapping (adapter resolution) and the ingest config/state (budget, trigger).
+export async function dueIngestBoards(db, now) {
+  const { rows } = await db.query(
+    `SELECT ${BOARD_COLS} FROM boards
+     WHERE ingest IS NOT NULL AND COALESCE((ingest->>'enabled')::boolean, false)
+       AND ingest_next_run_at IS NOT NULL AND ingest_next_run_at <= $1`,
+    [now]
+  );
+  return rows;
+}
+
+export async function setIngestNextRun(db, boardId, ts) {
+  await db.query("UPDATE boards SET ingest_next_run_at=$1 WHERE id=$2", [ts, boardId]);
+}
+
+// Sweep-owned run status (last_run_at, last_added, last_error, drain_left) —
+// kept out of updateBoard so a user saving config never clobbers it.
+export async function setIngestState(db, boardId, state) {
+  await db.query("UPDATE boards SET ingest_state=$1 WHERE id=$2", [state === null ? null : JSON.stringify(state), boardId]);
+}
+
+// The dedup ledger: every source_key ever admitted to this board. Rows outlive
+// their entities on purpose — deleting an item is a user judgment the feed
+// must not overturn on the next scan.
+export async function ingestedKeys(db, boardId) {
+  const { rows } = await db.query("SELECT source_key FROM ingest_log WHERE board_id=$1", [boardId]);
+  return new Set(rows.map((r) => r.source_key));
+}
+
+// Accepts the pool or a tx client (the folder adapter ledgers inside the
+// admit transaction).
+export async function recordIngest(dbc, boardId, sourceKey, at) {
+  await dbc.query(
+    "INSERT INTO ingest_log (board_id, source_key, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+    [boardId, sourceKey, at]
+  );
 }
 
 // --- board membership ---

@@ -85,6 +85,13 @@ test("poll cadence: fast while work is in flight, slow on a live board, off othe
   state.boardMapping = { fields: [{ key: "price", from: "connector" }], face: { from: "connector", producer: "chart" } };
   assert.equal(pollDelay(), 0, "connector but nothing live: no poll");
 
+  // Automatic ingestion admits items server-side on quiet boards — same
+  // stale-tab problem as live faces, same slow-poll cure.
+  state.boardMapping = null;
+  state.boardIngest = true;
+  assert.equal(pollDelay(), 30000, "ingestion-enabled board: slow poll");
+  state.boardIngest = false;
+
   state.items = [{ id: 1, status: "processing", tags: [] }];
   assert.equal(pollDelay(), 4000, "in-flight work: fast poll wins regardless of liveness");
 

@@ -4,6 +4,9 @@ node_modules/
 # server-owned data — lives on the droplet, never in git
 gallery/
 thumbnails/
+# watched-folder drop zone (bind-mounted into the app) — keep the dir, not the files
+ingest-root/*
+!ingest-root/.gitkeep
 *.db
 *.db-journal
 *.db-wal

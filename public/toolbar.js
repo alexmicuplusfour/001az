@@ -8,6 +8,7 @@ import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
 import { openMappingModal } from './mapping-modal.js';
+import { openIngestModal } from './ingest-modal.js';
 import { openBoardModal } from './board-modal.js';
 import { openConnectorBrowse } from './connector-browse.js';
 
@@ -178,6 +179,10 @@ export function renderToolbar(resultCount) {
           body.appendChild(ddRow({
             label: "Entity mapping…",
             onClick: () => { close(); openMappingModal(); },
+          }));
+          body.appendChild(ddRow({
+            label: "Automatic ingestion…",
+            onClick: () => { close(); openIngestModal(); },
           }));
         },
       }));

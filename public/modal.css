@@ -355,3 +355,19 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-more:disabled { opacity: .6; cursor: default; }
 
 .modal-footer button:disabled { opacity: .5; cursor: default; }
+
+/* ── automatic ingestion modal (ingest-modal.js) ──────────────────────────── */
+#ingest-modal .modal-dialog { width: min(640px, 94vw); }
+.im-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.im-row > label { font-size: 12px; color: #6b6b72; margin: 0; }
+.im-row select { max-width: 260px; }
+.im-filters { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.im-filter-row { display: flex; align-items: center; gap: 6px; }
+.im-filter-row select { font-size: 13px; padding: 6px 26px 6px 8px; }
+.im-filter-val { flex: 1; min-width: 0; }
+.im-filter-val input { width: 100%; font-size: 13px; padding: 6px 8px; }
+.im-hint { font-size: 12px; color: #9aa0aa; margin: 8px 0 0; line-height: 1.4; }
+.im-preview-count { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.im-sample { max-height: 220px; overflow-y: auto; }
+.im-status { font-size: 12px; color: #6b6b72; margin: 12px 0 0; }
+.im-status.error { color: #b4232a; }

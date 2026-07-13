@@ -19,6 +19,15 @@ a live connector.
   `.md`, and `.csv` anywhere, or use the upload button. Thumbnails and page-1
   previews are generated server-side (sharp for images, poppler for PDFs,
   mammoth for docx), originals type-sniffed and size-capped.
+- **Automatic ingestion** — a board can feed itself from a watched folder
+  (under a server-side ingestion root): filters over file metadata
+  (name/extension/size/dates), sorting with a per-run limit, and a trigger
+  schedule (continuous watch, interval, daily, or manual) with a live results
+  preview in the setup modal. One-directional and additive — source files are
+  never touched, and a dedup ledger means deleting an item in the app doesn't
+  resurrect it on the next scan. The layer is adapter-based like the
+  connectors: filter-defined connector feeds (e.g. "top 50 by market cap")
+  slot in next.
 - **AI tagging** — a queue worker sends each item to a vision/text model. The
   tag vocabulary is enforced *structurally*: the tool's `input_schema` is
   generated from the board's facets, so the model cannot emit an invalid tag.
@@ -82,7 +91,8 @@ Caddy ── TLS + reverse-proxy ──► Node/Express (server/server.js)
 | `server/worker.js` | AI tagging + connector-refresh queue poller |
 | `server/providers.js` | AI provider descriptor registry (add a provider = one descriptor) |
 | `server/connectors/` | data-connector runtime + domains (e.g. `crypto/`) |
-| `server/sources/` | per-format ingestion (image/PDF/docx/text) |
+| `server/ingestion/` | automatic-ingestion adapters (folder watching) + shared filter engine |
+| `server/sources/` | per-format file handling (image/PDF/docx/text) |
 | `server/auth.js` | session-cookie middleware |
 | `server/mintlink.js` | CLI: print a login link for an email |
 | `server/migrations/` | versioned schema migrations |
@@ -137,10 +147,12 @@ service on every push and PR (`.github/workflows/ci.yml`).
 | `COOKIE_SECURE` | `1` | set `0` for plain-http local dev |
 | `PORT` / `HOST` | `3001` / `127.0.0.1` | listen address |
 | `STATIC_DIR` | `./public` | frontend assets directory |
+| `INGEST_ROOT` | — (compose: `/data/ingest`) | root for watched ingestion folders; unset disables folder ingestion |
 
 Tuning knobs (`TAG_CONCURRENCY`, `POLL_MS`, `MAX_ATTEMPTS`, `STUCK_MS`,
-`EMBED_BATCH`, `REFRESH_BATCH`, connector rate limits) have sensible defaults;
-see the top of `server/server.js` and `server/worker.js`.
+`EMBED_BATCH`, `REFRESH_BATCH`, `INGEST_CONTINUOUS_MS`, `INGEST_SETTLE_MS`,
+`INGEST_RUN_CAP`, connector rate limits) have sensible defaults; see the top
+of `server/server.js` and `server/worker.js`.
 
 ## Deployment
 

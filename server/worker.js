@@ -36,7 +36,14 @@ import {
   pruneTagSnapshots,
   requeueItemForTag,
   advanceFaced,
+  dueIngestBoards,
+  setIngestNextRun,
+  setIngestState,
+  ingestedKeys,
+  recordIngest,
 } from "./db.js";
+import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
+import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
@@ -553,7 +560,7 @@ export async function documentTextFor(galleryDir, file) {
   return "";
 }
 
-export function startWorker({ db, thumbsDir, galleryDir }) {
+export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
@@ -783,6 +790,74 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
         await setEntityRefreshAt(db, row.entity.id, Date.now() + 60000); // retry later, don't wedge the sweep
         console.warn(`refresh error entity #${row.entity.id} (retrying in 60s): ${err.message}`);
         break;
+      }
+    }
+  }
+
+  // Ingestion sweep: run due boards' feeds (the worker tick is the cron — a
+  // "continuous" folder watch is just a 30s rescan). Per board: enumerate the
+  // source, drop everything ever ledgered (ingest_log — deletion in the app is
+  // a user judgment the feed must not overturn), then filter/sort/limit with
+  // the shared engine and admit through the adapter. Admissions are capped per
+  // tick; a bigger logical run drains across ticks with next_run_at=now,
+  // resuming from drain_left so the run's `limit` stays exact. Per-board
+  // failures land in ingest_state with a 5-minute backoff — never the loop.
+  const INGEST_CONTINUOUS_MS = Math.max(5000, Number(process.env.INGEST_CONTINUOUS_MS) || 30000);
+  const INGEST_RUN_CAP = Math.max(1, Number(process.env.INGEST_RUN_CAP) || 25);
+  async function ingestDue() {
+    for (const b of await dueIngestBoards(db, Date.now())) {
+      const cfg = b.ingest;
+      const now = Date.now();
+      try {
+        const adapter = resolveIngestAdapter(b);
+        if (!adapter) throw new Error("ingestion is not available for this board");
+        if (!sources) throw new Error("ingestion is not available (worker started without sources)");
+        const catalog = adapter.descriptor().filters;
+        const { candidates } = await adapter.enumerate(db, b, cfg);
+        const known = await ingestedKeys(db, b.id);
+        const fresh = candidates.filter((c) => !known.has(c.key));
+        // Budget: a drain tick resumes what's left of the current logical run
+        // instead of re-slicing a fresh limit (keeps "top-N" semantics exact).
+        const drainLeft = Number(b.ingest_state?.drain_left) || 0;
+        const budget = drainLeft > 0 ? drainLeft : (Number(cfg.limit) || Infinity);
+        const picked = applyLimit(applySort(applyFilters(fresh, cfg.filters, catalog), cfg.sort, catalog), budget);
+        const batch = picked.slice(0, INGEST_RUN_CAP);
+        let added = 0;
+        const errors = [];
+        for (const c of batch) {
+          try {
+            await adapter.admit(db, b, c, { sources });
+            added++;
+          } catch (err) {
+            // duplicate (already on the board) and skip (unsupported bytes)
+            // are ledger-and-forget: stop rescanning them. Real errors stay
+            // unledgered so the next run retries them.
+            if (err.duplicate || err.skip) await recordIngest(db, b.id, c.key, Date.now());
+            else errors.push(`${c.label}: ${err.message}`);
+          }
+        }
+        const remaining = picked.length - batch.length;
+        await setIngestState(db, b.id, {
+          last_run_at: now,
+          last_added: added,
+          last_error: errors[0] ?? null,
+          ...(remaining > 0 ? { drain_left: remaining } : {}),
+        });
+        await setIngestNextRun(db, b.id,
+          remaining > 0 ? Date.now() : nextIngestRunAt(cfg.trigger, Date.now(), { continuousMs: INGEST_CONTINUOUS_MS }));
+        if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
+      } catch (err) {
+        // Preserve a mid-drain budget across the failure — wiping it would
+        // hand the retry a fresh `limit` and over-admit the logical run.
+        const drainLeft = Number(b.ingest_state?.drain_left) || 0;
+        await setIngestState(db, b.id, {
+          last_run_at: now,
+          last_added: 0,
+          last_error: err.message,
+          ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
+        }).catch(() => {});
+        await setIngestNextRun(db, b.id, Date.now() + 5 * 60000).catch(() => {});
+        console.warn(`ingest error board "${b.name}" (retrying in 5m): ${err.message}`);
       }
     }
   }
@@ -1042,6 +1117,7 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     await retagDue();
     await embedDue();
     await refreshDue();
+    await ingestDue();
     await pruneSnapshots();
 
     // Boards without their own key only process when a default exists.
