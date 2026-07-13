@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard } from "./helpers.js";
-import { failOrRequeue, claimNextPending, retagItem, recoverStuck } from "../server/db.js";
+import { failOrRequeue, claimNextWork, retagItem, recoverStuck } from "../server/db.js";
 
 let srv, db, boardId;
 before(async () => {
@@ -37,9 +37,9 @@ test("transient error: requeued with a spaced retry_at, invisible to claims unti
   assert.equal(r.attempts, 1);
   assert.ok(Number(r.retry_at) > Date.now() + 30000, "first retry is ~1m out, not instant");
 
-  assert.equal(await claimNextPending(db, true), null, "not claimable while the timer runs");
+  assert.equal(await claimNextWork(db, true), null, "not claimable while the timer runs");
   await db.query("UPDATE items SET retry_at=$1 WHERE id=$2", [Date.now() - 1, id]);
-  const claimed = await claimNextPending(db, true);
+  const claimed = await claimNextWork(db, true);
   assert.equal(claimed?.id, id, "claimable once retry_at passes");
   await park(id);
 });
@@ -141,7 +141,7 @@ test("an explicit requeue clears the timer — the user's hand beats the backoff
   const r = await row(id);
   assert.equal(r.status, "pending");
   assert.equal(r.retry_at, null);
-  const claimed = await claimNextPending(db, true);
+  const claimed = await claimNextWork(db, true);
   assert.equal(claimed?.id, id, "immediately claimable after the explicit retag");
   await park(id);
 });

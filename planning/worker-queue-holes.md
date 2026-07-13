@@ -668,12 +668,79 @@ prune — and the entry's fix would delete the wrong rows:
    changed tags → appended; facet-less empty repeat → one row total; user no-op
    → skipped) + prune cutoff mirroring liveness.test.js's.
 
-### 10. Queue-fairness gaps (design choices with sharp edges)
+### 10. Queue-fairness gaps (design choices with sharp edges) — FIXED (starvation half; tiering deferred)
 - Extract leg's early `return` in `tick()` (worker.js ~924): a 500-file upload
   completely starves the tag and face legs until the extract queue is dry.
 - FIFO by `created_at` + `retagBoard` resetting whole boards: a scheduled retag of
   1,000 old items queues ahead of every fresh upload — the user watching
   "Processing…" waits behind the entire retag. No priority tiering.
+
+Verified in depth; blast radius corrected post-#5, one self-correcting nuance, and
+a throughput argument the entry missed:
+
+- **CORRECTED — the sweeps are NOT starved:** recoverStuck, retagDue, embedDue,
+  refreshDue, and the prunes all run at the top of every tick BEFORE the claim
+  legs, and the loop re-enters tick between batches (400 ms). A huge extract
+  backlog therefore does not stop live prices, embeddings, or retag scheduling —
+  post-#5 (bounded calls) those only pause per-batch, minutes at worst. The
+  starvation is leg-vs-leg only: `pending_face` and `pending` rows don't move
+  while `pending_extract` is non-empty.
+- **Quantified:** 500 OCR-heavy PDFs ≈ hours of extract-leg monopoly (the sidecar
+  serializes; up to ~40 s/doc at the OCR cap, plus each doc's AI extract call).
+  For that whole window nothing tags on ANY board and new connector entities get
+  no chart — cross-board collateral from one bulk upload.
+- **Nuance the entry missed (half self-correcting):** on a MAPPED board a fresh
+  upload enters via the extract leg — which has priority — so during a scheduled
+  retag it JUMPS the 1,000-item tag queue for its definition: fields and identity
+  appear promptly, only its tags land at the back of the FIFO (a card with fields
+  but no tags — visible progress). On an unmapped board the entry is fully right:
+  straight to `pending`, behind the entire retag (old `created_at` wins FIFO).
+- **The fairness fix is also a throughput fix:** extract-leg concurrency is
+  mostly wasted — 4 concurrent `extractOne`s serialize at the single-threaded
+  sidecar (#5's queue math), so an all-extract batch does ~one doc's work while
+  three slots sit in the sidecar queue. Mixing legs in one batch puts those idle
+  slots on tag calls AND drops the sidecar queue depth from ~3-deep toward
+  1–2-deep, easing the 240 s extractor budget (#5/#6 interplay).
+
+**FIXED (starvation half) — shipped as a unified queue, not round-robin.** The
+first design here was round-robin claim filling across the three legs; on
+reflection (user pushback: "aren't we over-optimizing for this setup?") that
+rebalances the starvation with a tuned ratio instead of removing its cause. The
+legs themselves were the scheduling artifact. Shipped instead: ONE claim,
+`claimNextWork` (db.js) — oldest ready item across
+pending_extract/pending_face/pending, stamped to its stage's in-flight status,
+which tells `tick()` which step to run (`STEP[row.status]`). The three claim
+functions and the three early-return loops are deleted. Consequences, all by
+construction rather than tuning:
+- no stage can starve another (there are no stages to serve unfairly, only age);
+- items complete end-to-end oldest-first — during a bulk upload, finished cards
+  trickle out from minute one instead of hours of extraction then a wall of
+  tags (the item re-enters the queue with its original created_at, so its next
+  step stays at the front);
+- the key gate lives in the one query (AI stages wait for a key; faces claim
+  keyless), retry_at gating unchanged, recoverStuck untouched and still in the
+  same flight (the #7 constraint);
+- scheduling policy is now literally one ORDER BY — which makes the deferred
+  half below a column away, not a redesign.
+245 tests green: 5 new in test/queue.test.js (cross-stage FIFO + step dispatch,
+trickle-completion, keyless face claim with AI stages waiting unfailed, retry_at
+parking one row without blocking younger work); retry.test.js migrated to
+`claimNextWork`. Double-check adds: the 5th test RUNS startWorker for real —
+seed a pending_face item (needs no key), watch the loop claim → dispatch →
+advance it to pending — the first test ever to exercise tick()'s wiring (the
+STEP map is only evaluated when startWorker runs; a typo there was previously
+invisible to the suite). Verified clean: zero claimNext* residuals, no stale
+extract-first comments, and the new 3-status claim uses the same
+idx_items_status/idx_items_created support the old claims did (a composite
+(status, created_at) only starts mattering at ~10k+ queue depth — note-only).
+
+**Priority tiering (retag-behind-uploads) — still DEFER, design noted:** the
+honest fix is an `items.priority` column (default 0; the scheduled-retag path
+alone stamps -1) with the claim ordering `priority DESC, created_at ASC` —
+orderings derived from `updated_at` can't express intent. At this deployment's
+scale (largest board ~300 items) a scheduled retag occupies the queue ~20–40 min
+worst-case, and unified-FIFO already interleaves a fresh upload's steps with the
+retag's by age. Revisit when 1,000-item scheduled retags are real.
 
 ### 11. Assorted minor
 - `dueLiveEntities` joins instances by `payload ? 'source'` — an entity holding two

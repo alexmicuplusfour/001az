@@ -957,66 +957,46 @@ export async function setSetting(db, key, value) {
 
 // --- AI tagging queue helpers ---
 
-// Atomically take the oldest pending item and mark it processing. SKIP LOCKED
-// keeps concurrent claimers (or a second worker) from grabbing the same row.
-// When no default key is configured, boards without their own key are skipped —
-// their items stay pending until a key appears (never failed for a missing key).
-// Rows whose retry_at is still in the future (a spaced transient retry) are
-// skipped; every requeue path that wants an immediate run clears retry_at.
-export async function claimNextPending(db, hasDefaultKey = true) {
+// Atomically take the oldest ready item — whatever stage it's in — and mark it
+// with that stage's in-flight status. ONE queue, one policy: oldest work first
+// (created_at, id), so an item flows extract → face → tag to completion before
+// newer items start (it re-enters the queue with its original created_at and
+// stays at the front). There are no per-stage legs to starve: a bulk upload's
+// extractions and other boards' tagging interleave by age. The returned row's
+// status ('extracting' | 'facing' | 'processing') tells the worker which step
+// to run.
+//
+// SKIP LOCKED keeps concurrent claimers (or a second worker) from grabbing the
+// same row. When no default key is configured, boards without their own key
+// are skipped for the AI stages — their items stay queued until a key appears
+// (never failed for a missing key) — while faces still claim (rendering a
+// chart is a data+render step, no model call). Rows whose retry_at is still in
+// the future (a spaced transient retry) are skipped; every requeue path that
+// wants an immediate run clears retry_at.
+export async function claimNextWork(db, hasDefaultKey = true) {
   const { rows } = await db.query(
-    `UPDATE items SET status='processing', updated_at=$1
+    `UPDATE items SET
+       status = CASE items.status
+         WHEN 'pending_extract' THEN 'extracting'
+         WHEN 'pending_face'    THEN 'facing'
+         ELSE 'processing' END,
+       updated_at = $1
      WHERE id = (
        SELECT i.id FROM items i JOIN boards b ON b.id = i.board_id
-       WHERE i.status='pending' AND (b.ai_key_id IS NOT NULL OR $2)
+       WHERE i.status IN ('pending_extract', 'pending_face', 'pending')
+         AND (i.status = 'pending_face' OR b.ai_key_id IS NOT NULL OR $2)
          AND (i.retry_at IS NULL OR i.retry_at <= $1)
        ORDER BY i.created_at ASC, i.id ASC LIMIT 1
        FOR UPDATE OF i SKIP LOCKED
      )
      RETURNING *`,
     [Date.now(), hasDefaultKey]
-  );
-  return rows[0] || null;
-}
-
-// Atomically take the oldest pending_face item and mark it facing. Unlike the
-// tag/extract claims this needs NO AI key — rendering a chart is a data+render
-// step, not a model call — so there's no default-key gate.
-export async function claimNextPendingFace(db) {
-  const { rows } = await db.query(
-    `UPDATE items SET status='facing', updated_at=$1
-     WHERE id = (
-       SELECT id FROM items WHERE status='pending_face'
-         AND (retry_at IS NULL OR retry_at <= $1)
-       ORDER BY created_at ASC, id ASC LIMIT 1
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING *`,
-    [Date.now()]
   );
   return rows[0] || null;
 }
 
 export async function setEntityFaceAt(db, id, at) {
   await db.query("UPDATE entities SET face_at=$1, updated_at=$2 WHERE id=$3", [at, Date.now(), id]);
-}
-
-// Atomically take the oldest pending_extract item and mark it extracting.
-// Mirrors claimNextPending; the worker poll loop calls this first.
-export async function claimNextPendingExtract(db, hasDefaultKey = true) {
-  const { rows } = await db.query(
-    `UPDATE items SET status='extracting', updated_at=$1
-     WHERE id = (
-       SELECT i.id FROM items i JOIN boards b ON b.id = i.board_id
-       WHERE i.status='pending_extract' AND (b.ai_key_id IS NOT NULL OR $2)
-         AND (i.retry_at IS NULL OR i.retry_at <= $1)
-       ORDER BY i.created_at ASC, i.id ASC LIMIT 1
-       FOR UPDATE OF i SKIP LOCKED
-     )
-     RETURNING *`,
-    [Date.now(), hasDefaultKey]
-  );
-  return rows[0] || null;
 }
 
 // Write extracted fields into payload and advance. Extraction is part of the

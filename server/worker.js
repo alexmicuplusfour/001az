@@ -2,9 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import {
-  claimNextPending,
-  claimNextPendingExtract,
-  claimNextPendingFace,
+  claimNextWork,
   setEntityFaceAt,
   updateItemPayload,
   markTagged,
@@ -1016,6 +1014,9 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     }
   }
 
+  // The claimed row's in-flight status names the step it needs.
+  const STEP = { extracting: processExtractOne, facing: processFaceOne, processing: processOne };
+
   async function tick() {
     const recovered = await recoverStuck(db, STUCK_MS, MAX_ATTEMPTS);
     if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
@@ -1027,40 +1028,19 @@ export function startWorker({ db, thumbsDir, galleryDir }) {
     // Boards without their own key only process when a default exists.
     const hasDefault = !!(await resolveDefaultAi(db));
 
-    // Extract leg has priority: pending_extract items go before pending.
-    const extractRows = [];
-    while (extractRows.length < CONCURRENCY) {
-      const row = await claimNextPendingExtract(db, hasDefault);
+    // One queue, oldest work first, whatever stage it's in (claimNextWork).
+    // An item flows extract → face → tag to completion before newer items
+    // start, so a bulk upload's extractions can't starve other work — the
+    // batch mixes stages by age.
+    const batch = [];
+    while (batch.length < CONCURRENCY) {
+      const row = await claimNextWork(db, hasDefault);
       if (!row) break;
-      extractRows.push(row);
+      batch.push(row);
     }
-    if (extractRows.length) {
-      await Promise.all(extractRows.map(processExtractOne));
-      return extractRows.length;
-    }
-
-    // Face leg: render connector chart faces before those entities tag.
-    const faceRows = [];
-    while (faceRows.length < CONCURRENCY) {
-      const row = await claimNextPendingFace(db);
-      if (!row) break;
-      faceRows.push(row);
-    }
-    if (faceRows.length) {
-      await Promise.all(faceRows.map(processFaceOne));
-      return faceRows.length;
-    }
-
-    // Tag leg.
-    const rows = [];
-    while (rows.length < CONCURRENCY) {
-      const row = await claimNextPending(db, hasDefault);
-      if (!row) break;
-      rows.push(row);
-    }
-    if (!rows.length) return 0;
-    await Promise.all(rows.map(processOne));
-    return rows.length;
+    if (!batch.length) return 0;
+    await Promise.all(batch.map((row) => STEP[row.status](row)));
+    return batch.length;
   }
 
   let running = true;
