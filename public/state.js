@@ -29,6 +29,7 @@ export const state = {
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,
   boardIngest: false,   // automatic ingestion enabled — keeps a slow delta poll alive
+  boardIngestNextRun: null, // ms timestamp of the next ingestion run (toolbar chip countdown)
   boardTokens: null,
   searchAvailable: false,
   searchDraft: "",

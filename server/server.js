@@ -406,9 +406,12 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     search: embeddingOk,
     manage: canManage,
     token_total: tokenTotal,
-    // Presence flag only — the client uses it to keep a slow delta poll alive
-    // on quiet boards so auto-ingested items appear without a reload.
+    // Presence flag + next-run stamp — the client keeps a slow delta poll
+    // alive on ingest boards, and the toolbar chip counts down to the run.
     ingest_enabled: !!(board.ingest && board.ingest.enabled !== false),
+    ingest_next_run_at: board.ingest && board.ingest.enabled !== false
+      ? board.ingest_next_run_at ?? null
+      : null,
   });
 }));
 
@@ -505,15 +508,28 @@ app.get("/api/ingest/folders", requireAuth, wrap(async (_req, res) => {
 }));
 
 // Dry-run a candidate config (request body, never saved): enumerate → filter
-// → sort with the shared engine. count = everything matching the filters
-// (capped: the walk stopped at the preview bound, render as "N+"); new = the
-// subset not yet in the ledger, i.e. what a run would actually consider.
+// → sort with the shared engine. Default response is the count alone —
+// count = everything matching the filters (capped: the walk stopped at the
+// preview bound, render as "N+"); new = the subset not yet in the ledger,
+// i.e. what a run would actually consider. body.sample = { offset, limit }
+// opts into a page of matching rows (+ hasMore) for the results view — each
+// page is a fresh stateless enumerate, same as connector browse paging.
 app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wrap(async (req, res) => {
   const adapter = resolveIngestAdapter(req.board);
   if (!adapter) return res.status(400).json({ error: "ingestion is not available for this board" });
-  const cfg = { ...(req.body || {}), enabled: true }; // preview ignores the toggle
+  const body = req.body || {};
+  const cfg = { ...body, enabled: true }; // preview ignores the toggle
+  delete cfg.sample;
   const err = validateIngest(cfg, adapter.descriptor(), { hasRoot: !!process.env.INGEST_ROOT });
   if (err) return res.status(400).json({ error: err });
+  let sample = null;
+  if (body.sample != null) {
+    const offset = Number(body.sample.offset ?? 0);
+    const limit = Number(body.sample.limit ?? 50);
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200)
+      return res.status(400).json({ error: "invalid sample window" });
+    sample = { offset, limit };
+  }
   const PREVIEW_CAP = 1000;
   let enumerated;
   try {
@@ -528,7 +544,10 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
     count: matched.length,
     new: matched.filter((c) => !known.has(c.key)).length,
     capped: !!enumerated.truncated,
-    sample: matched.slice(0, 20),
+    ...(sample ? {
+      sample: matched.slice(sample.offset, sample.offset + sample.limit),
+      hasMore: sample.offset + sample.limit < matched.length,
+    } : {}),
   });
 }));
 

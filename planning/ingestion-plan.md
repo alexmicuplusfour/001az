@@ -107,14 +107,20 @@ engine filters/sorts on, described by the descriptor's filter catalog.
   (arm on off→on / trigger change = immediate first run; disarm on off/manual);
   routes: `GET /api/boards/:id/ingest` (descriptor+config+state),
   `GET /api/ingest/folders` (picker, depth ≤3), `POST …/ingest/preview`
-  (dry-run body, never saved; count / new / capped / 20-row sample),
+  (dry-run body, never saved; count / new / capped by default, and
+  `sample: { offset, limit }` opts into a page of rows + hasMore — each page a
+  fresh stateless enumerate, like connector-browse paging),
   `POST …/ingest/run` (arm now; 409 when disabled). All board-scoped routes
   `requireBoardManager`. Board payload: `ingest_enabled` on `GET /api/boards/:id`,
   full `ingest`+`ingest_state` on `/settings`.
 - `public/ingest-modal.js` — descriptor-driven modal (toolbar chevron →
   "Automatic ingestion…"): enable, source (folder picker + recursive), filter
-  rows (fn→op-by-kind→typed value), sort & limit, trigger, debounced live
-  preview with stale-response guard, last-run status line, Save + Run now.
+  rows (fn→op-by-kind→typed value), sort & limit, trigger, last-run status
+  line, Save + Run now. Preview is manual and two-stage: a Preview button
+  fetches the count; clicking the count swaps the modal to a read-only
+  results list (connector-browse-style table, Load more, Back to settings —
+  same modal, so buffered edits survive). Config edits hide a shown count so
+  the results view can never open on stale numbers.
 - `public/data.js` — `pollDelay()` counts `state.boardIngest` into the 30s
   slow poll (same stale-tab cure as live faces; without it a quiet board never
   shows auto-ingested items).

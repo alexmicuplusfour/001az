@@ -77,6 +77,7 @@ async function main() {
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
   state.boardMapping = boardData?.mapping || null;
   state.boardIngest = !!boardData?.ingest_enabled;
+  state.boardIngestNextRun = boardData?.ingest_next_run_at ?? null;
   state.boardTokens = boardData?.token_total ?? null;
   state.searchAvailable = !!boardData?.search;
   state.me = meData;

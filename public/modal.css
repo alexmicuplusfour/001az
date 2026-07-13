@@ -358,6 +358,9 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 
 /* ── automatic ingestion modal (ingest-modal.js) ──────────────────────────── */
 #ingest-modal .modal-dialog { width: min(640px, 94vw); }
+/* results view: wide browse-style list; the inner .cb-scroll owns the scroll */
+#ingest-modal .modal-dialog.results { width: min(900px, 94vw); }
+#ingest-modal .modal-dialog.results .modal-body { overflow: hidden; }
 .im-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .im-row > label { font-size: 12px; color: #6b6b72; margin: 0; }
 .im-row select { max-width: 260px; }
@@ -367,7 +370,28 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-filter-val { flex: 1; min-width: 0; }
 .im-filter-val input { width: 100%; font-size: 13px; padding: 6px 8px; }
 .im-hint { font-size: 12px; color: #9aa0aa; margin: 8px 0 0; line-height: 1.4; }
-.im-preview-count { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
-.im-sample { max-height: 220px; overflow-y: auto; }
+.im-preview-btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 14px;
+  border: 1px solid #d3d3dc;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+.im-preview-btn:hover { background: #111; color: #fff; border-color: #111; }
+.im-preview-btn:disabled { opacity: .55; cursor: default; }
+/* the count doubles as the door into the results view */
+.im-preview-count {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: #111;
+}
+.im-preview-count:hover { text-decoration: underline; }
 .im-status { font-size: 12px; color: #6b6b72; margin: 12px 0 0; }
 .im-status.error { color: #b4232a; }

@@ -1,8 +1,15 @@
 // The automatic-ingestion modal: per-board source + filters + sort/limit +
-// trigger, with a live results preview. Fully descriptor-driven — the server's
-// /api/boards/:id/ingest payload declares the source schema, filter catalog
-// (with kinds that pick the operator set and input type), sorts and trigger
-// modes, so this file knows nothing about folders vs future feed adapters.
+// trigger, with an on-demand results preview. Fully descriptor-driven — the
+// server's /api/boards/:id/ingest payload declares the source schema, filter
+// catalog (with kinds that pick the operator set and input type), sorts and
+// trigger modes, so this file knows nothing about folders vs future feed
+// adapters.
+//
+// Preview is manual and two-stage: a Preview button fetches just the match
+// count; clicking the count swaps this modal to a read-only results list
+// (connector-browse-style table with Load more) — no inline table trying to
+// summarize thousands of files. Back returns to the settings view with every
+// buffered edit intact (same modal, same closure — nothing is rebuilt).
 import { state } from './state.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
@@ -25,6 +32,7 @@ const TRIGGER_LABELS = {
   interval: "Every N minutes",
   daily: "Daily at a set time",
 };
+const PAGE_SIZE = 50;
 
 const relTime = (ts) => {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -36,14 +44,28 @@ const relTime = (ts) => {
 
 let modalEl = null;
 
+// Re-learn the board's ingestion flags (enabled + next-run stamp) after a
+// save or run-now changed them server-side, then re-render so the toolbar
+// chip and the poll cadence follow.
+async function refreshBoardIngest() {
+  try {
+    const b = await fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
+    if (!b) return;
+    state.boardIngest = !!b.ingest_enabled;
+    state.boardIngestNextRun = b.ingest_next_run_at ?? null;
+    ensurePolling(); // the slow poll follows the flag
+    document.dispatchEvent(new Event("app:render"));
+  } catch { /* the chip's own expiry refetch will catch up */ }
+}
+
 export function openIngestModal() {
   if (modalEl) return; // already open
 
   const canEdit = !!state.boardManage;
-  const { overlay, body, footer, close } = createModal({
+  const { overlay, dialog, body, footer, titleEl, close } = createModal({
     title: "Automatic ingestion",
     id: "ingest-modal",
-    bodyStyle: "display:flex;flex-direction:column;gap:4px;",
+    bodyStyle: "display:flex;flex-direction:column;",
     onClose: () => { modalEl = null; },
   });
   modalEl = overlay;
@@ -92,6 +114,20 @@ export function openIngestModal() {
       if (s.default !== undefined && cfg.source[s.key] === undefined) cfg.source[s.key] = s.default;
     }
 
+    // Two views in one modal: settings (the config sections) and results (the
+    // paged preview list). Swapping views detaches nothing — all edit state
+    // lives on in the settings DOM while results are shown.
+    const settingsView = document.createElement("div");
+    settingsView.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+    const resultsView = document.createElement("div");
+    resultsView.style.cssText = "display:none;flex-direction:column;gap:12px;min-height:0;flex:1;";
+    body.append(settingsView, resultsView);
+    const footerSettings = document.createElement("div");
+    footerSettings.style.cssText = "display:flex;align-items:center;gap:8px;";
+    const footerResults = document.createElement("div");
+    footerResults.style.cssText = "display:none;align-items:center;gap:8px;";
+    footer.append(footerSettings, footerResults);
+
     // switchRow has no disabled mode — read-only viewers get inert rows.
     const inertUnlessEditable = (row) => {
       if (!canEdit) row.style.pointerEvents = "none";
@@ -99,7 +135,7 @@ export function openIngestModal() {
     };
 
     // ── Enable ──
-    body.appendChild(inertUnlessEditable(switchRow("Enable automatic ingestion", null, cfg.enabled, (on) => {
+    settingsView.appendChild(inertUnlessEditable(switchRow("Enable automatic ingestion", null, cfg.enabled, (on) => {
       cfg.enabled = on;
     })));
 
@@ -138,13 +174,13 @@ export function openIngestModal() {
           if (!cfg.source[s.key]) cfg.source[s.key] = opts[0];
         }
         sel.disabled = !canEdit;
-        sel.addEventListener("change", () => { cfg.source[s.key] = sel.value; refreshPreview(); });
+        sel.addEventListener("change", () => { cfg.source[s.key] = sel.value; invalidatePreview(); });
         row.append(lbl, sel);
         srcSection.appendChild(row);
       } else if (s.type === "boolean") {
         srcSection.appendChild(inertUnlessEditable(switchRow(s.label, null, cfg.source[s.key] !== false, (on) => {
           cfg.source[s.key] = on;
-          refreshPreview();
+          invalidatePreview();
         }, { small: true })));
       }
     }
@@ -154,7 +190,7 @@ export function openIngestModal() {
       note.textContent = "This board feeds from its connector's universe — nothing to configure.";
       srcSection.appendChild(note);
     }
-    body.appendChild(srcSection);
+    settingsView.appendChild(srcSection);
 
     // ── Filters ──
     const filterSection = section("Filters");
@@ -210,15 +246,15 @@ export function openIngestModal() {
         input.disabled = !canEdit;
         input.addEventListener("input", () => {
           f.value = input.type === "number" ? (input.value === "" ? "" : Number(input.value)) : input.value;
-          refreshPreview();
+          invalidatePreview();
         });
         valWrap.replaceChildren(input);
       }
 
       fnSel.disabled = !canEdit;
       opSel.disabled = !canEdit;
-      fnSel.addEventListener("change", () => { f.fn = fnSel.value; f.value = ""; syncOps(); refreshPreview(); });
-      opSel.addEventListener("change", () => { f.op = opSel.value; syncValueInput(); refreshPreview(); });
+      fnSel.addEventListener("change", () => { f.fn = fnSel.value; f.value = ""; syncOps(); invalidatePreview(); });
+      opSel.addEventListener("change", () => { f.op = opSel.value; syncValueInput(); invalidatePreview(); });
 
       const rm = document.createElement("button");
       rm.type = "button";
@@ -228,7 +264,7 @@ export function openIngestModal() {
       rm.addEventListener("click", () => {
         cfg.filters.splice(cfg.filters.indexOf(f), 1);
         row.remove();
-        refreshPreview();
+        invalidatePreview();
       });
 
       syncOps();
@@ -247,13 +283,14 @@ export function openIngestModal() {
       const f = { fn: first.fn, op: OPS_BY_KIND[first.kind][0], value: "" };
       cfg.filters.push(f);
       filterList.appendChild(filterRow(f));
+      invalidatePreview();
     });
     filterSection.appendChild(addFilter);
     const filterHint = document.createElement("p");
     filterHint.className = "im-hint";
     filterHint.textContent = "No filters = everything in the source is eligible. All filters must match.";
     filterSection.appendChild(filterHint);
-    body.appendChild(filterSection);
+    settingsView.appendChild(filterSection);
 
     // ── Sort & limit ──
     const sortSection = section("Sort & limit");
@@ -287,8 +324,8 @@ export function openIngestModal() {
     limitInput.style.width = "80px";
     if (cfg.limit) limitInput.value = cfg.limit;
     sortSel.disabled = orderSel.disabled = limitInput.disabled = !canEdit;
-    sortSel.addEventListener("change", () => { cfg.sort = { ...cfg.sort, by: sortSel.value }; refreshPreview(); });
-    orderSel.addEventListener("change", () => { cfg.sort = { ...cfg.sort, order: orderSel.value }; refreshPreview(); });
+    sortSel.addEventListener("change", () => { cfg.sort = { ...cfg.sort, by: sortSel.value }; invalidatePreview(); });
+    orderSel.addEventListener("change", () => { cfg.sort = { ...cfg.sort, order: orderSel.value }; invalidatePreview(); });
     limitInput.addEventListener("input", () => {
       cfg.limit = limitInput.value === "" ? null : Number(limitInput.value);
     });
@@ -298,7 +335,7 @@ export function openIngestModal() {
     limitHint.className = "im-hint";
     limitHint.textContent = "Sorting decides which items win when a per-run limit is set (e.g. 20 newest per day).";
     sortSection.appendChild(limitHint);
-    body.appendChild(sortSection);
+    settingsView.appendChild(sortSection);
 
     // ── Trigger ──
     const trigSection = section("Trigger");
@@ -333,17 +370,24 @@ export function openIngestModal() {
     syncTriggerInputs();
     trigRow.append(modeSel, everyInput, atInput);
     trigSection.appendChild(trigRow);
-    body.appendChild(trigSection);
+    settingsView.appendChild(trigSection);
 
-    // ── Preview ──
+    // ── Preview: a button fetches the count; the count opens the results view ──
     const prevSection = section("Preview");
-    const countLine = document.createElement("p");
-    countLine.className = "im-preview-count";
-    countLine.textContent = "…";
-    const sampleWrap = document.createElement("div");
-    sampleWrap.className = "im-sample";
-    prevSection.append(countLine, sampleWrap);
-    body.appendChild(prevSection);
+    const prevRow = document.createElement("div");
+    prevRow.className = "im-row";
+    const previewBtn = document.createElement("button");
+    previewBtn.type = "button";
+    previewBtn.className = "im-preview-btn";
+    previewBtn.textContent = "Preview";
+    const countBtn = document.createElement("button");
+    countBtn.type = "button";
+    countBtn.className = "im-preview-count";
+    countBtn.style.display = "none";
+    countBtn.title = "View the matching items";
+    prevRow.append(previewBtn, countBtn);
+    prevSection.appendChild(prevRow);
+    settingsView.appendChild(prevSection);
 
     // Status line from the sweep-owned run state.
     if (info.state?.last_run_at) {
@@ -353,39 +397,43 @@ export function openIngestModal() {
       line.textContent = st.last_error
         ? `Last run ${relTime(st.last_run_at)} — error: ${st.last_error}`
         : `Last run ${relTime(st.last_run_at)} — added ${st.last_added ?? 0}${st.drain_left ? ` (${st.drain_left} still draining)` : ""}`;
-      body.appendChild(line);
+      settingsView.appendChild(line);
     }
 
-    // Debounced preview with a stale-response guard.
-    let seq = 0;
-    let debounce = null;
-    function refreshPreview() {
-      clearTimeout(debounce);
-      debounce = setTimeout(async () => {
-        const mySeq = ++seq;
-        try {
-          const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(previewConfig()),
-          });
-          const data = await r.json().catch(() => ({}));
-          if (mySeq !== seq) return;
-          if (!r.ok) {
-            countLine.textContent = data.error || "Preview failed";
-            sampleWrap.replaceChildren();
-            return;
-          }
-          const plus = data.capped ? "+" : "";
-          countLine.textContent =
-            `${data.count}${plus} match${data.count === 1 && !data.capped ? "" : "es"}` +
-            (data.new !== data.count ? ` — ${data.new}${plus} not yet ingested` : "");
-          renderSample(data.sample || []);
-        } catch {
-          if (mySeq === seq) countLine.textContent = "Preview failed";
-        }
-      }, 400);
+    // A config edit makes a shown count a lie — hide it until re-previewed,
+    // so the results view can never open on stale numbers.
+    function invalidatePreview() {
+      countBtn.style.display = "none";
     }
+
+    previewBtn.addEventListener("click", async () => {
+      previewBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(previewConfig()),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          countBtn.style.display = "none";
+          toast.error(data.error || "Preview failed");
+          return;
+        }
+        // Lead with what a run would actually take; the rest is accounting.
+        const plus = data.capped ? "+" : "";
+        const already = data.count - data.new;
+        countBtn.textContent =
+          `${data.new}${plus} new match${data.new === 1 && !data.capped ? "" : "es"}` +
+          (already > 0 ? ` — ${already} already ingested` : "") + " ›";
+        countBtn.style.display = "";
+      } catch {
+        toast.error("Preview failed");
+      } finally {
+        previewBtn.disabled = false;
+      }
+    });
+    countBtn.addEventListener("click", showResults);
 
     // Only send filters the user has finished typing (a value-less filter
     // matches nothing server-side, which reads as a broken preview).
@@ -399,23 +447,42 @@ export function openIngestModal() {
       };
     }
 
-    function renderSample(rows) {
-      sampleWrap.replaceChildren();
-      if (!rows.length) return;
-      // Columns straight from the catalog: label first, then up to three
-      // non-name fields — agnostic to what the adapter exposes.
-      const cols = (desc.filters || []).filter((c) => c.fn !== "name").slice(0, 3);
-      const table = document.createElement("table");
-      table.className = "cb-table";
-      const thead = document.createElement("thead");
-      const hr = document.createElement("tr");
+    // ── Results view: read-only paged list, connector-browse chrome ──
+    const scroll = document.createElement("div");
+    scroll.className = "cb-scroll";
+    const table = document.createElement("table");
+    table.className = "cb-table";
+    const thead = document.createElement("thead");
+    const tbody = document.createElement("tbody");
+    table.append(thead, tbody);
+    const note = document.createElement("div");
+    note.className = "cb-note";
+    note.style.display = "none";
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "cb-more";
+    moreBtn.textContent = "Load more";
+    moreBtn.style.display = "none";
+    scroll.append(table, note, moreBtn);
+    resultsView.appendChild(scroll);
+
+    // Columns straight from the catalog: label first, then up to three
+    // non-name fields — agnostic to what the adapter exposes.
+    const cols = (desc.filters || []).filter((c) => c.fn !== "name").slice(0, 3);
+    {
+      const tr = document.createElement("tr");
       for (const h of ["Item", ...cols.map((c) => c.label)]) {
         const th = document.createElement("th");
         th.textContent = h;
-        hr.appendChild(th);
+        tr.appendChild(th);
       }
-      thead.appendChild(hr);
-      const tbody = document.createElement("tbody");
+      thead.appendChild(tr);
+    }
+
+    let resultOffset = 0;
+    let resultSeq = 0; // guards a slow page landing after Back → reopen
+
+    function appendRows(rows) {
       for (const row of rows) {
         const tr = document.createElement("tr");
         const name = document.createElement("td");
@@ -433,11 +500,76 @@ export function openIngestModal() {
         }
         tbody.appendChild(tr);
       }
-      table.append(thead, tbody);
-      sampleWrap.appendChild(table);
     }
 
-    // ── Footer ──
+    async function loadPage() {
+      const mySeq = resultSeq;
+      moreBtn.disabled = true;
+      note.style.display = "none";
+      try {
+        const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...previewConfig(), sample: { offset: resultOffset, limit: PAGE_SIZE } }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (mySeq !== resultSeq) return;
+        if (!r.ok) {
+          note.textContent = data.error || "Preview failed";
+          note.style.display = "";
+          return;
+        }
+        appendRows(data.sample || []);
+        resultOffset += (data.sample || []).length;
+        moreBtn.style.display = data.hasMore ? "" : "none";
+        if (!data.hasMore) {
+          note.textContent = !tbody.children.length
+            ? "Nothing matches."
+            : data.capped ? "Showing the first 1000 scanned — narrow the filters for an exact view." : "";
+          note.style.display = note.textContent ? "" : "none";
+        }
+      } catch {
+        if (mySeq === resultSeq) {
+          note.textContent = "Preview failed";
+          note.style.display = "";
+        }
+      } finally {
+        moreBtn.disabled = false;
+      }
+    }
+    moreBtn.addEventListener("click", loadPage);
+
+    function showResults() {
+      resultSeq++;
+      resultOffset = 0;
+      tbody.replaceChildren();
+      moreBtn.style.display = "none";
+      settingsView.style.display = "none";
+      footerSettings.style.display = "none";
+      resultsView.style.display = "flex";
+      footerResults.style.display = "flex";
+      dialog.classList.add("results");
+      titleEl.textContent = "Ingestion preview";
+      loadPage();
+    }
+    function showSettings() {
+      resultSeq++;
+      resultsView.style.display = "none";
+      footerResults.style.display = "none";
+      settingsView.style.display = "flex";
+      footerSettings.style.display = "flex";
+      dialog.classList.remove("results");
+      titleEl.textContent = "Automatic ingestion";
+    }
+
+    const backBtn = document.createElement("button");
+    backBtn.type = "button";
+    backBtn.className = "ghost";
+    backBtn.textContent = "← Back to settings";
+    backBtn.addEventListener("click", showSettings);
+    footerResults.appendChild(backBtn);
+
+    // ── Footer (settings view) ──
     if (canEdit) {
       const saveBtn = document.createElement("button");
       saveBtn.textContent = "Save";
@@ -454,8 +586,7 @@ export function openIngestModal() {
             toast.error(data.error || "Save failed");
             return;
           }
-          state.boardIngest = !!payload.enabled;
-          ensurePolling(); // the slow poll follows the flag
+          refreshBoardIngest();
           toast("Ingestion saved");
           close();
         } catch {
@@ -471,20 +602,19 @@ export function openIngestModal() {
           const r = await fetch(`/api/boards/${state.boardId}/ingest/run`, { method: "POST" });
           const data = await r.json().catch(() => ({}));
           if (!r.ok) return toast.error(data.error || "Run failed");
+          refreshBoardIngest(); // chip flips to "now", then follows the sweep
           toast("Ingestion run queued");
         } catch {
           toast.error("Run failed");
         }
       });
-      footer.append(saveBtn, runBtn);
+      footerSettings.append(saveBtn, runBtn);
     } else {
       const note = document.createElement("p");
       note.style.cssText = "font-size:12px;color:#8a8a92;margin:0;";
       note.textContent = "Only board admins can edit ingestion.";
-      footer.appendChild(note);
+      footerSettings.appendChild(note);
     }
-
-    refreshPreview();
   }
 
   function section(title) {

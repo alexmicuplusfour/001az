@@ -1146,6 +1146,18 @@ a.tool-btn {
   padding: 0 10px;
   white-space: nowrap;
 }
+/* ingestion chip — the mapping chip's clickable sibling: a refresh glyph +
+   countdown to the next automatic run; opens the ingestion modal */
+.ingest-chip {
+  gap: 5px;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ingest-chip:hover { background: var(--pill-bg-hover); }
+.ingest-chip-icon { display: inline-flex; }
+.ingest-chip-icon svg { width: 12px; height: 12px; }
 /* token usage chip in the board-group — coin icon + formatted count */
 .token-chip {
   display: inline-flex;

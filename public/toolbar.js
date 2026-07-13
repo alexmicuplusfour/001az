@@ -19,6 +19,65 @@ const elToolbarSub = document.getElementById("toolbar-sub");
 // the previous value to the new one as tagging ticks the total up.
 let tokenOdo = null;
 
+// ── ingestion chip: countdown to the board's next automatic run ──
+// The board payload carries ingest_next_run_at once; after each run the stamp
+// moves server-side, so when the countdown expires the chip re-fetches the
+// board (throttled) to learn the new schedule. A rebuilt toolbar strands the
+// old chip's interval, which self-clears on its next tick via isConnected.
+let ingestEtaFetchAt = 0;
+
+function fmtEta(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+function ingestChip() {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "mapping-chip ingest-chip";
+  chip.title = "Automatic ingestion — next run countdown. Click to configure.";
+  const icon = document.createElement("span");
+  icon.className = "ingest-chip-icon";
+  icon.innerHTML = ICONS.redo;
+  const eta = document.createElement("span");
+  chip.append(icon, eta);
+  chip.addEventListener("click", () => openIngestModal());
+
+  const render = () => {
+    const at = state.boardIngestNextRun;
+    if (!at) {
+      eta.textContent = "manual";
+      return false;
+    }
+    const left = at - Date.now();
+    eta.textContent = left <= 0 ? "now" : fmtEta(left);
+    return left <= 0;
+  };
+  render();
+  const t = setInterval(async () => {
+    if (!chip.isConnected) return clearInterval(t);
+    const due = render();
+    // Expired (or run-now fired): the sweep claims within a worker tick, so
+    // shortly after "now" the server holds a fresh next_run_at — re-learn it.
+    if (due && Date.now() - ingestEtaFetchAt > 5000) {
+      ingestEtaFetchAt = Date.now();
+      try {
+        const b = await fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
+        if (b) {
+          state.boardIngest = !!b.ingest_enabled;
+          state.boardIngestNextRun = b.ingest_next_run_at ?? null;
+        }
+      } catch { /* keep the last known stamp */ }
+    }
+  }, 1000);
+  return chip;
+}
+
 function openUserMenu(anchorEl) {
   openDropdown(anchorEl, {
     className: "user-menu-pop",
@@ -155,6 +214,12 @@ export function renderToolbar(resultCount) {
         chip.textContent = connectorName.charAt(0).toUpperCase() + connectorName.slice(1);
         chip.title = `Entity mapping template: ${connectorName}`;
         auth.appendChild(chip);
+      }
+
+      // Ingestion chip: a live countdown to the next automatic run, mirroring
+      // the mapping chip. Clicking opens the ingestion modal.
+      if (state.boardIngest) {
+        auth.appendChild(ingestChip());
       }
 
       // Add button + its ingestion menu — two separate rounded buttons with a

@@ -112,31 +112,55 @@ test("PATCH bookkeeping: arming, rearming on trigger change, disarming", async (
 test("board payload: ingest_enabled flag follows the saved config", async () => {
   let r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
   assert.equal(r.json.ingest_enabled, false);
+  assert.equal(r.json.ingest_next_run_at, null);
   await patchIngest(GOOD);
   r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
   assert.equal(r.json.ingest_enabled, true);
+  assert.ok(r.json.ingest_next_run_at > 0, "the chip's countdown stamp rides the payload");
   // Settings payload carries the full config for the modal.
   const s = await req(base, "GET", `/api/boards/${boardId}/settings`, { sid: admin.sid });
   assert.deepEqual(s.json.ingest.source, GOOD.source);
 });
 
-test("preview: dry-runs the request body without saving it", async () => {
+test("preview: dry-runs the request body without saving it; count by default, pages on demand", async () => {
   const saved = (await getBoard(db, boardId)).ingest;
+  const previewBody = {
+    source: { folder: "pick", recursive: true },
+    filters: [{ fn: "extension", op: "equals", value: "txt" }],
+    sort: { by: "name", order: "asc" },
+    trigger: { mode: "manual" },
+  };
+  // Default response: the count alone — no rows serialized.
   const r = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
     sid: admin.sid,
-    body: {
-      source: { folder: "pick", recursive: true },
-      filters: [{ fn: "extension", op: "equals", value: "txt" }],
-      sort: { by: "name", order: "asc" },
-      trigger: { mode: "manual" },
-    },
+    body: previewBody,
   });
   assert.equal(r.status, 200);
   assert.equal(r.json.count, 3, "a.txt, b.txt, deep/d.txt — c.md filtered out");
   assert.equal(r.json.new, 3, "nothing ledgered yet");
   assert.equal(r.json.capped, false);
-  assert.deepEqual(r.json.sample.map((c) => c.label), ["a.txt", "b.txt", "d.txt"]);
+  assert.equal(r.json.sample, undefined, "count-only unless a sample window is requested");
   assert.deepEqual((await getBoard(db, boardId)).ingest, saved, "preview never writes");
+
+  // sample: {offset, limit} pages the sorted matches for the results view.
+  const p1 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
+    sid: admin.sid,
+    body: { ...previewBody, sample: { offset: 0, limit: 2 } },
+  });
+  assert.deepEqual(p1.json.sample.map((c) => c.label), ["a.txt", "b.txt"]);
+  assert.equal(p1.json.hasMore, true);
+  const p2 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
+    sid: admin.sid,
+    body: { ...previewBody, sample: { offset: 2, limit: 2 } },
+  });
+  assert.deepEqual(p2.json.sample.map((c) => c.label), ["d.txt"]);
+  assert.equal(p2.json.hasMore, false);
+
+  const badWindow = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
+    sid: admin.sid,
+    body: { ...previewBody, sample: { offset: -1, limit: 0 } },
+  });
+  assert.equal(badWindow.status, 400);
 
   const bad = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
     sid: admin.sid,
