@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { ICONS, refreshEntityTags } from './utils.js';
 import { toast } from './toast.js';
 import { kindFor } from './kinds.js';
+import { mountModal } from './modal.js';
 
 // Tags live on instances. The grid's edit affordance targets the face
 // instance (the common case is a single-instance entity, where that's
@@ -75,21 +76,9 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
 
   dialog.append(header, body, footer);
   overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-  document.body.style.overflow = "hidden";
-
-  function close() {
-    overlay.remove();
-    document.body.style.overflow = "";
-    document.removeEventListener("keydown", onKey);
-  }
+  const close = mountModal({ overlay, dialog });
   closeBtn.onclick = close;
   cancelBtn.onclick = close;
-  let mdOnOverlay = false;
-  overlay.addEventListener("mousedown", (e) => { mdOnOverlay = e.target === overlay; });
-  overlay.addEventListener("click", (e) => { if (e.target === overlay && mdOnOverlay) close(); });
-  function onKey(e) { if (e.key === "Escape") close(); }
-  document.addEventListener("keydown", onKey);
 
   saveBtn.addEventListener("click", async () => {
     const tags = [];

@@ -856,6 +856,8 @@ body.bulk-mode .heart {
   justify-content: center;
   background: rgba(0,0,0,0.45);
   backdrop-filter: blur(3px);
+  opacity: 0;
+  transition: opacity 160ms ease;
 }
 .te-dialog {
   background: #fff;
@@ -867,6 +869,25 @@ body.bulk-mode .heart {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  opacity: 0;
+  transform: translateY(12px);
+  transition:
+    opacity 180ms ease,
+    transform 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.te-overlay.is-open { opacity: 1; }
+.te-overlay.is-open .te-dialog {
+  opacity: 1;
+  transform: translateY(0);
+}
+.te-overlay.is-closing { pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .te-overlay,
+  .te-dialog {
+    transition-duration: 1ms;
+  }
+  .te-dialog { transform: none; }
 }
 .te-header {
   position: relative;

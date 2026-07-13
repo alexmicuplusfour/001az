@@ -10,6 +10,8 @@
   background: rgba(0,0,0,0.3);
   backdrop-filter: blur(2px);
   -webkit-backdrop-filter: blur(2px);
+  opacity: 0;
+  transition: opacity 160ms ease;
 }
 .modal-dialog {
   background: #fff;
@@ -21,6 +23,25 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  opacity: 0;
+  transform: translateY(12px);
+  transition:
+    opacity 180ms ease,
+    transform 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.modal-overlay.is-open { opacity: 1; }
+.modal-overlay.is-open .modal-dialog {
+  opacity: 1;
+  transform: translateY(0);
+}
+.modal-overlay.is-closing { pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay,
+  .modal-dialog {
+    transition-duration: 1ms;
+  }
+  .modal-dialog { transform: none; }
 }
 .modal-header {
   display: flex;
