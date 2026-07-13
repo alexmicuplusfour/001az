@@ -229,6 +229,30 @@ export function ensurePolling() {
   }
 }
 
+// The board payload's ingestion flags, stamped into state in exactly one
+// place — the boot path, the ingest modal and the toolbar chip all funnel
+// through here so they can't drift on what "refreshed" means.
+export function stampBoardIngest(b) {
+  state.boardIngest = !!b.ingest_enabled;
+  state.boardIngestNextRun = b.ingest_next_run_at ?? null;
+}
+
+// Re-learn the flags after something changed them server-side (save, run-now,
+// countdown expiry), then let the poll cadence and toolbar follow. Resolves
+// true only when a fresh payload actually landed — callers back off on false.
+export async function refreshBoardIngest() {
+  try {
+    const b = await fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
+    if (!b) return false;
+    stampBoardIngest(b);
+    ensurePolling(); // the slow poll follows the flag
+    document.dispatchEvent(new Event("app:render"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Background-drain append: pages walk newest→oldest, so pushing each one at
 // the END keeps state.items newest-first. A delta poll may already have
 // unshifted one of these ids mid-drain — skip those.

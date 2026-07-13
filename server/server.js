@@ -77,6 +77,7 @@ import {
   getBoardTokenTotal,
   setIngestNextRun,
   ingestedKeys,
+  ingestedAmong,
 } from "./db.js";
 import {
   attachUser,
@@ -513,7 +514,10 @@ app.get("/api/ingest/folders", requireAuth, wrap(async (_req, res) => {
 // preview bound, render as "N+"); new = the subset not yet in the ledger,
 // i.e. what a run would actually consider. body.sample = { offset, limit }
 // opts into a page of matching rows (+ hasMore) for the results view — each
-// page is a fresh stateless enumerate, same as connector browse paging.
+// page is a fresh stateless enumerate, same as connector browse paging. Page
+// responses skip the full-ledger scan (and `new`) the count view needs;
+// instead each row carries `ingested` from a PK probe on just its page keys,
+// so the list can mark what a run would skip.
 app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wrap(async (req, res) => {
   const adapter = resolveIngestAdapter(req.board);
   if (!adapter) return res.status(400).json({ error: "ingestion is not available for this board" });
@@ -539,15 +543,21 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   }
   const catalog = adapter.descriptor().filters;
   const matched = applySort(applyFilters(enumerated.candidates, cfg.filters, catalog), cfg.sort, catalog);
+  if (sample) {
+    const rows = matched.slice(sample.offset, sample.offset + sample.limit);
+    const known = await ingestedAmong(db, req.board.id, rows.map((c) => c.key));
+    return res.json({
+      count: matched.length,
+      capped: !!enumerated.truncated,
+      sample: rows.map((c) => ({ ...c, ingested: known.has(c.key) })),
+      hasMore: sample.offset + sample.limit < matched.length,
+    });
+  }
   const known = await ingestedKeys(db, req.board.id);
   res.json({
     count: matched.length,
     new: matched.filter((c) => !known.has(c.key)).length,
     capped: !!enumerated.truncated,
-    ...(sample ? {
-      sample: matched.slice(sample.offset, sample.offset + sample.limit),
-      hasMore: sample.offset + sample.limit < matched.length,
-    } : {}),
   });
 }));
 

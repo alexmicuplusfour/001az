@@ -15,6 +15,8 @@ ingest-root/*
 # local scratch / tooling state (settings.local.json holds credentials)
 .claude/
 pets-test/
+emma-test/
+resumes-test/
 
 # compose secrets/overrides — .env.example is the template
 .env

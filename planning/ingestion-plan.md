@@ -109,7 +109,9 @@ engine filters/sorts on, described by the descriptor's filter catalog.
   `GET /api/ingest/folders` (picker, depth ≤3), `POST …/ingest/preview`
   (dry-run body, never saved; count / new / capped by default, and
   `sample: { offset, limit }` opts into a page of rows + hasMore — each page a
-  fresh stateless enumerate, like connector-browse paging),
+  fresh stateless enumerate, like connector-browse paging; pages skip the
+  ledger-wide `new` accounting and instead flag each row `ingested` via a PK
+  probe on just its keys),
   `POST …/ingest/run` (arm now; 409 when disabled). All board-scoped routes
   `requireBoardManager`. Board payload: `ingest_enabled` on `GET /api/boards/:id`,
   full `ingest`+`ingest_state` on `/settings`.
@@ -120,7 +122,14 @@ engine filters/sorts on, described by the descriptor's filter catalog.
   fetches the count; clicking the count swaps the modal to a read-only
   results list (connector-browse-style table, Load more, Back to settings —
   same modal, so buffered edits survive). Config edits hide a shown count so
-  the results view can never open on stale numbers.
+  the results view can never open on stale numbers (a seq guard also discards
+  in-flight count responses that an edit outran). Rows the ledger holds are
+  marked "Ingested"; Save refuses an unfinished filter row by name instead of
+  silently dropping it.
+- `public/data.js` also owns `stampBoardIngest`/`refreshBoardIngest` — the
+  single fetch-and-stamp path for `ingest_enabled`+`ingest_next_run_at` used
+  by boot, the modal and the toolbar countdown chip (which backs off 5s→60s
+  while the stamp refuses to advance, e.g. worker down or a long drain).
 - `public/data.js` — `pollDelay()` counts `state.boardIngest` into the 30s
   slow poll (same stale-tab cure as live faces; without it a quiet board never
   shows auto-ingested items).

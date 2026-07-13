@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
-import { getBoard, updateBoard } from "../server/db.js";
+import { getBoard, updateBoard, recordIngest } from "../server/db.js";
 
 let srv, db, base, admin, member, boardId, root;
 const OLD = Date.now() - 120000;
@@ -155,6 +155,19 @@ test("preview: dry-runs the request body without saving it; count by default, pa
   });
   assert.deepEqual(p2.json.sample.map((c) => c.label), ["d.txt"]);
   assert.equal(p2.json.hasMore, false);
+
+  // Pages skip the ledger-wide accounting the count view does; instead each
+  // row says whether the ledger already holds it.
+  assert.equal(p1.json.new, undefined, "no `new` on page responses");
+  assert.deepEqual(p1.json.sample.map((c) => c.ingested), [false, false], "nothing ledgered yet");
+  await recordIngest(db, boardId, p1.json.sample[0].key, Date.now());
+  const p3 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
+    sid: admin.sid,
+    body: { ...previewBody, sample: { offset: 0, limit: 3 } },
+  });
+  assert.deepEqual(p3.json.sample.map((c) => c.ingested), [true, false, false], "the ledgered row is marked");
+  const r2 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, { sid: admin.sid, body: previewBody });
+  assert.equal(r2.json.new, 2, "the count view still accounts against the whole ledger");
 
   const badWindow = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
     sid: admin.sid,

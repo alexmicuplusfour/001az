@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl } from './filters.js';
-import { inProgress, reconcile, ensurePolling, drainItems } from './data.js';
+import { inProgress, reconcile, ensurePolling, drainItems, stampBoardIngest } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
 import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
@@ -76,8 +76,7 @@ async function main() {
   state.boardManage = boardData ? !!boardData.manage : false;
   state.aiReasoning = boardData ? boardData.ai_reasoning !== false : true;
   state.boardMapping = boardData?.mapping || null;
-  state.boardIngest = !!boardData?.ingest_enabled;
-  state.boardIngestNextRun = boardData?.ingest_next_run_at ?? null;
+  stampBoardIngest(boardData || {});
   state.boardTokens = boardData?.token_total ?? null;
   state.searchAvailable = !!boardData?.search;
   state.me = meData;

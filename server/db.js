@@ -919,6 +919,17 @@ export async function ingestedKeys(db, boardId) {
   return new Set(rows.map((r) => r.source_key));
 }
 
+// Ledger membership for a handful of specific keys (a preview page) — a PK
+// probe instead of materializing a board's whole ledger.
+export async function ingestedAmong(db, boardId, keys) {
+  if (!keys.length) return new Set();
+  const { rows } = await db.query(
+    "SELECT source_key FROM ingest_log WHERE board_id=$1 AND source_key = ANY($2)",
+    [boardId, keys]
+  );
+  return new Set(rows.map((r) => r.source_key));
+}
+
 // Accepts the pool or a tx client (the folder adapter ledgers inside the
 // admit transaction).
 export async function recordIngest(dbc, boardId, sourceKey, at) {

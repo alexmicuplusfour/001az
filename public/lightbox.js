@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { ICONS, refreshEntityTags } from './utils.js';
+import { ICONS, refreshEntityTags, fmtDuration } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
@@ -86,13 +86,9 @@ function renderLightboxInfo() {
 // Relative age from a field's fetch/refresh timestamp (connector fields carry
 // `at`; live ones advance it each refresh, static ones keep the add time).
 function relTime(ms) {
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 45) return "just now";
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+  const d = Date.now() - ms;
+  if (d < 45000) return "just now";
+  return `${fmtDuration(d)} ago`;
 }
 
 // One "Fields" section: key/value rows with src badges and why-sentences.

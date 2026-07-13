@@ -11,10 +11,12 @@
 // summarize thousands of files. Back returns to the settings view with every
 // buffered edit intact (same modal, same closure — nothing is rebuilt).
 import { state } from './state.js';
+import { fmtDuration } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
+import { pagedTableScaffold } from './paged-table.js';
 import { switchRow } from './board-modal.js';
-import { ensurePolling } from './data.js';
+import { refreshBoardIngest, ensurePolling } from './data.js';
 
 const OP_LABELS = {
   contains: "contains", equals: "equals", starts_with: "starts with",
@@ -34,29 +36,9 @@ const TRIGGER_LABELS = {
 };
 const PAGE_SIZE = 50;
 
-const relTime = (ts) => {
-  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-};
+const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 let modalEl = null;
-
-// Re-learn the board's ingestion flags (enabled + next-run stamp) after a
-// save or run-now changed them server-side, then re-render so the toolbar
-// chip and the poll cadence follow.
-async function refreshBoardIngest() {
-  try {
-    const b = await fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
-    if (!b) return;
-    state.boardIngest = !!b.ingest_enabled;
-    state.boardIngestNextRun = b.ingest_next_run_at ?? null;
-    ensurePolling(); // the slow poll follows the flag
-    document.dispatchEvent(new Event("app:render"));
-  } catch { /* the chip's own expiry refetch will catch up */ }
-}
 
 export function openIngestModal() {
   if (modalEl) return; // already open
@@ -401,12 +383,17 @@ export function openIngestModal() {
     }
 
     // A config edit makes a shown count a lie — hide it until re-previewed,
-    // so the results view can never open on stale numbers.
+    // so the results view can never open on stale numbers. The seq also
+    // discards an in-flight count fetch: without it, a slow response landing
+    // after an edit would re-show a count for a config the user no longer has.
+    let previewSeq = 0;
     function invalidatePreview() {
+      previewSeq++;
       countBtn.style.display = "none";
     }
 
     previewBtn.addEventListener("click", async () => {
+      const mySeq = ++previewSeq;
       previewBtn.disabled = true;
       try {
         const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
@@ -415,8 +402,9 @@ export function openIngestModal() {
           body: JSON.stringify(previewConfig()),
         });
         const data = await r.json().catch(() => ({}));
+        if (mySeq !== previewSeq) return;
         if (!r.ok) {
-          countBtn.style.display = "none";
+          invalidatePreview();
           toast.error(data.error || "Preview failed");
           return;
         }
@@ -428,7 +416,7 @@ export function openIngestModal() {
           (already > 0 ? ` — ${already} already ingested` : "") + " ›";
         countBtn.style.display = "";
       } catch {
-        toast.error("Preview failed");
+        if (mySeq === previewSeq) toast.error("Preview failed");
       } finally {
         previewBtn.disabled = false;
       }
@@ -437,10 +425,11 @@ export function openIngestModal() {
 
     // Only send filters the user has finished typing (a value-less filter
     // matches nothing server-side, which reads as a broken preview).
+    const unfinishedFilter = (f) => f.value === "" || f.value === null || f.value === undefined;
     function previewConfig() {
       return {
         source: cfg.source,
-        filters: cfg.filters.filter((f) => f.value !== "" && f.value !== null && f.value !== undefined),
+        filters: cfg.filters.filter((f) => !unfinishedFilter(f)),
         sort: cfg.sort,
         trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" },
         ...(cfg.limit ? { limit: cfg.limit } : {}),
@@ -448,30 +437,18 @@ export function openIngestModal() {
     }
 
     // ── Results view: read-only paged list, connector-browse chrome ──
-    const scroll = document.createElement("div");
-    scroll.className = "cb-scroll";
-    const table = document.createElement("table");
-    table.className = "cb-table";
-    const thead = document.createElement("thead");
-    const tbody = document.createElement("tbody");
-    table.append(thead, tbody);
-    const note = document.createElement("div");
-    note.className = "cb-note";
-    note.style.display = "none";
-    const moreBtn = document.createElement("button");
-    moreBtn.type = "button";
-    moreBtn.className = "cb-more";
-    moreBtn.textContent = "Load more";
-    moreBtn.style.display = "none";
-    scroll.append(table, note, moreBtn);
+    const { scroll, thead, tbody, note, moreBtn } = pagedTableScaffold();
+    note.style.display = "none"; // .cb-note pads even when empty — hide until it speaks
     resultsView.appendChild(scroll);
 
     // Columns straight from the catalog: label first, then up to three
-    // non-name fields — agnostic to what the adapter exposes.
+    // non-name fields — agnostic to what the adapter exposes. A trailing
+    // status column marks rows the ledger already holds (a run skips them),
+    // so the "N new" promise on the count button is traceable in the list.
     const cols = (desc.filters || []).filter((c) => c.fn !== "name").slice(0, 3);
     {
       const tr = document.createElement("tr");
-      for (const h of ["Item", ...cols.map((c) => c.label)]) {
+      for (const h of ["Item", ...cols.map((c) => c.label), ""]) {
         const th = document.createElement("th");
         th.textContent = h;
         tr.appendChild(th);
@@ -498,6 +475,15 @@ export function openIngestModal() {
             : String(v);
           tr.appendChild(td);
         }
+        const status = document.createElement("td");
+        status.className = "cb-col-add";
+        if (row.ingested) {
+          const span = document.createElement("span");
+          span.className = "cb-on-board";
+          span.textContent = "Ingested";
+          status.appendChild(span);
+        }
+        tr.appendChild(status);
         tbody.appendChild(tr);
       }
     }
@@ -574,6 +560,15 @@ export function openIngestModal() {
       const saveBtn = document.createElement("button");
       saveBtn.textContent = "Save";
       saveBtn.addEventListener("click", async () => {
+        // Preview quietly skips an unfinished filter row, but saving that way
+        // would flip "matches nothing yet" into "matches everything" on the
+        // next run — refuse and point at the row instead.
+        const unfinished = cfg.filters.find(unfinishedFilter);
+        if (unfinished) {
+          const label = (desc.filters || []).find((c) => c.fn === unfinished.fn)?.label || unfinished.fn;
+          toast.error(`The "${label}" filter has no value — fill it in or remove it`);
+          return;
+        }
         const payload = { ...previewConfig(), enabled: cfg.enabled };
         try {
           const r = await fetch(`/api/boards/${state.boardId}`, {
@@ -586,7 +581,13 @@ export function openIngestModal() {
             toast.error(data.error || "Save failed");
             return;
           }
-          refreshBoardIngest();
+          // The PATCH that just succeeded is the truth about enabled-ness —
+          // stamp it locally first, so a dropped refetch can't leave the poll
+          // cadence and chip behind the save.
+          state.boardIngest = !!payload.enabled;
+          ensurePolling();
+          document.dispatchEvent(new Event("app:render"));
+          refreshBoardIngest(); // refines the next-run stamp
           toast("Ingestion saved");
           close();
         } catch {
@@ -602,7 +603,10 @@ export function openIngestModal() {
           const r = await fetch(`/api/boards/${state.boardId}/ingest/run`, { method: "POST" });
           const data = await r.json().catch(() => ({}));
           if (!r.ok) return toast.error(data.error || "Run failed");
-          refreshBoardIngest(); // chip flips to "now", then follows the sweep
+          // The route just armed next_run_at = now — no refetch needed. The
+          // chip flips to "now" on its next tick, and its own expiry refetch
+          // follows the sweep from there.
+          state.boardIngestNextRun = Date.now();
           toast("Ingestion run queued");
         } catch {
           toast.error("Run failed");

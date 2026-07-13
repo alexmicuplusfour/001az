@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
+import { pagedTableScaffold } from './paged-table.js';
 import { ensurePolling } from './data.js';
 
 // Browse-and-add ingestion modal for connector boards. Completely connector-
@@ -56,21 +57,7 @@ export function openConnectorBrowse(connectorName) {
   controls.append(searchInput, sortSel, orderBtn);
 
   // Scroll region holding the table + load-more.
-  const scroll = document.createElement("div");
-  scroll.className = "cb-scroll";
-  const table = document.createElement("table");
-  table.className = "cb-table";
-  const thead = document.createElement("thead");
-  const tbody = document.createElement("tbody");
-  table.append(thead, tbody);
-  const note = document.createElement("div");
-  note.className = "cb-note";
-  const moreBtn = document.createElement("button");
-  moreBtn.type = "button";
-  moreBtn.className = "cb-more";
-  moreBtn.textContent = "Load more";
-  moreBtn.style.display = "none";
-  scroll.append(table, note, moreBtn);
+  const { scroll, thead, tbody, note, moreBtn } = pagedTableScaffold();
 
   body.append(controls, scroll);
 

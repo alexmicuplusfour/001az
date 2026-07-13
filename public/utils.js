@@ -104,6 +104,17 @@ export function formatTokens(n) {
   return `${Math.round(n / 1000).toLocaleString()}k`;
 }
 
+// A duration as one coarse unit ("38s", "12m", "2h", "5d"), every unit
+// computed from the raw seconds — re-rounding minutes into hours would call
+// 85 minutes "2h". Shared by the countdown chip and both "N ago" stamps.
+export function fmtDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+}
+
 function appendCount(el, count) {
   if (count == null) return;
   const c = document.createElement("span");
