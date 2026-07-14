@@ -13,6 +13,19 @@ const SVG_RASTER_WIDTH = 2000; // SVG uploads are rasterized to WebP at this wid
 const MAX_PIXELS = 40e6; // decode cap: a 40MP image is ~160 MB of raw pixels
 const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };
 
+// `extensions` is the name-level pre-filter (folder feeds, catalog display) —
+// the sharp sniff in ingest() is the real gate, and unmatched extensions still
+// reach this handler as the dispatcher's fallback. `core`: images can't be
+// disabled — sharp is shared infrastructure (pdf/text previews render through
+// it) and the grid's face pipeline assumes it exists.
+export const manifest = {
+  name: "image",
+  label: "Images",
+  core: true,
+  extensions: ["jpg", "jpeg", "png", "webp", "avif", "heif", "heic", "gif", "svg"],
+  kinds: ["image"],
+};
+
 // The original-resolution metadata surfaced for image file fields (server/media).
 // Shared by ingest (from the decoded buffer) and metaFor (from the stored file).
 const pickImageMeta = (m) => ({

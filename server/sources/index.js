@@ -3,19 +3,63 @@
 // route picks a handler per file and stays format-blind. All handlers share
 // one storage convention — original in galleryDir/<name>, face in
 // thumbsDir/<name>.webp — which is what makes cleanup generic.
+//
+// One handler per dependency stack (image/sharp, text/dep-free, pdf/poppler,
+// docx/mammoth); each module exports a static `manifest` (name, label,
+// extensions, kinds) alongside its factory. The manifests are the registry
+// the plugin catalog reads — adding a media type is one module + one entry in
+// HANDLER_MODULES.
 import fs from "node:fs";
 import path from "node:path";
-import { imageSource } from "./image.js";
-import { docSource, isDocName } from "./doc.js";
+import * as image from "./image.js";
+import * as text from "./text.js";
+import * as pdf from "./pdf.js";
+import * as docx from "./docx.js";
+
+const HANDLER_MODULES = [image, text, pdf, docx];
+export const MANIFESTS = HANDLER_MODULES.map((m) => m.manifest);
+
+export const extOf = (name) => (name?.match(/\.([a-z0-9]+)$/i)?.[1] || "").toLowerCase();
+
+// Name-level pre-filter for folder feeds: every extension some handler
+// declares. Upload has no such gate — unknown extensions fall to the image
+// handler, whose sharp sniff rejects non-images.
+const KNOWN_EXTS = new Set(MANIFESTS.flatMap((m) => m.extensions));
+export const acceptsName = (name) => KNOWN_EXTS.has(extOf(name));
 
 export function createSources({ galleryDir, thumbsDir }) {
-  const image = imageSource({ galleryDir, thumbsDir });
-  const doc = docSource({ galleryDir, thumbsDir });
+  const handlers = {
+    image: image.imageSource({ galleryDir, thumbsDir }),
+    text: text.textSource({ galleryDir, thumbsDir }),
+    pdf: pdf.pdfSource({ galleryDir, thumbsDir }),
+    docx: docx.docxSource({ galleryDir, thumbsDir }),
+  };
+  const byExt = new Map();
+  const byKind = new Map();
+  for (const m of MANIFESTS) {
+    for (const e of m.extensions) byExt.set(e, m.name);
+    for (const k of m.kinds) byKind.set(k, handlers[m.name]);
+  }
 
   return {
-    // Docs are picked by extension; everything else goes to the image
-    // handler, whose sharp sniff is the real gate (non-images come back null).
-    forUpload: (originalName) => (isDocName(originalName) ? doc : image),
+    // Picked by extension; everything unmatched goes to the image handler,
+    // whose sharp sniff is the real gate (non-images come back null).
+    // `disabled` (a Set of handler names from the plugin registry) refuses
+    // the extension readably — new ingestion only; existing items are
+    // untouched by a disable. Throws WITHOUT err.unprocessable semantics:
+    // callers gate before their deterministic-refusal handling, so folder
+    // feeds retry after a re-enable instead of ledgering the file forever.
+    forUpload(originalName, disabled) {
+      const name = byExt.get(extOf(originalName)) || "image";
+      if (disabled?.has(name)) {
+        const m = MANIFESTS.find((x) => x.name === name);
+        const err = new Error(`${m.label} are disabled (Plugins page)`);
+        err.reason = err.message;
+        err.mediaDisabled = true;
+        throw err;
+      }
+      return handlers[name];
+    },
 
     // Remove everything a payload's files put on disk.
     cleanup(files) {
@@ -28,18 +72,18 @@ export function createSources({ galleryDir, thumbsDir }) {
       }
     },
 
-    backfillDims: image.backfillDims,
+    backfillDims: handlers.image.backfillDims,
 
     // Re-derive size + kind-specific metadata for a legacy file entry from disk
-    // (file-field backfill). Dispatch by kind — image handler owns images,
-    // everything else is a doc. Returns { size, meta } or null.
+    // (file-field backfill). Dispatch by kind; very old entries predate `kind`
+    // and are images. Returns { size, meta } or null.
     metaFor(entry) {
       if (!entry || !entry.name) return Promise.resolve(null);
-      return ((entry.kind || "image") === "image" ? image : doc).metaFor(entry);
+      return (byKind.get(entry.kind || "image") || handlers.image).metaFor(entry);
     },
 
     // Release handler-owned resources (the docx extraction worker pool) on
-    // graceful shutdown. Images hold none.
-    close: () => doc.close?.(),
+    // graceful shutdown.
+    close: () => Promise.all(Object.values(handlers).map((h) => h.close?.())),
   };
 }

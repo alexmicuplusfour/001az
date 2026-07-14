@@ -1,7 +1,7 @@
 // Document file fields — pdf / docx / txt / md / csv. The values come from work
-// the doc source handler (server/sources/doc.js) already does at ingest: the
-// PDF page count + title from pdfinfo, and word/line counts from the text it
-// extracts (docx sidecar / plain-text buffer), surfaced on the entry's `meta`.
+// the media source handlers (server/sources/{pdf,docx,text}.js) already do at
+// ingest: the PDF page count + title from pdfinfo, and word/line counts from
+// the text they extract (docx sidecar / plain-text buffer), surfaced on `meta`.
 // `pages`/`title` are pdf-only; word/line counts apply to text-bearing docs —
 // any field the handler didn't fill is simply null on that instance.
 export const group = "Documents";

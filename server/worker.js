@@ -41,6 +41,8 @@ import {
   setIngestState,
   ingestedKeys,
   recordIngest,
+  getPluginRow,
+  withPluginHealth,
 } from "./db.js";
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
@@ -49,18 +51,32 @@ import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { extractFileFields } from "./media/index.js";
 
+// A disabled AI plugin (Plugins page) drops out of resolution — configs that
+// reference it fall through to the next rung instead of erroring, and items
+// hold pending via the existing no-key machinery when nothing is left.
+async function aiPluginEnabled(db, provider) {
+  const row = await getPluginRow(db, `ai:${provider}`);
+  return row ? row.enabled : true;
+}
+
+// Every live tagger call lands in the plugin health ledger (structured error
+// or heal) so the Plugins page dot reflects real traffic — and the future
+// self-healing loop has telemetry to read.
+const trackedTagger = (db, args) =>
+  withPluginHealth(db, `ai:${args.provider}`, () => callTagger(args));
+
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
 export async function resolveDefaultAi(db) {
   const defId = Number(await getSetting(db, "default_key_id")) || 0;
   if (defId) {
     const key = await getAiKey(db, defId);
-    if (key) {
+    if (key && (await aiPluginEnabled(db, key.provider))) {
       const model = (await getSetting(db, "model")) || PROVIDERS[key.provider].defaultModel;
       return { provider: key.provider, apiKey: key.api_key, model };
     }
   }
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (process.env.ANTHROPIC_API_KEY && (await aiPluginEnabled(db, "anthropic"))) {
     return {
       provider: "anthropic",
       apiKey: process.env.ANTHROPIC_API_KEY,
@@ -77,6 +93,7 @@ export async function resolveEmbedder(db) {
   if ((await getSetting(db, "embed_enabled")) !== "1") return null;
   const embedProvider = await getSetting(db, "embed_provider");
   if (embedProvider === "local") {
+    if (!(await aiPluginEnabled(db, "local"))) return null; // sweep pauses
     return { provider: "local", apiKey: null, model: PROVIDERS.local.embeds.default };
   }
   // Key-based path (backward compat: embed_provider null + embed_key_id set).
@@ -84,6 +101,7 @@ export async function resolveEmbedder(db) {
   if (!keyId) return null;
   const key = await getAiKey(db, keyId);
   if (!key || !PROVIDERS[key.provider]?.embeds) return null;
+  if (!(await aiPluginEnabled(db, key.provider))) return null; // sweep pauses
   return {
     provider: key.provider,
     apiKey: key.api_key,
@@ -110,17 +128,21 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
   return text.slice(0, EMBED_TEXT_MAX_CHARS);
 }
 
-// A board's effective tagger: its own key (+ model) when set, else the default.
-async function resolveBoardAi(db, boardEntry) {
+// A board's effective tagger: its own key (+ model) when set, else the
+// default. A board key whose provider plugin is disabled falls through to
+// the default like a deleted key would — loudly, so the hold is explicable.
+// Exported for tests.
+export async function resolveBoardAi(db, boardEntry) {
   if (boardEntry.aiKeyId) {
     const key = await getAiKey(db, boardEntry.aiKeyId);
-    if (key) {
+    if (key && (await aiPluginEnabled(db, key.provider))) {
       return {
         provider: key.provider,
         apiKey: key.api_key,
         model: boardEntry.aiModel || PROVIDERS[key.provider].defaultModel,
       };
     }
+    if (key) console.log(`board AI provider ${key.provider} is disabled — falling back to the default tagger`);
   }
   return resolveDefaultAi(db);
 }
@@ -366,12 +388,15 @@ export function invalidateAllBoardCaches() {
 // of wrongly marking a whole batch. Returns { embedded, skipped }; throws for
 // batch-level failures. Exported so the sweep and tests share one path.
 export async function embedBatch(db, embedder, rows) {
-  const call = (rs) => embedTexts({
-    provider: embedder.provider,
-    apiKey: embedder.apiKey,
-    model: embedder.model,
-    texts: rs.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
-  });
+  const call = (rs) =>
+    withPluginHealth(db, `ai:${embedder.provider}`, () =>
+      embedTexts({
+        provider: embedder.provider,
+        apiKey: embedder.apiKey,
+        model: embedder.model,
+        texts: rs.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
+      })
+    );
   try {
     const { vectors } = await call(rows);
     for (let i = 0; i < rows.length; i++) await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
@@ -667,7 +692,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       .map(([key, { v }]) => `${key}: ${v}`);
     if (entity?.display_name) fieldLines.unshift(`entity: ${entity.display_name}`);
     if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
-    const { input, usage } = await callTagger({
+    const { input, usage } = await trackedTagger(db, {
       provider: ai.provider,
       apiKey: ai.apiKey,
       model: ai.model,
@@ -962,7 +987,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
     // files (images, connector entities) where there is no text sidecar.
     const parts = await modelInputForExtract(row.payload) ?? await modelInputFor(row.payload);
-    const { input, usage } = await callTagger({
+    const { input, usage } = await trackedTagger(db, {
       provider: ai.provider,
       apiKey: ai.apiKey,
       model: ai.model,

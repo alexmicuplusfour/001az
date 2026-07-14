@@ -527,50 +527,52 @@ test("crypto manifest advertises CoinMarketCap as a keyed provider", () => {
   assert.equal(cmc.needsKey, true);
 });
 
-test("GET /api/admin/connectors: shape, default provider, no key echo", async () => {
-  const r = await req(base, "GET", "/api/admin/connectors", { sid: admin.sid });
+test("plugins catalog: connector shape, default provider, no key echo", async () => {
+  const r = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
   assert.equal(r.status, 200);
-  const cx = r.json.find((c) => c.name === "crypto");
-  assert.ok(cx);
-  assert.equal(cx.category, "finance");
-  assert.equal(cx.activeProvider, "coingecko"); // default when the setting is unset
-  assert.equal(cx.keys.coingecko, false);
-  assert.equal(cx.keys.coinmarketcap, false);
-  assert.ok(cx.providers.some((p) => p.name === "coinmarketcap" && p.needsKey));
-  assert.ok(!JSON.stringify(r.json).includes("api_key")); // presence only, never the value
+  const gecko = r.json.plugins.find((p) => p.id === "crypto:coingecko");
+  assert.ok(gecko);
+  assert.equal(gecko.connector.domainLabel, "Crypto");
+  assert.equal(gecko.state.hasKey, false);
+  const cmc = r.json.plugins.find((p) => p.id === "crypto:coinmarketcap");
+  assert.equal(cmc.connector.needsKey, true);
+  assert.equal(cmc.state.hasKey, false);
+  // default when the setting is unset
+  assert.deepEqual(r.json.slots.domains.crypto, { setting: null, effective: "coingecko" });
+  assert.ok(!JSON.stringify(r.json).includes("cmc-test-key")); // presence only, never the value
 });
 
-test("GET /api/admin/connectors: requires admin", async () => {
+test("plugins catalog: requires admin", async () => {
   const u = await seedUser(db, "member-conn@test.local");
-  const r = await req(base, "GET", "/api/admin/connectors", { sid: u.sid });
+  const r = await req(base, "GET", "/api/admin/plugins", { sid: u.sid });
   assert.equal(r.status, 403);
 });
 
-test("POST /api/admin/connectors: validates provider and enforces the key", async () => {
-  let r = await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "nope" } });
+test("starring a domain default validates provider + key; PATCH stores the key", async () => {
+  let r = await req(base, "POST", "/api/admin/plugins/slots/crypto", { sid: admin.sid, body: { provider: "nope" } });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /provider must be one of/);
 
-  // Keyed provider with no key stored → rejected.
-  r = await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "coinmarketcap" } });
+  // Keyed provider with no key stored → can't be the default.
+  r = await req(base, "POST", "/api/admin/plugins/slots/crypto", { sid: admin.sid, body: { provider: "coinmarketcap" } });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /needs an API key/);
 
-  // Keyed provider with a key → stored (never echoed).
-  r = await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "coinmarketcap", api_key: "cmc-test-key" } });
+  // Store the key (write-through PATCH), then star it.
+  r = await req(base, "PATCH", "/api/admin/plugins/crypto:coinmarketcap", { sid: admin.sid, body: { config: { api_key: "cmc-test-key" } } });
   assert.equal(r.status, 200);
-  assert.equal(r.json.activeProvider, "coinmarketcap");
-  assert.equal(r.json.hasKey, true);
+  r = await req(base, "POST", "/api/admin/plugins/slots/crypto", { sid: admin.sid, body: { provider: "coinmarketcap" } });
+  assert.equal(r.status, 200);
 
-  const g = await req(base, "GET", "/api/admin/connectors", { sid: admin.sid });
-  const cx = g.json.find((c) => c.name === "crypto");
-  assert.equal(cx.activeProvider, "coinmarketcap");
-  assert.equal(cx.keys.coinmarketcap, true);
-  assert.equal(cx.keys.coingecko, false); // per-provider slots don't bleed
+  const g = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
+  assert.equal(g.json.slots.domains.crypto.setting, "coinmarketcap");
+  assert.equal(g.json.plugins.find((p) => p.id === "crypto:coinmarketcap").state.hasKey, true);
+  assert.equal(g.json.plugins.find((p) => p.id === "crypto:coingecko").state.hasKey, false); // per-provider slots don't bleed
 });
 
 test("POST entities via CoinMarketCap: identical canonical fields, src=coinmarketcap", async () => {
-  await req(base, "POST", "/api/admin/connectors/crypto", { sid: admin.sid, body: { provider: "coinmarketcap", api_key: "cmc-test-key" } });
+  await req(base, "PATCH", "/api/admin/plugins/crypto:coinmarketcap", { sid: admin.sid, body: { config: { api_key: "cmc-test-key" } } });
+  await req(base, "POST", "/api/admin/plugins/slots/crypto", { sid: admin.sid, body: { provider: "coinmarketcap" } });
   const { json: board } = await createBoard("conn-cmc");
   await patchBoard(board.id, { mapping: manifest.template });
 
@@ -612,23 +614,23 @@ test("POST entities via CoinMarketCap: identical canonical fields, src=coinmarke
   }
 });
 
-test("POST connectors: CoinGecko takes an optional key; slots stay per-provider", async () => {
+test("CoinGecko takes an optional key; slots stay per-provider", async () => {
   // A CoinMarketCap key is already stored (earlier test). Saving a CoinGecko
   // key must land in its own slot without disturbing CMC's.
-  const r = await req(base, "POST", "/api/admin/connectors/crypto", {
-    sid: admin.sid, body: { provider: "coingecko", api_key: "cg-demo-key" },
+  let r = await req(base, "PATCH", "/api/admin/plugins/crypto:coingecko", {
+    sid: admin.sid, body: { config: { api_key: "cg-demo-key" } },
   });
   assert.equal(r.status, 200);
-  assert.equal(r.json.activeProvider, "coingecko"); // keyless provider switches fine, key or not
-  assert.equal(r.json.hasKey, true);
+  r = await req(base, "POST", "/api/admin/plugins/slots/crypto", { sid: admin.sid, body: { provider: "coingecko" } });
+  assert.equal(r.status, 200); // keyless provider stars fine, key or not
 
-  const g = await req(base, "GET", "/api/admin/connectors", { sid: admin.sid });
-  const cx = g.json.find((c) => c.name === "crypto");
-  assert.equal(cx.keys.coingecko, true);
-  assert.equal(cx.keys.coinmarketcap, true); // CMC key preserved, not clobbered
+  const g = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
+  assert.equal(g.json.slots.domains.crypto.setting, "coingecko");
+  assert.equal(g.json.plugins.find((p) => p.id === "crypto:coingecko").state.hasKey, true);
+  assert.equal(g.json.plugins.find((p) => p.id === "crypto:coinmarketcap").state.hasKey, true); // CMC key preserved, not clobbered
 });
 
-test("POST connectors/:name/test: honors the selected provider, not the active one", async () => {
+test("plugins/:id/test: honors the plugin's provider, not the active one", async () => {
   // Active provider is CoinGecko here; testing CoinMarketCap must ping CMC and
   // name it — the bug was that Test reported whatever was active/saved.
   const original = globalThis.fetch;
@@ -640,11 +642,11 @@ test("POST connectors/:name/test: honors the selected provider, not the active o
     return original(url, opts);
   };
   try {
-    let r = await req(base, "POST", "/api/admin/connectors/crypto/test", { sid: admin.sid, body: { provider: "coingecko" } });
+    let r = await req(base, "POST", "/api/admin/plugins/crypto:coingecko/test", { sid: admin.sid });
     assert.equal(r.status, 200);
     assert.equal(r.json.provider, "coingecko");
 
-    r = await req(base, "POST", "/api/admin/connectors/crypto/test", { sid: admin.sid, body: { provider: "coinmarketcap", api_key: "typed-key" } });
+    r = await req(base, "POST", "/api/admin/plugins/crypto:coinmarketcap/test", { sid: admin.sid, body: { api_key: "typed-key" } });
     assert.equal(r.status, 200);
     assert.equal(r.json.provider, "coinmarketcap");
   } finally {

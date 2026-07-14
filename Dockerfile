@@ -2,7 +2,7 @@
 # defaults to ./public baked in below); Caddy in front does TLS and proxying.
 FROM node:22-slim
 
-# poppler renders PDF page-1 previews (pdftoppm/pdfinfo in sources/doc.js);
+# poppler renders PDF page-1 previews (pdftoppm/pdfinfo in sources/pdf.js);
 # without it docs still ingest, they just get no thumbnail. The dejavu font
 # is what text-file "page peek" previews (SVG text via sharp) draw with.
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils fonts-dejavu-core \

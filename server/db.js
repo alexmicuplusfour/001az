@@ -1018,6 +1018,79 @@ export async function setSetting(db, key, value) {
   }
 }
 
+// --- plugins ---
+// One row per plugin id; an ABSENT row means enabled with default config
+// (server/plugins.js coalesces), so nothing is ever seeded. `config` holds
+// only schema-declared overrides — secrets live in their existing stores.
+
+export async function listPluginRows(db) {
+  const { rows } = await db.query("SELECT * FROM plugins");
+  return rows;
+}
+
+export async function getPluginRow(db, id) {
+  const { rows } = await db.query("SELECT * FROM plugins WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+// Partial upsert: an undefined field leaves the stored value (or the absent-row
+// default) alone, so a toggle write never clobbers config and vice versa.
+export async function setPluginState(db, id, { enabled, config } = {}) {
+  await db.query(
+    `INSERT INTO plugins (id, enabled, config, updated_at)
+     VALUES ($1, COALESCE($2, TRUE), COALESCE($3::jsonb, '{}'::jsonb), $4)
+     ON CONFLICT (id) DO UPDATE SET
+       enabled    = COALESCE($2, plugins.enabled),
+       config     = COALESCE($3::jsonb, plugins.config),
+       updated_at = $4`,
+    [id, enabled ?? null, config !== undefined ? JSON.stringify(config) : null, Date.now()]
+  );
+}
+
+// Health ledger (the self-healing seed): failures always write (streaks bump
+// fail_count, last_error stays structured); success writes ONLY when healing
+// (fail_count > 0 or never-ok) so steady-state sweeps don't chatter the table.
+export async function recordPluginHealth(db, id, error = null) {
+  const now = Date.now();
+  if (error) {
+    const payload = JSON.stringify({
+      message: String(error.message || error).slice(0, 500),
+      status: error.status ?? null,
+      at: now,
+    });
+    await db.query(
+      `INSERT INTO plugins (id, last_fail_at, fail_count, last_error, updated_at)
+       VALUES ($1, $2, 1, $3::jsonb, $2)
+       ON CONFLICT (id) DO UPDATE SET
+         last_fail_at = $2, fail_count = plugins.fail_count + 1, last_error = $3::jsonb, updated_at = $2`,
+      [id, now, payload]
+    );
+  } else {
+    await db.query(
+      `INSERT INTO plugins (id, last_ok_at, updated_at) VALUES ($1, $2, $2)
+       ON CONFLICT (id) DO UPDATE SET last_ok_at = $2, fail_count = 0, last_error = NULL, updated_at = $2
+       WHERE plugins.fail_count > 0 OR plugins.last_ok_at IS NULL`,
+      [id, now]
+    );
+  }
+}
+
+// Run `fn` and ledger its outcome on plugin `id` (heal on success, structured
+// error on throw). The ledger write never masks the call's own result — a
+// failed health write is swallowed, the original value/throw passes through.
+// The one health-tracking pattern; every live provider/tagger/embed call and
+// admin reachability test funnels through here.
+export async function withPluginHealth(db, id, fn) {
+  try {
+    const out = await fn();
+    await recordPluginHealth(db, id).catch(() => {});
+    return out;
+  } catch (err) {
+    await recordPluginHealth(db, id, err).catch(() => {});
+    throw err;
+  }
+}
+
 // --- AI tagging queue helpers ---
 
 // Atomically take the oldest ready item — whatever stage it's in — and mark it

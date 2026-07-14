@@ -240,7 +240,7 @@ export function openMappingModal() {
         hint.className = "mm-face-hint";
         hint.textContent =
           `${activeLabel} can’t render this face — cards will show the symbol tile instead.` +
-          (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Connectors to enable it.` : "");
+          (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Plugins to enable it.` : "");
         faceRow.appendChild(hint);
       }
     }

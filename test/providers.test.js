@@ -95,11 +95,14 @@ before(async () => {
 });
 after(() => srv.close());
 
-test("GET /api/admin/ai-providers: admin-only, returns the catalog", async () => {
+test("GET /api/admin/ai-providers: admin-only, returns the catalog + enabled flags", async () => {
   const anon = await req(base, "GET", "/api/admin/ai-providers");
   assert.equal(anon.status, 403); // requireAdmin rejects anonymous
 
   const r = await req(base, "GET", "/api/admin/ai-providers", { sid: admin.sid });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json, providerCatalog());
+  // the static catalog rides through untouched, plus a per-provider plugin
+  // enabled flag (true on a fresh install — no plugins rows exist)
+  assert.deepEqual(r.json.map(({ enabled, ...rest }) => rest), providerCatalog());
+  assert.ok(r.json.every((p) => p.enabled === true));
 });

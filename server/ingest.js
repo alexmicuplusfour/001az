@@ -9,6 +9,7 @@ import os from "node:os";
 import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { extractFileFields } from "./media/index.js";
+import { disabledMediaSet } from "./plugins.js";
 
 // Backstop limits only — the client pre-filters oversized files and chunks
 // large drops (see UPLOAD_* in app.js; keep UPLOAD_MAX_BYTES in sync). If
@@ -27,10 +28,16 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // dbc: the pool or a tx client. Returns null for unsupported file types;
 // throws with err.reason for user-explainable refusals (e.g. PDF page cap).
 export async function admitFile(dbc, sources, board, tmpPath, originalName,
-  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null } = {}) {
+  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null, disabledMedia = null } = {}) {
+  // Resolve the handler BEFORE the unprocessable-stamping try: a disabled
+  // media plugin is a config state, not a property of the bytes — the throw
+  // stays retryable, so a folder feed picks the file up after a re-enable
+  // instead of ledgering it forever. Callers may pass the set (bulk uploads
+  // resolve it once per request); absent, it's read here.
+  const handler = sources.forUpload(originalName, disabledMedia ?? (await disabledMediaSet(dbc)));
   let file;
   try {
-    file = await sources.forUpload(originalName).ingest(tmpPath, originalName);
+    file = await handler.ingest(tmpPath, originalName);
   } catch (err) {
     // A handler throw is a deterministic function of the file's bytes (bad
     // decode, page cap) — retrying can't change it. Mark it so folder
@@ -97,6 +104,7 @@ export function mountIngest(app, { db, sources }) {
     }
 
     const now = Date.now();
+    const disabledMedia = await disabledMediaSet(db); // once per request, not per file
     // Per-file original modified time, sent by the client (File.lastModified),
     // aligned to req.files order. Absent → null (the `modified` file field stays
     // empty; the web platform exposes no creation date either).
@@ -114,6 +122,7 @@ export function mountIngest(app, { db, sources }) {
           modifiedAt: lm, // admitFile null-guards non-finite/zero
           createdAt: null, // unavailable for browser uploads
           uploadedBy: req.user.id,
+          disabledMedia,
         });
         if (!admitted) {
           rejected.push({ name: f.originalname, reason: "unsupported file type" });

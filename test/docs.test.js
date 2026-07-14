@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { startServer, adminSession, seedBoard } from "./helpers.js";
 import { anthropicRequest } from "../server/providers.js";
 import { documentTextFor } from "../server/worker.js";
+import { MANIFESTS, acceptsName } from "../server/sources/index.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -171,4 +172,18 @@ test("documentTextFor: a docx/text with no extractable text fails permanent-shap
   // content still flows through untouched
   fs.writeFileSync(path.join(dir, "u.txt"), "hello");
   assert.equal(await documentTextFor(dir, { kind: "text", name: "u.txt", original_name: "u.txt" }), "hello");
+});
+
+test("source registry: every declared extension maps to exactly one handler", () => {
+  const seen = new Map();
+  for (const m of MANIFESTS) {
+    assert.ok(m.name && m.label && m.extensions.length && m.kinds.length, `manifest ${m.name} is complete`);
+    for (const ext of m.extensions) {
+      assert.ok(!seen.has(ext), `extension .${ext} claimed by both ${seen.get(ext)} and ${m.name}`);
+      seen.set(ext, m.name);
+    }
+  }
+  // the folder-feed pre-filter is the manifests' union — and nothing else
+  assert.ok(acceptsName("shot.PNG") && acceptsName("cv.pdf") && acceptsName("notes.md"));
+  assert.ok(!acceptsName("movie.mp4") && !acceptsName("noext"));
 });

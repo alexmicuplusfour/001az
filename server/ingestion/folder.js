@@ -9,13 +9,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { admitFile } from "../ingest.js";
 import { withTx, recordIngest } from "../db.js";
-import { isDocName } from "../sources/doc.js";
-
-// Name-level pre-filter only — the image handler's sharp sniff is the real
-// gate (undecodable bytes come back null and the sweep ledgers the skip).
-const IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "avif", "heif", "heic", "gif", "svg"]);
-const acceptsName = (name) => isDocName(name) || IMAGE_EXTS.has(extOf(name));
-const extOf = (name) => (name.match(/\.([a-z0-9]+)$/i)?.[1] || "").toLowerCase();
+// Name-level pre-filter only (every handler-declared extension) — the image
+// handler's sharp sniff is the real gate (undecodable bytes come back null
+// and the sweep ledgers the skip).
+import { acceptsName, extOf } from "../sources/index.js";
 
 // Mirror the upload backstop (server/ingest.js MAX_BYTES) — multer isn't in
 // this path, so the scan enforces it.

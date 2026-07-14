@@ -15,6 +15,7 @@ function bind(name, mod) {
   return {
     name,
     manifest: mod.manifest,
+    providers: mod.providers, // raw provider modules (rpm/burst defaults for the plugin registry)
     search: (db, q) => runtime.search(db, conn, q),
     list: (db, opts) => runtime.list(db, conn, opts),
     fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
@@ -46,7 +47,7 @@ export function getConnector(name) {
 
 // Manifest listing for the client. `providers` is static (descriptors, no key
 // material); the active provider + key state is admin-only, resolved by the
-// /api/admin/connectors route. `category` groups siblings in the picker.
+// /api/admin/plugins catalog. `category` groups siblings in the picker.
 export function listConnectors() {
   return Object.values(CONNECTORS).map((c) => ({
     name: c.name,

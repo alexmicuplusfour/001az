@@ -8,9 +8,17 @@
 // Settings are namespaced by the connector's own name, so domains never collide:
 //   <name>_provider           active provider (unset/unknown → defaultProvider)
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
-import { getSetting } from "../db.js";
+import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
+
+// Plugin-registry state for one provider: enabled flag + config overrides
+// (rpm/burst). Read straight off the plugins row — an absent row means
+// enabled with no overrides, so a fresh install never touches the table.
+async function pluginRowState(db, conn, name) {
+  const row = await getPluginRow(db, `${conn.name}:${name}`);
+  return { enabled: row ? row.enabled : true, config: row?.config || {} };
+}
 
 // --- per-provider rate limiting + 429 backoff ---
 // A token bucket per provider keeps the sweep and backfills under each API's
@@ -28,6 +36,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function acquire(key, rpm, burst) {
   let b = buckets.get(key);
   if (!b) { b = { tokens: burst, last: Date.now(), rpm, burst, chain: Promise.resolve() }; buckets.set(key, b); }
+  else if (b.rpm !== rpm || b.burst !== burst) {
+    // Config overrides (Plugins page) apply live, not on next boot; clamp the
+    // saved-up tokens so a burst cut takes effect immediately.
+    b.rpm = rpm;
+    b.burst = burst;
+    b.tokens = Math.min(b.tokens, burst);
+  }
   const run = b.chain.then(async () => {
     for (;;) {
       const now = Date.now();
@@ -73,18 +88,41 @@ export function callProvider(name, provider, fn) {
   return acquire(name, rpm, burst).then(() => withRetry(fn));
 }
 
-// Resolve the active provider + its key. An unset or unknown provider name falls
-// back to the connector's default — defaults not laws, so a stale setting never
-// breaks adds.
+// callProvider under the shared plugin health ledger: outcomes (post-retry)
+// land on the provider's plugins row (structured error or heal), feeding the
+// Plugins page dot and, later, the self-healing loop.
+const tracked = (db, conn, name, provider, fn) =>
+  withPluginHealth(db, `${conn.name}:${name}`, () => callProvider(name, provider, fn));
+
+// Resolve the active provider + its key. An unset or unknown provider name
+// falls back to the connector's default, and a DISABLED provider falls
+// forward to the first enabled sibling — defaults not laws, so a stale
+// setting or a toggled-off plugin never breaks adds. Only when every
+// provider of the domain is off does this throw (readably; the routes and
+// the ingest preview surface messages as-is). The returned provider
+// descriptor carries the plugin-config rpm/burst overrides shallow-merged
+// in — every callProvider call site uses this object, so pacing config
+// flows everywhere from here.
 export async function activeProvider(db, conn) {
   const set = await getSetting(db, `${conn.name}_provider`);
-  const name = conn.providers[set] ? set : conn.defaultProvider;
-  return { name, provider: conn.providers[name], apiKey: (await providerKey(db, conn, name)) || null };
+  let name = conn.providers[set] ? set : conn.defaultProvider;
+  let st = await pluginRowState(db, conn, name);
+  if (!st.enabled) {
+    name = null;
+    for (const n of Object.keys(conn.providers)) {
+      const s = await pluginRowState(db, conn, n);
+      if (s.enabled) { name = n; st = s; break; }
+    }
+    if (!name) throw new Error(`every ${conn.name} provider is disabled (Plugins page)`);
+  }
+  const raw = conn.providers[name];
+  const provider = { ...raw, rpm: st.config.rpm ?? raw.rpm, burst: st.config.burst ?? raw.burst };
+  return { name, provider, apiKey: (await providerKey(db, conn, name)) || null };
 }
 
 export async function search(db, conn, query) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  return callProvider(name, provider, () => provider.search(query, { apiKey }));
+  return tracked(db, conn, name, provider, () => provider.search(query, { apiKey }));
 }
 
 // Browse a sorted, paginated page of the domain's catalog for the ingestion
@@ -94,7 +132,7 @@ export async function search(db, conn, query) {
 export async function list(db, conn, opts) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.list) return [];
-  return callProvider(name, provider, () => provider.list(opts, { apiKey }));
+  return tracked(db, conn, name, provider, () => provider.list(opts, { apiKey }));
 }
 
 // Assemble the connector entity from the active provider's raw values:
@@ -105,7 +143,7 @@ export async function list(db, conn, opts) {
 //  - source = { provider, id } — the provider handle a future refresh re-fetches from.
 export async function fetchEntity(db, conn, id, now = Date.now()) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  const e = await callProvider(name, provider, () => provider.fetchEntity(id, { apiKey }));
+  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, { apiKey }));
   const symbol = e.symbol || null;
   const identity = (symbol || "").toLowerCase() || e.id;
   const fields = {};
@@ -119,10 +157,14 @@ export async function fetchEntity(db, conn, id, now = Date.now()) {
 // → the active provider; no typed key → that provider's stored key.
 export async function testConnection(db, conn, { provider: pOverride, apiKey: kOverride } = {}) {
   const name = pOverride && conn.providers[pOverride] ? pOverride : (await activeProvider(db, conn)).name;
-  const provider = conn.providers[name];
+  // Deliberately no enabled gate on the explicit-override path: the admin
+  // tests a provider BEFORE enabling it. Config pacing still applies.
+  const st = await pluginRowState(db, conn, name);
+  const raw = conn.providers[name];
+  const provider = { ...raw, rpm: st.config.rpm ?? raw.rpm, burst: st.config.burst ?? raw.burst };
   if (!provider.testConnection) throw new Error("provider has no connection test");
   const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, conn, name);
-  await callProvider(name, provider, () => provider.testConnection({ apiKey }));
+  await tracked(db, conn, name, provider, () => provider.testConnection({ apiKey }));
   return { provider: name };
 }
 
@@ -199,7 +241,7 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
   if (!provider.history) return null; // provider can't supply history → fall back
   const id = name === source?.provider ? source.id : await resolveBySymbol(db, conn, entity.symbol);
   if (id == null) return null;
-  const series = await callProvider(name, provider, () => provider.history(id, faceCfg.period, { apiKey }));
+  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, { apiKey }));
   if (!series || !series.length) return null;
   return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
 }

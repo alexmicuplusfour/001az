@@ -108,6 +108,24 @@
       .access-drop-list input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; cursor: pointer; }
       .access-drop-list .access-admin-row { margin-left: 24px; font-size: 11px; color: #9aa0aa; }
       .access-drop-list .access-admin-row input:disabled { cursor: default; }
+
+      /* plugins tab */
+      .plugin-seg { margin-top: 26px; }
+      .plugin-seg:first-of-type { margin-top: 18px; }
+      .plugin-seg h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #9aa0aa; margin: 0 0 6px; }
+      .plugin-row { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid #ececef; border-radius: 10px; margin-top: 6px; }
+      .plugin-row .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #2fb344; }
+      .plugin-row .dot.off { background: #c9c9cf; }
+      .plugin-row .dot.warn { background: #e8a13c; }
+      .plugin-row .dot.bad { background: #d64545; }
+      .plugin-row .p-label { font-weight: 600; flex: none; }
+      .plugin-row .p-hint { color: #9aa0aa; font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .plugin-row .badge { flex: none; }
+      .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
+      .plugin-row .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
+      .plugin-row .gear:hover { background: #f1f1f3; color: #111; }
+      .plugin-row .core-lock { color: #c9c9cf; flex: none; display: flex; padding: 6px; }
+      .plugin-row.is-off .p-label, .plugin-row.is-off .p-hint { color: #b6b6bd; }
     </style>
   </head>
   <body>
@@ -127,13 +145,9 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             Boards
           </button>
-          <button class="tab" data-tab="ai">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L14.5 9.5 L22 12 L14.5 14.5 L12 22 L9.5 14.5 L2 12 L9.5 9.5 Z"/></svg>
-            AI Tagger
-          </button>
-          <button class="tab" data-tab="connectors">
+          <button class="tab" data-tab="plugins">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/></svg>
-            Connectors
+            Plugins
           </button>
         </nav>
         <main class="panels">
@@ -145,11 +159,8 @@
           <section class="panel" id="panel-boards" hidden>
             <div id="boards-content"></div>
           </section>
-          <section class="panel" id="panel-ai" hidden>
-            <div id="ai-config-content"></div>
-          </section>
-          <section class="panel" id="panel-connectors" hidden>
-            <div id="connectors-content"></div>
+          <section class="panel" id="panel-plugins" hidden>
+            <div id="plugins-content"></div>
           </section>
         </main>
       </div>

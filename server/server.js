@@ -77,6 +77,9 @@ import {
   clearIngestDrain,
   ingestedKeys,
   ingestedAmong,
+  setPluginState,
+  getPluginRow,
+  withPluginHealth,
 } from "./db.js";
 import {
   attachUser,
@@ -93,6 +96,7 @@ import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
 import { liveFields, faceCadence } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
+import { pluginCatalog, getPluginDef, pluginState } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
@@ -1008,7 +1012,8 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
   if (!key) return res.status(404).json({ error: "not found" });
   const model = req.body && req.body.model ? String(req.body.model) : null;
   try {
-    await testKey({ provider: key.provider, apiKey: key.api_key, model });
+    await withPluginHealth(db, `ai:${key.provider}`, () =>
+      testKey({ provider: key.provider, apiKey: key.api_key, model }));
     res.json({ ok: true, provider: key.provider });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1019,7 +1024,152 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
 // admin UI renders its provider/model pickers from this instead of hardcoding
 // them, so a new provider needs no client edit.
 app.get("/api/admin/ai-providers", requireAdmin, wrap(async (_req, res) => {
-  res.json(providerCatalog());
+  // The static catalog + each provider's plugin enabled flag, so the two
+  // consumers (board modal's per-board override, the Plugins page) can mark
+  // or skip toggled-off providers without a second fetch.
+  const catalog = providerCatalog();
+  for (const p of catalog) {
+    const row = await getPluginRow(db, `ai:${p.name}`);
+    p.enabled = row ? row.enabled : true;
+  }
+  res.json(catalog);
+}));
+
+// --- plugins (admin: the unified integrations catalog) ---
+// One payload for the Plugins page: every plugin (def + state, secrets
+// masked) plus the slot assignments — read from the same settings the
+// legacy per-layer routes use, just composed.
+app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
+  const plugins = await pluginCatalog(db);
+  const embedder = await resolveEmbedder(db);
+  const domains = {};
+  for (const c of listConnectors()) {
+    const conn = getConnector(c.name);
+    // setting = the stored star; effective = what resolution lands on (they
+    // diverge when the starred provider is disabled — the UI shows both).
+    let effective = null;
+    try { effective = (await conn.activeProvider(db)).name; } catch { /* every provider disabled */ }
+    domains[c.name] = { setting: (await getSetting(db, `${c.name}_provider`)) || null, effective };
+  }
+  res.json({
+    plugins,
+    slots: {
+      tagger: {
+        keyId: Number(await getSetting(db, "default_key_id")) || null,
+        model: (await getSetting(db, "model")) || null,
+        envKey: !!process.env.ANTHROPIC_API_KEY,
+      },
+      embedder: {
+        enabled: (await getSetting(db, "embed_enabled")) === "1",
+        provider: (await getSetting(db, "embed_provider")) || null,
+        keyId: Number(await getSetting(db, "embed_key_id")) || null,
+        model: (await getSetting(db, "embed_model")) || null,
+        stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
+      },
+      domains,
+    },
+  });
+}));
+
+// Star a connector domain's default provider. (Registered before the :id
+// routes so a domain can never be shadowed by an id match.) Enabled = usable,
+// default = preselected — starring is where the old make-active guards live
+// now: the plugin must be on, and a keyed provider must have its key.
+app.post("/api/admin/plugins/slots/:domain", requireAdmin, wrap(async (req, res) => {
+  const conn = getConnector(req.params.domain);
+  if (!conn) return res.status(404).json({ error: "unknown domain" });
+  const providers = conn.manifest.providers || [];
+  const provider = req.body?.provider ? String(req.body.provider) : "";
+  const desc = providers.find((p) => p.name === provider);
+  if (!desc) return res.status(400).json({ error: `provider must be one of: ${providers.map((p) => p.name).join(", ")}` });
+  const st = await pluginState(db, `${req.params.domain}:${provider}`);
+  if (!st.enabled) return res.status(400).json({ error: `${desc.label} is disabled — enable it first` });
+  if (desc.needsKey && !(await getSetting(db, `${req.params.domain}_key_${provider}`)))
+    return res.status(400).json({ error: `${desc.label} needs an API key` });
+  await setSetting(db, `${req.params.domain}_provider`, provider);
+  console.log(`connector ${req.params.domain}: default provider=${provider}`);
+  res.json({ ok: true });
+}));
+
+// Enable/disable a plugin and/or write its schema-declared config. Validated
+// against the plugin's own configSchema; everything checks out before
+// anything is written, so a bad field can't half-apply. Secret fields never
+// land in plugins.config — they write through to their real store.
+app.patch("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
+  const def = getPluginDef(req.params.id);
+  if (!def) return res.status(404).json({ error: "unknown plugin" });
+  const { enabled, config } = req.body || {};
+
+  if (enabled !== undefined) {
+    if (typeof enabled !== "boolean") return res.status(400).json({ error: "enabled must be true or false" });
+    if (def.core && !enabled) return res.status(400).json({ error: `${def.label} is a core plugin and can't be disabled` });
+  }
+
+  let nextConfig;
+  const secretWrites = [];
+  if (config !== undefined) {
+    if (!config || typeof config !== "object" || Array.isArray(config))
+      return res.status(400).json({ error: "config must be an object" });
+    const schema = new Map(def.configSchema.map((f) => [f.key, f]));
+    nextConfig = { ...((await getPluginRow(db, def.id))?.config || {}) };
+    for (const [k, v] of Object.entries(config)) {
+      const f = schema.get(k);
+      if (!f) return res.status(400).json({ error: `unknown config field: ${k}` });
+      if (f.type === "secret") {
+        // Secrets never land in plugins.config. Connector keys write through to
+        // the `<domain>_key_<provider>` setting ("" or null clears, a string
+        // sets). No other plugin kind has a secret sink today — reject loudly
+        // rather than 200-with-silent-discard so a future secret field can't
+        // vanish unnoticed.
+        if (def.kind !== "connector")
+          return res.status(400).json({ error: `${def.label} has no secret store for ${f.label}` });
+        secretWrites.push([`${def.connector.domain}_key_${def.name}`, v == null ? null : String(v).trim() || null]);
+        continue;
+      }
+      if (v === null) { delete nextConfig[k]; continue; } // back to the schema default
+      if (f.type === "number") {
+        const n = Number(v);
+        if (!Number.isFinite(n) || (f.min !== undefined && n < f.min))
+          return res.status(400).json({ error: `${f.label} must be a number${f.min !== undefined ? ` of at least ${f.min}` : ""}` });
+        nextConfig[k] = n;
+      } else if (f.type === "toggle") {
+        if (typeof v !== "boolean") return res.status(400).json({ error: `${f.label} must be true or false` });
+        nextConfig[k] = v;
+      } else {
+        nextConfig[k] = String(v);
+      }
+    }
+  }
+
+  for (const [key, val] of secretWrites) await setSetting(db, key, val);
+  if (enabled !== undefined || nextConfig !== undefined)
+    await setPluginState(db, def.id, { enabled, config: nextConfig });
+  console.log(`plugin ${def.id} updated by admin: enabled=${enabled ?? "(unchanged)"}${nextConfig ? " +config" : ""}${secretWrites.length ? " +key" : ""}`);
+  res.json({ ok: true, state: await pluginState(db, def.id) });
+}));
+
+// Reachability test. Connector plugins test through the shared runtime (the
+// typed key wins over the stored one, so the toast reflects the form). AI
+// keys are tested individually via /api/admin/ai-keys/:id/test; media has
+// nothing to call out to.
+app.post("/api/admin/plugins/:id/test", requireAdmin, wrap(async (req, res) => {
+  const def = getPluginDef(req.params.id);
+  if (!def) return res.status(404).json({ error: "unknown plugin" });
+  if (def.kind !== "connector") {
+    return res.status(400).json({
+      error: def.kind === "ai" ? "test AI keys individually — each key has its own Test" : "nothing to test for a media plugin",
+    });
+  }
+  const conn = getConnector(def.connector.domain);
+  try {
+    const { provider } = await conn.testConnection(db, {
+      provider: def.name,
+      apiKey: req.body?.api_key !== undefined ? String(req.body.api_key).trim() : undefined,
+    });
+    res.json({ ok: true, provider });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 }));
 
 app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
@@ -1098,7 +1248,8 @@ app.post("/api/admin/ai-config/embed-test", requireAdmin, wrap(async (_req, res)
   const embedder = await resolveEmbedder(db);
   if (!embedder) return res.status(400).json({ error: "semantic search is not enabled/configured" });
   try {
-    await embedTexts({ ...embedder, texts: ["ping"] });
+    await withPluginHealth(db, `ai:${embedder.provider}`, () =>
+      embedTexts({ ...embedder, texts: ["ping"] }));
     res.json({ ok: true, provider: embedder.provider, model: embedder.model });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1109,77 +1260,18 @@ app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
   const ai = await resolveDefaultAi(db);
   if (!ai) return res.status(400).json({ error: "No default API key configured" });
   try {
-    await testKey(ai);
+    await withPluginHealth(db, `ai:${ai.provider}`, () => testKey(ai));
     res.json({ ok: true, model: ai.model, provider: ai.provider });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 }));
 
-// --- connector config (admin: which data provider backs each connector) ---
-// Settings keys are per connector: `${name}_provider` and `${name}_api_key`.
-// The connector's own activeProvider()/testConnection() read them, so these
-// routes stay generic across connectors.
-app.get("/api/admin/connectors", requireAdmin, wrap(async (_req, res) => {
-  const out = [];
-  for (const c of listConnectors()) {
-    const conn = getConnector(c.name);
-    // Key presence per provider (never the value) — keys live in their own
-    // per-provider slot so switching backends doesn't overwrite them.
-    const keys = {};
-    for (const p of c.providers) keys[p.name] = !!(await getSetting(db, `${c.name}_key_${p.name}`));
-    out.push({
-      name: c.name,
-      label: c.label,
-      category: c.category,
-      description: c.description,
-      providers: c.providers,
-      activeProvider: conn.activeProvider ? (await conn.activeProvider(db)).name : null,
-      keys,
-    });
-  }
-  res.json(out);
-}));
-
-app.post("/api/admin/connectors/:name", requireAdmin, wrap(async (req, res) => {
-  const conn = getConnector(req.params.name);
-  if (!conn) return res.status(404).json({ error: "unknown connector" });
-  const providers = conn.manifest.providers || [];
-  const provider = req.body?.provider ? String(req.body.provider) : "";
-  const desc = providers.find((p) => p.name === provider);
-  if (!desc) return res.status(400).json({ error: `provider must be one of: ${providers.map((p) => p.name).join(", ")}` });
-
-  const keyName = `${req.params.name}_key_${provider}`;
-  // api_key: a non-empty string sets it, an explicit "" clears it, undefined
-  // leaves the stored key alone. Validate the final state before persisting.
-  let nextKey; // undefined = leave as-is
-  if (req.body?.api_key !== undefined) nextKey = String(req.body.api_key).trim() || null;
-  const willHaveKey = nextKey !== undefined ? !!nextKey : !!(await getSetting(db, keyName));
-  if (desc.needsKey && !willHaveKey) return res.status(400).json({ error: `${desc.label} needs an API key` });
-
-  if (nextKey !== undefined) await setSetting(db, keyName, nextKey);
-  await setSetting(db, `${req.params.name}_provider`, provider);
-  console.log(`connector ${req.params.name}: provider=${provider} (key ${willHaveKey ? "set" : "none"})`);
-  res.json({ ok: true, activeProvider: provider, hasKey: willHaveKey });
-}));
-
-app.post("/api/admin/connectors/:name/test", requireAdmin, wrap(async (req, res) => {
-  const conn = getConnector(req.params.name);
-  if (!conn) return res.status(404).json({ error: "unknown connector" });
-  if (!conn.testConnection) return res.status(400).json({ error: "connector has no connection test" });
-  try {
-    // Test the provider the admin has selected, with the key they just typed
-    // (falling back to that provider's stored key) — so the toast names what
-    // they're actually configuring, not the currently-active provider.
-    const { provider } = await conn.testConnection(db, {
-      provider: req.body?.provider ? String(req.body.provider) : undefined,
-      apiKey: req.body?.api_key !== undefined ? String(req.body.api_key).trim() : undefined,
-    });
-    res.json({ ok: true, provider });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-}));
+// Connector admin config lives on the Plugins surface now:
+// GET /api/admin/plugins (catalog + key presence), PATCH /api/admin/plugins/:id
+// (keys write through to `${domain}_key_${provider}` settings),
+// POST /api/admin/plugins/slots/:domain (default provider),
+// POST /api/admin/plugins/:id/test (reachability).
 
 // Three shapes from one route: no params = the whole board as a bare array
 // (legacy); ?limit/&after = one keyset page ({ items, nextCursor, now });
