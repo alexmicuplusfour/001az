@@ -275,11 +275,16 @@ A multi-lens review of the slice surfaced and fixed:
 
 Reviewed and left alone (known-benign, by design or too narrow):
 
-- Every drain tick / preview count / results page re-enumerates the full
-  paged window (~4 CoinGecko calls at 250/page; FMP is one cached screener
-  call, though its token bucket still paces the cache-served pages ~1/s).
-  Stateless-enumerate is the phase-1 design; revisit only if a real feed
-  hurts.
+- Cold enumerate cost stands (a preview against a fresh sort pages the metered
+  catalog — ~4 CoinGecko calls, ~5-9s keyless) but is now paid ONCE per
+  (connector, provider, sort): the feed adapter caches the enumerated window
+  (`INGEST_FEED_CACHE_MS`, default 60s). Filters and the per-run limit apply
+  downstream, so a count, its result pages, repeated previews, and filter-only
+  edits in one session all reuse the window (measured ~5s cold → ~8ms warm).
+  A sort change or a provider switch re-fetches (different key); the sweep
+  reuses it too and tolerates the staleness. Drain ticks within a run therefore
+  don't re-page either. (FMP additionally caches its screener for 5 min under
+  the window cache.)
 - CoinGecko can't honor a `price` sort provider-side and FMP's whole
   universe is top-1000-by-mcap — bounded windows are approximate for
   off-default sorts, documented in the adapter header.

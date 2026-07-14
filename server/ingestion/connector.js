@@ -28,6 +28,20 @@ const ENUM_CAP = 1000;
 const ENUM_PAGE = 250;
 const MAX_PAGES = 40; // backstop for a provider that never returns empty
 
+// Enumerated-window cache. Filling the window is the expensive part — up to
+// ENUM_CAP/ENUM_PAGE metered provider calls (≈4 CoinGecko fetches, ~9s cold),
+// serialized through the per-provider rate limiter and competing with the live
+// refresh sweep. But filters and the per-run limit are applied DOWNSTREAM by the
+// shared engine; only the sort reaches the provider. So a count, its result
+// pages, repeated previews, and filter tweaks in one session all want the SAME
+// window — cache it briefly, keyed by connector + active provider + sort + cap,
+// so only the first call pays. The catalog is a point-in-time snapshot either
+// way, and the sweep tolerates a few seconds of staleness. TTL is read per call
+// (not frozen at import) so tests can disable it; 0 = always fresh.
+const windowCache = new Map();
+const cacheTtl = () =>
+  process.env.INGEST_FEED_CACHE_MS != null ? Number(process.env.INGEST_FEED_CACHE_MS) : 60000;
+
 export function forBoard(board) {
   const name = board?.mapping?.input?.connector;
   const conn = name ? getConnector(name) : null;
@@ -68,20 +82,27 @@ export function feedAdapter(conn) {
     // engine still re-sorts within the window, but the window itself is then
     // approximate. CoinGecko has no price order, for instance.)
     async enumerate(db, _board, cfg, { limit = Infinity } = {}) {
-      const { provider } = await conn.activeProvider(db);
-      if (!provider.list)
+      const active = await conn.activeProvider(db);
+      if (!active.provider.list)
         throw new Error(`the active ${conn.name} provider can't browse its catalog — switch providers to use feeds`);
       const cap = Math.min(limit, ENUM_CAP);
+      const sortBy = cfg.sort?.by || browse.defaultSort;
+      const order = cfg.sort?.order === "asc" ? "asc" : "desc";
+
+      // Serve a warm window (filters/limit are applied by the caller, so a
+      // filter-only edit still hits). The candidate objects are read-only
+      // downstream (applyFilters/applySort copy), so sharing by reference is safe.
+      const ck = `${conn.name}|${active.name}|${sortBy}|${order}|${cap}`;
+      const ttl = cacheTtl();
+      const hit = windowCache.get(ck);
+      if (hit && ttl > 0 && Date.now() - hit.at < ttl)
+        return { candidates: hit.candidates, truncated: hit.truncated };
+
       const seen = new Set();
       const candidates = [];
       let dry = false; // saw the catalog actually end (an empty page)
       for (let page = 1; page <= MAX_PAGES && candidates.length < cap; page++) {
-        const rows = await conn.list(db, {
-          sort: cfg.sort?.by || browse.defaultSort,
-          order: cfg.sort?.order === "asc" ? "asc" : "desc",
-          page,
-          pageSize: ENUM_PAGE,
-        });
+        const rows = await conn.list(db, { sort: sortBy, order, page, pageSize: ENUM_PAGE });
         if (!rows.length) { dry = true; break; }
         for (const r of rows) {
           if (candidates.length >= cap) break;
@@ -98,7 +119,9 @@ export function feedAdapter(conn) {
       // can't know what lies past it (a provider whose universe is exactly the
       // cap — FMP's 1000-row screener — must still read "N+", not "all of it"),
       // and a MAX_PAGES exit means pages were still coming.
-      return { candidates, truncated: !dry };
+      const result = { candidates, truncated: !dry };
+      if (ttl > 0) windowCache.set(ck, { at: Date.now(), ...result });
+      return result;
     },
 
     // One catalog row → one entity + tag vehicle through the same path as a

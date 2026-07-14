@@ -53,6 +53,7 @@ services:
       INGEST_CONTINUOUS_MS: ${INGEST_CONTINUOUS_MS:-}
       INGEST_SETTLE_MS: ${INGEST_SETTLE_MS:-}
       INGEST_RUN_CAP: ${INGEST_RUN_CAP:-}
+      INGEST_FEED_CACHE_MS: ${INGEST_FEED_CACHE_MS:-}
       # scheduled auto-tagging (weekend detection, run times) uses server-local time
       TZ: ${TZ:-UTC}
     volumes:

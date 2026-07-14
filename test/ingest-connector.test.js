@@ -117,6 +117,35 @@ test("enumerate: the preview/window cap marks truncation", async () => {
   assert.equal(truncated, true);
 });
 
+test("enumerate: a warm window is reused across calls; sort change or TTL expiry refetches", async () => {
+  const prev = process.env.INGEST_FEED_CACHE_MS;
+  process.env.INGEST_FEED_CACHE_MS = "60000"; // opt this test into caching
+  try {
+    const conn = stubConn({ pages: [[row("a", "A"), row("b", "B")], []] });
+    const a = feedAdapter(conn);
+    const first = await a.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
+    assert.equal(conn.listCalls.length, 2); // page 1 + the empty page
+    // Same sort → cache hit, no new provider calls, same candidates.
+    const second = await a.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
+    assert.equal(conn.listCalls.length, 2, "warm window served without re-paging");
+    assert.deepEqual(second.candidates.map((c) => c.key), first.candidates.map((c) => c.key));
+    // A filter-only edit reuses the window too (filters apply downstream) —
+    // enumerate never sees filters, so this is the same key; still no refetch.
+    await a.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
+    assert.equal(conn.listCalls.length, 2);
+    // Different sort → different window → refetch.
+    await a.enumerate(null, null, { sort: { by: "price", order: "asc" } });
+    assert.ok(conn.listCalls.length > 2, "a new sort re-pages the provider");
+    // TTL 0 disables the cache entirely.
+    process.env.INGEST_FEED_CACHE_MS = "0";
+    const before = conn.listCalls.length;
+    await a.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
+    assert.ok(conn.listCalls.length > before, "TTL 0 always refetches");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = prev;
+  }
+});
+
 test("enumerate: an active provider without list() throws a readable error", async () => {
   const a = feedAdapter(stubConn({ providerCanList: false }));
   await assert.rejects(() => a.enumerate(null, null, {}), /can't browse its catalog/);
