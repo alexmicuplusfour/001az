@@ -370,7 +370,15 @@ export function openIngestModal() {
     const previewBtn = document.createElement("button");
     previewBtn.type = "button";
     previewBtn.className = "im-preview-btn";
-    previewBtn.textContent = "Preview";
+    // Label + spinner as siblings: while loading the label goes hidden (keeping
+    // the button's width so it can't jump) and the spinner shows centered.
+    const previewLabel = document.createElement("span");
+    previewLabel.className = "im-btn-label";
+    previewLabel.textContent = "Preview";
+    const previewSpin = document.createElement("span");
+    previewSpin.className = "im-btn-spin";
+    previewSpin.setAttribute("aria-hidden", "true");
+    previewBtn.append(previewLabel, previewSpin);
     const countBtn = document.createElement("button");
     countBtn.type = "button";
     countBtn.className = "im-preview-count";
@@ -404,6 +412,7 @@ export function openIngestModal() {
     previewBtn.addEventListener("click", async () => {
       const mySeq = ++previewSeq;
       previewBtn.disabled = true;
+      previewBtn.classList.add("loading");
       try {
         const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
           method: "POST",
@@ -428,6 +437,7 @@ export function openIngestModal() {
         if (mySeq === previewSeq) toast.error("Preview failed");
       } finally {
         previewBtn.disabled = false;
+        previewBtn.classList.remove("loading");
       }
     });
     countBtn.addEventListener("click", showResults);
