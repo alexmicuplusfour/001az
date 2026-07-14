@@ -38,9 +38,14 @@ const MAX_PAGES = 40; // backstop for a provider that never returns empty
 // so only the first call pays. The catalog is a point-in-time snapshot either
 // way, and the sweep tolerates a few seconds of staleness. TTL is read per call
 // (not frozen at import) so tests can disable it; 0 = always fresh.
+// Empty string counts as unset (default 60s), NOT as 0 — compose passes an
+// unset knob through as "" (`${VAR:-}`), and Number("") is 0, which would
+// silently disable the cache in the container. An explicit "0" still disables.
 const windowCache = new Map();
-const cacheTtl = () =>
-  process.env.INGEST_FEED_CACHE_MS != null ? Number(process.env.INGEST_FEED_CACHE_MS) : 60000;
+const cacheTtl = () => {
+  const v = process.env.INGEST_FEED_CACHE_MS;
+  return v == null || v === "" ? 60000 : Number(v);
+};
 
 export function forBoard(board) {
   const name = board?.mapping?.input?.connector;

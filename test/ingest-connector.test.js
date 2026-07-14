@@ -141,6 +141,15 @@ test("enumerate: a warm window is reused across calls; sort change or TTL expiry
     const before = conn.listCalls.length;
     await a.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
     assert.ok(conn.listCalls.length > before, "TTL 0 always refetches");
+    // Empty string (compose passes an unset ${VAR:-} through as "") means
+    // DEFAULT, not 0 — else the container silently loses the cache.
+    process.env.INGEST_FEED_CACHE_MS = "";
+    const c2 = stubConn({ pages: [[row("z", "Z")], []] });
+    const a2 = feedAdapter(c2);
+    await a2.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
+    const warmed = c2.listCalls.length;
+    await a2.enumerate(null, null, { sort: { by: "rank", order: "desc" } });
+    assert.equal(c2.listCalls.length, warmed, "empty-string TTL caches at the 60s default");
   } finally {
     process.env.INGEST_FEED_CACHE_MS = prev;
   }
