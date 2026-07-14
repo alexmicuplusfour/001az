@@ -856,8 +856,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
           last_error: err.message,
           ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
         }).catch(() => {});
-        await setIngestNextRun(db, b.id, Date.now() + 5 * 60000).catch(() => {});
-        console.warn(`ingest error board "${b.name}" (retrying in 5m): ${err.message}`);
+        // Scheduled triggers back off 5 minutes and retry; a manual run was
+        // asked for ONCE — its outcome is this error (visible in the modal
+        // status line), not a silent retry loop that runs forever until the
+        // source heals. "Run now" re-arms it whenever the user wants.
+        const manual = cfg?.trigger?.mode === "manual";
+        await setIngestNextRun(db, b.id, manual ? null : Date.now() + 5 * 60000).catch(() => {});
+        console.warn(`ingest error board "${b.name}" (${manual ? "manual — not retried" : "retrying in 5m"}): ${err.message}`);
       }
     }
   }

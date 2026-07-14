@@ -15,7 +15,6 @@ import {
   reprocessEntity,
   getEntityBoard,
   entityInstanceCount,
-  createEntity,
   cancelBoardQueue,
   seedAdmin,
   createUser,
@@ -70,12 +69,12 @@ import {
   updateItemPayloads,
   reextractItem,
   retagItem,
-  insertItem,
-  setEntityRefreshAt,
   rescheduleEntityRefreshes,
   boardEntityIdentities,
   getBoardTokenTotal,
   setIngestNextRun,
+  setIngestState,
+  clearIngestDrain,
   ingestedKeys,
   ingestedAmong,
 } from "./db.js";
@@ -91,7 +90,8 @@ import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js"
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
-import { liveFields, nextRefreshAt, faceCadence } from "./connectors/runtime.js";
+import { addConnectorEntity } from "./connectors/add.js";
+import { liveFields, faceCadence } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { mountIngest } from "./ingest.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
@@ -458,6 +458,9 @@ app.patch("/api/boards/:id", requireAuth, requireBoardManager, wrap(async (req, 
   const { update, error, sweep } = buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
   if (Object.keys(update).length > 0) await updateBoard(db, prev.id, update);
+  // A saved config supersedes any half-drained run of the old one — a stale
+  // drain_left would hand the next run the dead config's budget as its limit.
+  if (update.ingest !== undefined) await clearIngestDrain(db, prev.id);
   if (sweep) {
     const n = await queueUntagged(db, prev.id);
     if (n) console.log(`board ${prev.id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
@@ -878,7 +881,28 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
     }
   }
 
+  // A mapping edit that switches the board's input (files ↔ connector, or one
+  // connector for another) orphans any saved ingest config: it was written
+  // against the old adapter's descriptor, and run against the new one it
+  // ranges from admitting nothing (unknown filter fields fail closed) to
+  // scanning the whole ingestion root (a feed config's empty source resolves
+  // to INGEST_ROOT itself under the folder adapter) — on the old trigger
+  // cadence. Clear config, timer and run state; the modal starts fresh under
+  // the new input. The dedup ledger stays — deletions remain final.
+  let inputSwitched = false;
+  if (update.mapping !== undefined) {
+    const prevInput = prev.mapping?.input?.connector ?? null;
+    const nextInput = update.mapping?.input?.connector ?? null;
+    if (prevInput !== nextInput && (prev.ingest || prev.ingest_next_run_at)) {
+      inputSwitched = true;
+      update.ingest = null;
+      update.ingestNextRunAt = null;
+    }
+  }
+
   if (Object.keys(update).length > 0) await updateBoard(db, id, update);
+  if (inputSwitched) await setIngestState(db, id, null);
+  else if (update.ingest !== undefined) await clearIngestDrain(db, id);
 
   // A mapping change can turn fields live/idle or move their cadence — recompute
   // every entity's next refresh (empty live set clears their schedules).
@@ -1351,71 +1375,6 @@ app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {
   }
 }));
 
-// Create one connector entity + its file-less tag-vehicle instance and return
-// the client row. Shared by the single add and the bulk add. Throws a tagged
-// error on the two recoverable cases so callers can map them: `.duplicate` for a
-// 23505 (identity already on the board), `.provider` for a fetch/provider error.
-async function addConnectorEntity(board, connector, connectorName, entityId) {
-  let entity;
-  try {
-    entity = await connector.fetchEntity(db, entityId);
-  } catch (err) { err.provider = true; throw err; }
-
-  // Bound fields live on the entity; one file-less instance is the tag
-  // vehicle (tags/reasoning/queue state are per instance). A connector-face
-  // board renders the chart first (face leg) so the tagger sees it — the face
-  // is part of the item's definition, so it renders even with auto-tag off
-  // (`park` makes the face leg park the item in held afterwards instead of
-  // flowing into tagging). Face-less connector items are definition-complete
-  // at birth: auto-tag off holds them as before.
-  const wantsFace = board.mapping?.face?.from === "connector";
-  const status = wantsFace ? "pending_face" : board.auto_tag ? "pending" : "held";
-  let eid;
-  try {
-    eid = await createEntity(db, board.id, {
-      identity: entity.identity,
-      displayName: entity.display_name,
-      symbol: entity.symbol || null,
-      fields: entity.fields,
-    });
-  } catch (err) {
-    if (err.code === "23505") { const e = new Error("entity already on this board"); e.duplicate = true; throw e; }
-    throw err;
-  }
-  // Provider handle rides on the tag-vehicle instance (entities has no free-
-  // form payload) for a future liveness re-fetch.
-  const payload = {
-    identity: entity.identity, files: [], fields: {}, mapping: board.mapping, source: entity.source,
-    ...(wantsFace && !board.auto_tag ? { park: true } : {}),
-  };
-  const id = await insertItem(db, board.id, payload, status, eid);
-
-  // Schedule the first liveness refresh when the mapping has live fields.
-  const live = liveFields(board.mapping);
-  if (live.length) await setEntityRefreshAt(db, eid, nextRefreshAt(entity.fields, live));
-
-  console.log(`connector entity created: ${connectorName}/${entityId} → #${eid} (${entity.display_name})`);
-  return {
-    id: eid,
-    name: entity.identity,
-    identity: entity.identity,
-    display_name: entity.display_name,
-    symbol: entity.symbol || null,
-    displayLabel: entity.display_name || entity.identity,
-    status,
-    tags: [],
-    kind: "connector",
-    w: null,
-    h: null,
-    label: null,
-    fields: entity.fields,
-    instances: [{
-      id, name: entity.identity, label: null, w: null, h: null,
-      kind: "connector", status, tags: [], undecided: false,
-    }],
-  };
-}
-
 // Create an entity from a connector — no file upload, fields come from the
 // connector's fetchEntity call. Goes straight to pending (tagger runs over
 // the bound fields). 409 when the identity already exists on this board.
@@ -1432,7 +1391,7 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
   if (!connector) return res.status(404).json({ error: "unknown connector" });
 
   try {
-    res.json(await addConnectorEntity(board, connector, connectorName, entityId));
+    res.json(await addConnectorEntity(db, board, connector, connectorName, entityId));
   } catch (err) {
     if (err.duplicate) return res.status(409).json({ error: err.message });
     if (err.provider) {
@@ -1463,7 +1422,7 @@ app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => 
   const added = [], skipped = [];
   for (const entityId of ids) {
     try {
-      added.push(await addConnectorEntity(board, connector, connectorName, String(entityId)));
+      added.push(await addConnectorEntity(db, board, connector, connectorName, String(entityId)));
     } catch (err) {
       if (err.duplicate) { skipped.push({ id: entityId, reason: "duplicate" }); continue; }
       console.error(`bulk add error (${connectorName}/${entityId}):`, err.message);

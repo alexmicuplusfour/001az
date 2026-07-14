@@ -211,18 +211,50 @@ test("folder picker: bounded listing under the root", async () => {
   assert.ok(r.json.folders.includes("pick/deep"));
 });
 
-test("connector boards: ingestion answers 'not available' everywhere (until phase 2)", async () => {
+test("connector boards: the feed adapter serves a browse-derived descriptor", async () => {
   const cid = await seedBoard(db, "connector-board");
   await updateBoard(db, cid, {
     mapping: { input: { connector: "crypto" }, identity: { from: "connector" }, fields: [] },
   });
   const info = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
-  assert.equal(info.json.available, false);
+  assert.equal(info.json.available, true);
+  const desc = info.json.descriptor;
+  assert.deepEqual(desc.source, [], "the connector universe is the source — nothing to configure");
+  assert.ok(desc.filters.some((f) => f.fn === "market_cap" && f.kind === "number"), "usd column → number filter");
+  assert.ok(desc.filters.some((f) => f.fn === "change_24h" && f.kind === "number"), "percent column → number filter");
+  assert.ok(desc.sorts.some((s) => s.by === "market_cap"));
+  assert.deepEqual(desc.triggerModes, ["manual", "interval", "daily"], "no continuous rescan against a metered API");
 
+  // A folder-shaped config can't land on a feed board…
   const patch = await req(base, "PATCH", `/api/boards/${cid}`, { sid: admin.sid, body: { ingest: GOOD } });
   assert.equal(patch.status, 400);
-  assert.match(patch.json.error, /not available/);
+  assert.match(patch.json.error, /unknown source option/);
 
-  const prev = await req(base, "POST", `/api/boards/${cid}/ingest/preview`, { sid: admin.sid, body: GOOD });
-  assert.equal(prev.status, 400);
+  // …a feed config saves and arms; the folder-only continuous mode is refused.
+  const feedCfg = {
+    enabled: true,
+    source: {},
+    filters: [{ fn: "market_cap", op: "gte", value: 1e9 }],
+    sort: { by: "market_cap", order: "desc" },
+    limit: 50,
+    trigger: { mode: "interval", every: 60 },
+  };
+  const ok = await req(base, "PATCH", `/api/boards/${cid}`, { sid: admin.sid, body: { ingest: feedCfg } });
+  assert.equal(ok.status, 200);
+  const b = await getBoard(db, cid);
+  assert.deepEqual(b.ingest.filters, feedCfg.filters);
+  assert.ok(b.ingest_next_run_at <= Date.now(), "armed for an immediate first run");
+  const cont = await req(base, "PATCH", `/api/boards/${cid}`, {
+    sid: admin.sid, body: { ingest: { ...feedCfg, trigger: { mode: "continuous" } } },
+  });
+  assert.equal(cont.status, 400);
+  assert.match(cont.json.error, /trigger mode/);
+
+  // A connector the registry doesn't know keeps answering "not available".
+  await updateBoard(db, cid, { ingest: null, ingestNextRunAt: null });
+  await updateBoard(db, cid, {
+    mapping: { input: { connector: "nope" }, identity: { from: "connector" }, fields: [] },
+  });
+  const gone = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
+  assert.equal(gone.json.available, false);
 });

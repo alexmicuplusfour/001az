@@ -121,6 +121,8 @@ test("FMP list: screens US stocks, sorts, paginates, and filters a query against
       { apiKey: "test-key" }
     );
     assert.deepEqual(rows.map((row) => row.symbol), ["BIG", "MID"]);
+    assert.equal(rows[0].values.rank, 1, "market-cap rank stamped at universe load (BIG is largest)");
+    assert.equal(rows[1].values.rank, 2);
     assert.equal(rows[0].values.price, 20);
     assert.equal(rows[0].values.sector, "Technology");
     assert.equal(rows[0].values.exchange, "NASDAQ"); // short form, not the full name

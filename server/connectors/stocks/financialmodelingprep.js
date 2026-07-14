@@ -170,6 +170,7 @@ function browseRow(row) {
     symbol,
     label: name,
     values: {
+      rank: row?.mcapRank ?? null,
       name,
       price: number(row?.price),
       market_cap: number(row?.marketCap),
@@ -206,7 +207,14 @@ async function stockUniverse(apiKey) {
     isActivelyTrading: true,
     limit: MAX_BROWSE_ROWS,
   }, apiKey);
-  screenerCache = { at: Date.now(), rows: Array.isArray(rows) ? rows : [] };
+  const list = Array.isArray(rows) ? rows : [];
+  // Market-cap rank within the universe, computed here rather than trusted
+  // from response order — it makes "top 50 stocks" expressible as a feed
+  // filter (rank ≤ 50), mirroring crypto's market_cap_rank.
+  [...list]
+    .sort((a, b) => (number(b?.marketCap) ?? 0) - (number(a?.marketCap) ?? 0))
+    .forEach((row, i) => { row.mcapRank = i + 1; });
+  screenerCache = { at: Date.now(), rows: list };
   return screenerCache.rows;
 }
 

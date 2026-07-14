@@ -1,7 +1,8 @@
 # Automatic ingestion — the third leg (folder watching first)
 
-Shipped 2026-07-13. Phase 1 only (agnostic core + folder adapter + modal);
-phase 2 (connector-feed adapter) is specced at the bottom, not built.
+Shipped 2026-07-13 (phase 1: agnostic core + folder adapter + modal).
+Phase 2 (connector-feed adapter) shipped 2026-07-14 — see the bottom section
+for what was built and the semantics it settled.
 
 ## What this is
 
@@ -86,8 +87,9 @@ engine filters/sorts on, described by the descriptor's filter catalog.
 
 - `server/migrations/0015_ingestion.sql` — the three board columns + ingest_log.
 - `server/ingestion/index.js` — registry (`resolveIngestAdapter`: null
-  input.connector → folder; connector names → null until phase 2), trigger
-  math (`nextIngestRunAt`, sibling of `nextAutoTagRun`, server-local TZ),
+  input.connector → folder; a connector name → the phase-2 feed adapter,
+  or null for a connector the registry doesn't know), trigger math
+  (`nextIngestRunAt`, sibling of `nextAutoTagRun`, server-local TZ),
   `validateIngest`.
 - `server/ingestion/filter-engine.js` — pure evaluate/applyFilters/applySort
   (stable, nulls last)/applyLimit.
@@ -102,7 +104,9 @@ engine filters/sorts on, described by the descriptor's filter catalog.
   `INGEST_RUN_CAP` (25) per tick. Bigger runs drain across ticks with
   `next_run_at = now`, resuming from `ingest_state.drain_left` so the run's
   `limit` stays exact (never re-sliced). Per-board failures → `last_error` +
-  5-min backoff, never the loop. `startWorker` gained an optional `sources`.
+  5-min backoff for scheduled triggers, never the loop; a failed MANUAL run
+  disarms instead (asked once, answered once — Run now re-arms it).
+  `startWorker` gained an optional `sources`.
 - `server/server.js` — validateIngest wired into `buildBoardContentUpdate`
   (arm on off→on / trigger change = immediate first run; disarm on off/manual);
   routes: `GET /api/boards/:id/ingest` (descriptor+config+state),
@@ -175,16 +179,121 @@ engine filters/sorts on, described by the descriptor's filter catalog.
   file vanishing mid-read) would ledger-skip a good file. Accepted — the tmp
   copy is made moments earlier by the same process.
 
-## Phase 2 (next slice): connector-feed adapter
+## Phase 2 (shipped 2026-07-14): connector-feed adapter
 
-"Mirror a filter-defined bucket" for stocks/crypto (top-50-by-market-cap etc.):
-relocate `addConnectorEntity` (server.js ~1215 — closes over module `db`, so
-the move adds a db param) to `server/connectors/add.js`;
-`server/ingestion/connector.js` builds its descriptor from `manifest.browse`
-(columns → filter kinds, sorts), enumerates via paged `connector.list()`
-(bounded; `truncated` → "N+" preview), `key` = lowercase symbol ‖ id (mirrors
-entity identity), admit-then-ledger healed by the entities unique constraint +
-`err.duplicate`. `triggerModes: manual/interval/daily`. Zero core edits — the
-sweep, routes, modal, engine and ledger already speak the interface. News =
-one more adapter (or free via this one once a news connector exists), with the
-AI event-identity layer as its own future design.
+A connector board feeds from a filter-defined bucket of its domain's catalog
+(rank ≤ 50, market_cap ≥ X, sector = tech). Built as specced, zero core edits
+— the sweep, routes, modal, engine and ledger spoke the interface unchanged:
+
+- `server/connectors/add.js` — `addConnectorEntity` relocated from server.js
+  verbatim plus a `db` param (it closed over the module pool); the routes and
+  the feed adapter share it, so feeds get charts, live-field scheduling and
+  the park policy for free.
+- `server/ingestion/connector.js` — `feedAdapter(conn)` (split from
+  `forBoard(board)` so tests can drive a stub connector): descriptor from
+  `manifest.browse` (columns → filter catalog with usd/percent → number,
+  sorts as-is, `triggerModes: manual/interval/daily` — no `continuous`
+  against a metered API); `enumerate` pages `connector.list()` in the
+  configured sort order into a bounded window (ENUM_CAP 1000 = PREVIEW_CAP,
+  pageSize 250, MAX_PAGES 40), dedupes keys across pages (rank drift),
+  `truncated` at the cap; `admit` = addConnectorEntity → recordIngest,
+  non-transactional and healed by the entities (board_id, identity) unique
+  constraint + `err.duplicate` (the sweep ledgers it). Candidate `key` =
+  lowercase symbol ‖ provider id — the same derivation as entity identity and
+  browse's `on_board`, so all three agree on "already here".
+- One client edit: the modal's unsaved-config trigger default was hardcoded
+  `continuous`; now it prefers `continuous` when offered, else the
+  descriptor's first mode (a feed board's Save used to 400 out of the box).
+
+Semantics settled by the build:
+
+- **`limit` is per-RUN admission** (the modal's own label), not a mirror
+  size: each run takes up to N *new* candidates, so successive runs walk down
+  the catalog. "Mirror the top 50" is a FILTER (`rank ≤ 50`); a filter-bounded
+  feed drains to last_added 0 once the bucket is ledgered.
+- **Stop paging on an EMPTY page only.** Providers clamp pageSize internally
+  (FMP caps at 100) but keep offset math consistent with their own clamp — a
+  short-but-nonempty page is normal paging, and treating it as "dry" would
+  silently miss everything past a provider's first clamped page.
+- **Provider-side sort is load-bearing** for the bounded window: "top N by X"
+  must fill the window in X order. A provider that can't honor a sort key
+  falls back to its default order (CoinGecko has no price order) — the engine
+  still re-sorts within the window, but the window itself is approximate then.
+- An active provider without `list()` throws a readable "can't browse its
+  catalog" instead of enumerating an empty universe as count 0.
+
+Verified: 288 tests (9 new in test/ingest-connector.test.js: descriptor
+derivation, empty-vs-short page, cross-page dedupe, cap/truncated, list-less
+provider, admit+ledger+duplicate, sweep e2e over a mocked CoinGecko;
+ingest-routes' phase-1 pin flipped to assert the served descriptor). Live on
+the compose stack against keyless CoinGecko: preview count (capped 1000-row
+window, ~5s paced), top-2 run admitted btc+eth with real fields, second run
+took the next 2 (per-run limit semantics), rank≤4 config drained to 0,
+deleted entity not resurrected, board delete cascaded the ledger. Browser DOM
+not automated (as ever) — the modal is descriptor-driven and the results view
+was exercised only via the preview API shapes.
+
+Tick-hold note (known-benign family): each admit is a real `fetchEntity`
+(FMP cold = 3 HTTP calls at rpm 60/burst 2), so a 25-admit tick on a cold
+FMP board can spend ~1–2 min inside the rate limiter, delaying the tag queue
+behind the single-flight tick. Bounded by INGEST_RUN_CAP + drain.
+
+### Loose-ends pass (2026-07-14, same day)
+
+A multi-lens review of the slice surfaced and fixed:
+
+- **Mapping input switch orphaning the ingest config** (the real bug of the
+  pass): editing a board's mapping from files→connector (or back, or between
+  connectors) left the saved ingest config running under the wrong adapter —
+  a folder config on a feed board re-enumerated the metered catalog on its
+  `continuous` 30s cadence forever (admitting nothing under unknown filters,
+  or EVERYTHING with none), and a feed config on a files board resolved its
+  empty `source.folder` to INGEST_ROOT itself and ingested the whole root.
+  The admin mapping PATCH now clears config + timer + run state when
+  `input.connector` changes; the ledger stays (deletions remain final).
+- **Stale drain budgets**: `drain_left` had no run identity — saving a new
+  config mid-drain handed the next run the dead config's remaining budget as
+  its limit. Config saves now clear it (`clearIngestDrain`, the one
+  sweep-state field a save may touch; run history stays).
+- **Manual error retry loop**: the error path re-armed every trigger mode at
+  +5 min, so a failed manual Run-now silently retried forever until the
+  source healed. Manual now disarms on error (outcome visible in the modal
+  status); scheduled modes keep the 5-min backoff.
+- **enumerate honesty + cost**: window filled to the cap now reports
+  `truncated` without fetching the probe page beyond it (FMP's self-capped
+  1000-row universe used to read "1000, complete"); a MAX_PAGES exit is
+  truncated too. Stop condition is still an empty page only.
+- **Results-view formatting**: feed descriptors now carry the column's
+  `display` kind (usd/percent) and the preview list formats through the same
+  fmtUsd/fmtPercent as connector-browse (moved to paged-table.js, shared) —
+  sub-cent prices no longer flatten to "0". Number filter inputs also lost
+  their `min="0"` clamp (change_24h ≤ −5 is the bread-and-butter feed
+  filter); within_days keeps min 1.
+- **Stocks rank**: FMP browse rows gain `rank` (market-cap position computed
+  at screener load), so "top 50 stocks" is expressible as `rank ≤ 50` like
+  crypto — previously stocks had no rank column at all.
+
+Reviewed and left alone (known-benign, by design or too narrow):
+
+- Every drain tick / preview count / results page re-enumerates the full
+  paged window (~4 CoinGecko calls at 250/page; FMP is one cached screener
+  call, though its token bucket still paces the cache-served pages ~1/s).
+  Stateless-enumerate is the phase-1 design; revisit only if a real feed
+  hurts.
+- CoinGecko can't honor a `price` sort provider-side and FMP's whole
+  universe is top-1000-by-mcap — bounded windows are approximate for
+  off-default sorts, documented in the adapter header.
+- A candidate that deterministically fails `fetchEntity` (delisted coin
+  still in the catalog) is retried every run and keeps `last_error` set; it
+  self-resolves when the catalog drops the row. Ledgering 404s would block
+  re-adds if the asset returns.
+- Symbol-less rows key by provider id (not portable across a provider
+  switch) — same identity rule as manual adds. Provider re-resolution
+  mid-enumerate can interleave catalogs if an admin switches backends inside
+  a ~5s window. The sweep's `!sources` guard also blocks feeds on a worker
+  started without sources — never the case in prod.
+- Ghost entity if the process dies between createEntity and insertItem —
+  pre-existing, shared with the manual add path.
+
+News = one more adapter (or free via this one once a news connector exists),
+with the AI event-identity layer as its own future design.

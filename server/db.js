@@ -911,6 +911,13 @@ export async function setIngestState(db, boardId, state) {
   await db.query("UPDATE boards SET ingest_state=$1 WHERE id=$2", [state === null ? null : JSON.stringify(state), boardId]);
 }
 
+// The one sweep-state field a config save IS allowed to touch: drain_left is
+// the unfinished budget of the run the OLD config started — carrying it into
+// a new config hands the next run a stale limit. Run history stays.
+export async function clearIngestDrain(db, boardId) {
+  await db.query("UPDATE boards SET ingest_state = ingest_state - 'drain_left' WHERE id=$1", [boardId]);
+}
+
 // The dedup ledger: every source_key ever admitted to this board. Rows outlive
 // their entities on purpose — deleting an item is a user judgment the feed
 // must not overturn on the next scan.

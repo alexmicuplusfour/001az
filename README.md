@@ -19,15 +19,16 @@ a live connector.
   `.md`, and `.csv` anywhere, or use the upload button. Thumbnails and page-1
   previews are generated server-side (sharp for images, poppler for PDFs,
   mammoth for docx), originals type-sniffed and size-capped.
-- **Automatic ingestion** — a board can feed itself from a watched folder
-  (under a server-side ingestion root): filters over file metadata
-  (name/extension/size/dates), sorting with a per-run limit, and a trigger
-  schedule (continuous watch, interval, daily, or manual) with a live results
-  preview in the setup modal. One-directional and additive — source files are
-  never touched, and a dedup ledger means deleting an item in the app doesn't
-  resurrect it on the next scan. The layer is adapter-based like the
-  connectors: filter-defined connector feeds (e.g. "top 50 by market cap")
-  slot in next.
+- **Automatic ingestion** — a board can feed itself from a source: a watched
+  folder (under a server-side ingestion root) for file boards, or a
+  filter-defined slice of a connector's catalog (e.g. "top 50 by market cap")
+  for crypto/stocks boards. Filters over the source's fields (file metadata,
+  or catalog columns like price/rank/sector), sorting with a per-run limit,
+  and a trigger schedule (continuous watch or interval/daily/manual) with a
+  live results preview in the setup modal. One-directional and additive —
+  source files are never touched, and a dedup ledger means deleting an item in
+  the app doesn't resurrect it on the next run. Adapter-based like the
+  connectors themselves: adding a source type is one file.
 - **AI tagging** — a queue worker sends each item to a vision/text model. The
   tag vocabulary is enforced *structurally*: the tool's `input_schema` is
   generated from the board's facets, so the model cannot emit an invalid tag.
@@ -91,7 +92,7 @@ Caddy ── TLS + reverse-proxy ──► Node/Express (server/server.js)
 | `server/worker.js` | AI tagging + connector-refresh queue poller |
 | `server/providers.js` | AI provider descriptor registry (add a provider = one descriptor) |
 | `server/connectors/` | data-connector runtime + domains (e.g. `crypto/`) |
-| `server/ingestion/` | automatic-ingestion adapters (folder watching) + shared filter engine |
+| `server/ingestion/` | automatic-ingestion adapters (folder watching, connector feeds) + shared filter engine |
 | `server/sources/` | per-format file handling (image/PDF/docx/text) |
 | `server/auth.js` | session-cookie middleware |
 | `server/mintlink.js` | CLI: print a login link for an email |

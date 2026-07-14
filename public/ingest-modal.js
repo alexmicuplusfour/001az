@@ -14,7 +14,7 @@ import { state } from './state.js';
 import { fmtDuration } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
-import { pagedTableScaffold } from './paged-table.js';
+import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { refreshBoardIngest, ensurePolling } from './data.js';
 
@@ -85,12 +85,20 @@ export function openIngestModal() {
     // Buffered config — edits stay local until Save.
     const saved = info.config;
     const cfg = {
-      enabled: saved ? saved.enabled !== false : true,
+      // Opt-in: a board with no saved config opens with ingestion OFF, so
+      // configuring a source and hitting Save can't silently arm the sweep.
+      // An existing config keeps its saved state (only an explicit false = off).
+      enabled: saved ? saved.enabled !== false : false,
       source: { ...(saved?.source || {}) },
       filters: (saved?.filters || []).map((f) => ({ ...f })),
       sort: saved?.sort ? { ...saved.sort } : { by: desc.sorts?.[0]?.by, order: "desc" },
       limit: saved?.limit ?? null,
-      trigger: saved?.trigger ? { ...saved.trigger } : { mode: "continuous" },
+      // Default to watching when the adapter offers it (folders); a feed
+      // adapter without "continuous" starts on its first declared mode —
+      // defaulting outside the descriptor would make Save fail validation.
+      trigger: saved?.trigger
+        ? { ...saved.trigger }
+        : { mode: (desc.triggerModes || []).includes("continuous") ? "continuous" : (desc.triggerModes?.[0] || "manual") },
     };
     for (const s of desc.source || []) {
       if (s.default !== undefined && cfg.source[s.key] === undefined) cfg.source[s.key] = s.default;
@@ -217,8 +225,9 @@ export function openIngestModal() {
         const input = document.createElement("input");
         if (kind === "number" || f.op === "within_days") {
           input.type = "number";
-          input.min = "0";
-          if (f.op === "within_days") input.placeholder = "days";
+          // Day counts can't be negative; plain number fields can (a feed
+          // filtering 24h change ≤ -5 is the bread-and-butter case).
+          if (f.op === "within_days") { input.min = "1"; input.placeholder = "days"; }
         } else if (kind === "date") {
           input.type = "date";
         } else {
@@ -469,9 +478,14 @@ export function openIngestModal() {
         for (const c of cols) {
           const td = document.createElement("td");
           const v = row.values?.[c.fn];
+          // `display` is the adapter's richer column kind (feed descriptors
+          // carry usd/percent) — same formatters as the browse modal, so a
+          // sub-cent price never flattens to "0".
           td.textContent = v === null || v === undefined ? "—"
+            : c.display === "usd" ? fmtUsd(Number(v))
+            : c.display === "percent" ? fmtPercent(Number(v))
             : c.kind === "date" ? new Date(v).toLocaleDateString()
-            : c.kind === "number" ? Number(v).toLocaleString()
+            : c.kind === "number" ? fmtNumber(Number(v))
             : String(v);
           tr.appendChild(td);
         }

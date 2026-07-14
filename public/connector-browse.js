@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
-import { pagedTableScaffold } from './paged-table.js';
+import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent } from './paged-table.js';
 import { ensurePolling } from './data.js';
 
 // Browse-and-add ingestion modal for connector boards. Completely connector-
@@ -10,20 +10,8 @@ import { ensurePolling } from './data.js';
 // columns (fetched from /api/connectors), and the board-scoped /connector-list
 // endpoint supplies the rows. Crypto today; stocks / businesses / movies drop in
 // with zero changes here. Replaces the old search flyout.
-
-// --- agnostic cell formatting, keyed only by the column's declared `kind` ---
-function fmtUsd(v) {
-  if (v == null || !Number.isFinite(v)) return "—";
-  const a = Math.abs(v);
-  if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
-  if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
-  if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
-  if (a >= 1) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-  return `$${v.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
-}
-function fmtNumber(v) {
-  return v == null || !Number.isFinite(v) ? "—" : v.toLocaleString();
-}
+// Cell formatting by display kind lives in paged-table.js, shared with the
+// ingest preview so the same value never renders two ways.
 const ALIGN_END = new Set(["usd", "percent", "number"]);
 
 export function openConnectorBrowse(connectorName) {
@@ -148,11 +136,8 @@ export function openConnectorBrowse(connectorName) {
         td.append(name, sym);
       } else if (col.kind === "percent") {
         const v = data.values?.[col.key];
-        if (v == null || !Number.isFinite(v)) td.textContent = "—";
-        else {
-          td.textContent = `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
-          td.classList.add(v >= 0 ? "cb-up" : "cb-down");
-        }
+        td.textContent = fmtPercent(v);
+        if (v != null && Number.isFinite(v)) td.classList.add(v >= 0 ? "cb-up" : "cb-down");
       } else {
         td.textContent = cellText(col, data);
       }

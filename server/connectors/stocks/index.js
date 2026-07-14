@@ -57,8 +57,11 @@ export const manifest = {
   browse: {
     // No "Day" (change_1d) column: the screener that backs browse has no
     // intraday change, so it would always render blank. The field still exists
-    // on the board, fed live by the quote refresh.
+    // on the board, fed live by the quote refresh. `rank` is the universe's
+    // market-cap rank (computed at screener load) — it's what lets a feed say
+    // "top 50" as a filter.
     columns: [
+      { key: "rank",       label: "#",       kind: "number", width: 40 },
       { key: "name",       label: "Name",    kind: "text", primary: true },
       { key: "price",      label: "Price",   kind: "usd" },
       { key: "market_cap", label: "Mkt cap", kind: "usd" },

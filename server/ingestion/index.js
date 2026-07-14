@@ -5,14 +5,16 @@
 // pinned interface. Adding an ingestible domain = one adapter file here;
 // the sweep, routes, modal, filter engine and ledger are all adapter-blind.
 import * as folder from "./folder.js";
+import { forBoard as connectorFeed } from "./connector.js";
 import { OPS_BY_KIND } from "./filter-engine.js";
 
 // null input.connector = a file board → the folder adapter. Connector boards
-// (crypto/stocks) get the generic feed adapter in the next slice; until then
-// they resolve to null and the routes answer "not available for this board".
+// (crypto/stocks) get a per-board feed adapter built from their manifest's
+// `browse` block; an unknown connector (or one without a catalog) resolves to
+// null and the routes answer "not available for this board".
 export function resolveIngestAdapter(board) {
   const name = board?.mapping?.input?.connector;
-  return name ? null : folder;
+  return name ? connectorFeed(board) : folder;
 }
 
 // Next run after `from` per the trigger config (sibling of nextAutoTagRun,
