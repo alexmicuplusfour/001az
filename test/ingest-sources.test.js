@@ -14,7 +14,7 @@ import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.j
 import { backend as ftpBackend } from "../server/ingestion/sources/ftp.js";
 import * as files from "../server/ingestion/files.js";
 import {
-  getBoard, updateBoard, ingestedKeys, setPluginState,
+  getBoard, updateBoard, ingestedKeys, setPluginState, recordIngest,
   createSourceConnection, getSourceConnection,
 } from "../server/db.js";
 import { createSources } from "../server/sources/index.js";
@@ -312,4 +312,58 @@ test("browsing a removed connection is a readable refusal", async () => {
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /removed|pick another/);
+});
+
+// --- remote enumeration: full-listing cache (no reach cap that would clog) ---
+
+test("remote source: files added after the first batch is ingested are still seen", async () => {
+  await setPluginState(db, "source:ftp", { installed: true });
+  const dir = path.join(ftpRoot, "grow");
+  fs.mkdirSync(dir);
+  for (const n of ["a.txt", "b.txt", "c.txt"]) fs.writeFileSync(path.join(dir, n), "x");
+  const connId = await createSourceConnection(db, "ftp", "grow-conn", ftpConn);
+  const boardId = await seedBoard(db, "grow-board");
+  await updateBoard(db, boardId, {
+    ingest: { enabled: true, source: { type: "ftp", connectionId: connId, path: "grow", recursive: true }, trigger: { mode: "manual" } },
+  });
+  const board = await getBoard(db, boardId);
+
+  const first = await files.enumerate(db, board, board.ingest);
+  assert.deepEqual(first.candidates.map((c) => c.key).sort(), ["grow/a.txt", "grow/b.txt", "grow/c.txt"]);
+  for (const c of first.candidates) await recordIngest(db, boardId, c.key, Date.now()); // ledger the batch
+
+  // Add more, re-enumerate: the new files are walked (not hidden behind the
+  // ingested batch) and read as fresh vs the ledger. (Cache is off in tests.)
+  for (const n of ["d.txt", "e.txt"]) fs.writeFileSync(path.join(dir, n), "x");
+  const second = await files.enumerate(db, board, board.ingest);
+  assert.deepEqual(second.candidates.map((c) => c.key).sort(),
+    ["grow/a.txt", "grow/b.txt", "grow/c.txt", "grow/d.txt", "grow/e.txt"]);
+  const known = await ingestedKeys(db, boardId);
+  assert.deepEqual(second.candidates.filter((c) => !known.has(c.key)).map((c) => c.key).sort(),
+    ["grow/d.txt", "grow/e.txt"], "the new files are fresh and would ingest");
+});
+
+test("remote enumeration is briefly cached (reused within TTL, re-walked on a key change)", async () => {
+  await setPluginState(db, "source:ftp", { installed: true });
+  const dir = path.join(ftpRoot, "cache");
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, "one.txt"), "x");
+  const connId = await createSourceConnection(db, "ftp", "cache-conn", ftpConn);
+  const boardId = await seedBoard(db, "cache-board");
+  await updateBoard(db, boardId, {
+    ingest: { enabled: true, source: { type: "ftp", connectionId: connId, path: "cache", recursive: true }, trigger: { mode: "manual" } },
+  });
+  const board = await getBoard(db, boardId);
+
+  process.env.INGEST_FEED_CACHE_MS = "60000"; // enable the cache just for this test
+  try {
+    assert.equal((await files.enumerate(db, board, board.ingest)).candidates.length, 1);
+    fs.writeFileSync(path.join(dir, "two.txt"), "x"); // added while the window is warm
+    assert.equal((await files.enumerate(db, board, board.ingest)).candidates.length, 1, "served from cache");
+    // A different cache key (recursive flag) forces a fresh walk → sees both.
+    const other = { ...board.ingest, source: { ...board.ingest.source, recursive: false } };
+    assert.equal((await files.enumerate(db, board, other)).candidates.length, 2, "key change → fresh walk");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = "0"; // restore the test default (cache off)
+  }
 });

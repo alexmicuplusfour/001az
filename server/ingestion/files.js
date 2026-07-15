@@ -41,13 +41,27 @@ const FILE_SORTS = [
 ];
 const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 
-// A remote source's enumeration window. The worker sweeps with no limit (it
-// wants every candidate to dedup + sort), which is free for a local folder but
-// would re-list an entire bucket / FTP tree on every tick for a remote source.
-// Bound remote walks to this many entries (a feed sees the first N, like the
-// connector feed's ENUM_CAP; narrow with a base path or filters for more).
-// Matches the preview cap so the sweep and preview agree on the window.
-const REMOTE_ENUM_CAP = 1000;
+// Remote enumeration is served from a briefly-cached FULL listing, not a hard
+// reach cap. A capped window would "clog": once the first N files are ingested
+// they still fill the window (the ledger dedups DOWNSTREAM, not during the
+// walk), so files added afterwards would never be seen — breaking the whole
+// point of watching a growing source. Instead the walk lists the source in full
+// and caches the result for INGEST_FEED_CACHE_MS, so cost is bounded by
+// FREQUENCY (one listing per cache window, reused by back-to-back drain ticks
+// and preview pages) rather than by size, with no reach limit. Same mechanism
+// as the connector feed. SAFETY_CAP is only an out-of-memory backstop for a
+// pathological source (narrow the base path if you ever hit it). Candidate
+// objects are read-only downstream (applyFilters/applySort copy), so serving a
+// cached array by reference is safe.
+const SAFETY_CAP = 100000;
+const windowCache = new Map();
+// TTL read per call: 0 = off (the tests use this); empty string counts as unset
+// → the 60s default (compose passes an unset knob through as "", and Number("")
+// is 0, which would silently disable the cache in the container).
+const cacheTtl = () => {
+  const v = process.env.INGEST_FEED_CACHE_MS;
+  return v == null || v === "" ? 60000 : Number(v);
+};
 
 // Resolve the backend for a board's source config. Dispatches by `source.type`
 // (absent → "folder", so existing file boards are unchanged), enforces the
@@ -91,19 +105,9 @@ export function descriptor() {
 // List the source's files into candidates the shared engine filters/sorts on.
 // `accept`/`maxBytes` are applied inside the backend walk so `limit` counts only
 // admissible files (identical to the pre-split folder behaviour).
-export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
-  const mod = getSourceBackend(cfg.source?.type || "folder");
-  // Bound remote walks (see REMOTE_ENUM_CAP); a local folder stays unbounded.
-  const cap = mod?.manifest.needsConnection ? Math.min(limit, REMOTE_ENUM_CAP) : limit;
-  const be = await resolveBackend(db, cfg.source);
-  const { entries, truncated } = await be.list({
-    path: sourcePath(cfg.source),
-    recursive: cfg.source?.recursive !== false,
-    limit: cap,
-    accept: acceptsName,
-    maxBytes: MAX_BYTES,
-  });
-  const candidates = entries
+// Map backend file entries → the candidate shape the shared engine filters/sorts.
+function toCandidates(entries) {
+  return entries
     .filter((e) => e.type === "file")
     .map((e) => ({
       key: e.key,
@@ -117,7 +121,35 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
         created: e.created,
       },
     }));
-  return { candidates, truncated };
+}
+
+export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
+  const type = cfg.source?.type || "folder";
+  const srcPath = sourcePath(cfg.source);
+  const recursive = cfg.source?.recursive !== false;
+  const remote = !!getSourceBackend(type)?.manifest.needsConnection;
+
+  // Remote: serve a briefly-cached full listing (see the cache note above) so a
+  // growing source is fully seen; the caller's `limit` is ignored — the ledger,
+  // filters and per-run limit downstream do the bounding. Keyed by what changes
+  // the listing (not the sort, which is applied downstream), so a count, its
+  // result pages, and back-to-back drain ticks in one window all reuse it.
+  if (remote) {
+    const key = `${type}|${cfg.source?.connectionId ?? ""}|${srcPath}|${recursive}`;
+    const ttl = cacheTtl();
+    const hit = windowCache.get(key);
+    if (hit && ttl > 0 && Date.now() - hit.at < ttl) return { candidates: hit.candidates, truncated: hit.truncated };
+    const be = await resolveBackend(db, cfg.source);
+    const { entries, truncated } = await be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytes: MAX_BYTES });
+    const result = { candidates: toCandidates(entries), truncated };
+    if (ttl > 0) windowCache.set(key, { at: Date.now(), ...result });
+    return result;
+  }
+
+  // Local folder: walk fresh each call (cheap, always current), honoring limit.
+  const be = await resolveBackend(db, cfg.source);
+  const { entries, truncated } = await be.list({ path: srcPath, recursive, limit, accept: acceptsName, maxBytes: MAX_BYTES });
+  return { candidates: toCandidates(entries), truncated };
 }
 
 // Admit one candidate: fetch the source file to tmp (never consume the
