@@ -9,6 +9,7 @@ import { providerSignal } from "../runtime.js";
 const BASE = "https://api.coingecko.com/api/v3";
 
 export const label = "CoinGecko";
+export const description = "Live crypto prices & market data — keyless";
 export const needsKey = false;
 // Calls/min the runtime paces to (demo key ~30/min; keyless is stricter — the
 // 429/401-under-load backoff covers the residual). A small burst keeps the

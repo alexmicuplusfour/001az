@@ -1,18 +1,18 @@
-// Plugins tab: the unified integrations catalog — AI providers, connector
-// data providers, media types — as a segmented list. Toggle = enabled
-// (usable), badge = the slot default (preselected); the gear opens each
-// plugin's own modal (plugin-modal.js) for keys/config/defaults. Everything
-// renders from GET /api/admin/plugins; this module holds no catalog
-// knowledge of its own. Self-guards on /api/me.
+// Plugins tab: the integrations catalog as a flat list of INSTALLED cards —
+// capabilities (the app's own: media handlers, the embedder) and connections
+// (AI providers, data providers) side by side, no segment headers. Each card =
+// label + one-line description + a right-aligned role tag; the gear opens the
+// plugin's config modal, Remove takes it off the page (disabled for core
+// capabilities). "Add plugin" browses what's available. Everything renders from
+// GET /api/admin/plugins; this module holds no catalog knowledge of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { makeSwitch } from "/board-modal.js";
 import { openPluginModal } from "/plugin-modal.js";
+import { openAddPluginModal } from "/plugin-add-modal.js";
 
 const GEAR_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
-const LOCK_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
 
-// Which provider currently backs the tagger / embedder slots (for badges).
+// Which provider currently backs the tagger / embedder slots (for badges + tag).
 // The tagger falls back to the anthropic env var when no default key is set.
 export function slotProviders(slots, keys) {
   const keyProvider = (id) => keys.find((k) => k.id === id)?.provider || null;
@@ -25,6 +25,34 @@ export function slotProviders(slots, keys) {
   return { tagger, embedder };
 }
 
+// The right-aligned tag: category + the role/qualifier that defines the card.
+// AI shows the slot it's currently the default for (tagger/embedder), else bare
+// "AI"; a data connector shows its domain; media is always core.
+export function tagFor(p, defaults) {
+  if (p.kind === "ai") {
+    if (defaults.tagger === p.name) return "AI · tagger";
+    if (defaults.embedder === p.name) return "AI · embedder";
+    return "AI";
+  }
+  if (p.kind === "connector") return `Data · ${p.connector.domain}`;
+  return "Media · core";
+}
+
+// The dynamic key state — whether a connection is configured yet. The static
+// description says "bring a key"; this says whether you have.
+function keyNote(p) {
+  if (p.kind === "ai") {
+    if (p.ai.keyless) return null;
+    const n = p.state.keyCount;
+    return n ? { text: `${n} key${n > 1 ? "s" : ""}` } : { text: "no key yet", warn: true };
+  }
+  if (p.kind === "connector") {
+    if (p.state.hasKey) return { text: "key stored" };
+    return p.connector.needsKey ? { text: "no key yet", warn: true } : { text: "keyless" };
+  }
+  return null;
+}
+
 export async function renderPlugins() {
   const me = await fetch("/api/me").then((r) => r.json());
   if (!me || !me.is_admin) return;
@@ -35,30 +63,33 @@ export async function renderPlugins() {
   } catch { return; }
   const { plugins, slots } = data;
   const defaults = slotProviders(slots, keys);
+  const installed = plugins.filter((p) => p.state.installed);
+  const available = plugins.filter((p) => !p.state.installed);
 
   const sec = document.createElement("div");
   sec.className = "section";
-  sec.innerHTML = `<h2>Plugins</h2><p class="sub">Every integration in one place. The switch turns a plugin on or off; a badge marks the default for its slot (tagger, embedder, data provider). Configure keys and options via the gear.</p>`;
-
-  // Segments in display order: AI, then each connector domain, then media.
-  const segs = [];
-  const bySeg = new Map();
-  for (const p of plugins) {
-    if (!bySeg.has(p.segment)) { bySeg.set(p.segment, []); segs.push(p.segment); }
-    bySeg.get(p.segment).push(p);
-  }
-  const segLabel = (seg, list) =>
-    seg === "ai" ? "AI providers" : seg === "media" ? "Media types" : list[0].connector.domainLabel;
+  sec.innerHTML = `<h2>Plugins</h2><p class="sub">Capabilities and connections in one place. Add the services you use; core capabilities are always on. Configure keys and options via the gear.</p>`;
 
   const ctx = { slots, keys, defaults, refresh: renderPlugins };
-  for (const seg of segs) {
-    const list = bySeg.get(seg);
-    const box = document.createElement("div");
-    box.className = "plugin-seg";
-    box.innerHTML = `<h3>${segLabel(seg, list)}</h3>`;
-    for (const p of list) box.appendChild(pluginRow(p, ctx));
-    sec.appendChild(box);
+
+  const list = document.createElement("div");
+  list.className = "plugin-list";
+  for (const p of installed) list.appendChild(pluginRow(p, ctx));
+  sec.appendChild(list);
+
+  const add = document.createElement("div");
+  add.className = "plugin-add";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.textContent = "+ Add plugin";
+  if (available.length) {
+    addBtn.onclick = () => openAddPluginModal(available, ctx);
+  } else {
+    addBtn.disabled = true;
+    addBtn.title = "Everything available is already installed";
   }
+  add.appendChild(addBtn);
+  sec.appendChild(add);
 
   document.getElementById("plugins-content").replaceChildren(sec);
 }
@@ -70,35 +101,22 @@ function badge(text, cls = "") {
   return b;
 }
 
-function rowHint(p, ctx) {
-  if (p.kind === "ai") {
-    if (p.ai.keyless) return "runs on-server · no API key";
-    const n = p.state.keyCount;
-    const env = p.name === "anthropic" && ctx.slots.tagger.envKey ? " · env key" : "";
-    return (n ? `${n} key${n > 1 ? "s" : ""}` : "no keys") + env;
-  }
-  if (p.kind === "connector")
-    return p.state.hasKey ? "key stored" : p.connector.needsKey ? "no key yet" : "keyless tier";
-  return p.capabilities.extensions.map((e) => "." + e).join(" ");
-}
-
 function pluginRow(p, ctx) {
   const row = document.createElement("div");
-  row.className = "plugin-row" + (p.state.enabled ? "" : " is-off");
+  row.className = "plugin-row";
 
-  const dot = document.createElement("span");
-  const h = p.state.health;
-  dot.className = "dot" +
-    (!p.state.enabled ? " off" : h?.failCount >= 3 ? " bad" : h?.failCount >= 1 ? " warn" : "");
-  if (h?.lastError?.message) dot.title = h.lastError.message;
-  row.appendChild(dot);
-
-  const label = document.createElement("span");
+  const main = document.createElement("div");
+  main.className = "p-main";
+  const label = document.createElement("div");
   label.className = "p-label";
   label.textContent = p.label;
-  row.appendChild(label);
+  const desc = document.createElement("div");
+  desc.className = "p-desc";
+  desc.textContent = p.description || "";
+  main.append(label, desc);
+  row.appendChild(main);
 
-  // slot badges
+  // slot default badges
   if (p.kind === "ai") {
     if (ctx.defaults.tagger === p.name)
       row.appendChild(badge(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env"));
@@ -106,39 +124,28 @@ function pluginRow(p, ctx) {
   }
   if (p.kind === "connector") {
     const d = ctx.slots.domains[p.connector.domain] || {};
-    const starred = (d.setting || d.effective) === p.name;
-    if (starred) {
+    // Badge whichever card actually resolves as the domain default (d.effective),
+    // not the stored star — so removing the starred provider still shows the
+    // active fallback as default. Note when the star points elsewhere (e.g. it
+    // was removed): the star setting is preserved so re-adding restores it.
+    if (d.effective === p.name) {
       row.appendChild(badge("default"));
-      // truthful UI: a disabled default keeps its star, with the fallback named
-      if (!p.state.enabled && d.effective && d.effective !== p.name)
-        row.appendChild(badge(`falling back to ${d.effective}`, "warn"));
+      if (d.setting && d.setting !== d.effective) row.appendChild(badge(`was ${d.setting}`, "warn"));
     }
   }
 
-  const hint = document.createElement("span");
-  hint.className = "p-hint";
-  hint.textContent = rowHint(p, ctx);
-  row.appendChild(hint);
-
-  if (p.core) {
-    const lock = document.createElement("span");
-    lock.className = "core-lock";
-    lock.title = "Core plugin — always on";
-    lock.innerHTML = LOCK_SVG;
-    row.appendChild(lock);
-  } else {
-    const sw = makeSwitch(p.state.enabled, async (on) => {
-      try {
-        await api("PATCH", `/api/admin/plugins/${p.id}`, { enabled: on });
-        toast(`${p.label} ${on ? "enabled" : "disabled"}`);
-        ctx.refresh();
-      } catch (err) {
-        toast.error(err.message);
-        ctx.refresh();
-      }
-    }, { small: true });
-    row.appendChild(sw);
+  const note = keyNote(p);
+  if (note) {
+    const el = document.createElement("span");
+    el.className = "p-note" + (note.warn ? " warn" : "");
+    el.textContent = note.text;
+    row.appendChild(el);
   }
+
+  const tag = document.createElement("span");
+  tag.className = "p-tag";
+  tag.textContent = tagFor(p, ctx.defaults);
+  row.appendChild(tag);
 
   const gear = document.createElement("button");
   gear.className = "gear";
@@ -147,5 +154,47 @@ function pluginRow(p, ctx) {
   gear.onclick = () => openPluginModal(p, ctx);
   row.appendChild(gear);
 
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "p-remove";
+  remove.textContent = "Remove";
+  if (p.core) {
+    remove.disabled = true;
+    remove.title = "Core capability — always installed";
+  } else {
+    remove.onclick = () => removePlugin(p, ctx);
+  }
+  row.appendChild(remove);
+
   return row;
+}
+
+// Remove never blocks (graceful degradation) — it just names the impact first.
+async function removePlugin(p, ctx) {
+  const impact = removalImpact(p, ctx);
+  const msg = `Remove ${p.label}?` +
+    (impact ? `\n\n${impact}` : "") +
+    `\n\nExisting boards keep their data — it just won't refresh until you add it back.`;
+  if (!confirm(msg)) return;
+  try {
+    await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: false });
+    toast(`${p.label} removed`);
+    ctx.refresh();
+  } catch (err) {
+    toast.error(err.message);
+  }
+}
+
+function removalImpact(p, ctx) {
+  if (p.kind === "ai") {
+    const roles = [];
+    if (ctx.defaults.tagger === p.name) roles.push("the default tagger");
+    if (ctx.defaults.embedder === p.name) roles.push("the default embedder");
+    if (roles.length) return `This is ${roles.join(" and ")}.`;
+  }
+  if (p.kind === "connector") {
+    const d = ctx.slots.domains[p.connector.domain] || {};
+    if ((d.setting || d.effective) === p.name) return `This is the default ${p.connector.domain} provider.`;
+  }
+  return "";
 }

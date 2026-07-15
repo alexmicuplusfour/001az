@@ -96,7 +96,7 @@ import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
 import { liveFields, faceCadence } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
-import { pluginCatalog, getPluginDef, pluginState } from "./plugins.js";
+import { pluginCatalog, getPluginDef, pluginState, pluginInstalled } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
@@ -1024,13 +1024,12 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
 // admin UI renders its provider/model pickers from this instead of hardcoding
 // them, so a new provider needs no client edit.
 app.get("/api/admin/ai-providers", requireAdmin, wrap(async (_req, res) => {
-  // The static catalog + each provider's plugin enabled flag, so the two
-  // consumers (board modal's per-board override, the Plugins page) can mark
-  // or skip toggled-off providers without a second fetch.
+  // The static catalog + each provider's install flag, so the two consumers
+  // (board modal's per-board override, the Plugins page) can mark or skip
+  // not-installed providers without a second fetch.
   const catalog = providerCatalog();
   for (const p of catalog) {
-    const row = await getPluginRow(db, `ai:${p.name}`);
-    p.enabled = row ? row.enabled : true;
+    p.installed = await pluginInstalled(db, `ai:${p.name}`);
   }
   res.json(catalog);
 }));
@@ -1046,9 +1045,9 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   for (const c of listConnectors()) {
     const conn = getConnector(c.name);
     // setting = the stored star; effective = what resolution lands on (they
-    // diverge when the starred provider is disabled — the UI shows both).
+    // diverge when the starred provider isn't installed — the UI shows both).
     let effective = null;
-    try { effective = (await conn.activeProvider(db)).name; } catch { /* every provider disabled */ }
+    try { effective = (await conn.activeProvider(db)).name; } catch { /* no provider installed */ }
     domains[c.name] = { setting: (await getSetting(db, `${c.name}_provider`)) || null, effective };
   }
   res.json({
@@ -1083,7 +1082,7 @@ app.post("/api/admin/plugins/slots/:domain", requireAdmin, wrap(async (req, res)
   const desc = providers.find((p) => p.name === provider);
   if (!desc) return res.status(400).json({ error: `provider must be one of: ${providers.map((p) => p.name).join(", ")}` });
   const st = await pluginState(db, `${req.params.domain}:${provider}`);
-  if (!st.enabled) return res.status(400).json({ error: `${desc.label} is disabled — enable it first` });
+  if (!st.installed) return res.status(400).json({ error: `${desc.label} is not installed — add it first` });
   if (desc.needsKey && !(await getSetting(db, `${req.params.domain}_key_${provider}`)))
     return res.status(400).json({ error: `${desc.label} needs an API key` });
   await setSetting(db, `${req.params.domain}_provider`, provider);
@@ -1091,18 +1090,18 @@ app.post("/api/admin/plugins/slots/:domain", requireAdmin, wrap(async (req, res)
   res.json({ ok: true });
 }));
 
-// Enable/disable a plugin and/or write its schema-declared config. Validated
-// against the plugin's own configSchema; everything checks out before
+// Add/remove a plugin (install state) and/or write its schema-declared config.
+// Validated against the plugin's own configSchema; everything checks out before
 // anything is written, so a bad field can't half-apply. Secret fields never
 // land in plugins.config — they write through to their real store.
 app.patch("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
   const def = getPluginDef(req.params.id);
   if (!def) return res.status(404).json({ error: "unknown plugin" });
-  const { enabled, config } = req.body || {};
+  const { installed, config } = req.body || {};
 
-  if (enabled !== undefined) {
-    if (typeof enabled !== "boolean") return res.status(400).json({ error: "enabled must be true or false" });
-    if (def.core && !enabled) return res.status(400).json({ error: `${def.label} is a core plugin and can't be disabled` });
+  if (installed !== undefined) {
+    if (typeof installed !== "boolean") return res.status(400).json({ error: "installed must be true or false" });
+    if (def.core && !installed) return res.status(400).json({ error: `${def.label} is a core capability and can't be removed` });
   }
 
   let nextConfig;
@@ -1142,9 +1141,9 @@ app.patch("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
   }
 
   for (const [key, val] of secretWrites) await setSetting(db, key, val);
-  if (enabled !== undefined || nextConfig !== undefined)
-    await setPluginState(db, def.id, { enabled, config: nextConfig });
-  console.log(`plugin ${def.id} updated by admin: enabled=${enabled ?? "(unchanged)"}${nextConfig ? " +config" : ""}${secretWrites.length ? " +key" : ""}`);
+  if (installed !== undefined || nextConfig !== undefined)
+    await setPluginState(db, def.id, { installed, config: nextConfig });
+  console.log(`plugin ${def.id} updated by admin: installed=${installed ?? "(unchanged)"}${nextConfig ? " +config" : ""}${secretWrites.length ? " +key" : ""}`);
   res.json({ ok: true, state: await pluginState(db, def.id) });
 }));
 

@@ -7,7 +7,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
 import { pluginDefs, getPluginDef, pluginState, pluginCatalog } from "../server/plugins.js";
-import { setPluginState, setSetting, getSetting, createAiKey, recordPluginHealth, getPluginRow } from "../server/db.js";
+import { setPluginState, setSetting, getSetting, createAiKey, recordPluginHealth, getPluginRow, updateBoard } from "../server/db.js";
+import { up as carryConnectorInstalls } from "../server/migrations/0018_carry_connector_installs.js";
 import { getConnector } from "../server/connectors/index.js";
 import { resolveDefaultAi, resolveBoardAi, resolveEmbedder } from "../server/worker.js";
 
@@ -24,10 +25,19 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   for (const d of pluginDefs()) {
     assert.equal(d.id, `${d.segment}:${d.name}`);
     assert.ok(["ai", "connector", "media"].includes(d.kind), d.id);
+    // Every card must say what it is: a label and a one-line description.
+    assert.ok(d.label && d.label.trim(), `${d.id}: has a label`);
+    assert.ok(d.description && d.description.trim(), `${d.id}: has a description`);
     for (const f of d.configSchema) assert.ok(FIELD_TYPES.has(f.type), `${d.id}.${f.key}: known field type`);
   }
-  // core = images only (sharp is shared infra; everything else may toggle)
-  assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id), ["media:image"]);
+  // the embedder is named for what it is, not a vague "Local"
+  assert.equal(getPluginDef("ai:local").label, "Xenova");
+  // core = the app's own capabilities (always installed, not removable): every
+  // media handler + the on-device embedder.
+  assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
+    ["ai:local", "media:image", "media:text", "media:pdf", "media:docx"]);
+  // exactly one connection is pre-added — the flagship AI provider.
+  assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
 });
 
 test("defs: capabilities mirror the underlying descriptors", () => {
@@ -60,25 +70,45 @@ before(async () => {
 });
 after(() => srv.close());
 
-test("state: absent row = enabled with schema defaults; writes are partial", async () => {
+test("state: install defaults follow the tier; config is schema-default overlaid", async () => {
+  // No row yet: connections are available (not installed), the flagship is
+  // pre-added, core capabilities are always installed.
+  assert.equal((await pluginState(db, "crypto:coingecko")).installed, false);
+  assert.equal((await pluginState(db, "ai:openai")).installed, false);
+  assert.equal((await pluginState(db, "ai:anthropic")).installed, true, "flagship pre-added");
+  assert.equal((await pluginState(db, "ai:local")).installed, true, "embedder is core");
+  assert.equal((await pluginState(db, "media:pdf")).installed, true, "media is core");
+
   const fresh = await pluginState(db, "crypto:coingecko");
-  assert.equal(fresh.enabled, true);
   assert.equal(fresh.config.rpm, getPluginDef("crypto:coingecko").configSchema.find((f) => f.key === "rpm").default);
 
+  // Partial writes: a config-only write leaves install state alone (NULL → tier
+  // default), and an install write never clobbers config.
   await setPluginState(db, "crypto:coingecko", { config: { rpm: 5 } });
-  await setPluginState(db, "crypto:coingecko", { enabled: false }); // must not clobber config
+  assert.equal((await pluginState(db, "crypto:coingecko")).installed, false, "config write kept the default install state");
+  await setPluginState(db, "crypto:coingecko", { installed: true });
   const s = await pluginState(db, "crypto:coingecko");
-  assert.equal(s.enabled, false);
-  assert.equal(s.config.rpm, 5);
+  assert.equal(s.installed, true);
+  assert.equal(s.config.rpm, 5, "install write kept config");
   assert.ok(s.config.burst, "unset fields keep their schema default");
 
-  await setPluginState(db, "crypto:coingecko", { enabled: true, config: {} });
+  await setPluginState(db, "crypto:coingecko", { installed: false, config: {} });
 });
 
-test("state: a core plugin reads enabled no matter what the row says", async () => {
-  await setPluginState(db, "media:image", { enabled: false });
-  assert.equal((await pluginState(db, "media:image")).enabled, true);
-  await setPluginState(db, "media:image", { enabled: true });
+test("state: a core plugin reads installed no matter what the row says", async () => {
+  await setPluginState(db, "media:image", { installed: false });
+  assert.equal((await pluginState(db, "media:image")).installed, true);
+  await setPluginState(db, "media:image", { installed: true });
+});
+
+test("state: a health-only row (NULL installed) falls to the tier default", async () => {
+  // recordPluginHealth writes a row WITHOUT installed — a plugin that was merely
+  // called must not read as explicitly installed.
+  await recordPluginHealth(db, "ai:gemini", new Error("boom"));
+  const row = await getPluginRow(db, "ai:gemini");
+  assert.equal(row.installed, null, "health write leaves installed NULL");
+  assert.equal((await pluginState(db, "ai:gemini")).installed, false, "still available, not installed");
+  await recordPluginHealth(db, "ai:gemini"); // heal, leaving the NULL row
 });
 
 test("health: failures streak, success writes only when healing", async () => {
@@ -134,27 +164,29 @@ test("GET /api/admin/plugins: admin-only; plugins + slots in one payload", async
   // slot state reads the same settings the legacy routes use
   assert.equal(r.json.slots.tagger.keyId, null);
   assert.equal(r.json.slots.embedder.enabled, false);
-  assert.deepEqual(r.json.slots.domains.crypto, { setting: null, effective: "coingecko" });
-  assert.deepEqual(r.json.slots.domains.stocks, { setting: null, effective: "financialmodelingprep" });
+  // Nothing is installed by default in either connector domain, so resolution
+  // has nothing to land on — effective is null until a provider is added.
+  assert.deepEqual(r.json.slots.domains.crypto, { setting: null, effective: null });
+  assert.deepEqual(r.json.slots.domains.stocks, { setting: null, effective: null });
 });
 
 // --- slice 3: writes + enforcement ---
 
 test("PATCH /api/admin/plugins/:id: the validation matrix", async () => {
   const p = (id, body) => req(base, "PATCH", `/api/admin/plugins/${id}`, { sid: admin.sid, body });
-  assert.equal((await p("crypto:nope", { enabled: false })).status, 404);
+  assert.equal((await p("crypto:nope", { installed: false })).status, 404);
   assert.equal((await req(base, "PATCH", "/api/admin/plugins/crypto:coingecko")).status, 403); // anon
 
-  const core = await p("media:image", { enabled: false });
+  const core = await p("media:image", { installed: false });
   assert.equal(core.status, 400);
-  assert.match(core.json.error, /core/);
+  assert.match(core.json.error, /can't be removed/);
 
-  assert.equal((await p("crypto:coingecko", { enabled: "yes" })).status, 400);
+  assert.equal((await p("crypto:coingecko", { installed: "yes" })).status, 400);
   assert.equal((await p("crypto:coingecko", { config: { bogus: 1 } })).status, 400);
   assert.equal((await p("crypto:coingecko", { config: { rpm: 0 } })).status, 400);
   assert.equal((await p("crypto:coingecko", { config: { rpm: "abc" } })).status, 400);
-  // nothing half-applied by the failures above
-  assert.equal((await pluginState(db, "crypto:coingecko")).enabled, true);
+  // nothing half-applied by the failures above (coingecko is available by default)
+  assert.equal((await pluginState(db, "crypto:coingecko")).installed, false);
 
   const ok = await p("crypto:coingecko", { config: { rpm: 5 } });
   assert.equal(ok.status, 200);
@@ -176,44 +208,50 @@ test("PATCH: a secret writes through to the settings store, never plugins.config
   assert.equal(await getSetting(db, "stocks_key_financialmodelingprep"), null);
 });
 
-test("slots/:domain: starring validates enabled + key, then writes the setting", async () => {
+test("slots/:domain: starring validates installed + key, then writes the setting", async () => {
   const star = (domain, provider) => req(base, "POST", `/api/admin/plugins/slots/${domain}`, { sid: admin.sid, body: { provider } });
   assert.equal((await star("movies", "x")).status, 404);
   assert.equal((await star("crypto", "nope")).status, 400);
 
-  // coinmarketcap needs a key; its settings key was set earlier in this file
+  // an available (not-installed) provider can't be starred — add it first
+  const notAdded = await star("crypto", "coinmarketcap");
+  assert.equal(notAdded.status, 400);
+  assert.match(notAdded.json.error, /not installed/);
+
+  // install it (its settings key was set earlier in this file); now it stars
+  await setPluginState(db, "crypto:coinmarketcap", { installed: true });
   const ok = await star("crypto", "coinmarketcap");
   assert.equal(ok.status, 200);
   assert.equal(await getSetting(db, "crypto_provider"), "coinmarketcap");
 
-  await setPluginState(db, "crypto:coingecko", { enabled: false });
-  const dis = await star("crypto", "coingecko");
-  assert.equal(dis.status, 400);
-  assert.match(dis.json.error, /disabled/);
-  await setPluginState(db, "crypto:coingecko", { enabled: true });
+  // install coingecko so the rest of the suite has a live crypto provider
+  await setPluginState(db, "crypto:coingecko", { installed: true });
   await star("crypto", "coingecko"); // leave coingecko starred for later tests
 
+  // fmp installed but keyless → the key guard fires (installed check passes first)
+  await setPluginState(db, "stocks:financialmodelingprep", { installed: true });
   await setSetting(db, "stocks_key_financialmodelingprep", null);
   const nokey = await star("stocks", "financialmodelingprep");
   assert.equal(nokey.status, 400);
   assert.match(nokey.json.error, /API key/);
 });
 
-test("activeProvider: disabled default falls forward; all-disabled throws readably", async () => {
+test("activeProvider: not-installed default falls forward; none-installed throws readably", async () => {
   const conn = getConnector("crypto");
+  // both installed + coingecko starred from the previous test
   assert.equal((await conn.activeProvider(db)).name, "coingecko");
 
-  await setPluginState(db, "crypto:coingecko", { enabled: false });
+  await setPluginState(db, "crypto:coingecko", { installed: false });
   assert.equal((await conn.activeProvider(db)).name, "coinmarketcap");
 
-  await setPluginState(db, "crypto:coinmarketcap", { enabled: false });
-  await assert.rejects(conn.activeProvider(db), /every crypto provider is disabled/);
+  await setPluginState(db, "crypto:coinmarketcap", { installed: false });
+  await assert.rejects(conn.activeProvider(db), /no crypto provider is installed/);
   // the catalog route reports effective=null instead of erroring
   const r = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
   assert.equal(r.json.slots.domains.crypto.effective, null);
 
-  await setPluginState(db, "crypto:coingecko", { enabled: true });
-  await setPluginState(db, "crypto:coinmarketcap", { enabled: true });
+  await setPluginState(db, "crypto:coingecko", { installed: true });
+  await setPluginState(db, "crypto:coinmarketcap", { installed: true });
 });
 
 test("activeProvider: config rpm/burst overrides ride the returned descriptor", async () => {
@@ -225,69 +263,48 @@ test("activeProvider: config rpm/burst overrides ride the returned descriptor", 
   await setPluginState(db, "crypto:coingecko", { config: {} });
 });
 
-test("resolvers: a disabled AI plugin drops out; fallbacks stay graceful", async () => {
+test("resolvers: a not-installed AI plugin drops out; fallbacks stay graceful", async () => {
   const savedEnv = process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   try {
+    // openai is available by default — a default key on a not-installed provider
+    // resolves to nothing until it's added.
     const keyId = await createAiKey(db, "main", "openai", "sk-t1");
     await setSetting(db, "default_key_id", String(keyId));
+    assert.equal(await resolveDefaultAi(db), null, "not installed → drops out");
+
+    await setPluginState(db, "ai:openai", { installed: true });
     assert.equal((await resolveDefaultAi(db)).provider, "openai");
 
-    await setPluginState(db, "ai:openai", { enabled: false });
-    assert.equal(await resolveDefaultAi(db), null); // no env fallback here
-
-    // a board pinned to the disabled provider falls through to the default
-    await setPluginState(db, "ai:openai", { enabled: true });
+    // a board pinned to an available (not-installed) provider falls through to
+    // the default — gemini is never added here.
     const gkey = await createAiKey(db, "g", "gemini", "sk-t2");
-    await setPluginState(db, "ai:gemini", { enabled: false });
     const viaBoard = await resolveBoardAi(db, { aiKeyId: gkey, aiModel: "gemini-2.5-pro" });
     assert.equal(viaBoard.provider, "openai");
 
-    // env fallback honors the anthropic toggle
+    // env fallback honors the anthropic install state (pre-added by default)
     process.env.ANTHROPIC_API_KEY = "sk-env";
     await setSetting(db, "default_key_id", null);
     assert.equal((await resolveDefaultAi(db)).provider, "anthropic");
-    await setPluginState(db, "ai:anthropic", { enabled: false });
+    await setPluginState(db, "ai:anthropic", { installed: false });
     assert.equal(await resolveDefaultAi(db), null);
 
-    // embedder: local pauses when ai:local is off
+    // embedder: local is core (always installed); the sweep is gated by the
+    // embed_enabled setting, not install state.
     await setSetting(db, "embed_enabled", "1");
     await setSetting(db, "embed_provider", "local");
     assert.equal((await resolveEmbedder(db)).provider, "local");
-    await setPluginState(db, "ai:local", { enabled: false });
-    assert.equal(await resolveEmbedder(db), null);
+    await setSetting(db, "embed_enabled", null);
+    assert.equal(await resolveEmbedder(db), null, "off via the setting, not a removal");
   } finally {
     if (savedEnv !== undefined) process.env.ANTHROPIC_API_KEY = savedEnv;
     else delete process.env.ANTHROPIC_API_KEY;
-    await setPluginState(db, "ai:anthropic", { enabled: true });
-    await setPluginState(db, "ai:gemini", { enabled: true });
-    await setPluginState(db, "ai:local", { enabled: true });
+    await setPluginState(db, "ai:anthropic", { installed: true });
+    await setPluginState(db, "ai:openai", { installed: false });
     await setSetting(db, "embed_enabled", null);
     await setSetting(db, "embed_provider", null);
     await setSetting(db, "default_key_id", null);
   }
-});
-
-test("upload door: a disabled media plugin refuses its extensions readably", async () => {
-  const board = await seedBoard(db, "plugin-uploads");
-  const send = async (name, content) => {
-    const fd = new FormData();
-    fd.append("files", new File([content], name, { type: "text/plain" }));
-    const res = await fetch(`${base}/api/upload?board=${board}`, {
-      method: "POST", headers: { Cookie: `sid=${admin.sid}` }, body: fd,
-    });
-    return res.json();
-  };
-
-  await setPluginState(db, "media:text", { enabled: false });
-  const r1 = await send("notes.txt", "hello");
-  assert.equal(r1.uploaded.length, 0);
-  assert.match(r1.rejected[0].reason, /disabled.*Plugins page/);
-
-  await setPluginState(db, "media:text", { enabled: true });
-  const r2 = await send("notes.txt", "hello");
-  assert.equal(r2.uploaded.length, 1);
-  assert.equal(r2.rejected.length, 0);
 });
 
 test("health ledger: connector traffic records failures and heals through the runtime", async () => {
@@ -317,4 +334,28 @@ test("health ledger: connector traffic records failures and heals through the ru
   row = await getPluginRow(db, "crypto:coingecko");
   assert.equal(row.fail_count, 0);
   assert.equal(row.last_error, null);
+});
+
+test("migration 0018: carries in-use connectors over on upgrade", async () => {
+  // A crypto board (its default is in use) + a stored FMP key (adopted).
+  const boardId = await seedBoard(db, "carry-crypto");
+  await updateBoard(db, boardId, {
+    mapping: { input: { connector: "crypto" }, identity: { from: "connector" }, fields: [] },
+  });
+  await setSetting(db, "stocks_key_financialmodelingprep", "fmp-carry");
+  // Reset to the post-0017 "available" posture so 0018's restore is observable.
+  // Clear cmc's key (set by an earlier test) so it's the clean negative case:
+  // a non-default provider with no key and no board of its own.
+  await setSetting(db, "crypto_key_coinmarketcap", null);
+  await setPluginState(db, "crypto:coingecko", { installed: false });
+  await setPluginState(db, "crypto:coinmarketcap", { installed: false });
+  await setPluginState(db, "stocks:financialmodelingprep", { installed: false });
+
+  await carryConnectorInstalls(db);
+
+  assert.equal((await pluginState(db, "crypto:coingecko")).installed, true, "keyless default of a domain with boards");
+  assert.equal((await pluginState(db, "stocks:financialmodelingprep")).installed, true, "adopted via a stored key");
+  assert.equal((await pluginState(db, "crypto:coinmarketcap")).installed, false, "no key, not the default → stays available");
+
+  await setSetting(db, "stocks_key_financialmodelingprep", null);
 });

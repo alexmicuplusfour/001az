@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { startServer, adminSession, seedUser, seedBoard, seedItem, req } from "./helpers.js";
-import { mintPermanentInvite, setBoardMembers, createAiKey, setSetting } from "../server/db.js";
+import { mintPermanentInvite, setBoardMembers, createAiKey, setSetting, setPluginState } from "../server/db.js";
 
 let srv, db, base;
 let admin, member, outsider;
@@ -188,7 +188,9 @@ test("semantic search respects auth, board access, and the enabled flag", async 
   r = await req(base, "GET", `/api/search?board=${boardA}&q=x`);
   assert.equal(r.status, 401);
 
-  // Turn it on with a fake (never-called) eligible key.
+  // Turn it on with a fake (never-called) eligible key. OpenAI must be added
+  // (available-not-installed by default) for the embedder to resolve.
+  await setPluginState(db, "ai:openai", { installed: true });
   const keyId = await createAiKey(db, "embed-test", "openai", "sk-test");
   await setSetting(db, "embed_key_id", String(keyId));
   await setSetting(db, "embed_enabled", "1");

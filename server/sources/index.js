@@ -43,22 +43,11 @@ export function createSources({ galleryDir, thumbsDir }) {
 
   return {
     // Picked by extension; everything unmatched goes to the image handler,
-    // whose sharp sniff is the real gate (non-images come back null).
-    // `disabled` (a Set of handler names from the plugin registry) refuses
-    // the extension readably — new ingestion only; existing items are
-    // untouched by a disable. Throws WITHOUT err.unprocessable semantics:
-    // callers gate before their deterministic-refusal handling, so folder
-    // feeds retry after a re-enable instead of ledgering the file forever.
-    forUpload(originalName, disabled) {
-      const name = byExt.get(extOf(originalName)) || "image";
-      if (disabled?.has(name)) {
-        const m = MANIFESTS.find((x) => x.name === name);
-        const err = new Error(`${m.label} are disabled (Plugins page)`);
-        err.reason = err.message;
-        err.mediaDisabled = true;
-        throw err;
-      }
-      return handlers[name];
+    // whose sharp sniff is the real gate (non-images come back null). Media
+    // handlers are core capabilities (always present), so there's no
+    // disabled-type refusal here.
+    forUpload(originalName) {
+      return handlers[byExt.get(extOf(originalName)) || "image"];
     },
 
     // Remove everything a payload's files put on disk.

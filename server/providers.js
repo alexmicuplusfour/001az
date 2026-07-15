@@ -247,6 +247,7 @@ const compatWire = {
 
 const anthropic = {
   label: "Anthropic",
+  description: "Claude models for tagging & descriptions — bring a key",
   wire: anthropicWire,
   defaultModel: "claude-haiku-4-5",
   models: [
@@ -260,6 +261,7 @@ const anthropic = {
 
 const openai = {
   label: "OpenAI",
+  description: "GPT models for tagging + embeddings — bring a key",
   wire: compatWire,
   base: "https://api.openai.com/v1",
   defaultModel: "gpt-5-mini",
@@ -281,6 +283,7 @@ const openai = {
 
 const gemini = {
   label: "Gemini",
+  description: "Google models for tagging + embeddings — bring a key",
   wire: compatWire,
   base: "https://generativelanguage.googleapis.com/v1beta/openai",
   defaultModel: "gemini-2.5-flash",
@@ -307,6 +310,7 @@ const gemini = {
 // embeddings API on the international platform.
 const glm = {
   label: "GLM",
+  description: "Z.ai GLM models for tagging — bring a key",
   wire: compatWire,
   base: "https://api.z.ai/api/paas/v4",
   defaultModel: "glm-4.6v",
@@ -324,7 +328,8 @@ const glm = {
 // and models fields are intentionally empty; `keyless` marks it as something
 // that must never appear in the API key registration form.
 const local = {
-  label: "Local",
+  label: "Xenova",
+  description: "On-device embeddings for search — no API key (transformers.js)",
   wire: null,
   defaultModel: null,
   models: [],
@@ -344,6 +349,7 @@ const local = {
 // be verified at zero cost; the default is a cheap dedicated vision model.
 const openrouter = {
   label: "OpenRouter",
+  description: "Many model backends behind one key",
   wire: compatWire,
   base: "https://openrouter.ai/api/v1",
   defaultModel: "qwen/qwen3-vl-32b-instruct",
@@ -405,6 +411,7 @@ export function providerCatalog() {
     return {
       name,
       label: p.label,
+      description: p.description || "",
       defaultModel: p.defaultModel,
       models: p.models,
       research: p.research,

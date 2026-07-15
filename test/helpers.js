@@ -17,6 +17,7 @@ import {
   setBoardMembers,
   createEntity,
   insertItem,
+  setPluginState,
 } from "../server/db.js";
 
 const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgres://gallery:gallery@127.0.0.1:5433/postgres";
@@ -81,6 +82,13 @@ export async function adminSession(db) {
 export async function seedUser(db, email) {
   const u = await createUser(db, email, null);
   return { id: u.id, sid: await createSession(db, u.id), email };
+}
+
+// Connector providers are "available, not installed" by default (the plugin
+// install model), so activeProvider throws until one is added. A test that
+// exercises a connector adds it first, exactly like a user would.
+export async function installConnectors(db, ...ids) {
+  for (const id of ids) await setPluginState(db, id, { installed: true });
 }
 
 export async function seedBoard(db, name, memberIds = []) {

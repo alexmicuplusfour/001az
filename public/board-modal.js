@@ -408,10 +408,10 @@ export async function openBoardModal(board, opts = {}) {
       for (const k of keys) {
         const opt = document.createElement("option");
         opt.value = String(k.id);
-        // A disabled plugin's keys stay pickable (defaults not laws) but say
-        // so — the worker falls back to the app default while it's off.
-        const off = aiCatalog[k.provider]?.enabled === false;
-        opt.textContent = `${k.name} — ${k.provider}${off ? " · disabled" : ""}`;
+        // A not-installed provider's keys stay pickable (defaults not laws) but
+        // say so — the worker falls back to the app default while it's not added.
+        const off = aiCatalog[k.provider]?.installed === false;
+        opt.textContent = `${k.name} — ${k.provider}${off ? " · not installed" : ""}`;
         aiKeySel.appendChild(opt);
       }
       if (board && board.ai_key_id && keys.find((k) => k.id === board.ai_key_id)) {

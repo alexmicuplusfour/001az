@@ -1019,9 +1019,9 @@ export async function setSetting(db, key, value) {
 }
 
 // --- plugins ---
-// One row per plugin id; an ABSENT row means enabled with default config
-// (server/plugins.js coalesces), so nothing is ever seeded. `config` holds
-// only schema-declared overrides — secrets live in their existing stores.
+// One row per plugin id; an ABSENT (or NULL-installed) row falls to the tier
+// default (server/plugins.js coalesces), so nothing is ever seeded. `config`
+// holds only schema-declared overrides — secrets live in their existing stores.
 
 export async function listPluginRows(db) {
   const { rows } = await db.query("SELECT * FROM plugins");
@@ -1033,17 +1033,18 @@ export async function getPluginRow(db, id) {
   return rows[0] || null;
 }
 
-// Partial upsert: an undefined field leaves the stored value (or the absent-row
-// default) alone, so a toggle write never clobbers config and vice versa.
-export async function setPluginState(db, id, { enabled, config } = {}) {
+// Partial upsert: an undefined field leaves the stored value alone, so an
+// install write never clobbers config and vice versa. A config-only write
+// leaves `installed` NULL (falls to the tier default) rather than forcing it.
+export async function setPluginState(db, id, { installed, config } = {}) {
   await db.query(
-    `INSERT INTO plugins (id, enabled, config, updated_at)
-     VALUES ($1, COALESCE($2, TRUE), COALESCE($3::jsonb, '{}'::jsonb), $4)
+    `INSERT INTO plugins (id, installed, config, updated_at)
+     VALUES ($1, $2, COALESCE($3::jsonb, '{}'::jsonb), $4)
      ON CONFLICT (id) DO UPDATE SET
-       enabled    = COALESCE($2, plugins.enabled),
+       installed  = COALESCE($2, plugins.installed),
        config     = COALESCE($3::jsonb, plugins.config),
        updated_at = $4`,
-    [id, enabled ?? null, config !== undefined ? JSON.stringify(config) : null, Date.now()]
+    [id, installed ?? null, config !== undefined ? JSON.stringify(config) : null, Date.now()]
   );
 }
 

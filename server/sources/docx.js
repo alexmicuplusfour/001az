@@ -15,6 +15,7 @@ import { textCounts, renderTextPreview } from "./shared.js";
 export const manifest = {
   name: "docx",
   label: "Word documents",
+  description: "Extract text from .docx (via mammoth)",
   extensions: ["docx"],
   kinds: ["docx"],
 };

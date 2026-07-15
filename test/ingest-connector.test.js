@@ -6,7 +6,7 @@
 // mocked provider.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedBoard, req } from "./helpers.js";
+import { startServer, adminSession, seedBoard, req, installConnectors } from "./helpers.js";
 import { getBoard, updateBoard, setIngestNextRun, deleteEntity } from "../server/db.js";
 import { feedAdapter } from "../server/ingestion/connector.js";
 import { resolveIngestAdapter } from "../server/ingestion/index.js";
@@ -177,6 +177,7 @@ before(async () => {
   srv = await startServer();
   ({ db, base } = srv);
   admin = await adminSession(db);
+  await installConnectors(db, "crypto:coingecko"); // the sweep e2e drives the real crypto connector
   sources = createSources({ galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir });
   process.env.POLL_MS = "50";
   originalFetch = globalThis.fetch;

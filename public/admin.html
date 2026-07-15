@@ -110,22 +110,35 @@
       .access-drop-list .access-admin-row input:disabled { cursor: default; }
 
       /* plugins tab */
-      .plugin-seg { margin-top: 26px; }
-      .plugin-seg:first-of-type { margin-top: 18px; }
-      .plugin-seg h3 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: #9aa0aa; margin: 0 0 6px; }
-      .plugin-row { display: flex; align-items: center; gap: 12px; padding: 11px 12px; border: 1px solid #ececef; border-radius: 10px; margin-top: 6px; }
-      .plugin-row .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #2fb344; }
-      .plugin-row .dot.off { background: #c9c9cf; }
-      .plugin-row .dot.warn { background: #e8a13c; }
-      .plugin-row .dot.bad { background: #d64545; }
-      .plugin-row .p-label { font-weight: 600; flex: none; }
-      .plugin-row .p-hint { color: #9aa0aa; font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .plugin-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+      .plugin-row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; }
+      .plugin-row .p-main { flex: 1; min-width: 0; }
+      .plugin-row .p-label { font-weight: 600; }
+      .plugin-row .p-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .plugin-row .p-note { flex: none; font-size: 11px; color: #b6b6bd; }
+      .plugin-row .p-note.warn { color: #c08a2c; }
+      .plugin-row .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
       .plugin-row .badge { flex: none; }
       .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
       .plugin-row .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
       .plugin-row .gear:hover { background: #f1f1f3; color: #111; }
-      .plugin-row .core-lock { color: #c9c9cf; flex: none; display: flex; padding: 6px; }
-      .plugin-row.is-off .p-label, .plugin-row.is-off .p-hint { color: #b6b6bd; }
+      .plugin-row .p-remove { flex: none; font: inherit; font-size: 12px; padding: 5px 12px; border: 1px solid #e2e2e6; border-radius: 7px; background: #fff; color: #6b6b72; cursor: pointer; }
+      .plugin-row .p-remove:hover:not(:disabled) { border-color: #d64545; color: #d64545; }
+      .plugin-row .p-remove:disabled { opacity: .5; cursor: default; }
+      .plugin-add { margin-top: 16px; }
+      .plugin-add button { font: inherit; font-size: 13px; padding: 8px 16px; border: 1px dashed #cfcfd6; border-radius: 9px; background: #fff; color: #444; cursor: pointer; }
+      .plugin-add button:hover:not(:disabled) { border-color: #111; color: #111; }
+      .plugin-add button:disabled { opacity: .5; cursor: default; }
+      /* add-plugin modal: available list */
+      .pa-row { display: flex; align-items: center; gap: 10px; padding: 11px 2px; border-bottom: 1px solid #f0f0f2; }
+      .pa-row:last-child { border-bottom: none; }
+      .pa-main { flex: 1; min-width: 0; }
+      .pa-label { font-weight: 600; }
+      .pa-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; }
+      .pa-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
+      .pa-add { flex: none; font: inherit; font-size: 12px; padding: 5px 14px; border: 1px solid #111; border-radius: 7px; background: #111; color: #fff; cursor: pointer; }
+      .pa-add:hover { background: #333; }
+      .pa-empty { color: #9aa0aa; font-size: 13px; padding: 20px 2px; }
     </style>
   </head>
   <body>

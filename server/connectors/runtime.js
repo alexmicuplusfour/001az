@@ -12,12 +12,14 @@ import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
-// Plugin-registry state for one provider: enabled flag + config overrides
-// (rpm/burst). Read straight off the plugins row — an absent row means
-// enabled with no overrides, so a fresh install never touches the table.
+// Plugin-registry state for one provider: install flag + config overrides
+// (rpm/burst). Read straight off the plugins row. Connectors are never core or
+// pre-installed (only the flagship AI provider is), so an absent/NULL row means
+// the provider is AVAILABLE — not usable until added. activeProvider only runs
+// for boards that already added a provider, so a live board keeps working.
 async function pluginRowState(db, conn, name) {
   const row = await getPluginRow(db, `${conn.name}:${name}`);
-  return { enabled: row ? row.enabled : true, config: row?.config || {} };
+  return { installed: row?.installed ?? false, config: row?.config || {} };
 }
 
 // --- per-provider rate limiting + 429 backoff ---
@@ -95,25 +97,24 @@ const tracked = (db, conn, name, provider, fn) =>
   withPluginHealth(db, `${conn.name}:${name}`, () => callProvider(name, provider, fn));
 
 // Resolve the active provider + its key. An unset or unknown provider name
-// falls back to the connector's default, and a DISABLED provider falls
-// forward to the first enabled sibling — defaults not laws, so a stale
-// setting or a toggled-off plugin never breaks adds. Only when every
-// provider of the domain is off does this throw (readably; the routes and
-// the ingest preview surface messages as-is). The returned provider
-// descriptor carries the plugin-config rpm/burst overrides shallow-merged
-// in — every callProvider call site uses this object, so pacing config
-// flows everywhere from here.
+// falls back to the connector's default, and a NOT-INSTALLED provider falls
+// forward to the first installed sibling — defaults not laws, so a stale
+// setting or a removed plugin never breaks adds. Only when no provider of the
+// domain is installed does this throw (readably; the routes and the ingest
+// preview surface messages as-is). The returned provider descriptor carries the
+// plugin-config rpm/burst overrides shallow-merged in — every callProvider call
+// site uses this object, so pacing config flows everywhere from here.
 export async function activeProvider(db, conn) {
   const set = await getSetting(db, `${conn.name}_provider`);
   let name = conn.providers[set] ? set : conn.defaultProvider;
   let st = await pluginRowState(db, conn, name);
-  if (!st.enabled) {
+  if (!st.installed) {
     name = null;
     for (const n of Object.keys(conn.providers)) {
       const s = await pluginRowState(db, conn, n);
-      if (s.enabled) { name = n; st = s; break; }
+      if (s.installed) { name = n; st = s; break; }
     }
-    if (!name) throw new Error(`every ${conn.name} provider is disabled (Plugins page)`);
+    if (!name) throw new Error(`no ${conn.name} provider is installed (add one on the Plugins page)`);
   }
   const raw = conn.providers[name];
   const provider = { ...raw, rpm: st.config.rpm ?? raw.rpm, burst: st.config.burst ?? raw.burst };

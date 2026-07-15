@@ -13,6 +13,7 @@ const MAP_LIMIT = 5000;            // top-N by rank; covers anything searchable
 const MAP_TTL = 6 * 60 * 60 * 1000; // the id/symbol map barely changes
 
 export const label = "CoinMarketCap";
+export const description = "Live crypto prices — needs a key";
 export const needsKey = true;
 export const rpm = 30; // basic plan ~30/min; runtime paces + backs off on 429
 

@@ -19,6 +19,7 @@ const THUMB_WIDTH = 600; // matches the image source
 export const manifest = {
   name: "pdf",
   label: "PDF documents",
+  description: "Extract text + a page-1 preview (via poppler)",
   extensions: ["pdf"],
   kinds: ["pdf"],
 };

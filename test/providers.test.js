@@ -95,14 +95,15 @@ before(async () => {
 });
 after(() => srv.close());
 
-test("GET /api/admin/ai-providers: admin-only, returns the catalog + enabled flags", async () => {
+test("GET /api/admin/ai-providers: admin-only, returns the catalog + install flags", async () => {
   const anon = await req(base, "GET", "/api/admin/ai-providers");
   assert.equal(anon.status, 403); // requireAdmin rejects anonymous
 
   const r = await req(base, "GET", "/api/admin/ai-providers", { sid: admin.sid });
   assert.equal(r.status, 200);
-  // the static catalog rides through untouched, plus a per-provider plugin
-  // enabled flag (true on a fresh install — no plugins rows exist)
-  assert.deepEqual(r.json.map(({ enabled, ...rest }) => rest), providerCatalog());
-  assert.ok(r.json.every((p) => p.enabled === true));
+  // the static catalog rides through untouched, plus a per-provider install flag
+  assert.deepEqual(r.json.map(({ installed, ...rest }) => rest), providerCatalog());
+  // fresh install: only the core embedder + the pre-added flagship are installed
+  const installed = r.json.filter((p) => p.installed).map((p) => p.name).sort();
+  assert.deepEqual(installed, ["anthropic", "local"]);
 });

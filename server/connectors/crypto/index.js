@@ -46,6 +46,7 @@ export const manifest = {
   providers: Object.entries(providers).map(([name, p]) => ({
     name,
     label: p.label,
+    description: p.description || "",
     needsKey: !!p.needsKey,
   })),
   // Face producers this domain can render; drives the mapping modal's face row.

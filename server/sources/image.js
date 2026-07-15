@@ -20,7 +20,8 @@ const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "av
 // it) and the grid's face pipeline assumes it exists.
 export const manifest = {
   name: "image",
-  label: "Images",
+  label: "Image files",
+  description: "Accept & thumbnail JPG, PNG, WebP, GIF, SVG",
   core: true,
   extensions: ["jpg", "jpeg", "png", "webp", "avif", "heif", "heic", "gif", "svg"],
   kinds: ["image"],

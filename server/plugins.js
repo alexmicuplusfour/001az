@@ -4,17 +4,20 @@
 // sources/ manifests) into a uniform shape; nothing here loads code — the
 // catalog entry format IS the future dropped-in-module manifest (phase 2).
 //
-// Plugin id = "<segment>:<name>" — segments are also the page grouping:
+// Plugin id = "<segment>:<name>" — the segment is the id namespace (and, for a
+// connector, its domain); the page itself is a flat list, tagged per card:
 //   ai:openai …        (kind "ai")
 //   crypto:coingecko … (kind "connector", segment = the domain)
 //   media:pdf …        (kind "media")
 //
-// State model: enabled = usable, slot default = preselected. A plugin's DB
-// row (plugins table) is optional — absent means enabled with default config.
-// `configSchema` declares the modal's fields; `plugins.config` stores only
-// those overrides. Secrets never land there: a connector's api_key field
-// writes through to the existing `<domain>_key_<provider>` setting, and AI
-// keys stay in the ai_keys table.
+// State model: installed = a card on the page, usable (vs available = add it
+// first); slot default = preselected. A plugin's DB row (plugins table) is
+// optional — an absent/NULL-installed row falls to the plugin's tier default
+// (core capabilities + the pre-added flagship = installed, everything else =
+// available). `configSchema` declares the modal's fields; `plugins.config`
+// stores only those overrides. Secrets never land there: a connector's api_key
+// field writes through to the existing `<domain>_key_<provider>` setting, and
+// AI keys stay in the ai_keys table.
 import { PROVIDERS, providerCatalog } from "./providers.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS } from "./sources/index.js";
@@ -29,7 +32,12 @@ function aiDefs() {
     segment: "ai",
     name: p.name,
     label: p.label,
-    core: false,
+    description: p.description || "",
+    // The on-device embedder (local/Xenova) is a core capability — no account,
+    // always installed. Anthropic is the one connection pre-added, since tagging
+    // (the product's core value) must work out of the box; it's still removable.
+    core: p.name === "local",
+    defaultInstalled: p.name === "anthropic",
     capabilities: { tag: !!PROVIDERS[p.name].wire, embed: !!p.embeds, research: p.research },
     configSchema: [],
     // the modal's pickers (models + notes, embed catalog) — same data the
@@ -49,6 +57,7 @@ function connectorDefs() {
         segment: c.name,
         name: p.name,
         label: p.label,
+        description: p.description || "",
         core: false,
         capabilities: {
           search: !!raw.search,
@@ -77,7 +86,11 @@ function mediaDefs() {
     segment: "media",
     name: m.name,
     label: m.label,
-    core: !!m.core,
+    description: m.description || "",
+    // Media handlers are capabilities the app has, not connections you opt into
+    // — all core (always installed, not removable). "Don't want .docx? just
+    // don't upload one." poppler/mammoth already degrade gracefully when absent.
+    core: true,
     capabilities: { extensions: m.extensions, kinds: m.kinds },
     configSchema: [],
   }));
@@ -96,15 +109,33 @@ export const getPluginDef = (id) => pluginDefs().find((d) => d.id === id) || nul
 const configDefaults = (def) =>
   Object.fromEntries(def.configSchema.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]));
 
-// The effective { enabled, config } for one plugin — absent row = enabled,
-// config = schema defaults overlaid with stored overrides. Core plugins are
-// always enabled no matter what the row says (belt over the API guard).
+// Whether a plugin is installed (a card on the page, usable) vs available (add
+// it first). Core capabilities are always installed; an explicit add/remove row
+// wins; otherwise the per-tier default (the flagship AI provider is pre-added,
+// everything else is available). A NULL `installed` means no explicit choice —
+// a row that exists only for health telemetry must fall to the default, NOT
+// read as installed. Pure (def + row) so callers with a row in hand reuse it.
+export function installedFor(def, row) {
+  if (def.core) return true;
+  if (row && row.installed != null) return row.installed;
+  return def.defaultInstalled ?? false;
+}
+
+// Convenience: install state for one plugin id (reads its row). Used by the
+// AI-resolution and slot-star gates.
+export async function pluginInstalled(db, id) {
+  const def = getPluginDef(id);
+  return def ? installedFor(def, await getPluginRow(db, id)) : false;
+}
+
+// The effective { installed, config } for one plugin — install state per the
+// tier rule, config = schema defaults overlaid with stored overrides.
 export async function pluginState(db, id) {
   const def = getPluginDef(id);
   if (!def) return null;
   const row = await getPluginRow(db, id);
   return {
-    enabled: def.core || (row ? row.enabled : true),
+    installed: installedFor(def, row),
     config: { ...configDefaults(def), ...(row?.config || {}) },
   };
 }
@@ -113,19 +144,6 @@ const health = (row) =>
   row && (row.last_ok_at || row.last_fail_at)
     ? { failCount: row.fail_count, lastOkAt: row.last_ok_at, lastFailAt: row.last_fail_at, lastError: row.last_error }
     : null;
-
-// The media handlers currently switched off — the ingest door's refusal set.
-// Core handlers never appear (they can't be disabled). One 13-row read; the
-// upload route resolves it once per request, not per file.
-export async function disabledMediaSet(db) {
-  const rows = await listPluginRows(db);
-  return new Set(
-    rows
-      .filter((r) => !r.enabled && r.id.startsWith("media:"))
-      .map((r) => r.id.slice("media:".length))
-      .filter((name) => !getPluginDef(`media:${name}`)?.core)
-  );
-}
 
 // The full admin catalog: every def + its state, secrets masked. Connector
 // key presence comes from the settings store; AI key counts from ai_keys.
@@ -138,7 +156,7 @@ export async function pluginCatalog(db) {
     const entry = {
       ...def,
       state: {
-        enabled: def.core || (row ? row.enabled : true),
+        installed: installedFor(def, row),
         config: { ...configDefaults(def), ...(row?.config || {}) },
         health: health(row),
       },

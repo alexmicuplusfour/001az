@@ -4,7 +4,7 @@
 // lowercase symbol, provenance is the provider name.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedUser, req } from "./helpers.js";
+import { startServer, adminSession, seedUser, req, installConnectors } from "./helpers.js";
 import { createEntity, setSetting, getSetting } from "../server/db.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
@@ -46,6 +46,8 @@ before(async () => {
   srv = await startServer();
   ({ db, base } = srv);
   admin = await adminSession(db);
+  // Add the connectors these tests drive (default posture is available-not-added).
+  await installConnectors(db, "crypto:coingecko", "crypto:coinmarketcap", "stocks:financialmodelingprep");
 });
 
 after(() => srv.close());
@@ -76,6 +78,7 @@ test("runtime: generic domain×provider dispatch over an arbitrary connector", a
   const acme = mk("Acme", false);
   const globex = mk("Globex", true);
   const conn = { name: "widgets", providers: { acme, globex }, defaultProvider: "acme", manifest: {} };
+  await installConnectors(db, "widgets:acme", "widgets:globex"); // both added
 
   // Unset provider → the connector's own default; an unknown value falls back too.
   assert.equal((await runtime.activeProvider(db, conn)).name, "acme");
@@ -317,6 +320,7 @@ test("runtime.list: dispatches with opts + key; a provider without list() yields
     async search() { return []; }, async fetchEntity() { return {}; },
   };
   const conn = { name: "listconn", providers: { withList }, defaultProvider: "withList", manifest: {} };
+  await installConnectors(db, "listconn:withList");
   await setSetting(db, "listconn_key_withList", "K");
   const rows = await runtime.list(db, conn, { sort: "x", order: "desc", page: 1, pageSize: 5, query: "" });
   assert.deepEqual(rows, [{ id: "a", symbol: "A", label: "Ay", values: { x: 1 } }]);
@@ -325,6 +329,7 @@ test("runtime.list: dispatches with opts + key; a provider without list() yields
 
   const noList = { label: "NL", async search() { return []; }, async fetchEntity() { return {}; } };
   const conn2 = { name: "nolistconn", providers: { noList }, defaultProvider: "noList", manifest: {} };
+  await installConnectors(db, "nolistconn:noList");
   assert.deepEqual(await runtime.list(db, conn2, {}), []); // no list() → graceful empty
 });
 

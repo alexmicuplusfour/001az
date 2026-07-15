@@ -10,6 +10,7 @@ const MAX_BROWSE_ROWS = 1000;
 const US_EXCHANGE = /NASDAQ|NYSE|AMEX/i;
 
 export const label = "Financial Modeling Prep";
+export const description = "US stock quotes, fundamentals, and price history — needs a key";
 export const needsKey = true;
 // The runtime's token bucket paces *logical* connector calls, but FMP meters raw
 // HTTP requests and a cold fetchEntity fans out to three (quote + profile +

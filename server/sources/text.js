@@ -9,6 +9,7 @@ import { textCounts, renderTextPreview } from "./shared.js";
 export const manifest = {
   name: "text",
   label: "Text files",
+  description: "Read .txt / .md / .csv as plain text",
   extensions: ["txt", "md", "csv"],
   kinds: ["text"],
 };

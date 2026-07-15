@@ -1,14 +1,18 @@
-// Per-plugin configuration modal, opened from the Plugins tab. Sections vary
-// by kind: connectors get their schema-driven config form (key, rate limits)
-// plus Test and the domain-default star; AI providers get their key registry
-// (this provider's slice of ai_keys) plus the default-tagger / embeddings
-// slots they can serve; media types are informational (the row toggle is
-// their substance). All writes go through the plugins API + the existing
+// Per-plugin configuration modal, opened from the Plugins tab gear. Sections
+// vary by kind: connectors get their schema-driven config form (key, rate
+// limits) plus Test and the domain-default star; AI providers get their key
+// registry (this provider's slice of ai_keys) plus the default-tagger /
+// embeddings slots they can serve; media types are informational (core
+// capabilities, nothing to configure). The last recorded health error surfaces
+// at the top. All writes go through the plugins API + the existing
 // ai-keys/ai-config routes — this file owns no state of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal } from "/modal.js";
 import { fillModelSelect, switchRow } from "/board-modal.js";
+import { fmtDuration } from "/utils.js";
+
+const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 const LABEL_CSS = "display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;";
 const MONO_CSS = "font-family:'SF Mono',Consolas,monospace;font-size:13px;";
@@ -40,6 +44,17 @@ export function openPluginModal(p, ctx) {
     bodyStyle: "display:flex;flex-direction:column;gap:26px;",
   });
   const done = () => { close(); ctx.refresh(); };
+
+  // Health lives here now (the row has no status dot): surface the last recorded
+  // error, if any, so a failing integration is legible where you'd fix it.
+  const health = p.state.health;
+  if (health?.lastError?.message) {
+    const banner = document.createElement("div");
+    banner.style.cssText = "background:#fdf0f0;border:1px solid #f3d3d3;color:#8a3535;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.4;";
+    const when = health.lastFailAt ? ` · ${relTime(health.lastFailAt)}` : "";
+    banner.textContent = `Last error${when}: ${health.lastError.message}`;
+    body.appendChild(banner);
+  }
 
   if (p.kind === "connector") {
     body.appendChild(connectorSection(p, ctx, done));
@@ -444,9 +459,7 @@ function mediaSection(p) {
   const note = document.createElement("p");
   note.className = "muted";
   note.style.margin = "0";
-  note.textContent = p.core
-    ? "Core plugin — image ingestion is always on (previews for every media type render through it)."
-    : "Turning this plugin off stops NEW uploads and feed ingestion of these types. Existing items keep their files and previews.";
+  note.textContent = "Core capability — always installed. It's how the app reads these file types; there's nothing to configure.";
   sec.appendChild(note);
   return sec;
 }

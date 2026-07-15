@@ -6,7 +6,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, req, installConnectors } from "./helpers.js";
 import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced } from "../server/db.js";
 import { renderChart } from "../server/connectors/faces/price-chart.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -18,6 +18,7 @@ before(async () => {
   srv = await startServer();
   ({ db, base, galleryDir, thumbsDir } = srv);
   admin = await adminSession(db);
+  await installConnectors(db, "crypto:coingecko", "crypto:coinmarketcap");
 });
 after(() => srv.close());
 
@@ -42,6 +43,7 @@ test("produceFace: gated on the provider having history and a known producer", a
   const withHist = { label: "P1", async history() { return [{ t: 0, price: 1 }, { t: 1, price: 2 }]; }, async search() { return [{ id: "p1-id", symbol: "ZZ" }]; } };
   const noHist = { label: "P2", async search() { return [{ id: "p2-id", symbol: "ZZ" }]; } };
   const conn = { name: "facetest", providers: { withHist, noHist }, defaultProvider: "withHist", faces: { chart } };
+  await installConnectors(db, "facetest:withHist", "facetest:noHist");
   const entity = { symbol: "ZZ", display_name: "Zed" };
   const source = { provider: "withHist", id: "abc" };
   const cfg = { producer: "chart", period: "1y" };

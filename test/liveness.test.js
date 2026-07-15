@@ -5,7 +5,7 @@
 // global settings (crypto_provider) start clean here.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, req, installConnectors } from "./helpers.js";
 import {
   getEntity, getBoard, createEntity, initDb,
   setSetting, setEntityRefreshAt, dueLiveEntities,
@@ -20,6 +20,7 @@ before(async () => {
   srv = await startServer();
   ({ db, base } = srv);
   admin = await adminSession(db);
+  await installConnectors(db, "crypto:coingecko", "crypto:coinmarketcap");
 });
 after(() => srv.close());
 
@@ -53,6 +54,7 @@ test("runtime.refresh: rewrites only due fields, advances at, reports moved", as
     async testConnection() { return true; },
   };
   const conn = { name: "livetest", providers: { p1 }, defaultProvider: "p1", manifest: {} };
+  await installConnectors(db, "livetest:p1");
   const mapping = { fields: [
     { key: "price", from: "connector", fn: "price", live: true, every: 1 },
     { key: "cap",   from: "connector", fn: "cap",   live: true, every: 60 },
@@ -85,6 +87,7 @@ test("runtime.refresh: re-resolves the id by symbol after a provider switch", as
   });
   const p1 = mk("p1"), p2 = mk("p2");
   const conn = { name: "switchtest", providers: { p1, p2 }, defaultProvider: "p1", manifest: {} };
+  await installConnectors(db, "switchtest:p1", "switchtest:p2");
   await setSetting(db, "switchtest_provider", "p2"); // active != the source provider
 
   const mapping = { fields: [{ key: "price", from: "connector", fn: "price", live: true, every: 1 }] };
@@ -109,6 +112,7 @@ test("runtime.refresh: liveness comes from the board mapping, not the stamped on
     async testConnection() { return true; },
   };
   const conn = { name: "boardmap", providers: { p1 }, defaultProvider: "p1", manifest: {} };
+  await installConnectors(db, "boardmap:p1");
   const stamped = { fields: [{ key: "price", from: "connector", fn: "price" }] };                       // no live
   const boardMapping = { fields: [{ key: "price", from: "connector", fn: "price", live: true, every: 1 }] };
   const inst = { id: 1, payload: { source: { provider: "p1", id: "x" }, mapping: stamped } };

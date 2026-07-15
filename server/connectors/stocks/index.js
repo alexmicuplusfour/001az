@@ -44,6 +44,7 @@ export const manifest = {
   providers: Object.entries(providers).map(([name, provider]) => ({
     name,
     label: provider.label,
+    description: provider.description || "",
     needsKey: !!provider.needsKey,
   })),
   faces: [

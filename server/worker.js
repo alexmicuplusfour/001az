@@ -41,23 +41,22 @@ import {
   setIngestState,
   ingestedKeys,
   recordIngest,
-  getPluginRow,
   withPluginHealth,
 } from "./db.js";
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
+import { pluginInstalled } from "./plugins.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { extractFileFields } from "./media/index.js";
 
-// A disabled AI plugin (Plugins page) drops out of resolution — configs that
-// reference it fall through to the next rung instead of erroring, and items
-// hold pending via the existing no-key machinery when nothing is left.
-async function aiPluginEnabled(db, provider) {
-  const row = await getPluginRow(db, `ai:${provider}`);
-  return row ? row.enabled : true;
-}
+// A not-installed AI plugin (Plugins page) drops out of resolution — configs
+// that reference it fall through to the next rung instead of erroring, and
+// items hold pending via the existing no-key machinery when nothing is left.
+// (anthropic is pre-added; the local embedder is core; everything else is
+// available-until-added — pluginInstalled applies the tier rule.)
+const aiPluginInstalled = (db, provider) => pluginInstalled(db, `ai:${provider}`);
 
 // Every live tagger call lands in the plugin health ledger (structured error
 // or heal) so the Plugins page dot reflects real traffic — and the future
@@ -71,12 +70,12 @@ export async function resolveDefaultAi(db) {
   const defId = Number(await getSetting(db, "default_key_id")) || 0;
   if (defId) {
     const key = await getAiKey(db, defId);
-    if (key && (await aiPluginEnabled(db, key.provider))) {
+    if (key && (await aiPluginInstalled(db, key.provider))) {
       const model = (await getSetting(db, "model")) || PROVIDERS[key.provider].defaultModel;
       return { provider: key.provider, apiKey: key.api_key, model };
     }
   }
-  if (process.env.ANTHROPIC_API_KEY && (await aiPluginEnabled(db, "anthropic"))) {
+  if (process.env.ANTHROPIC_API_KEY && (await aiPluginInstalled(db, "anthropic"))) {
     return {
       provider: "anthropic",
       apiKey: process.env.ANTHROPIC_API_KEY,
@@ -93,7 +92,7 @@ export async function resolveEmbedder(db) {
   if ((await getSetting(db, "embed_enabled")) !== "1") return null;
   const embedProvider = await getSetting(db, "embed_provider");
   if (embedProvider === "local") {
-    if (!(await aiPluginEnabled(db, "local"))) return null; // sweep pauses
+    if (!(await aiPluginInstalled(db, "local"))) return null; // core → always true; kept for symmetry
     return { provider: "local", apiKey: null, model: PROVIDERS.local.embeds.default };
   }
   // Key-based path (backward compat: embed_provider null + embed_key_id set).
@@ -101,7 +100,7 @@ export async function resolveEmbedder(db) {
   if (!keyId) return null;
   const key = await getAiKey(db, keyId);
   if (!key || !PROVIDERS[key.provider]?.embeds) return null;
-  if (!(await aiPluginEnabled(db, key.provider))) return null; // sweep pauses
+  if (!(await aiPluginInstalled(db, key.provider))) return null; // sweep pauses
   return {
     provider: key.provider,
     apiKey: key.api_key,
@@ -129,20 +128,20 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
 }
 
 // A board's effective tagger: its own key (+ model) when set, else the
-// default. A board key whose provider plugin is disabled falls through to
+// default. A board key whose provider plugin is not installed falls through to
 // the default like a deleted key would — loudly, so the hold is explicable.
 // Exported for tests.
 export async function resolveBoardAi(db, boardEntry) {
   if (boardEntry.aiKeyId) {
     const key = await getAiKey(db, boardEntry.aiKeyId);
-    if (key && (await aiPluginEnabled(db, key.provider))) {
+    if (key && (await aiPluginInstalled(db, key.provider))) {
       return {
         provider: key.provider,
         apiKey: key.api_key,
         model: boardEntry.aiModel || PROVIDERS[key.provider].defaultModel,
       };
     }
-    if (key) console.log(`board AI provider ${key.provider} is disabled — falling back to the default tagger`);
+    if (key) console.log(`board AI provider ${key.provider} is not installed — falling back to the default tagger`);
   }
   return resolveDefaultAi(db);
 }
