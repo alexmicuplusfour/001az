@@ -64,7 +64,6 @@ export async function renderPlugins() {
   const { plugins, slots } = data;
   const defaults = slotProviders(slots, keys);
   const installed = plugins.filter((p) => p.state.installed);
-  const available = plugins.filter((p) => !p.state.installed);
 
   const sec = document.createElement("div");
   sec.className = "section";
@@ -72,24 +71,25 @@ export async function renderPlugins() {
 
   const ctx = { slots, keys, defaults, refresh: renderPlugins };
 
-  const list = document.createElement("div");
-  list.className = "plugin-list";
-  for (const p of installed) list.appendChild(pluginRow(p, ctx));
-  sec.appendChild(list);
-
+  // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
+  // marking installed ones "Added" — so they stay visible across reopens, not
+  // just within one session. Core capabilities are never addable.
+  const connections = plugins.filter((p) => !p.core);
   const add = document.createElement("div");
   add.className = "plugin-add";
   const addBtn = document.createElement("button");
   addBtn.type = "button";
   addBtn.textContent = "+ Add plugin";
-  if (available.length) {
-    addBtn.onclick = () => openAddPluginModal(available, ctx);
-  } else {
-    addBtn.disabled = true;
-    addBtn.title = "Everything available is already installed";
-  }
+  // Always openable — the modal browses the whole connection catalog (added ones
+  // shown as "Added"), so it stays useful even when nothing new is available.
+  addBtn.onclick = () => openAddPluginModal(connections, ctx);
   add.appendChild(addBtn);
   sec.appendChild(add);
+
+  const list = document.createElement("div");
+  list.className = "plugin-list";
+  for (const p of installed) list.appendChild(pluginRow(p, ctx));
+  sec.appendChild(list);
 
   document.getElementById("plugins-content").replaceChildren(sec);
 }
@@ -156,12 +156,14 @@ function pluginRow(p, ctx) {
 
   const remove = document.createElement("button");
   remove.type = "button";
-  remove.className = "p-remove";
   remove.textContent = "Remove";
   if (p.core) {
+    // not a destructive action here — a neutral, disabled control
+    remove.className = "ghost sm";
     remove.disabled = true;
     remove.title = "Core capability — always installed";
   } else {
+    remove.className = "danger sm";
     remove.onclick = () => removePlugin(p, ctx);
   }
   row.appendChild(remove);

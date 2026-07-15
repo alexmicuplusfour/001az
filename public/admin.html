@@ -72,10 +72,12 @@
         background: #111;
         color: #fff;
       }
+      button:disabled { opacity: .5; cursor: default; }
+      button.sm { padding: 5px 12px; font-size: 12px; }
       button.ghost { background: #f1f1f3; color: #111; }
-      button.ghost:hover { background: #e6e6ea; }
+      button.ghost:hover:not(:disabled) { background: #e6e6ea; }
       button.danger { background: transparent; color: #d33; border-color: #f0caca; }
-      button.danger:hover { background: #fdeaea; }
+      button.danger:hover:not(:disabled) { background: #fdeaea; }
       table { width: 100%; border-collapse: collapse; }
       th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid #eee; font-size: 13px; }
       th { color: #6b6b72; font-weight: 600; }
@@ -109,35 +111,26 @@
       .access-drop-list .access-admin-row { margin-left: 24px; font-size: 11px; color: #9aa0aa; }
       .access-drop-list .access-admin-row input:disabled { cursor: default; }
 
-      /* plugins tab */
+      /* plugins tab — the plugin row and the add-modal row share the .p-* parts */
       .plugin-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
       .plugin-row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; }
-      .plugin-row .p-main { flex: 1; min-width: 0; }
-      .plugin-row .p-label { font-weight: 600; }
-      .plugin-row .p-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .plugin-row .p-note { flex: none; font-size: 11px; color: #b6b6bd; }
-      .plugin-row .p-note.warn { color: #c08a2c; }
-      .plugin-row .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
+      .p-main { flex: 1; min-width: 0; }
+      .p-label { font-weight: 600; }
+      .p-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .p-note { flex: none; font-size: 11px; color: #b6b6bd; }
+      .p-note.warn { color: #c08a2c; }
+      .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
       .plugin-row .badge { flex: none; }
       .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
-      .plugin-row .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
-      .plugin-row .gear:hover { background: #f1f1f3; color: #111; }
-      .plugin-row .p-remove { flex: none; font: inherit; font-size: 12px; padding: 5px 12px; border: 1px solid #e2e2e6; border-radius: 7px; background: #fff; color: #6b6b72; cursor: pointer; }
-      .plugin-row .p-remove:hover:not(:disabled) { border-color: #d64545; color: #d64545; }
-      .plugin-row .p-remove:disabled { opacity: .5; cursor: default; }
+      .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
+      .gear:hover { background: #f1f1f3; color: #111; }
       .plugin-add { margin-top: 16px; }
-      .plugin-add button { font: inherit; font-size: 13px; padding: 8px 16px; border: 1px dashed #cfcfd6; border-radius: 9px; background: #fff; color: #444; cursor: pointer; }
+      /* deliberately a dashed "add zone", not a primary button */
+      .plugin-add button { border-style: dashed; border-color: #cfcfd6; background: #fff; color: #444; }
       .plugin-add button:hover:not(:disabled) { border-color: #111; color: #111; }
-      .plugin-add button:disabled { opacity: .5; cursor: default; }
-      /* add-plugin modal: available list */
+      /* add-plugin modal: rows reuse .p-*; only the row frame differs from a card */
       .pa-row { display: flex; align-items: center; gap: 10px; padding: 11px 2px; border-bottom: 1px solid #f0f0f2; }
       .pa-row:last-child { border-bottom: none; }
-      .pa-main { flex: 1; min-width: 0; }
-      .pa-label { font-weight: 600; }
-      .pa-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; }
-      .pa-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
-      .pa-add { flex: none; font: inherit; font-size: 12px; padding: 5px 14px; border: 1px solid #111; border-radius: 7px; background: #111; color: #fff; cursor: pointer; }
-      .pa-add:hover { background: #333; }
       .pa-empty { color: #9aa0aa; font-size: 13px; padding: 20px 2px; }
     </style>
   </head>

@@ -1,14 +1,16 @@
-// The "Add plugin" browse modal: the available (not-installed) plugins from the
-// same catalog, each with its label + description + role tag and an Add button.
-// Adding writes installed:true and refreshes the page underneath. The catalog
-// entry IS the future dropped-in-module manifest — a later phase grows an "add
-// from GitHub / npm URL" path here; today it browses what ships.
+// The "Add plugin" browse modal: the whole CONNECTION catalog (every non-core
+// plugin), each with its label + description + role tag. Available ones show an
+// Add button (writes installed:true, refreshes the page underneath); already-
+// installed ones show a disabled "Added" — so added plugins stay in the list
+// across reopens, not just within one session. The catalog entry IS the future
+// dropped-in-module manifest — a later phase grows an "add from GitHub / npm
+// URL" path here; today it browses what ships.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal } from "/modal.js";
 import { tagFor } from "/admin-plugins.js";
 
-export function openAddPluginModal(available, ctx) {
+export function openAddPluginModal(connections, ctx) {
   const { body, close } = createModal({
     title: "Add a plugin",
     bodyStyle: "display:flex;flex-direction:column;",
@@ -23,19 +25,13 @@ export function openAddPluginModal(available, ctx) {
   const list = document.createElement("div");
   body.appendChild(list);
 
-  // Local copy so an Add can drop the row without a full reopen.
-  let items = [...available];
-
-  function render() {
-    list.replaceChildren();
-    if (!items.length) {
-      const empty = document.createElement("div");
-      empty.className = "pa-empty";
-      empty.textContent = "Everything available is already installed.";
-      list.appendChild(empty);
-      return;
-    }
-    for (const p of items) list.appendChild(row(p));
+  if (!connections.length) {
+    const empty = document.createElement("div");
+    empty.className = "pa-empty";
+    empty.textContent = "No connections available.";
+    list.appendChild(empty);
+  } else {
+    for (const p of connections) list.appendChild(row(p));
   }
 
   function row(p) {
@@ -43,41 +39,46 @@ export function openAddPluginModal(available, ctx) {
     r.className = "pa-row";
 
     const main = document.createElement("div");
-    main.className = "pa-main";
+    main.className = "p-main";
     const label = document.createElement("div");
-    label.className = "pa-label";
+    label.className = "p-label";
     label.textContent = p.label;
     const desc = document.createElement("div");
-    desc.className = "pa-desc";
+    desc.className = "p-desc";
     desc.textContent = p.description || "";
     main.append(label, desc);
     r.appendChild(main);
 
     const tag = document.createElement("span");
-    tag.className = "pa-tag";
+    tag.className = "p-tag";
     tag.textContent = tagFor(p, ctx.defaults);
     r.appendChild(tag);
 
     const addBtn = document.createElement("button");
     addBtn.type = "button";
-    addBtn.className = "pa-add";
-    addBtn.textContent = "Add";
-    addBtn.onclick = async () => {
-      addBtn.disabled = true;
-      try {
-        await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
-        toast(`${p.label} added`);
-        items = items.filter((x) => x.id !== p.id);
-        render();
-        ctx.refresh(); // refresh the page underneath so the new card appears
-      } catch (err) {
-        addBtn.disabled = false;
-        toast.error(err.message);
-      }
-    };
+    const asAdded = () => { addBtn.textContent = "Added"; addBtn.className = "ghost sm"; addBtn.disabled = true; };
+    if (p.state.installed) {
+      asAdded(); // already on the page — shown for context, not addable again
+    } else {
+      addBtn.className = "sm";
+      addBtn.textContent = "Add";
+      addBtn.onclick = async () => {
+        addBtn.disabled = true;
+        addBtn.textContent = "Adding…";
+        try {
+          await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
+          toast(`${p.label} added`);
+          asAdded(); // keep the row; flip the button in place (no list reshuffle)
+          ctx.refresh(); // refresh the page underneath so the new card appears
+        } catch (err) {
+          addBtn.disabled = false;
+          addBtn.className = "sm";
+          addBtn.textContent = "Add";
+          toast.error(err.message);
+        }
+      };
+    }
     r.appendChild(addBtn);
     return r;
   }
-
-  render();
 }
