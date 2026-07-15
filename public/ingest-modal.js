@@ -101,9 +101,9 @@ export function openIngestModal() {
         ? { ...saved.trigger }
         : { mode: (desc.triggerModes || []).includes("continuous") ? "continuous" : (desc.triggerModes?.[0] || "manual") },
     };
-    for (const s of desc.source || []) {
-      if (s.default !== undefined && cfg.source[s.key] === undefined) cfg.source[s.key] = s.default;
-    }
+    // Per-source field defaults are seeded per SELECTED source (each source has
+    // its own field schema) inside buildFileSource — not here, where the source
+    // isn't chosen yet.
 
     // Two views in one modal: settings (the config sections) and results (the
     // paged preview list). Swapping views detaches nothing — all edit state
@@ -156,6 +156,14 @@ export function openIngestModal() {
       if (!cfg.source.type) cfg.source.type = "folder";
       if (!sources.some((s) => s.type === cfg.source.type)) cfg.source.type = sources[0].type;
       const current = () => sources.find((x) => x.type === cfg.source.type) || sources[0];
+      // Fill the selected source's field defaults (e.g. recursive:true) for
+      // anything the saved config left unset — each source carries its own
+      // schema (info.sources[].sourceSchema), so this is per-source, not shared.
+      const seedSourceDefaults = (s) => {
+        for (const f of s?.sourceSchema || [])
+          if (f.default !== undefined && cfg.source[f.key] === undefined) cfg.source[f.key] = f.default;
+      };
+      seedSourceDefaults(current());
 
       // "Pull from" line: the source-type picker (only when there's a choice) and,
       // for a remote source, the connection picker — both inline on one row.
@@ -177,8 +185,14 @@ export function openIngestModal() {
         }
         typeSel.disabled = !canEdit;
         typeSel.addEventListener("change", () => {
+          const next = sources.find((x) => x.type === typeSel.value) || sources[0];
           // A source switch is a fresh source config (keep only recursive intent).
           cfg.source = { type: typeSel.value, recursive: cfg.source.recursive !== false };
+          seedSourceDefaults(next);
+          // Remote sources CAN watch continuously, but a 30s poll against a
+          // network source is rarely wanted — nudge a carried-over "continuous"
+          // to interval. A default, not a law: continuous stays in the dropdown.
+          if (next.needsConnection && cfg.trigger.mode === "continuous") cfg.trigger.mode = "interval";
           renderConn();
           renderDetail();
           renderTriggerModes(); // the new source may offer different modes
@@ -282,9 +296,8 @@ export function openIngestModal() {
       }, { small: true })));
     }
 
-    // The trigger modes offered for the currently-selected source. File boards
-    // restrict per source (a remote source drops "continuous"); connector boards
-    // fall back to the shared descriptor.
+    // The trigger modes offered for the currently-selected source (file boards
+    // read them per source; connector boards fall back to the shared descriptor).
     function sourceTriggerModes() {
       if (!info.sources) return desc.triggerModes || [];
       const s = info.sources.find((x) => x.type === (cfg.source.type || "folder"));
@@ -454,13 +467,23 @@ export function openIngestModal() {
     if (cfg.trigger.at) atInput.value = cfg.trigger.at;
     modeSel.disabled = everyInput.disabled = atInput.disabled = !canEdit;
 
+    // A gentle note when watching continuously — chattier against a remote source.
+    const trigHint = document.createElement("p");
+    trigHint.className = "im-hint";
+    const currentSource = () => (info.sources || []).find((x) => x.type === (cfg.source.type || "folder"));
+
     function syncTriggerInputs() {
       everyInput.style.display = cfg.trigger.mode === "interval" ? "" : "none";
       atInput.style.display = cfg.trigger.mode === "daily" ? "" : "none";
+      if (cfg.trigger.mode !== "continuous") { trigHint.style.display = "none"; return; }
+      trigHint.style.display = "";
+      trigHint.textContent = currentSource()?.needsConnection
+        ? "Continuous re-checks the source about every 30s — fine for your own server, but a busy poll on a remote source. Interval is gentler."
+        : "Continuous re-checks the folder about every 30s.";
     }
-    // Trigger modes depend on the selected source (a remote source drops the 30s
-    // "continuous" rescan). Rebuilt when the source switches; a now-invalid mode
-    // (e.g. continuous → FTP) falls to the first mode the new source offers.
+    // Trigger modes come from the selected source (all sources offer all modes;
+    // remote just defaults away from continuous). Rebuilt when the source
+    // switches; a mode the new source doesn't list falls to its first mode.
     function renderTriggerModes() {
       const modes = sourceTriggerModes();
       if (!modes.includes(cfg.trigger.mode)) cfg.trigger.mode = modes[0] || "manual";
@@ -480,6 +503,7 @@ export function openIngestModal() {
     renderTriggerModes();
     trigRow.append(modeSel, everyInput, atInput);
     trigSection.appendChild(trigRow);
+    trigSection.appendChild(trigHint);
     settingsView.appendChild(trigSection);
 
     // ── Preview: a button fetches the count; the count opens the results view ──

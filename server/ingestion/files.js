@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { admitFile } from "../ingest.js";
-import { withTx, recordIngest, getSourceConnection, listSourceConnections } from "../db.js";
+import { withTx, recordIngest, getSourceConnection, listSourceConnections, withPluginHealth } from "../db.js";
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
 import { acceptsName, extOf } from "../sources/index.js";
 import { getSourceBackend, SOURCE_MODULES } from "./sources/index.js";
@@ -52,7 +52,10 @@ const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 // as the connector feed. SAFETY_CAP is only an out-of-memory backstop for a
 // pathological source (narrow the base path if you ever hit it). Candidate
 // objects are read-only downstream (applyFilters/applySort copy), so serving a
-// cached array by reference is safe.
+// cached array by reference is safe. Entries are pruned on write once past
+// their window (an expired entry is a guaranteed miss anyway), so the map holds
+// only the actively-swept sources — a re-pointed or deleted board's stale key,
+// and its full candidate array, doesn't linger for the worker's lifetime.
 const SAFETY_CAP = 100000;
 const windowCache = new Map();
 // TTL read per call: 0 = off (the tests use this); empty string counts as unset
@@ -62,6 +65,25 @@ const cacheTtl = () => {
   const v = process.env.INGEST_FEED_CACHE_MS;
   return v == null || v === "" ? 60000 : Number(v);
 };
+
+// Evict entries whose window has lapsed. Called on every write, so residency
+// tracks the live set rather than every config ever enumerated.
+function pruneWindowCache(now, ttl) {
+  for (const [k, v] of windowCache) if (now - v.at >= ttl) windowCache.delete(k);
+}
+// Test seam: the cache is module-private; tests assert it doesn't accumulate.
+export const _windowCacheSize = () => windowCache.size;
+
+// Drop every cached listing for a connection. The cache key carries the
+// connection's ID but not its config, so editing a connection's host/bucket/
+// prefix (same ID) would otherwise serve the OLD settings' listing until the
+// window lapses. The connection routes call this on edit/remove so the next
+// enumerate re-walks with the current config. `connectionId` is the key's 2nd
+// `|`-segment; split (not substring) so a path containing "|<id>|" can't match.
+export function invalidateSourceCache(connectionId) {
+  const id = String(connectionId);
+  for (const k of windowCache.keys()) if (k.split("|")[1] === id) windowCache.delete(k);
+}
 
 // Resolve the backend for a board's source config. Dispatches by `source.type`
 // (absent → "folder", so existing file boards are unchanged), enforces the
@@ -90,12 +112,15 @@ export async function resolveBackend(db, source = {}) {
 // Per-board source config → the directory/prefix a backend should read.
 const sourcePath = (source = {}) => source.folder ?? source.path ?? "";
 
-// The descriptor the routes serve and the modal renders. The `source` schema is
-// the folder backend's for now (every file board is folder-typed until remote
-// sources land); the filter/sort/trigger catalog is shared across all sources.
+// The descriptor the routes serve and the modal renders: the SHARED file
+// catalog — filters, sorts and trigger modes are identical across every file
+// source. The per-source FIELD schema is deliberately NOT here (it's inherently
+// per-source): each backend's is carried by its listSources() entry
+// (info.sources[].sourceSchema). `source: []` mirrors the connector adapter,
+// whose universe likewise has nothing global to configure.
 export function descriptor() {
   return {
-    source: getSourceBackend("folder").manifest.sourceSchema,
+    source: [],
     filters: FILE_FILTERS,
     sorts: FILE_SORTS,
     triggerModes: FILE_TRIGGERS,
@@ -140,9 +165,23 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
     const hit = windowCache.get(key);
     if (hit && ttl > 0 && Date.now() - hit.at < ttl) return { candidates: hit.candidates, truncated: hit.truncated };
     const be = await resolveBackend(db, cfg.source);
-    const { entries, truncated } = await be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytes: MAX_BYTES });
+    // The remote listing is the source's reachability probe — the sweep's
+    // equivalent of the admin Test button. Ledger its outcome on the source
+    // plugin (heal on success, structured error on throw) so a source that's
+    // down turns the gear-modal dot red with its last error and heals when it
+    // recovers, mirroring connector feeds. Only the network call is wrapped;
+    // resolveBackend's config errors (connection removed) aren't a source-health
+    // signal, and a cache hit above rightly probes nothing. Per-file fetch
+    // failures in admit stay board-level (retryable) — list is the coarse
+    // "is this source working" signal, exactly what Test checks.
+    const { entries, truncated } = await withPluginHealth(db, `source:${type}`, () =>
+      be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytes: MAX_BYTES }));
     const result = { candidates: toCandidates(entries), truncated };
-    if (ttl > 0) windowCache.set(key, { at: Date.now(), ...result });
+    if (ttl > 0) {
+      const now = Date.now();
+      pruneWindowCache(now, ttl);
+      windowCache.set(key, { at: now, ...result });
+    }
     return result;
   }
 
@@ -238,9 +277,11 @@ export async function listSources(db) {
       browsable: !!m.browsable,
       needsConnection: !!m.needsConnection,
       sourceSchema: m.sourceSchema || [],
-      // Remote sources drop "continuous" (a 30s rescan is rude against a network
-      // source — interval's 1-minute floor is plenty); the local folder keeps it.
-      triggerModes: m.needsConnection ? FILE_TRIGGERS.filter((t) => t !== "continuous") : FILE_TRIGGERS,
+      // Every source offers every mode (defaults not laws): a remote source CAN
+      // watch continuously — the listing cache bounds the real cost — but the
+      // modal defaults it to interval and hints that continuous is a ~30s poll,
+      // steering without forbidding.
+      triggerModes: FILE_TRIGGERS,
       ready: true,
     };
     if (m.needsConnection) {

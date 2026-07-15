@@ -106,6 +106,7 @@ import { mountIngest } from "./ingest.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
+import { invalidateSourceCache } from "./ingestion/files.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -1318,11 +1319,16 @@ app.patch("/api/admin/source-connections/:id", requireAdmin, wrap(async (req, re
   }
   if (!(await updateSourceConnection(db, existing.id, update)))
     return res.status(400).json({ error: "nothing to update" });
+  // A config edit changes what the source returns but not the cache key (same
+  // id) — drop its cached listings so boards re-walk with the new settings.
+  invalidateSourceCache(existing.id);
   res.json({ ok: true });
 }));
 
 app.delete("/api/admin/source-connections/:id", requireAdmin, wrap(async (req, res) => {
   if (!(await deleteSourceConnection(db, Number(req.params.id)))) return res.status(404).json({ error: "not found" });
+  // Don't keep serving a removed connection's listing until the window lapses.
+  invalidateSourceCache(req.params.id);
   console.log(`source connection #${req.params.id} deleted by admin`);
   res.json({ ok: true });
 }));

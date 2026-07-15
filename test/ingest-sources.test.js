@@ -15,7 +15,7 @@ import { backend as ftpBackend } from "../server/ingestion/sources/ftp.js";
 import * as files from "../server/ingestion/files.js";
 import {
   getBoard, updateBoard, ingestedKeys, setPluginState, recordIngest,
-  createSourceConnection, getSourceConnection,
+  createSourceConnection, getSourceConnection, getPluginRow,
 } from "../server/db.js";
 import { createSources } from "../server/sources/index.js";
 
@@ -123,6 +123,33 @@ test("source connection: validation + admin-only", async () => {
     { sid: member.sid, body: { type: "ftp", label: "x", config: { host: "h" } } })).status, 403);
 });
 
+test("ftp connection: the allowSelfSigned toggle round-trips (not rejected as an unknown field)", async () => {
+  const admin = await adminSession(db);
+
+  // The FTPS self-signed opt-out is a real schema field — the config validator
+  // must accept it, and coerce must store it (regression: it used to be read by
+  // the backend but absent from connectionSchema, so the unknown-field check
+  // rejected it and self-signed FTPS was unconfigurable).
+  const created = await req(srv.base, "POST", "/api/admin/source-connections", {
+    sid: admin.sid,
+    body: { type: "ftp", label: "Self-signed FTPS", config: { host: "ftps.example.com", secure: true, allowSelfSigned: true } },
+  });
+  assert.equal(created.status, 200);
+  const stored = await getSourceConnection(db, created.json.id);
+  assert.equal(stored.config.allowSelfSigned, true, "toggle persisted");
+  assert.equal(stored.config.secure, true);
+
+  // Default (omitted) → verify (false).
+  const dflt = await req(srv.base, "POST", "/api/admin/source-connections", {
+    sid: admin.sid,
+    body: { type: "ftp", label: "Verifying FTPS", config: { host: "ftps2.example.com", secure: true } },
+  });
+  assert.equal((await getSourceConnection(db, dflt.json.id)).config.allowSelfSigned, false, "defaults to verify");
+
+  await req(srv.base, "DELETE", `/api/admin/source-connections/${created.json.id}`, { sid: admin.sid });
+  await req(srv.base, "DELETE", `/api/admin/source-connections/${dflt.json.id}`, { sid: admin.sid });
+});
+
 test("catalog: source plugins present; folder core-installed, ftp/s3 available + connectionCount", async () => {
   const admin = await adminSession(db);
   const c1 = await createSourceConnection(db, "ftp", "one", { host: "h1" });
@@ -207,6 +234,36 @@ test("file adapter: an uninstalled source is a readable refusal", async () => {
   await setPluginState(db, "source:ftp", { installed: true }); // restore for other tests
 });
 
+test("source health: a failing remote sweep reddens the plugin dot; a good run heals it", async () => {
+  await setPluginState(db, "source:ftp", { installed: true });
+  // The listing is the reachability probe — a scheduled sweep against a dead
+  // source must land on the plugin's health ledger (gear-modal dot), not just
+  // the board's last_error, and must heal once the source comes back.
+  const prev = process.env.INGEST_FEED_CACHE_MS;
+  process.env.INGEST_FEED_CACHE_MS = "0"; // don't let a cache hit skip the probe
+  const deadPort = await freePort(); // freePort closes its listener → connection refused
+  const deadId = await createSourceConnection(db, "ftp", "dead", { host: "127.0.0.1", port: deadPort });
+  const liveId = await createSourceConnection(db, "ftp", "live", ftpConn);
+  try {
+    // Down → a structured failure is recorded on source:ftp.
+    await assert.rejects(files.enumerate(db, {}, { source: { type: "ftp", connectionId: deadId, path: "" } }));
+    const failed = await getPluginRow(db, "source:ftp");
+    assert.ok(failed.fail_count > 0, "failure bumped the health streak");
+    assert.ok(failed.last_error, "structured last_error stored");
+
+    // Back up → the next successful listing heals the streak.
+    await files.enumerate(db, {}, { source: { type: "ftp", connectionId: liveId, path: "" } });
+    const healed = await getPluginRow(db, "source:ftp");
+    assert.equal(healed.fail_count, 0, "success reset the streak");
+    assert.equal(healed.last_error, null, "and cleared the error");
+  } finally {
+    if (prev === undefined) delete process.env.INGEST_FEED_CACHE_MS;
+    else process.env.INGEST_FEED_CACHE_MS = prev;
+    await req(srv.base, "DELETE", `/api/admin/source-connections/${deadId}`, { sid: (await adminSession(db)).sid });
+    await req(srv.base, "DELETE", `/api/admin/source-connections/${liveId}`, { sid: (await adminSession(db)).sid });
+  }
+});
+
 // --- board routes: GET /ingest sources, source/browse, save-time validation ---
 
 test("GET /ingest lists installed sources + connections; browse navigates the tree", async () => {
@@ -220,12 +277,18 @@ test("GET /ingest lists installed sources + connections; browse navigates the tr
   const srcs = Object.fromEntries(info.json.sources.map((s) => [s.type, s]));
   assert.ok(srcs.folder, "folder source always listed");
   assert.ok(srcs.ftp?.connections.some((c) => c.id === connId && c.label === "browse-server"));
+  // The descriptor is the SHARED catalog only — the per-source field schema
+  // lives on each source (folder's `folder`, ftp's `path`), never folded into
+  // one folder-shaped descriptor.source.
+  assert.deepEqual(info.json.descriptor.source, [], "descriptor carries no single source schema");
+  assert.ok(srcs.folder.sourceSchema.some((f) => f.key === "folder"));
+  assert.ok(srcs.ftp.sourceSchema.some((f) => f.key === "path"));
   // Connections carry no secret material to the (manager) client.
   for (const c of srcs.ftp.connections) assert.deepEqual(Object.keys(c).sort(), ["id", "label"]);
-  // Trigger modes are per-source: the local folder can watch continuously, a
-  // remote source cannot (interval floor only).
+  // Every source offers every trigger mode, including continuous — a remote
+  // source may watch (the modal defaults it away, but doesn't forbid it).
   assert.ok(srcs.folder.triggerModes.includes("continuous"), "folder offers continuous");
-  assert.ok(!srcs.ftp.triggerModes.includes("continuous"), "remote drops continuous");
+  assert.ok(srcs.ftp.triggerModes.includes("continuous"), "remote may also watch continuously");
 
   const root = await req(srv.base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
     sid: admin.sid, body: { source: { type: "ftp", connectionId: connId }, path: "" },
@@ -365,5 +428,45 @@ test("remote enumeration is briefly cached (reused within TTL, re-walked on a ke
     assert.equal((await files.enumerate(db, board, other)).candidates.length, 2, "key change → fresh walk");
   } finally {
     process.env.INGEST_FEED_CACHE_MS = "0"; // restore the test default (cache off)
+  }
+});
+
+test("remote enumeration cache evicts lapsed windows (no unbounded growth)", async () => {
+  await setPluginState(db, "source:ftp", { installed: true });
+  const connId = await createSourceConnection(db, "ftp", "evict-conn", ftpConn);
+  const board = { ingest: { source: { type: "ftp", connectionId: connId, path: "", recursive: true } } };
+
+  process.env.INGEST_FEED_CACHE_MS = "40"; // a tiny window so it lapses within the test
+  try {
+    await files.enumerate(db, board, board.ingest); // writes key A (recursive:true)
+    await new Promise((r) => setTimeout(r, 60));     // let every prior window (incl. A) lapse
+    // A write under a fresh key prunes the lapsed entries instead of piling on:
+    // whatever the cache held before, it now holds only this one live window.
+    await files.enumerate(db, board, { source: { ...board.ingest.source, recursive: false } });
+    assert.equal(files._windowCacheSize(), 1, "stale windows evicted, not accumulated");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = "0";
+  }
+});
+
+test("editing a connection drops its cached listing (config isn't in the cache key)", async () => {
+  const admin = await adminSession(db);
+  await setPluginState(db, "source:ftp", { installed: true });
+  const connId = await createSourceConnection(db, "ftp", "edit-conn", ftpConn);
+  const board = { ingest: { source: { type: "ftp", connectionId: connId, path: "", recursive: true } } };
+
+  process.env.INGEST_FEED_CACHE_MS = "60000"; // warm window so the edit has something to drop
+  try {
+    await files.enumerate(db, board, board.ingest); // caches this connection's listing
+    const before = files._windowCacheSize();
+    // A config edit keeps the same id (same cache key) — the route must drop the
+    // window so the board re-walks with the new settings, not up to 60s stale.
+    const patched = await req(srv.base, "PATCH", `/api/admin/source-connections/${connId}`, {
+      sid: admin.sid, body: { config: { host: ftpConn.host, port: ftpConn.port, user: ftpConn.user } },
+    });
+    assert.equal(patched.status, 200);
+    assert.equal(files._windowCacheSize(), before - 1, "the connection's cached window was dropped");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = "0";
   }
 });

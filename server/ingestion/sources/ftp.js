@@ -19,6 +19,10 @@ export const manifest = {
     { key: "host", type: "text", label: "Host", required: true, help: "hostname or IP" },
     { key: "port", type: "number", label: "Port", default: 21, min: 1 },
     { key: "secure", type: "toggle", label: "Use FTPS (TLS)", default: false },
+    // FTPS only: self-hosted servers usually carry a self-signed cert, which a
+    // verifying client rejects. This opts out of verification for THIS
+    // connection (ignored when secure is off). Default: verify.
+    { key: "allowSelfSigned", type: "toggle", label: "Allow self-signed TLS cert", default: false, help: "FTPS only — skip certificate verification" },
     { key: "user", type: "text", label: "Username", default: "anonymous" },
     { key: "password", type: "secret", label: "Password" },
   ],
@@ -31,8 +35,11 @@ export const manifest = {
 
 const joinPosix = (a, b) => (a ? `${a.replace(/\/+$/, "")}/${b}` : b);
 
+// Control-connection timeout; a slow server just fails the tick and retries.
+const CONNECT_TIMEOUT_MS = 30000;
+
 async function withClient(conn, fn) {
-  const client = new ftp.Client(Number(conn.timeoutMs) || 30000);
+  const client = new ftp.Client(CONNECT_TIMEOUT_MS);
   try {
     await client.access({
       host: conn.host,
@@ -40,9 +47,10 @@ async function withClient(conn, fn) {
       user: conn.user || "anonymous",
       password: conn.password || "",
       secure: !!conn.secure,
-      // Self-hosted/test FTPS servers usually carry a self-signed cert — a
-      // connection can opt out of verification (default: verify).
-      secureOptions: conn.secure ? { rejectUnauthorized: conn.rejectUnauthorized !== false } : undefined,
+      // Self-hosted/test FTPS servers usually carry a self-signed cert, which a
+      // verifying client rejects — the connection's `allowSelfSigned` toggle
+      // opts out of verification (default: verify). Ignored when secure is off.
+      secureOptions: conn.secure ? { rejectUnauthorized: !conn.allowSelfSigned } : undefined,
     });
     return await fn(client);
   } finally {
