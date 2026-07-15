@@ -80,6 +80,11 @@ import {
   setPluginState,
   getPluginRow,
   withPluginHealth,
+  listSourceConnections,
+  getSourceConnection,
+  createSourceConnection,
+  updateSourceConnection,
+  deleteSourceConnection,
 } from "./db.js";
 import {
   attachUser,
@@ -100,6 +105,7 @@ import { pluginCatalog, getPluginDef, pluginState, pluginInstalled } from "./plu
 import { mountIngest } from "./ingest.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
+import { getSourceBackend } from "./ingestion/sources/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -459,7 +465,7 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
 
 app.patch("/api/boards/:id", requireAuth, requireBoardManager, wrap(async (req, res) => {
   const prev = req.board;
-  const { update, error, sweep } = buildBoardContentUpdate(req.body, prev);
+  const { update, error, sweep } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
   if (Object.keys(update).length > 0) await updateBoard(db, prev.id, update);
   // A saved config supersedes any half-drained run of the old one — a stale
@@ -483,10 +489,29 @@ app.get("/api/boards/:id/ingest", requireAuth, requireBoardManager, wrap(async (
   res.json({
     available: !!adapter,
     descriptor: adapter ? adapter.descriptor() : null,
+    // File boards: the installed source backends (folder/ftp/s3) + their pickable
+    // connections. Connector boards: null (their source is the connector itself).
+    sources: adapter?.listSources ? await adapter.listSources(db) : null,
     config: req.board.ingest || null,
     state: req.board.ingest_state || null,
     root: !!process.env.INGEST_ROOT,
   });
+}));
+
+// Browse one directory level of a board's configured (or in-progress) source —
+// the source-browse modal navigates the tree to pick a base folder. The source
+// credentials are resolved server-side from the saved connection; the client
+// sends only { type, connectionId } + a nav path.
+app.post("/api/boards/:id/ingest/source/browse", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const adapter = resolveIngestAdapter(req.board);
+  if (!adapter?.browse) return res.status(400).json({ error: "browsing isn't available for this board" });
+  const source = req.body?.source || {};
+  const navPath = req.body?.path != null ? String(req.body.path) : (source.path ?? source.folder ?? "");
+  try {
+    res.json(await adapter.browse(db, source, navPath));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 }));
 
 // Subfolders under the ingestion root for the folder picker. Bounded walk
@@ -531,8 +556,13 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   const body = req.body || {};
   const cfg = { ...body, enabled: true }; // preview ignores the toggle
   delete cfg.sample;
-  const err = validateIngest(cfg, adapter.descriptor(), { hasRoot: !!process.env.INGEST_ROOT });
+  const hasRoot = !!process.env.INGEST_ROOT;
+  const err = validateIngest(cfg, adapter.descriptor(), { hasRoot });
   if (err) return res.status(400).json({ error: err });
+  if (adapter.validateSource) {
+    const srcErr = await adapter.validateSource(db, cfg.source || {}, { hasRoot });
+    if (srcErr) return res.status(400).json({ error: srcErr });
+  }
   let sample = null;
   if (body.sample != null) {
     const offset = Number(body.sample.offset ?? 0);
@@ -601,7 +631,7 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
 // and the auto-tag schedule (with the timer bookkeeping). Returns
 // { update, error, sweep } — error is a string when the body is invalid, sweep
 // is true when auto-tagging transitions off→on (caller queues untagged items).
-function buildBoardContentUpdate(body = {}, prev) {
+async function buildBoardContentUpdate(body = {}, prev) {
   body = body || {};
   const update = {};
   if (body.name !== undefined) update.name = String(body.name).trim();
@@ -634,10 +664,13 @@ function buildBoardContentUpdate(body = {}, prev) {
       update.ingestNextRunAt = null;
     } else {
       const adapter = resolveIngestAdapter(prev);
-      const ingErr = validateIngest(body.ingest, adapter ? adapter.descriptor() : null, {
-        hasRoot: !!process.env.INGEST_ROOT,
-      });
+      const hasRoot = !!process.env.INGEST_ROOT;
+      const ingErr = validateIngest(body.ingest, adapter ? adapter.descriptor() : null, { hasRoot });
       if (ingErr) return { error: ingErr };
+      if (adapter?.validateSource) {
+        const srcErr = await adapter.validateSource(db, body.ingest.source || {}, { hasRoot });
+        if (srcErr) return { error: srcErr };
+      }
       update.ingest = body.ingest;
       const wasArmed = !!(prev.ingest && prev.ingest.enabled !== false && prev.ingest.trigger?.mode !== "manual");
       const isArmed = body.ingest.enabled && body.ingest.trigger.mode !== "manual";
@@ -843,7 +876,7 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const id = req.params.id;
   const prev = await getBoard(db, id);
   if (!prev) return res.status(404).json({ error: "not found" });
-  const { update, error, sweep } = buildBoardContentUpdate(req.body, prev);
+  const { update, error, sweep } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
 
   // Admin-only fields, layered on top of the shared content set.
@@ -1156,7 +1189,9 @@ app.post("/api/admin/plugins/:id/test", requireAdmin, wrap(async (req, res) => {
   if (!def) return res.status(404).json({ error: "unknown plugin" });
   if (def.kind !== "connector") {
     return res.status(400).json({
-      error: def.kind === "ai" ? "test AI keys individually — each key has its own Test" : "nothing to test for a media plugin",
+      error: def.kind === "ai" ? "test AI keys individually — each key has its own Test"
+        : def.kind === "source" ? "test source connections individually — each has its own Test"
+        : "nothing to test for a media plugin",
     });
   }
   const conn = getConnector(def.connector.domain);
@@ -1166,6 +1201,149 @@ app.post("/api/admin/plugins/:id/test", requireAdmin, wrap(async (req, res) => {
       apiKey: req.body?.api_key !== undefined ? String(req.body.api_key).trim() : undefined,
     });
     res.json({ ok: true, provider });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}));
+
+// --- source connections (reusable remote-ingestion credentials) ---
+// Admin-only; a board manager only references them (never sees a secret). The
+// connection's field set is the backend's connectionSchema — validate/coerce/
+// mask all read from it, so a new source needs no route edits.
+
+// Mask secret fields on read (value → presence boolean); echo only non-secrets.
+function maskConnection(c) {
+  const schema = getSourceBackend(c.type)?.manifest.connectionSchema || [];
+  const config = {};
+  const hasSecret = {};
+  for (const f of schema) {
+    if (f.type === "secret") hasSecret[f.key] = c.config?.[f.key] != null && c.config[f.key] !== "";
+    else if (c.config && f.key in c.config) config[f.key] = c.config[f.key];
+  }
+  return { id: c.id, type: c.type, label: c.label, config, hasSecret, boards_using: Number(c.boards_using) || 0, created_at: c.created_at };
+}
+
+// Validate an incoming config against the schema. `existing` lets a blank secret
+// (or blank required-text) pass when a value is already stored (blank = keep).
+function validateConnectionConfig(schema, incoming = {}, existing = {}) {
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) return "config must be an object";
+  const keys = new Set(schema.map((f) => f.key));
+  for (const k of Object.keys(incoming)) if (!keys.has(k)) return `unknown field "${k}"`;
+  const provided = (k) => Object.prototype.hasOwnProperty.call(incoming, k);
+  const stored = (k) => existing[k] != null && existing[k] !== "";
+  for (const f of schema) {
+    const v = incoming[f.key];
+    if (f.type === "number") {
+      if (provided(f.key) && v !== "" && v != null) {
+        const n = Number(v);
+        if (!Number.isFinite(n) || (f.min !== undefined && n < f.min))
+          return `${f.label} must be a number${f.min !== undefined ? ` of at least ${f.min}` : ""}`;
+      }
+    } else if (f.type === "secret" || f.type === "text") {
+      const willHave = (provided(f.key) && String(v ?? "").trim() !== "") || stored(f.key);
+      if (f.required && !willHave) return `${f.label} is required`;
+    }
+  }
+  return null;
+}
+
+// Build the full stored config: start from `existing` (for edits; {} for create),
+// overlay the incoming values, keep a blank secret as the stored one, and fill
+// schema defaults for untouched fields.
+function coerceConnectionConfig(schema, incoming = {}, existing = {}) {
+  const out = {};
+  const provided = (k) => Object.prototype.hasOwnProperty.call(incoming, k);
+  for (const f of schema) {
+    const v = incoming[f.key];
+    if (f.type === "secret") {
+      if (provided(f.key) && v != null && String(v).trim() !== "") out[f.key] = String(v).trim();
+      else if (existing[f.key] != null && existing[f.key] !== "") out[f.key] = existing[f.key]; // blank = keep
+    } else if (f.type === "number") {
+      if (provided(f.key) && v !== "" && v != null) out[f.key] = Number(v);
+      else if (existing[f.key] !== undefined) out[f.key] = existing[f.key];
+      else if (f.default !== undefined) out[f.key] = f.default;
+    } else if (f.type === "toggle") {
+      if (provided(f.key)) out[f.key] = !!v;
+      else if (existing[f.key] !== undefined) out[f.key] = existing[f.key];
+      else if (f.default !== undefined) out[f.key] = f.default;
+    } else { // text
+      if (provided(f.key)) out[f.key] = String(v).trim();
+      else if (existing[f.key] !== undefined) out[f.key] = existing[f.key];
+      else if (f.default !== undefined) out[f.key] = f.default;
+    }
+  }
+  return out;
+}
+
+app.get("/api/admin/source-connections", requireAdmin, wrap(async (req, res) => {
+  const type = req.query.type ? String(req.query.type) : null;
+  const conns = await listSourceConnections(db, type);
+  res.json(conns.map(maskConnection));
+}));
+
+app.post("/api/admin/source-connections", requireAdmin, wrap(async (req, res) => {
+  const { type, label, config } = req.body || {};
+  const mod = type ? getSourceBackend(String(type)) : null;
+  if (!mod || !mod.manifest.needsConnection)
+    return res.status(400).json({ error: "unknown or connection-less source type" });
+  const lbl = (label ? String(label) : "").trim().slice(0, 80);
+  if (!lbl) return res.status(400).json({ error: "label required" });
+  const err = validateConnectionConfig(mod.manifest.connectionSchema, config || {}, {});
+  if (err) return res.status(400).json({ error: err });
+  const clean = coerceConnectionConfig(mod.manifest.connectionSchema, config || {}, {});
+  const id = await createSourceConnection(db, mod.manifest.name, lbl, clean);
+  console.log(`source connection added: "${lbl}" (${mod.manifest.name})`);
+  res.json({ id, type: mod.manifest.name, label: lbl });
+}));
+
+app.patch("/api/admin/source-connections/:id", requireAdmin, wrap(async (req, res) => {
+  const existing = await getSourceConnection(db, Number(req.params.id));
+  if (!existing) return res.status(404).json({ error: "not found" });
+  const schema = getSourceBackend(existing.type)?.manifest.connectionSchema || [];
+  const { label, config } = req.body || {};
+  const update = {};
+  if (label !== undefined) {
+    const lbl = String(label).trim().slice(0, 80);
+    if (!lbl) return res.status(400).json({ error: "label required" });
+    update.label = lbl;
+  }
+  if (config !== undefined) {
+    const err = validateConnectionConfig(schema, config, existing.config || {});
+    if (err) return res.status(400).json({ error: err });
+    update.config = coerceConnectionConfig(schema, config, existing.config || {});
+  }
+  if (!(await updateSourceConnection(db, existing.id, update)))
+    return res.status(400).json({ error: "nothing to update" });
+  res.json({ ok: true });
+}));
+
+app.delete("/api/admin/source-connections/:id", requireAdmin, wrap(async (req, res) => {
+  if (!(await deleteSourceConnection(db, Number(req.params.id)))) return res.status(404).json({ error: "not found" });
+  console.log(`source connection #${req.params.id} deleted by admin`);
+  res.json({ ok: true });
+}));
+
+// Reachability test. `{ id }` tests a stored connection (typed fields merge over
+// it, so an edited form tests before Save); `{ type, config }` tests a not-yet-
+// saved one. Blank secrets fall back to the stored value.
+app.post("/api/admin/source-connections/test", requireAdmin, wrap(async (req, res) => {
+  const { id, type, config } = req.body || {};
+  let mod, merged;
+  if (id != null) {
+    const existing = await getSourceConnection(db, Number(id));
+    if (!existing) return res.status(404).json({ error: "not found" });
+    mod = getSourceBackend(existing.type);
+    merged = coerceConnectionConfig(mod?.manifest.connectionSchema || [], config || {}, existing.config || {});
+  } else {
+    mod = type ? getSourceBackend(String(type)) : null;
+    if (!mod || !mod.manifest.needsConnection) return res.status(400).json({ error: "unknown source type" });
+    const err = validateConnectionConfig(mod.manifest.connectionSchema, config || {}, {});
+    if (err) return res.status(400).json({ error: err });
+    merged = coerceConnectionConfig(mod.manifest.connectionSchema, config || {}, {});
+  }
+  try {
+    await withPluginHealth(db, `source:${mod.manifest.name}`, () => mod.backend({ conn: merged }).test());
+    res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

@@ -19,16 +19,19 @@ a live connector.
   `.md`, and `.csv` anywhere, or use the upload button. Thumbnails and page-1
   previews are generated server-side (sharp for images, poppler for PDFs,
   mammoth for docx), originals type-sniffed and size-capped.
-- **Automatic ingestion** — a board can feed itself from a source: a watched
-  folder (under a server-side ingestion root) for file boards, or a
+- **Automatic ingestion** — a board can feed itself from a source: a local
+  watched folder (under a server-side ingestion root), a **remote file source**
+  (FTP/FTPS or S3-compatible object storage, browsable in a modal), or a
   filter-defined slice of a connector's catalog (e.g. "top 50 by market cap")
-  for crypto/stocks boards. Filters over the source's fields (file metadata,
-  or catalog columns like price/rank/sector), sorting with a per-run limit,
-  and a trigger schedule (continuous watch or interval/daily/manual) with a
-  live results preview in the setup modal. One-directional and additive —
-  source files are never touched, and a dedup ledger means deleting an item in
-  the app doesn't resurrect it on the next run. Adapter-based like the
-  connectors themselves: adding a source type is one file.
+  for crypto/stocks boards. Remote sources are **plugins** you add on the
+  Plugins page, with reusable saved connections (credentials live once, boards
+  reference them). Filters over the source's fields (file metadata, or catalog
+  columns like price/rank/sector), sorting with a per-run limit, and a trigger
+  schedule (continuous watch or interval/daily/manual) with a live results
+  preview in the setup modal. One-directional and additive — source files are
+  never touched, and a dedup ledger means deleting an item in the app doesn't
+  resurrect it on the next run. Adapter-based: adding a file source is one
+  backend module (list/fetch/test) in `server/ingestion/sources/`.
 - **AI tagging** — a queue worker sends each item to a vision/text model. The
   tag vocabulary is enforced *structurally*: the tool's `input_schema` is
   generated from the board's facets, so the model cannot emit an invalid tag.

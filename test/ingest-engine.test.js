@@ -6,6 +6,7 @@ import path from "node:path";
 import { evaluate, applyFilters, applySort, applyLimit, OPS_BY_KIND } from "../server/ingestion/filter-engine.js";
 import { nextIngestRunAt, validateIngest } from "../server/ingestion/index.js";
 import { resolveJailed, descriptor } from "../server/ingestion/folder.js";
+import { validateSource } from "../server/ingestion/files.js";
 
 const CAT = [
   { fn: "name", kind: "text", label: "Name" },
@@ -109,8 +110,6 @@ test("validateIngest: the folder descriptor's rules, one by one", () => {
   assert.match(validateIngest({ ...good, filters: [{ fn: "nope", op: "equals", value: "x" }] }, desc, opts), /unknown filter field/);
   assert.match(validateIngest({ ...good, filters: [{ fn: "name", op: "gte", value: 1 }] }, desc, opts), /not valid for text/);
   assert.match(validateIngest({ ...good, filters: [{ fn: "modified", op: "within_days", value: 0 }] }, desc, opts), /day count/);
-  assert.match(validateIngest({ ...good, source: { folder: "../x" } }, desc, opts), /escapes/);
-  assert.match(validateIngest(good, desc, { hasRoot: false }), /INGEST_ROOT/);
   assert.match(validateIngest({ ...good, limit: 0 }, desc, opts), /limit/);
   assert.match(validateIngest({ ...good, limit: 501 }, desc, opts), /limit/);
   assert.match(validateIngest({ ...good, sort: { by: "nope" } }, desc, opts), /unknown sort/);
@@ -120,6 +119,17 @@ test("validateIngest: the folder descriptor's rules, one by one", () => {
   assert.match(validateIngest({ ...good, trigger: { mode: "daily", at: "25:00" } }, desc, opts), /HH:MM/);
   assert.equal(validateIngest({ ...good, trigger: { mode: "daily", at: "23:45" } }, desc, opts), null);
   assert.match(validateIngest(good, null, opts), /not available/);
+});
+
+test("validateSource: the folder source rules (jail + INGEST_ROOT), no db", async () => {
+  // db=null skips the install gate (a pure unit check); folder needs no connection.
+  const ok = { type: "folder", folder: "drop", recursive: true };
+  assert.equal(await validateSource(null, ok, { hasRoot: true }), null);
+  assert.equal(await validateSource(null, { type: "folder" }, { hasRoot: true }), null, "blank folder = the root itself");
+  assert.match(await validateSource(null, { ...ok, folder: "../x" }, { hasRoot: true }), /escapes/);
+  assert.match(await validateSource(null, ok, { hasRoot: false }), /INGEST_ROOT/);
+  assert.match(await validateSource(null, { ...ok, recursive: "yes" }, { hasRoot: true }), /recursive/);
+  assert.match(await validateSource(null, { type: "nope" }, { hasRoot: true }), /unknown ingestion source/);
 });
 
 test("OPS_BY_KIND is the single op source the descriptor leans on", () => {

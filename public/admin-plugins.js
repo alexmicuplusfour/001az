@@ -11,6 +11,7 @@ import { openPluginModal } from "/plugin-modal.js";
 import { openAddPluginModal } from "/plugin-add-modal.js";
 
 const GEAR_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+const KEY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
 
 // Which provider currently backs the tagger / embedder slots (for badges + tag).
 // The tagger falls back to the anthropic env var when no default key is set.
@@ -35,6 +36,7 @@ export function tagFor(p, defaults) {
     return "AI";
   }
   if (p.kind === "connector") return `Data · ${p.connector.domain}`;
+  if (p.kind === "source") return p.core ? "Source · local" : "Source · remote";
   return "Media · core";
 }
 
@@ -50,6 +52,11 @@ function keyNote(p) {
     if (p.state.hasKey) return { text: "key stored" };
     return p.connector.needsKey ? { text: "no key yet", warn: true } : { text: "keyless" };
   }
+  if (p.kind === "source") {
+    if (!p.capabilities.needsConnection) return null; // folder: nothing to connect
+    const n = p.state.connectionCount || 0;
+    return n ? { text: `${n} connection${n > 1 ? "s" : ""}` } : { text: "no connections yet", warn: true };
+  }
   return null;
 }
 
@@ -57,9 +64,13 @@ export async function renderPlugins() {
   const me = await fetch("/api/me").then((r) => r.json());
   if (!me || !me.is_admin) return;
 
-  let data, keys;
+  let data, keys, srcConnections;
   try {
-    [data, keys] = await Promise.all([api("GET", "/api/admin/plugins"), api("GET", "/api/admin/ai-keys")]);
+    [data, keys, srcConnections] = await Promise.all([
+      api("GET", "/api/admin/plugins"),
+      api("GET", "/api/admin/ai-keys"),
+      api("GET", "/api/admin/source-connections"),
+    ]);
   } catch { return; }
   const { plugins, slots } = data;
   const defaults = slotProviders(slots, keys);
@@ -69,7 +80,7 @@ export async function renderPlugins() {
   sec.className = "section";
   sec.innerHTML = `<h2>Plugins</h2><p class="sub">Capabilities and connections in one place. Add the services you use; core capabilities are always on. Configure keys and options via the gear.</p>`;
 
-  const ctx = { slots, keys, defaults, refresh: renderPlugins };
+  const ctx = { slots, keys, connections: srcConnections, defaults, refresh: renderPlugins };
 
   // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
   // marking installed ones "Added" — so they stay visible across reopens, not
@@ -138,7 +149,10 @@ function pluginRow(p, ctx) {
   if (note) {
     const el = document.createElement("span");
     el.className = "p-note" + (note.warn ? " warn" : "");
-    el.textContent = note.text;
+    el.innerHTML = KEY_SVG; // stroke=currentColor → matches the label text color
+    const txt = document.createElement("span");
+    txt.textContent = note.text;
+    el.appendChild(txt);
     row.appendChild(el);
   }
 
@@ -197,6 +211,10 @@ function removalImpact(p, ctx) {
   if (p.kind === "connector") {
     const d = ctx.slots.domains[p.connector.domain] || {};
     if ((d.setting || d.effective) === p.name) return `This is the default ${p.connector.domain} provider.`;
+  }
+  if (p.kind === "source") {
+    const n = p.state.connectionCount || 0;
+    if (n) return `Its ${n} saved connection${n > 1 ? "s" : ""} become unusable until you add it back.`;
   }
   return "";
 }

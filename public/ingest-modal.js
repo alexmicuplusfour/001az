@@ -16,6 +16,7 @@ import { toast } from './toast.js';
 import { createModal } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent } from './paged-table.js';
 import { switchRow } from './board-modal.js';
+import { openSourceBrowse } from './source-browse-modal.js';
 import { refreshBoardIngest, ensurePolling } from './data.js';
 
 const OP_LABELS = {
@@ -57,21 +58,21 @@ export function openIngestModal() {
   loading.textContent = "Loading…";
   body.appendChild(loading);
 
-  Promise.all([
-    fetch(`/api/boards/${state.boardId}/ingest`).then((r) => (r.ok ? r.json() : Promise.reject(r.status))),
-    fetch(`/api/ingest/folders`).then((r) => (r.ok ? r.json() : { root: false, folders: [] })).catch(() => ({ root: false, folders: [] })),
-  ]).then(([info, folderInfo]) => {
-    loading.remove();
-    build(info, folderInfo);
-  }).catch((status) => {
-    // The config carries server folder paths, so the GET is manager-gated —
-    // plain members get told why instead of a generic failure.
-    loading.textContent = status === 403
-      ? "Only board admins can view ingestion settings."
-      : "Failed to load ingestion settings.";
-  });
+  fetch(`/api/boards/${state.boardId}/ingest`)
+    .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+    .then((info) => {
+      loading.remove();
+      build(info);
+    })
+    .catch((status) => {
+      // The config carries server folder paths, so the GET is manager-gated —
+      // plain members get told why instead of a generic failure.
+      loading.textContent = status === 403
+        ? "Only board admins can view ingestion settings."
+        : "Failed to load ingestion settings.";
+    });
 
-  function build(info, folderInfo) {
+  function build(info) {
     if (!info.available) {
       const note = document.createElement("p");
       note.className = "cb-note";
@@ -129,58 +130,151 @@ export function openIngestModal() {
       cfg.enabled = on;
     })));
 
-    // ── Source (descriptor-driven) ──
+    // ── Source ──
+    // File boards get a source picker (local folder / FTP / S3, whichever are
+    // installed), each with its own fields; connector boards feed from their
+    // connector's universe and have nothing to configure. info.sources is the
+    // installed source backends (+ pickable connections); null on a connector.
     const srcSection = section("Source");
-    for (const s of desc.source || []) {
-      if (s.type === "folder") {
-        if (!info.root) {
-          const warn = document.createElement("p");
-          warn.className = "mm-face-hint";
-          warn.textContent = "The server has no ingestion root configured (INGEST_ROOT), so folder ingestion is unavailable.";
-          srcSection.appendChild(warn);
-          continue;
-        }
-        const row = document.createElement("div");
-        row.className = "im-row";
-        const lbl = document.createElement("label");
-        lbl.textContent = s.label;
-        const sel = document.createElement("select");
-        const opts = [...(folderInfo.folders || [])];
-        // Keep a saved folder selectable even if it vanished from the root.
-        if (cfg.source[s.key] && !opts.includes(cfg.source[s.key])) opts.unshift(cfg.source[s.key]);
-        if (!opts.length) {
-          const o = document.createElement("option");
-          o.value = "";
-          o.textContent = "— no folders under the ingestion root —";
-          sel.appendChild(o);
-        } else {
-          for (const f of opts) {
-            const o = document.createElement("option");
-            o.value = f;
-            o.textContent = f;
-            if (f === cfg.source[s.key]) o.selected = true;
-            sel.appendChild(o);
-          }
-          if (!cfg.source[s.key]) cfg.source[s.key] = opts[0];
-        }
-        sel.disabled = !canEdit;
-        sel.addEventListener("change", () => { cfg.source[s.key] = sel.value; invalidatePreview(); });
-        row.append(lbl, sel);
-        srcSection.appendChild(row);
-      } else if (s.type === "boolean") {
-        srcSection.appendChild(inertUnlessEditable(switchRow(s.label, null, cfg.source[s.key] !== false, (on) => {
-          cfg.source[s.key] = on;
-          invalidatePreview();
-        }, { small: true })));
-      }
-    }
-    if (!(desc.source || []).length) {
+    if (info.sources) {
+      buildFileSource(srcSection);
+    } else {
       const note = document.createElement("p");
       note.className = "im-hint";
       note.textContent = "This board feeds from its connector's universe — nothing to configure.";
       srcSection.appendChild(note);
     }
     settingsView.appendChild(srcSection);
+
+    // The file-source picker + the selected source's fields. cfg.source carries
+    // { type, folder|path, recursive, connectionId? } — type absent = folder.
+    // Layout: a compact "Pull from" line (source type + connection, inline) over
+    // a focused Folder block (path field + Browse) and the subfolders toggle —
+    // the folder is the thing you actually set, so it gets the emphasis.
+    function buildFileSource(host) {
+      const sources = info.sources;
+      if (!cfg.source.type) cfg.source.type = "folder";
+      if (!sources.some((s) => s.type === cfg.source.type)) cfg.source.type = sources[0].type;
+      const current = () => sources.find((x) => x.type === cfg.source.type) || sources[0];
+
+      // "Pull from" line: the source-type picker (only when there's a choice) and,
+      // for a remote source, the connection picker — both inline on one row.
+      const pullRow = document.createElement("div");
+      pullRow.className = "im-row";
+      const pullLbl = document.createElement("label");
+      pullLbl.textContent = "Pull from";
+      pullRow.append(pullLbl);
+
+      if (sources.length > 1) {
+        const typeSel = document.createElement("select");
+        for (const s of sources) {
+          const o = document.createElement("option");
+          o.value = s.type;
+          o.textContent = s.label;
+          if (s.type === cfg.source.type) o.selected = true;
+          typeSel.appendChild(o);
+        }
+        typeSel.disabled = !canEdit;
+        typeSel.addEventListener("change", () => {
+          // A source switch is a fresh source config (keep only recursive intent).
+          cfg.source = { type: typeSel.value, recursive: cfg.source.recursive !== false };
+          renderConn();
+          renderDetail();
+          invalidatePreview();
+        });
+        pullRow.appendChild(typeSel);
+      }
+
+      let connSel = null;
+      function renderConn() {
+        if (connSel) { connSel.remove(); connSel = null; }
+        const s = current();
+        if (!s.needsConnection || !s.connections || !s.connections.length) return;
+        connSel = document.createElement("select");
+        for (const c of s.connections) {
+          const o = document.createElement("option");
+          o.value = String(c.id);
+          o.textContent = c.label;
+          if (String(c.id) === String(cfg.source.connectionId)) o.selected = true;
+          connSel.appendChild(o);
+        }
+        if (cfg.source.connectionId == null) cfg.source.connectionId = s.connections[0].id;
+        connSel.disabled = !canEdit;
+        connSel.addEventListener("change", () => { cfg.source.connectionId = Number(connSel.value); invalidatePreview(); });
+        pullRow.appendChild(connSel);
+      }
+      renderConn();
+      host.appendChild(pullRow);
+      // Nothing to pick (single source, no connection) → drop the empty row.
+      if (!pullRow.querySelector("select")) pullRow.style.display = "none";
+
+      const detail = document.createElement("div");
+      detail.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+      host.appendChild(detail);
+
+      function renderDetail() {
+        detail.replaceChildren();
+        const s = current();
+        if (s.type === "folder" && (!info.root || !s.ready)) {
+          const warn = document.createElement("p");
+          warn.className = "mm-face-hint";
+          warn.textContent = "The server has no ingestion root configured (INGEST_ROOT), so folder ingestion is unavailable.";
+          detail.appendChild(warn);
+          return;
+        }
+        if (s.needsConnection && (!s.connections || !s.connections.length)) {
+          const note = document.createElement("p");
+          note.className = "im-hint";
+          note.textContent = `No ${s.label} connections yet — an admin adds them on the Plugins page.`;
+          detail.appendChild(note);
+          return;
+        }
+        renderFolderBlock(detail, s);
+      }
+      renderDetail();
+    }
+
+    // The focused Folder block: a "Folder" label over a full-width path field +
+    // Browse (the tree modal), then the subfolders toggle. `key` is where the
+    // base path lives on cfg.source (local folder keeps `folder`; remote uses
+    // `path`); blank = the source's root.
+    function renderFolderBlock(host, s) {
+      const key = s.type === "folder" ? "folder" : "path";
+
+      const lbl = document.createElement("div");
+      lbl.className = "im-sublabel";
+      lbl.textContent = "Folder";
+      host.appendChild(lbl);
+
+      const row = document.createElement("div");
+      row.className = "im-source-path";
+      const pathIn = document.createElement("input");
+      pathIn.type = "text";
+      pathIn.placeholder = "blank = the whole source";
+      pathIn.value = cfg.source[key] || "";
+      pathIn.disabled = !canEdit;
+      pathIn.addEventListener("input", () => { cfg.source[key] = pathIn.value; invalidatePreview(); });
+      const browseBtn = document.createElement("button");
+      browseBtn.type = "button";
+      browseBtn.className = "im-btn";
+      browseBtn.textContent = "Browse…";
+      browseBtn.disabled = !canEdit || !s.browsable;
+      browseBtn.addEventListener("click", () => {
+        openSourceBrowse({
+          boardId: state.boardId,
+          source: { type: s.type, connectionId: cfg.source.connectionId },
+          start: cfg.source[key] || "",
+          onPick: (picked) => { cfg.source[key] = picked; pathIn.value = picked; invalidatePreview(); },
+        });
+      });
+      row.append(pathIn, browseBtn);
+      host.appendChild(row);
+
+      host.appendChild(inertUnlessEditable(switchRow("Include subfolders", null, cfg.source.recursive !== false, (on) => {
+        cfg.source.recursive = on;
+        invalidatePreview();
+      }, { small: true })));
+    }
 
     // ── Filters ──
     const filterSection = section("Filters");

@@ -88,8 +88,46 @@ services:
       timeout: 3s
       retries: 10
 
+  # --- optional local sources for exercising remote ingestion (FTP / S3) ---
+  # Opt-in only — a plain `up` never starts these (they carry a profile), so
+  # prod is untouched. Bring them up for testing with:
+  #   docker compose --profile dev-sources up -d ftp minio
+  # then add an FTP / S3 connection on the Plugins page pointing at:
+  #   FTP  host=ftp  user=gallery pass=gallery  (or 127.0.0.1:21 from the host)
+  #   S3   endpoint=http://minio:9000  bucket=<make one>  key/secret=gallery/gallerysecret  path-style=on
+  ftp:
+    image: stilliard/pure-ftpd
+    profiles: ["dev-sources"]
+    restart: unless-stopped
+    environment:
+      FTP_USER_NAME: gallery
+      FTP_USER_PASS: gallery
+      FTP_USER_HOME: /home/ftpusers/gallery
+      PUBLICHOST: 127.0.0.1
+    ports:
+      - "127.0.0.1:21:21"
+      - "127.0.0.1:30000-30009:30000-30009"
+    volumes:
+      # serve the same tree the local folder source watches, for easy comparison
+      - ./ingest-root:/home/ftpusers/gallery
+
+  minio:
+    image: minio/minio
+    profiles: ["dev-sources"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: gallery
+      MINIO_ROOT_PASSWORD: gallerysecret
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001" # web console
+    volumes:
+      - miniodata:/data
+
 volumes:
   pgdata:
   appdata:
   caddy_data:
   caddy_config:
+  miniodata:

@@ -21,7 +21,8 @@
 import { PROVIDERS, providerCatalog } from "./providers.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS } from "./sources/index.js";
-import { listPluginRows, getPluginRow, getSetting, listAiKeys } from "./db.js";
+import { MANIFESTS as SOURCE_MANIFESTS } from "./ingestion/sources/index.js";
+import { listPluginRows, getPluginRow, getSetting, listAiKeys, listSourceConnections } from "./db.js";
 
 // --- static defs (no db) ---
 
@@ -96,9 +97,30 @@ function mediaDefs() {
   }));
 }
 
+function sourceDefs() {
+  return SOURCE_MANIFESTS.map((m) => ({
+    id: `source:${m.name}`,
+    kind: "source",
+    segment: "source",
+    name: m.name,
+    label: m.label,
+    description: m.description || "",
+    // The local folder is a capability (always installed, uses INGEST_ROOT);
+    // ftp/s3 are connections you Add. A source has no global plugins.config —
+    // its state is the saved connections (source_connections). The
+    // connectionSchema drives the connection-add form in the gear modal.
+    core: !!m.core,
+    defaultInstalled: false,
+    capabilities: { browsable: !!m.browsable, needsConnection: !!m.needsConnection },
+    connectionSchema: m.connectionSchema || [],
+    configSchema: [],
+    source: { needsConnection: !!m.needsConnection, browsable: !!m.browsable },
+  }));
+}
+
 let DEFS = null; // built once — the sub-registries are static
 export function pluginDefs() {
-  if (!DEFS) DEFS = [...aiDefs(), ...connectorDefs(), ...mediaDefs()];
+  if (!DEFS) DEFS = [...aiDefs(), ...connectorDefs(), ...mediaDefs(), ...sourceDefs()];
   return DEFS;
 }
 
@@ -150,6 +172,7 @@ const health = (row) =>
 export async function pluginCatalog(db) {
   const rows = new Map((await listPluginRows(db)).map((r) => [r.id, r]));
   const aiKeys = await listAiKeys(db);
+  const connections = await listSourceConnections(db);
   const out = [];
   for (const def of pluginDefs()) {
     const row = rows.get(def.id);
@@ -167,6 +190,9 @@ export async function pluginCatalog(db) {
     }
     if (def.kind === "ai") {
       entry.state.keyCount = aiKeys.filter((k) => k.provider === def.name).length;
+    }
+    if (def.kind === "source" && def.capabilities.needsConnection) {
+      entry.state.connectionCount = connections.filter((c) => c.type === def.name).length;
     }
     out.push(entry);
   }

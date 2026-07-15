@@ -62,7 +62,7 @@ test("PATCH validation: every rejection names its rule", async () => {
     [{ ...GOOD, limit: 0 }, /limit/],
     [{ ...GOOD, limit: 501 }, /limit/],
     [{ ...GOOD, source: { folder: "../escape" } }, /escapes/],
-    [{ ...GOOD, source: {} }, /folder is required/],
+    [{ ...GOOD, source: { recursive: "yes" } }, /recursive/],
     [{ ...GOOD, trigger: { mode: "hourly" } }, /trigger mode/],
     [{ ...GOOD, sort: { by: "nope" } }, /unknown sort/],
   ];
@@ -225,10 +225,11 @@ test("connector boards: the feed adapter serves a browse-derived descriptor", as
   assert.ok(desc.sorts.some((s) => s.by === "market_cap"));
   assert.deepEqual(desc.triggerModes, ["manual", "interval", "daily"], "no continuous rescan against a metered API");
 
-  // A folder-shaped config can't land on a feed board…
+  // A folder-shaped config can't land on a feed board — its file filters
+  // (name/extension/…) aren't in the connector's catalog.
   const patch = await req(base, "PATCH", `/api/boards/${cid}`, { sid: admin.sid, body: { ingest: GOOD } });
   assert.equal(patch.status, 400);
-  assert.match(patch.json.error, /unknown source option/);
+  assert.match(patch.json.error, /unknown filter field/);
 
   // …a feed config saves and arms; the folder-only continuous mode is refused.
   const feedCfg = {

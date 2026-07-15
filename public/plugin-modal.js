@@ -62,6 +62,8 @@ export function openPluginModal(p, ctx) {
     if (!p.ai.keyless) body.appendChild(keysSection(p, ctx, done));
     if (p.capabilities.tag) body.appendChild(taggerSection(p, ctx, done));
     if (p.capabilities.embed) body.appendChild(embedSection(p, ctx, done));
+  } else if (p.kind === "source") {
+    body.appendChild(sourceSection(p, ctx, done));
   } else {
     body.appendChild(mediaSection(p));
   }
@@ -445,6 +447,174 @@ function embedSection(p, ctx, done) {
     actions.append(test, off);
   }
   sec.appendChild(actions);
+  return sec;
+}
+
+// --- source: saved connections (add / edit / test / remove) ---
+
+function sourceSection(p, ctx, done) {
+  // The local folder is a core capability — no saved connection, boards pick a
+  // subfolder in their own ingestion settings.
+  if (!p.capabilities.needsConnection) {
+    const sec = section("Local folder", null);
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.style.margin = "0";
+    note.textContent = "Core capability — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
+    sec.appendChild(note);
+    return sec;
+  }
+
+  const mine = (ctx.connections || []).filter((c) => c.type === p.name);
+  const sec = section("Connections", `Saved ${p.label} servers. A board picks one plus a subpath — the credentials never leave here.`);
+
+  if (mine.length) {
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    head.innerHTML = "<tr><th>Name</th><th>Server</th><th></th></tr>";
+    table.appendChild(head);
+    const tbody = document.createElement("tbody");
+    for (const c of mine) {
+      const tr = document.createElement("tr");
+
+      const nameTd = document.createElement("td");
+      nameTd.textContent = c.label;
+      if (c.boards_using) {
+        const b = document.createElement("span");
+        b.className = "badge";
+        b.style.marginLeft = "6px";
+        b.textContent = `${c.boards_using} board${c.boards_using > 1 ? "s" : ""}`;
+        nameTd.appendChild(b);
+      }
+
+      const hintTd = document.createElement("td");
+      hintTd.style.cssText = `${MONO_CSS}color:#9aa0aa`;
+      hintTd.textContent = p.connectionSchema.filter((f) => f.type === "text").map((f) => c.config?.[f.key]).filter(Boolean)[0] || "";
+
+      const actTd = document.createElement("td");
+      const act = document.createElement("div");
+      act.className = "row-actions";
+      const testBtn = document.createElement("button");
+      testBtn.className = "ghost";
+      testBtn.textContent = "test";
+      testBtn.onclick = busy(testBtn, "testing…", async () => {
+        try { await api("POST", "/api/admin/source-connections/test", { id: c.id }); toast(`✓ "${c.label}" reachable`); }
+        catch (err) { toast.error(`"${c.label}": ${err.message}`); }
+      });
+      const editBtn = document.createElement("button");
+      editBtn.className = "ghost";
+      editBtn.textContent = "edit";
+      editBtn.onclick = () => renderForm(c);
+      const delBtn = document.createElement("button");
+      delBtn.className = "danger";
+      delBtn.textContent = "remove";
+      delBtn.onclick = async () => {
+        const extra = c.boards_using ? ` ${c.boards_using} board(s) use it and will stop refreshing until re-pointed.` : "";
+        if (!confirm(`Remove connection "${c.label}"?${extra}`)) return;
+        try { await api("DELETE", `/api/admin/source-connections/${c.id}`); toast(`"${c.label}" removed`); done(); }
+        catch (err) { toast.error(err.message); }
+      };
+      act.append(testBtn, editBtn, delBtn);
+      actTd.appendChild(act);
+
+      tr.append(nameTd, hintTd, actTd);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    sec.appendChild(table);
+  }
+
+  // Add / edit form. Rebuilt on mode switch so toggle rows get the right initial
+  // state (switchRow captures its value at construction).
+  const formHost = document.createElement("div");
+  sec.appendChild(formHost);
+
+  function renderForm(editing) {
+    formHost.replaceChildren();
+    const box = document.createElement("div");
+    box.style.cssText = "display:flex;flex-direction:column;gap:10px;border-top:1px solid #eee;padding-top:12px;";
+    const title = document.createElement("div");
+    title.style.cssText = "font-size:13px;font-weight:600;";
+    title.textContent = editing ? `Edit "${editing.label}"` : "Add a connection";
+    box.appendChild(title);
+
+    const labelIn = document.createElement("input");
+    labelIn.placeholder = "Name (e.g. Client server)";
+    labelIn.style.cssText = "width:100%;box-sizing:border-box;";
+    labelIn.value = editing?.label || "";
+    box.appendChild(labeled("Name", labelIn));
+
+    const getters = [];
+    for (const f of p.connectionSchema) {
+      if (f.type === "toggle") {
+        let on = editing ? !!editing.config?.[f.key] : !!f.default;
+        box.appendChild(switchRow(f.label, f.help || "", on, (v) => { on = v; }));
+        getters.push({ f, get: () => on });
+        continue;
+      }
+      const input = document.createElement("input");
+      input.style.cssText = `width:100%;box-sizing:border-box;${f.type === "secret" ? MONO_CSS : ""}`;
+      if (f.type === "number") { input.type = "number"; if (f.min !== undefined) input.min = String(f.min); }
+      if (f.type === "secret") {
+        input.type = "password";
+        input.autocomplete = "off";
+        input.placeholder = editing?.hasSecret?.[f.key] ? "•••• stored — leave blank to keep" : (f.required ? "required" : f.help || "");
+      } else {
+        input.value = editing?.config?.[f.key] ?? (f.default ?? "");
+        input.placeholder = f.help || "";
+      }
+      box.appendChild(labeled(f.label, input));
+      getters.push({ f, get: () => (f.type === "number" ? (input.value === "" ? undefined : Number(input.value)) : input.value.trim()) });
+    }
+
+    const collect = () => {
+      const config = {};
+      for (const { f, get } of getters) {
+        const v = get();
+        if (f.type === "secret") { if (v) config[f.key] = v; } // blank = keep the stored one
+        else if (f.type === "toggle") config[f.key] = v;
+        else if (v !== undefined && v !== "") config[f.key] = v;
+      }
+      return { label: labelIn.value.trim(), config };
+    };
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = editing ? "Save changes" : "Add connection";
+    saveBtn.onclick = busy(saveBtn, "Saving…", async () => {
+      const { label, config } = collect();
+      if (!label) { toast.error("Name required"); return; }
+      try {
+        if (editing) await api("PATCH", `/api/admin/source-connections/${editing.id}`, { label, config });
+        else await api("POST", "/api/admin/source-connections", { type: p.name, label, config });
+        toast(editing ? "Connection saved" : `"${label}" added`);
+        done();
+      } catch (err) { toast.error(err.message); }
+    });
+    const testBtn = document.createElement("button");
+    testBtn.className = "ghost";
+    testBtn.textContent = "Test";
+    testBtn.onclick = busy(testBtn, "Testing…", async () => {
+      const { config } = collect();
+      try {
+        await api("POST", "/api/admin/source-connections/test", editing ? { id: editing.id, config } : { type: p.name, config });
+        toast("✓ reachable");
+      } catch (err) { toast.error(err.message); }
+    });
+    actions.append(saveBtn, testBtn);
+    if (editing) {
+      const cancel = document.createElement("button");
+      cancel.className = "ghost";
+      cancel.textContent = "Cancel";
+      cancel.onclick = () => renderForm(null);
+      actions.appendChild(cancel);
+    }
+    box.appendChild(actions);
+    formHost.appendChild(box);
+  }
+  renderForm(null);
+
   return sec;
 }
 

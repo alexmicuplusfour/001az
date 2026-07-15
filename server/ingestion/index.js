@@ -1,20 +1,22 @@
 // The ingestion registry: resolves a board's input type to its ingestion
 // adapter, owns the trigger schedule math, and validates saved configs.
 // An adapter declares a descriptor (source schema, filter catalog, sorts,
-// trigger modes) and implements enumerate/admit — see folder.js for the
-// pinned interface. Adding an ingestible domain = one adapter file here;
-// the sweep, routes, modal, filter engine and ledger are all adapter-blind.
-import * as folder from "./folder.js";
+// trigger modes) and implements enumerate/admit — see files.js for the file
+// adapter (folder/ftp/s3 via pluggable source backends) and connector.js for
+// the catalog-feed adapter. The sweep, routes, modal, filter engine and ledger
+// are all adapter-blind.
+import * as files from "./files.js";
 import { forBoard as connectorFeed } from "./connector.js";
 import { OPS_BY_KIND } from "./filter-engine.js";
 
-// null input.connector = a file board → the folder adapter. Connector boards
-// (crypto/stocks) get a per-board feed adapter built from their manifest's
+// null input.connector = a file board → the shared file adapter (its source
+// backend is picked per-board by ingest.source.type, default folder). Connector
+// boards (crypto/stocks) get a per-board feed adapter built from their manifest's
 // `browse` block; an unknown connector (or one without a catalog) resolves to
 // null and the routes answer "not available for this board".
 export function resolveIngestAdapter(board) {
   const name = board?.mapping?.input?.connector;
-  return name ? connectorFeed(board) : folder;
+  return name ? connectorFeed(board) : files;
 }
 
 // Next run after `from` per the trigger config (sibling of nextAutoTagRun,
@@ -48,22 +50,11 @@ export function validateIngest(ingest, descriptor, { hasRoot = false } = {}) {
   if (!descriptor) return "ingestion is not available for this board";
   if (typeof ingest.enabled !== "boolean") return "ingest.enabled must be a boolean";
 
-  // Source, checked against the adapter's declared schema.
-  const src = ingest.source || {};
-  if (typeof src !== "object" || Array.isArray(src)) return "ingest.source must be an object";
-  for (const s of descriptor.source || []) {
-    const v = src[s.key];
-    if (s.type === "folder") {
-      if (!hasRoot) return "ingestion root is not configured on the server (INGEST_ROOT)";
-      if (typeof v !== "string" || !v.trim()) return "ingest.source.folder is required";
-      if (!folder.resolveJailed("/jail-check", v)) return "ingest.source.folder escapes the ingestion root";
-    }
-    if (s.type === "boolean" && v !== undefined && typeof v !== "boolean")
-      return `ingest.source.${s.key} must be a boolean`;
-  }
-  for (const k of Object.keys(src)) {
-    if (!(descriptor.source || []).some((s) => s.key === k)) return `unknown source option "${k}"`;
-  }
+  // Source shape only — the concrete per-source rules (folder jail, connection
+  // reference, install gate) depend on the chosen source type and live in the
+  // adapter's async validateSource, which the routes call alongside this.
+  if (ingest.source !== undefined && (typeof ingest.source !== "object" || Array.isArray(ingest.source)))
+    return "ingest.source must be an object";
 
   // Filters against the catalog + the shared op table.
   const filters = ingest.filters ?? [];

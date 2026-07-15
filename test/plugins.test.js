@@ -20,11 +20,12 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
     "ai:local", "ai:anthropic", "ai:openai", "ai:gemini", "ai:glm", "ai:openrouter",
     "crypto:coingecko", "crypto:coinmarketcap", "stocks:financialmodelingprep",
     "media:image", "media:text", "media:pdf", "media:docx",
+    "source:folder", "source:ftp", "source:s3",
   ]);
   assert.equal(new Set(ids).size, ids.length);
   for (const d of pluginDefs()) {
     assert.equal(d.id, `${d.segment}:${d.name}`);
-    assert.ok(["ai", "connector", "media"].includes(d.kind), d.id);
+    assert.ok(["ai", "connector", "media", "source"].includes(d.kind), d.id);
     // Every card must say what it is: a label and a one-line description.
     assert.ok(d.label && d.label.trim(), `${d.id}: has a label`);
     assert.ok(d.description && d.description.trim(), `${d.id}: has a description`);
@@ -33,9 +34,9 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   // the embedder is named for what it is, not a vague "Local"
   assert.equal(getPluginDef("ai:local").label, "Xenova");
   // core = the app's own capabilities (always installed, not removable): every
-  // media handler + the on-device embedder.
+  // media handler, the on-device embedder, and the local-folder source.
   assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
-    ["ai:local", "media:image", "media:text", "media:pdf", "media:docx"]);
+    ["ai:local", "media:image", "media:text", "media:pdf", "media:docx", "source:folder"]);
   // exactly one connection is pre-added — the flagship AI provider.
   assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
 });

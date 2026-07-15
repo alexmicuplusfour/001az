@@ -946,6 +946,58 @@ export async function recordIngest(dbc, boardId, sourceKey, at) {
   );
 }
 
+// --- source connections (reusable credentials for remote ingestion sources) ---
+// One row per saved connection (ftp/s3 host+login), referenced by boards from
+// JSONB (ingest.source.connectionId). Secrets live in `config` — the routes
+// mask them on read and the runtime reads them raw. Mirrors the ai_keys shape.
+
+export async function listSourceConnections(db, type = null) {
+  const { rows } = await db.query(
+    `SELECT c.id, c.type, c.label, c.config, c.created_at, c.updated_at,
+       (SELECT COUNT(*) FROM boards b WHERE (b.ingest #>> '{source,connectionId}') = c.id::text) AS boards_using
+     FROM source_connections c
+     ${type ? "WHERE c.type = $1" : ""}
+     ORDER BY c.created_at ASC`,
+    type ? [type] : []
+  );
+  return rows;
+}
+
+export async function getSourceConnection(db, id) {
+  if (!Number.isFinite(Number(id))) return null;
+  const { rows } = await db.query("SELECT id, type, label, config FROM source_connections WHERE id=$1", [Number(id)]);
+  return rows[0] || null;
+}
+
+export async function createSourceConnection(db, type, label, config) {
+  const now = Date.now();
+  const { rows } = await db.query(
+    "INSERT INTO source_connections (type, label, config, created_at, updated_at) VALUES ($1, $2, $3::jsonb, $4, $4) RETURNING id",
+    [type, label, JSON.stringify(config || {}), now]
+  );
+  return rows[0].id;
+}
+
+// Partial: an undefined field is left alone. `config` is a full replacement of
+// the merged object — the route merges blank-secret-keeps before calling.
+export async function updateSourceConnection(db, id, { label, config } = {}) {
+  const sets = [];
+  const vals = [];
+  let i = 1;
+  if (label !== undefined) { sets.push(`label=$${i++}`); vals.push(label); }
+  if (config !== undefined) { sets.push(`config=$${i++}::jsonb`); vals.push(JSON.stringify(config)); }
+  if (!sets.length) return false;
+  sets.push(`updated_at=$${i++}`); vals.push(Date.now());
+  vals.push(Number(id));
+  const r = await db.query(`UPDATE source_connections SET ${sets.join(", ")} WHERE id=$${i}`, vals);
+  return r.rowCount > 0;
+}
+
+export async function deleteSourceConnection(db, id) {
+  const r = await db.query("DELETE FROM source_connections WHERE id=$1", [Number(id)]);
+  return r.rowCount > 0;
+}
+
 // --- board membership ---
 
 export async function getBoardMemberIds(db, boardId) {
