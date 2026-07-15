@@ -6,6 +6,15 @@ import * as crypto from "./crypto/index.js";
 import * as stocks from "./stocks/index.js";
 import * as runtime from "./runtime.js";
 
+// The provider descriptor list, derived LIVE from a connector's providers map —
+// the single source of truth. A dynamically-registered provider (Plugins page /
+// an installed plugin) shows up here immediately; nothing keeps a parallel
+// manifest snapshot in sync, so the card and the resolver can never drift.
+const providerDescriptors = (providers) =>
+  Object.entries(providers).map(([name, p]) => ({
+    name, label: p.label, description: p.description || "", needsKey: !!p.needsKey,
+  }));
+
 // Compose a data-only connector module with the runtime dispatch. The returned
 // object's method names match what the routes already call
 // (search/fetchEntity/testConnection/activeProvider), so server.js is untouched
@@ -16,6 +25,7 @@ function bind(name, mod) {
     name,
     manifest: mod.manifest,
     providers: mod.providers, // raw provider modules (rpm/burst defaults for the plugin registry)
+    providerList: () => providerDescriptors(conn.providers), // live descriptors (single source)
     search: (db, q) => runtime.search(db, conn, q),
     list: (db, opts) => runtime.list(db, conn, opts),
     fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
@@ -58,6 +68,38 @@ export function listConnectors() {
     faces: c.manifest.faces || [],
     browse: c.manifest.browse || null,
     template: c.manifest.template,
-    providers: c.manifest.providers,
+    providers: c.providerList(),
   }));
+}
+
+// --- dynamic registration (phase 2) ---
+// Adding a domain or a provider is a live mutation of the maps above; because
+// listConnectors()/providerList() derive from the live `providers` map, the
+// catalog and the resolver update together from a single write. The loader
+// (server/plugins/loader.js) calls these AFTER a module is fully built +
+// validated, so a half-built plugin never lands here (register-last).
+
+// Register a whole new data domain (a `connector-domain` plugin). `mod` is the
+// same pure-data shape a built-in exports: { providers, defaultProvider,
+// manifest, faces? }. Idempotent on re-register (a reload replaces the binding).
+export function registerConnector(name, mod) {
+  CONNECTORS[name] = bind(name, mod);
+}
+
+export function unregisterConnector(name) {
+  delete CONNECTORS[name];
+}
+
+// Add one provider to an existing domain (a `connector-provider` plugin). Writes
+// into the domain's LIVE providers map — the same object activeProvider iterates
+// and providerList() derives from — so one write reaches both.
+export function registerConnectorProvider(domain, name, providerMod) {
+  const c = CONNECTORS[domain];
+  if (!c) throw new Error(`unknown connector domain: ${domain}`);
+  c.providers[name] = providerMod;
+}
+
+export function unregisterConnectorProvider(domain, name) {
+  const c = CONNECTORS[domain];
+  if (c) delete c.providers[name];
 }

@@ -366,6 +366,23 @@ const openrouter = {
 export const PROVIDERS = { local, anthropic, openai, gemini, glm, openrouter };
 for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
 
+// --- dynamic registration (phase 2) ---
+// Register a dynamically-loaded AI provider (an `ai-provider` plugin). The
+// descriptor is the same data shape a built-in is (label/description/wire/
+// defaultModel/models/embeds/research/keyless…); providerCatalog() reads
+// PROVIDERS live, so the plugin's card and the board modal pick it up from this
+// one write. `external` marks it for uninstall and lets the UI distinguish it.
+// The loader calls this only after the descriptor is fully validated.
+export function registerProvider(name, desc) {
+  desc.name = name;
+  desc.external = true;
+  PROVIDERS[name] = desc;
+}
+
+export function unregisterProvider(name) {
+  delete PROVIDERS[name];
+}
+
 // Callers reach through the registry directly: PROVIDERS[p].defaultModel for
 // the default, PROVIDERS[p]?.embeds as the "does this provider embed" check.
 // The one place a plain list is needed (validation error messages) derives it

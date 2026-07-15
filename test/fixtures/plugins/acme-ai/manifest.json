@@ -1,0 +1,8 @@
+{
+  "id": "acme.model",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Acme AI",
+  "description": "a test AI tagging provider (fixture)",
+  "main": "index.js"
+}

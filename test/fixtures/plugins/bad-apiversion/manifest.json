@@ -1,0 +1,9 @@
+{
+  "id": "acme.old",
+  "apiVersion": 999,
+  "kind": "connector-provider",
+  "domain": "crypto",
+  "label": "Acme Old",
+  "description": "targets a future contract this host can't honor",
+  "main": "index.js"
+}

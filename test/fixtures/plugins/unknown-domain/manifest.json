@@ -1,0 +1,9 @@
+{
+  "id": "acme.orphan",
+  "apiVersion": 1,
+  "kind": "connector-provider",
+  "domain": "nope",
+  "label": "Acme Orphan",
+  "description": "a connector-provider for a domain that does not exist",
+  "main": "index.js"
+}

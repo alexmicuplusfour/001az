@@ -1,0 +1,8 @@
+{
+  "id": "acme.embed",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Acme Embed",
+  "description": "an embed-only AI provider (fixture) — no tagging wire",
+  "main": "index.js"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "acme.gecko",
+  "apiVersion": 1,
+  "kind": "connector-provider",
+  "domain": "crypto",
+  "label": "Acme Gecko",
+  "description": "A test crypto provider (fixture)",
+  "main": "index.js"
+}

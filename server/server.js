@@ -95,6 +95,7 @@ import {
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
+import { loadAll as loadPlugins } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
@@ -151,6 +152,7 @@ for (const level of ["log", "warn", "error"]) {
 
 const db = openDb(DATABASE_URL);
 await initDb(db);
+await loadPlugins(db); // register dynamically-installed plugins before routes serve
 await seedAdmin(db, ADMIN_EMAIL);
 
 // Source handlers (server/sources/): store originals + faces (thumbnails)
@@ -1111,7 +1113,7 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
 app.post("/api/admin/plugins/slots/:domain", requireAdmin, wrap(async (req, res) => {
   const conn = getConnector(req.params.domain);
   if (!conn) return res.status(404).json({ error: "unknown domain" });
-  const providers = conn.manifest.providers || [];
+  const providers = conn.providerList();
   const provider = req.body?.provider ? String(req.body.provider) : "";
   const desc = providers.find((p) => p.name === provider);
   if (!desc) return res.status(400).json({ error: `provider must be one of: ${providers.map((p) => p.name).join(", ")}` });

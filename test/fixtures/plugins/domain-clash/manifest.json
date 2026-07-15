@@ -1,0 +1,9 @@
+{
+  "id": "acme.clash",
+  "apiVersion": 1,
+  "kind": "connector-domain",
+  "domain": "crypto",
+  "label": "Acme Clash",
+  "description": "a connector-domain that tries to shadow the built-in crypto domain",
+  "main": "index.js"
+}

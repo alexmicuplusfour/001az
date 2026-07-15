@@ -1,0 +1,9 @@
+{
+  "id": "acme.boom",
+  "apiVersion": 1,
+  "kind": "connector-provider",
+  "domain": "crypto",
+  "label": "Acme Boom",
+  "description": "a valid manifest whose factory throws at build time",
+  "main": "index.js"
+}

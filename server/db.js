@@ -1144,6 +1144,45 @@ export async function withPluginHealth(db, id, fn) {
   }
 }
 
+// --- external plugins (the dynamic-loading install record) ---
+// Distinct from the `plugins` table (config/health for ALL plugins): this holds
+// only WHERE an external plugin came from and where its code lives, so boot can
+// reload it. See server/migrations/0020_external_plugins.sql.
+
+export async function listExternalPlugins(db) {
+  const { rows } = await db.query("SELECT * FROM external_plugins");
+  return rows;
+}
+
+// Record an install (or re-install). `manifest` is stored verbatim; a successful
+// (re)load clears any prior load_error. Called only after the code is on disk.
+export async function upsertExternalPlugin(db, { id, kind, sourceUrl, resolvedRef, dir, manifest }) {
+  await db.query(
+    `INSERT INTO external_plugins (id, kind, source_url, resolved_ref, dir, manifest, installed_at, load_error)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NULL)
+     ON CONFLICT (id) DO UPDATE SET
+       kind = $2, source_url = $3, resolved_ref = $4, dir = $5, manifest = $6::jsonb,
+       installed_at = $7, load_error = NULL`,
+    [id, kind, sourceUrl, resolvedRef ?? null, dir, JSON.stringify(manifest), Date.now()]
+  );
+}
+
+// Mark a load failure without dropping the install record — the code stays on
+// disk (the dir is unchanged), so a later Retry can reload it. `error` is
+// coerced to the same structured shape the health ledger uses.
+export async function setExternalLoadError(db, id, error) {
+  const payload = error
+    ? JSON.stringify({ message: String(error.message || error).slice(0, 500), at: Date.now() })
+    : null;
+  await db.query("UPDATE external_plugins SET load_error = $2::jsonb WHERE id = $1", [id, payload]);
+}
+
+// Remove the install record. The caller also rm's the dir + drops the `plugins`
+// row (config/health) — this is only the provenance half.
+export async function deleteExternalPlugin(db, id) {
+  await db.query("DELETE FROM external_plugins WHERE id = $1", [id]);
+}
+
 // --- AI tagging queue helpers ---
 
 // Atomically take the oldest ready item — whatever stage it's in — and mark it

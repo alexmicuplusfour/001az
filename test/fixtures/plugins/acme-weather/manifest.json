@@ -1,0 +1,9 @@
+{
+  "id": "acme.weather",
+  "apiVersion": 1,
+  "kind": "connector-domain",
+  "domain": "weather",
+  "label": "Acme Weather",
+  "description": "a whole new data domain (fixture)",
+  "main": "index.js"
+}

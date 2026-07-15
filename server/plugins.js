@@ -22,7 +22,7 @@ import { PROVIDERS, providerCatalog } from "./providers.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS } from "./sources/index.js";
 import { MANIFESTS as SOURCE_MANIFESTS } from "./ingestion/sources/index.js";
-import { listPluginRows, getPluginRow, getSetting, listAiKeys, listSourceConnections } from "./db.js";
+import { listPluginRows, getPluginRow, getSetting, listAiKeys, listSourceConnections, listExternalPlugins } from "./db.js";
 
 // --- static defs (no db) ---
 
@@ -118,11 +118,19 @@ function sourceDefs() {
   }));
 }
 
-let DEFS = null; // built once — the sub-registries are static
+// Memoized across reads, but NO LONGER "built once": a dynamically-loaded plugin
+// mutates the live registries (PROVIDERS / CONNECTORS), so the loader calls
+// resetDefs() after every register/unregister to force a lazy rebuild. Because
+// aiDefs()/connectorDefs() derive from those live maps, a registered external
+// plugin appears here with no special-casing — the single-source payoff.
+let DEFS = null;
 export function pluginDefs() {
   if (!DEFS) DEFS = [...aiDefs(), ...connectorDefs(), ...mediaDefs(), ...sourceDefs()];
   return DEFS;
 }
+
+// Drop the memo after the live registries change (plugin install/uninstall).
+export function resetDefs() { DEFS = null; }
 
 export const getPluginDef = (id) => pluginDefs().find((d) => d.id === id) || null;
 
@@ -167,10 +175,36 @@ const health = (row) =>
     ? { failCount: row.fail_count, lastOkAt: row.last_ok_at, lastFailAt: row.last_fail_at, lastError: row.last_error }
     : null;
 
+// external_plugins.kind (the manifest kind) → catalog kind (the card's family).
+const CATALOG_KIND = { "ai-provider": "ai", "connector-provider": "connector", "connector-domain": "connector" };
+
+// An external plugin that FAILED to load never reaches the live registries, so
+// pluginDefs() can't see it — but it's installed (code on disk) and must show as
+// an errored card with its reason + a Retry. Built from the stored manifest +
+// the recorded load_error (health row, if any, carries prior runtime failures).
+function erroredExternalEntry(ext, row) {
+  const m = ext.manifest || {};
+  return {
+    id: ext.id,
+    kind: CATALOG_KIND[ext.kind] || "connector",
+    segment: ext.id.split(":")[0],
+    name: m.id || ext.id,
+    label: m.label || ext.id,
+    description: m.description || "",
+    core: false,
+    external: true,
+    source: { url: ext.source_url, ref: ext.resolved_ref },
+    capabilities: {},
+    configSchema: [],
+    state: { installed: true, config: {}, loadError: ext.load_error || { message: "failed to load", at: null }, health: health(row) },
+  };
+}
+
 // The full admin catalog: every def + its state, secrets masked. Connector
 // key presence comes from the settings store; AI key counts from ai_keys.
 export async function pluginCatalog(db) {
   const rows = new Map((await listPluginRows(db)).map((r) => [r.id, r]));
+  const externals = new Map((await listExternalPlugins(db)).map((r) => [r.id, r]));
   const aiKeys = await listAiKeys(db);
   const connections = await listSourceConnections(db);
   const out = [];
@@ -185,6 +219,15 @@ export async function pluginCatalog(db) {
       },
     };
     delete entry.state.config.api_key; // never echo secrets, even by accident
+    // A successfully-loaded external plugin: mark it + carry its provenance so the
+    // page can show source/version + a real Remove (uninstall), not just a toggle.
+    const ext = externals.get(def.id);
+    if (ext) {
+      entry.external = true;
+      entry.source = { url: ext.source_url, ref: ext.resolved_ref };
+      entry.state.installed = true; // installed-from-URL: present ⇒ installed (Remove = uninstall)
+      externals.delete(def.id); // consumed — the rest are errored (below)
+    }
     if (def.kind === "connector") {
       entry.state.hasKey = !!(await getSetting(db, `${def.connector.domain}_key_${def.name}`));
     }
@@ -196,5 +239,7 @@ export async function pluginCatalog(db) {
     }
     out.push(entry);
   }
+  // Externals still in the map failed to register → surface them as errored cards.
+  for (const ext of externals.values()) out.push(erroredExternalEntry(ext, rows.get(ext.id)));
   return out;
 }
