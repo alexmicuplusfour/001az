@@ -71,7 +71,7 @@ export function openSourceBrowse({ boardId, source, start = "", onPick }) {
     pathLine.replaceChildren();
     const label = document.createElement("span");
     label.style.fontFamily = "'SF Mono',Consolas,monospace";
-    label.textContent = current ? `/${current}` : "/";
+    label.textContent = current ? `/${current.replace(/\/+$/, "")}` : "/";
     pathLine.appendChild(label);
     if (parent !== null && parent !== undefined) {
       const up = document.createElement("button");
@@ -107,7 +107,10 @@ export function openSourceBrowse({ boardId, source, start = "", onPick }) {
 
   const useBtn = document.createElement("button");
   useBtn.textContent = "Use this folder";
-  useBtn.onclick = () => { onPick(current); close(); };
+  // Hand back a clean path — S3 dir prefixes carry a trailing slash ("sub/")
+  // while folder/FTP paths don't ("sub"); normalize so the saved base path (and
+  // any path filter) reads the same across sources. enumerate re-adds the slash.
+  useBtn.onclick = () => { onPick((current || "").replace(/\/+$/, "")); close(); };
   const cancel = document.createElement("button");
   cancel.className = "ghost";
   cancel.textContent = "Cancel";

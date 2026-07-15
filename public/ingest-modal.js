@@ -167,6 +167,7 @@ export function openIngestModal() {
 
       if (sources.length > 1) {
         const typeSel = document.createElement("select");
+        typeSel.setAttribute("aria-label", "Source type");
         for (const s of sources) {
           const o = document.createElement("option");
           o.value = s.type;
@@ -180,6 +181,7 @@ export function openIngestModal() {
           cfg.source = { type: typeSel.value, recursive: cfg.source.recursive !== false };
           renderConn();
           renderDetail();
+          renderTriggerModes(); // the new source may offer different modes
           invalidatePreview();
         });
         pullRow.appendChild(typeSel);
@@ -190,15 +192,19 @@ export function openIngestModal() {
         if (connSel) { connSel.remove(); connSel = null; }
         const s = current();
         if (!s.needsConnection || !s.connections || !s.connections.length) return;
+        // Default to — or repair a dangling saved id to — the first connection,
+        // so the select's value and cfg.source.connectionId always agree.
+        if (!s.connections.some((c) => String(c.id) === String(cfg.source.connectionId)))
+          cfg.source.connectionId = s.connections[0].id;
         connSel = document.createElement("select");
+        connSel.setAttribute("aria-label", "Connection");
         for (const c of s.connections) {
           const o = document.createElement("option");
           o.value = String(c.id);
           o.textContent = c.label;
-          if (String(c.id) === String(cfg.source.connectionId)) o.selected = true;
           connSel.appendChild(o);
         }
-        if (cfg.source.connectionId == null) cfg.source.connectionId = s.connections[0].id;
+        connSel.value = String(cfg.source.connectionId);
         connSel.disabled = !canEdit;
         connSel.addEventListener("change", () => { cfg.source.connectionId = Number(connSel.value); invalidatePreview(); });
         pullRow.appendChild(connSel);
@@ -258,7 +264,7 @@ export function openIngestModal() {
       browseBtn.type = "button";
       browseBtn.className = "im-btn";
       browseBtn.textContent = "Browse…";
-      browseBtn.disabled = !canEdit || !s.browsable;
+      browseBtn.disabled = !canEdit || !s.browsable || (s.needsConnection && cfg.source.connectionId == null);
       browseBtn.addEventListener("click", () => {
         openSourceBrowse({
           boardId: state.boardId,
@@ -274,6 +280,15 @@ export function openIngestModal() {
         cfg.source.recursive = on;
         invalidatePreview();
       }, { small: true })));
+    }
+
+    // The trigger modes offered for the currently-selected source. File boards
+    // restrict per source (a remote source drops "continuous"); connector boards
+    // fall back to the shared descriptor.
+    function sourceTriggerModes() {
+      if (!info.sources) return desc.triggerModes || [];
+      const s = info.sources.find((x) => x.type === (cfg.source.type || "folder"));
+      return s?.triggerModes || desc.triggerModes || [];
     }
 
     // ── Filters ──
@@ -427,13 +442,7 @@ export function openIngestModal() {
     const trigRow = document.createElement("div");
     trigRow.className = "im-row";
     const modeSel = document.createElement("select");
-    for (const m of desc.triggerModes || []) {
-      const o = document.createElement("option");
-      o.value = m;
-      o.textContent = TRIGGER_LABELS[m] || m;
-      if (m === cfg.trigger.mode) o.selected = true;
-      modeSel.appendChild(o);
-    }
+    modeSel.setAttribute("aria-label", "Trigger");
     const everyInput = document.createElement("input");
     everyInput.type = "number";
     everyInput.min = "1";
@@ -449,10 +458,26 @@ export function openIngestModal() {
       everyInput.style.display = cfg.trigger.mode === "interval" ? "" : "none";
       atInput.style.display = cfg.trigger.mode === "daily" ? "" : "none";
     }
+    // Trigger modes depend on the selected source (a remote source drops the 30s
+    // "continuous" rescan). Rebuilt when the source switches; a now-invalid mode
+    // (e.g. continuous → FTP) falls to the first mode the new source offers.
+    function renderTriggerModes() {
+      const modes = sourceTriggerModes();
+      if (!modes.includes(cfg.trigger.mode)) cfg.trigger.mode = modes[0] || "manual";
+      modeSel.replaceChildren();
+      for (const m of modes) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = TRIGGER_LABELS[m] || m;
+        if (m === cfg.trigger.mode) o.selected = true;
+        modeSel.appendChild(o);
+      }
+      syncTriggerInputs();
+    }
     modeSel.addEventListener("change", () => { cfg.trigger.mode = modeSel.value; syncTriggerInputs(); });
     everyInput.addEventListener("input", () => { cfg.trigger.every = Number(everyInput.value); });
     atInput.addEventListener("input", () => { cfg.trigger.at = atInput.value; });
-    syncTriggerInputs();
+    renderTriggerModes();
     trigRow.append(modeSel, everyInput, atInput);
     trigSection.appendChild(trigRow);
     settingsView.appendChild(trigSection);

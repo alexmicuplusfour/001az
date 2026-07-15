@@ -1240,6 +1240,10 @@ function validateConnectionConfig(schema, incoming = {}, existing = {}) {
           return `${f.label} must be a number${f.min !== undefined ? ` of at least ${f.min}` : ""}`;
       }
     } else if (f.type === "secret" || f.type === "text") {
+      // A text/secret field must be a string (or number) — reject objects/arrays/
+      // booleans before coerce turns them into "[object Object]"/"true" garbage.
+      if (provided(f.key) && v != null && typeof v !== "string" && typeof v !== "number")
+        return `${f.label} must be text`;
       const willHave = (provided(f.key) && String(v ?? "").trim() !== "") || stored(f.key);
       if (f.required && !willHave) return `${f.label} is required`;
     }
@@ -1333,7 +1337,8 @@ app.post("/api/admin/source-connections/test", requireAdmin, wrap(async (req, re
     const existing = await getSourceConnection(db, Number(id));
     if (!existing) return res.status(404).json({ error: "not found" });
     mod = getSourceBackend(existing.type);
-    merged = coerceConnectionConfig(mod?.manifest.connectionSchema || [], config || {}, existing.config || {});
+    if (!mod) return res.status(400).json({ error: `unknown source type "${existing.type}"` });
+    merged = coerceConnectionConfig(mod.manifest.connectionSchema, config || {}, existing.config || {});
   } else {
     mod = type ? getSourceBackend(String(type)) : null;
     if (!mod || !mod.manifest.needsConnection) return res.status(400).json({ error: "unknown source type" });

@@ -19,6 +19,7 @@
     "sharp": "^0.33.5"
   },
   "devDependencies": {
+    "aws-sdk-client-mock": "^4.1.0",
     "better-sqlite3": "^11.8.1",
     "ftp-srv": "^4.6.3"
   }

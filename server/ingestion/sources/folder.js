@@ -109,11 +109,15 @@ export function backend({ source } = {}) {
     },
 
     // Copy the source file to tmp (never consume the original). key is relative
-    // to the board's configured folder.
+    // to the board's configured folder. Re-jail the joined path too — key is
+    // trusted today (it comes from the jailed walk), but this keeps fetch safe
+    // if a caller ever hands it a client-influenced key.
     async fetch(key, tmpPath) {
       const dir = resolveJailed(process.env.INGEST_ROOT, base);
       if (!dir) throw new Error("ingestion folder is not configured");
-      await fs.promises.copyFile(path.join(dir, key), tmpPath);
+      const src = resolveJailed(dir, key);
+      if (!src) throw new Error("source path escapes the ingestion root");
+      await fs.promises.copyFile(src, tmpPath);
     },
 
     async test() {

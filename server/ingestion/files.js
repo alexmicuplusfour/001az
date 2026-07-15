@@ -41,6 +41,14 @@ const FILE_SORTS = [
 ];
 const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 
+// A remote source's enumeration window. The worker sweeps with no limit (it
+// wants every candidate to dedup + sort), which is free for a local folder but
+// would re-list an entire bucket / FTP tree on every tick for a remote source.
+// Bound remote walks to this many entries (a feed sees the first N, like the
+// connector feed's ENUM_CAP; narrow with a base path or filters for more).
+// Matches the preview cap so the sweep and preview agree on the window.
+const REMOTE_ENUM_CAP = 1000;
+
 // Resolve the backend for a board's source config. Dispatches by `source.type`
 // (absent → "folder", so existing file boards are unchanged), enforces the
 // plugin install gate, and resolves the saved connection for remote sources.
@@ -55,7 +63,14 @@ export async function resolveBackend(db, source = {}) {
   if (!mod.manifest.needsConnection) return mod.backend({ source });
   const conn = await getSourceConnection(db, source.connectionId);
   if (!conn) throw new Error("that source connection was removed — pick another for this board");
-  return mod.backend({ source, conn: conn.config });
+  // The connection must be for THIS source type — the single chokepoint that
+  // keeps validateSource's invariant true at run/browse time too, so a caller
+  // (e.g. the browse route) can't drive one backend with another's credentials.
+  if (conn.type !== type) throw new Error(`that connection is a ${conn.type} connection, not ${type}`);
+  // A malformed/hand-edited row (config not a JSON object) degrades to defaults
+  // rather than throwing an opaque TypeError deep in the backend.
+  const config = conn.config && typeof conn.config === "object" && !Array.isArray(conn.config) ? conn.config : {};
+  return mod.backend({ source, conn: config });
 }
 
 // Per-board source config → the directory/prefix a backend should read.
@@ -77,11 +92,14 @@ export function descriptor() {
 // `accept`/`maxBytes` are applied inside the backend walk so `limit` counts only
 // admissible files (identical to the pre-split folder behaviour).
 export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
+  const mod = getSourceBackend(cfg.source?.type || "folder");
+  // Bound remote walks (see REMOTE_ENUM_CAP); a local folder stays unbounded.
+  const cap = mod?.manifest.needsConnection ? Math.min(limit, REMOTE_ENUM_CAP) : limit;
   const be = await resolveBackend(db, cfg.source);
   const { entries, truncated } = await be.list({
     path: sourcePath(cfg.source),
     recursive: cfg.source?.recursive !== false,
-    limit,
+    limit: cap,
     accept: acceptsName,
     maxBytes: MAX_BYTES,
   });
@@ -188,6 +206,9 @@ export async function listSources(db) {
       browsable: !!m.browsable,
       needsConnection: !!m.needsConnection,
       sourceSchema: m.sourceSchema || [],
+      // Remote sources drop "continuous" (a 30s rescan is rude against a network
+      // source — interval's 1-minute floor is plenty); the local folder keeps it.
+      triggerModes: m.needsConnection ? FILE_TRIGGERS.filter((t) => t !== "continuous") : FILE_TRIGGERS,
       ready: true,
     };
     if (m.needsConnection) {

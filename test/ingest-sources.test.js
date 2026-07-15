@@ -50,9 +50,13 @@ before(async () => {
   ftpServer.on("login", (_data, resolve) => resolve({ root: ftpRoot }));
   await ftpServer.listen();
   ftpConn = { host: "127.0.0.1", port, user: "anonymous", password: "", secure: false };
+
+  // Give folder-source validation a root to jail against (reuse the ftp tree).
+  process.env.INGEST_ROOT = ftpRoot;
 });
 
 after(async () => {
+  delete process.env.INGEST_ROOT;
   sources.close?.();
   await ftpServer?.close();
   fs.rmSync(ftpRoot, { recursive: true, force: true });
@@ -218,6 +222,10 @@ test("GET /ingest lists installed sources + connections; browse navigates the tr
   assert.ok(srcs.ftp?.connections.some((c) => c.id === connId && c.label === "browse-server"));
   // Connections carry no secret material to the (manager) client.
   for (const c of srcs.ftp.connections) assert.deepEqual(Object.keys(c).sort(), ["id", "label"]);
+  // Trigger modes are per-source: the local folder can watch continuously, a
+  // remote source cannot (interval floor only).
+  assert.ok(srcs.folder.triggerModes.includes("continuous"), "folder offers continuous");
+  assert.ok(!srcs.ftp.triggerModes.includes("continuous"), "remote drops continuous");
 
   const root = await req(srv.base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
     sid: admin.sid, body: { source: { type: "ftp", connectionId: connId }, path: "" },
@@ -250,4 +258,58 @@ test("saving an ftp source validates the connection reference", async () => {
     sid: admin.sid, body: { ingest: { ...base, source: { type: "ftp", connectionId: connId, path: "" } } },
   });
   assert.equal(ok.status, 200);
+});
+
+test("save + browse refuse a connection whose type doesn't match the source", async () => {
+  const admin = await adminSession(db);
+  await setPluginState(db, "source:ftp", { installed: true });
+  const s3conn = await createSourceConnection(db, "s3", "a bucket", { bucket: "b", accessKeyId: "k", secretAccessKey: "s" });
+  const boardId = await seedBoard(db, "type-mismatch");
+  const base = { enabled: true, filters: [], sort: { by: "modified", order: "desc" }, trigger: { mode: "manual" } };
+
+  const save = await req(srv.base, "PATCH", `/api/boards/${boardId}`, {
+    sid: admin.sid, body: { ingest: { ...base, source: { type: "ftp", connectionId: s3conn, path: "" } } },
+  });
+  assert.equal(save.status, 400);
+  assert.match(save.json.error, /different source/);
+
+  // The browse route resolves through the same chokepoint — mismatch refused there too.
+  const browse = await req(srv.base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
+    sid: admin.sid, body: { source: { type: "ftp", connectionId: s3conn }, path: "" },
+  });
+  assert.equal(browse.status, 400);
+  assert.match(browse.json.error, /not ftp|different/);
+});
+
+test("save refuses a folder that escapes the ingest root, and an uninstalled source", async () => {
+  const admin = await adminSession(db);
+  const base = { enabled: true, filters: [], sort: { by: "modified", order: "desc" }, trigger: { mode: "manual" } };
+
+  const escapeBoard = await seedBoard(db, "escape");
+  const escape = await req(srv.base, "PATCH", `/api/boards/${escapeBoard}`, {
+    sid: admin.sid, body: { ingest: { ...base, source: { type: "folder", folder: "../secret" } } },
+  });
+  assert.equal(escape.status, 400);
+  assert.match(escape.json.error, /escapes/);
+
+  // S3 is available-not-installed by default → saving an s3 source is refused.
+  await setPluginState(db, "source:s3", { installed: false });
+  const s3conn = await createSourceConnection(db, "s3", "b", { bucket: "b", accessKeyId: "k", secretAccessKey: "s" });
+  const s3Board = await seedBoard(db, "s3-uninstalled");
+  const uninstalled = await req(srv.base, "PATCH", `/api/boards/${s3Board}`, {
+    sid: admin.sid, body: { ingest: { ...base, source: { type: "s3", connectionId: s3conn, path: "" } } },
+  });
+  assert.equal(uninstalled.status, 400);
+  assert.match(uninstalled.json.error, /isn't installed/);
+});
+
+test("browsing a removed connection is a readable refusal", async () => {
+  const admin = await adminSession(db);
+  await setPluginState(db, "source:ftp", { installed: true });
+  const boardId = await seedBoard(db, "browse-gone");
+  const r = await req(srv.base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
+    sid: admin.sid, body: { source: { type: "ftp", connectionId: 999999 }, path: "" },
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /removed|pick another/);
 });
