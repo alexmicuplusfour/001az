@@ -27,7 +27,7 @@ import {
 } from "./connectors/index.js";
 import { resetDefs } from "./plugins.js";
 import { providerSignal } from "./connectors/runtime.js";
-import { renderChart } from "./connectors/faces/price-chart.js";
+import { renderChart } from "./faces/price-chart.js";
 import {
   listExternalPlugins, setExternalLoadError, getExternalPlugin,
   upsertExternalPlugin, deleteExternalPlugin, deletePluginRow, setPluginState,

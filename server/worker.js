@@ -49,6 +49,7 @@ import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
 import { pluginInstalled } from "./plugins.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
+import { storeFace } from "./faces/index.js";
 import { extractFileFields } from "./media/index.js";
 
 // A not-installed AI plugin (Plugins page) drops out of resolution — configs
@@ -512,9 +513,8 @@ export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, 
   const rendered = await conn.produceFace(db, entity, inst.payload?.source, faceCfg);
   if (!rendered) { await setEntityFaceAt(db, entity.id, null); return null; } // no history → keep the tile
   const name = crypto.randomBytes(16).toString("hex");
-  await fs.promises.writeFile(path.join(galleryDir, name), rendered.webp);
-  await fs.promises.writeFile(path.join(thumbsDir, name + ".webp"), rendered.webp);
-  const face = { name, kind: "image", generated: true, w: rendered.w, h: rendered.h };
+  const stored = await storeFace({ galleryDir, thumbsDir }, name, rendered, { generated: true });
+  const face = { ...stored, kind: "image", generated: true };
   const old = inst.payload?.files?.[0];
   await updateItemPayload(db, inst.id, { files: [face] });
   await setEntityFaceAt(db, entity.id, now);

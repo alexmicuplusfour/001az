@@ -11,15 +11,15 @@
 // structural layer. See slice-5b-crypto-provider-plan.md.
 import * as coingecko from "./coingecko.js";
 import * as coinmarketcap from "./coinmarketcap.js";
-import { renderChart } from "../faces/price-chart.js";
 
 export const providers = { coingecko, coinmarketcap };
 export const defaultProvider = "coingecko";
 
-// Face producers — domain rendering the runtime dispatches to (like providers
-// for data). `chart` needs the active provider's history(); if it's missing the
-// face falls back to the symbol tile.
-export const faces = { chart: renderChart };
+// Face wiring — which shared face producer (server/faces) renders this domain's
+// card face, keyed by the face-slot name the runtime dispatches on. `chart` → the
+// price-chart producer, fed the active provider's history(); missing history →
+// symbol-tile fallback. The renderer lives in the registry, not here.
+export const faces = { chart: "price-chart" };
 
 export const manifest = {
   label: "Crypto",

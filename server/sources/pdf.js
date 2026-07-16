@@ -3,18 +3,17 @@
 // sharp), so it rides the exact same path as an image thumbnail. Poppler is a
 // system dependency (poppler-utils in the Dockerfile) — no poppler on the box
 // and the doc still ingests, just without a preview or page count.
-import sharp from "sharp";
 import fs from "node:fs";
-import os from "node:os";
 import crypto from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { pdfPage } from "../faces/pdf-page.js";
+import { storeFace } from "../faces/index.js";
 
 const run = promisify(execFile);
 
 const PDF_MAX_PAGES = 100; // Anthropic document-block limit
-const THUMB_WIDTH = 600; // matches the image source
 
 export const manifest = {
   name: "pdf",
@@ -59,8 +58,11 @@ export function pdfSource({ galleryDir, thumbsDir }) {
         throw err;
       }
       entry.meta = { pages, title };
-      const dims = await renderPdfPreview(tmpPath, path.join(thumbsDir, filename + ".webp"));
-      if (dims) { entry.w = dims.w; entry.h = dims.h; }
+      const rendered = await pdfPage(tmpPath);
+      if (rendered) {
+        const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered);
+        entry.w = w; entry.h = h;
+      }
 
       await fs.promises.writeFile(path.join(galleryDir, filename), buf);
       return entry;
@@ -79,20 +81,5 @@ async function pdfInfo(pdfPath) {
     return { pages: pages ? Number(pages[1]) : null, title: title ? title[1] : null };
   } catch {
     return { pages: null, title: null };
-  }
-}
-
-// Page 1 -> png (pdftoppm) -> webp thumbnail (sharp). Returns { w, h } or
-// null when poppler isn't installed or the render fails.
-async function renderPdfPreview(pdfPath, thumbPath) {
-  const prefix = path.join(os.tmpdir(), "docprev-" + crypto.randomBytes(6).toString("hex"));
-  try {
-    await run("pdftoppm", ["-png", "-f", "1", "-singlefile", "-scale-to", String(THUMB_WIDTH), pdfPath, prefix]);
-    const info = await sharp(prefix + ".png").webp({ quality: 72 }).toFile(thumbPath);
-    return { w: info.width, h: info.height };
-  } catch {
-    return null;
-  } finally {
-    await fs.promises.unlink(prefix + ".png").catch(() => {});
   }
 }

@@ -9,6 +9,7 @@
 //   <name>_provider           active provider (unset/unknown → defaultProvider)
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
 import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
+import { getFaceProducer } from "../faces/index.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
@@ -233,10 +234,11 @@ export async function refresh(db, conn, entity, inst, mapping, now = Date.now())
 // Produce the connector face bytes for an entity, or null when unavailable
 // (unknown producer, provider has no history, empty series) — the caller keeps
 // the symbol tile. `source` is the provider handle; re-resolve by symbol on a
-// provider switch, like refresh. Domain rendering lives in the connector's
-// `faces` map; the raw series comes from the active provider's history().
+// provider switch, like refresh. The connector's `faces` map NAMES a shared
+// producer (server/faces); the raw series comes from the active provider's
+// history().
 export async function produceFace(db, conn, entity, source, faceCfg) {
-  const producer = conn.faces?.[faceCfg?.producer];
+  const producer = getFaceProducer(conn.faces?.[faceCfg?.producer]);
   if (!producer) return null;
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.history) return null; // provider can't supply history → fall back

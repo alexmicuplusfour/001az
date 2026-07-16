@@ -7,8 +7,9 @@ import sharp from "sharp";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { imageThumb } from "../faces/image-thumb.js";
+import { storeFace } from "../faces/index.js";
 
-const THUMB_WIDTH = 600;
 const SVG_RASTER_WIDTH = 2000; // SVG uploads are rasterized to WebP at this width
 const MAX_PIXELS = 40e6; // decode cap: a 40MP image is ~160 MB of raw pixels
 const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };
@@ -80,18 +81,17 @@ export function imageSource({ galleryDir, thumbsDir }) {
         if (!ext) return null;
         const id = crypto.randomBytes(8).toString("hex");
         const filename = `${id}.${ext}`;
-        const thumbInfo = await sharp(buf, { pages: 1, limitInputPixels: MAX_PIXELS })
-          .rotate()
-          .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
-          .webp({ quality: 72 })
-          .toFile(path.join(thumbsDir, filename + ".webp"));
+        // The face (thumbnail) via the shared producer; the original is written
+        // separately below (storeFace writes only the thumb for a non-generated face).
+        const rendered = await imageThumb(buf, { maxPixels: MAX_PIXELS });
+        const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered);
         await fs.promises.writeFile(path.join(galleryDir, filename), buf);
         return {
           name: filename,
           original_name: originalName || filename,
           kind: "image",
-          w: thumbInfo.width,
-          h: thumbInfo.height,
+          w,
+          h,
           // Stored-file size + original-resolution metadata for file fields
           // (server/media). meta.width/height are the source pixels — distinct
           // from w/h, which are the thumbnail's.

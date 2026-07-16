@@ -10,7 +10,9 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { createDocxPool } from "./docx-pool.js";
-import { textCounts, renderTextPreview } from "./shared.js";
+import { textCounts } from "./shared.js";
+import { textPeek } from "../faces/text-peek.js";
+import { storeFace } from "../faces/index.js";
 
 export const manifest = {
   name: "docx",
@@ -60,8 +62,8 @@ export function docxSource({ galleryDir, thumbsDir }) {
       const entry = { name: filename, original_name: originalName || filename, kind: "docx", size: buf.length, meta: textCounts(text) };
       await fs.promises.writeFile(path.join(galleryDir, filename + ".txt"), text);
       await fs.promises.writeFile(path.join(galleryDir, filename + ".html"), docHtml(html));
-      const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));
-      if (dims) { entry.w = dims.w; entry.h = dims.h; }
+      const rendered = await textPeek(text);
+      if (rendered) { const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered); entry.w = w; entry.h = h; }
 
       await fs.promises.writeFile(path.join(galleryDir, filename), buf);
       return entry;

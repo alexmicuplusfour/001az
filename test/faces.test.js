@@ -8,7 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, req, installConnectors } from "./helpers.js";
 import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced } from "../server/db.js";
-import { renderChart } from "../server/connectors/faces/price-chart.js";
+import { renderChart } from "../server/faces/price-chart.js";
+import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from "../server/faces/index.js";
 import * as runtime from "../server/connectors/runtime.js";
 import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
@@ -36,13 +37,27 @@ test("renderChart: produces a fixed-size webp from a series (and survives emptie
   assert.ok(Buffer.isBuffer(empty.webp) && empty.webp.length > 0);
 });
 
+test("face registry: getFaceProducer resolves a registered name and rejects unknowns", async () => {
+  const p = getFaceProducer("price-chart");
+  assert.equal(typeof p, "function", "the built-in chart producer is registered");
+  const { webp, w, h } = await p([{ t: 0, price: 1 }, { t: 1, price: 2 }], { symbol: "X", name: "X", period: "1y" });
+  assert.ok(Buffer.isBuffer(webp) && w === 600 && h === 360); // same artifact as the direct renderChart
+  // Every built-in face producer is in the registry (slice 2 routed the file
+  // handlers' thumbnailers through it too — image/pdf/text are producers now).
+  for (const name of ["price-chart", "image-thumb", "pdf-page", "text-peek"])
+    assert.equal(typeof getFaceProducer(name), "function", `${name} is registered`);
+  assert.equal(getFaceProducer("nope"), null);                // unknown name → null (caller keeps the tile)
+  assert.equal(getFaceProducer(undefined), null);             // falsy name → null
+});
+
 // ── runtime.produceFace: provider gating + producer lookup ───────────────────
 
 test("produceFace: gated on the provider having history and a known producer", async () => {
   const chart = async (series, opts) => ({ webp: Buffer.from([1, 2, 3]), w: 1, h: 1, series, opts });
+  registerFaceProducer("facetest-chart", chart); // the connector NAMES it; the registry owns the fn
   const withHist = { label: "P1", async history() { return [{ t: 0, price: 1 }, { t: 1, price: 2 }]; }, async search() { return [{ id: "p1-id", symbol: "ZZ" }]; } };
   const noHist = { label: "P2", async search() { return [{ id: "p2-id", symbol: "ZZ" }]; } };
-  const conn = { name: "facetest", providers: { withHist, noHist }, defaultProvider: "withHist", faces: { chart } };
+  const conn = { name: "facetest", providers: { withHist, noHist }, defaultProvider: "withHist", faces: { chart: "facetest-chart" } };
   await installConnectors(db, "facetest:withHist", "facetest:noHist");
   const entity = { symbol: "ZZ", display_name: "Zed" };
   const source = { provider: "withHist", id: "abc" };
@@ -56,6 +71,7 @@ test("produceFace: gated on the provider having history and a known producer", a
   await setSetting(db, "facetest_provider", "noHist");
   assert.equal(await runtime.produceFace(db, conn, entity, source, cfg), null); // active provider has no history → fall back
   await setSetting(db, "facetest_provider", "withHist");
+  unregisterFaceProducer("facetest-chart");
 });
 
 // ── pure: entityRefreshAt keeps a face-only board on the sweep ───────────────

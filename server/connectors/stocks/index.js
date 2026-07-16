@@ -1,11 +1,11 @@
 // Stocks connector — US-listed equities in USD. The domain defines stable
 // fields and presentation while provider modules normalize their own APIs.
 import * as financialmodelingprep from "./financialmodelingprep.js";
-import { renderChart } from "../faces/price-chart.js";
 
 export const providers = { financialmodelingprep };
 export const defaultProvider = "financialmodelingprep";
-export const faces = { chart: renderChart };
+// Face wiring: the shared price-chart producer (server/faces), by name. See crypto.
+export const faces = { chart: "price-chart" };
 
 export const manifest = {
   label: "Stocks",

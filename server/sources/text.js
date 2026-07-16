@@ -4,7 +4,9 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { textCounts, renderTextPreview } from "./shared.js";
+import { textCounts } from "./shared.js";
+import { textPeek } from "../faces/text-peek.js";
+import { storeFace } from "../faces/index.js";
 
 export const manifest = {
   name: "text",
@@ -42,8 +44,8 @@ export function textSource({ galleryDir, thumbsDir }) {
       const filename = `${crypto.randomBytes(8).toString("hex")}.${ext}`;
       const text = buf.toString("utf8");
       const entry = { name: filename, original_name: originalName || filename, kind: "text", size: buf.length, meta: textCounts(text) };
-      const dims = await renderTextPreview(text, path.join(thumbsDir, filename + ".webp"));
-      if (dims) { entry.w = dims.w; entry.h = dims.h; }
+      const rendered = await textPeek(text);
+      if (rendered) { const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered); entry.w = w; entry.h = h; }
 
       await fs.promises.writeFile(path.join(galleryDir, filename), buf);
       return entry;
