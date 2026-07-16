@@ -2,9 +2,9 @@
 // plugin), each with its label + description + role tag. Available ones show an
 // Add button (writes installed:true, refreshes the page underneath); already-
 // installed ones show a disabled "Added" — so added plugins stay in the list
-// across reopens, not just within one session. The catalog entry IS the future
-// dropped-in-module manifest — a later phase grows an "add from GitHub / npm
-// URL" path here; today it browses what ships.
+// across reopens, not just within one session. Above the list, an "Install from
+// URL" field fetches, installs, and loads a community plugin live (GitHub / npm /
+// tarball); the browse list below is the catalog that ships with the app.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal } from "/modal.js";
@@ -15,6 +15,8 @@ export function openAddPluginModal(connections, ctx) {
     title: "Add a plugin",
     bodyStyle: "display:flex;flex-direction:column;",
   });
+
+  body.appendChild(installFromUrlZone(ctx, close));
 
   const intro = document.createElement("p");
   intro.className = "sub";
@@ -81,4 +83,70 @@ export function openAddPluginModal(connections, ctx) {
     r.appendChild(addBtn);
     return r;
   }
+}
+
+// Paste a GitHub/npm/tarball URL → the server downloads, runs `npm install`,
+// validates, and loads it live. This RUNS code from the internet as the server
+// (ratified self-hosted trust model, no sandbox), so a confirm names that risk
+// before the POST. The install is long-running (npm); the button shows a pending
+// state and errors surface inline rather than as a toast that outlives the modal.
+function installFromUrlZone(ctx, close) {
+  const zone = document.createElement("div");
+  zone.className = "pa-install";
+
+  const label = document.createElement("p");
+  label.className = "sub";
+  label.textContent = "Install a community plugin from a GitHub repo, npm package, or tarball URL.";
+  zone.appendChild(label);
+
+  const row = document.createElement("div");
+  row.className = "pa-install-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "github:owner/repo · npm:name · https://…/plugin.tgz";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "sm";
+  btn.textContent = "Install";
+  row.append(input, btn);
+  zone.appendChild(row);
+
+  const err = document.createElement("div");
+  err.className = "pa-install-err";
+  err.hidden = true;
+  zone.appendChild(err);
+
+  const setBusy = (busy) => {
+    input.disabled = busy;
+    btn.disabled = busy;
+    btn.textContent = busy ? "Installing…" : "Install";
+  };
+
+  async function install() {
+    const url = input.value.trim();
+    err.hidden = true;
+    if (!url) { input.focus(); return; }
+    if (!confirm(
+      `Install a plugin from:\n${url}\n\n` +
+      "This downloads and runs code from the internet with the server's full " +
+      "access — there is no sandbox. Only install sources you trust.",
+    )) return;
+    setBusy(true);
+    try {
+      const { plugin } = await api("POST", "/api/admin/plugins/install", { url });
+      toast(`${plugin?.label || "Plugin"} installed`);
+      ctx.refresh();  // the new card appears on the page underneath
+      close();
+    } catch (e) {
+      setBusy(false);
+      err.textContent = e.message;
+      err.hidden = false;
+    }
+  }
+
+  btn.onclick = install;
+  input.onkeydown = (e) => { if (e.key === "Enter") install(); };
+  return zone;
 }

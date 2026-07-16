@@ -30,12 +30,15 @@ export function slotProviders(slots, keys) {
 // AI shows the slot it's currently the default for (tagger/embedder), else bare
 // "AI"; a data connector shows its domain; media is always core.
 export function tagFor(p, defaults) {
+  // An external plugin that failed to load carries only its manifest — no live
+  // p.connector/p.ai descriptor — so guard every deref below with `?.`.
+  if (p.state?.loadError) return "Plugin · error";
   if (p.kind === "ai") {
     if (defaults.tagger === p.name) return "AI · tagger";
     if (defaults.embedder === p.name) return "AI · embedder";
     return "AI";
   }
-  if (p.kind === "connector") return `Data · ${p.connector.domain}`;
+  if (p.kind === "connector") return `Data · ${p.connector?.domain ?? "external"}`;
   if (p.kind === "source") return p.core ? "Source · local" : "Source · remote";
   return "Media · core";
 }
@@ -43,6 +46,7 @@ export function tagFor(p, defaults) {
 // The dynamic key state — whether a connection is configured yet. The static
 // description says "bring a key"; this says whether you have.
 function keyNote(p) {
+  if (p.state?.loadError) return null; // errored externals show their reason, not a key note
   if (p.kind === "ai") {
     if (p.ai.keyless) return null;
     const n = p.state.keyCount;
@@ -113,6 +117,10 @@ function badge(text, cls = "") {
 }
 
 function pluginRow(p, ctx) {
+  // An external plugin whose code failed to load never reached the live maps, so
+  // it has no descriptor to render badges/keys/config from — its own errored card.
+  if (p.external && p.state.loadError) return erroredRow(p, ctx);
+
   const row = document.createElement("div");
   row.className = "plugin-row";
 
@@ -125,6 +133,7 @@ function pluginRow(p, ctx) {
   desc.className = "p-desc";
   desc.textContent = p.description || "";
   main.append(label, desc);
+  if (p.external && p.source) main.appendChild(sourceLine(p.source));
   row.appendChild(main);
 
   // slot default badges
@@ -185,16 +194,99 @@ function pluginRow(p, ctx) {
   return row;
 }
 
+// An external plugin's provenance: where it came from + the ref actually installed.
+function sourceLine(source) {
+  const el = document.createElement("div");
+  el.className = "p-src";
+  el.textContent = source.ref ? `${source.url} · ${source.ref}` : source.url;
+  el.title = el.textContent;
+  return el;
+}
+
+// A failed-to-load external plugin: its reason + Retry (re-run the install from the
+// stored URL — installFromUrl retries an errored id in place) + Remove (uninstall).
+// No gear/badges/key-note: there's no live descriptor to configure.
+function erroredRow(p, ctx) {
+  const row = document.createElement("div");
+  row.className = "plugin-row errored";
+
+  const main = document.createElement("div");
+  main.className = "p-main";
+  const label = document.createElement("div");
+  label.className = "p-label";
+  label.textContent = p.label;
+  const err = document.createElement("div");
+  err.className = "p-err";
+  err.textContent = `Failed to load: ${p.state.loadError?.message || "unknown error"}`;
+  main.append(label);
+  if (p.source) main.appendChild(sourceLine(p.source));
+  main.appendChild(err);
+  row.appendChild(main);
+
+  const tag = document.createElement("span");
+  tag.className = "p-tag";
+  tag.textContent = tagFor(p, ctx.defaults);
+  row.appendChild(tag);
+
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "ghost sm";
+  retry.textContent = "Retry";
+  retry.disabled = !p.source?.url;
+  retry.title = p.source?.url ? "Re-download and load from the stored source" : "No source URL on record";
+  retry.onclick = () => retryInstall(p, ctx, retry);
+  row.appendChild(retry);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "danger sm";
+  remove.textContent = "Remove";
+  remove.onclick = () => removePlugin(p, ctx);
+  row.appendChild(remove);
+
+  return row;
+}
+
+async function retryInstall(p, ctx, btn) {
+  // Retry re-downloads and re-RUNS code from the stored URL — the same risk the
+  // install modal confirms. For a moving ref (a branch / the default) that code
+  // may have changed since it was first trusted, so name the risk again here.
+  if (!confirm(
+    `Reinstall ${p.label} from:\n${p.source.url}\n\n` +
+    "This re-downloads and runs code from the internet with the server's full " +
+    "access — there is no sandbox. Only continue if you trust this source.",
+  )) return;
+  btn.disabled = true;
+  btn.textContent = "Retrying…";
+  try {
+    await api("POST", "/api/admin/plugins/install", { url: p.source.url });
+    toast(`${p.label} reinstalled`);
+    ctx.refresh();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "Retry";
+    toast.error(err.message);
+    ctx.refresh(); // a failed retry persisted a fresh reason — re-render so the card shows it
+  }
+}
+
 // Remove never blocks (graceful degradation) — it just names the impact first.
+// An external plugin is truly uninstalled (DELETE: code off the disk); a built-in
+// is only made unavailable (PATCH installed:false), so the copy differs.
 async function removePlugin(p, ctx) {
   const impact = removalImpact(p, ctx);
-  const msg = `Remove ${p.label}?` +
-    (impact ? `\n\n${impact}` : "") +
-    `\n\nExisting boards keep their data — it just won't refresh until you add it back.`;
+  const msg = p.external
+    ? `Uninstall ${p.label}?` +
+      (impact ? `\n\n${impact}` : "") +
+      `\n\nThis deletes its downloaded code. Existing boards keep their data; re-adding means downloading it again.`
+    : `Remove ${p.label}?` +
+      (impact ? `\n\n${impact}` : "") +
+      `\n\nExisting boards keep their data — it just won't refresh until you add it back.`;
   if (!confirm(msg)) return;
   try {
-    await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: false });
-    toast(`${p.label} removed`);
+    if (p.external) await api("DELETE", `/api/admin/plugins/${p.id}`);
+    else await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: false });
+    toast(`${p.label} ${p.external ? "uninstalled" : "removed"}`);
     ctx.refresh();
   } catch (err) {
     toast.error(err.message);
@@ -202,6 +294,7 @@ async function removePlugin(p, ctx) {
 }
 
 function removalImpact(p, ctx) {
+  if (p.state?.loadError) return ""; // errored: never registered, so nothing depends on it
   if (p.kind === "ai") {
     const roles = [];
     if (ctx.defaults.tagger === p.name) roles.push("the default tagger");

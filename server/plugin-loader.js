@@ -31,6 +31,7 @@ import { renderChart } from "./connectors/faces/price-chart.js";
 import {
   listExternalPlugins, setExternalLoadError, getExternalPlugin,
   upsertExternalPlugin, deleteExternalPlugin, deletePluginRow, setPluginState,
+  getSetting, setSetting, listAiKeys, deleteAiKey,
 } from "./db.js";
 
 // The contract version. A plugin's manifest.apiVersion major must equal this;
@@ -209,6 +210,10 @@ export async function loadDir(dir) {
 // structured load_error (surfaced as an errored card by pluginCatalog) and is
 // logged; the next plugin still loads and boot proceeds.
 export async function loadAll(db) {
+  // Reclaim staging dirs orphaned by a hard kill mid-install — nothing else
+  // sweeps them, and installs recreate `.staging` on demand. Safe here: boot runs
+  // before any route serves, so no install is ever in flight.
+  fs.rmSync(path.join(pluginsDir(), ".staging"), { recursive: true, force: true });
   // Load connector-domain plugins first: a connector-provider may extend a domain
   // another plugin supplies, and registering into an absent domain throws. DB row
   // order is otherwise arbitrary, so pin domains ahead of everything else.
@@ -323,15 +328,42 @@ export async function installFromUrl(db, url) {
   }
 }
 
-// Uninstall an external plugin: unregister → drop both rows → remove its code.
-// Built-in ids have no external_plugins row → readable throw (they use PATCH
-// installed:false, which is availability, not removal).
+// Uninstall an external plugin: unregister → drop both rows → clear its stored
+// secrets/selection → remove its code. Built-in ids have no external_plugins row
+// → readable throw (they use PATCH installed:false, which is availability, not
+// removal, and deliberately keeps their config).
 export async function uninstall(db, id) {
   const row = await getExternalPlugin(db, id);
   if (!row) throw new Error("not an installed plugin (built-ins can't be uninstalled)");
   unregister(row.manifest);
   await deleteExternalPlugin(db, id);
   await deletePluginRow(db, id); // its config/health
+  await cleanupPluginConfig(db, row.manifest);
   if (row.dir) fs.rmSync(row.dir, { recursive: true, force: true });
   console.log(`plugin ${id} uninstalled`);
+}
+
+// A true uninstall leaves NOTHING behind (unlike a built-in's reversible
+// installed:false). Runtime paths already degrade gracefully when these linger —
+// activeProvider falls back, the worker gates on aiPluginInstalled — but keeping
+// them would retain key material after removal AND silently re-activate the
+// provider on a later reinstall. Surgical, never prefix-based: a domain name
+// could otherwise collide with another setting family (e.g. a domain "embed"
+// vs the embed_key_id / embed_model settings).
+async function cleanupPluginConfig(db, manifest) {
+  if (manifest.kind === "ai-provider") {
+    // Every key registered for this provider (deleteAiKey also handles board
+    // fallback + clearing the default-tagger pointer).
+    for (const k of await listAiKeys(db)) {
+      if (k.provider === manifest.id) await deleteAiKey(db, k.id);
+    }
+    return;
+  }
+  // connector-provider | connector-domain: the provider's API-key slot, plus the
+  // domain's active-provider pointer. A whole-domain uninstall clears the pointer
+  // outright; a single-provider uninstall clears it only if it named this one.
+  const domain = manifest.domain;
+  await setSetting(db, `${domain}_key_${manifest.id}`, null);
+  if (manifest.kind === "connector-domain" || (await getSetting(db, `${domain}_provider`)) === manifest.id)
+    await setSetting(db, `${domain}_provider`, null);
 }

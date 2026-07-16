@@ -132,6 +132,16 @@
       .pa-row { display: flex; align-items: center; gap: 10px; padding: 11px 2px; border-bottom: 1px solid #f0f0f2; }
       .pa-row:last-child { border-bottom: none; }
       .pa-empty { color: #9aa0aa; font-size: 13px; padding: 20px 2px; }
+      /* external-plugin provenance (source url · installed ref), under the desc */
+      .p-src { color: #b0b6c0; font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* an external plugin whose code failed to load: a warning-tinted card */
+      .plugin-row.errored { border-color: #f0d8b0; background: #fffaf0; }
+      .p-err { color: #b0741a; font-size: 12px; margin-top: 3px; white-space: normal; }
+      /* install-from-URL zone at the top of the add modal */
+      .pa-install { display: flex; flex-direction: column; gap: 8px; padding: 0 0 14px; border-bottom: 1px solid #ececef; margin-bottom: 4px; }
+      .pa-install-row { display: flex; gap: 8px; }
+      .pa-install .sub { margin: 0; }
+      .pa-install-err { color: #d33; font-size: 12px; white-space: pre-wrap; }
     </style>
   </head>
   <body>

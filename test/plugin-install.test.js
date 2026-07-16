@@ -15,7 +15,7 @@ import { installFromUrl, uninstall, unregister } from "../server/plugin-loader.j
 import { getConnector } from "../server/connectors/index.js";
 import { PROVIDERS } from "../server/providers.js";
 import { pluginCatalog } from "../server/plugins.js";
-import { getExternalPlugin, setExternalLoadError } from "../server/db.js";
+import { getExternalPlugin, setExternalLoadError, getSetting, setSetting, listAiKeys, createAiKey } from "../server/db.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 
@@ -113,6 +113,33 @@ test("installFromUrl: an ai-provider registers into PROVIDERS and shows as an ex
   assert.equal((await pluginCatalog(db)).some((p) => p.id === id), false, "off the catalog");
 });
 
+test("uninstall: a connector plugin's key + active-provider selection are cleared (nothing left behind)", async () => {
+  const id = await installFromUrl(db, FIX("acme-gecko")); // crypto:acme.gecko
+  await setSetting(db, "crypto_key_acme.gecko", "secret-key");
+  await setSetting(db, "crypto_provider", "acme.gecko"); // it's the active crypto provider
+
+  await uninstall(db, id);
+  assert.equal(await getSetting(db, "crypto_key_acme.gecko"), null, "api-key setting cleared");
+  assert.equal(await getSetting(db, "crypto_provider"), null, "active-provider pointer cleared (would re-activate on reinstall)");
+});
+
+test("uninstall: a connector uninstall leaves a DIFFERENT domain provider's selection intact", async () => {
+  const id = await installFromUrl(db, FIX("acme-gecko"));
+  await setSetting(db, "crypto_provider", "coingecko"); // a built-in is the active one, not the plugin
+  await uninstall(db, id);
+  assert.equal(await getSetting(db, "crypto_provider"), "coingecko", "another provider's selection is untouched");
+  await setSetting(db, "crypto_provider", null); // tidy up
+});
+
+test("uninstall: an ai-provider's registered keys are removed", async () => {
+  const id = await installFromUrl(db, FIX("acme-ai")); // ai:acme.model, provider "acme.model"
+  await createAiKey(db, "acme key", "acme.model", "sk-acme");
+  assert.ok((await listAiKeys(db)).some((k) => k.provider === "acme.model"), "key exists before uninstall");
+
+  await uninstall(db, id);
+  assert.equal((await listAiKeys(db)).some((k) => k.provider === "acme.model"), false, "no orphan keys for a gone provider");
+});
+
 test("installFromUrl: a failed errored-retry preserves the prior install and refreshes the reason", async () => {
   // Set up an errored plugin the way boot does: code on disk + a row, but
   // load_error set and NOT registered (so a retry is allowed, not 409'd).
@@ -140,6 +167,28 @@ test("installFromUrl: a failed errored-retry preserves the prior install and ref
   assert.deepEqual(geckoDirs, [path.basename(before.dir)], "the failed retry's dir was cleaned; only the prior one remains");
 
   fs.rmSync(badDir, { recursive: true, force: true });
+  await uninstall(db, id);
+});
+
+test("pluginCatalog: an errored external surfaces the shape the errored card renders", async () => {
+  // The admin page's errored card (plugin-add slice 3) reads external + source +
+  // state.loadError off the catalog entry — an errored plugin never registers, so
+  // erroredExternalEntry synthesises it from the stored manifest. Pin those fields
+  // (a failed-to-load external once crashed the render, which had no descriptor).
+  const id = await installFromUrl(db, FIX("acme-gecko"));
+  const row = await getExternalPlugin(db, id);
+  unregister(row.manifest); // as boot leaves a load failure: code on disk, not registered
+  await setExternalLoadError(db, id, new Error("kaboom on load"));
+
+  const entry = (await pluginCatalog(db)).find((p) => p.id === id);
+  assert.ok(entry, "errored external is still a catalog entry");
+  assert.equal(entry.external, true);
+  assert.equal(entry.kind, "connector", "connector-provider maps to a connector card");
+  assert.equal(entry.state.installed, true, "so it lands in the installed list");
+  assert.equal(entry.source.url, FIX("acme-gecko"));
+  assert.match(entry.state.loadError.message, /kaboom on load/);
+  assert.equal(entry.connector, undefined, "no live descriptor — the render must not deref it");
+
   await uninstall(db, id);
 });
 
