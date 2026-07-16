@@ -1100,6 +1100,12 @@ export async function setPluginState(db, id, { installed, config } = {}) {
   );
 }
 
+// Drop a plugin's config/health row entirely. Used when UNINSTALLING an external
+// plugin (built-ins keep their row and just flip `installed`). Safe if absent.
+export async function deletePluginRow(db, id) {
+  await db.query("DELETE FROM plugins WHERE id = $1", [id]);
+}
+
 // Health ledger (the self-healing seed): failures always write (streaks bump
 // fail_count, last_error stays structured); success writes ONLY when healing
 // (fail_count > 0 or never-ok) so steady-state sweeps don't chatter the table.
@@ -1152,6 +1158,11 @@ export async function withPluginHealth(db, id, fn) {
 export async function listExternalPlugins(db) {
   const { rows } = await db.query("SELECT * FROM external_plugins");
   return rows;
+}
+
+export async function getExternalPlugin(db, id) {
+  const { rows } = await db.query("SELECT * FROM external_plugins WHERE id = $1", [id]);
+  return rows[0] || null;
 }
 
 // Record an install (or re-install). `manifest` is stored verbatim; a successful

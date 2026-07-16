@@ -21,7 +21,7 @@ COPY . .
 # Server-owned state (uploads + thumbnails) lives on a volume at /data.
 # The transformers cache dir must be node-owned before we switch users so the
 # pre-download (and runtime writes) succeed without permission errors.
-RUN mkdir -p /data/gallery /data/thumbnails /data/ingest && chown -R node:node /data \
+RUN mkdir -p /data/gallery /data/thumbnails /data/ingest /data/plugins /data/.npm && chown -R node:node /data \
   && mkdir -p /app/node_modules/@huggingface/transformers/.cache \
   && chown -R node:node /app/node_modules/@huggingface/transformers
 USER node
@@ -33,7 +33,9 @@ RUN node -e "import('@huggingface/transformers').then(({pipeline})=>pipeline('fe
 ENV HOST=0.0.0.0 \
     PORT=3001 \
     GALLERY_DIR=/data/gallery \
-    THUMBS_DIR=/data/thumbnails
+    THUMBS_DIR=/data/thumbnails \
+    PLUGINS_DIR=/data/plugins \
+    npm_config_cache=/data/.npm
 
 EXPOSE 3001
 CMD ["node", "server/server.js"]

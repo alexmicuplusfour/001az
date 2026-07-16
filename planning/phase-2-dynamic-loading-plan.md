@@ -1,6 +1,27 @@
 # Plugins phase 2 — dynamic loading (install community plugins from a URL)
 
-**Status: SLICE 1 SHIPPED (local, uncommitted) 2026-07-16; slices 2–4 planned.**
+**Status: SLICES 1–2 SHIPPED 2026-07-16 (slice 1 committed 3ce0f4c; slice 2 local); slices 3–4 planned.**
+Slice 2 = fetch (github/npm/tarball/file) + npm install + install/uninstall routes.
+358 tests (10 in `test/plugin-install.test.js`, incl. a **hermetic tarball-download**
+path — a local HTTP server serving a real `.tgz`, the only test that runs the
+network branch). A review pass + that smoke test fixed 4 loose ends: (1) OOM-unsafe
+tarball buffering (cap ran after `arrayBuffer()`) → reject on content-length +
+stream with a running cap; (2) `execFile` 1 MB maxBuffer → 16 MB (a chatty npm
+install would ENOBUFS); (3) no connector-domain install coverage → added; (4) a
+cross-platform tar bug the smoke test caught — GNU tar read a Windows drive-letter
+path `C:\…` as a `host:path` spec → run tar with `cwd` + a RELATIVE archive name.
+A **second review pass (2026-07-16)** fixed the one real bug it turned up: a failed
+(re)install could destroy the already-installed code. The commit dir was keyed
+`<catalogId>@<ref>`, so an errored-retry with the same ref overwrote the old dir
+in place, then the `loadDir`-catch `rm`'d it — leaving no code on disk and a row
+pointing at nothing (next boot: a misleading "no manifest.json"). Fix: **commit
+into a unique `…@<ref>-<nonce>` dir**, so every install lands in its own directory;
+delete the prior dir only AFTER the new load + persist succeed; on a failed retry
+drop only the just-fetched code and `setExternalLoadError` the fresh reason —
+pre-install state is always recoverable. (Dir names are cosmetic: dedupe is by
+catalog id in the DB, `resolved_ref` is displayed from its own column.) Also added
+the missing **ai-provider install** test (the third registration path) + a test
+that pins the failed-errored-retry rollback. See the slice-2 section for the shape.
 Slice 1 = the loader + registry seams + boot-load, provable offline from fixtures
 (no network). 13 tests in `test/dynamic-plugins.test.js`; the lone full-suite
 flake is the pre-existing ingest-sweep `until()` race — passes isolated. A first
@@ -255,29 +276,47 @@ The whole runtime, driven by files already on disk (a test fixture).
   `PROVIDERS`; bad `apiVersion` → errored entry, others still load; a throwing
   factory → errored entry, boot survives.
 
-### Slice 2 — fetch + npm install + install/uninstall routes (no UI)
-- `server/plugins/fetch.js`: resolve a URL to a tarball + ref.
-  - GitHub: `owner/repo[@ref]` or a full URL → codeload tarball
-    (`https://codeload.github.com/owner/repo/tar.gz/<ref>`); `resolved_ref` = the
-    ref (or the commit it resolves to). No `git` binary needed (tarball, not clone).
-  - npm: `name[@version]` → registry metadata → tarball URL → download;
-    `resolved_ref` = the resolved version.
-  - Download (with `providerSignal`-style timeout + a size cap) → extract to a
-    staging dir under `PLUGINS_DIR/.staging/`.
-- `npm install --omit=dev` in the staging dir via `child_process` with a timeout
-  and captured stdout/stderr (failure → readable `load_error` incl. the tail of
-  npm's output). `npm_config_cache=/data/.npm` so a read-only `$HOME` can't bite;
-  `--no-audit --no-fund --ignore-scripts` by default (scripts off is a cheap real
-  mitigation; document that a plugin needing postinstall must say so — revisit).
-- `POST /api/admin/plugins/install {url}` (requireAdmin): fetch → npm install →
-  `loader.loadDir` on staging → on success atomic-rename staging → `dir`, persist,
-  register, return entry; on any failure clean staging + readable error.
-- `DELETE /api/admin/plugins/:id` (requireAdmin, external only): unload + rm dir +
-  rows.
-- Tests: point the resolver at a **local fixture tarball** (no network in CI) —
-  install registers + persists + serves; a tarball whose `npm install` fails →
-  clean error, nothing registered; uninstall unregisters + removes files + rows;
-  built-in id → 400.
+### Slice 2 — fetch + npm install + install/uninstall routes (no UI) — SHIPPED 2026-07-16
+- `server/plugin-fetch.js` — `resolveSource(url)` (pure) → one of four kinds, and
+  `fetchModule(source, stagingDir)` (the only network in the phase):
+  - `github:owner/repo[@ref]` / a github.com URL (incl. `/tree/<ref>`) → the API
+    tarball endpoint (defaults to the repo's default branch, redirects to codeload;
+    no `git` binary). `npm:name[@version]` / a bare (scoped) name → registry
+    metadata → the version's `dist.tarball`. A direct `https://…​.tgz` URL. And
+    **`file:` / a local path → a dir copy** — a real feature (dev / air-gapped /
+    vendored) AND the hermetic test vector (no network, no npm).
+  - Download → size cap → `tar -xzf --strip-components=1` (both github + npm wrap
+    in one top dir). System `tar` (present in the image; no new dep).
+- `npm install` lives in `plugin-loader.js` and is **skipped entirely when the
+  plugin declares no deps** — so a dep-free connector/AI plugin needs no npm and
+  installs offline. When it runs: `--omit=dev --no-audit --no-fund` +
+  **`--ignore-scripts` by default** (nothing executes until the manifest validates
+  and the factory loads); a plugin opts into lifecycle scripts with
+  `manifest.allowScripts: true` (native modules). `npm_config_cache=/data/.npm`.
+- `installFromUrl(db, url)`: resolve → staging dir → fetch → validate manifest →
+  **reinstall policy** (a healthy id → 409 "remove first"; an ERRORED id → retried
+  in place) → npm install → **atomic rename** staging → `PLUGINS_DIR/<catalogId>@
+  <ref>` (dir named from the catalog id, so one vendor.name across two domains
+  can't collide) → `loadDir` (register-last; on failure rm the dir) → persist
+  `external_plugins` row + `setPluginState(installed:true)`. `finally` cleans
+  staging. `uninstall(db, id)`: unregister → drop both rows → rm dir; a built-in id
+  (no install record) → readable throw.
+- Routes: `POST /api/admin/plugins/install {url}` (requireAdmin; 409 via
+  `err.status`; returns the new card) + `DELETE /api/admin/plugins/:id`
+  (requireAdmin; built-in → 400). Slice-1 refinement folded in: `catalogIdFor` is
+  manifest-only (connector-domain `defaultProvider === id`), so identity is known
+  pre-load — needed to name the dir + dedupe reinstalls.
+- Tests (`test/plugin-install.test.js`, 10): resolveSource matrix; a `file:` install
+  → registers + persists + `installed`+`external` card → uninstall reverses all of
+  it; a connector-domain install; an ai-provider install (the third register path);
+  a failed errored-retry preserves the prior dir/row + refreshes the reason; healthy
+  reinstall → 409; a validation-failing fresh install persists nothing; the two
+  routes incl. admin-gating + built-in DELETE 400; a hermetic tarball download.
+  358 suite green.
+- Deferred (noted, not blocking): an install-time concurrency lock (two installs of
+  one id); an HTTP deadline for long npm installs (slice 3 streams progress); a boot
+  sweep of a stale `.staging` after a hard kill; git-URL deps (need `git` in the
+  image); SHA-pinning a github branch ref (a later hardening).
 
 ### Slice 3 — the UI (Add-modal "from URL" + external Remove)
 - `public/plugin-add-modal.js`: add a **"Install from URL"** field + button above

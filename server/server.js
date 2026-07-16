@@ -95,7 +95,7 @@ import {
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
-import { loadAll as loadPlugins } from "./plugin-loader.js";
+import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
@@ -1204,6 +1204,35 @@ app.post("/api/admin/plugins/:id/test", requireAdmin, wrap(async (req, res) => {
       apiKey: req.body?.api_key !== undefined ? String(req.body.api_key).trim() : undefined,
     });
     res.json({ ok: true, provider });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}));
+
+// Install a plugin from a URL (github:owner/repo, npm:name, an https tarball, or
+// a local path): fetch → npm install → validate → register → persist, live (no
+// restart). Admin-only, and it runs code from the internet AS THE SERVER — no
+// sandbox, by the ratified self-hosted trust model; the page names that risk
+// before calling this. Long-running (npm install); returns the new card.
+app.post("/api/admin/plugins/install", requireAdmin, wrap(async (req, res) => {
+  const url = req.body?.url ? String(req.body.url).trim() : "";
+  if (!url) return res.status(400).json({ error: "a plugin URL is required" });
+  try {
+    const id = await installFromUrl(db, url);
+    const plugin = (await pluginCatalog(db)).find((p) => p.id === id) || null;
+    res.json({ ok: true, plugin });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+}));
+
+// Uninstall an EXTERNAL plugin: unregister + remove its code + drop its rows. A
+// built-in id has no install record → 400 (built-ins use PATCH { installed:false }
+// — availability, not removal).
+app.delete("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
+  try {
+    await uninstall(db, req.params.id);
+    res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

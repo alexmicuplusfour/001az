@@ -15,6 +15,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { execFile } from "node:child_process";
+import crypto from "node:crypto";
+import { resolveSource, fetchModule } from "./plugin-fetch.js";
 import { registerProvider, unregisterProvider } from "./providers.js";
 import {
   getConnector,
@@ -24,7 +28,10 @@ import {
 import { resetDefs } from "./plugins.js";
 import { providerSignal } from "./connectors/runtime.js";
 import { renderChart } from "./connectors/faces/price-chart.js";
-import { listExternalPlugins, setExternalLoadError } from "./db.js";
+import {
+  listExternalPlugins, setExternalLoadError, getExternalPlugin,
+  upsertExternalPlugin, deleteExternalPlugin, deletePluginRow, setPluginState,
+} from "./db.js";
 
 // The contract version. A plugin's manifest.apiVersion major must equal this;
 // bump only on a breaking change to the manifest / ctx / return shapes.
@@ -83,6 +90,10 @@ export function validateManifest(m) {
   if (typeof m.label !== "string" || !m.label) throw new Error("manifest.label is required");
   if (typeof m.main !== "string" || !m.main || m.main.includes(".."))
     throw new Error("manifest.main must be a relative path inside the plugin (no '..')");
+  // Opt-in to running npm lifecycle scripts at install (native modules). Default
+  // off — nothing executes until the manifest validates and the factory loads.
+  if (m.allowScripts !== undefined && typeof m.allowScripts !== "boolean")
+    throw new Error("manifest.allowScripts must be a boolean");
   if (m.kind === "connector-provider" || m.kind === "connector-domain") {
     if (typeof m.domain !== "string" || !m.domain) throw new Error(`${m.kind} requires manifest.domain`);
     // The domain is a catalog segment (before the ':') and a map key — a simple slug.
@@ -116,16 +127,23 @@ function validateBuilt(m, built) {
       throw new Error("connector-domain must return a non-empty providers map");
     if (!built.defaultProvider || !built.providers[built.defaultProvider])
       throw new Error("connector-domain defaultProvider must be a key of providers");
+    // The default provider is named for the plugin so the catalog id
+    // (`<domain>:<id>`) is knowable from the manifest ALONE — needed to name the
+    // install dir and dedupe reinstalls before the module is ever loaded.
+    if (built.defaultProvider !== m.id)
+      throw new Error(`connector-domain defaultProvider must equal manifest.id ("${m.id}")`);
     if (!built.manifest) throw new Error("connector-domain must return a domain manifest");
   }
 }
 
 // The catalog id a plugin owns: `<segment>:<vendor.name>`. Segment is "ai" or the
 // (existing or new) connector domain. One plugin = one primary card = one row.
-export function catalogIdFor(m, built) {
+// Manifest-only (a connector-domain's defaultProvider === id, enforced above), so
+// the id is known before the module loads — the install flow needs it to name the
+// dir and detect a reinstall.
+export function catalogIdFor(m) {
   if (m.kind === "ai-provider") return `ai:${m.id}`;
-  if (m.kind === "connector-provider") return `${m.domain}:${m.id}`;
-  return `${m.domain}:${built.defaultProvider}`; // connector-domain
+  return `${m.domain}:${m.id}`; // connector-provider + connector-domain
 }
 
 // --- load / register (the ONE place a registry is mutated) ---
@@ -182,7 +200,7 @@ export async function loadDir(dir) {
   // a plugin's own domain.
   if (manifest.kind === "connector-domain" && getConnector(manifest.domain))
     throw new Error(`domain "${manifest.domain}" already exists — use kind "connector-provider" to add a provider to it`);
-  const catalogId = catalogIdFor(manifest, built);
+  const catalogId = catalogIdFor(manifest);
   registerBuilt(manifest, built);
   return { catalogId, manifest };
 }
@@ -208,4 +226,112 @@ export async function loadAll(db) {
     }
   }
   if (rows.length) console.log(`plugins: loaded ${ok}/${rows.length} external plugin(s)`);
+}
+
+// --- install / uninstall (slice 2) ---
+
+const run = promisify(execFile);
+const NPM_TIMEOUT_MS = Number(process.env.PLUGIN_NPM_TIMEOUT_MS) || 180000;
+
+// Where installed code lives — a node-owned dir on the persistent /data volume,
+// so installs survive restarts AND image rebuilds. Read lazily so tests can point
+// it at a temp dir.
+export const pluginsDir = () => process.env.PLUGINS_DIR || "/data/plugins";
+
+const sanitizeRef = (ref) => String(ref || "ref").replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 40) || "ref";
+
+// Run `npm install --omit=dev` in a plugin dir — but ONLY if it declares
+// dependencies. A dep-free plugin (the common connector/AI case) skips npm
+// entirely, so there's no network when there's nothing to fetch and the install
+// path stays offline-testable. Lifecycle scripts are OFF unless the manifest
+// opts in (`allowScripts`) — nothing executes before validate + load.
+async function npmInstall(dir, { allowScripts }) {
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")); }
+  catch { return; } // no package.json → nothing to install
+  if (!pkg.dependencies || !Object.keys(pkg.dependencies).length) return;
+  const args = ["install", "--omit=dev", "--no-audit", "--no-fund"];
+  if (!allowScripts) args.push("--ignore-scripts");
+  try {
+    // maxBuffer well above execFile's 1 MB default — a chatty-but-successful npm
+    // install must not spuriously fail with ENOBUFS.
+    await run("npm", args, { cwd: dir, timeout: NPM_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, NODE_ENV: "production" } });
+  } catch (e) {
+    const tail = String(e.stderr || e.stdout || e.message || "").split("\n").slice(-8).join("\n").trim();
+    throw new Error(`npm install failed: ${tail}`);
+  }
+}
+
+// Install a plugin from a URL: fetch → npm install → validate → move into place →
+// register → persist. Atomic — everything happens in a staging dir first, and
+// only an atomic rename commits it; any failure cleans up and persists nothing.
+// Reinstall policy: a healthy id must be removed first (readable throw); an
+// ERRORED one (row present, load_error set, never registered) is retried in place.
+// Returns the loaded plugin's catalog id.
+export async function installFromUrl(db, url) {
+  const source = resolveSource(url);
+  const root = pluginsDir();
+  fs.mkdirSync(path.join(root, ".staging"), { recursive: true });
+  const staging = path.join(root, ".staging", crypto.randomBytes(8).toString("hex"));
+  fs.mkdirSync(staging, { recursive: true });
+
+  try {
+    const { resolvedRef } = await fetchModule(source, staging);
+    const manifest = readManifest(staging);
+    validateManifest(manifest);
+    const catalogId = catalogIdFor(manifest);
+
+    const existing = await getExternalPlugin(db, catalogId);
+    if (existing && !existing.load_error) {
+      const e = new Error(`${manifest.label} is already installed — remove it first`);
+      e.status = 409;
+      throw e;
+    }
+
+    await npmInstall(staging, { allowScripts: !!manifest.allowScripts });
+
+    // Commit into a fresh, unique dir (`…@<ref>-<nonce>`). Every install lands in
+    // its own directory, so a failed (re)install can never overwrite the code
+    // that's already on disk — the pre-install state is always recoverable. The
+    // dir name is cosmetic: reinstalls dedupe by catalog id (the DB row) and
+    // `resolved_ref` is shown from its own column, not parsed from the dir name.
+    // The full catalog id (not manifest.id alone) keeps one vendor.name used
+    // across two domains from colliding.
+    const dir = path.join(root, `${catalogId.replace(/[:/\\]/g, "__")}@${sanitizeRef(resolvedRef)}-${crypto.randomBytes(3).toString("hex")}`);
+    fs.renameSync(staging, dir); // atomic commit (same filesystem as PLUGINS_DIR)
+
+    try {
+      await loadDir(dir); // validates + registers (register-last)
+    } catch (err) {
+      // Roll back to exactly the pre-install state: drop only the just-fetched
+      // code, leave any existing (even errored) dir + row untouched, and refresh
+      // the stored reason so an errored retry's card shows why THIS attempt failed.
+      fs.rmSync(dir, { recursive: true, force: true });
+      if (existing) await setExternalLoadError(db, catalogId, err).catch(() => {});
+      throw err;
+    }
+
+    await upsertExternalPlugin(db, { id: catalogId, kind: manifest.kind, sourceUrl: String(url), resolvedRef, dir, manifest });
+    await setPluginState(db, catalogId, { installed: true }); // enforcement (pluginRowState) reads this
+    // Loaded + persisted — now it's safe to drop the prior dir (a reinstall or an
+    // errored retry with a different ref); nothing points at it anymore.
+    if (existing?.dir && existing.dir !== dir) fs.rmSync(existing.dir, { recursive: true, force: true });
+    console.log(`plugin ${catalogId} installed from ${url}`);
+    return catalogId;
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true }); // no-op once renamed away
+  }
+}
+
+// Uninstall an external plugin: unregister → drop both rows → remove its code.
+// Built-in ids have no external_plugins row → readable throw (they use PATCH
+// installed:false, which is availability, not removal).
+export async function uninstall(db, id) {
+  const row = await getExternalPlugin(db, id);
+  if (!row) throw new Error("not an installed plugin (built-ins can't be uninstalled)");
+  unregister(row.manifest);
+  await deleteExternalPlugin(db, id);
+  await deletePluginRow(db, id); // its config/health
+  if (row.dir) fs.rmSync(row.dir, { recursive: true, force: true });
+  console.log(`plugin ${id} uninstalled`);
 }

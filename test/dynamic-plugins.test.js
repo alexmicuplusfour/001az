@@ -45,7 +45,7 @@ test("validateManifest: a connector-domain cannot claim a reserved or non-slug d
 test("catalogIdFor: the segment is 'ai' or the domain, the name is the vendor.name", () => {
   assert.equal(catalogIdFor({ kind: "ai-provider", id: "acme.model" }), "ai:acme.model");
   assert.equal(catalogIdFor({ kind: "connector-provider", domain: "crypto", id: "acme.gecko" }), "crypto:acme.gecko");
-  assert.equal(catalogIdFor({ kind: "connector-domain", domain: "weather" }, { defaultProvider: "acme.weather" }), "weather:acme.weather");
+  assert.equal(catalogIdFor({ kind: "connector-domain", domain: "weather", id: "acme.weather" }), "weather:acme.weather");
 });
 
 test("loadDir: a valid connector-provider registers into the live domain map", async () => {
