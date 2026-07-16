@@ -1,9 +1,13 @@
 # Face pipeline — one pluggable pipeline for card-face generation
 
-**Status: PLANNED (not started). A behavior-identical refactor that pulls "make
-a card face" out of the four places it currently lives into one registry of
-named face producers — the enabling substrate for the deferred media/source
-plugin tier (audio → whisper, etc.). Self-contained for a fresh session.**
+**Status: SLICES 1–2 SHIPPED 2026-07-17 (committed 97e24ca; behavior-identical,
+363 tests green), + a graceful-degradation follow-up (uncommitted): the doc
+handlers re-wrap `storeFace` in try/catch — see the note below. Slice 3 deferred
+— it ships WITH the media/source plugin kind, not standalone. A refactor that
+pulls "make a card face" out of the four places it lived into one `server/faces/`
+registry of named producers — the enabling substrate for the deferred
+media/source plugin tier (audio → whisper, etc.). Self-contained for a fresh
+session.**
 
 ## The insight
 
@@ -196,6 +200,19 @@ client is untouched.
   behavior nuance: a thumbnail is briefly held in memory before `storeFace`
   writes it. Thumbnails are tens of KB; negligible even on the 458 MB droplet.
   If it ever mattered, a producer could opt into streaming — not worth it now.
+- **The toBuffer split also relocated the WRITE.** Pre-refactor, the doc
+  thumbnailers wrote inside their own try/catch and returned null on failure, so
+  a write error (ENOTDIR, disk-full) degraded to a badge and the doc still
+  ingested. After the split, the producer only renders (→ buffer) and `storeFace`
+  writes OUTSIDE any try/catch — so that same failure would reject the whole
+  ingest. Fixed by re-wrapping the `storeFace` call in try/catch in text/docx/pdf
+  (each logs a `console.warn` and continues — the doc ingests with an extension
+  badge). **image is deliberately NOT wrapped**: an image's whole point is its
+  thumbnail, so a face failure rightly rejects the upload (documented at
+  `image.js` ingest). Regression guards: two tests in `test/docs.test.js` (text +
+  docx; docx also pins that the .txt/.html sidecars survive the thumb failure —
+  pdf can't reach `storeFace` on the host, its `pdfPage` returns null without
+  poppler).
 - **`connectors/faces/` disappears** (moved to `server/faces/`). Update the
   `slice-5d-connector-faces-plan.md` pointer and any comment referencing the old
   path. `git mv` preserves history; check `plugin-loader.js` + `crypto/index.js`

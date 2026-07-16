@@ -12,6 +12,8 @@ import { startServer, adminSession, seedBoard } from "./helpers.js";
 import { anthropicRequest } from "../server/providers.js";
 import { documentTextFor } from "../server/worker.js";
 import { MANIFESTS, acceptsName } from "../server/sources/index.js";
+import { textSource } from "../server/sources/text.js";
+import { docxSource } from "../server/sources/docx.js";
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 
@@ -186,4 +188,62 @@ test("source registry: every declared extension maps to exactly one handler", ()
   // the folder-feed pre-filter is the manifests' union — and nothing else
   assert.ok(acceptsName("shot.PNG") && acceptsName("cv.pdf") && acceptsName("notes.md"));
   assert.ok(!acceptsName("movie.mp4") && !acceptsName("noext"));
+});
+
+test("a preview-write failure leaves the doc ingesting (graceful degradation)", async (t) => {
+  // The card preview is optional: if the thumbnail can't be written, the doc
+  // still ingests with a badge — never a rejection. Regression guard for the
+  // face-pipeline refactor, which moved the write out of the producer's own
+  // try/catch (storeFace) — this pins that the doc handlers still swallow it.
+  const galleryDir = fs.mkdtempSync(path.join(os.tmpdir(), "gal-"));
+  const thumbsDir = fs.mkdtempSync(path.join(os.tmpdir(), "thb-"));
+  t.after(() => {
+    fs.rmSync(galleryDir, { recursive: true, force: true });
+    fs.rmSync(thumbsDir, { recursive: true, force: true });
+  });
+  const handler = textSource({ galleryDir, thumbsDir });
+  // Break the thumb store: replace the dir with a file, so writing
+  // thumbsDir/<name>.webp fails (ENOTDIR) while the original write still works.
+  fs.rmdirSync(thumbsDir);
+  fs.writeFileSync(thumbsDir, "x");
+
+  const tmp = path.join(galleryDir, "in.txt");
+  fs.writeFileSync(tmp, "hello world\nsecond line");
+  const entry = await handler.ingest(tmp, "note.txt");
+
+  assert.ok(entry, "the doc still ingests despite the thumbnail failure");
+  assert.equal(entry.kind, "text");
+  assert.equal(entry.w, undefined, "no preview dims when the thumb couldn't be written");
+  assert.ok(fs.existsSync(path.join(galleryDir, entry.name)), "the original is stored");
+});
+
+test("a docx preview-write failure still writes the original + sidecars", async (t) => {
+  // Same graceful degradation for docx — but docx writes .txt/.html sidecars
+  // AROUND the thumb, so this also pins that a swallowed thumb failure doesn't
+  // cost those artifacts (text.js has no sidecars to lose). Uses the real docx
+  // fixture: textPeek renders via sharp (available on the host), so this
+  // actually reaches storeFace and exercises the catch — unlike pdf, whose
+  // pdfPage returns null without poppler and never gets there.
+  const galleryDir = fs.mkdtempSync(path.join(os.tmpdir(), "gal-"));
+  const thumbsDir = fs.mkdtempSync(path.join(os.tmpdir(), "thb-"));
+  const handler = docxSource({ galleryDir, thumbsDir });
+  t.after(async () => {
+    await handler.close();
+    fs.rmSync(galleryDir, { recursive: true, force: true });
+    fs.rmSync(thumbsDir, { recursive: true, force: true });
+  });
+  // Break the thumb store: replace the dir with a file (ENOTDIR on write).
+  fs.rmdirSync(thumbsDir);
+  fs.writeFileSync(thumbsDir, "x");
+
+  const tmp = path.join(galleryDir, "in.docx");
+  fs.copyFileSync(path.join(FIXTURES, "sample.docx"), tmp);
+  const entry = await handler.ingest(tmp, "designer.docx");
+
+  assert.ok(entry, "the docx still ingests despite the thumbnail failure");
+  assert.equal(entry.kind, "docx");
+  assert.equal(entry.w, undefined, "no preview dims when the thumb couldn't be written");
+  assert.ok(fs.existsSync(path.join(galleryDir, entry.name)), "the original is stored");
+  assert.ok(fs.existsSync(path.join(galleryDir, entry.name + ".txt")), "the text sidecar survives the thumb failure");
+  assert.ok(fs.existsSync(path.join(galleryDir, entry.name + ".html")), "the html sidecar survives the thumb failure");
 });

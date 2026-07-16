@@ -44,8 +44,12 @@ export function textSource({ galleryDir, thumbsDir }) {
       const filename = `${crypto.randomBytes(8).toString("hex")}.${ext}`;
       const text = buf.toString("utf8");
       const entry = { name: filename, original_name: originalName || filename, kind: "text", size: buf.length, meta: textCounts(text) };
+      // Optional preview: a render or write failure leaves a badge, never rejects.
       const rendered = await textPeek(text);
-      if (rendered) { const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered); entry.w = w; entry.h = h; }
+      if (rendered) {
+        try { const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered); entry.w = w; entry.h = h; }
+        catch (e) { console.warn(`text preview store failed for ${filename}: ${e.message} (badge)`); }
+      }
 
       await fs.promises.writeFile(path.join(galleryDir, filename), buf);
       return entry;

@@ -58,10 +58,15 @@ export function pdfSource({ galleryDir, thumbsDir }) {
         throw err;
       }
       entry.meta = { pages, title };
+      // The preview is optional: a render (pdfPage → null) OR a write failure
+      // leaves the card an extension badge and the doc still ingests — never a
+      // rejection over a missing thumbnail (graceful degradation).
       const rendered = await pdfPage(tmpPath);
       if (rendered) {
-        const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered);
-        entry.w = w; entry.h = h;
+        try {
+          const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered);
+          entry.w = w; entry.h = h;
+        } catch (e) { console.warn(`pdf preview store failed for ${filename}: ${e.message} (badge)`); }
       }
 
       await fs.promises.writeFile(path.join(galleryDir, filename), buf);

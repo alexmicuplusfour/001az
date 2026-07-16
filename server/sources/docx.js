@@ -62,8 +62,12 @@ export function docxSource({ galleryDir, thumbsDir }) {
       const entry = { name: filename, original_name: originalName || filename, kind: "docx", size: buf.length, meta: textCounts(text) };
       await fs.promises.writeFile(path.join(galleryDir, filename + ".txt"), text);
       await fs.promises.writeFile(path.join(galleryDir, filename + ".html"), docHtml(html));
+      // Optional preview: a render or write failure leaves a badge, never rejects.
       const rendered = await textPeek(text);
-      if (rendered) { const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered); entry.w = w; entry.h = h; }
+      if (rendered) {
+        try { const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered); entry.w = w; entry.h = h; }
+        catch (e) { console.warn(`docx preview store failed for ${filename}: ${e.message} (badge)`); }
+      }
 
       await fs.promises.writeFile(path.join(galleryDir, filename), buf);
       return entry;

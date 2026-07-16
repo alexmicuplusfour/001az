@@ -83,6 +83,10 @@ export function imageSource({ galleryDir, thumbsDir }) {
         const filename = `${id}.${ext}`;
         // The face (thumbnail) via the shared producer; the original is written
         // separately below (storeFace writes only the thumb for a non-generated face).
+        // Unlike the doc handlers, the face is NOT optional here: an image's whole
+        // point is its thumbnail, so a render/write failure rejects the upload
+        // (behavior-identical to the pre-face-pipeline inline toFile). imageThumb
+        // throws rather than returning null, so there's no null-guard branch.
         const rendered = await imageThumb(buf, { maxPixels: MAX_PIXELS });
         const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered);
         await fs.promises.writeFile(path.join(galleryDir, filename), buf);
