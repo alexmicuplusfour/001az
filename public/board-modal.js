@@ -5,6 +5,7 @@
 import { toast } from "/toast.js";
 import { createModal } from "/modal.js";
 import { api } from "/api.js";
+import { buildMappingPane } from "/mapping-modal.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
@@ -266,8 +267,11 @@ const STARTER_FACETS = [
 //   opts.boardId   — with board=null and canEditAI=false, fetch this board's
 //                    editable settings first (the gallery's manage path).
 //   opts.onSaved   — called with the saved body after a successful save.
+//   opts.withMapping — also show a Mapping/Tagging pane toggle and fold the
+//                    entity mapping into the same Save (gallery pencil only —
+//                    the mapping pane reads gallery state for the current board).
 export async function openBoardModal(board, opts = {}) {
-  const { canEditAI = false, onSaved, boardId } = opts;
+  const { canEditAI = false, onSaved, boardId, withMapping = false } = opts;
   if (!board && boardId) {
     try { board = await api("GET", `/api/boards/${boardId}/settings`); }
     catch { toast.error("Couldn't load board settings"); return; }
@@ -284,22 +288,33 @@ export async function openBoardModal(board, opts = {}) {
     ? `<label>AI tagger <span style="font-weight:400;color:#9aa0aa">(which API key and model tag this board)</span></label>
        <div id="board-modal-ai" style="display:flex;gap:8px;margin-bottom:14px;"></div>`
     : "";
+  // Mapping|Tagging pane toggle (gallery pencil only). Tagging is the default —
+  // it's the more-touched half — so it's the active (right) segment on open.
+  const paneToggle = withMapping ? `
+    <div class="pane-toggle" id="board-modal-panes">
+      <button type="button" class="pane-toggle-btn" data-pane="mapping">Mapping</button>
+      <button type="button" class="pane-toggle-btn active" data-pane="tagging">Tagging</button>
+    </div>` : "";
   body.innerHTML = `
     <label>Board name</label>
     <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
-    <label>AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
-    <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
-    <div class="modal-section">
-      <div class="modal-section-title">AI tagging</div>
-      ${aiKeyBlock}
-      <div id="board-modal-reasoning" style="margin:0 0 10px;font-size:13px"></div>
-      <div id="board-modal-research" style="margin:0 0 10px;font-size:13px"></div>
-      <div id="board-modal-autotag" style="font-size:13px"></div>
+    ${paneToggle}
+    <div id="board-modal-tagging">
+      <div class="modal-section" style="border-top:none;margin-top:0;padding-top:0;">
+        <div class="modal-section-title">AI tagging</div>
+        ${aiKeyBlock}
+        <div id="board-modal-reasoning" style="margin:0 0 10px;font-size:13px"></div>
+        <div id="board-modal-research" style="margin:0 0 10px;font-size:13px"></div>
+        <div id="board-modal-autotag" style="font-size:13px"></div>
+      </div>
+      <label style="display:block;font-size:12px;color:#6b6b72;margin:18px 0 4px;">AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
+      <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
+      <div class="modal-section">
+        <div class="modal-section-title">Facets</div>
+        <textarea id="board-modal-facets" rows="12"></textarea>
+      </div>
     </div>
-    <div class="modal-section">
-      <div class="modal-section-title">Facets</div>
-      <textarea id="board-modal-facets" rows="12"></textarea>
-    </div>`;
+    ${withMapping ? '<div id="board-modal-mapping" style="display:none;flex-direction:column;gap:12px;"></div>' : ""}`;
   body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
   body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
   body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
@@ -312,6 +327,26 @@ export async function openBoardModal(board, opts = {}) {
   // New boards start from the starter facets (the editor is empty at this
   // point, so nothing user-written is ever overwritten).
   if (isNew) facetEditor.setFacets(STARTER_FACETS);
+
+  // Mapping pane (gallery pencil only). buildMappingPane reads gallery state for
+  // the current board; admin.html loads this file too but never sets withMapping,
+  // so it's built only here. Visibility is via `display` (not the `hidden`
+  // attribute) so the pane's own flex layout can't override it.
+  let mappingPane = null;
+  if (withMapping) {
+    const panes = document.getElementById("board-modal-panes");
+    const taggingEl = document.getElementById("board-modal-tagging");
+    const mappingEl = document.getElementById("board-modal-mapping");
+    panes.addEventListener("click", (e) => {
+      const btn = e.target.closest(".pane-toggle-btn");
+      if (!btn) return;
+      const showMapping = btn.dataset.pane === "mapping";
+      panes.querySelectorAll(".pane-toggle-btn").forEach((b) => b.classList.toggle("active", b === btn));
+      mappingEl.style.display = showMapping ? "flex" : "none";
+      taggingEl.style.display = showMapping ? "none" : "";
+    });
+    mappingPane = buildMappingPane({ container: mappingEl });
+  }
 
   let aiReasoning = isNew ? true : board.ai_reasoning !== false;
   document.getElementById("board-modal-reasoning").appendChild(
@@ -452,11 +487,23 @@ export async function openBoardModal(board, opts = {}) {
       auto_tag_skip_weekends: at.skipWeekends,
       retag_on_refresh: at.retagOnRefresh,
     };
+    // Fold a touched mapping into the same PATCH. Only when the admin actually
+    // edited it — an untouched pane omits `mapping` so the save stays a light
+    // tagging update (no server-side reschedule/backfill). Mapping only ever
+    // rides the admin endpoint, which is exactly the canEditAI branch below.
+    let savedMapping;
+    if (mappingPane && canEditAI && mappingPane.isDirty()) {
+      const res = mappingPane.collect();
+      if (!res.ok) return; // collect() already toasted the reason
+      Object.assign(payload, res.payload);
+      savedMapping = res.payload.mapping;
+    }
     try {
       let saved = payload;
       if (isNew) saved = await api("POST", "/api/admin/boards", payload);
       else if (canEditAI) await api("PATCH", `/api/admin/boards/${board.id}`, payload);
       else await api("PATCH", `/api/boards/${board.id}`, payload);
+      if (mappingPane && savedMapping !== undefined) mappingPane.applySaved(savedMapping);
       close();
       onSaved?.(saved);
       toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);

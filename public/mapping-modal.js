@@ -1,7 +1,6 @@
 import { state } from './state.js';
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
-import { createModal } from './modal.js';
 import { ICONS } from './utils.js';
 import { loadProviders, byName, fillModelSelect } from './board-modal.js';
 
@@ -11,12 +10,17 @@ const KINDS = ["text", "number", "url", "date"];
 // re-fetches the whole entity but only rewrites fields whose cadence elapsed.
 const CADENCES = [[0, "Off"], [1, "1 min"], [5, "5 min"], [15, "15 min"], [60, "1 hour"], [360, "6 hours"], [1440, "1 day"]];
 
-let modalEl = null;
-
-export function openMappingModal() {
-  if (modalEl) return; // already open
-
+// Builds the entity-mapping editor into `container` — a pane inside the board
+// modal (board-modal.js), which owns the modal chrome + the single Save button.
+// Returns { isDirty, collect, applySaved }: the host folds collect()'s payload
+// into its one PATCH. Reads/writes the gallery `state` for the current board,
+// which is why board-modal imports this lazily (admin.html never pulls it in).
+export function buildMappingPane({ container }) {
   const isAdmin = !!state.me?.is_admin;
+  // Any user edit flips the pane dirty, so a pure-tagging save omits `mapping`
+  // and doesn't needlessly re-run the server's reschedule/backfill.
+  let dirty = false;
+  const markDirty = () => { dirty = true; };
   // Clone current mapping so edits are buffered until Save.
   let fields = (state.boardMapping?.fields || []).map((f) => ({ ...f }));
   let identityFrom = state.boardMapping?.identity?.from || "raw";
@@ -39,12 +43,14 @@ export function openMappingModal() {
   let extractModelSel = null;
   let extractLoaded = false;
 
-  const { overlay, body, footer, closeBtn, close } = createModal({
-    title: "Entity mapping",
-    bodyStyle: "display:flex;flex-direction:column;gap:12px;",
-    onClose: () => { modalEl = null; },
-  });
-  modalEl = overlay;
+  // The host (board-modal) provides a flex-column container and owns its
+  // visibility via the Mapping/Tagging toggle — so we never set `display` here,
+  // where an inline display:flex would defeat the host's display:none.
+  // Real data edits (text/select/checkbox) fire input/change; button-driven
+  // mutations (add/remove/apply-template) call markDirty() at their handlers.
+  container.addEventListener("input", markDirty, true);
+  container.addEventListener("change", markDirty, true);
+  const body = container;
 
   // Template row — very top of the body, right-aligned, divider below.
   // Applying a connector template rewires the whole mapping (input, identity,
@@ -420,6 +426,7 @@ export function openMappingModal() {
               labelEl: fileMenuLabel(c),
               onClick: () => {
                 fields.push({ key: c.key, kind: c.kind, from: "file", fn: c.fn });
+                markDirty();
                 close();
                 renderFields();
               },
@@ -477,6 +484,7 @@ export function openMappingModal() {
     removeBtn.addEventListener("click", () => {
       const idx = fields.indexOf(f);
       if (idx >= 0) fields.splice(idx, 1);
+      markDirty();
       renderFields();
     });
 
@@ -594,6 +602,7 @@ export function openMappingModal() {
     addBtn.addEventListener("click", () => {
       if (fields.filter((f) => f.from === "ai").length >= 12) { toast.info("Maximum 12 AI fields"); return; }
       fields.push({ key: "", kind: "text", from: "ai", hint: "" });
+      markDirty();
       renderFields();
       const rows = fieldsList.querySelectorAll(".mm-key");
       rows[rows.length - 1]?.focus();
@@ -667,18 +676,13 @@ export function openMappingModal() {
     }).catch(() => {});
   }
 
-  // Footer
-  if (isAdmin) {
-    const saveBtn = document.createElement("button");
-    saveBtn.className = "mm-save";
-    saveBtn.textContent = "Save";
-    saveBtn.addEventListener("click", save);
-    footer.append(saveBtn);
-  } else {
+  // The host modal owns the Save button. Non-admins get a read-only pane, so
+  // say why inline (the host's Save persists tagging only for them).
+  if (!isAdmin) {
     const note = document.createElement("p");
-    note.style.cssText = "font-size:12px;color:#8a8a92;margin:0;";
+    note.style.cssText = "font-size:12px;color:#8a8a92;margin:8px 0 0;";
     note.textContent = "Only admins can edit the entity mapping.";
-    footer.appendChild(note);
+    body.appendChild(note);
   }
 
   async function loadCatalog() {
@@ -717,13 +721,18 @@ export function openMappingModal() {
     connectorProviders = connector.providers || [];
     connectorActiveProvider = connector.activeProvider || null;
     faceCfg = t.face ? { ...t.face } : { from: "raw" };
+    markDirty();
     renderIdentityRow();
     renderFaceRow();
     renderFields();
     toast(`${connector.label} template loaded`);
   }
 
-  async function save() {
+  // Validate + assemble the mapping payload for the host modal's PATCH. Returns
+  // { ok:false } after toasting on invalid input, else { ok:true, payload } —
+  // the payload merges straight into the board PATCH body (extract_* only once
+  // the provider fetch has landed, so a quick Save can't wipe a stored override).
+  function collect() {
     // Flush any pending key-input blur normalizations.
     const activeKey = document.activeElement;
     if (activeKey && fieldsList.contains(activeKey)) activeKey.blur();
@@ -734,14 +743,14 @@ export function openMappingModal() {
     const fileFields = fields.filter((f) => f.from === "file");
     const seen = new Set();
     for (const f of aiFields) {
-      if (!/^[a-z][a-z0-9_]*$/.test(f.key)) { toast.error(`Invalid field key: "${f.key}"`); return; }
-      if (seen.has(f.key)) { toast.error(`Duplicate field key: "${f.key}"`); return; }
+      if (!/^[a-z][a-z0-9_]*$/.test(f.key)) { toast.error(`Invalid field key: "${f.key}"`); return { ok: false }; }
+      if (seen.has(f.key)) { toast.error(`Duplicate field key: "${f.key}"`); return { ok: false }; }
       seen.add(f.key);
     }
 
     if (identityFrom === "ai" && !identityHint.trim()) {
       toast.error("Identity hint is required when using AI instruction");
-      return;
+      return { ok: false };
     }
     const identitySlot = identityFrom === "ai"
       ? { from: "ai", hint: identityHint.trim() }
@@ -767,35 +776,21 @@ export function openMappingModal() {
         }
       : null;
 
-    try {
-      const r = await fetch(`/api/admin/boards/${state.boardId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mapping,
-          ...(extractLoaded ? {
-            extract_key_id: extractKeyId ?? null,
-            extract_model: extractKeyId ? (extractModel || null) : null,
-          } : {}),
-        }),
-      });
-      if (!r.ok) {
-        const body = await r.json().catch(() => ({}));
-        toast.error(body.error || "Save failed");
-        return;
-      }
-      state.boardMapping = mapping;
-      toast("Mapping saved");
-      close();
-      // Re-render so the toolbar picks up the new mapping — the plus button's
-      // behaviour (file picker vs connector search) depends on mapping.input.
-      document.dispatchEvent(new Event('app:render'));
-    } catch {
-      toast.error("Save failed");
-    }
+    return {
+      ok: true,
+      payload: {
+        mapping,
+        ...(extractLoaded ? {
+          extract_key_id: extractKeyId ?? null,
+          extract_model: extractKeyId ? (extractModel || null) : null,
+        } : {}),
+      },
+    };
   }
 
-  requestAnimationFrame(() => {
-    (fieldsList.querySelector(".mm-key") || closeBtn).focus();
-  });
+  // Reflect a saved mapping back into gallery state so the toolbar re-reads
+  // mapping.input (the host modal dispatches app:render after its onSaved).
+  function applySaved(mapping) { state.boardMapping = mapping; }
+
+  return { isDirty: () => dirty, collect, applySaved };
 }

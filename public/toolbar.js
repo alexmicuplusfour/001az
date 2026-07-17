@@ -8,7 +8,6 @@ import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
-import { openMappingModal } from './mapping-modal.js';
 import { openIngestModal } from './ingest-modal.js';
 import { openBoardModal } from './board-modal.js';
 import { openConnectorBrowse } from './connector-browse.js';
@@ -164,6 +163,7 @@ export function renderToolbar(resultCount) {
       const editBtn = toolBtn(ICONS.pencil, "board-edit-btn", () => openBoardModal(null, {
         canEditAI: !!state.me?.is_admin,
         boardId: state.boardId,
+        withMapping: true,
         onSaved: (payload) => {
           state.boardName = payload.name;
           state.facets = payload.facets;
@@ -237,10 +237,6 @@ export function renderToolbar(resultCount) {
         align: "end",
         minWidth: 180,
         build: (body, { close }) => {
-          body.appendChild(ddRow({
-            label: "Entity mapping…",
-            onClick: () => { close(); openMappingModal(); },
-          }));
           body.appendChild(ddRow({
             label: "Automatic ingestion…",
             onClick: () => { close(); openIngestModal(); },
