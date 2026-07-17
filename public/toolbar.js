@@ -139,6 +139,19 @@ export function renderToolbar(resultCount) {
     // The board selector and its edit pencil are one unit — keep them tight.
     const boardGroup = document.createElement("div");
     boardGroup.className = "board-group";
+
+    // A connector-backed board carries a mapping template; surface its name as a
+    // chip beside the edit pencil. The data source is a board-config detail, so
+    // it belongs with the board controls, not the ingest (+) cluster.
+    const connectorName = state.boardMapping?.input?.connector;
+    let templateChip = null;
+    if (connectorName) {
+      templateChip = document.createElement("span");
+      templateChip.className = "mapping-chip";
+      templateChip.textContent = connectorName.charAt(0).toUpperCase() + connectorName.slice(1);
+      templateChip.title = `Entity mapping template: ${connectorName}`;
+    }
+
     if (state.me && state.boards.length > 1) {
       const boardBtn = document.createElement("button");
       boardBtn.className = "tool-btn board-btn";
@@ -176,6 +189,7 @@ export function renderToolbar(resultCount) {
       editBtn.title = "Edit board";
       editBtn.setAttribute("aria-label", "Edit board");
       boardGroup.appendChild(editBtn);
+      if (templateChip) boardGroup.appendChild(templateChip);
 
       if (state.boardTokens > 0) {
         if (!tokenOdo) tokenOdo = new Odometer(formatTokens(state.boardTokens));
@@ -189,6 +203,9 @@ export function renderToolbar(resultCount) {
         // changed digits roll; if not, this is a no-op.
         tokenOdo.set(formatTokens(state.boardTokens));
       }
+    } else if (templateChip) {
+      // No edit pencil (non-manager) — still show the data-source chip.
+      boardGroup.appendChild(templateChip);
     }
     elToolbar.appendChild(boardGroup);
   }
@@ -199,21 +216,13 @@ export function renderToolbar(resultCount) {
     if (state.boardName) {
       // Split button: plus = file picker OR connector search (based on mapping.input);
       // chevron always opens the ingestion menu.
+      // The + button's behaviour depends on the board's input source (file
+      // picker vs connector browse); the template chip itself now renders in the
+      // board-group beside the edit pencil.
       const connectorName = state.boardMapping?.input?.connector;
 
-      // A connector-backed board carries a mapping template; surface its name as
-      // a chip in front of the add button so the board's data source is legible
-      // at a glance.
-      if (connectorName) {
-        const chip = document.createElement("span");
-        chip.className = "mapping-chip";
-        chip.textContent = connectorName.charAt(0).toUpperCase() + connectorName.slice(1);
-        chip.title = `Entity mapping template: ${connectorName}`;
-        auth.appendChild(chip);
-      }
-
-      // Ingestion chip: a live countdown to the next automatic run, mirroring
-      // the mapping chip. Clicking opens the ingestion modal.
+      // Ingestion chip: a live countdown to the next automatic run. Clicking
+      // opens the ingestion modal.
       if (state.boardIngest) {
         auth.appendChild(ingestChip());
       }
