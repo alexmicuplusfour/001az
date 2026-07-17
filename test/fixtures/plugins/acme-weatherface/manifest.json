@@ -1,0 +1,9 @@
+{
+  "id": "acme.weatherface",
+  "apiVersion": 1,
+  "kind": "connector-domain",
+  "domain": "weatherface",
+  "label": "Acme Weather (custom face)",
+  "main": "index.js",
+  "faceProducers": ["acme.weatherface.tile"]
+}

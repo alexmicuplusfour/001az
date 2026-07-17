@@ -2,8 +2,10 @@
 
 **Status: SLICES 1–2 SHIPPED 2026-07-17 (committed 97e24ca; behavior-identical,
 363 tests green), + a graceful-degradation follow-up (uncommitted): the doc
-handlers re-wrap `storeFace` in try/catch — see the note below. Slice 3 deferred
-— it ships WITH the media/source plugin kind, not standalone. A refactor that
+handlers re-wrap `storeFace` in try/catch — see the note below. **SLICE 3 also
+SHIPPED (uncommitted): the plugin→registry bridge — a connector-domain plugin can
+now ship its OWN face producer** (see the slice-3 section). The media/source
+plugin KIND is still future; audio plugs in there. A refactor that
 pulls "make a card face" out of the four places it lived into one `server/faces/`
 registry of named producers — the enabling substrate for the deferred
 media/source plugin tier (audio → whisper, etc.). Self-contained for a fresh
@@ -162,21 +164,31 @@ client is untouched.
   text 600×760) pass unchanged; they now also assert the producer is resolvable
   by name.
 
-### Slice 3 — make the registry pluggable (the media-tier seam; defer until needed)
-- `registerFaceProducer`/`unregisterFaceProducer` become live-mutation seams the
-  dynamic loader calls (register-last, same discipline as
-  `registerProvider`/`registerConnector`). A plugin's `ctx` gains
-  `ctx.registerFace`? — NO: a plugin does not register faces directly; a **media
-  handler plugin** (the deferred kind) *declares* a face producer in its module
-  object, and the loader registers it, exactly as connector-domain registers its
-  providers. So this slice is really "the loader knows how to register a
-  plugin-supplied face producer," and it lands **with** the media/source plugin
-  kind, not before it.
-- This is where **audio** plugs in: an audio handler ships a `waveform` producer
-  (server-side SVG/canvas → webp, like `price-chart`); transcription is a
-  separate concern (a sidecar, per the media plan). No client code ships.
-- Deferred deliberately — build slices 1–2 as the standalone cleanup/foundation;
-  build slice 3 as part of the media-plugin tier when that is actually scoped.
+### Slice 3 — make the registry pluggable (the plugin→registry bridge) — SHIPPED 2026-07-17
+Built ahead of the media/source kind, for **connector-domain** plugins (the one
+existing dynamic kind that owns a `faces` map). A plugin can now ship its OWN
+face producer, not just name a built-in.
+- `registerFaceProducer`/`unregisterFaceProducer` are now called by the loader
+  (register-last, same discipline as `registerProvider`/`registerConnector`). A
+  plugin does NOT register faces directly and gets no `ctx.registerFace`: the
+  manifest **declares** the producer names (`manifest.faceProducers: [...]`,
+  stored so uninstall can undo them) and the factory **provides** the functions
+  (`built.faceProducers: { name: fn }`), exactly as a connector-domain declares
+  `faces:[…]` and provides a `providers` map. `validateManifest` requires each
+  name to be namespaced under the plugin id (`<id>` or `<id>.*`) so it can never
+  overwrite a built-in (`price-chart`, …) or another plugin's producer;
+  `validateBuilt` requires a function for each declared name (before any write).
+  `registerBuilt`/`unregister` register/unregister them alongside the connector.
+- Tests (`test/plugin-install.test.js` + fixture `acme-weatherface`): a from-URL
+  connector-domain ships a `tile` producer → registered live, `produceFace`
+  resolves it end-to-end, uninstall unregisters it (no orphan); a plugin naming
+  `price-chart` is rejected (`namespaced under the plugin id`) and the built-in
+  survives.
+- Still future (needs the media/source kind): **audio** plugs in here — an audio
+  handler ships a `waveform` producer (server-side SVG/canvas → webp, like
+  `price-chart`); transcription is a separate concern (a sidecar, per the media
+  plan). No client code ships. A plugin-authoring nicety not yet added: a
+  `ctx` rasterize helper (SVG→webp) so a producer needn't bundle its own `sharp`.
 
 ## Verify (compose stack, per slice)
 1. After slice 1: a crypto board with a chart face renders identical webps

@@ -16,6 +16,7 @@ import { getConnector } from "../server/connectors/index.js";
 import { PROVIDERS } from "../server/providers.js";
 import { pluginCatalog } from "../server/plugins.js";
 import { getExternalPlugin, setExternalLoadError, getSetting, setSetting, listAiKeys, createAiKey } from "../server/db.js";
+import { getFaceProducer } from "../server/faces/index.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 
@@ -94,6 +95,46 @@ test("installFromUrl: a connector-domain installs the whole domain (dir named fr
   await uninstall(db, id);
   assert.equal(getConnector("weather"), null, "domain removed on uninstall");
   assert.equal(await getExternalPlugin(db, id), null);
+});
+
+test("installFromUrl: a connector-domain brings its OWN face producer (slice 3 bridge)", async () => {
+  assert.equal(getFaceProducer("acme.weatherface.tile"), null, "not registered before install");
+  const id = await installFromUrl(db, FIX("acme-weatherface"));
+  assert.equal(id, "weatherface:acme.weatherface");
+
+  // A from-URL plugin contributed a face producer the app never shipped — it's
+  // live in the shared registry and it's the plugin's own function.
+  const producer = getFaceProducer("acme.weatherface.tile");
+  assert.equal(typeof producer, "function", "plugin-supplied producer registered live");
+  const out = await producer([{ t: 0, price: 1 }]);
+  assert.ok(Buffer.isBuffer(out.webp) && out.w === 120 && out.h === 90, "it is the plugin's fn");
+  // end-to-end: the domain's `tile` face slot names it, so produceFace resolves
+  // the plugin's own producer through the registry and renders with it.
+  const face = await getConnector("weatherface").produceFace(
+    db, { symbol: "WF", display_name: "Weatherville" },
+    { provider: "acme.weatherface", id: "wf-1" }, { producer: "tile", period: "1y" });
+  assert.ok(face && Buffer.isBuffer(face.webp) && face.w === 120, "produceFace rendered via the plugin's producer");
+
+  await uninstall(db, id);
+  assert.equal(getFaceProducer("acme.weatherface.tile"), null, "unregistered on uninstall — no orphan");
+  assert.equal(getConnector("weatherface"), null);
+});
+
+test("installFromUrl: a plugin can't register a face producer outside its namespace (no clobbering built-ins)", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wf-clobber-"));
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    id: "acme.evil", apiVersion: 1, kind: "connector-domain", domain: "evilface",
+    label: "Evil", main: "index.js", faceProducers: ["price-chart"], // tries to hijack the built-in chart
+  }));
+  fs.writeFileSync(path.join(dir, "index.js"),
+    'export default () => ({ providers: { "acme.evil": { async search(){return[];}, async fetchEntity(){return{};} } },' +
+    ' defaultProvider: "acme.evil", manifest: { label: "Evil" }, faces: {},' +
+    ' faceProducers: { "price-chart": async () => ({ webp: Buffer.from([1]), w: 1, h: 1 }) } });\n');
+
+  await assert.rejects(installFromUrl(db, dir), /namespaced under the plugin id/);
+  assert.equal(typeof getFaceProducer("price-chart"), "function", "the built-in producer is untouched");
+  assert.equal(await getExternalPlugin(db, "evilface:acme.evil"), null, "nothing persisted");
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("installFromUrl: an ai-provider registers into PROVIDERS and shows as an external AI card", async () => {

@@ -28,6 +28,7 @@ import {
 import { resetDefs } from "./plugins.js";
 import { providerSignal } from "./connectors/runtime.js";
 import { renderChart } from "./faces/price-chart.js";
+import { registerFaceProducer, unregisterFaceProducer } from "./faces/index.js";
 import {
   listExternalPlugins, setExternalLoadError, getExternalPlugin,
   upsertExternalPlugin, deleteExternalPlugin, deletePluginRow, setPluginState,
@@ -103,6 +104,24 @@ export function validateManifest(m) {
     if (m.kind === "connector-domain" && RESERVED_DOMAINS.has(m.domain.toLowerCase()))
       throw new Error(`manifest.domain "${m.domain}" is reserved`);
   }
+  // A connector-domain may ship its OWN face producer(s) — a novel card face
+  // (a waveform, a weather tile), not just the built-in price chart. The manifest
+  // DECLARES their names (stored, so uninstall can unregister them) and the factory
+  // PROVIDES the functions. Each name must sit in the plugin's own namespace (the
+  // id, or `<id>.*`) so it can never overwrite a built-in ("price-chart", …) or
+  // another plugin's producer — the registry is a single global map.
+  if (m.faceProducers !== undefined) {
+    if (m.kind !== "connector-domain")
+      throw new Error("manifest.faceProducers is only supported on a connector-domain plugin");
+    if (!Array.isArray(m.faceProducers) || m.faceProducers.some((n) => typeof n !== "string" || !n))
+      throw new Error("manifest.faceProducers must be an array of producer names");
+    for (const n of m.faceProducers) {
+      if (n !== m.id && !n.startsWith(`${m.id}.`))
+        throw new Error(`face producer "${n}" must be namespaced under the plugin id ("${m.id}" or "${m.id}.*")`);
+      if (!/^[a-z0-9][a-z0-9._-]*$/i.test(n))
+        throw new Error(`face producer name "${n}" may contain only letters, digits, '.', '-', '_'`);
+    }
+  }
 }
 
 // Validate the object the factory returned, per kind (the shape the registries
@@ -134,6 +153,11 @@ function validateBuilt(m, built) {
     if (built.defaultProvider !== m.id)
       throw new Error(`connector-domain defaultProvider must equal manifest.id ("${m.id}")`);
     if (!built.manifest) throw new Error("connector-domain must return a domain manifest");
+    // Every declared face producer must be backed by a function (verified before
+    // anything registers — register-last).
+    for (const n of m.faceProducers || [])
+      if (typeof built.faceProducers?.[n] !== "function")
+        throw new Error(`manifest declares face producer "${n}" but the factory returned no function for it`);
   }
 }
 
@@ -171,17 +195,26 @@ function registerBuilt(manifest, built) {
   switch (manifest.kind) {
     case "ai-provider": registerProvider(manifest.id, built); break;
     case "connector-provider": registerConnectorProvider(manifest.domain, manifest.id, built); break;
-    case "connector-domain": registerConnector(manifest.domain, built); break;
+    case "connector-domain":
+      // The plugin's own face producers join the shared registry so its `faces`
+      // map can name them (re-register on reload just overwrites — idempotent).
+      for (const n of manifest.faceProducers || []) registerFaceProducer(n, built.faceProducers[n]);
+      registerConnector(manifest.domain, built);
+      break;
   }
   resetDefs(); // the live registries changed → rebuild the memoized catalog defs
 }
 
-// Undo a registration (uninstall / failed reload). `manifest` is the stored one.
+// Undo a registration (uninstall / failed reload). `manifest` is the stored one,
+// so its declared faceProducers are known without the built module.
 export function unregister(manifest) {
   switch (manifest.kind) {
     case "ai-provider": unregisterProvider(manifest.id); break;
     case "connector-provider": unregisterConnectorProvider(manifest.domain, manifest.id); break;
-    case "connector-domain": unregisterConnector(manifest.domain); break;
+    case "connector-domain":
+      unregisterConnector(manifest.domain);
+      for (const n of manifest.faceProducers || []) unregisterFaceProducer(n);
+      break;
   }
   resetDefs();
 }
