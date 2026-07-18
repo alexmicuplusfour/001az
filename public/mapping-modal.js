@@ -305,7 +305,7 @@ export function buildMappingPane({ container }) {
     sub.className = "mm-face-prefer";
     const lbl = document.createElement("span");
     lbl.className = "mm-face-prefer-label";
-    lbl.textContent = "prefer when available";
+    lbl.textContent = "Prefer (when available)";
     sub.append(lbl, preferSel, pickSel);
     faceRow.appendChild(sub);
   }
