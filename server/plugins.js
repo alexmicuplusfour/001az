@@ -20,9 +20,10 @@
 // AI keys stay in the ai_keys table.
 import { PROVIDERS, providerCatalog } from "./providers.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
-import { MANIFESTS as MEDIA_MANIFESTS } from "./sources/index.js";
+import { MANIFESTS as MEDIA_MANIFESTS, extOf } from "./sources/index.js";
 import { sourceManifests } from "./ingestion/sources/index.js";
 import { listPluginRows, getPluginRow, getSetting, listAiKeys, listSourceConnections, listExternalPlugins } from "./db.js";
+import { UPLOAD_HARD_CEILING } from "./upload-limits.js";
 
 // --- static defs (no db) ---
 
@@ -92,8 +93,13 @@ function mediaDefs() {
     // — all core (always installed, not removable). "Don't want .docx? just
     // don't upload one." poppler/mammoth already degrade gracefully when absent.
     core: true,
-    capabilities: { extensions: m.extensions, kinds: m.kinds },
-    configSchema: [],
+    // maxBytes is the manifest default; the effective per-type limit (default ⊕
+    // admin override) is composed by mediaLimits() below.
+    capabilities: { extensions: m.extensions, kinds: m.kinds, maxBytes: m.maxBytes },
+    // The one adjustable knob: the per-type upload limit, stored in bytes (the
+    // admin modal shows MB). No `default` here — an absent override falls to the
+    // manifest maxBytes in mediaLimits(), so the manifest stays the single default.
+    configSchema: [{ key: "maxBytes", label: "Max upload size", type: "number", min: 1 }],
   }));
 }
 
@@ -168,6 +174,45 @@ export async function pluginState(db, id) {
     installed: installedFor(def, row),
     config: { ...configDefaults(def), ...(row?.config || {}) },
   };
+}
+
+// A stored per-type size override (Plugins page → media card gear, Slice 3),
+// read straight off the plugin row's config. Only a positive finite number
+// counts; anything else falls through to the manifest default.
+const overrideMaxBytes = (row) => {
+  const v = Number(row?.config?.maxBytes);
+  return Number.isFinite(v) && v > 0 ? v : null;
+};
+
+// The effective per-media-type upload limits — the SINGLE source read by both
+// the ingest gate (admitFile, via mediaLimitLookup) and GET /api/media-types
+// (the client's accept + size pre-filter). Manifest default ⊕ admin override.
+// One listPluginRows read; callers resolve once per request/sweep, not per file.
+export async function mediaLimits(db) {
+  const rows = new Map((await listPluginRows(db)).map((r) => [r.id, r]));
+  return pluginDefs()
+    .filter((d) => d.kind === "media")
+    .map((d) => ({
+      name: d.name,
+      label: d.label,
+      extensions: d.capabilities.extensions,
+      kinds: d.capabilities.kinds,
+      // Clamp to the absolute ceiling so the client is never offered a size multer
+      // would 413 (an over-large admin override caps here, not at an upload error).
+      maxBytes: Math.min(overrideMaxBytes(rows.get(d.id)) ?? d.capabilities.maxBytes, UPLOAD_HARD_CEILING),
+    }));
+}
+
+// A per-file limit resolver built from mediaLimits(): originalName → effective
+// maxBytes for its type. Unknown extensions fall to the image limit, mirroring
+// the ingest dispatcher's image fallback (sources/index.js forUpload). Returns
+// null only if there are no media types at all (→ admitFile skips the gate).
+export async function mediaLimitLookup(db) {
+  const limits = await mediaLimits(db);
+  const byExt = new Map();
+  for (const l of limits) for (const e of l.extensions) byExt.set(e, l.maxBytes);
+  const fallback = limits.find((l) => l.name === "image")?.maxBytes ?? null;
+  return (originalName) => byExt.get(extOf(originalName)) ?? fallback;
 }
 
 const health = (row) =>

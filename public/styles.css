@@ -518,6 +518,30 @@ main#grid {
   font-weight: 600;
   letter-spacing: 1px;
 }
+/* Audio card face: the full waveform (shown whole, not cover-cropped like a doc
+   page) in a band above the title strip; a ♪ badge when there's no waveform. */
+.audio-face {
+  line-height: normal;
+}
+.audio-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 140px;
+  overflow: hidden;
+  border-radius: 8px 8px 0 0;
+  background: #fff;
+}
+.audio-wave img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain; /* whole waveform, wide + short — never cropped */
+  border-radius: 8px 8px 0 0;
+}
+.audio-badge {
+  font-size: 46px;
+  letter-spacing: 0;
+}
 .doc-title {
   display: flex;
   align-items: center;
@@ -1273,6 +1297,31 @@ a.tool-btn {
 }
 #lightbox-doc[hidden] {
   display: none;
+}
+
+/* Audio view: the waveform face above a native player, centered like the other
+   media. cursor:default + a stopPropagation in JS keep player clicks from
+   closing the lightbox (the frame gets this for free as a separate context). */
+#lightbox-audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  width: min(720px, 100%);
+  cursor: default;
+}
+#lightbox-audio[hidden] {
+  display: none;
+}
+#lightbox-audio-wave {
+  width: 100%;
+  border-radius: 8px;
+}
+#lightbox-audio-wave[hidden] {
+  display: none;
+}
+#lightbox-audio-el {
+  width: 100%;
 }
 
 .lightbox.loading::after {

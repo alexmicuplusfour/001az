@@ -147,6 +147,49 @@ const docKind = {
   },
 };
 
+// Audio items carry a waveform face (server/faces/waveform.js) — wide and short,
+// so it's shown WHOLE (object-fit: contain) rather than cover-cropped like a doc
+// page. No waveform (ffmpeg absent at ingest) → a ♪ badge. Detail view is the
+// player (lightbox.js showMedia branches on kind === "audio").
+const audioKind = {
+  face(item, card, layout) {
+    const wrap = document.createElement("div");
+    wrap.className = "audio-face";
+    if (item.w && item.h) {
+      const wave = document.createElement("div");
+      wave.className = "audio-wave";
+      const im = document.createElement("img");
+      im.src = thumbUrl(item.name);
+      im.loading = "lazy";
+      im.decoding = "async";
+      im.alt = item.displayLabel;
+      im.addEventListener("load", () => { im.classList.add("loaded"); layout(); });
+      wave.appendChild(im);
+      wrap.appendChild(faceMedia(wave));
+    } else {
+      const badge = document.createElement("div");
+      badge.className = "doc-badge audio-badge";
+      badge.textContent = "♪";
+      wrap.appendChild(faceMedia(badge));
+    }
+    wrap.appendChild(titleStrip(item.displayLabel, item.instances?.length));
+    card.classList.add("loaded");
+    return wrap;
+  },
+  progressFace(p, card) {
+    const wrap = document.createElement("div");
+    wrap.className = "audio-face";
+    const badge = document.createElement("div");
+    badge.className = "doc-badge audio-badge";
+    badge.textContent = "♪";
+    wrap.append(faceMedia(badge), titleStrip(p.name || "uploading"));
+    card.classList.add("loaded");
+    return wrap;
+  },
+  openDetail(item) { openLightbox(item); },
+  previewUrl(item) { return item.w && item.h ? thumbUrl(item.name) : null; },
+};
+
 // Connector entities have no files. Same card anatomy as documents —
 // face area + title strip — with a symbol tile standing in for the preview.
 const connectorKind = {
@@ -173,5 +216,6 @@ const connectorKind = {
 
 export function kindFor(item) {
   if (item?.kind === "connector") return connectorKind;
+  if (item?.kind === "audio") return audioKind;
   return item?.kind && item.kind !== "image" ? docKind : imageKind;
 }

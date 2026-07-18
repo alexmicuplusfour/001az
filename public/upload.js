@@ -3,11 +3,16 @@ import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount } from './data.js';
 
-const UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // keep in sync with server MAX_BYTES
 const UPLOAD_CHUNK_FILES = 20;
 const UPLOAD_CHUNK_BYTES = 32 * 1024 * 1024;
 const UPLOAD_CONCURRENCY = 2;
 const UPLOAD_ATTEMPTS = 3;
+
+// Fallbacks used ONLY when GET /api/media-types is unreachable (offline / 500),
+// so a failed fetch never blocks uploads — the server's admitFile gate stays
+// authoritative regardless. Mirrors today's built-in image+doc set + 10 MB cap.
+const FALLBACK_MAX_BYTES = 10 * 1024 * 1024;
+const FALLBACK_DOC_RE = /\.(pdf|docx|txt|md|csv)$/i;
 
 let uploadQueue = [];
 let uploadWorkers = 0;
@@ -18,11 +23,44 @@ let processingToast = null;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Whether a file is an image for PLACEHOLDER purposes (object-URL preview vs a
+// badge) — MIME first, then the extensions browsers don't always type. This is
+// only the optimistic upload-card face; the real kind comes back from the server.
 const isImageFile = (f) => f.type.startsWith("image/") || /\.(avif|heif|heic|svg)$/i.test(f.name);
-const isDocFile = (f) => /\.(pdf|docx|txt|md|csv)$/i.test(f.name);
+const extOfName = (name) => (name.match(/\.([a-z0-9]+)$/i)?.[1] || "").toLowerCase();
+const mb = (bytes) => Math.round(bytes / (1024 * 1024));
 
-export function handleFiles(fileList) {
-  const files = [...fileList].filter((f) => isImageFile(f) || isDocFile(f));
+// Accepted media types + per-type upload limits, from the server (single source:
+// the media manifests). Fetched once and memoized; the accept filter + size
+// pre-filter read it, so which types/sizes are allowed is never hardcoded here.
+let mediaTypesP = null;
+function loadMediaTypes() {
+  return (mediaTypesP ||= fetch("/api/media-types")
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null));
+}
+
+// The accept predicate + per-file size limit, from the fetched types (or a
+// permissive-but-bounded fallback when the fetch failed). Accepts a known
+// extension or any file the browser typed as an image (an extension-less image
+// still ingests — the server's image handler sniffs it); unknown extensions
+// fall to the image limit, mirroring the server dispatcher's fallback.
+function uploadGate(types) {
+  if (!types || !types.length) {
+    return { accepts: (f) => isImageFile(f) || FALLBACK_DOC_RE.test(f.name), limitFor: () => FALLBACK_MAX_BYTES };
+  }
+  const byExt = new Map();
+  for (const t of types) for (const e of t.extensions) byExt.set(e.toLowerCase(), t.maxBytes);
+  const imageLimit = types.find((t) => t.name === "image")?.maxBytes ?? FALLBACK_MAX_BYTES;
+  return {
+    accepts: (f) => byExt.has(extOfName(f.name)) || isImageFile(f),
+    limitFor: (f) => byExt.get(extOfName(f.name)) ?? imageLimit,
+  };
+}
+
+export async function handleFiles(fileList) {
+  const { accepts, limitFor } = uploadGate(await loadMediaTypes());
+  const files = [...fileList].filter(accepts);
   if (!files.length) return;
 
   if (!uploadStats) {
@@ -32,8 +70,9 @@ export function handleFiles(fileList) {
 
   const valid = [];
   for (const f of files) {
+    const limit = limitFor(f);
     if (f.size === 0) bumpSkip("empty file");
-    else if (f.size > UPLOAD_MAX_BYTES) bumpSkip("larger than 10 MB");
+    else if (f.size > limit) bumpSkip(`larger than ${mb(limit)} MB`);
     else valid.push(f);
   }
 
@@ -266,6 +305,13 @@ document.addEventListener('app:item-merged', (e) => {
 export function initUpload() {
   const elFileInput = document.getElementById("file-input");
   const elDropOverlay = document.getElementById("drop-overlay");
+
+  // Reflect the server's accepted types in the file picker once loaded (the
+  // static `accept` attr in index.html is only the offline fallback). image/*
+  // covers browser-typed images; add every declared extension (incl. audio).
+  loadMediaTypes().then((types) => {
+    if (types?.length) elFileInput.accept = ["image/*", ...types.flatMap((t) => t.extensions.map((e) => "." + e))].join(",");
+  });
 
   elFileInput.addEventListener("change", () => {
     handleFiles(elFileInput.files);

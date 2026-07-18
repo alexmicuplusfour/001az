@@ -9,11 +9,13 @@ import os from "node:os";
 import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { requireAuth } from "./auth.js";
 import { extractFileFields } from "./media/index.js";
+import { mediaLimitLookup } from "./plugins.js";
+import { UPLOAD_HARD_CEILING } from "./upload-limits.js";
 
-// Backstop limits only — the client pre-filters oversized files and chunks
-// large drops (see UPLOAD_* in app.js; keep UPLOAD_MAX_BYTES in sync). If
-// multer still trips one of these, the whole request 413s.
-const MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
+// multer's ONLY global size limit is UPLOAD_HARD_CEILING (server/upload-limits.js)
+// — an absolute per-file backstop. The real, per-media-type limits (manifest
+// defaults, admin-adjustable, clamped to the ceiling) are enforced in admitFile,
+// so one gate covers both the upload door and folder/remote ingestion.
 const MAX_FILES = 200; // per request
 
 // Express 4 doesn't forward rejected promises from async handlers.
@@ -27,7 +29,22 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // dbc: the pool or a tx client. Returns null for unsupported file types;
 // throws with err.reason for user-explainable refusals (e.g. PDF page cap).
 export async function admitFile(dbc, sources, board, tmpPath, originalName,
-  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null } = {}) {
+  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null, maxBytes = null } = {}) {
+  // Per-type size gate — the real, admin-adjustable upload limit lives HERE, not
+  // at multer (whose global ceiling is only an absolute backstop, and which
+  // folder/remote ingestion never passes through). `maxBytes` is the effective
+  // limit the caller resolved once via plugins.mediaLimitLookup; null (a bare
+  // test caller) skips the gate. An oversize file is deterministic in its bytes,
+  // so mark it unprocessable → ingestion ledgers-and-forgets rather than rescans.
+  if (maxBytes != null) {
+    const { size } = await fs.promises.stat(tmpPath);
+    if (size > maxBytes) {
+      const err = new Error(`file is larger than the ${Math.round(maxBytes / (1024 * 1024))} MB limit for its type`);
+      err.reason = err.message;
+      err.unprocessable = true;
+      throw err;
+    }
+  }
   // Pick the handler by extension (media handlers are core capabilities — always
   // present, never removable, so there's no disabled-type gate here).
   const handler = sources.forUpload(originalName);
@@ -86,7 +103,7 @@ export function mountIngest(app, { db, sources }) {
   // Disk-backed upload (bounded memory; we process one file at a time).
   const upload = multer({
     dest: os.tmpdir(),
-    limits: { fileSize: MAX_BYTES, files: MAX_FILES },
+    limits: { fileSize: UPLOAD_HARD_CEILING, files: MAX_FILES },
   });
 
   app.post("/api/upload", requireAuth, upload.array("files", MAX_FILES), wrap(async (req, res) => {
@@ -104,6 +121,9 @@ export function mountIngest(app, { db, sources }) {
     // aligned to req.files order. Absent → null (the `modified` file field stays
     // empty; the web platform exposes no creation date either).
     const lastModifieds = [].concat((req.body && req.body.lastModified) || []);
+    // Resolve the effective per-type size limits ONCE for the whole request
+    // (manifest defaults ⊕ admin overrides), then gate each file by its type.
+    const limitFor = await mediaLimitLookup(db);
 
     const uploaded = [];
     const rejected = [];
@@ -117,6 +137,7 @@ export function mountIngest(app, { db, sources }) {
           modifiedAt: lm, // admitFile null-guards non-finite/zero
           createdAt: null, // unavailable for browser uploads
           uploadedBy: req.user.id,
+          maxBytes: limitFor(f.originalname),
         });
         if (!admitted) {
           rejected.push({ name: f.originalname, reason: "unsupported file type" });
@@ -151,7 +172,7 @@ export function mountIngest(app, { db, sources }) {
   // to the app's generic error handler.
   app.use((err, _req, res, next) => {
     if (err && err.code === "LIMIT_FILE_SIZE")
-      return res.status(413).json({ error: "file too large (max 10 MB)" });
+      return res.status(413).json({ error: `file too large (max ${Math.round(UPLOAD_HARD_CEILING / (1024 * 1024))} MB)` });
     if (err && err.code === "LIMIT_FILE_COUNT")
       return res.status(413).json({ error: `too many files (max ${MAX_FILES})` });
     next(err);

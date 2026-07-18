@@ -60,7 +60,7 @@ async function withClient(conn, fn) {
 
 export function backend({ conn = {} } = {}) {
   return {
-    async list({ path = "", recursive = false, limit = Infinity, accept = null, maxBytes = Infinity, includeDirs = false } = {}) {
+    async list({ path = "", recursive = false, limit = Infinity, accept = null, maxBytesFor = () => Infinity, includeDirs = false } = {}) {
       return withClient(conn, async (client) => {
         const entries = [];
         let truncated = false;
@@ -85,7 +85,7 @@ export function backend({ conn = {} } = {}) {
             }
             if (!info.isFile) continue;
             if (accept && !accept(info.name)) continue;
-            if (info.size > maxBytes) continue;
+            if (info.size > maxBytesFor(info.name)) continue;
             entries.push({
               key: full, name: info.name, path: full, type: "file",
               size: info.size,

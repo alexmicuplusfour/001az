@@ -26,6 +26,10 @@ export const manifest = {
   core: true,
   extensions: ["jpg", "jpeg", "png", "webp", "avif", "heif", "heic", "gif", "svg"],
   kinds: ["image"],
+  // Per-type upload limit in bytes — the manifest default, adjustable per type on
+  // the Plugins page. multer's global ceiling (server/ingest.js) is only an
+  // absolute backstop; this is the real gate, enforced in admitFile.
+  maxBytes: 10 * 1024 * 1024,
 };
 
 // The original-resolution metadata surfaced for image file fields (server/media).

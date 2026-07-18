@@ -17,11 +17,7 @@ import { withTx, recordIngest, getSourceConnection, listSourceConnections, withP
 import { acceptsName, extOf } from "../sources/index.js";
 import { getSourceBackend, sourceModules } from "./sources/index.js";
 import { resolveJailed } from "./sources/folder.js";
-import { pluginInstalled } from "../plugins.js";
-
-// Mirror the upload backstop (server/ingest.js MAX_BYTES): remote fetches don't
-// pass through multer, so the scan enforces it.
-const MAX_BYTES = 10 * 1024 * 1024;
+import { pluginInstalled, mediaLimitLookup } from "../plugins.js";
 
 // The file filter catalog + sorts, shared by every file source. `values` a
 // backend fills (name/path/extension/file_size/modified/created) feed these.
@@ -153,6 +149,11 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
   const srcPath = sourcePath(cfg.source);
   const recursive = cfg.source?.recursive !== false;
   const remote = !!getSourceBackend(type)?.manifest.needsConnection;
+  // Per-type size gate for the walk: a file over ITS type's effective limit is
+  // dropped during enumeration, so `limit` counts only admissible files and the
+  // browse/preview reflects what will actually ingest (a 40 MB audio passes, a
+  // 15 MB image doesn't). admitFile re-checks at admit time as the authority.
+  const limitFor = await mediaLimitLookup(db);
 
   // Remote: serve a briefly-cached full listing (see the cache note above) so a
   // growing source is fully seen; the caller's `limit` is ignored — the ledger,
@@ -175,7 +176,7 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
     // failures in admit stay board-level (retryable) — list is the coarse
     // "is this source working" signal, exactly what Test checks.
     const { entries, truncated } = await withPluginHealth(db, `source:${type}`, () =>
-      be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytes: MAX_BYTES }));
+      be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytesFor: limitFor }));
     const result = { candidates: toCandidates(entries), truncated };
     if (ttl > 0) {
       const now = Date.now();
@@ -187,7 +188,7 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
 
   // Local folder: walk fresh each call (cheap, always current), honoring limit.
   const be = await resolveBackend(db, cfg.source);
-  const { entries, truncated } = await be.list({ path: srcPath, recursive, limit, accept: acceptsName, maxBytes: MAX_BYTES });
+  const { entries, truncated } = await be.list({ path: srcPath, recursive, limit, accept: acceptsName, maxBytesFor: limitFor });
   return { candidates: toCandidates(entries), truncated };
 }
 
@@ -198,6 +199,7 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
 // the same latent orphan window the upload route has.
 export async function admit(db, board, candidate, { sources } = {}) {
   const be = await resolveBackend(db, board.ingest?.source);
+  const limitFor = await mediaLimitLookup(db); // effective per-type size gate
   const tmp = path.join(os.tmpdir(), `ingest-${crypto.randomBytes(8).toString("hex")}`);
   await be.fetch(candidate.key, tmp);
   let admitted = null;
@@ -207,6 +209,7 @@ export async function admit(db, board, candidate, { sources } = {}) {
         addedAt: Date.now(),
         modifiedAt: candidate.values.modified,
         createdAt: candidate.values.created, // file sources fill `created` (media/universal.js)
+        maxBytes: limitFor(candidate.label),
       });
       if (!admitted) {
         const e = new Error("unsupported file type");

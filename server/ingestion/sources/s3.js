@@ -44,7 +44,7 @@ const baseName = (key) => key.replace(/\/+$/, "").split("/").pop();
 
 export function backend({ conn = {} } = {}) {
   return {
-    async list({ path = "", recursive = false, limit = Infinity, accept = null, maxBytes = Infinity, includeDirs = false } = {}) {
+    async list({ path = "", recursive = false, limit = Infinity, accept = null, maxBytesFor = () => Infinity, includeDirs = false } = {}) {
       const client = makeClient(conn);
       const Prefix = withSlash(path);
       const entries = [];
@@ -71,7 +71,7 @@ export function backend({ conn = {} } = {}) {
             const name = baseName(obj.Key);
             if (!name) continue;
             if (accept && !accept(name)) continue;
-            if (obj.Size > maxBytes) continue;
+            if (obj.Size > maxBytesFor(name)) continue;
             entries.push({
               key: obj.Key, name, path: obj.Key, type: "file",
               size: obj.Size,

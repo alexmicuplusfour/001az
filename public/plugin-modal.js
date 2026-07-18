@@ -65,7 +65,7 @@ export function openPluginModal(p, ctx) {
   } else if (p.kind === "source") {
     body.appendChild(sourceSection(p, ctx, done));
   } else {
-    body.appendChild(mediaSection(p));
+    body.appendChild(mediaSection(p, done));
   }
 
   const closeBtn = document.createElement("button");
@@ -618,9 +618,9 @@ function sourceSection(p, ctx, done) {
   return sec;
 }
 
-// --- media: informational ---
+// --- media: accepted extensions + the adjustable per-type upload limit ---
 
-function mediaSection(p) {
+function mediaSection(p, done) {
   const sec = section("File types", null);
   const list = document.createElement("p");
   list.style.cssText = "margin:0;" + MONO_CSS;
@@ -629,7 +629,44 @@ function mediaSection(p) {
   const note = document.createElement("p");
   note.className = "muted";
   note.style.margin = "0";
-  note.textContent = "Core capability — always installed. It's how the app reads these file types; there's nothing to configure.";
+  note.textContent = "Core capability — always installed; it's how the app reads these file types.";
   sec.appendChild(note);
+
+  // Per-type upload limit: the manifest default, overridable here. Shown in MB;
+  // stored as bytes in the plugin config, which the server reads in mediaLimits.
+  const MB = 1024 * 1024;
+  const defaultMB = Math.round((p.capabilities.maxBytes || 0) / MB);
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.step = "1";
+  input.style.cssText = "width:100%;box-sizing:border-box;";
+  input.value = p.state.config.maxBytes != null ? String(Math.round(p.state.config.maxBytes / MB)) : "";
+  input.placeholder = `${defaultMB} (default)`;
+  sec.appendChild(labeled(
+    `Max upload size (MB) <span style="color:#b6b6bd;font-weight:400;">· blank = default (${defaultMB} MB)</span>`,
+    input,
+  ));
+
+  const save = document.createElement("button");
+  save.textContent = "Save";
+  save.onclick = busy(save, "Saving…", async () => {
+    const raw = input.value.trim();
+    let maxBytes = null; // blank → clear the override (back to the manifest default)
+    if (raw !== "") {
+      const mbVal = Number(raw);
+      if (!Number.isFinite(mbVal) || mbVal < 1) return toast.error("Enter at least 1 MB, or leave blank for the default");
+      maxBytes = Math.round(mbVal * MB);
+    }
+    try {
+      await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { maxBytes } });
+      toast(`${p.label} saved`);
+      done();
+    } catch (err) { toast.error(err.message); }
+  });
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+  actions.appendChild(save);
+  sec.appendChild(actions);
   return sec;
 }

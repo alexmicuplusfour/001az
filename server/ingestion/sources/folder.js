@@ -40,8 +40,6 @@ export const manifest = {
   ],
 };
 
-const MAX_BYTES_DEFAULT = 10 * 1024 * 1024;
-
 // Build a backend bound to one board's source config (its base folder). The
 // adapter calls resolveBackend → backend({ source }) per run/request.
 export function backend({ source } = {}) {
@@ -49,12 +47,12 @@ export function backend({ source } = {}) {
 
   return {
     // One directory level (includeDirs, non-recursive) for the browse modal, or
-    // a bounded recursive walk for enumerate. `accept(name)` + `maxBytes` are the
-    // adapter's shared file-acceptance policy, applied here so `limit` counts
-    // only the files a run would actually take — identical to the pre-split
-    // behaviour. The settle window (a half-copied local file waits a scan) is
-    // folder-specific and stays here.
-    async list({ path: sub = base, recursive = false, limit = Infinity, accept = null, maxBytes = MAX_BYTES_DEFAULT, includeDirs = false } = {}) {
+    // a bounded recursive walk for enumerate. `accept(name)` + `maxBytesFor(name)`
+    // are the adapter's shared file-acceptance policy — the size limit is PER TYPE
+    // (maxBytesFor resolves it from the file's name), applied here so `limit`
+    // counts only the files a run would actually take. The settle window (a
+    // half-copied local file waits a scan) is folder-specific and stays here.
+    async list({ path: sub = base, recursive = false, limit = Infinity, accept = null, maxBytesFor = () => Infinity, includeDirs = false } = {}) {
       const settleMs = Number(process.env.INGEST_SETTLE_MS) || 10000;
       const dir = resolveJailed(process.env.INGEST_ROOT, sub);
       if (!dir) throw new Error("ingestion folder is not configured or escapes the ingestion root");
@@ -88,7 +86,7 @@ export function backend({ source } = {}) {
           } catch {
             continue; // vanished between readdir and stat
           }
-          if (st.size > maxBytes || st.mtimeMs > cutoff) continue;
+          if (st.size > maxBytesFor(e.name) || st.mtimeMs > cutoff) continue;
           entries.push({
             key: relChild, // posix-style relpath = the ledger source_key
             name: e.name,

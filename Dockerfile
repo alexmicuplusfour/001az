@@ -3,9 +3,11 @@
 FROM node:22-slim
 
 # poppler renders PDF page-1 previews (pdftoppm/pdfinfo in sources/pdf.js);
-# without it docs still ingest, they just get no thumbnail. The dejavu font
-# is what text-file "page peek" previews (SVG text via sharp) draw with.
-RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils fonts-dejavu-core \
+# ffmpeg renders audio waveform faces (showwavespic in faces/waveform.js);
+# without either, those files still ingest — they just get a badge, not a
+# thumbnail. The dejavu font is what text-file "page peek" previews (SVG text
+# via sharp) draw with.
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils fonts-dejavu-core ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production

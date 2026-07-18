@@ -11,9 +11,10 @@
 import * as universal from "./universal.js";
 import * as image from "./image.js";
 import * as document from "./document.js";
+import * as audio from "./audio.js";
 
 // Universal always applies; the kind modules are matched per entry by appliesTo.
-const KIND_MODULES = [image, document];
+const KIND_MODULES = [image, document, audio];
 const ALL_MODULES = [universal, ...KIND_MODULES];
 
 const kindMatches = (appliesTo, kind) =>

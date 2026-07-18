@@ -15,8 +15,9 @@ import * as image from "./image.js";
 import * as text from "./text.js";
 import * as pdf from "./pdf.js";
 import * as docx from "./docx.js";
+import * as audio from "./audio.js";
 
-const HANDLER_MODULES = [image, text, pdf, docx];
+const HANDLER_MODULES = [image, text, pdf, docx, audio];
 export const MANIFESTS = HANDLER_MODULES.map((m) => m.manifest);
 
 export const extOf = (name) => (name?.match(/\.([a-z0-9]+)$/i)?.[1] || "").toLowerCase();
@@ -33,6 +34,7 @@ export function createSources({ galleryDir, thumbsDir }) {
     text: text.textSource({ galleryDir, thumbsDir }),
     pdf: pdf.pdfSource({ galleryDir, thumbsDir }),
     docx: docx.docxSource({ galleryDir, thumbsDir }),
+    audio: audio.audioSource({ galleryDir, thumbsDir }),
   };
   const byExt = new Map();
   const byKind = new Map();

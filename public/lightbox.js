@@ -4,7 +4,7 @@ import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
-import { fullUrl, kindFor } from './kinds.js';
+import { fullUrl, thumbUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
 
 // Format numeric field values readably based on key conventions.
@@ -22,6 +22,17 @@ function formatFieldNumber(key, v) {
   }
   if (key === "megapixels") return v + " MP";
   if (/^(width|height|pages|word_count|line_count)$/.test(key)) return v.toLocaleString();
+  // Audio file fields (server/media/audio.js) — human units, not the currency
+  // the v>=1 fallback below would otherwise apply.
+  if (key === "duration") {
+    const s = Math.max(0, Math.round(v));
+    const pad = (n) => String(n).padStart(2, "0");
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+  }
+  if (key === "bitrate") return Math.round(v / 1000) + " kbps";
+  if (key === "sample_rate") return (v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " kHz";
+  if (key === "channels") return v === 1 ? "mono" : v === 2 ? "stereo" : String(v);
   if (/market_cap|volume/.test(key)) {
     const abs = Math.abs(v);
     if (abs >= 1e12) return "$" + (v / 1e12).toFixed(2) + "T";
@@ -47,6 +58,9 @@ const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
 const elLightboxDownload = document.getElementById("lightbox-download");
+const elLightboxAudio = document.getElementById("lightbox-audio");
+const elLightboxAudioEl = document.getElementById("lightbox-audio-el");
+const elLightboxAudioWave = document.getElementById("lightbox-audio-wave");
 
 let lightboxImg = null;
 let lightboxList = [];
@@ -488,11 +502,40 @@ function preloadFull(i) {
   }
 }
 
+// Detach the audio player: pause, drop its source, reset — so it stops playing
+// and buffering when you navigate away or close. Safe to call when already hidden.
+function hideAudio() {
+  if (elLightboxAudio.hidden) return;
+  elLightboxAudioEl.pause();
+  elLightboxAudioEl.removeAttribute("src");
+  elLightboxAudioEl.load();
+  elLightboxAudioWave.removeAttribute("src");
+  elLightboxAudio.hidden = true;
+}
+
 // Render a file-carrying thing (an instance, or the entity's face fields as
 // a fallback) into the main lightbox view. Documents render inline in a
 // same-origin frame; the frame paints progressively, so no loading spinner.
 // docx can't render in a frame; its formatted-HTML sidecar can.
 function showMedia(f) {
+  // Audio: the waveform face (when it rendered) above a native <audio> player;
+  // no waveform → just the player (the card badge covered the visual).
+  if (f.kind === "audio") {
+    elLightboxImg.onload = null;
+    elLightboxImg.removeAttribute("src");
+    elLightboxImg.hidden = true;
+    if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
+    elLightbox.classList.remove("loading");
+    if (f.w && f.h) { elLightboxAudioWave.src = thumbUrl(f.name); elLightboxAudioWave.hidden = false; }
+    else { elLightboxAudioWave.removeAttribute("src"); elLightboxAudioWave.hidden = true; }
+    const url = fullUrl(f.name);
+    if (elLightboxAudioEl.getAttribute("src") !== url) elLightboxAudioEl.src = url;
+    elLightboxAudio.hidden = false;
+    // Keep keyboard nav (arrows/Escape) on the lightbox, not the player.
+    elLightbox.focus({ preventScroll: true });
+    return;
+  }
+  hideAudio();
   const isDoc = f.kind && f.kind !== "image";
   if (isDoc) {
     elLightboxImg.onload = null;
@@ -590,6 +633,7 @@ export function closeLightbox() {
   elLightboxImg.hidden = false;
   elLightboxDoc.hidden = true;
   elLightboxDoc.removeAttribute("src");
+  hideAudio();
   lightboxImg = null;
   lightboxList = [];
   lightboxIndex = -1;
@@ -629,6 +673,8 @@ export function initLightbox() {
     setPanel(!panelOpen);
   });
   elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
+  // Player clicks (play/scrub/volume) must not bubble to the lightbox close.
+  elLightboxAudio.addEventListener("click", (e) => e.stopPropagation());
   elLightboxDownload.innerHTML = ICONS.download;
   document.getElementById("lightbox-panel-close").addEventListener("click", () => setPanel(false));
 

@@ -20,6 +20,7 @@ export const manifest = {
   description: "Extract text from .docx (via mammoth)",
   extensions: ["docx"],
   kinds: ["docx"],
+  maxBytes: 10 * 1024 * 1024, // per-type upload limit (bytes); see sources/image.js
 };
 
 export function docxSource({ galleryDir, thumbsDir }) {

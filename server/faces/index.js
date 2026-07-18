@@ -20,6 +20,7 @@ import { renderChart } from "./price-chart.js";
 import { imageThumb } from "./image-thumb.js";
 import { pdfPage } from "./pdf-page.js";
 import { textPeek } from "./text-peek.js";
+import { waveform } from "./waveform.js";
 
 // The complete catalogue of face producers. Built-in handlers/connectors import
 // their producer directly (below); this map is the named registry the connector
@@ -30,6 +31,7 @@ const FACE_PRODUCERS = {
   "image-thumb": imageThumb,  // uploaded image → oriented ≤600px webp
   "pdf-page": pdfPage,        // pdf page 1 → webp (poppler)
   "text-peek": textPeek,      // text/docx first lines → webp page peek
+  "waveform": waveform,       // audio → ffmpeg showwavespic waveform webp
 };
 
 // Resolve a producer by name. A falsy/unknown name → null, so callers gate on it

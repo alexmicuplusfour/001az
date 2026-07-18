@@ -11,7 +11,7 @@ import { startServer, seedBoard } from "./helpers.js";
 import { enumerate, admit } from "../server/ingestion/folder.js";
 import { applyFilters } from "../server/ingestion/filter-engine.js";
 import { descriptor } from "../server/ingestion/folder.js";
-import { getBoard, updateBoard, ingestedKeys, deleteEntity } from "../server/db.js";
+import { getBoard, updateBoard, ingestedKeys, deleteEntity, setPluginState } from "../server/db.js";
 import { createSources } from "../server/sources/index.js";
 
 let srv, db, sources, root;
@@ -87,6 +87,23 @@ test("enumerate: values feed the shared filter engine", async () => {
   assert.deepEqual(txt.map((c) => c.key), ["a.txt"]);
   const pdf = applyFilters(candidates, [{ fn: "name", op: "starts_with", value: "b." }], cat);
   assert.deepEqual(pdf.map((c) => c.key), ["b.PDF"]);
+});
+
+test("enumerate: the size cap is per TYPE, not a flat limit", async () => {
+  // Same-size txt and pdf; lower ONLY the text limit under their size, so the
+  // txt is dropped during the walk while the pdf (default 10 MB) is kept —
+  // proving the gate resolves the limit per file type, not from a flat cap.
+  put("kap/small.txt", "z".repeat(2000));
+  put("kap/small.pdf", "%PDF-" + "z".repeat(2000));
+  await setPluginState(db, "media:text", { config: { maxBytes: 1000 } });
+  try {
+    const board = await boardWatching("kap", "kap");
+    const keys = (await enumerate(db, board, board.ingest)).candidates.map((c) => c.key).sort();
+    assert.ok(keys.includes("small.pdf"), "pdf under its default limit is kept");
+    assert.ok(!keys.includes("small.txt"), "txt over the lowered text limit is dropped");
+  } finally {
+    await setPluginState(db, "media:text", { config: {} });
+  }
 });
 
 test("admit: birth statuses match the upload door (unmapped→pending, mapped+park, held)", async () => {

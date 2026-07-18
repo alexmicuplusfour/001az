@@ -102,7 +102,7 @@ import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
 import { liveFields, faceCadence } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
-import { pluginCatalog, getPluginDef, pluginState, pluginInstalled } from "./plugins.js";
+import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
@@ -1671,6 +1671,16 @@ app.get("/api/connectors", requireAuth, wrap(async (_req, res) => {
 // fields" section — static descriptors, no db, like a connector manifest.
 app.get("/api/file-fields", requireAuth, wrap(async (_req, res) => {
   res.json(mediaCatalog());
+}));
+
+// The accepted media types + their effective per-type upload limits (manifest
+// defaults ⊕ admin overrides). The client's upload accept filter + size
+// pre-filter read this, so the accepted set and its limits live in ONE place
+// (the media manifests) instead of being duplicated in the client. Public
+// capability metadata — the same info the file-input `accept` attr already
+// exposes — so no auth gate.
+app.get("/api/media-types", wrap(async (_req, res) => {
+  res.json(await mediaLimits(db));
 }));
 
 app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {

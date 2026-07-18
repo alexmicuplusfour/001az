@@ -21,6 +21,7 @@ export const manifest = {
   description: "Extract text + a page-1 preview (via poppler)",
   extensions: ["pdf"],
   kinds: ["pdf"],
+  maxBytes: 10 * 1024 * 1024, // per-type upload limit (bytes); see sources/image.js
 };
 
 export function pdfSource({ galleryDir, thumbsDir }) {

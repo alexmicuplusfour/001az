@@ -14,6 +14,7 @@ export const manifest = {
   description: "Read .txt / .md / .csv as plain text",
   extensions: ["txt", "md", "csv"],
   kinds: ["text"],
+  maxBytes: 10 * 1024 * 1024, // per-type upload limit (bytes); see sources/image.js
 };
 
 export function textSource({ galleryDir, thumbsDir }) {

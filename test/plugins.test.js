@@ -6,7 +6,8 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
-import { pluginDefs, getPluginDef, pluginState, pluginCatalog } from "../server/plugins.js";
+import { pluginDefs, getPluginDef, pluginState, pluginCatalog, mediaLimits, mediaLimitLookup } from "../server/plugins.js";
+import { UPLOAD_HARD_CEILING } from "../server/upload-limits.js";
 import { setPluginState, setSetting, getSetting, createAiKey, recordPluginHealth, getPluginRow, updateBoard } from "../server/db.js";
 import { up as carryConnectorInstalls } from "../server/migrations/0018_carry_connector_installs.js";
 import { getConnector } from "../server/connectors/index.js";
@@ -19,7 +20,7 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   assert.deepEqual(ids, [
     "ai:local", "ai:anthropic", "ai:openai", "ai:gemini", "ai:glm", "ai:openrouter",
     "crypto:coingecko", "crypto:coinmarketcap", "stocks:financialmodelingprep",
-    "media:image", "media:text", "media:pdf", "media:docx",
+    "media:image", "media:text", "media:pdf", "media:docx", "media:audio",
     "source:folder", "source:ftp", "source:s3",
   ]);
   assert.equal(new Set(ids).size, ids.length);
@@ -36,7 +37,7 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   // core = the app's own capabilities (always installed, not removable): every
   // media handler, the on-device embedder, and the local-folder source.
   assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
-    ["ai:local", "media:image", "media:text", "media:pdf", "media:docx", "source:folder"]);
+    ["ai:local", "media:image", "media:text", "media:pdf", "media:docx", "media:audio", "source:folder"]);
   // exactly one connection is pre-added — the flagship AI provider.
   assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
 });
@@ -58,7 +59,7 @@ test("defs: capabilities mirror the underlying descriptors", () => {
   assert.ok(rpm.default >= 1, "rpm default comes from the provider descriptor");
 
   const pdf = getPluginDef("media:pdf");
-  assert.deepEqual(pdf.capabilities, { extensions: ["pdf"], kinds: ["pdf"] });
+  assert.deepEqual(pdf.capabilities, { extensions: ["pdf"], kinds: ["pdf"], maxBytes: 10 * 1024 * 1024 });
 });
 
 // --- state + the served catalog ---
@@ -100,6 +101,60 @@ test("state: a core plugin reads installed no matter what the row says", async (
   await setPluginState(db, "media:image", { installed: false });
   assert.equal((await pluginState(db, "media:image")).installed, true);
   await setPluginState(db, "media:image", { installed: true });
+});
+
+test("media limits: manifest default, admin override, and per-name lookup", async () => {
+  const MB = 1024 * 1024;
+  // Defaults come straight from the manifests (all 10 MB today).
+  const base0 = await mediaLimits(db);
+  const pdf = base0.find((t) => t.name === "pdf");
+  assert.equal(pdf.maxBytes, 10 * MB);
+  assert.deepEqual(pdf.extensions, ["pdf"]);
+
+  // A stored override on the media plugin's config wins over the manifest default.
+  await setPluginState(db, "media:pdf", { config: { maxBytes: 25 * MB } });
+  assert.equal((await mediaLimits(db)).find((t) => t.name === "pdf").maxBytes, 25 * MB);
+  // A non-positive / garbage override is ignored → back to the manifest default.
+  await setPluginState(db, "media:pdf", { config: { maxBytes: -1 } });
+  assert.equal((await mediaLimits(db)).find((t) => t.name === "pdf").maxBytes, 10 * MB);
+  await setPluginState(db, "media:pdf", { config: {} }); // reset
+
+  // The per-file lookup maps by extension; an unknown extension falls to the
+  // image limit, mirroring the ingest dispatcher's image fallback (forUpload).
+  const limitFor = await mediaLimitLookup(db);
+  assert.equal(limitFor("a.pdf"), 10 * MB);
+  assert.equal(limitFor("mystery.qzx"), base0.find((t) => t.name === "image").maxBytes);
+});
+
+test("GET /api/media-types serves accepted types + effective limits (public)", async () => {
+  const r = await req(base, "GET", "/api/media-types");
+  assert.equal(r.status, 200, "public capability metadata — no auth gate");
+  assert.deepEqual(r.json.map((t) => t.name).sort(), ["audio", "docx", "image", "pdf", "text"]);
+  const image = r.json.find((t) => t.name === "image");
+  assert.ok(image.extensions.includes("jpg"));
+  assert.equal(typeof image.maxBytes, "number");
+});
+
+test("admin PATCH: a media maxBytes override flows to mediaLimits + /api/media-types, and clears", async () => {
+  const MB = 1024 * 1024;
+  const set = await req(base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config: { maxBytes: 30 * MB } } });
+  assert.equal(set.status, 200);
+  assert.equal((await mediaLimits(db)).find((t) => t.name === "pdf").maxBytes, 30 * MB);
+  const served = await req(base, "GET", "/api/media-types");
+  assert.equal(served.json.find((t) => t.name === "pdf").maxBytes, 30 * MB, "the endpoint serves the override");
+
+  // Blank in the modal → null → the route deletes the override → manifest default.
+  const clear = await req(base, "PATCH", "/api/admin/plugins/media:pdf", { sid: admin.sid, body: { config: { maxBytes: null } } });
+  assert.equal(clear.status, 200);
+  assert.equal((await mediaLimits(db)).find((t) => t.name === "pdf").maxBytes, 10 * MB, "cleared → back to the manifest default");
+});
+
+test("media limits clamp to the absolute upload ceiling", async () => {
+  const huge = 10 * 1024 * 1024 * 1024; // 10 GB — far over the ceiling
+  await setPluginState(db, "media:pdf", { config: { maxBytes: huge } });
+  assert.equal((await mediaLimits(db)).find((t) => t.name === "pdf").maxBytes, UPLOAD_HARD_CEILING,
+    "an over-large override caps at the ceiling, so the client never offers what multer would 413");
+  await setPluginState(db, "media:pdf", { config: {} });
 });
 
 test("state: a health-only row (NULL installed) falls to the tier default", async () => {

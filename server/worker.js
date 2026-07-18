@@ -643,6 +643,17 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
       }];
     }
+    if (file.kind === "audio") {
+      // No transcription yet, so there's no text to tag on — and the waveform
+      // thumbnail carries no semantic signal (and is ABSENT when ffmpeg isn't
+      // installed, which would crash the image readFile below). Anchor on the
+      // filename so audio on an AI board degrades to a name-only tag instead of
+      // erroring. The transcription slot replaces this branch later.
+      return [{
+        kind: "text",
+        text: `The item is an audio file named "${file.original_name}". Tag it using the record_tags tool, judging from its name.`,
+      }];
+    }
     const buf = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp"));
     // A generated connector face (e.g. a price chart) gets a chart-aware anchor
     // so the tagger reads the trend, not a generic "image".
