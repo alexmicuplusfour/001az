@@ -17,6 +17,8 @@ import { PROVIDERS } from "../server/providers.js";
 import { pluginCatalog } from "../server/plugins.js";
 import { getExternalPlugin, setExternalLoadError, getSetting, setSetting, listAiKeys, createAiKey } from "../server/db.js";
 import { getFaceProducer } from "../server/faces/index.js";
+import { getSourceBackend } from "../server/ingestion/sources/index.js";
+import { listSources } from "../server/ingestion/files.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 
@@ -134,6 +136,55 @@ test("installFromUrl: a plugin can't register a face producer outside its namesp
   await assert.rejects(installFromUrl(db, dir), /namespaced under the plugin id/);
   assert.equal(typeof getFaceProducer("price-chart"), "function", "the built-in producer is untouched");
   assert.equal(await getExternalPlugin(db, "evilface:acme.evil"), null, "nothing persisted");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("installFromUrl: a source plugin installs as the 4th kind (registers live; uninstall reverses)", async () => {
+  assert.equal(getSourceBackend("acme.filedrop"), null, "not registered before install");
+  const id = await installFromUrl(db, FIX("acme-source"));
+  assert.equal(id, "source:acme.filedrop");
+
+  // registered live in the ingestion-source registry — the loader learned a 4th kind
+  const mod = getSourceBackend("acme.filedrop");
+  assert.ok(mod && typeof mod.backend === "function", "backend registered live");
+  // shows up as an installed source (listSources reads the live registry)
+  assert.ok((await listSources(db)).some((s) => s.type === "acme.filedrop"), "in the source list");
+  // and as an external source card in the plugin catalog
+  const entry = (await pluginCatalog(db)).find((p) => p.id === id);
+  assert.equal(entry.kind, "source");
+  assert.equal(entry.external, true);
+  assert.equal(entry.state.installed, true);
+
+  await uninstall(db, id);
+  assert.equal(getSourceBackend("acme.filedrop"), null, "unregistered on uninstall");
+  assert.equal((await listSources(db)).some((s) => s.type === "acme.filedrop"), false, "gone from the source list");
+  assert.equal((await pluginCatalog(db)).some((p) => p.id === id), false, "off the catalog");
+});
+
+test("installFromUrl: an external source can't make itself un-removable via core:true", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "src-core-"));
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    id: "acme.sticky", apiVersion: 1, kind: "source", label: "Sticky", main: "index.js",
+  }));
+  fs.writeFileSync(path.join(dir, "index.js"),
+    'export default () => ({ manifest: { name: "acme.sticky", label: "Sticky", core: true }, backend: () => ({ async list(){return{entries:[]};} }) });\n');
+  const id = await installFromUrl(db, dir);
+  const entry = (await pluginCatalog(db)).find((p) => p.id === id);
+  assert.equal(entry.core, false, "an installed-from-URL plugin is never core (stays removable)");
+  await uninstall(db, id);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("installFromUrl: a source whose manifest.name != id is rejected", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "src-bad-"));
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    id: "acme.wrong", apiVersion: 1, kind: "source", label: "Wrong", main: "index.js",
+  }));
+  fs.writeFileSync(path.join(dir, "index.js"),
+    'export default () => ({ manifest: { name: "mismatch" }, backend: () => ({ async list(){return{entries:[]};} }) });\n');
+  await assert.rejects(installFromUrl(db, dir), /manifest\.name must equal manifest\.id/);
+  assert.equal(getSourceBackend("mismatch"), null, "nothing registered");
+  assert.equal(await getExternalPlugin(db, "source:acme.wrong"), null, "nothing persisted");
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

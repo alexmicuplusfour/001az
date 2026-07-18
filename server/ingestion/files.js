@@ -15,7 +15,7 @@ import { admitFile } from "../ingest.js";
 import { withTx, recordIngest, getSourceConnection, listSourceConnections, withPluginHealth } from "../db.js";
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
 import { acceptsName, extOf } from "../sources/index.js";
-import { getSourceBackend, SOURCE_MODULES } from "./sources/index.js";
+import { getSourceBackend, sourceModules } from "./sources/index.js";
 import { resolveJailed } from "./sources/folder.js";
 import { pluginInstalled } from "../plugins.js";
 
@@ -267,7 +267,7 @@ export async function validateSource(db, source = {}, { hasRoot = false } = {}) 
 // the server has an INGEST_ROOT (ready) at all.
 export async function listSources(db) {
   const out = [];
-  for (const mod of SOURCE_MODULES) {
+  for (const mod of sourceModules()) {
     const m = mod.manifest;
     if (!(await pluginInstalled(db, `source:${m.name}`))) continue;
     const entry = {

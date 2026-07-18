@@ -21,7 +21,7 @@
 import { PROVIDERS, providerCatalog } from "./providers.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS } from "./sources/index.js";
-import { MANIFESTS as SOURCE_MANIFESTS } from "./ingestion/sources/index.js";
+import { sourceManifests } from "./ingestion/sources/index.js";
 import { listPluginRows, getPluginRow, getSetting, listAiKeys, listSourceConnections, listExternalPlugins } from "./db.js";
 
 // --- static defs (no db) ---
@@ -98,7 +98,7 @@ function mediaDefs() {
 }
 
 function sourceDefs() {
-  return SOURCE_MANIFESTS.map((m) => ({
+  return sourceManifests().map((m) => ({
     id: `source:${m.name}`,
     kind: "source",
     segment: "source",
@@ -176,7 +176,7 @@ const health = (row) =>
     : null;
 
 // external_plugins.kind (the manifest kind) → catalog kind (the card's family).
-const CATALOG_KIND = { "ai-provider": "ai", "connector-provider": "connector", "connector-domain": "connector" };
+const CATALOG_KIND = { "ai-provider": "ai", "connector-provider": "connector", "connector-domain": "connector", "source": "source" };
 
 // An external plugin that FAILED to load never reaches the live registries, so
 // pluginDefs() can't see it — but it's installed (code on disk) and must show as
@@ -226,6 +226,9 @@ export async function pluginCatalog(db) {
       entry.external = true;
       entry.source = { url: ext.source_url, ref: ext.resolved_ref };
       entry.state.installed = true; // installed-from-URL: present ⇒ installed (Remove = uninstall)
+      // Never core: an installed-from-URL plugin is always removable, even if its
+      // manifest claims core (which would otherwise disable Remove in the admin UI).
+      entry.core = false;
       externals.delete(def.id); // consumed — the rest are errored (below)
     }
     if (def.kind === "connector") {

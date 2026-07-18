@@ -25,6 +25,7 @@ import {
   registerConnector, unregisterConnector,
   registerConnectorProvider, unregisterConnectorProvider,
 } from "./connectors/index.js";
+import { registerSource, unregisterSource } from "./ingestion/sources/index.js";
 import { resetDefs } from "./plugins.js";
 import { providerSignal } from "./connectors/runtime.js";
 import { renderChart } from "./faces/price-chart.js";
@@ -39,13 +40,133 @@ import {
 // bump only on a breaking change to the manifest / ctx / return shapes.
 export const PLUGIN_API_VERSION = 1;
 
-const KINDS = new Set(["ai-provider", "connector-provider", "connector-domain"]);
-
 // The other catalog segments a connector-domain must not claim — a domain named
 // "ai"/"media"/"source" would mint catalog ids that collide with those families.
 // (Existing connector domains like crypto are caught separately, at loadDir, by
 // the getConnector shadow check.)
 const RESERVED_DOMAINS = new Set(["ai", "media", "source"]);
+
+// --- per-kind definitions (the ONE place a kind's specifics live) ---
+// Adding a plugin kind = one entry in KIND_DEFS (+ a register/unregister seam on
+// its registry). The loader below is kind-agnostic — it looks the kind up in this
+// table and never switches on manifest.kind. Each definition supplies: catalogId
+// (the card/row id), validateManifest (kind-specific manifest checks beyond the
+// common ones), validateBuilt (the shape the factory must return), and register/
+// unregister (the live-registry writes). The install lifecycle itself (fetch, npm,
+// validate, persist, health) is shared and never per-kind — see loadDir/installFromUrl.
+
+// Both connector kinds carry a `domain` — a catalog segment (before the ':') and a
+// map key, so a simple slug.
+const requireDomain = (m) => {
+  if (typeof m.domain !== "string" || !m.domain) throw new Error(`${m.kind} requires manifest.domain`);
+  if (!/^[a-z0-9][a-z0-9-]*$/i.test(m.domain))
+    throw new Error("manifest.domain must be a simple slug (letters, digits, '-')");
+};
+
+// A connector-domain may ship its OWN face producer(s) — a novel card face, not
+// just the built-in price chart. The manifest DECLARES their names (stored, so
+// uninstall can unregister them); each must sit in the plugin's own namespace (the
+// id, or `<id>.*`) so it can never overwrite a built-in ("price-chart", …) or
+// another plugin's producer. The factory PROVIDES the functions (validateBuilt).
+const validateFaceProducerNames = (m) => {
+  if (m.faceProducers === undefined) return;
+  if (!Array.isArray(m.faceProducers) || m.faceProducers.some((n) => typeof n !== "string" || !n))
+    throw new Error("manifest.faceProducers must be an array of producer names");
+  for (const n of m.faceProducers) {
+    if (n !== m.id && !n.startsWith(`${m.id}.`))
+      throw new Error(`face producer "${n}" must be namespaced under the plugin id ("${m.id}" or "${m.id}.*")`);
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(n))
+      throw new Error(`face producer name "${n}" may contain only letters, digits, '.', '-', '_'`);
+  }
+};
+
+const KIND_DEFS = {
+  "ai-provider": {
+    catalogId: (m) => `ai:${m.id}`,
+    validateBuilt: (m, built) => {
+      // `wire` is the dispatch object ({ tag, embed, testKey }); an embed-only
+      // provider (like the built-in local one) has wire null + embeds set. Reject
+      // only a descriptor that can neither tag nor embed — matches aiDefs' !!wire.
+      if (!built.wire && !built.embeds)
+        throw new Error("ai-provider must return a descriptor with a wire (tagging) or embeds config");
+      if (!built.label) throw new Error("ai-provider descriptor needs a label");
+      // defaultModel names the tagging model; only a tagging (wire) provider needs
+      // one. An embed-only descriptor legitimately has none (the built-in `local`).
+      if (built.wire && !built.defaultModel) throw new Error("a tagging ai-provider descriptor needs a defaultModel");
+    },
+    register: (m, built) => registerProvider(m.id, built),
+    unregister: (m) => unregisterProvider(m.id),
+  },
+
+  "connector-provider": {
+    catalogId: (m) => `${m.domain}:${m.id}`,
+    validateManifest: requireDomain,
+    validateBuilt: (m, built) => {
+      if (typeof built.search !== "function" || typeof built.fetchEntity !== "function")
+        throw new Error("connector-provider must return a provider with search() and fetchEntity()");
+    },
+    register: (m, built) => registerConnectorProvider(m.domain, m.id, built),
+    unregister: (m) => unregisterConnectorProvider(m.domain, m.id),
+  },
+
+  "connector-domain": {
+    catalogId: (m) => `${m.domain}:${m.id}`,
+    validateManifest: (m) => {
+      requireDomain(m);
+      if (RESERVED_DOMAINS.has(m.domain.toLowerCase()))
+        throw new Error(`manifest.domain "${m.domain}" is reserved`);
+      validateFaceProducerNames(m);
+    },
+    validateBuilt: (m, built) => {
+      if (!built.providers || !Object.keys(built.providers).length)
+        throw new Error("connector-domain must return a non-empty providers map");
+      if (!built.defaultProvider || !built.providers[built.defaultProvider])
+        throw new Error("connector-domain defaultProvider must be a key of providers");
+      // The default provider is named for the plugin so the catalog id
+      // (`<domain>:<id>`) is knowable from the manifest ALONE — needed to name the
+      // install dir and dedupe reinstalls before the module is ever loaded.
+      if (built.defaultProvider !== m.id)
+        throw new Error(`connector-domain defaultProvider must equal manifest.id ("${m.id}")`);
+      if (!built.manifest) throw new Error("connector-domain must return a domain manifest");
+      // Every declared face producer must be backed by a function (register-last).
+      for (const n of m.faceProducers || [])
+        if (typeof built.faceProducers?.[n] !== "function")
+          throw new Error(`manifest declares face producer "${n}" but the factory returned no function for it`);
+    },
+    register: (m, built) => {
+      // The plugin's own face producers join the shared registry so its `faces`
+      // map can name them (re-register on reload just overwrites — idempotent).
+      for (const n of m.faceProducers || []) registerFaceProducer(n, built.faceProducers[n]);
+      registerConnector(m.domain, built);
+    },
+    unregister: (m) => {
+      unregisterConnector(m.domain);
+      for (const n of m.faceProducers || []) unregisterFaceProducer(n);
+    },
+  },
+
+  // An ingestion source (where files come FROM — ftp/s3/webdav/…). The factory
+  // returns the same { manifest, backend } shape a built-in source module exports;
+  // the client (ingest modal + browse) is already generic, so nothing else changes.
+  "source": {
+    catalogId: (m) => `source:${m.id}`,
+    validateBuilt: (m, built) => {
+      if (!built.manifest || typeof built.manifest !== "object")
+        throw new Error("source must return a { manifest, backend } module");
+      // manifest.name is the catalog segment (`source:<name>`) and the install-state
+      // key, so it must equal the plugin id — the id is then knowable from the
+      // manifest alone (mirrors connector-domain's defaultProvider === id).
+      if (built.manifest.name !== m.id)
+        throw new Error(`source manifest.name must equal manifest.id ("${m.id}")`);
+      if (typeof built.backend !== "function")
+        throw new Error("source must return a backend({ source, conn }) factory");
+    },
+    register: (m, built) => registerSource(m.id, built),
+    unregister: (m) => unregisterSource(m.id),
+  },
+};
+
+const KINDS = new Set(Object.keys(KIND_DEFS));
 
 // --- the ctx facade: the whole stable surface a plugin may use ---
 // Per-request context (apiKey, abort signal) rides the per-call opts instead
@@ -96,69 +217,19 @@ export function validateManifest(m) {
   // off — nothing executes until the manifest validates and the factory loads.
   if (m.allowScripts !== undefined && typeof m.allowScripts !== "boolean")
     throw new Error("manifest.allowScripts must be a boolean");
-  if (m.kind === "connector-provider" || m.kind === "connector-domain") {
-    if (typeof m.domain !== "string" || !m.domain) throw new Error(`${m.kind} requires manifest.domain`);
-    // The domain is a catalog segment (before the ':') and a map key — a simple slug.
-    if (!/^[a-z0-9][a-z0-9-]*$/i.test(m.domain))
-      throw new Error("manifest.domain must be a simple slug (letters, digits, '-')");
-    if (m.kind === "connector-domain" && RESERVED_DOMAINS.has(m.domain.toLowerCase()))
-      throw new Error(`manifest.domain "${m.domain}" is reserved`);
-  }
-  // A connector-domain may ship its OWN face producer(s) — a novel card face
-  // (a waveform, a weather tile), not just the built-in price chart. The manifest
-  // DECLARES their names (stored, so uninstall can unregister them) and the factory
-  // PROVIDES the functions. Each name must sit in the plugin's own namespace (the
-  // id, or `<id>.*`) so it can never overwrite a built-in ("price-chart", …) or
-  // another plugin's producer — the registry is a single global map.
-  if (m.faceProducers !== undefined) {
-    if (m.kind !== "connector-domain")
-      throw new Error("manifest.faceProducers is only supported on a connector-domain plugin");
-    if (!Array.isArray(m.faceProducers) || m.faceProducers.some((n) => typeof n !== "string" || !n))
-      throw new Error("manifest.faceProducers must be an array of producer names");
-    for (const n of m.faceProducers) {
-      if (n !== m.id && !n.startsWith(`${m.id}.`))
-        throw new Error(`face producer "${n}" must be namespaced under the plugin id ("${m.id}" or "${m.id}.*")`);
-      if (!/^[a-z0-9][a-z0-9._-]*$/i.test(n))
-        throw new Error(`face producer name "${n}" may contain only letters, digits, '.', '-', '_'`);
-    }
-  }
+  // faceProducers is a connector-domain-only field; its shape/namespace checks live
+  // in that kind's definition — this only guards it appearing on the wrong kind.
+  if (m.faceProducers !== undefined && m.kind !== "connector-domain")
+    throw new Error("manifest.faceProducers is only supported on a connector-domain plugin");
+  KIND_DEFS[m.kind].validateManifest?.(m); // kind-specific manifest checks
 }
 
-// Validate the object the factory returned, per kind (the shape the registries
-// expect). Kept minimal — enough to fail fast with a readable reason.
+// Validate the object the factory returned — the shape its registry expects.
+// The "is an object" check is common; everything else is kind-specific (in the
+// definition). Kept minimal — enough to fail fast with a readable reason.
 function validateBuilt(m, built) {
   if (!built || typeof built !== "object") throw new Error("the plugin factory must return an object");
-  if (m.kind === "ai-provider") {
-    // `wire` is the dispatch object ({ tag, embed, testKey }); an embed-only
-    // provider (like the built-in local one) has wire null + embeds set. Reject
-    // only a descriptor that can neither tag nor embed — matches aiDefs' !!wire.
-    if (!built.wire && !built.embeds)
-      throw new Error("ai-provider must return a descriptor with a wire (tagging) or embeds config");
-    if (!built.label) throw new Error("ai-provider descriptor needs a label");
-    // defaultModel names the tagging model; only a tagging (wire) provider needs
-    // one. An embed-only descriptor (wire null, embeds set) legitimately has none
-    // — the built-in `local` is exactly this shape.
-    if (built.wire && !built.defaultModel) throw new Error("a tagging ai-provider descriptor needs a defaultModel");
-  } else if (m.kind === "connector-provider") {
-    if (typeof built.search !== "function" || typeof built.fetchEntity !== "function")
-      throw new Error("connector-provider must return a provider with search() and fetchEntity()");
-  } else if (m.kind === "connector-domain") {
-    if (!built.providers || !Object.keys(built.providers).length)
-      throw new Error("connector-domain must return a non-empty providers map");
-    if (!built.defaultProvider || !built.providers[built.defaultProvider])
-      throw new Error("connector-domain defaultProvider must be a key of providers");
-    // The default provider is named for the plugin so the catalog id
-    // (`<domain>:<id>`) is knowable from the manifest ALONE — needed to name the
-    // install dir and dedupe reinstalls before the module is ever loaded.
-    if (built.defaultProvider !== m.id)
-      throw new Error(`connector-domain defaultProvider must equal manifest.id ("${m.id}")`);
-    if (!built.manifest) throw new Error("connector-domain must return a domain manifest");
-    // Every declared face producer must be backed by a function (verified before
-    // anything registers — register-last).
-    for (const n of m.faceProducers || [])
-      if (typeof built.faceProducers?.[n] !== "function")
-        throw new Error(`manifest declares face producer "${n}" but the factory returned no function for it`);
-  }
+  KIND_DEFS[m.kind].validateBuilt?.(m, built);
 }
 
 // The catalog id a plugin owns: `<segment>:<vendor.name>`. Segment is "ai" or the
@@ -167,8 +238,7 @@ function validateBuilt(m, built) {
 // the id is known before the module loads — the install flow needs it to name the
 // dir and detect a reinstall.
 export function catalogIdFor(m) {
-  if (m.kind === "ai-provider") return `ai:${m.id}`;
-  return `${m.domain}:${m.id}`; // connector-provider + connector-domain
+  return KIND_DEFS[m.kind].catalogId(m);
 }
 
 // --- load / register (the ONE place a registry is mutated) ---
@@ -192,30 +262,14 @@ async function buildModule(dir, manifest) {
 }
 
 function registerBuilt(manifest, built) {
-  switch (manifest.kind) {
-    case "ai-provider": registerProvider(manifest.id, built); break;
-    case "connector-provider": registerConnectorProvider(manifest.domain, manifest.id, built); break;
-    case "connector-domain":
-      // The plugin's own face producers join the shared registry so its `faces`
-      // map can name them (re-register on reload just overwrites — idempotent).
-      for (const n of manifest.faceProducers || []) registerFaceProducer(n, built.faceProducers[n]);
-      registerConnector(manifest.domain, built);
-      break;
-  }
+  KIND_DEFS[manifest.kind].register(manifest, built);
   resetDefs(); // the live registries changed → rebuild the memoized catalog defs
 }
 
 // Undo a registration (uninstall / failed reload). `manifest` is the stored one,
-// so its declared faceProducers are known without the built module.
+// so a connector-domain's declared faceProducers are known without the built module.
 export function unregister(manifest) {
-  switch (manifest.kind) {
-    case "ai-provider": unregisterProvider(manifest.id); break;
-    case "connector-provider": unregisterConnectorProvider(manifest.domain, manifest.id); break;
-    case "connector-domain":
-      unregisterConnector(manifest.domain);
-      for (const n of manifest.faceProducers || []) unregisterFaceProducer(n);
-      break;
-  }
+  KIND_DEFS[manifest.kind]?.unregister(manifest);
   resetDefs();
 }
 
@@ -392,6 +446,10 @@ async function cleanupPluginConfig(db, manifest) {
     }
     return;
   }
+  // A source's saved connections (source_connections) are admin-managed and, like
+  // connector keys, deliberately survive a reinstall — nothing to clear here. (It
+  // also has no domain, so the connector-settings logic below doesn't apply.)
+  if (manifest.kind === "source") return;
   // connector-provider | connector-domain: the provider's API-key slot, plus the
   // domain's active-provider pointer. A whole-domain uninstall clears the pointer
   // outright; a single-provider uninstall clears it only if it named this one.

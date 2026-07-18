@@ -12,11 +12,26 @@ import * as folder from "./folder.js";
 import * as ftp from "./ftp.js";
 import * as s3 from "./s3.js";
 
+// Live map — built-ins seeded at load; a `source` plugin registers into it at
+// install and out at uninstall. The readers below derive from it at call time, so
+// a newly installed source appears without a restart (no frozen snapshot).
 const BACKENDS = { folder, ftp, s3 };
 
-// Backend modules, in registry order (folder first — it's core).
-export const SOURCE_MODULES = Object.values(BACKENDS);
-export const MANIFESTS = SOURCE_MODULES.map((m) => m.manifest);
+// Backend modules / their manifests, read live (folder first — it's core). A
+// source module is { manifest, backend } — the same shape a built-in exports.
+export const sourceModules = () => Object.values(BACKENDS);
+export const sourceManifests = () => sourceModules().map((m) => m.manifest);
 
 // The module (with .manifest + .backend) for a source type, or null.
 export const getSourceBackend = (name) => BACKENDS[name] || null;
+
+// --- dynamic registration (phase 2): a `source` plugin adds/removes a backend ---
+// Keyed by the plugin id (which equals its manifest.name), like the built-ins are
+// keyed by their name. The loader calls these register-last (after validation).
+export function registerSource(name, mod) {
+  BACKENDS[name] = mod;
+}
+
+export function unregisterSource(name) {
+  delete BACKENDS[name];
+}

@@ -1,0 +1,7 @@
+{
+  "id": "acme.filedrop",
+  "apiVersion": 1,
+  "kind": "source",
+  "label": "Acme File Drop",
+  "main": "index.js"
+}
