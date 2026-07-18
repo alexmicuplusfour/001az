@@ -1,8 +1,8 @@
 # Face normalization — a Face row on every board (file boards get one too)
 
-**Status: BUILT + PUSHED to branch `face-normalization` 2026-07-19 (both phases, +4 new
-tests; the only red in a full run is a pre-existing ingest-sweep timing flake). Pending
-merge to main. Design agreed 2026-07-18. As-built notes below; the rest is the design.**
+**Status: SHIPPED — committed + pushed to main 2026-07-19 as `ea3da92` (both phases, +4 new
+tests; the only red in a full run is a pre-existing ingest-sweep timing flake). Design
+agreed 2026-07-18. As-built notes below; the rest is the design.**
 
 ## As-built (small deviations from the plan)
 
