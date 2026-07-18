@@ -4,6 +4,23 @@
 tests; the only red in a full run is a pre-existing ingest-sweep timing flake). Design
 agreed 2026-07-18. As-built notes below; the rest is the design.**
 
+## UX revision 2026-07-19 (post-ship, user feedback)
+
+The first cut replaced the "File preview" label with the two selects and offered an
+"Any type" prefer default. Revised per the user:
+- **"File preview" is now always shown** on line 1 (derived or not) — the face is still the
+  preview; the selects only *refine which instance* supplies it.
+- **The selects moved to a second line** under it, behind a muted `prefer when available`
+  label (`.mm-face-prefer`).
+- **"Any type" is gone; Image is the default.** `prefer` is soft (selectFace falls back to
+  any instance when the type is absent), so an image default just means "show the image if
+  there is one" without losing the fallback. `collect()` now **always** persists an explicit
+  `{ from:"file", prefer, pick }` for a derived board (image/first by default) rather than
+  only-when-diverging. Raw identity still writes nothing (single instance).
+
+`selectFace` and the validator are unchanged — the validator still accepts `any` (dead from
+the UI, kept as selectFace's absent-config semantic).
+
 ## As-built (small deviations from the plan)
 
 - **The read-only "File preview" label reuses the existing `.mm-locked-badge`** pill

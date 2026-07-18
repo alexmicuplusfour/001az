@@ -313,6 +313,17 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   border-radius: 6px;
   padding: 6px 9px;
 }
+/* Second line of the file-board face row: "prefer when available [type] [order]". */
+.mm-face-prefer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.mm-face-prefer-label {
+  font-size: 12px;
+  color: #8a8a92;
+}
 
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
 #connector-browse .modal-dialog { width: min(900px, 94vw); }

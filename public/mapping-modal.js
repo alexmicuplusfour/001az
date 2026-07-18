@@ -258,12 +258,11 @@ export function buildMappingPane({ container }) {
     }
   }
 
-  // A file board's face row. One file = one face → a read-only "File preview"
-  // label (mirroring identity's "filename (raw)"). Under derived identity an
-  // entity can bundle several instances, so two light selects choose which backs
-  // the card face: a preferred type and first/latest. Both default to today's
-  // behavior (Any + First = the oldest instance), and only diverging values are
-  // saved (collect()), so an untouched board writes no mapping.face.
+  // A file board's face row. The face is always the "File preview" — the pretty
+  // rendered face of one instance (mirroring identity's "filename (raw)"). Under
+  // derived identity an entity can bundle several instances, so a second line
+  // refines WHICH one supplies that preview: a preferred file type (image by
+  // default) and, among those, first/latest added.
   function renderFileFaceRow() {
     faceRow.className = "mm-row";
     const controls = document.createElement("div");
@@ -271,16 +270,13 @@ export function buildMappingPane({ container }) {
     const key = document.createElement("span");
     key.className = "mm-key-locked";
     key.textContent = "face";
-    controls.appendChild(key);
+    const label = document.createElement("span");
+    label.className = "mm-locked-badge";
+    label.textContent = "File preview";
+    controls.append(key, label);
+    faceRow.appendChild(controls);
 
-    if (identityFrom !== "ai") {
-      const label = document.createElement("span");
-      label.className = "mm-locked-badge";
-      label.textContent = "File preview";
-      controls.appendChild(label);
-      faceRow.appendChild(controls);
-      return;
-    }
+    if (identityFrom !== "ai") return; // one instance per entity — nothing to pick
 
     const mkSel = (opts, val, title) => {
       const sel = document.createElement("select");
@@ -294,17 +290,24 @@ export function buildMappingPane({ container }) {
       }
       return sel;
     };
+    const prefer = faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : "image";
     const preferSel = mkSel(
-      [["any", "Any type"], ["image", "Image"], ["document", "Document"], ["audio", "Audio"]],
-      faceCfg.prefer || "any", "Preferred file type for the card face");
+      [["image", "Image"], ["document", "Document"], ["audio", "Audio"]],
+      prefer, "Preferred file type for the preview");
     const pickSel = mkSel(
       [["first", "First added"], ["latest", "Latest added"]],
-      faceCfg.pick || "first", "Which instance supplies the face");
+      faceCfg.pick || "first", "Which instance when several qualify");
     const sync = () => { faceCfg = { from: "file", prefer: preferSel.value, pick: pickSel.value }; };
     preferSel.addEventListener("change", sync);
     pickSel.addEventListener("change", sync);
-    controls.append(preferSel, pickSel);
-    faceRow.appendChild(controls);
+
+    const sub = document.createElement("div");
+    sub.className = "mm-face-prefer";
+    const lbl = document.createElement("span");
+    lbl.className = "mm-face-prefer-label";
+    lbl.textContent = "prefer when available";
+    sub.append(lbl, preferSel, pickSel);
+    faceRow.appendChild(sub);
   }
 
   const fieldsList = document.createElement("div");
@@ -822,13 +825,12 @@ export function buildMappingPane({ container }) {
     if (faceCfg.from === "connector") {
       face = { from: "connector", producer: faceCfg.producer, period: faceCfg.period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
     } else if (!inputConnector && identityFrom === "ai") {
-      // File board, derived identity: persist a face only when it diverges from
-      // the default (Any + First = the oldest-instance pick, same as no config).
-      // Raw identity has no instance choice (its "File preview" row writes
-      // nothing), so flipping ai→raw and saving strips any stale prefer/pick.
-      const prefer = faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : null;
-      const pick = faceCfg.pick && faceCfg.pick !== "first" ? faceCfg.pick : null;
-      if (prefer || pick) face = { from: "file", ...(prefer ? { prefer } : {}), ...(pick ? { pick } : {}) };
+      // Derived file board: the preview follows an explicit preference — image by
+      // default. There's no "no preference" option; prefer is soft (selectFace
+      // falls back to any instance when the type is absent), so a default of image
+      // just means "show the image if there is one". Raw identity is single-
+      // instance, so flipping ai→raw and saving drops the face entirely.
+      face = { from: "file", prefer: faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : "image", pick: faceCfg.pick || "first" };
     }
     const hasContent = allFields.length > 0 || identityFrom !== "raw" || inputConnector || face;
     const mapping = hasContent
