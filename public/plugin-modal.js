@@ -56,16 +56,32 @@ export function openPluginModal(p, ctx) {
     body.appendChild(banner);
   }
 
+  // Each builder returns { node, actions }: the section's content plus its
+  // primary action bar (or null). We collect them so the buttons can live in
+  // the footer rather than floating at the bottom of the scrollable body.
+  const built = [];
   if (p.kind === "connector") {
-    body.appendChild(connectorSection(p, ctx, done));
+    built.push(connectorSection(p, ctx, done));
   } else if (p.kind === "ai") {
-    if (!p.ai.keyless) body.appendChild(keysSection(p, ctx, done));
-    if (p.capabilities.tag) body.appendChild(taggerSection(p, ctx, done));
-    if (p.capabilities.embed) body.appendChild(embedSection(p, ctx, done));
+    if (!p.ai.keyless) built.push(keysSection(p, ctx, done));
+    if (p.capabilities.tag) built.push(taggerSection(p, ctx, done));
+    if (p.capabilities.embed) built.push(embedSection(p, ctx, done));
   } else if (p.kind === "source") {
-    body.appendChild(sourceSection(p, ctx, done));
+    built.push(sourceSection(p, ctx, done));
   } else {
-    body.appendChild(mediaSection(p, done));
+    built.push(mediaSection(p, done));
+  }
+  for (const b of built) body.appendChild(b.node);
+
+  // One action group → lift it into the footer next to Close. Two or more
+  // (e.g. an AI provider serving both tagger and embedder) stay inline, since
+  // each Save is scoped to its own section and collapsing them would be
+  // ambiguous.
+  const groups = built.map((b) => b.actions).filter(Boolean);
+  if (groups.length === 1) {
+    footer.appendChild(groups[0]);
+  } else {
+    for (const b of built) if (b.actions) b.node.appendChild(b.actions);
   }
 
   const closeBtn = document.createElement("button");
@@ -180,8 +196,7 @@ function connectorSection(p, ctx, done) {
     });
     actions.appendChild(star);
   }
-  sec.appendChild(actions);
-  return sec;
+  return { node: sec, actions };
 }
 
 // --- ai: this provider's keys (add / test / remove) ---
@@ -270,7 +285,7 @@ function keysSection(p, ctx, done) {
     }
   };
   sec.appendChild(addForm);
-  return sec;
+  return { node: sec, actions: null };
 }
 
 // --- ai: the default-tagger slot ---
@@ -287,7 +302,7 @@ function taggerSection(p, ctx, done) {
     none.style.margin = "0";
     none.textContent = "Add a key above to make this provider the default tagger.";
     sec.appendChild(none);
-    return sec;
+    return { node: sec, actions: null };
   }
 
   const keySel = document.createElement("select");
@@ -340,8 +355,7 @@ function taggerSection(p, ctx, done) {
     });
     actions.appendChild(test);
   }
-  sec.appendChild(actions);
-  return sec;
+  return { node: sec, actions };
 }
 
 // --- ai: the embedder slot (semantic search) ---
@@ -358,7 +372,7 @@ function embedSection(p, ctx, done) {
     none.style.margin = "0";
     none.textContent = "Add a key above to embed with this provider.";
     sec.appendChild(none);
-    return sec;
+    return { node: sec, actions: null };
   }
 
   let keySel = null;
@@ -446,8 +460,7 @@ function embedSection(p, ctx, done) {
     });
     actions.append(test, off);
   }
-  sec.appendChild(actions);
-  return sec;
+  return { node: sec, actions };
 }
 
 // --- source: saved connections (add / edit / test / remove) ---
@@ -462,7 +475,7 @@ function sourceSection(p, ctx, done) {
     note.style.margin = "0";
     note.textContent = "Core capability — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
     sec.appendChild(note);
-    return sec;
+    return { node: sec, actions: null };
   }
 
   const mine = (ctx.connections || []).filter((c) => c.type === p.name);
@@ -615,7 +628,9 @@ function sourceSection(p, ctx, done) {
   }
   renderForm(null);
 
-  return sec;
+  // The add/edit form is rebuilt on demand and carries its own Save/Test/Cancel,
+  // so there's no single primary action to hoist into the footer.
+  return { node: sec, actions: null };
 }
 
 // --- media: accepted extensions + the adjustable per-type upload limit ---
@@ -667,6 +682,5 @@ function mediaSection(p, done) {
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
   actions.appendChild(save);
-  sec.appendChild(actions);
-  return sec;
+  return { node: sec, actions };
 }
