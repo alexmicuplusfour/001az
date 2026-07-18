@@ -10,9 +10,14 @@ const UPLOAD_ATTEMPTS = 3;
 
 // Fallbacks used ONLY when GET /api/media-types is unreachable (offline / 500),
 // so a failed fetch never blocks uploads — the server's admitFile gate stays
-// authoritative regardless. Mirrors today's built-in image+doc set + 10 MB cap.
+// authoritative regardless. Mirrors the built-in doc + audio sets; audio must be
+// listed here too or a single failed fetch (the null is memoized) would filter
+// every audio upload client-side for the session even though the server accepts
+// it. The 50 MB audio cap is the fallback for audio; 10 MB for everything else.
 const FALLBACK_MAX_BYTES = 10 * 1024 * 1024;
 const FALLBACK_DOC_RE = /\.(pdf|docx|txt|md|csv)$/i;
+const FALLBACK_AUDIO_RE = /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac)$/i;
+const FALLBACK_AUDIO_MAX_BYTES = 50 * 1024 * 1024;
 
 let uploadQueue = [];
 let uploadWorkers = 0;
@@ -47,7 +52,10 @@ function loadMediaTypes() {
 // fall to the image limit, mirroring the server dispatcher's fallback.
 function uploadGate(types) {
   if (!types || !types.length) {
-    return { accepts: (f) => isImageFile(f) || FALLBACK_DOC_RE.test(f.name), limitFor: () => FALLBACK_MAX_BYTES };
+    return {
+      accepts: (f) => isImageFile(f) || FALLBACK_DOC_RE.test(f.name) || FALLBACK_AUDIO_RE.test(f.name),
+      limitFor: (f) => FALLBACK_AUDIO_RE.test(f.name) ? FALLBACK_AUDIO_MAX_BYTES : FALLBACK_MAX_BYTES,
+    };
   }
   const byExt = new Map();
   for (const t of types) for (const e of t.extensions) byExt.set(e.toLowerCase(), t.maxBytes);

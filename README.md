@@ -83,7 +83,12 @@ Caddy ── TLS + reverse-proxy ──► Node/Express (server/server.js)
   Caddy just terminates TLS and proxies.
 - **State**: Postgres holds items, entities, users, sessions, invites,
   favorites, crates, boards, facets/fields, and settings. Uploaded originals and
-  thumbnails live on disk (a Docker volume in production).
+  thumbnails live on disk (a Docker volume in production). Per-file upload limits
+  are per media type (manifest defaults, adjustable per type on the Plugins page,
+  under an absolute `UPLOAD_HARD_CEILING`). Audio defaults to a larger cap
+  (50 MB) than images/docs (10 MB), so enabling heavy audio use grows the disk
+  volume faster — size it accordingly. Uploads stream to disk and ffmpeg reads
+  the path, so the larger cap costs disk, not RAM.
 
 ## Repo layout
 

@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startServer, adminSession, seedBoard } from "./helpers.js";
+import { setPluginState } from "../server/db.js";
 import { audioSource } from "../server/sources/audio.js";
 import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
@@ -146,6 +147,31 @@ test("upload route: a WAV ingests as an audio-kind item", async (t) => {
   assert.equal(body.rejected.length, 0, "the WAV is accepted");
   assert.equal(body.uploaded[0].kind, "audio");
   assert.equal(body.uploaded[0].label, "voice.wav");
+});
+
+test("upload route: a file over its per-type limit is rejected with a reason", async (t) => {
+  const { base, db, close } = await startServer();
+  t.after(close);
+  const admin = await adminSession(db);
+  const board = await seedBoard(db, "audio-limit-board");
+  // Drop the audio limit below this WAV so admitFile's size gate fires on the
+  // /api/upload path (the real user-facing leg of Slice 0's per-type limit) and
+  // surfaces err.reason into rejected[].reason — not just the folder walk.
+  await setPluginState(db, "media:audio", { config: { maxBytes: 4096 } });
+
+  const fd = new FormData();
+  fd.append("files", new File([wavBuffer({ seconds: 1 })], "big.wav", { type: "audio/wav" }));
+  const res = await fetch(`${base}/api/upload?board=${board}`, {
+    method: "POST",
+    headers: { Cookie: `sid=${admin.sid}` },
+    body: fd,
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.uploaded.length, 0, "the over-limit file is not admitted");
+  assert.equal(body.rejected.length, 1);
+  assert.equal(body.rejected[0].name, "big.wav");
+  assert.match(body.rejected[0].reason, /larger than .* limit for its type/i);
 });
 
 // Only meaningful where ffmpeg exists; skipped otherwise so CI without the
