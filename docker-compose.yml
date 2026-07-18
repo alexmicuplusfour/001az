@@ -23,6 +23,18 @@ services:
       # needs a real default: the sidecar does int() on it, empty would crash
       OCR_MAX_PAGES: ${OCR_MAX_PAGES:-20}
 
+  transcriber:
+    build:
+      context: ./transcriber
+      args:
+        # one knob bakes AND serves the model — see transcriber/Dockerfile.
+        # changing it needs a rebuild (baked model), so it's build-time, not UI.
+        WHISPER_MODEL: ${WHISPER_MODEL:-base}
+    restart: unless-stopped
+    environment:
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      WHISPER_BEAM: ${WHISPER_BEAM:-5}
+
   app:
     build: .
     restart: unless-stopped
@@ -37,6 +49,10 @@ services:
       # judgment history (tag_snapshots) — deduped upstream, so 0 = keep forever
       TAG_SNAPSHOT_RETENTION_DAYS: ${TAG_SNAPSHOT_RETENTION_DAYS:-0}
       EXTRACTOR_URL: http://extractor:3002
+      TRANSCRIBER_URL: http://transcriber:3003
+      # names the sidecar's baked model so the app can stamp the transcript
+      # cache with it (same ${WHISPER_MODEL} as the transcriber → no drift)
+      TRANSCRIBER_MODEL: ${WHISPER_MODEL:-base}
       # outbound tuning — code owns the defaults (empty passes through safely);
       # set in .env only when a provider's pace or latency demands it
       CONNECTOR_RPM: ${CONNECTOR_RPM:-}
@@ -46,6 +62,7 @@ services:
       AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
       AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
       EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
+      TRANSCRIBER_TIMEOUT_MS: ${TRANSCRIBER_TIMEOUT_MS:-}
       # automatic ingestion: watched folders live under this root (bind-mounted
       # below — drop files into ./ingest-root on the host). The tunables are
       # code-owned defaults; set in .env only to deviate.
@@ -63,6 +80,8 @@ services:
       db:
         condition: service_healthy
       extractor:
+        condition: service_started
+      transcriber:
         condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

@@ -549,7 +549,53 @@ const noTextError = (file) => {
   e.status = 422; // permanent-shaped: failOrRequeue fails it on the first attempt
   return e;
 };
-export async function documentTextFor(galleryDir, file) {
+// The audio transcriber sidecar (faster-whisper) — audio's equivalent of the
+// extractor: raw bytes in, text out. Same failure contract as the extractor
+// (downtime throws status-less → failOrRequeue waits it out).
+const TRANSCRIBER_URL = process.env.TRANSCRIBER_URL || "http://transcriber:3003";
+// Generous like the extractor: the sidecar is single-threaded and a clip
+// transcribes at ~2x real-time, so a queued request can sit behind others.
+const TRANSCRIBER_TIMEOUT_MS = Number(process.env.TRANSCRIBER_TIMEOUT_MS) || 240000;
+// Names the model the sidecar bakes (compose feeds both from one ${WHISPER_MODEL}).
+// Used only to stamp the transcript cache, so a model bump re-transcribes.
+const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "base";
+
+// The local whisper-sidecar engine, wrapped as an interchangeable descriptor
+// { id, model, transcribe } so a provider engine (deferred) slots in the way
+// resolveEmbedder picks local vs a provider. transcribe throws status-less on
+// downtime so the item requeues rather than tagging on empty text.
+function localTranscriber() {
+  return {
+    id: "local",
+    model: TRANSCRIBER_MODEL,
+    async transcribe(buf) {
+      let res;
+      try {
+        res = await fetch(`${TRANSCRIBER_URL}/transcribe`, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: buf,
+          signal: AbortSignal.timeout(TRANSCRIBER_TIMEOUT_MS),
+        });
+      } catch (e) {
+        throw new Error(`transcriber unreachable (${e.message}) — will retry`);
+      }
+      if (!res.ok) throw new Error(`transcriber failed (HTTP ${res.status}) — will retry`);
+      return (await res.json()).text || "";
+    },
+  };
+}
+
+// A board's audio→text engine. v1 always resolves to the local sidecar (no key,
+// always on, like the extractor — transcription is how audio becomes taggable).
+// `board` is accepted now (unused) so a future per-board provider choice slots
+// in like the tagger, or app-wide like the embedder, with an audio-incapable
+// provider (Claude) degrading to local. Exported for tests.
+export async function resolveTranscriber(db, board = null) {
+  return localTranscriber();
+}
+
+export async function documentTextFor(galleryDir, file, transcriber = null) {
   if (file.kind === "pdf") {
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
     let res;
@@ -579,6 +625,26 @@ export async function documentTextFor(galleryDir, file) {
   if (file.kind === "text") {
     const text = await fs.promises.readFile(path.join(galleryDir, file.name), "utf8").catch(() => "");
     if (!text.trim()) throw noTextError(file);
+    return text;
+  }
+  if (file.kind === "audio") {
+    if (!transcriber) throw new Error("transcriber not resolved — will retry"); // v1 always resolves local
+    // Cache-first, provenance-stamped: <name>.txt is "# engine: <id>:<model>",
+    // a blank line, then the transcript. Reuse ONLY when the same engine
+    // produced it, so a model bump or a provider swap re-transcribes instead of
+    // serving stale text; a plain retag on the same engine hits the cache.
+    // Transcribe-once — cleanup already rm's <name>.txt with the file.
+    const stamp = `# engine: ${transcriber.id}:${transcriber.model}`;
+    const cachePath = path.join(galleryDir, file.name + ".txt");
+    const cached = await fs.promises.readFile(cachePath, "utf8").catch(() => null);
+    if (cached !== null) {
+      const sep = cached.indexOf("\n\n");
+      if (sep !== -1 && cached.slice(0, sep) === stamp) return cached.slice(sep + 2);
+      // different engine (or unstamped legacy) → fall through and re-transcribe
+    }
+    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+    const text = await transcriber.transcribe(buf); // downtime throws → requeue, never empty
+    await fs.promises.writeFile(cachePath, `${stamp}\n\n${text}`);
     return text;
   }
   return "";
@@ -644,14 +710,23 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       }];
     }
     if (file.kind === "audio") {
-      // No transcription yet, so there's no text to tag on — and the waveform
-      // thumbnail carries no semantic signal (and is ABSENT when ffmpeg isn't
-      // installed, which would crash the image readFile below). Anchor on the
-      // filename so audio on an AI board degrades to a name-only tag instead of
-      // erroring. The transcription slot replaces this branch later.
+      // Tag on the speech: transcribe (the extract leg may have already primed
+      // the <name>.txt cache; otherwise this fills it) then tag the transcript.
+      // Transcriber downtime throws out of documentTextFor → the item requeues
+      // rather than tagging on empty text.
+      const text = await documentTextFor(galleryDir, file, await resolveTranscriber(db));
+      if (text.trim()) {
+        return [{
+          kind: "text",
+          text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this recording using the record_tags tool.`,
+        }];
+      }
+      // Genuinely speechless (music, ambient, silence) → empty transcript. Anchor
+      // on the filename so it degrades to a name-only tag, like a textless
+      // document, instead of erroring.
       return [{
         kind: "text",
-        text: `The item is an audio file named "${file.original_name}". Tag it using the record_tags tool, judging from its name.`,
+        text: `The item is an audio recording named "${file.original_name}" with no discernible speech. Tag it using the record_tags tool, judging from its name.`,
       }];
     }
     const buf = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp"));
@@ -674,7 +749,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   async function modelInputForExtract(payload) {
     const file = payload.files?.[0];
     if (!file) return null; // connector entity with no file — nothing to extract
-    const text = await documentTextFor(galleryDir, file);
+    const transcriber = file.kind === "audio" ? await resolveTranscriber(db) : null;
+    const text = await documentTextFor(galleryDir, file, transcriber);
     if (!text.trim()) return null;
     return [{
       kind: "text",

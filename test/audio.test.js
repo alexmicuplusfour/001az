@@ -17,7 +17,7 @@ import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
-import { documentTextFor } from "../server/worker.js";
+import { documentTextFor, resolveTranscriber } from "../server/worker.js";
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
 // sampleRate/channels) with no binary, and it's real audio ffmpeg can draw.
@@ -57,10 +57,103 @@ test("the waveform producer is registered in the face registry", () => {
   assert.equal(typeof getFaceProducer("waveform"), "function");
 });
 
-test("documentTextFor yields no text for audio (the future transcription seam)", async () => {
-  // Audio falls through to "" — so audio on an AI board skips the extract leg
-  // cleanly today, and this is exactly where the transcription slot plugs in.
-  assert.equal(await documentTextFor("/nonexistent", { kind: "audio", name: "x.mp3", original_name: "x.mp3" }), "");
+// A deterministic stub engine: counts transcribe() calls and returns a fixed
+// transcript, so cache hits/misses are observable without a real sidecar.
+function stubTranscriber(text = "hello world", { id = "local", model = "base" } = {}) {
+  const eng = { id, model, calls: 0, async transcribe() { eng.calls++; return text; } };
+  return eng;
+}
+
+test("documentTextFor(audio): transcribes, returns text, writes a stamped .txt cache", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw-audio-bytes");
+  const eng = stubTranscriber("The quick brown fox.");
+  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
+
+  assert.equal(await documentTextFor(dir, file, eng), "The quick brown fox.");
+  assert.equal(eng.calls, 1);
+  assert.equal(
+    fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
+    "# engine: local:base\n\nThe quick brown fox.",
+    "cache carries the engine stamp then the transcript",
+  );
+});
+
+test("documentTextFor(audio): a second call on the same engine hits the cache (no re-transcribe)", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
+  const eng = stubTranscriber("cached line");
+  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
+
+  assert.equal(await documentTextFor(dir, file, eng), "cached line");
+  assert.equal(await documentTextFor(dir, file, eng), "cached line");
+  assert.equal(eng.calls, 1, "the second read came from the cache");
+});
+
+test("documentTextFor(audio): a cache from a DIFFERENT engine is ignored and re-transcribed", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
+  // A stale cache produced by a different model — the flexibility guard.
+  fs.writeFileSync(path.join(dir, "a.mp3.txt"), "# engine: local:small\n\nold transcript");
+  const eng = stubTranscriber("fresh transcript", { model: "base" });
+  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
+
+  assert.equal(await documentTextFor(dir, file, eng), "fresh transcript", "different stamp → re-transcribed");
+  assert.equal(eng.calls, 1);
+  assert.equal(
+    fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
+    "# engine: local:base\n\nfresh transcript",
+    "the cache is re-stamped with the producing engine",
+  );
+});
+
+test("documentTextFor(audio): an empty transcript is a real answer — cached, not re-run", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
+  const eng = stubTranscriber(""); // a genuinely speechless clip
+  const file = { kind: "audio", name: "a.mp3", original_name: "silence.mp3" };
+
+  assert.equal(await documentTextFor(dir, file, eng), "");
+  assert.equal(await documentTextFor(dir, file, eng), "");
+  assert.equal(eng.calls, 1, "empty transcript is cached like any other");
+  assert.equal(fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"), "# engine: local:base\n\n");
+});
+
+test("documentTextFor(audio): transcriber downtime throws status-less (requeue, never empty)", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
+  const eng = { id: "local", model: "base", async transcribe() { throw new Error("transcriber unreachable (ECONNREFUSED) — will retry"); } };
+  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
+
+  await assert.rejects(
+    documentTextFor(dir, file, eng),
+    (e) => /transcriber unreachable/.test(e.message) && e.status === undefined,
+  );
+  assert.equal(fs.existsSync(path.join(dir, "a.mp3.txt")), false, "no cache written on failure");
+});
+
+test("resolveTranscriber: v1 resolves the always-on local sidecar and maps its HTTP results", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+
+  const eng = await resolveTranscriber(null); // v1 ignores db/board
+  assert.equal(eng.id, "local");
+  assert.ok(eng.model, "carries a model for the cache stamp");
+
+  // healthy: POSTs to the sidecar's /transcribe, returns .text
+  let seen;
+  globalThis.fetch = async (url, opts) => { seen = { url: String(url), opts }; return { ok: true, status: 200, json: async () => ({ text: "hi there" }) }; };
+  assert.equal(await eng.transcribe(Buffer.from("x")), "hi there");
+  assert.match(seen.url, /\/transcribe$/);
+  assert.equal(seen.opts.method, "POST");
+
+  // non-OK → status-less throw so failOrRequeue waits it out
+  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber failed/.test(e.message) && e.status === undefined);
+
+  // unreachable (deploy blip) → same shape
+  globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
+  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber unreachable/.test(e.message) && e.status === undefined);
 });
 
 test("audio ingest: metadata lands; the waveform face degrades gracefully", async (t) => {
