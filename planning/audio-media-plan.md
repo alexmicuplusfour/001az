@@ -1,7 +1,7 @@
 # Audio media type — core support + waveform faces (transcription deferred)
 
-**Status: SHIPPED locally 2026-07-18, UNCOMMITTED (381 tests green, +11 new). All
-four slices done. Both user-resolved forks held: faces are real ffmpeg
+**Status: SHIPPED — COMMITTED + PUSHED to main 2026-07-18 as `157a5d2` (383 tests
+green, +13 new; board-modal.js excluded). All four slices done. Both user-resolved forks held: faces are real ffmpeg
 waveforms; the upload limit is per-file-type + admin-adjustable (persisted in the
 plugin `config` blob). Deviations found while building are marked ✦ below; the
 rest of this doc is the as-built design.**
