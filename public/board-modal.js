@@ -332,6 +332,11 @@ export async function openBoardModal(board, opts = {}) {
   // the current board; admin.html loads this file too but never sets withMapping,
   // so it's built only here. Visibility is via `display` (not the `hidden`
   // attribute) so the pane's own flex layout can't override it.
+  //
+  // Built lazily on first reveal: Tagging is the default tab, so a save that
+  // never opens Mapping shouldn't pay for the pane's fetches (connectors,
+  // file-fields, ai-keys, settings — the last one already loaded above). A pane
+  // that was never built stays null, so its mapping is never folded into Save.
   let mappingPane = null;
   if (withMapping) {
     const panes = document.getElementById("board-modal-panes");
@@ -344,8 +349,8 @@ export async function openBoardModal(board, opts = {}) {
       panes.querySelectorAll(".pane-toggle-btn").forEach((b) => b.classList.toggle("active", b === btn));
       mappingEl.style.display = showMapping ? "flex" : "none";
       taggingEl.style.display = showMapping ? "none" : "";
+      if (showMapping && !mappingPane) mappingPane = buildMappingPane({ container: mappingEl });
     });
-    mappingPane = buildMappingPane({ container: mappingEl });
   }
 
   let aiReasoning = isNew ? true : board.ai_reasoning !== false;
