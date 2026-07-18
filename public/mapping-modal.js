@@ -165,6 +165,9 @@ export function buildMappingPane({ container }) {
     idSrcSel.addEventListener("change", () => {
       identityFrom = idSrcSel.value;
       idHintWrap.style.display = identityFrom === "ai" ? "block" : "none";
+      // A file board's face controls only make sense under derived identity
+      // (several instances per entity), so they track this select — like the hint.
+      renderFaceRow();
     });
 
     identityRow.append(idControls, idHintWrap);
@@ -181,7 +184,10 @@ export function buildMappingPane({ container }) {
 
   function renderFaceRow() {
     faceRow.replaceChildren();
-    if (!inputConnector || !connectorFaces.length) { faceRow.style.display = "none"; return; }
+    // File boards get a face row too (normalized): a read-only "File preview"
+    // label that expands to instance-pick controls under derived identity.
+    if (!inputConnector) { faceRow.style.display = ""; renderFileFaceRow(); return; }
+    if (!connectorFaces.length) { faceRow.style.display = "none"; return; }
     faceRow.style.display = "";
     const isProducer = faceCfg.from === "connector";
     faceRow.className = "mm-row" + (isProducer ? " mm-row-connector" : "");
@@ -250,6 +256,55 @@ export function buildMappingPane({ container }) {
         faceRow.appendChild(hint);
       }
     }
+  }
+
+  // A file board's face row. One file = one face → a read-only "File preview"
+  // label (mirroring identity's "filename (raw)"). Under derived identity an
+  // entity can bundle several instances, so two light selects choose which backs
+  // the card face: a preferred type and first/latest. Both default to today's
+  // behavior (Any + First = the oldest instance), and only diverging values are
+  // saved (collect()), so an untouched board writes no mapping.face.
+  function renderFileFaceRow() {
+    faceRow.className = "mm-row";
+    const controls = document.createElement("div");
+    controls.className = "fe-head";
+    const key = document.createElement("span");
+    key.className = "mm-key-locked";
+    key.textContent = "face";
+    controls.appendChild(key);
+
+    if (identityFrom !== "ai") {
+      const label = document.createElement("span");
+      label.className = "mm-locked-badge";
+      label.textContent = "File preview";
+      controls.appendChild(label);
+      faceRow.appendChild(controls);
+      return;
+    }
+
+    const mkSel = (opts, val, title) => {
+      const sel = document.createElement("select");
+      sel.disabled = !isAdmin;
+      sel.title = title;
+      for (const [v, l] of opts) {
+        const o = document.createElement("option");
+        o.value = v; o.textContent = l;
+        if (v === val) o.selected = true;
+        sel.appendChild(o);
+      }
+      return sel;
+    };
+    const preferSel = mkSel(
+      [["any", "Any type"], ["image", "Image"], ["document", "Document"], ["audio", "Audio"]],
+      faceCfg.prefer || "any", "Preferred file type for the card face");
+    const pickSel = mkSel(
+      [["first", "First added"], ["latest", "Latest added"]],
+      faceCfg.pick || "first", "Which instance supplies the face");
+    const sync = () => { faceCfg = { from: "file", prefer: preferSel.value, pick: pickSel.value }; };
+    preferSel.addEventListener("change", sync);
+    pickSel.addEventListener("change", sync);
+    controls.append(preferSel, pickSel);
+    faceRow.appendChild(controls);
   }
 
   const fieldsList = document.createElement("div");
@@ -763,9 +818,18 @@ export function buildMappingPane({ container }) {
       ...fileFields.map((f) => ({ key: f.key, kind: f.kind, from: "file", fn: f.fn })),
       ...aiFields.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
     ];
-    const face = faceCfg.from === "connector"
-      ? { from: "connector", producer: faceCfg.producer, period: faceCfg.period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) }
-      : null;
+    let face = null;
+    if (faceCfg.from === "connector") {
+      face = { from: "connector", producer: faceCfg.producer, period: faceCfg.period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
+    } else if (!inputConnector && identityFrom === "ai") {
+      // File board, derived identity: persist a face only when it diverges from
+      // the default (Any + First = the oldest-instance pick, same as no config).
+      // Raw identity has no instance choice (its "File preview" row writes
+      // nothing), so flipping ai→raw and saving strips any stale prefer/pick.
+      const prefer = faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : null;
+      const pick = faceCfg.pick && faceCfg.pick !== "first" ? faceCfg.pick : null;
+      if (prefer || pick) face = { from: "file", ...(prefer ? { prefer } : {}), ...(pick ? { pick } : {}) };
+    }
     const hasContent = allFields.length > 0 || identityFrom !== "raw" || inputConnector || face;
     const mapping = hasContent
       ? {

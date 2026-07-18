@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, req, installConnectors } from "./helpers.js";
-import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced } from "../server/db.js";
+import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced, listItems } from "../server/db.js";
+import { selectFace } from "../server/faces/select.js";
 import { renderChart } from "../server/faces/price-chart.js";
 import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from "../server/faces/index.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -420,4 +421,99 @@ test("validateMapping: face slot rules", async () => {
   // face on a non-connector board → rejected (no connector input).
   r = await patch({ identity: { from: "raw" }, face: { from: "connector", producer: "chart", period: "1y" }, fields: [] });
   assert.equal(r.status, 400); assert.match(r.json.error, /connector/);
+});
+
+// ── file-face selection (face normalization) ─────────────────────────────────
+
+test("selectFace: prefer + pick over an entity's instances", () => {
+  // Oldest→newest, as the listing orders them.
+  const insts = [
+    { name: "a", kind: "pdf" },
+    { name: "b", kind: "image" },
+    { name: "c", kind: "audio" },
+  ];
+  const face = (cfg) => selectFace(insts, cfg)?.name;
+
+  // Default (absent / raw / connector cfg) → first (oldest).
+  assert.equal(face(undefined), "a");
+  assert.equal(face({ from: "file" }), "a");
+  assert.equal(face({ from: "raw" }), "a");
+  assert.equal(face({ from: "connector" }), "a");
+
+  // pick.
+  assert.equal(face({ from: "file", pick: "latest" }), "c");
+  assert.equal(face({ from: "file", pick: "first" }), "a");
+
+  // prefer maps granular kinds → families; picks within the matched pool.
+  assert.equal(face({ from: "file", prefer: "image" }), "b");
+  assert.equal(face({ from: "file", prefer: "document" }), "a"); // pdf ∈ document
+  assert.equal(face({ from: "file", prefer: "audio", pick: "latest" }), "c");
+
+  // prefer is a preference, not a filter — no match falls back to the full pool.
+  assert.equal(selectFace([{ name: "x", kind: "image" }], { from: "file", prefer: "audio" })?.name, "x");
+
+  // empty / missing.
+  assert.equal(selectFace([], { from: "file" }), null);
+  assert.equal(selectFace(null, { from: "file" }), null);
+});
+
+test("selectFace: the client mirror is byte-identical to the server", () => {
+  // public/lightbox.js hand-copies FACE_FAMILY + selectFace (build-less frontend,
+  // no shared import). Extract both from source and assert they match, so the
+  // pair can't silently drift — the one documented hazard of the mirror.
+  const pick = (src) => {
+    const family = src.match(/const FACE_FAMILY = \{[^}]*\};/)[0];
+    const fn = src.match(/function selectFace\(instances, faceCfg\) \{[\s\S]*?\n\}/)[0];
+    return `${family}\n${fn}`;
+  };
+  const server = fs.readFileSync(new URL("../server/faces/select.js", import.meta.url), "utf8");
+  const client = fs.readFileSync(new URL("../public/lightbox.js", import.meta.url), "utf8");
+  assert.equal(pick(client), pick(server));
+});
+
+test("validateMapping: file-face slot rules", async () => {
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "file-face-validate" } });
+  const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
+  const files = (face) => ({ identity: { from: "ai", hint: "the title" }, face, fields: [] });
+
+  assert.equal((await patch(files({ from: "file" }))).status, 200);
+  assert.equal((await patch(files({ from: "file", prefer: "image", pick: "latest" }))).status, 200);
+
+  let r = await patch(files({ from: "file", prefer: "movie" }));
+  assert.equal(r.status, 400); assert.match(r.json.error, /prefer/);
+
+  r = await patch(files({ from: "file", pick: "random" }));
+  assert.equal(r.status, 400); assert.match(r.json.error, /pick/);
+
+  // A static file face has no producer/period/cadence.
+  r = await patch(files({ from: "file", period: "1y" }));
+  assert.equal(r.status, 400); assert.match(r.json.error, /file face/);
+
+  // A file face on a connector board → rejected.
+  r = await patch({ input: { connector: "crypto" }, identity: { from: "connector" }, face: { from: "file" }, fields: [] });
+  assert.equal(r.status, 400); assert.match(r.json.error, /files board/);
+});
+
+test("listing: the item face follows mapping.face over a multi-instance entity", async () => {
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "file-face-listing" } });
+  await req(base, "PATCH", `/api/admin/boards/${board.id}`, {
+    sid: admin.sid, body: { mapping: { identity: { from: "ai", hint: "the title" }, face: { from: "file", prefer: "image", pick: "latest" }, fields: [] } },
+  });
+  const eid = await createEntity(db, board.id, { identity: "invoice-7", displayName: "Invoice 7" });
+  // Two instances, oldest→newest: an image (older) then a pdf (newer).
+  await insertItem(db, board.id, { identity: "invoice-7", files: [{ name: "scan.webp", kind: "image", w: 10, h: 10 }] }, "tagged", eid);
+  await insertItem(db, board.id, { identity: "invoice-7", files: [{ name: "doc.webp", kind: "pdf", w: 20, h: 20 }] }, "tagged", eid);
+
+  const list = async (mapping) => {
+    if (mapping) await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
+    const { items } = await listItems(db, admin.id, board.id);
+    return items.find((i) => i.id === eid);
+  };
+
+  // prefer:image → the webp scan wins even though it's the older instance.
+  assert.equal((await list()).name, "scan.webp");
+  // prefer:document,pick:latest → the newer pdf.
+  assert.equal((await list({ identity: { from: "ai", hint: "t" }, face: { from: "file", prefer: "document", pick: "latest" }, fields: [] })).name, "doc.webp");
+  // No face config → first (oldest) instance, the legacy default.
+  assert.equal((await list({ identity: { from: "ai", hint: "t" }, fields: [] })).name, "scan.webp");
 });

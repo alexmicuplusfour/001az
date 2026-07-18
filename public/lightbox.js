@@ -7,6 +7,24 @@ import { scrollToCard } from './grid.js';
 import { fullUrl, thumbUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
 
+// MIRROR of server/faces/select.js — which instance backs an entity's card face,
+// per the board's mapping.face { prefer, pick }. Kept byte-identical to the
+// server so the client re-derives the same face after an instance changes here;
+// change both together (test/faces.test.js asserts parity).
+const FACE_FAMILY = { image: "image", pdf: "document", docx: "document", text: "document", audio: "audio" };
+function selectFace(instances, faceCfg) {
+  if (!instances || !instances.length) return null;
+  const isFile = faceCfg?.from === "file";
+  const prefer = isFile ? faceCfg.prefer || "any" : "any";
+  const pick = isFile ? faceCfg.pick || "first" : "first";
+  let pool = instances;
+  if (prefer !== "any") {
+    const matched = instances.filter((i) => FACE_FAMILY[i.kind] === prefer);
+    if (matched.length) pool = matched; // a preference, not a filter — else keep all
+  }
+  return pick === "latest" ? pool[pool.length - 1] : pool[0];
+}
+
 // Format numeric field values readably based on key conventions.
 function formatFieldNumber(key, v) {
   if (v === null || v === undefined) return "—";
@@ -244,8 +262,8 @@ function paintPanel(img, inst, reasoning, fields) {
           if (!r.ok) throw new Error();
           img.instances = img.instances.filter((x) => x.id !== f.id);
           refreshEntityTags(img);
-          // The face may have changed; follow the first remaining instance.
-          const face = img.instances[0];
+          // The face may have changed; re-pick per the board's face config.
+          const face = selectFace(img.instances, state.boardMapping?.face);
           if (face) { img.name = face.name; img.w = face.w; img.h = face.h; img.kind = face.kind; img.label = face.label; }
           if (currentInstIndex >= img.instances.length) currentInstIndex = 0;
           document.dispatchEvent(new Event('app:render'));

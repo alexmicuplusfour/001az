@@ -807,7 +807,8 @@ function validateMapping(mapping) {
   if (mapping.face !== undefined) {
     const fc = mapping.face;
     if (!fc || typeof fc !== "object") return "mapping.face must be an object";
-    if (fc.from !== "raw" && fc.from !== "connector") return `mapping.face.from must be "raw" or "connector"`;
+    if (fc.from !== "raw" && fc.from !== "connector" && fc.from !== "file")
+      return `mapping.face.from must be "raw", "connector", or "file"`;
     if (fc.from === "connector") {
       const conn = getConnector(mapping.input?.connector);
       if (!conn) return "a connector face requires a connector input";
@@ -820,6 +821,18 @@ function validateMapping(mapping) {
         if (fc.live && (!Number.isInteger(fc.every) || fc.every < 1 || fc.every > 43200))
           return `live face needs an integer "every" in minutes (1–43200)`;
       }
+    }
+    // A file face selects which instance backs the card (server/faces/select.js).
+    // Files boards only; a static file has nothing to refresh, so it carries no
+    // producer/period/cadence.
+    if (fc.from === "file") {
+      if (mapping.input && mapping.input !== "files") return "a file face is only valid on a files board";
+      if (fc.prefer !== undefined && !["any", "image", "document", "audio"].includes(fc.prefer))
+        return `invalid face prefer "${fc.prefer}"`;
+      if (fc.pick !== undefined && !["first", "latest"].includes(fc.pick))
+        return `invalid face pick "${fc.pick}"`;
+      for (const k of ["producer", "period", "live", "every"])
+        if (fc[k] !== undefined) return `a file face has no "${k}"`;
     }
   }
   return null;

@@ -1,6 +1,7 @@
 import pg from "pg";
 import crypto from "node:crypto";
 import { runMigrations } from "./migrate.js";
+import { selectFace } from "./faces/select.js";
 
 // BIGINT (int8) comes back from pg as a string by default. Everything we store
 // in BIGINT is a ms epoch or a row id — both far below 2^53 — so parse to
@@ -94,7 +95,8 @@ function instanceEntry(r) {
 }
 
 // The board listing: entities, each carrying its instances. Face fields
-// (name/w/h/kind/label) mirror the first instance so the card path needs no
+// (name/w/h/kind/label) mirror the instance selectFace picks (the board's
+// mapping.face { prefer, pick }; oldest by default) so the card path needs no
 // special cases; tags at the entity level are the union across instances
 // (what filtering and facet counts consume), per-instance tags ride inside.
 //
@@ -158,6 +160,16 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
     byEntity.get(r.entity_id).push(instanceEntry(r));
   }
 
+  // The board's face-selection config decides which instance of a derived-
+  // identity entity supplies the card face. A single-board view (boardId set)
+  // loads it once; the cross-board listing leaves it null → selectFace's
+  // first-instance default, identical to the legacy pick.
+  let faceCfg = null;
+  if (boardId != null) {
+    const { rows } = await db.query("SELECT mapping FROM boards WHERE id = $1", [boardId]);
+    faceCfg = rows[0]?.mapping?.face || null;
+  }
+
   const crateMap = new Map();
   if (userId) {
     const memberships = await db.query(
@@ -174,7 +186,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
 
   const items = ents.map((e) => {
     const instances = byEntity.get(e.id) || [];
-    const face = instances[0] || null;
+    const face = selectFace(instances, faceCfg);
     const tags = [];
     const seen = new Set();
     for (const i of instances) for (const t of i.tags) if (!seen.has(t)) { seen.add(t); tags.push(t); }
