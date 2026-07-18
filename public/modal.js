@@ -10,24 +10,28 @@
 // bodyStyle (cssText for the body), onClose (run after the modal is dismissed).
 // Lock/unlock page scroll while a modal is open. Removing the scrollbar would
 // otherwise reflow the page wider by its width; we reserve that width as
-// padding-right so the layout stays put. Ref-counted so a modal opened from
-// another modal doesn't unlock early or pad twice.
+// padding-right on the root element so the layout stays put. We pad <html>
+// rather than <body> on purpose: a page may center its body (max-width +
+// margin:auto) with border-box, where growing body padding shrinks the content
+// instead of holding it in place. The root has no such constraint. Ref-counted
+// so a modal opened from another modal doesn't unlock early or pad twice.
 let scrollLocks = 0;
 let savedPaddingRight = "";
 function lockScroll() {
   if (scrollLocks++ > 0) return;
-  savedPaddingRight = document.body.style.paddingRight;
-  const sbw = window.innerWidth - document.documentElement.clientWidth;
+  const root = document.documentElement;
+  savedPaddingRight = root.style.paddingRight;
+  const sbw = window.innerWidth - root.clientWidth;
   if (sbw > 0) {
-    const cur = parseFloat(getComputedStyle(document.body).paddingRight) || 0;
-    document.body.style.paddingRight = `${cur + sbw}px`;
+    const cur = parseFloat(getComputedStyle(root).paddingRight) || 0;
+    root.style.paddingRight = `${cur + sbw}px`;
   }
   document.body.style.overflow = "hidden";
 }
 function unlockScroll() {
   if (scrollLocks === 0 || --scrollLocks > 0) return;
   document.body.style.overflow = "";
-  document.body.style.paddingRight = savedPaddingRight;
+  document.documentElement.style.paddingRight = savedPaddingRight;
 }
 
 export function mountModal({ overlay, dialog, onClose } = {}) {
