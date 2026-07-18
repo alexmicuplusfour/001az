@@ -8,6 +8,28 @@
 //
 // Options: title (string, also the dialog aria-label), id (overlay element id),
 // bodyStyle (cssText for the body), onClose (run after the modal is dismissed).
+// Lock/unlock page scroll while a modal is open. Removing the scrollbar would
+// otherwise reflow the page wider by its width; we reserve that width as
+// padding-right so the layout stays put. Ref-counted so a modal opened from
+// another modal doesn't unlock early or pad twice.
+let scrollLocks = 0;
+let savedPaddingRight = "";
+function lockScroll() {
+  if (scrollLocks++ > 0) return;
+  savedPaddingRight = document.body.style.paddingRight;
+  const sbw = window.innerWidth - document.documentElement.clientWidth;
+  if (sbw > 0) {
+    const cur = parseFloat(getComputedStyle(document.body).paddingRight) || 0;
+    document.body.style.paddingRight = `${cur + sbw}px`;
+  }
+  document.body.style.overflow = "hidden";
+}
+function unlockScroll() {
+  if (scrollLocks === 0 || --scrollLocks > 0) return;
+  document.body.style.overflow = "";
+  document.body.style.paddingRight = savedPaddingRight;
+}
+
 export function mountModal({ overlay, dialog, onClose } = {}) {
   if (!overlay || !dialog) throw new Error("mountModal requires an overlay and dialog");
 
@@ -20,7 +42,7 @@ export function mountModal({ overlay, dialog, onClose } = {}) {
     removed = true;
     if (closeTimer !== null) window.clearTimeout(closeTimer);
     overlay.remove();
-    document.body.style.overflow = "";
+    unlockScroll();
     onClose?.();
   }
   function close() {
@@ -40,7 +62,7 @@ export function mountModal({ overlay, dialog, onClose } = {}) {
   overlay.addEventListener("click", (e) => { if (e.target === overlay && mdOnOverlay) close(); });
 
   document.body.appendChild(overlay);
-  document.body.style.overflow = "hidden";
+  lockScroll();
   document.addEventListener("keydown", onKey);
   window.requestAnimationFrame(() => {
     if (!closed) overlay.classList.add("is-open");
