@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import {
-  claimNextWork,
+  claimFairBatch,
   setEntityFaceAt,
   updateItemPayload,
   markTagged,
@@ -680,7 +680,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
-  const CONCURRENCY = Math.max(1, Number(process.env.TAG_CONCURRENCY) || 4);
+  // Per-resource lanes (worker-rework Stage 1) replace the single global "4": AI
+  // in-flight is a memory/cost fuse (the provider RATE is the per-key token bucket in
+  // providers.js), the extractor sidecar is single-threaded so its lane is ≈1-2, and
+  // faces are light. TAG_CONCURRENCY stays as a deprecated alias for AI_INFLIGHT.
+  const AI_INFLIGHT = Math.max(1, Number(process.env.AI_INFLIGHT) || Number(process.env.TAG_CONCURRENCY) || 8);
+  const EXTRACT_CONCURRENCY = Math.max(1, Number(process.env.EXTRACT_CONCURRENCY) || 2);
+  const FACE_CONCURRENCY = Math.max(1, Number(process.env.FACE_CONCURRENCY) || 2);
   const TEXT_DOC_MAX_CHARS = 50000; // ~12k tokens; plenty for tagging judgment
 
   // What the model sees for an item: parts built from its files by kind.
@@ -1270,53 +1276,90 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // The claimed row's in-flight status names the step it needs.
   const STEP = { extracting: processExtractOne, facing: processFaceOne, processing: processOne };
 
-  async function tick() {
-    const recovered = await recoverStuck(db, STUCK_MS, MAX_ATTEMPTS);
-    if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
-    await retagDue();
-    await embedDue();
-    await refreshDue();
-    await ingestDue();
-    await pruneSnapshots();
+  // --- per-resource lanes (worker-rework Stage 1) ---
+  // The single-flight tick is gone. A dispatcher claims fair work and LAUNCHES it
+  // without awaiting, bounded per resource by a lane counter, so each work type runs
+  // at its own capacity and one lane's wait — a paced AI call, a slow OCR — never
+  // blocks another. Maintenance (recovery + sweeps) runs on its own loop, so a slow
+  // sweep can't stall the dispatcher either.
+  const lane = (max) => { let used = 0; return { free: () => used < max, freeSlots: () => max - used, take: () => { used++; }, release: () => { used--; } }; };
+  const aiLane = lane(AI_INFLIGHT), extractLane = lane(EXTRACT_CONCURRENCY), faceLane = lane(FACE_CONCURRENCY);
 
-    // Boards without their own key only process when a default exists.
-    const hasDefault = !!(await resolveDefaultAi(db));
-
-    // One queue, oldest work first, whatever stage it's in (claimNextWork).
-    // An item flows extract → face → tag to completion before newer items
-    // start, so a bulk upload's extractions can't starve other work — the
-    // batch mixes stages by age.
-    const batch = [];
-    while (batch.length < CONCURRENCY) {
-      const row = await claimNextWork(db, hasDefault);
-      if (!row) break;
-      batch.push(row);
-    }
-    if (!batch.length) return 0;
-    await Promise.all(batch.map((row) => STEP[row.status](row)));
-    return batch.length;
-  }
+  // inFlight: ids this process is actively holding — recoverStuck skips them so it
+  // can't reclaim a live call as "stuck" (Stage 0: recovery ownership). pipelines:
+  // the live promises, awaited by stop() to drain on shutdown.
+  const inFlight = new Set();
+  const pipelines = new Set();
+  let hasDefault = false; // refreshed each maintenance pass; read by the dispatcher
 
   let running = true;
-  let wake = () => {};
+  let wake = () => {};          // nudge the dispatcher (a lane freed, or new work)
+  let maintainWake = () => {};
   let transcribeWake = () => {};
-  const loop = (async () => {
+
+  // Fill one lane that has room with a single board-fair BATCH of its stage, sized to
+  // the free slots — so boards interleave (a small board's items claim ahead of a big
+  // board's backlog) instead of the oldest board monopolizing the lane. A batch, not
+  // one-at-a-time: single-row claims collapse to FIFO. Each pipeline is fire-and-tracked
+  // — on settle it frees its lane, leaves the in-flight sets, and nudges the dispatcher.
+  async function fillLane(ln, stage) {
+    const rows = await claimFairBatch(db, hasDefault, [stage], ln.freeSlots());
+    for (const row of rows) {
+      ln.take();
+      inFlight.add(row.id);
+      const p = STEP[row.status](row).finally(() => {
+        ln.release();
+        inFlight.delete(row.id);
+        pipelines.delete(p);
+        wake();
+      });
+      pipelines.add(p);
+    }
+  }
+
+  // One pass over the lanes with room. Stops claiming once `running` is false so
+  // shutdown drains cleanly; the dispatcher re-runs this on every completion/poll.
+  async function fillLanes() {
+    if (running && aiLane.free()) await fillLane(aiLane, "pending");
+    if (running && extractLane.free()) await fillLane(extractLane, "pending_extract");
+    if (running && faceLane.free()) await fillLane(faceLane, "pending_face");
+  }
+
+  // The dispatcher: keep the lanes full. Poll short while work is in flight (a
+  // completion frees a lane — refill promptly, and cover any missed wake), long when
+  // idle. wake() short-circuits the sleep.
+  const dispatchLoop = (async () => {
     while (running) {
-      let n = 0;
-      try {
-        n = await tick();
-      } catch (e) {
-        console.error("worker tick error:", e.message);
-      }
+      try { await fillLanes(); }
+      catch (e) { console.error("worker dispatch error:", e.message); }
       if (!running) break;
-      // Interruptible sleep: stop() short-circuits it so shutdown never
-      // waits out a poll interval.
       await new Promise((r) => {
-        const t = setTimeout(r, n > 0 ? 400 : POLL_MS);
-        wake = () => {
-          clearTimeout(t);
-          r();
-        };
+        const t = setTimeout(r, inFlight.size ? 250 : POLL_MS);
+        wake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
+  // Maintenance: recovery + the sweeps on a cadence, off the dispatcher's path so a
+  // slow sweep can't stall claims. Nudges the dispatcher after, since retag/ingest may
+  // have created claimable work.
+  const maintainLoop = (async () => {
+    while (running) {
+      try {
+        const recovered = await recoverStuck(db, STUCK_MS, MAX_ATTEMPTS, [...inFlight]);
+        if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
+        hasDefault = !!(await resolveDefaultAi(db));
+        await retagDue();
+        await embedDue();
+        await refreshDue();
+        await ingestDue();
+        await pruneSnapshots();
+      } catch (e) { console.error("worker maintain error:", e.message); }
+      if (!running) break;
+      wake();
+      await new Promise((r) => {
+        const t = setTimeout(r, POLL_MS);
+        maintainWake = () => { clearTimeout(t); r(); };
       });
     }
   })();
@@ -1377,9 +1420,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
 
   resolveDefaultAi(db).then((ai) => {
     if (ai) {
-      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings, ${CONCURRENCY} concurrent).`);
+      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face).`);
     } else {
-      console.log(`AI tagging worker started (no default key — only boards with their own key will tag, ${CONCURRENCY} concurrent).`);
+      console.log(`AI tagging worker started (no default key — only boards with their own key will tag; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face).`);
     }
   }).catch((e) => console.warn(`worker: default-AI probe failed at start: ${e.message}`)); // log-only — an unhandled rejection here would crash the boot
   // Stop claiming immediately; the returned promise resolves once the
@@ -1387,7 +1430,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   return () => {
     running = false;
     wake();
+    maintainWake();
     transcribeWake();
-    return Promise.all([loop, transcribeLoop]);
+    // Drain: let the loops finish their current pass and stop claiming, THEN await the
+    // in-flight pipelines (captured after the loops settle, so a final fill's launches
+    // are included). server.js caps the total wait.
+    return (async () => {
+      await Promise.all([dispatchLoop, maintainLoop, transcribeLoop]);
+      await Promise.all([...pipelines]);
+    })();
   };
 }

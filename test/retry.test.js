@@ -149,3 +149,20 @@ test("an explicit requeue clears the timer — the user's hand beats the backoff
   assert.equal(claimed?.id, id, "immediately claimable after the explicit retag");
   await park(id);
 });
+
+// worker-rework Stage 0: recovery ownership — recoverStuck must never reclaim a row
+// this process is actively holding, even if its call outlasts the stuck window.
+test("recoverStuck skips an id the worker still holds, even past the stuck window", async () => {
+  const id = await insertItem("processing");
+  // Backdate it well past any stuck window, so status + age alone would recover it.
+  await db.query("UPDATE items SET updated_at=$1 WHERE id=$2", [Date.now() - 3600000, id]);
+
+  // Owned by a live flight (in the in-flight set) → recovery leaves it alone.
+  assert.equal(await recoverStuck(db, 180000, 3, [id]), 0, "an owned in-flight row is not recovered");
+  assert.equal((await row(id)).status, "processing", "still processing, untouched");
+
+  // Not owned (crash/drain debris) → recovered as before (empty exclude = old behavior).
+  assert.equal(await recoverStuck(db, 180000, 3, []), 1, "an unowned stuck row is recovered");
+  assert.equal((await row(id)).status, "pending", "requeued to its stage");
+  await park(id);
+});

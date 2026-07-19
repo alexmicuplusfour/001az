@@ -1226,26 +1226,54 @@ export async function deleteExternalPlugin(db, id) {
 // chart is a data+render step, no model call). Rows whose retry_at is still in
 // the future (a spaced transient retry) are skipped; every requeue path that
 // wants an immediate run clears retry_at.
-export async function claimNextWork(db, hasDefaultKey = true) {
+//
+// `stages` is the set of pending statuses the caller will accept — the worker's
+// dispatcher passes only the stages whose lane has a free slot (worker-rework
+// Stage 1: capacity-aware claiming), so a full sidecar lane doesn't stop tag work
+// from being claimed. Default = all three (the single-flight/test path, unchanged).
+// Board-fair batch claim (worker-rework Stage 2). Ranks each board's ready items by
+// age (row_number per board), then serves rank 0 of every board before rank 1, etc. —
+// so a small board's work interleaves ahead of a large board's backlog instead of
+// waiting behind it. Fairness holds while active boards ≤ the batch size and degrades
+// to plain FIFO beyond (no worse than before). Claimed as ONE snapshot of `limit` rows:
+// single-row claims would collapse to FIFO (removing a head promotes the same board's
+// next item). The window function forbids FOR UPDATE, so the pick (ranked, unlocked)
+// and the lock (by id, SKIP LOCKED) are separate CTEs feeding the UPDATE.
+export async function claimFairBatch(db, hasDefaultKey = true, stages = ["pending_extract", "pending_face", "pending"], limit = 1) {
+  const now = Date.now();
   const { rows } = await db.query(
-    `UPDATE items SET
+    `WITH ready AS (
+       SELECT i.id, i.created_at,
+              row_number() OVER (PARTITION BY i.board_id ORDER BY i.created_at, i.id) AS board_rank
+       FROM items i JOIN boards b ON b.id = i.board_id
+       WHERE i.status = ANY($3::text[])
+         AND (i.status = 'pending_face' OR b.ai_key_id IS NOT NULL OR $2)
+         AND (i.retry_at IS NULL OR i.retry_at <= $1)
+     ),
+     pick AS (
+       SELECT id FROM ready ORDER BY board_rank ASC, created_at ASC, id ASC LIMIT $4
+     ),
+     claimed AS (
+       SELECT id FROM items WHERE id IN (SELECT id FROM pick) FOR UPDATE SKIP LOCKED
+     )
+     UPDATE items SET
        status = CASE items.status
          WHEN 'pending_extract' THEN 'extracting'
          WHEN 'pending_face'    THEN 'facing'
          ELSE 'processing' END,
        updated_at = $1
-     WHERE id = (
-       SELECT i.id FROM items i JOIN boards b ON b.id = i.board_id
-       WHERE i.status IN ('pending_extract', 'pending_face', 'pending')
-         AND (i.status = 'pending_face' OR b.ai_key_id IS NOT NULL OR $2)
-         AND (i.retry_at IS NULL OR i.retry_at <= $1)
-       ORDER BY i.created_at ASC, i.id ASC LIMIT 1
-       FOR UPDATE OF i SKIP LOCKED
-     )
+     WHERE id IN (SELECT id FROM claimed)
      RETURNING *`,
-    [Date.now(), hasDefaultKey]
+    [now, hasDefaultKey, stages, limit]
   );
-  return rows[0] || null;
+  return rows;
+}
+
+// One row, oldest-ready-first — the LIMIT-1 case of claimFairBatch (which equals plain
+// FIFO: the globally-oldest ready row is always its own board's rank 0). The stable
+// entry point for tests and any single-claim caller.
+export async function claimNextWork(db, hasDefaultKey = true, stages = ["pending_extract", "pending_face", "pending"]) {
+  return (await claimFairBatch(db, hasDefaultKey, stages, 1))[0] || null;
 }
 
 export async function setEntityFaceAt(db, id, at) {
@@ -1756,7 +1784,13 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
 // ceiling's headroom means an innocent item must straddle maxAttempts+2
 // separate interruptions (deploys included) before it could be wrongly
 // failed. Returns the number of rows touched.
-export async function recoverStuck(db, olderThanMs, maxAttempts = 3) {
+// excludeIds: rows THIS worker process is actively holding — the in-memory in-flight
+// set (worker-rework Stage 0: recovery ownership). A live in-flight call can outlast
+// olderThanMs (research tagging runs minutes; the extractor 240 s), so status + age
+// alone can't tell "crashed" from "still working" — ownership can. Recovery then only
+// ever touches rows no live flight owns: genuine crash/drain debris. An empty array
+// excludes nothing (id <> ALL('{}') is vacuously true) — the single-flight / boot path.
+export async function recoverStuck(db, olderThanMs, maxAttempts = 3, excludeIds = []) {
   const now = Date.now();
   const [b0, b1, b2] = RETRY_BACKOFF_MS;
   const { rowCount } = await db.query(
@@ -1772,8 +1806,9 @@ export async function recoverStuck(db, olderThanMs, maxAttempts = 3) {
        retry_at = CASE WHEN attempts + 1 >= $2 THEN NULL
                        ELSE $3::bigint + (CASE LEAST(attempts, 2) WHEN 0 THEN ${b0} WHEN 1 THEN ${b1} ELSE ${b2} END) END,
        updated_at = $3
-     WHERE status IN ('processing','extracting','facing') AND updated_at < $1`,
-    [now - olderThanMs, maxAttempts + TRANSIENT_EXTRA, now]
+     WHERE status IN ('processing','extracting','facing') AND updated_at < $1
+       AND id <> ALL($4::bigint[])`,
+    [now - olderThanMs, maxAttempts + TRANSIENT_EXTRA, now, excludeIds]
   );
   return rowCount;
 }
