@@ -93,7 +93,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, nextAutoTagRun } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, nextAutoTagRun } from "./worker.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -1114,6 +1114,14 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
         model: (await getSetting(db, "embed_model")) || null,
         stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
       },
+      // Transcription is always on (local sidecar by default); `active` is what
+      // actually resolves — a configured provider that lost its key falls to local.
+      transcriber: {
+        provider: (await getSetting(db, "transcribe_provider")) || "local",
+        keyId: Number(await getSetting(db, "transcribe_key_id")) || null,
+        model: (await getSetting(db, "transcribe_model")) || null,
+        active: (await resolveTranscriber(db)).id,
+      },
       domains,
     },
   });
@@ -1417,11 +1425,22 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
     // the provider default); zeros when not configured.
     stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
   };
-  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed });
+  // Transcription is always on (local sidecar by default); the provider choice
+  // is the toggle, so there's no enabled flag. `active` is what's actually in
+  // effect — a configured provider that lost its key falls back to local.
+  const transcriber = await resolveTranscriber(db);
+  const transcribe = {
+    provider: (await getSetting(db, "transcribe_provider")) || "local",
+    keyId: Number(await getSetting(db, "transcribe_key_id")) || null,
+    model: (await getSetting(db, "transcribe_model")) || null,
+    active: transcriber.id, // the engine family actually in effect ("local" or a provider)
+  };
+  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe });
 }));
 
 app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel, embedProvider } = req.body || {};
+  const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel, embedProvider,
+    transcribeProvider, transcribeKeyId, transcribeModel } = req.body || {};
   if (defaultKeyId !== undefined) {
     if (defaultKeyId === null) {
       await setSetting(db, "default_key_id", null);
@@ -1471,7 +1490,36 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     }
     await setSetting(db, "embed_enabled", embedEnabled ? "1" : null);
   }
-  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"}`);
+  // Transcription: `transcribe_provider` names the engine directly — "local"
+  // (the always-on sidecar) or any provider that ADVERTISES `transcribes` with a
+  // matching key. Capability-gated, no provider name special-cased.
+  if (transcribeProvider !== undefined) {
+    if (!transcribeProvider || transcribeProvider === "local") {
+      await setSetting(db, "transcribe_provider", "local");
+      await setSetting(db, "transcribe_key_id", null);
+      await setSetting(db, "transcribe_model", null);
+    } else {
+      const desc = PROVIDERS[transcribeProvider];
+      if (!desc?.transcribes) {
+        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].transcribes && !PROVIDERS[n].keyless).join(" or ");
+        return res.status(400).json({ error: `transcription needs a ${names || "capable"} key — ${transcribeProvider} advertises none` });
+      }
+      const key = transcribeKeyId != null ? await getAiKey(db, Number(transcribeKeyId)) : null;
+      if (!key || key.provider !== transcribeProvider) {
+        return res.status(400).json({ error: `pick a ${desc.label} key to transcribe with it` });
+      }
+      // A pinned model must be one the provider advertises — otherwise every
+      // transcribe would throw at the wire and the item requeues forever. Unset
+      // (null) is fine: resolveTranscriber falls back to transcribes.default.
+      if (transcribeModel && !desc.transcribes.models.some((m) => m.id === transcribeModel)) {
+        return res.status(400).json({ error: `${desc.label} can't transcribe with model "${transcribeModel}"` });
+      }
+      await setSetting(db, "transcribe_provider", transcribeProvider);
+      await setSetting(db, "transcribe_key_id", String(key.id));
+      await setSetting(db, "transcribe_model", transcribeModel || null);
+    }
+  }
+  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"} transcribe=${transcribeProvider ?? "(unchanged)"}`);
   res.json({ ok: true });
 }));
 
@@ -1483,6 +1531,36 @@ app.post("/api/admin/ai-config/embed-test", requireAdmin, wrap(async (_req, res)
     await withPluginHealth(db, `ai:${embedder.provider}`, () =>
       embedTexts({ ...embedder, texts: ["ping"] }));
     res.json({ ok: true, provider: embedder.provider, model: embedder.model });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}));
+
+// A ~0.25s 8 kHz mono PCM WAV of a quiet tone — small, valid audio for a
+// reachability probe. The endpoint accepts it and returns (transcript is
+// usually empty; a 200 is the signal that key + model + endpoint all work).
+function tinyWav() {
+  const sr = 8000, n = 2000, bytes = n * 2;
+  const b = Buffer.alloc(44 + bytes);
+  b.write("RIFF", 0); b.writeUInt32LE(36 + bytes, 4); b.write("WAVE", 8);
+  b.write("fmt ", 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(sr, 24); b.writeUInt32LE(sr * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34);
+  b.write("data", 36); b.writeUInt32LE(bytes, 40);
+  for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.sin(i / 6) * 6000), 44 + i * 2);
+  return b;
+}
+
+// Transcribe a tiny synthesized clip to prove the transcriber config works end
+// to end (the transcription analog of embed-test). Always resolves an engine —
+// local or a provider — so there's no "not configured" case.
+app.post("/api/admin/ai-config/transcribe-test", requireAdmin, wrap(async (_req, res) => {
+  const t = await resolveTranscriber(db);
+  const provider = t.id; // the engine family ("local" or a provider name)
+  try {
+    // The provider engine already wraps itself in the plugin-health ledger
+    // (resolveTranscriber); local has none, same as the sidecar path.
+    await t.transcribe(tinyWav(), "probe.wav");
+    res.json({ ok: true, provider, model: t.model });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

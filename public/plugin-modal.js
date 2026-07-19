@@ -66,6 +66,7 @@ export function openPluginModal(p, ctx) {
     if (!p.ai.keyless) built.push(keysSection(p, ctx, done));
     if (p.capabilities.tag) built.push(taggerSection(p, ctx, done));
     if (p.capabilities.embed) built.push(embedSection(p, ctx, done));
+    if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, done));
   } else if (p.kind === "source") {
     built.push(sourceSection(p, ctx, done));
   } else {
@@ -461,6 +462,126 @@ function embedSection(p, ctx, done) {
     actions.append(test, off);
   }
   return { node: sec, actions };
+}
+
+// Transcription slot — audio → text so recordings can be tagged. Mirrors
+// embedSection, but transcription is always on (the local sidecar is the
+// default), so there's no enable toggle: the provider choice IS the toggle.
+// A provider advertises this via `transcribes`; the keyless local sidecar shows
+// its baked model as a note (WHISPER_MODEL is a deploy knob, not a runtime pick).
+function transcribeSection(p, ctx, done) {
+  const tr = ctx.slots.transcriber;
+  const active = ctx.defaults.transcriber === p.name;
+  const mine = ctx.keys.filter((k) => k.provider === p.name);
+  const sec = section("Transcription", "Audio → text so recordings can be tagged. One transcriber serves the whole app; the on-server whisper sidecar is the default.");
+
+  if (!p.ai.keyless && !mine.length) {
+    const none = document.createElement("p");
+    none.className = "muted";
+    none.style.margin = "0";
+    none.textContent = "Add a key above to transcribe with this provider.";
+    sec.appendChild(none);
+    return { node: sec, actions: null };
+  }
+
+  // Key picker (non-keyless providers).
+  let keySel = null;
+  if (!p.ai.keyless) {
+    keySel = document.createElement("select");
+    keySel.style.cssText = "width:100%;";
+    for (const k of mine) {
+      const opt = document.createElement("option");
+      opt.value = String(k.id);
+      opt.textContent = k.name;
+      keySel.appendChild(opt);
+    }
+    if (active && tr.keyId) keySel.value = String(tr.keyId);
+    if (mine.length > 1 || !active) sec.appendChild(labeled("Key", keySel));
+  }
+
+  // Model picker — a provider gets a dropdown of its transcribes.models; the
+  // keyless local sidecar shows its single baked model as a note.
+  let modelSel = null;
+  if (!p.ai.keyless && p.ai.transcribes.models.length > 1) {
+    modelSel = document.createElement("select");
+    modelSel.style.cssText = "width:100%;";
+    fillModelSelect(modelSel, { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default }, active ? tr.model : null);
+    sec.appendChild(labeled("Transcription model", modelSel));
+  } else {
+    const one = p.ai.transcribes.models[0];
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.style.margin = "0";
+    note.textContent = one.id + " — " + one.note;
+    sec.appendChild(note);
+  }
+
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+
+  if (p.ai.keyless) {
+    // The local sidecar is the default. Offer "use local" only when a provider
+    // is currently overriding it.
+    if (active) {
+      const note = document.createElement("p");
+      note.className = "muted";
+      note.style.margin = "0";
+      note.textContent = "On-server · always available · the default transcriber.";
+      sec.appendChild(note);
+    } else {
+      const use = document.createElement("button");
+      use.textContent = "Use local transcriber";
+      use.onclick = busy(use, "Saving…", async () => {
+        try {
+          await api("POST", "/api/admin/ai-config", { transcribeProvider: "local" });
+          toast("Transcription set to the on-server sidecar");
+          done();
+        } catch (err) { toast.error(err.message); }
+      });
+      actions.appendChild(use);
+    }
+  } else {
+    const save = document.createElement("button");
+    save.textContent = active ? "Save" : "Make default transcriber";
+    save.onclick = busy(save, "Saving…", async () => {
+      const model = modelSel?.value || p.ai.transcribes.default;
+      try {
+        await api("POST", "/api/admin/ai-config", {
+          transcribeProvider: p.name,
+          transcribeKeyId: Number(keySel.value),
+          transcribeModel: model,
+        });
+        toast("Transcription settings saved");
+        done();
+      } catch (err) { toast.error(err.message); }
+    });
+    actions.appendChild(save);
+
+    if (active) {
+      const test = document.createElement("button");
+      test.className = "ghost";
+      test.textContent = "Test";
+      test.onclick = busy(test, "Testing…", async () => {
+        try {
+          const { model: m, provider: pr } = await api("POST", "/api/admin/ai-config/transcribe-test");
+          toast(`✓ ${pr}/${m} reachable`);
+        } catch (err) { toast.error(err.message); }
+      });
+      const off = document.createElement("button");
+      off.className = "danger";
+      off.textContent = "Use local instead";
+      off.onclick = busy(off, "Saving…", async () => {
+        try {
+          await api("POST", "/api/admin/ai-config", { transcribeProvider: "local" });
+          toast("Transcription reverted to the on-server sidecar");
+          done();
+        } catch (err) { toast.error(err.message); }
+      });
+      actions.append(test, off);
+    }
+  }
+
+  return { node: sec, actions: actions.children.length ? actions : null };
 }
 
 // --- source: saved connections (add / edit / test / remove) ---

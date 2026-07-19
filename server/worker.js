@@ -45,7 +45,7 @@ import {
 } from "./db.js";
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
-import { callTagger, embedTexts, PROVIDERS } from "./providers.js";
+import { callTagger, embedTexts, transcribeAudio, PROVIDERS } from "./providers.js";
 import { pluginInstalled } from "./plugins.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
@@ -586,12 +586,32 @@ function localTranscriber() {
   };
 }
 
-// A board's audio→text engine. v1 always resolves to the local sidecar (no key,
-// always on, like the extractor — transcription is how audio becomes taggable).
-// `board` is accepted now (unused) so a future per-board provider choice slots
-// in like the tagger, or app-wide like the embedder, with an audio-incapable
-// provider (Claude) degrading to local. Exported for tests.
+// A board's audio→text engine. An app-wide `transcribe_provider` setting can
+// point at any provider that ADVERTISES `transcribes` (a stored key + installed
+// plugin); everything else — unset, "local", a no-audio provider (Claude has
+// `transcribes: null`), a missing key — falls back to the always-on local
+// sidecar. Never fails to resolve: audio must always become taggable. Fully
+// capability-driven — no provider name is hardcoded here. `board` is accepted
+// for a future per-board choice (unused today). Exported for tests + server.
 export async function resolveTranscriber(db, board = null) {
+  const provider = await getSetting(db, "transcribe_provider");
+  if (provider && provider !== "local" && PROVIDERS[provider]?.transcribes && (await aiPluginInstalled(db, provider))) {
+    const keyId = Number(await getSetting(db, "transcribe_key_id")) || 0;
+    const key = keyId ? await getAiKey(db, keyId) : null;
+    if (key) {
+      const model = (await getSetting(db, "transcribe_model")) || PROVIDERS[provider].transcribes.default;
+      return {
+        id: provider, // the engine family; the cache stamp appends :model (→ "openai:gpt-4o-transcribe")
+        model,
+        // Runs under the plugin-health ledger like every other provider call
+        // (trackedTagger, embedBatch) so transcription traffic + errors show on
+        // the Plugins page — otherwise a paid provider transcribes invisibly.
+        transcribe: async (buf, filename) =>
+          (await withPluginHealth(db, `ai:${provider}`, () =>
+            transcribeAudio({ provider, apiKey: key.api_key, model, audio: buf, filename }))).text,
+      };
+    }
+  }
   return localTranscriber();
 }
 
@@ -643,8 +663,17 @@ export async function documentTextFor(galleryDir, file, transcriber = null) {
       // different engine (or unstamped legacy) → fall through and re-transcribe
     }
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-    const text = await transcriber.transcribe(buf); // downtime throws → requeue, never empty
-    await fs.promises.writeFile(cachePath, `${stamp}\n\n${text}`);
+    // Pass the stored name so a provider wire gets a valid audio extension; the
+    // local sidecar ignores it (PyAV sniffs the bytes).
+    const text = await transcriber.transcribe(buf, file.name); // downtime throws → requeue, never empty
+    // Cache the result — EXCEPT an empty transcript from a provider engine. The
+    // local sidecar's empty is trustworthy (VAD silence), so cache it and never
+    // re-bill; a provider returning 200-with-empty is ambiguous (a blip vs real
+    // silence), so leave it uncached and let a retag re-attempt rather than
+    // freezing the clip as speechless.
+    if (text || transcriber.id === "local") {
+      await fs.promises.writeFile(cachePath, `${stamp}\n\n${text}`);
+    }
     return text;
   }
   return "";

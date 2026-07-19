@@ -23,7 +23,10 @@ export function slotProviders(slots, keys) {
   const embedder = !slots.embedder.enabled ? null
     : slots.embedder.provider === "local" ? "local"
     : keyProvider(slots.embedder.keyId);
-  return { tagger, embedder };
+  // Transcription always resolves (local by default); the server hands us the
+  // provider actually in effect.
+  const transcriber = slots.transcriber?.active || "local";
+  return { tagger, embedder, transcriber };
 }
 
 // The right-aligned tag: category + the role/qualifier that defines the card.
@@ -36,6 +39,8 @@ export function tagFor(p, defaults) {
   if (p.kind === "ai") {
     if (defaults.tagger === p.name) return "AI · tagger";
     if (defaults.embedder === p.name) return "AI · embedder";
+    // local is the implicit transcriber default — only badge a provider override.
+    if (defaults.transcriber === p.name && p.name !== "local") return "AI · transcriber";
     return "AI";
   }
   if (p.kind === "connector") return `Data · ${p.connector?.domain ?? "external"}`;
@@ -141,6 +146,7 @@ function pluginRow(p, ctx) {
     if (ctx.defaults.tagger === p.name)
       row.appendChild(badge(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env"));
     if (ctx.defaults.embedder === p.name) row.appendChild(badge("default embedder"));
+    if (ctx.defaults.transcriber === p.name && p.name !== "local") row.appendChild(badge("default transcriber"));
   }
   if (p.kind === "connector") {
     const d = ctx.slots.domains[p.connector.domain] || {};

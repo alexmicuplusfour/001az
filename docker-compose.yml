@@ -61,6 +61,7 @@ services:
       CONNECTOR_RETRY_CAP_MS: ${CONNECTOR_RETRY_CAP_MS:-}
       AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
       AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
+      AI_TRANSCRIBE_TIMEOUT_MS: ${AI_TRANSCRIBE_TIMEOUT_MS:-}
       EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
       TRANSCRIBER_TIMEOUT_MS: ${TRANSCRIBER_TIMEOUT_MS:-}
       # automatic ingestion: watched folders live under this root (bind-mounted

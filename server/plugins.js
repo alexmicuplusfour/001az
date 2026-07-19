@@ -40,11 +40,11 @@ function aiDefs() {
     // (the product's core value) must work out of the box; it's still removable.
     core: p.name === "local",
     defaultInstalled: p.name === "anthropic",
-    capabilities: { tag: !!PROVIDERS[p.name].wire, embed: !!p.embeds, research: p.research },
+    capabilities: { tag: !!PROVIDERS[p.name].wire, embed: !!p.embeds, transcribe: !!p.transcribes, research: p.research },
     configSchema: [],
-    // the modal's pickers (models + notes, embed catalog) — same data the
-    // board modal reads from /api/admin/ai-providers
-    ai: { defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, keyless: p.keyless },
+    // the modal's pickers (models + notes, embed/transcribe catalogs) — same data
+    // the board modal reads from /api/admin/ai-providers
+    ai: { defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, keyless: p.keyless },
   }));
 }
 

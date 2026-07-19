@@ -84,15 +84,19 @@ const KIND_DEFS = {
   "ai-provider": {
     catalogId: (m) => `ai:${m.id}`,
     validateBuilt: (m, built) => {
-      // `wire` is the dispatch object ({ tag, embed, testKey }); an embed-only
-      // provider (like the built-in local one) has wire null + embeds set. Reject
-      // only a descriptor that can neither tag nor embed — matches aiDefs' !!wire.
-      if (!built.wire && !built.embeds)
-        throw new Error("ai-provider must return a descriptor with a wire (tagging) or embeds config");
+      // `wire` is the dispatch object ({ tag?, embed?, transcribe?, testKey }); an
+      // embed-only provider (like the built-in local one) has wire null + embeds
+      // set. Reject only a descriptor that can do none of tag / embed / transcribe.
+      if (!built.wire && !built.embeds && !built.transcribes)
+        throw new Error("ai-provider must return a descriptor with a wire (tagging), embeds, or transcribes config");
       if (!built.label) throw new Error("ai-provider descriptor needs a label");
-      // defaultModel names the tagging model; only a tagging (wire) provider needs
-      // one. An embed-only descriptor legitimately has none (the built-in `local`).
-      if (built.wire && !built.defaultModel) throw new Error("a tagging ai-provider descriptor needs a defaultModel");
+      // A capability is only real if its wire method exists: advertising
+      // `transcribes` requires wire.transcribe (mirrors how tagging requires wire.tag).
+      if (built.transcribes && typeof built.wire?.transcribe !== "function")
+        throw new Error("a transcribes ai-provider descriptor needs wire.transcribe");
+      // defaultModel names the tagging model; only a tagging (wire.tag) provider
+      // needs one. An embed-only or transcribe-only descriptor legitimately has none.
+      if (built.wire?.tag && !built.defaultModel) throw new Error("a tagging ai-provider descriptor needs a defaultModel");
     },
     register: (m, built) => registerProvider(m.id, built),
     unregister: (m) => unregisterProvider(m.id),

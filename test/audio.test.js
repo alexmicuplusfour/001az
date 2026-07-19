@@ -10,14 +10,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startServer, adminSession, seedBoard } from "./helpers.js";
-import { setPluginState } from "../server/db.js";
+import { startServer, adminSession, seedBoard, req } from "./helpers.js";
+import { setPluginState, createAiKey, setSetting, getSetting } from "../server/db.js";
 import { audioSource } from "../server/sources/audio.js";
 import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
 import { documentTextFor, resolveTranscriber } from "../server/worker.js";
+import { transcribeAudio, providerCatalog } from "../server/providers.js";
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
 // sampleRate/channels) with no binary, and it's real audio ffmpeg can draw.
@@ -107,6 +108,20 @@ test("documentTextFor(audio): a cache from a DIFFERENT engine is ignored and re-
   );
 });
 
+test("documentTextFor(audio): a provider engine stamps the cache as <provider>:<model> (no doubled model)", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
+  // A provider engine's id is the family; model is separate — the stamp is
+  // id:model, so a bug that folded model into id would double it here.
+  const eng = stubTranscriber("provider transcript", { id: "openai", model: "gpt-4o-transcribe" });
+  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
+  assert.equal(await documentTextFor(dir, file, eng), "provider transcript");
+  assert.equal(
+    fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
+    "# engine: openai:gpt-4o-transcribe\n\nprovider transcript",
+  );
+});
+
 test("documentTextFor(audio): an empty transcript is a real answer — cached, not re-run", async (t) => {
   const { galleryDir: dir } = tmpDirs(t);
   fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
@@ -117,6 +132,19 @@ test("documentTextFor(audio): an empty transcript is a real answer — cached, n
   assert.equal(await documentTextFor(dir, file, eng), "");
   assert.equal(eng.calls, 1, "empty transcript is cached like any other");
   assert.equal(fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"), "# engine: local:base\n\n");
+});
+
+test("documentTextFor(audio): a PROVIDER's empty transcript is NOT cached (a blip must not freeze the clip)", async (t) => {
+  const { galleryDir: dir } = tmpDirs(t);
+  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
+  // A provider engine (id ≠ "local") returning "" is ambiguous — could be a blip.
+  const eng = stubTranscriber("", { id: "openai", model: "whisper-1" });
+  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
+
+  assert.equal(await documentTextFor(dir, file, eng), "");
+  assert.equal(fs.existsSync(path.join(dir, "a.mp3.txt")), false, "no cache written for a provider empty");
+  assert.equal(await documentTextFor(dir, file, eng), "");
+  assert.equal(eng.calls, 2, "the second call re-attempts rather than serving a frozen empty");
 });
 
 test("documentTextFor(audio): transcriber downtime throws status-less (requeue, never empty)", async (t) => {
@@ -132,11 +160,13 @@ test("documentTextFor(audio): transcriber downtime throws status-less (requeue, 
   assert.equal(fs.existsSync(path.join(dir, "a.mp3.txt")), false, "no cache written on failure");
 });
 
-test("resolveTranscriber: v1 resolves the always-on local sidecar and maps its HTTP results", async (t) => {
+test("resolveTranscriber: with no provider configured, resolves the local sidecar and maps its HTTP results", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
 
-  const eng = await resolveTranscriber(null); // v1 ignores db/board
+  // A stub db whose settings are all empty → no transcribe_provider → local.
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
   assert.equal(eng.id, "local");
   assert.ok(eng.model, "carries a model for the cache stamp");
 
@@ -154,6 +184,94 @@ test("resolveTranscriber: v1 resolves the always-on local sidecar and maps its H
   // unreachable (deploy blip) → same shape
   globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
   await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber unreachable/.test(e.message) && e.status === undefined);
+});
+
+// ── Slice 3: capability-advertised provider transcription ────────────────────
+
+test("providerCatalog advertises transcribes per provider (capability, not a hardcoded list)", () => {
+  const cat = Object.fromEntries(providerCatalog().map((p) => [p.name, p]));
+  assert.ok(cat.openai.transcribes, "openai advertises transcription");
+  assert.equal(cat.openai.transcribes.default, "gpt-4o-transcribe");
+  assert.equal(cat.anthropic.transcribes, null, "claude advertises none (no audio modality)");
+  assert.ok(cat.local.transcribes, "the on-server sidecar advertises transcription");
+});
+
+test("transcribeAudio (shared compat wire): multipart POST to /audio/transcriptions; error mapping", async (t) => {
+  const orig = globalThis.fetch;
+  t.after(() => { globalThis.fetch = orig; });
+
+  let seen;
+  globalThis.fetch = async (url, opts) => { seen = { url: String(url), opts }; return { ok: true, status: 200, json: async () => ({ text: "hi" }) }; };
+  const { text } = await transcribeAudio({ provider: "openai", apiKey: "sk", model: "whisper-1", audio: Buffer.from("x"), filename: "clip.mp3" });
+  assert.equal(text, "hi");
+  assert.match(seen.url, /\/audio\/transcriptions$/);
+  assert.equal(seen.opts.method, "POST");
+  assert.ok(seen.opts.body instanceof FormData, "sends multipart FormData, not JSON");
+  assert.equal(seen.opts.body.get("file").name, "clip.mp3", "the caller's filename (audio extension) reaches the endpoint");
+  assert.equal(seen.opts.headers["Content-Type"], undefined, "no JSON content-type — fetch sets the multipart boundary");
+
+  // non-OK → the compat error carries the provider message + HTTP status
+  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({ error: { message: "bad key" } }) });
+  await assert.rejects(
+    transcribeAudio({ provider: "openai", apiKey: "x", model: "whisper-1", audio: Buffer.from("x") }),
+    (e) => /bad key/.test(e.message) && e.status === 401,
+  );
+});
+
+test("resolveTranscriber: an installed provider with a key resolves a provider engine (capability-gated)", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  await setPluginState(db, "ai:openai", { installed: true });
+  const created = await createAiKey(db, "k", "openai", "sk-test");
+  const keyId = created.id ?? created;
+  await setSetting(db, "transcribe_provider", "openai");
+  await setSetting(db, "transcribe_key_id", String(keyId));
+
+  const eng = await resolveTranscriber(db);
+  assert.equal(eng.id, "openai", "engine id is the provider family (the stamp appends :model)");
+  assert.equal(eng.model, "gpt-4o-transcribe");
+
+  // its transcribe routes through the openai wire → /audio/transcriptions
+  const orig = globalThis.fetch;
+  t.after(() => { globalThis.fetch = orig; });
+  let seen;
+  globalThis.fetch = async (url, opts) => { seen = { url: String(url), opts }; return { ok: true, status: 200, json: async () => ({ text: "spoken words" }) }; };
+  assert.equal(await eng.transcribe(Buffer.from("audio")), "spoken words");
+  assert.match(seen.url, /\/audio\/transcriptions$/);
+});
+
+test("resolveTranscriber: a configured provider with no key falls back to local (never fails)", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  await setPluginState(db, "ai:openai", { installed: true });
+  await setSetting(db, "transcribe_provider", "openai"); // but no transcribe_key_id
+  const eng = await resolveTranscriber(db);
+  assert.equal(eng.id, "local", "no usable key → the always-on sidecar, not an error");
+});
+
+test("ai-config POST: a transcribe model the provider doesn't advertise is rejected (400, not stored)", async (t) => {
+  const { base, db, close } = await startServer();
+  t.after(close);
+  const admin = await adminSession(db);
+  await setPluginState(db, "ai:openai", { installed: true });
+  const created = await createAiKey(db, "k", "openai", "sk-test");
+  const keyId = created.id ?? created;
+
+  // A bogus model → 400, and nothing is persisted (the provider stays unset).
+  const bad = await req(base, "POST", "/api/admin/ai-config", {
+    sid: admin.sid,
+    body: { transcribeProvider: "openai", transcribeKeyId: keyId, transcribeModel: "whisper-9-ultra" },
+  });
+  assert.equal(bad.status, 400);
+  assert.equal(await getSetting(db, "transcribe_provider"), null, "the bad request stored nothing");
+
+  // A real advertised model → 200 and it sticks.
+  const ok = await req(base, "POST", "/api/admin/ai-config", {
+    sid: admin.sid,
+    body: { transcribeProvider: "openai", transcribeKeyId: keyId, transcribeModel: "whisper-1" },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(await getSetting(db, "transcribe_model"), "whisper-1");
 });
 
 test("audio ingest: metadata lands; the waveform face degrades gracefully", async (t) => {

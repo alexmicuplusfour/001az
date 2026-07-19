@@ -51,6 +51,9 @@ const compatHeaders = (apiKey) => ({ Authorization: `Bearer ${apiKey}`, "Content
 // research tagging legitimately runs minutes. Env-tunable, read per call.
 const chatSignal = () => AbortSignal.timeout(Number(process.env.AI_CHAT_TIMEOUT_MS) || 180000);
 const embedSignal = () => AbortSignal.timeout(Number(process.env.AI_EMBED_TIMEOUT_MS) || 60000);
+// Transcription is slow (minutes for a long clip) — a generous default, like the
+// local sidecar's timeout; env-tunable per call.
+const transcribeSignal = () => AbortSignal.timeout(Number(process.env.AI_TRANSCRIBE_TIMEOUT_MS) || 240000);
 const keyTestSignal = () => AbortSignal.timeout(30000); // admin Test button — interactive, fail fast
 // A failed compat response, turned into a readable error. OpenRouter buries
 // the useful upstream detail under error.metadata.raw and leaves error.message
@@ -239,6 +242,30 @@ const compatWire = {
     });
     return { vectors, usage: { input: data.usage?.prompt_tokens || 0, output: 0, cacheRead: 0 } };
   },
+
+  // Transcribe audio → text (OpenAI-style POST /audio/transcriptions, multipart).
+  // The parallel to embed: any compat-family provider whose backend exposes this
+  // endpoint opts in by setting `transcribes` on its descriptor — the generic
+  // path never names a provider. Returns { text, usage }; usage is per-audio
+  // (not tokens), left zero — transcription billing isn't tracked yet.
+  async transcribe(desc, { apiKey, model, audio, filename }) {
+    const form = new FormData();
+    form.append("model", model || desc.transcribes.default);
+    // The multipart filename's EXTENSION is load-bearing: OpenAI validates the
+    // audio format from it, and rejects an extensionless name. Callers pass the
+    // stored <hex>.<ext> name; the fallback is only for a bare reachability probe.
+    form.append("file", new Blob([audio]), filename || "audio.wav");
+    const r = await fetch(`${desc.base}/audio/transcriptions`, {
+      method: "POST",
+      // NOT compatHeaders — FormData sets its own multipart Content-Type + boundary.
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal: transcribeSignal(),
+    });
+    if (!r.ok) throw await compatError(r, desc.label);
+    const data = await r.json();
+    return { text: data.text || "", usage: { input: 0, output: 0, cacheRead: 0 } };
+  },
 };
 
 // --- the registry ---
@@ -277,6 +304,17 @@ const openai = {
     models: [
       { id: "text-embedding-3-small", note: "cheapest, plenty here" },
       { id: "text-embedding-3-large", note: "sharper, ~6× cost" },
+    ],
+  },
+  // OpenAI's /audio/transcriptions endpoint (shared compatWire.transcribe). A
+  // provider advertises this only if its backend serves that endpoint — the
+  // generic path reads the flag, never the provider name.
+  transcribes: {
+    default: "gpt-4o-transcribe",
+    models: [
+      { id: "gpt-4o-mini-transcribe", note: "fast, cheapest" },
+      { id: "gpt-4o-transcribe", note: "balanced" },
+      { id: "whisper-1", note: "the classic Whisper" },
     ],
   },
 };
@@ -338,6 +376,15 @@ const local = {
   embeds: {
     default: LOCAL_EMBED_MODEL,
     models: [{ id: LOCAL_EMBED_MODEL, note: "runs on-server · no API key" }],
+  },
+  // The on-server whisper sidecar. Its model is baked into the image and set via
+  // WHISPER_MODEL at deploy (a build-time knob, not a runtime pick), so there's a
+  // single model here mirrored from the app-side TRANSCRIBER_MODEL env — the UI
+  // shows it as a note, not a dropdown. Resolved directly by resolveTranscriber,
+  // not via the wire (local.wire is null).
+  transcribes: {
+    default: process.env.TRANSCRIBER_MODEL || "base",
+    models: [{ id: process.env.TRANSCRIBER_MODEL || "base", note: "runs on-server · no API key · set via WHISPER_MODEL at deploy" }],
   },
 };
 
@@ -412,6 +459,15 @@ export function embedTexts({ provider, ...rest }) {
   return desc.wire.embed(desc, rest);
 }
 
+// Transcribe audio bytes → { text, usage } via a provider's wire. Only
+// transcribes-capable providers qualify — callers gate on
+// PROVIDERS[provider].transcribes. `local` is the on-server whisper sidecar,
+// resolved directly by resolveTranscriber (worker.js), so it never routes here.
+export function transcribeAudio({ provider, ...rest }) {
+  const desc = PROVIDERS[provider];
+  return desc.wire.transcribe(desc, rest);
+}
+
 // Cheap key/model validation for the admin "Test" buttons. Throws with the
 // provider's error message on failure.
 export function testKey({ provider, ...rest }) {
@@ -434,6 +490,7 @@ export function providerCatalog() {
       research: p.research,
       keyless: !!p.keyless,
       embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
+      transcribes: p.transcribes ? { default: p.transcribes.default, models: p.transcribes.models } : null,
     };
   });
 }

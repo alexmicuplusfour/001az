@@ -1,9 +1,10 @@
 # Transcription slot — audio → text for provider-agnostic tagging (local whisper sidecar)
 
-**Status: Slices 1–2 BUILT & VERIFIED (2026-07-19) — the `transcriber/` sidecar
-exists, builds, and transcribes, and the server now transcribes audio → tags on
-the transcript (full test suite green, 393 pass); Slice 3 not started. This is
-the deferred
+**Status: Slices 1–3 BUILT & VERIFIED (2026-07-19) — the `transcriber/` sidecar
+exists and transcribes, the server transcribes audio → tags on the transcript,
+and provider transcription is a capability-advertised slot (OpenAI ships; any
+provider or plugin advertising `transcribes` slots in). Full suite green (397
+pass). This is the deferred
 "transcription slot" from [audio-media-plan.md](audio-media-plan.md) — the
 swappable half of the media tier. Design + engine locked via research below.
 Builds on the audio media tier (committed `157a5d2`): core already ingests,
@@ -210,24 +211,76 @@ re-transcription); a cache stamped with a *different* engine id is ignored and
 re-transcribed (the flexibility guard); transcriber-unreachable throws (requeue,
 not empty); an audio item end-to-end tags from a stub transcript.
 
-### Slice 3 — DEFERRED: the two flexibility doors v1 keeps open
-Both are pure adds behind the Slice 2 seam — no rework, because the resolver
-already takes `board`, returns an engine descriptor, and the cache is
-engine-stamped:
-- **Provider as default transcriber** (for providers that support audio):
-  OpenAI `gpt-4o-transcribe`/`whisper-1`, Google STT, Gemini native as swappable
-  engines behind `resolveTranscriber` — per-key/per-board like the tagger, or
-  app-wide like the embedder — with Claude (no audio) falling back to local.
-  Plus an admin config surface (like the embedder's "Semantic search" section).
-- **More local performance without a provider:** the `WHISPER_MODEL` build arg
-  is already the dial (`base`→`small`→`turbo`) — but deliberately a **deploy-time
-  knob, not a UI setting**. The model is baked into the image (Slice 1), so
-  moving it is a rebuild, exactly like the embedder model; a UI toggle would
-  imply a runtime switch the baked image can't honor. The principle drawing the
-  line: UI config is for runtime-swappable engines (a provider + its key, above);
-  the local model is a build-time bake, so it lives in `.env` / `--build-arg`,
-  never a dropdown.
-Only when the local `base` default isn't enough — v1 ships without either.
+### Slice 3 — ✅ BUILT & VERIFIED (2026-07-19): capability-advertised transcription engines
+Provider transcription is a **capability contract, not a hardcoded provider
+list** — the exact shape embeddings already use. Core owns the contract; each
+provider (built-in descriptor OR `ai-provider` plugin) advertises whether it
+transcribes, and nothing in core enumerates which providers do. Mirrors `embeds`
+end to end:
+- **Descriptor field** `transcribes: {default, models[]} | null` on the provider
+  descriptor, parallel to `embeds` ([providers.js](../server/providers.js)).
+- **Shared wire method** `compatWire.transcribe(desc, {apiKey, model, audio}) →
+  {text, usage}` — OpenAI-style `POST /audio/transcriptions` (multipart) — the
+  parallel to `compatWire.embed`. A compat-family provider whose backend exposes
+  that endpoint opts in by *setting `transcribes`*; no per-provider code. A
+  provider needing a different shape (a native `generateContent` audio call, a
+  separate STT service) ships its own wire and advertises the same flag — the
+  endpoint heterogeneity lives in the wire, never in core.
+- **Generic everywhere, zero provider names:** a `transcribeAudio()` dispatcher
+  (parallel to `embedTexts`, with `provider === "local"` special-cased to the
+  sidecar the way `embedTexts` special-cases `localEmbed`); `resolveTranscriber`
+  gates on `PROVIDERS[p]?.transcribes` and falls back to local otherwise;
+  `providerCatalog()` + the admin surface render the picker from the flag.
+- **Loader validation** ([plugin-loader.js:90](../server/plugin-loader.js#L90)):
+  widen the "must tag or embed" capability reject to "tag, embed, or transcribe,"
+  and require `wire.transcribe` to be a function when `transcribes` is set.
+- **Claude → local is automatic:** Anthropic's descriptor is `transcribes: null`
+  (like its `embeds: null`), so a board on a no-audio provider resolves to the
+  local sidecar. The capability field IS the fallback — no special-casing.
+- **Local advertises too:** `local.transcribes = {default: <WHISPER_MODEL>, …}`
+  so the sidecar is a first-class registry engine, not a hardcoded case.
+Because the Slice 2 seam already takes `board`, returns an engine descriptor, and
+engine-stamps the cache, a transcribing provider (built-in or plugin) slots in
+with **zero core change** and the `.txt` cache re-transcribes when the engine id
+flips.
+
+**Config UI** mirrors the embedder's "Semantic search" section: enabled toggle,
+provider picker (local + any `transcribes`-capable provider), and — only when a
+*provider* is chosen — a model picker (its `transcribes.models`) + key + Test,
+noting per-minute billing. Selecting **local** shows no model dropdown: the
+`WHISPER_MODEL` is baked (Slice 1), a deploy-time knob not a UI setting — a
+toggle would imply a runtime switch the baked image can't honor. The line: UI
+config is for runtime-swappable engines (provider + key + model param); the local
+model lives in `.env` / `--build-arg`.
+
+Resolution scope (app-wide like the embedder vs per-board like the tagger) is the
+one open product call; the seam supports either. Recommended default: **app-wide**
+— transcription is content-normalization (audio→text so it's taggable), the same
+category as extraction and embedding, not a per-board judgment like tagging.
+
+**What shipped (2026-07-19):**
+- `transcribes` descriptor field + shared `compatWire.transcribe` +
+  `transcribeAudio()` dispatch + catalog flag ([providers.js](../server/providers.js));
+  loader validation ([plugin-loader.js](../server/plugin-loader.js)); `plugins.js`
+  capability `transcribe: !!p.transcribes`. **OpenAI advertises** `transcribes`
+  (real `/audio/transcriptions`); **local advertises** (the sidecar); Gemini is
+  left `null` pending verification that its OpenAI-compat base proxies
+  `/audio/transcriptions` (else it ships a native wire — exactly the plugin path).
+- **App-wide resolution** chosen: `resolveTranscriber(db, board)` reads a global
+  `transcribe_provider` (+ `transcribe_key_id`/`transcribe_model`), gates on the
+  capability, and falls back to local for anything unusable — never fails.
+- **No enabled toggle** — transcription is always on (local default), so the
+  provider *choice* is the toggle. Config is a per-provider **Transcription**
+  section in the plugin modal (`transcribeSection`, gated on `capabilities.
+  transcribe`), mirroring the embedder's per-provider `embedSection` — not a
+  standalone page. `transcribe-test` synthesizes a tiny WAV to probe e2e.
+- Verified: 6 backend tests (catalog advertisement, the multipart wire + error
+  mapping, provider-engine resolution, local fallback, local-sidecar mapping);
+  full suite green (397). Frontend mirrors `embedSection` (no UI test harness;
+  syntax-checked).
+
+The compose-stack e2e (a real provider key transcribing a real clip) is a manual
+run, same as Slice 2's — it needs an API key.
 
 ## Verify (compose stack)
 1. Slice 1: `curl -X POST --data-binary @clip.mp3 http://localhost:3003/transcribe`

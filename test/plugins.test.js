@@ -44,9 +44,9 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
 
 test("defs: capabilities mirror the underlying descriptors", () => {
   const local = getPluginDef("ai:local");
-  assert.deepEqual(local.capabilities, { tag: false, embed: true, research: false });
+  assert.deepEqual(local.capabilities, { tag: false, embed: true, transcribe: true, research: false });
   const anthropic = getPluginDef("ai:anthropic");
-  assert.deepEqual(anthropic.capabilities, { tag: true, embed: false, research: true });
+  assert.deepEqual(anthropic.capabilities, { tag: true, embed: false, transcribe: false, research: true });
   assert.ok(anthropic.ai.models.some((m) => m.id === anthropic.ai.defaultModel));
 
   const gecko = getPluginDef("crypto:coingecko");
