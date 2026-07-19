@@ -1,33 +1,21 @@
-// Provider plumbing for the AI tagger: the tagging call, embeddings, and key
-// validation, per provider. Prompt building, the queue, and tag validation are
-// provider-agnostic and live in worker.js.
+// The AI-provider ENGINE: the tagging call, embeddings, transcription, key
+// validation, per-key pacing, and the registry itself. Everything here is
+// provider-agnostic — it reads descriptor fields and never branches on a
+// provider name. Prompt building, the queue, and tag validation live in
+// worker.js.
 //
-// Each provider is one descriptor in the PROVIDERS registry below: its quirks
-// are data (base URL, which max-tokens field it wants, whether it forces the
-// tool call, …), and it points at one of two `wire` families — `anthropic`
-// (SDK, tool_use blocks, server-side web_search) or `openai-compat` (plain
-// fetch to /chat/completions). The generic code reads descriptor fields; it
-// never branches on a provider name. Adding a provider is one descriptor.
+// A provider is one descriptor: its quirks are data (base URL, which max-tokens
+// field it wants, whether it forces the tool call, …) and it points at one of
+// two `wire` families — `anthropic` (SDK, tool_use blocks, server-side
+// web_search) or `compat` (plain fetch to /chat/completions). The built-in
+// descriptors live in ./ai-providers/ as (wires) => descriptor factories — the
+// same contract a plugin returns — and are registered below; a dropped-in plugin
+// enters the SAME registry the SAME way (registerProvider). Adding a provider,
+// built-in or plugin, is one descriptor.
+import crypto from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
-
-// Local embedding via @huggingface/transformers (ONNX, in-process). The
-// pipeline is lazy-loaded on first call and the Promise is cached so concurrent
-// callers all await the same initialisation without double-loading.
-const LOCAL_EMBED_MODEL = "Xenova/bge-small-en-v1.5";
-let _localPipeline = null;
-async function localEmbed({ texts }) {
-  if (!_localPipeline) {
-    const { pipeline } = await import("@huggingface/transformers");
-    _localPipeline = pipeline("feature-extraction", LOCAL_EMBED_MODEL, { dtype: "q8" });
-  }
-  const pipe = await _localPipeline;
-  const vectors = [];
-  for (const text of texts) {
-    const out = await pipe(text, { pooling: "mean", normalize: true });
-    vectors.push(new Float32Array(out.data));
-  }
-  return { vectors, usage: { input: 0, output: 0, cacheRead: 0 } };
-}
+import { acquire } from "./provider-pacing.js";
+import { BUILTIN_PROVIDERS } from "./ai-providers/index.js";
 
 const TOOL_NAME = "record_tags";
 const TOOL_DESC = "Record the applicable taxonomy tags for this item.";
@@ -126,7 +114,10 @@ export function compatRequest({ provider, model, systemText, schema, parts, tool
 // --- wire families ---
 // Each owns tag/testKey/embed and reads the descriptor for base URL, label,
 // and its `compat`/`research` data. `embed: null` marks a family (or provider)
-// with no embeddings API.
+// with no embeddings API. Both are exported (WIRES, below) and handed to plugins
+// on `ctx.wires` — a compat-protocol provider reuses `WIRES.compat` and brings
+// only its descriptor (base + `compat` quirks + catalog), never a copy of the
+// protocol. A provider speaking a genuinely new protocol still brings its own.
 
 const anthropicWire = {
   async tag(desc, { apiKey, model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
@@ -268,162 +259,45 @@ const compatWire = {
   },
 };
 
+// The shared wire families, keyed by name — the two protocols the app speaks.
+// Exposed to plugins via ctx.wires (plugin-loader.js) so an external provider on
+// a known protocol references one instead of reimplementing it; a bug fix to a
+// wire reaches every provider riding it, built-in or plugin, from this one spot.
+export const WIRES = { anthropic: anthropicWire, compat: compatWire };
+
 // --- the registry ---
-// One descriptor per provider. `models`/`embeds.models` carry the admin catalog
-// (id + note) as the single source of truth — the admin UI is served from here.
+// One descriptor per provider, keyed by name. `models`/`embeds.models` carry the
+// admin catalog (id + note) as the single source of truth — the admin UI is
+// served from here. Built-ins are populated below from ./ai-providers factories;
+// plugins add theirs live via registerProvider. Both land in this one map.
+export const PROVIDERS = {};
 
-const anthropic = {
-  label: "Anthropic",
-  description: "Claude models for tagging & descriptions — bring a key",
-  wire: anthropicWire,
-  defaultModel: "claude-haiku-4-5",
-  models: [
-    { id: "claude-haiku-4-5", note: "fast, cheapest" },
-    { id: "claude-sonnet-4-6", note: "balanced" },
-    { id: "claude-opus-4-8", note: "sharpest, most expensive" },
-  ],
-  research: true, // server-side web_search before tagging
-  embeds: null,
-};
+// A networked (keyed) provider MUST declare its rate limit — pacing is part of the
+// provider contract, not an optional add-on. On-device/keyless providers (local,
+// whisper) make no external calls and are exempt. Enforced here for built-ins and
+// in registerProvider for dynamically-loaded plugins, so no AI provider can enter
+// the registry without a declared rpm/burst.
+export function requireRateLimit(name, desc) {
+  if (!desc.wire || desc.keyless) return; // on-device / keyless → no external rate limit
+  if (!(desc.rpm > 0) || !(desc.burst > 0))
+    throw new Error(`AI provider "${name}" must declare positive rpm and burst (rate-limit contract)`);
+}
 
-const openai = {
-  label: "OpenAI",
-  description: "GPT models for tagging + embeddings — bring a key",
-  wire: compatWire,
-  base: "https://api.openai.com/v1",
-  defaultModel: "gpt-5-mini",
-  models: [
-    { id: "gpt-5-nano", note: "fast, cheapest" },
-    { id: "gpt-5-mini", note: "balanced" },
-    { id: "gpt-5.1", note: "sharpest, most expensive" },
-  ],
-  research: false, // web search lives on the Responses API, not chat completions
-  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
-  embeds: {
-    default: "text-embedding-3-small",
-    models: [
-      { id: "text-embedding-3-small", note: "cheapest, plenty here" },
-      { id: "text-embedding-3-large", note: "sharper, ~6× cost" },
-    ],
-  },
-  // OpenAI's /audio/transcriptions endpoint (shared compatWire.transcribe). A
-  // provider advertises this only if its backend serves that endpoint — the
-  // generic path reads the flag, never the provider name.
-  transcribes: {
-    default: "gpt-4o-transcribe",
-    models: [
-      { id: "gpt-4o-mini-transcribe", note: "fast, cheapest" },
-      { id: "gpt-4o-transcribe", note: "balanced" },
-      { id: "whisper-1", note: "the classic Whisper" },
-    ],
-  },
-};
+// The ONE write into the registry: stamp the self-name, enforce the rate-limit
+// contract, insert. Built-ins and plugins both land here — the only difference is
+// a plugin flags `external` first (registerProvider), so a built-in is never
+// offered for uninstall. Keeping this a single function is what makes "built-ins
+// and plugins enter the registry the same way" true in code, not just in prose.
+function install(name, desc) {
+  desc.name = name;
+  requireRateLimit(name, desc); // any provider declares its rate limit, or it's rejected
+  PROVIDERS[name] = desc;
+}
 
-const gemini = {
-  label: "Gemini",
-  description: "Google models for tagging + embeddings — bring a key",
-  wire: compatWire,
-  base: "https://generativelanguage.googleapis.com/v1beta/openai",
-  defaultModel: "gemini-2.5-flash",
-  models: [
-    { id: "gemini-2.5-flash-lite", note: "fast, cheapest" },
-    { id: "gemini-2.5-flash", note: "balanced" },
-    { id: "gemini-2.5-pro", note: "sharpest, most expensive" },
-  ],
-  research: false, // the compat layer exposes no grounding
-  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
-  embeds: {
-    default: "gemini-embedding-001",
-    models: [{ id: "gemini-embedding-001", note: "Gemini's embedder" }],
-  },
-};
-
-// Z.ai. Text and vision are separate families (glm-5.x is text-only), so the
-// default must be a V model or image boards break; glm-5.2 is offered but
-// marked text-only. Quirks below are live-verified (2026-07): tool_choice
-// accepts only "auto" (forceToolChoice false — the user-turn instruction plus
-// the missing-call throw carry the forcing), `strict` isn't in its function
-// schema, thinking defaults ON and must be disabled or it burns output tokens,
-// and there is no /models endpoint (keyTest is a one-token completion). No
-// embeddings API on the international platform.
-const glm = {
-  label: "GLM",
-  description: "Z.ai GLM models for tagging — bring a key",
-  wire: compatWire,
-  base: "https://api.z.ai/api/paas/v4",
-  defaultModel: "glm-4.6v",
-  models: [
-    { id: "glm-4.6v-flash", note: "free" },
-    { id: "glm-4.6v", note: "balanced" },
-    { id: "glm-5.2", note: "sharpest, text boards only" },
-  ],
-  research: false, // has a chat-completions web_search tool — future work
-  compat: { maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion" },
-  embeds: null,
-};
-
-// Local embedding-only provider: no API key, no tagger capability. The wire
-// and models fields are intentionally empty; `keyless` marks it as something
-// that must never appear in the API key registration form.
-const local = {
-  label: "Local Embedder (Xenova)",
-  description: "On-device embeddings for search — no API key (transformers.js)",
-  wire: null,
-  defaultModel: null,
-  models: [],
-  research: false,
-  keyless: true,
-  embeds: {
-    default: LOCAL_EMBED_MODEL,
-    models: [{ id: LOCAL_EMBED_MODEL, note: "runs on-server · no API key" }],
-  },
-};
-
-// The on-server whisper sidecar — its own core, keyless provider (the
-// transcription peer of the Xenova embedder above). The model is baked into the
-// image and set via WHISPER_MODEL at deploy (a build-time knob, not a runtime
-// pick), so the single model here is mirrored from the app-side TRANSCRIBER_MODEL
-// env — the UI shows it as a note, not a dropdown. Resolved directly by
-// resolveTranscriber (wire null), never through the compat wire.
-const whisper = {
-  label: "Local Transcriber (Whisper)",
-  description: "On-device speech-to-text so recordings can be tagged — no API key",
-  wire: null,
-  defaultModel: null,
-  models: [],
-  research: false,
-  keyless: true,
-  embeds: null,
-  transcribes: {
-    default: process.env.TRANSCRIBER_MODEL || "base",
-    models: [{ id: process.env.TRANSCRIBER_MODEL || "base", note: "runs on-server · no API key · set via WHISPER_MODEL at deploy" }],
-  },
-};
-
-// OpenRouter — an OpenAI-compatible aggregator: one key, many models. Fits the
-// compat family with no new fields (bearer auth, /chat/completions, max_tokens).
-// strictTools is off because the backend models vary in strict-schema support,
-// and the key test is a one-token completion — OpenRouter has no per-model GET
-// and its ids carry a slash. Free vision models exist (`:free`), so tagging can
-// be verified at zero cost; the default is a cheap dedicated vision model.
-const openrouter = {
-  label: "OpenRouter",
-  description: "Many model backends behind one key",
-  wire: compatWire,
-  base: "https://openrouter.ai/api/v1",
-  defaultModel: "qwen/qwen3-vl-32b-instruct",
-  models: [
-    { id: "google/gemma-4-31b-it:free", note: "free" },
-    { id: "qwen/qwen3-vl-32b-instruct", note: "balanced" },
-    { id: "google/gemini-3.5-flash", note: "sharpest, most expensive" },
-  ],
-  research: false,
-  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion" },
-  embeds: null,
-};
-
-export const PROVIDERS = { local, whisper, anthropic, openai, gemini, glm, openrouter };
-for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
+// Populate the built-ins: call each factory with the shared wires and install the
+// descriptor it returns. Insertion order (see ai-providers/index.js) sets the
+// registry + catalog display order.
+for (const [name, make] of Object.entries(BUILTIN_PROVIDERS)) install(name, make(WIRES));
 
 // --- dynamic registration (phase 2) ---
 // Register a dynamically-loaded AI provider (an `ai-provider` plugin). The
@@ -433,9 +307,8 @@ for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-
 // one write. `external` marks it for uninstall and lets the UI distinguish it.
 // The loader calls this only after the descriptor is fully validated.
 export function registerProvider(name, desc) {
-  desc.name = name;
-  desc.external = true;
-  PROVIDERS[name] = desc;
+  desc.external = true; // marks it for uninstall + lets the UI distinguish it from a built-in
+  install(name, desc);
 }
 
 export function unregisterProvider(name) {
@@ -446,6 +319,30 @@ export function unregisterProvider(name) {
 // the default, PROVIDERS[p]?.embeds as the "does this provider embed" check.
 // The one place a plain list is needed (validation error messages) derives it
 // inline from Object.keys(PROVIDERS).
+
+// --- per-key pacing ---
+// AI calls run through the same token bucket connectors use (provider-pacing.js),
+// but bucketed per API KEY, not per provider: two keys of one provider are two
+// accounts with independent limits, two boards sharing a key contend. Every keyed
+// provider DECLARES its rpm/burst in the descriptor (required — see requireRateLimit,
+// grounded in each provider's published tier where one exists), so the DEFAULT below
+// is a defensive fallback only, never reached for a validated provider. AI_RPM/AI_BURST
+// override for ops + tests (mirrors CONNECTOR_RPM). No withRetry layer here on purpose:
+// the Anthropic SDK already retries and the queue's spaced retry_at is the retry
+// mechanism (worker-queue-holes §2) — this paces only. Keyless on-device providers
+// (local/whisper) never reach here.
+const DEFAULT_AI_RPM = 300, DEFAULT_AI_BURST = 10;
+const aiKeyBucket = (provider, apiKey) =>
+  `ai:${provider}:${apiKey ? crypto.createHash("sha1").update(apiKey).digest("hex").slice(0, 12) : "nokey"}`;
+// rpmOverride/burstOverride carry the per-provider Plugins-page config (read by the
+// worker's aiRate helper); precedence is env > admin override > descriptor default.
+async function paceAi(provider, apiKey, rpmOverride, burstOverride) {
+  const desc = PROVIDERS[provider];
+  if (desc?.keyless) return; // on-device (local/whisper): no external call, nothing to pace
+  const rpm = Number(process.env.AI_RPM) || rpmOverride || desc?.rpm || DEFAULT_AI_RPM;
+  const burst = Number(process.env.AI_BURST) || burstOverride || desc?.burst || DEFAULT_AI_BURST;
+  await acquire(aiKeyBucket(provider, apiKey), rpm, burst);
+}
 
 // --- public dispatchers ---
 
@@ -458,15 +355,18 @@ export function unregisterProvider(name) {
 // normalized to { input, output, cacheRead, searches } — cache reads are kept
 // out of `input` because they bill at a fraction of the input rate. Throws with
 // a readable message on any failure.
-export function callTagger({ provider, research = false, ...rest }) {
+export async function callTagger({ provider, research = false, rpm, burst, ...rest }) {
+  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
   return desc.wire.tag(desc, { ...rest, research: research && desc.research });
 }
 
 // Embed a batch of texts (semantic search). Only embeddings-capable providers
-// qualify — callers gate on PROVIDERS[provider].embeds before reaching here.
-export function embedTexts({ provider, ...rest }) {
-  if (provider === "local") return localEmbed(rest);
+// qualify — callers gate on PROVIDERS[provider].embeds before reaching here. The
+// on-device `local` provider rides its own wire.embed like any other (paceAi
+// no-ops for keyless), so there's no provider-name branch here.
+export async function embedTexts({ provider, rpm, burst, ...rest }) {
+  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
   return desc.wire.embed(desc, rest);
 }
@@ -476,7 +376,8 @@ export function embedTexts({ provider, ...rest }) {
 // PROVIDERS[provider].transcribes. `whisper` is the on-server sidecar, resolved
 // directly by resolveTranscriber (worker.js) with a null wire, so it never
 // routes here — only keyed provider engines do.
-export function transcribeAudio({ provider, ...rest }) {
+export async function transcribeAudio({ provider, rpm, burst, ...rest }) {
+  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
   return desc.wire.transcribe(desc, rest);
 }

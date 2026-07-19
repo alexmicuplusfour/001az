@@ -9,6 +9,11 @@ services:
     build: !reset null
     pull_policy: never
 
+  transcriber:
+    image: 001az-transcriber:${APP_TAG:-latest}
+    build: !reset null
+    pull_policy: never
+
   app:
     image: 001az-app:${APP_TAG:-latest}
     build: !reset null

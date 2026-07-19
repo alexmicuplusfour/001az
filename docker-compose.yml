@@ -57,6 +57,8 @@ services:
       # set in .env only when a provider's pace or latency demands it
       CONNECTOR_RPM: ${CONNECTOR_RPM:-}
       CONNECTOR_BURST: ${CONNECTOR_BURST:-}
+      AI_RPM: ${AI_RPM:-}
+      AI_BURST: ${AI_BURST:-}
       CONNECTOR_TIMEOUT_MS: ${CONNECTOR_TIMEOUT_MS:-}
       CONNECTOR_RETRY_CAP_MS: ${CONNECTOR_RETRY_CAP_MS:-}
       AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}

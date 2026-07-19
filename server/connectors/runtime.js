@@ -10,6 +10,7 @@
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
 import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 import { getFaceProducer } from "../faces/index.js";
+import { acquire } from "../provider-pacing.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
@@ -24,40 +25,15 @@ async function pluginRowState(db, conn, name) {
 }
 
 // --- per-provider rate limiting + 429 backoff ---
-// A token bucket per provider keeps the sweep and backfills under each API's
-// limit instead of bursting and 429ing. Acquisition is serialized per provider
-// so concurrent callers don't all spend the same tokens; when the bucket is
-// empty a call waits for a refill. On a 429 the call is retried, honoring
-// Retry-After capped at 30 s — these sleeps run inside the worker's
-// single-flight tick, so a provider asking for an hour must not be taken at
-// its word; long waits belong to the queue's spaced retry_at, not here.
-// rpm/burst come from the provider descriptor.
+// Token-bucket pacing lives in provider-pacing.js (shared with the AI wire, so
+// both throttle the same way). The bucket key here is the connector provider
+// name; rpm/burst come from the provider descriptor (+ the Plugins-page override
+// merged in activeProvider). On a 429 the call is retried below, honoring
+// Retry-After capped at 30 s — these sleeps run inside the worker's single-flight
+// tick, so a provider asking for an hour must not be taken at its word; long
+// waits belong to the queue's spaced retry_at, not here.
 const DEFAULT_RPM = 30, DEFAULT_BURST = 15;
-const buckets = new Map();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function acquire(key, rpm, burst) {
-  let b = buckets.get(key);
-  if (!b) { b = { tokens: burst, last: Date.now(), rpm, burst, chain: Promise.resolve() }; buckets.set(key, b); }
-  else if (b.rpm !== rpm || b.burst !== burst) {
-    // Config overrides (Plugins page) apply live, not on next boot; clamp the
-    // saved-up tokens so a burst cut takes effect immediately.
-    b.rpm = rpm;
-    b.burst = burst;
-    b.tokens = Math.min(b.tokens, burst);
-  }
-  const run = b.chain.then(async () => {
-    for (;;) {
-      const now = Date.now();
-      b.tokens = Math.min(b.burst, b.tokens + ((now - b.last) / 60000) * b.rpm);
-      b.last = now;
-      if (b.tokens >= 1) { b.tokens -= 1; return; }
-      await sleep(((1 - b.tokens) / b.rpm) * 60000);
-    }
-  });
-  b.chain = run.catch(() => {}); // keep the per-provider chain alive on failure
-  return run;
-}
 
 // 429 and — for tiers like CoinGecko's demo key — 401 both signal "slow down"
 // (the key is valid; it's rate). Retry either, honoring Retry-After up to the

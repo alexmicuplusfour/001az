@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { startServer, adminSession } from "./helpers.js";
 import { PLUGIN_API_VERSION, validateManifest, loadDir, loadAll, unregister, catalogIdFor } from "../server/plugin-loader.js";
 import { getConnector } from "../server/connectors/index.js";
-import { PROVIDERS, providerCatalog } from "../server/providers.js";
+import { PROVIDERS, providerCatalog, WIRES } from "../server/providers.js";
 import { pluginCatalog } from "../server/plugins.js";
 import { setPluginState, setSetting, upsertExternalPlugin } from "../server/db.js";
 
@@ -64,6 +64,9 @@ test("loadDir: a valid ai-provider registers into PROVIDERS and the served catal
   assert.equal(catalogId, "ai:acme.model");
   assert.equal(PROVIDERS["acme.model"].label, "Acme AI");
   assert.equal(PROVIDERS["acme.model"].external, true, "stamped external for uninstall");
+  // It brought only a descriptor and reused the shared compat wire via ctx.wires —
+  // the same object core's built-in compat providers dispatch through, not a copy.
+  assert.equal(PROVIDERS["acme.model"].wire, WIRES.compat, "reuses the shared compat wire");
   assert.ok(providerCatalog().some((p) => p.name === "acme.model"), "flows through providerCatalog");
   unregister(manifest);
   assert.equal(PROVIDERS["acme.model"], undefined, "unregister removes it");

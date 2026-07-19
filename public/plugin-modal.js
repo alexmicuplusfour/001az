@@ -109,6 +109,7 @@ export function openPluginModal(p, ctx) {
       if (p.capabilities.tag) built.push(taggerSection(p, ctx, reload));
       if (p.capabilities.embed) built.push(embedSection(p, ctx, reload));
       if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, reload));
+      if (p.configSchema.length) built.push(pacingSection(p, reload)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {
       built.push(sourceSection(p, ctx, reload));
     } else {
@@ -239,6 +240,40 @@ function connectorSection(p, ctx, reload) {
   });
 
   return { node: sec, footerActions: [save, test] };
+}
+
+// --- ai: per-provider request pacing (rpm/burst) — mirrors the connector config ---
+// Same number-field + Save shape as connectorSection, scoped to the rate-limit
+// fields the ai plugin declares. Keyless providers declare none, so the dispatch
+// above skips this section for them. Empty input = back to the descriptor default.
+function pacingSection(p, reload) {
+  const sec = section(
+    "Rate limit",
+    "How fast the worker calls this provider's API, per key. Raise it to match your account tier; blank uses the default."
+  );
+  const fields = [];
+  for (const f of p.configSchema) {
+    const input = document.createElement("input");
+    input.type = "number";
+    if (f.min !== undefined) input.min = String(f.min);
+    input.value = p.state.config[f.key] ?? "";
+    input.placeholder = `default ${f.default}`;
+    input.style.cssText = "width:100%;box-sizing:border-box;";
+    fields.push({ f, value: () => (input.value === "" ? null : Number(input.value)) });
+    sec.appendChild(labeled(f.label + (f.help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${f.help}</span>` : ""), input));
+  }
+  const save = document.createElement("button");
+  save.textContent = "Save";
+  save.onclick = busy(save, "Saving…", async () => {
+    const config = {};
+    for (const { f, value } of fields) config[f.key] = value(); // null = clear the override, back to default
+    try {
+      await api("PATCH", `/api/admin/plugins/${p.id}`, { config });
+      toast(`${p.label} rate limit saved`);
+      reload();
+    } catch (err) { toast.error(err.message); }
+  });
+  return { node: sec, footerActions: [save] };
 }
 
 // --- ai: this provider's keys (add / test / remove) ---

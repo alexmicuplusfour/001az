@@ -47,7 +47,7 @@ import {
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, transcribeAudio, PROVIDERS } from "./providers.js";
-import { pluginInstalled } from "./plugins.js";
+import { pluginInstalled, pluginState } from "./plugins.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
@@ -63,8 +63,17 @@ const aiPluginInstalled = (db, provider) => pluginInstalled(db, `ai:${provider}`
 // Every live tagger call lands in the plugin health ledger (structured error
 // or heal) so the Plugins page dot reflects real traffic — and the future
 // self-healing loop has telemetry to read.
-const trackedTagger = (db, args) =>
-  withPluginHealth(db, `ai:${args.provider}`, () => callTagger(args));
+// A provider's effective rate limit: the Plugins-page rpm/burst override, or the
+// descriptor default (pluginState merges the configSchema defaults in). Read per
+// call — the config changes rarely and it's a single indexed lookup — and handed
+// to the pacing bucket via the dispatcher args. Keyless providers have no rpm here
+// (empty configSchema); they never reach paceAi anyway.
+const aiRate = async (db, provider) => (await pluginState(db, `ai:${provider}`))?.config || {};
+
+const trackedTagger = async (db, args) => {
+  const { rpm, burst } = await aiRate(db, args.provider);
+  return withPluginHealth(db, `ai:${args.provider}`, () => callTagger({ ...args, rpm, burst }));
+};
 
 // The app-default tagger: settings-designated key, else the legacy env var.
 // Returns { provider, apiKey, model } or null when nothing is configured.
@@ -392,12 +401,14 @@ export function invalidateAllBoardCaches() {
 // of wrongly marking a whole batch. Returns { embedded, skipped }; throws for
 // batch-level failures. Exported so the sweep and tests share one path.
 export async function embedBatch(db, embedder, rows) {
+  const { rpm, burst } = await aiRate(db, embedder.provider); // per-provider pacing (local: none)
   const call = (rs) =>
     withPluginHealth(db, `ai:${embedder.provider}`, () =>
       embedTexts({
         provider: embedder.provider,
         apiKey: embedder.apiKey,
         model: embedder.model,
+        rpm, burst,
         texts: rs.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
       })
     );
@@ -614,6 +625,7 @@ export async function resolveTranscriber(db, board = null) {
     const key = keyId ? await getAiKey(db, keyId) : null;
     if (key) {
       const model = (await getSetting(db, "transcribe_model")) || PROVIDERS[provider].transcribes.default;
+      const { rpm, burst } = await aiRate(db, provider); // per-provider pacing, same bucket as tagging
       return {
         id: provider, // the engine family; the cache stamp appends :model (→ "openai:gpt-4o-transcribe")
         model,
@@ -622,7 +634,7 @@ export async function resolveTranscriber(db, board = null) {
         // the Plugins page — otherwise a paid provider transcribes invisibly.
         transcribe: async (buf, filename) =>
           (await withPluginHealth(db, `ai:${provider}`, () =>
-            transcribeAudio({ provider, apiKey: key.api_key, model, audio: buf, filename }))).text,
+            transcribeAudio({ provider, apiKey: key.api_key, model, rpm, burst, audio: buf, filename }))).text,
       };
     }
   }

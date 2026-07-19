@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { resolveSource, fetchModule } from "./plugin-fetch.js";
-import { registerProvider, unregisterProvider } from "./providers.js";
+import { registerProvider, unregisterProvider, WIRES } from "./providers.js";
 import {
   getConnector,
   registerConnector, unregisterConnector,
@@ -196,6 +196,10 @@ async function fetchJson(url, { signal, ...opts } = {}) {
 const makeCtx = (manifest) => ({
   apiVersion: PLUGIN_API_VERSION,
   fetchJson,
+  // The shared AI wire families ({ anthropic, compat }). An ai-provider on a known
+  // protocol returns `wire: ctx.wires.compat` and brings only its descriptor (base
+  // + `compat` quirks + model catalog) — the protocol code stays in core, one copy.
+  wires: WIRES,
   renderChart, // face rendering, for connector plugins that ship a chart face
   log: (...a) => console.log(`[plugin ${manifest.id}]`, ...a),
 });

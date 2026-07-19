@@ -14,7 +14,7 @@ test("every descriptor is well-formed and self-named", () => {
     assert.equal(d.name, name, `${name}: self-reference stamped`);
     assert.equal(typeof d.label, "string");
     assert.equal(typeof d.research, "boolean");
-    if (d.keyless) continue; // local: no wire, no tagger models — embed-only
+    if (d.keyless) continue; // local/whisper: on-device, no tagger models (local's wire is embed-only)
     assert.ok(d.wire && typeof d.wire.tag === "function", `${name}: has a wire family`);
     assert.ok(Array.isArray(d.models) && d.models.length, `${name}: has a model catalog`);
     for (const m of d.models) assert.equal(typeof m.note, "string", `${name}/${m.id}: note is a string`);

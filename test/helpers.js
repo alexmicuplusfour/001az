@@ -42,6 +42,8 @@ export async function startServer() {
   process.env.STATIC_DIR = tmp; // no real frontend needed for API tests
   process.env.CONNECTOR_RPM = "1000000"; // don't rate-limit stubbed provider calls in tests
   process.env.CONNECTOR_BURST = "1000000";
+  process.env.AI_RPM = "1000000"; // same for the AI wire's per-key pacing
+  process.env.AI_BURST = "1000000";
   process.env.INGEST_FEED_CACHE_MS = "0"; // enumerate fresh each call unless a test opts in
 
   // Query string cache-busts the import so repeated starts in one process each
