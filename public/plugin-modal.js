@@ -560,26 +560,17 @@ function transcribeSection(p, ctx, reload) {
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
 
   if (p.ai.keyless) {
-    // The on-device whisper sidecar is the default. Offer the switch-back only
-    // when a provider is currently overriding it.
-    if (active) {
-      const note = document.createElement("p");
-      note.className = "muted";
-      note.style.margin = "0";
-      note.textContent = "On-server · always available · the default transcriber.";
-      sec.appendChild(note);
-    } else {
-      const use = document.createElement("button");
-      use.textContent = "Use Whisper";
-      use.onclick = busy(use, "Saving…", async () => {
-        try {
-          await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
-          toast("Transcription set to the on-device Whisper sidecar");
-          reload();
-        } catch (err) { toast.error(err.message); }
-      });
-      actions.appendChild(use);
-    }
+    // The on-device whisper sidecar — nothing to configure (its model is a
+    // deploy knob), so the button just makes it the default, and sits disabled +
+    // secondary while it already is, like the other slots.
+    const apply = async () => {
+      try {
+        await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
+        toast("Transcription set to the on-device Whisper sidecar");
+        reload();
+      } catch (err) { toast.error(err.message); }
+    };
+    actions.appendChild(slotButton("Make default transcriber", active, [], apply));
   } else {
     const apply = async () => {
       const model = modelSel?.value || p.ai.transcribes.default;
