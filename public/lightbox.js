@@ -79,6 +79,7 @@ const elLightboxDownload = document.getElementById("lightbox-download");
 const elLightboxAudio = document.getElementById("lightbox-audio");
 const elLightboxAudioEl = document.getElementById("lightbox-audio-el");
 const elLightboxAudioWave = document.getElementById("lightbox-audio-wave");
+const elLightboxAudioText = document.getElementById("lightbox-audio-transcript");
 
 let lightboxImg = null;
 let lightboxList = [];
@@ -528,7 +529,35 @@ function hideAudio() {
   elLightboxAudioEl.removeAttribute("src");
   elLightboxAudioEl.load();
   elLightboxAudioWave.removeAttribute("src");
+  elLightboxAudioText.hidden = true;
+  elLightboxAudioText.textContent = "";
   elLightboxAudio.hidden = true;
+}
+
+// The transcript replaces the waveform in the audio view when there's speech.
+// Fetched per open (independent of the side panel); the waveform stays as the
+// fallback while a fresh upload is still transcribing (null) or for a clip with
+// no discernible speech (""). Tokened so fast navigation can't paint a stale one.
+let audioTextReq = 0;
+async function showAudioText(f) {
+  const token = ++audioTextReq;
+  const showWave = () => {
+    elLightboxAudioText.hidden = true;
+    if (f.w && f.h) { elLightboxAudioWave.src = thumbUrl(f.name); elLightboxAudioWave.hidden = false; }
+    else { elLightboxAudioWave.removeAttribute("src"); elLightboxAudioWave.hidden = true; }
+  };
+  showWave(); // immediate fallback while the transcript loads
+  try {
+    const r = await fetch(`/api/instances/${f.id}/transcript`);
+    if (token !== audioTextReq) return; // superseded by a newer open
+    const { transcript } = r.ok ? await r.json() : {};
+    if (transcript && transcript.trim()) {
+      elLightboxAudioWave.hidden = true;
+      elLightboxAudioWave.removeAttribute("src");
+      elLightboxAudioText.textContent = transcript;
+      elLightboxAudioText.hidden = false;
+    }
+  } catch { /* keep the waveform fallback */ }
 }
 
 // Render a file-carrying thing (an instance, or the entity's face fields as
@@ -544,11 +573,12 @@ function showMedia(f) {
     elLightboxImg.hidden = true;
     if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
     elLightbox.classList.remove("loading");
-    if (f.w && f.h) { elLightboxAudioWave.src = thumbUrl(f.name); elLightboxAudioWave.hidden = false; }
-    else { elLightboxAudioWave.removeAttribute("src"); elLightboxAudioWave.hidden = true; }
     const url = fullUrl(f.name);
     if (elLightboxAudioEl.getAttribute("src") !== url) elLightboxAudioEl.src = url;
     elLightboxAudio.hidden = false;
+    // Transcript replaces the waveform when there's speech; the waveform is the
+    // fallback while still transcribing or when the clip has no speech.
+    showAudioText(f);
     // Keep keyboard nav (arrows/Escape) on the lightbox, not the player.
     elLightbox.focus({ preventScroll: true });
     return;

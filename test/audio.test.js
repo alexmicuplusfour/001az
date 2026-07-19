@@ -11,13 +11,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
-import { setPluginState, createAiKey, setSetting, getSetting } from "../server/db.js";
+import { setPluginState, createAiKey, setSetting, getSetting, oneAudioNeedingTranscription,
+  createEntity, insertItem, reprocessEntity } from "../server/db.js";
 import { audioSource } from "../server/sources/audio.js";
 import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
-import { documentTextFor, resolveTranscriber } from "../server/worker.js";
+import { resolveTranscriber, embedTextFor } from "../server/worker.js";
 import { transcribeAudio, providerCatalog } from "../server/providers.js";
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
@@ -58,108 +59,6 @@ test("the waveform producer is registered in the face registry", () => {
   assert.equal(typeof getFaceProducer("waveform"), "function");
 });
 
-// A deterministic stub engine: counts transcribe() calls and returns a fixed
-// transcript, so cache hits/misses are observable without a real sidecar.
-function stubTranscriber(text = "hello world", { id = "whisper", model = "base" } = {}) {
-  const eng = { id, model, calls: 0, async transcribe() { eng.calls++; return text; } };
-  return eng;
-}
-
-test("documentTextFor(audio): transcribes, returns text, writes a stamped .txt cache", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw-audio-bytes");
-  const eng = stubTranscriber("The quick brown fox.");
-  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
-
-  assert.equal(await documentTextFor(dir, file, eng), "The quick brown fox.");
-  assert.equal(eng.calls, 1);
-  assert.equal(
-    fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
-    "# engine: whisper:base\n\nThe quick brown fox.",
-    "cache carries the engine stamp then the transcript",
-  );
-});
-
-test("documentTextFor(audio): a second call on the same engine hits the cache (no re-transcribe)", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  const eng = stubTranscriber("cached line");
-  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
-
-  assert.equal(await documentTextFor(dir, file, eng), "cached line");
-  assert.equal(await documentTextFor(dir, file, eng), "cached line");
-  assert.equal(eng.calls, 1, "the second read came from the cache");
-});
-
-test("documentTextFor(audio): a cache from a DIFFERENT engine is ignored and re-transcribed", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  // A stale cache produced by a different model — the flexibility guard.
-  fs.writeFileSync(path.join(dir, "a.mp3.txt"), "# engine: whisper:small\n\nold transcript");
-  const eng = stubTranscriber("fresh transcript", { model: "base" });
-  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
-
-  assert.equal(await documentTextFor(dir, file, eng), "fresh transcript", "different stamp → re-transcribed");
-  assert.equal(eng.calls, 1);
-  assert.equal(
-    fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
-    "# engine: whisper:base\n\nfresh transcript",
-    "the cache is re-stamped with the producing engine",
-  );
-});
-
-test("documentTextFor(audio): a provider engine stamps the cache as <provider>:<model> (no doubled model)", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  // A provider engine's id is the family; model is separate — the stamp is
-  // id:model, so a bug that folded model into id would double it here.
-  const eng = stubTranscriber("provider transcript", { id: "openai", model: "gpt-4o-transcribe" });
-  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
-  assert.equal(await documentTextFor(dir, file, eng), "provider transcript");
-  assert.equal(
-    fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
-    "# engine: openai:gpt-4o-transcribe\n\nprovider transcript",
-  );
-});
-
-test("documentTextFor(audio): an empty transcript is a real answer — cached, not re-run", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  const eng = stubTranscriber(""); // a genuinely speechless clip
-  const file = { kind: "audio", name: "a.mp3", original_name: "silence.mp3" };
-
-  assert.equal(await documentTextFor(dir, file, eng), "");
-  assert.equal(await documentTextFor(dir, file, eng), "");
-  assert.equal(eng.calls, 1, "empty transcript is cached like any other");
-  assert.equal(fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"), "# engine: whisper:base\n\n");
-});
-
-test("documentTextFor(audio): a PROVIDER's empty transcript is NOT cached (a blip must not freeze the clip)", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  // A provider engine (id ≠ "local") returning "" is ambiguous — could be a blip.
-  const eng = stubTranscriber("", { id: "openai", model: "whisper-1" });
-  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
-
-  assert.equal(await documentTextFor(dir, file, eng), "");
-  assert.equal(fs.existsSync(path.join(dir, "a.mp3.txt")), false, "no cache written for a provider empty");
-  assert.equal(await documentTextFor(dir, file, eng), "");
-  assert.equal(eng.calls, 2, "the second call re-attempts rather than serving a frozen empty");
-});
-
-test("documentTextFor(audio): transcriber downtime throws status-less (requeue, never empty)", async (t) => {
-  const { galleryDir: dir } = tmpDirs(t);
-  fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  const eng = { id: "whisper", model: "base", async transcribe() { throw new Error("transcriber unreachable (ECONNREFUSED) — will retry"); } };
-  const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
-
-  await assert.rejects(
-    documentTextFor(dir, file, eng),
-    (e) => /transcriber unreachable/.test(e.message) && e.status === undefined,
-  );
-  assert.equal(fs.existsSync(path.join(dir, "a.mp3.txt")), false, "no cache written on failure");
-});
-
 test("resolveTranscriber: with no provider configured, resolves the whisper sidecar and maps its HTTP results", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
@@ -177,9 +76,14 @@ test("resolveTranscriber: with no provider configured, resolves the whisper side
   assert.match(seen.url, /\/transcribe$/);
   assert.equal(seen.opts.method, "POST");
 
-  // non-OK → status-less throw so failOrRequeue waits it out
+  // non-OK carries the HTTP status so the transcription loop can classify it:
+  // a 5xx is a transient server fault (back off + retry)...
   globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
-  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber failed/.test(e.message) && e.status === undefined);
+  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber failed/.test(e.message) && e.status === 500);
+
+  // ...a 422 is undecodable input (the loop marks it a permanent transcript_error)
+  globalThis.fetch = async () => ({ ok: false, status: 422, json: async () => ({}) });
+  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => e.status === 422);
 
   // unreachable (deploy blip) → same shape
   globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
@@ -273,6 +177,60 @@ test("ai-config POST: a transcribe model the provider doesn't advertise is rejec
   });
   assert.equal(ok.status, 200);
   assert.equal(await getSetting(db, "transcribe_model"), "whisper-1");
+});
+
+// ── Transcription is decoupled from tagging (its own loop) ───────────────────
+
+test("oneAudioNeedingTranscription: picks audio lacking a transcript; skips transcribed / errored / non-audio", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  const board = await seedBoard(db, "transc-queue");
+  const ins = async (payload) => {
+    const { rows: [{ id }] } = await db.query(
+      "INSERT INTO items (board_id, payload, status, created_at, updated_at) VALUES ($1,$2,'held',$3,$3) RETURNING id",
+      [board, JSON.stringify(payload), Date.now()]);
+    return id;
+  };
+  await ins({ files: [{ name: "a.mp3", kind: "audio" }], transcript: "already done" });
+  await ins({ files: [{ name: "b.mp3", kind: "audio" }], transcript_error: "bad audio" });
+  await ins({ files: [{ name: "c.png", kind: "image" }] });
+  const need = await ins({ files: [{ name: "d.mp3", kind: "audio" }] });
+
+  const row = await oneAudioNeedingTranscription(db);
+  assert.equal(row.id, need, "the one audio item with neither a transcript nor an error");
+  assert.equal(row.payload.files[0].name, "d.mp3");
+});
+
+test("reprocess clears a transcript_error so a failed transcription retries; a good transcript survives", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  const board = await seedBoard(db, "reprocess-transc");
+
+  // One clip that failed to transcribe (permanent error) and one that succeeded.
+  const badE = await createEntity(db, board, { identity: "bad.mp3" });
+  const badItem = await insertItem(db, board, { files: [{ name: "bad.mp3", kind: "audio" }], transcript_error: "undecodable audio" }, "failed", badE);
+  const okE = await createEntity(db, board, { identity: "good.mp3" });
+  const okItem = await insertItem(db, board, { files: [{ name: "good.mp3", kind: "audio" }], transcript: "hello there" }, "tagged", okE);
+
+  await reprocessEntity(db, badE);
+  await reprocessEntity(db, okE);
+
+  const { rows } = await db.query("SELECT id, payload FROM items WHERE id = ANY($1)", [[badItem, okItem]]);
+  const p = Object.fromEntries(rows.map((r) => [Number(r.id), r.payload]));
+  assert.equal(p[badItem].transcript_error, undefined, "the failed clip's error is cleared → the loop will retry it");
+  assert.equal(p[badItem].transcript, undefined, "still no transcript, so it re-queues");
+  assert.equal(p[okItem].transcript, "hello there", "a good transcript survives reprocess — no re-billing");
+
+  // Only the cleared clip re-enters the transcription queue (the good one is done).
+  const nextUp = await oneAudioNeedingTranscription(db);
+  assert.equal(Number(nextUp.id), badItem);
+});
+
+test("embedTextFor: an audio transcript is part of the embed text (searchable by speech)", () => {
+  const withText = embedTextFor([], {}, { transcript: "the quick brown fox jumps", files: [{ original_name: "clip.mp3" }] });
+  assert.match(withText, /quick brown fox/, "the transcript feeds the vector");
+  // Untagged audio with no transcript falls back to the filename, as before.
+  assert.equal(embedTextFor([], {}, { files: [{ original_name: "clip.mp3" }] }), "clip.mp3");
 });
 
 test("audio ingest: metadata lands; the waveform face degrades gracefully", async (t) => {

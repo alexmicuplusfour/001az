@@ -17,6 +17,7 @@ import {
   retagBoard,
   setBoardNextRun,
   itemsNeedingEmbedding,
+  oneAudioNeedingTranscription,
   setItemEmbedding,
   setItemEmbedError,
   getEntity,
@@ -124,6 +125,9 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
     if (k !== "description" && typeof v === "string" && v.trim()) parts.push(v.trim());
   }
   if (tags.length) parts.push(tags.map((t) => t.replace("/", ": ")).join("; "));
+  // Audio: the transcript is the richest signal — include it so a recording is
+  // searchable by what's spoken, tagged or not.
+  if (payload.transcript) parts.push(payload.transcript);
   const text = parts.join("\n") || payload.files?.[0]?.original_name || payload.identity || "untitled item";
   return text.slice(0, EMBED_TEXT_MAX_CHARS);
 }
@@ -562,9 +566,11 @@ const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "base";
 
 // The on-server whisper-sidecar engine, wrapped as an interchangeable descriptor
 // { id, model, transcribe } so a provider engine slots in the way resolveEmbedder
-// picks local vs a provider. transcribe throws status-less on downtime so the
-// item requeues rather than tagging on empty text. id "whisper" matches the
-// keyless `whisper` provider — its plugin card and the transcribe_provider sentinel.
+// picks local vs a provider. transcribe throws status-less when the sidecar is
+// unreachable (transient), and status-tagged (422 undecodable / 5xx fault) on a
+// non-OK response, so the transcription loop can back off vs mark permanent. id
+// "whisper" matches the keyless `whisper` provider — its plugin card and the
+// transcribe_provider sentinel.
 function whisperTranscriber() {
   return {
     id: "whisper",
@@ -581,7 +587,14 @@ function whisperTranscriber() {
       } catch (e) {
         throw new Error(`transcriber unreachable (${e.message}) — will retry`);
       }
-      if (!res.ok) throw new Error(`transcriber failed (HTTP ${res.status}) — will retry`);
+      if (!res.ok) {
+        // Attach the status so the transcription loop can tell a transient
+        // server fault (5xx → back off and retry) from bad input (422 → mark
+        // permanent). `unreachable` above stays status-less (also transient).
+        const e = new Error(`transcriber failed (HTTP ${res.status})`);
+        e.status = res.status;
+        throw e;
+      }
       return (await res.json()).text || "";
     },
   };
@@ -616,7 +629,7 @@ export async function resolveTranscriber(db, board = null) {
   return whisperTranscriber();
 }
 
-export async function documentTextFor(galleryDir, file, transcriber = null) {
+export async function documentTextFor(galleryDir, file) {
   if (file.kind === "pdf") {
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
     let res;
@@ -646,35 +659,6 @@ export async function documentTextFor(galleryDir, file, transcriber = null) {
   if (file.kind === "text") {
     const text = await fs.promises.readFile(path.join(galleryDir, file.name), "utf8").catch(() => "");
     if (!text.trim()) throw noTextError(file);
-    return text;
-  }
-  if (file.kind === "audio") {
-    if (!transcriber) throw new Error("transcriber not resolved — will retry"); // v1 always resolves local
-    // Cache-first, provenance-stamped: <name>.txt is "# engine: <id>:<model>",
-    // a blank line, then the transcript. Reuse ONLY when the same engine
-    // produced it, so a model bump or a provider swap re-transcribes instead of
-    // serving stale text; a plain retag on the same engine hits the cache.
-    // Transcribe-once — cleanup already rm's <name>.txt with the file.
-    const stamp = `# engine: ${transcriber.id}:${transcriber.model}`;
-    const cachePath = path.join(galleryDir, file.name + ".txt");
-    const cached = await fs.promises.readFile(cachePath, "utf8").catch(() => null);
-    if (cached !== null) {
-      const sep = cached.indexOf("\n\n");
-      if (sep !== -1 && cached.slice(0, sep) === stamp) return cached.slice(sep + 2);
-      // different engine (or unstamped legacy) → fall through and re-transcribe
-    }
-    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-    // Pass the stored name so a provider wire gets a valid audio extension; the
-    // local sidecar ignores it (PyAV sniffs the bytes).
-    const text = await transcriber.transcribe(buf, file.name); // downtime throws → requeue, never empty
-    // Cache the result — EXCEPT an empty transcript from a provider engine. The
-    // whisper sidecar's empty is trustworthy (VAD silence), so cache it and never
-    // re-bill; a provider returning 200-with-empty is ambiguous (a blip vs real
-    // silence), so leave it uncached and let a retag re-attempt rather than
-    // freezing the clip as speechless.
-    if (text || transcriber.id === "whisper") {
-      await fs.promises.writeFile(cachePath, `${stamp}\n\n${text}`);
-    }
     return text;
   }
   return "";
@@ -740,20 +724,26 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       }];
     }
     if (file.kind === "audio") {
-      // Tag on the speech: transcribe (the extract leg may have already primed
-      // the <name>.txt cache; otherwise this fills it) then tag the transcript.
-      // Transcriber downtime throws out of documentTextFor → the item requeues
-      // rather than tagging on empty text.
-      const text = await documentTextFor(galleryDir, file, await resolveTranscriber(db));
-      if (text.trim()) {
+      // The transcript is produced out-of-band by the transcription loop and
+      // stored on the payload, independent of tagging. If it isn't ready yet
+      // (and didn't permanently fail), requeue — status-less — so the first tag
+      // still tags the speech rather than the filename.
+      const transcript = payload.transcript;
+      if (transcript === undefined && !payload.transcript_error) {
+        // A wait, not a failure — don't burn tag attempts while a long clip
+        // transcribes (noCount requeues indefinitely on a short backoff).
+        const e = new Error("awaiting transcription — will retry");
+        e.noCount = true;
+        throw e;
+      }
+      if (transcript && transcript.trim()) {
         return [{
           kind: "text",
-          text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this recording using the record_tags tool.`,
+          text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${transcript.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this recording using the record_tags tool.`,
         }];
       }
-      // Genuinely speechless (music, ambient, silence) → empty transcript. Anchor
-      // on the filename so it degrades to a name-only tag, like a textless
-      // document, instead of erroring.
+      // No discernible speech (music/ambient/silence) or a permanent transcribe
+      // failure → anchor on the filename, like a textless document.
       return [{
         kind: "text",
         text: `The item is an audio recording named "${file.original_name}" with no discernible speech. Tag it using the record_tags tool, judging from its name.`,
@@ -779,8 +769,19 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   async function modelInputForExtract(payload) {
     const file = payload.files?.[0];
     if (!file) return null; // connector entity with no file — nothing to extract
-    const transcriber = file.kind === "audio" ? await resolveTranscriber(db) : null;
-    const text = await documentTextFor(galleryDir, file, transcriber);
+    let text;
+    if (file.kind === "audio") {
+      // Audio's "text" is its transcript (produced out-of-band); wait for it the
+      // same way the tag leg does. A speechless clip has nothing to extract.
+      if (payload.transcript === undefined && !payload.transcript_error) {
+        const e = new Error("awaiting transcription — will retry");
+        e.noCount = true; // a wait, not a failure — see modelInputFor
+        throw e;
+      }
+      text = payload.transcript || "";
+    } else {
+      text = await documentTextFor(galleryDir, file);
+    }
     if (!text.trim()) return null;
     return [{
       kind: "text",
@@ -1286,6 +1287,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
 
   let running = true;
   let wake = () => {};
+  let transcribeWake = () => {};
   const loop = (async () => {
     while (running) {
       let n = 0;
@@ -1307,6 +1309,60 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     }
   })();
 
+  // Transcription loop — dedicated, separate from the tick, so a multi-minute
+  // clip never blocks tagging/embedding/ingestion. It's I/O-bound (awaits the
+  // sidecar), so it runs concurrently. It queries audio by payload (not status),
+  // so EVERY audio item is transcribed regardless of tagging; the transcript
+  // lands on payload.transcript for the tagger, the embedder, and the lightbox.
+  let transcribeBackoffUntil = 0;
+  const transcribeLoop = (async () => {
+    while (running) {
+      let did = false;
+      try {
+        if (Date.now() >= transcribeBackoffUntil) {
+          const row = await oneAudioNeedingTranscription(db);
+          if (row) {
+            did = true;
+            const file = row.payload.files?.[0];
+            try {
+              if (!file) throw new Error("no file on the item");
+              const transcriber = await resolveTranscriber(db);
+              const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+              const text = await transcriber.transcribe(buf, file.name);
+              await updateItemPayload(db, row.id, { transcript: text });
+              console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
+            } catch (err) {
+              // Transient (back off, don't mark): the sidecar unreachable, or a
+              // 5xx from either the sidecar (internal fault) or a provider, or a
+              // provider rate-limit/timeout. Permanent (mark, skip): a real
+              // bad-request — a provider 4xx, or the sidecar's 422 on undecodable
+              // bytes. A reprocess clears transcript_error to retry a permanent.
+              const s = Number(err?.status);
+              const transient = /unreachable/.test(err.message) || s === 429 || s === 408 || (s >= 500 && s < 600);
+              if (transient) {
+                transcribeBackoffUntil = Date.now() + 60000;
+                did = false;
+                console.warn(`transcribe: transient error (retry in 60s): ${err.message}`);
+              } else {
+                // Permanent for this clip. Mark it so the queue moves on; it'll
+                // tag from its filename, like a textless document.
+                await updateItemPayload(db, row.id, { transcript_error: String(err.message).slice(0, 300) });
+                console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${err.message}`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error("transcribe loop error:", e.message);
+      }
+      if (!running) break;
+      await new Promise((r) => {
+        const t = setTimeout(r, did ? 200 : POLL_MS);
+        transcribeWake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
   resolveDefaultAi(db).then((ai) => {
     if (ai) {
       console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings, ${CONCURRENCY} concurrent).`);
@@ -1319,6 +1375,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   return () => {
     running = false;
     wake();
-    return loop;
+    transcribeWake();
+    return Promise.all([loop, transcribeLoop]);
   };
 }

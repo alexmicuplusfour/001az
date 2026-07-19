@@ -375,10 +375,12 @@ export async function reextractItem(db, id) {
   const current = aiMappingJson(rows[0].mapping);
   // `- 'park'`: an explicit re-extract runs the full pipeline through tagging,
   // even on an auto-tag-off board — park only gates the automatic ingest flow.
+  // `- 'transcript_error'`: for audio the extracted text IS the transcript, so a
+  // re-extract retries a failed transcription (a good transcript is kept).
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park'
-                        ELSE jsonb_set(payload - 'park', '{mapping}', $3::jsonb) END,
+     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
+                        ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
          status='pending_extract', attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE id=$2 AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')`,
     [Date.now(), id, current]
@@ -1571,10 +1573,13 @@ export async function reprocessEntity(db, entityId) {
   const current = aiMappingJson(rows[0].mapping);
   // `- 'park'`: an explicit reprocess runs the full pipeline through tagging,
   // even on an auto-tag-off board — park only gates the automatic ingest flow.
+  // `- 'transcript_error'`: a reprocess retries a failed transcription (the loop
+  // re-queues any audio item lacking both transcript + error). A successful
+  // `transcript` is kept — no needless re-transcription / provider re-billing.
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park'
-                        ELSE jsonb_set(payload - 'park', '{mapping}', $3::jsonb) END,
+     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
+                        ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
          status = CASE
            WHEN COALESCE($3::jsonb, payload->'mapping')->'face'->>'from' = 'connector'
                 AND (jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
@@ -1626,19 +1631,39 @@ export async function setItemEmbedError(db, id, message) {
   await db.query("UPDATE items SET embed_error=$1 WHERE id=$2", [String(message).slice(0, 500), id]);
 }
 
-// Tagged items whose vector is missing or from another model — the embedding
-// sweep's work queue. Newest first so fresh uploads become searchable before
-// a long backfill finishes. Items whose text the embedder rejected
-// (embed_error) are skipped until fresh tags give them new text.
+// The embedding sweep's work queue: items whose vector is missing or from
+// another model. Two sources become searchable — tagged items (embedded from
+// their tags + reasoning) and transcribed audio (embedded from its transcript,
+// even when the board doesn't tag). Newest first so fresh uploads become
+// searchable before a long backfill finishes; items the embedder rejected
+// (embed_error) are skipped until they get fresh text.
 export async function itemsNeedingEmbedding(db, model, limit) {
   const { rows } = await db.query(
     `SELECT id, tags, tag_reasoning, payload FROM items
-     WHERE status='tagged' AND embed_error IS NULL
+     WHERE embed_error IS NULL
        AND (embedding IS NULL OR embedding_model IS DISTINCT FROM $1)
+       AND (status='tagged'
+            OR (payload->'files'->0->>'kind'='audio' AND payload ? 'transcript'))
      ORDER BY updated_at DESC, id DESC LIMIT $2`,
     [model, limit]
   );
   return rows;
+}
+
+// One audio item still needing a transcript — the transcription loop's work
+// queue. Independent of tagging and status: any audio item with neither a
+// `transcript` nor a permanent `transcript_error` qualifies, newest first so
+// fresh uploads transcribe before a backlog. `payload ? 'key'` is the jsonb
+// key-exists test (an empty-string transcript for a silent clip still counts).
+export async function oneAudioNeedingTranscription(db) {
+  const { rows } = await db.query(
+    `SELECT id, payload FROM items
+     WHERE payload->'files'->0->>'kind'='audio'
+       AND NOT (payload ? 'transcript')
+       AND NOT (payload ? 'transcript_error')
+     ORDER BY created_at DESC LIMIT 1`
+  );
+  return rows[0] || null;
 }
 
 // Current-model vectors for one board (the search corpus). Stale vectors are

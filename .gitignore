@@ -1,5 +1,7 @@
 # dependencies
 node_modules/
+# python sidecar bytecode (extractor/, transcriber/)
+__pycache__/
 
 # server-owned data — lives on the droplet, never in git
 gallery/

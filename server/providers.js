@@ -473,8 +473,9 @@ export function embedTexts({ provider, ...rest }) {
 
 // Transcribe audio bytes → { text, usage } via a provider's wire. Only
 // transcribes-capable providers qualify — callers gate on
-// PROVIDERS[provider].transcribes. `local` is the on-server whisper sidecar,
-// resolved directly by resolveTranscriber (worker.js), so it never routes here.
+// PROVIDERS[provider].transcribes. `whisper` is the on-server sidecar, resolved
+// directly by resolveTranscriber (worker.js) with a null wire, so it never
+// routes here — only keyed provider engines do.
 export function transcribeAudio({ provider, ...rest }) {
   const desc = PROVIDERS[provider];
   return desc.wire.transcribe(desc, rest);

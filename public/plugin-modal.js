@@ -494,10 +494,10 @@ function embedSection(p, ctx, reload) {
 }
 
 // Transcription slot — audio → text so recordings can be tagged. Mirrors
-// embedSection, but transcription is always on (the local sidecar is the
+// embedSection, but transcription is always on (the whisper sidecar is the
 // default), so there's no enable toggle: the provider choice IS the toggle.
-// A provider advertises this via `transcribes`; the keyless local sidecar shows
-// its baked model as a note (WHISPER_MODEL is a deploy knob, not a runtime pick).
+// A provider advertises this via `transcribes`; the keyless whisper sidecar
+// shows its baked model as a note (WHISPER_MODEL is a deploy knob, not runtime).
 function transcribeSection(p, ctx, reload) {
   const tr = ctx.slots.transcriber;
   const active = ctx.defaults.transcriber === p.name;

@@ -57,7 +57,7 @@ export function createSources({ galleryDir, thumbsDir }) {
       for (const f of files || []) {
         if (!f.name) continue;
         fs.rmSync(path.join(galleryDir, f.name), { force: true });
-        fs.rmSync(path.join(galleryDir, f.name + ".txt"), { force: true }); // docx / audio-transcript text sidecar
+        fs.rmSync(path.join(galleryDir, f.name + ".txt"), { force: true }); // docx text sidecar (+ legacy audio-transcript files)
         fs.rmSync(path.join(galleryDir, f.name + ".html"), { force: true }); // docx html sidecar
         fs.rmSync(path.join(thumbsDir, f.name + ".webp"), { force: true });
       }

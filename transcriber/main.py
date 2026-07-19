@@ -29,10 +29,29 @@ model = WhisperModel(MODEL, device="cpu", compute_type=COMPUTE, local_files_only
 print(f"whisper '{MODEL}' ready", flush=True)
 
 
+class DecodeError(Exception):
+    """The bytes couldn't be decoded as audio — a bad-input (permanent) failure,
+    as opposed to an internal server fault (transient, worth a retry). The two
+    map to 422 vs 500 so the caller can give up on one and requeue the other."""
+
+
+def _is_decode_error(exc: Exception) -> bool:
+    # PyAV surfaces unreadable/corrupt containers as av.* errors; the decoder can
+    # also raise a bare ValueError/EOFError on truncated input. Match by module
+    # name so we don't hard-depend on PyAV's exact class tree across versions.
+    return type(exc).__module__.split(".", 1)[0] == "av" or isinstance(exc, (ValueError, EOFError))
+
+
 def transcribe_bytes(body: bytes) -> str:
-    # segments is a generator — iterating it is what actually runs inference.
-    segments, _info = model.transcribe(io.BytesIO(body), beam_size=BEAM, vad_filter=True)
-    text = "".join(seg.text for seg in segments).strip()
+    # segments is a generator — iterating it is what actually runs inference, so
+    # a decode failure can surface at the join, not just at transcribe().
+    try:
+        segments, _info = model.transcribe(io.BytesIO(body), beam_size=BEAM, vad_filter=True)
+        text = "".join(seg.text for seg in segments).strip()
+    except Exception as exc:
+        if _is_decode_error(exc):
+            raise DecodeError(str(exc)) from exc
+        raise
     return text[:MAX_CHARS]
 
 
@@ -50,7 +69,12 @@ class Handler(BaseHTTPRequestHandler):
             ms = (time.monotonic() - t0) * 1000
             print(f"transcribe {length}b -> {len(text)} chars in {ms:.0f}ms", flush=True)
             self._json(200, {"text": text})
+        except DecodeError as exc:
+            # Bad input — the caller marks it permanent (no endless requeue).
+            print(f"transcribe {length}b UNDECODABLE: {exc}", flush=True)
+            self._json(422, {"error": f"undecodable audio: {exc}"})
         except Exception as exc:
+            # Internal fault — the caller treats 5xx as transient and retries.
             print(f"transcribe {length}b FAILED: {exc}", flush=True)
             self._json(500, {"error": str(exc)})
 

@@ -1677,6 +1677,14 @@ app.get("/api/instances/:id/reasoning", requireAuth, requireItemAccess, wrap(asy
   });
 }));
 
+// The audio transcript for the lightbox — produced out-of-band by the
+// transcription loop. null while still transcribing (or not audio); "" for a
+// clip with no discernible speech.
+app.get("/api/instances/:id/transcript", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const row = await getItemReasoning(db, req.itemId);
+  res.json({ transcript: row?.payload?.transcript ?? null });
+}));
+
 // Tags are per instance — a human call about one piece of material.
 app.patch("/api/instances/:id/tags", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const tags = req.body && Array.isArray(req.body.tags) ? req.body.tags : null;
