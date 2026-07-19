@@ -38,6 +38,28 @@ const busy = (btn, label, fn) => async () => {
   try { await fn(); } finally { btn.disabled = false; btn.textContent = prev; }
 };
 
+// A slot's primary button, always labelled "Make default {slot}". When this
+// provider isn't the default it's the enabled, primary promote action. When it
+// already IS the default the button goes disabled + secondary — a status marker,
+// not a dead "Save" — and re-enables only once you change the key or model, so
+// you can still repoint the running default. `sels` are the selects to watch;
+// `apply` runs the write.
+function slotButton(label, isDefault, sels, apply) {
+  const btn = document.createElement("button");
+  btn.textContent = label;
+  const initial = sels.map((s) => s.value);
+  const sync = () => {
+    const dirty = sels.some((s, i) => s.value !== initial[i]);
+    const on = !isDefault || dirty;
+    btn.disabled = !on;
+    btn.className = on ? "" : "ghost";
+  };
+  sels.forEach((s) => s.addEventListener("change", sync));
+  sync();
+  btn.onclick = busy(btn, "Saving…", apply);
+  return btn;
+}
+
 export function openPluginModal(p, ctx) {
   const { body, footer, close } = createModal({
     title: p.label,
@@ -349,9 +371,7 @@ function taggerSection(p, ctx, reload) {
 
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-  const save = document.createElement("button");
-  save.textContent = isDefault ? "Save" : "Make default tagger";
-  save.onclick = busy(save, "Saving…", async () => {
+  const apply = async () => {
     try {
       await api("POST", "/api/admin/ai-config", {
         defaultKeyId: keySel.value === "env" ? null : Number(keySel.value),
@@ -360,8 +380,8 @@ function taggerSection(p, ctx, reload) {
       toast("Default tagger saved");
       reload();
     } catch (err) { toast.error(err.message); }
-  });
-  actions.appendChild(save);
+  };
+  actions.appendChild(slotButton("Make default tagger", isDefault, [keySel, modelSel], apply));
 
   if (isDefault) {
     const test = document.createElement("button");
@@ -443,29 +463,20 @@ function embedSection(p, ctx, reload) {
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
 
-  // Once this provider is the active embedder, "Save" only means something if
-  // there's a choice to persist — a different key or a different model.
-  // The keyless, single-model local embedder (Xenova) has neither, so Save
-  // would just re-write the current config: drop it and leave Test / Turn off.
   const enabled = active && em.enabled;
-  const canChange = (!p.ai.keyless && mine.length > 1) || p.ai.embeds.models.length > 1;
-  if (!enabled || canChange) {
-    const save = document.createElement("button");
-    save.textContent = enabled ? "Save" : "Make default embedder";
-    save.onclick = busy(save, "Saving…", async () => {
-      const model = modelSel?.value || p.ai.embeds.default;
-      if (enabled && em.model && em.model !== model &&
-          !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) return;
-      try {
-        await api("POST", "/api/admin/ai-config", p.ai.keyless
-          ? { embedProvider: "local", embedEnabled: true }
-          : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
-        toast("Semantic search settings saved");
-        reload();
-      } catch (err) { toast.error(err.message); }
-    });
-    actions.appendChild(save);
-  }
+  const apply = async () => {
+    const model = modelSel?.value || p.ai.embeds.default;
+    if (enabled && em.model && em.model !== model &&
+        !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) return;
+    try {
+      await api("POST", "/api/admin/ai-config", p.ai.keyless
+        ? { embedProvider: "local", embedEnabled: true }
+        : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
+      toast("Semantic search settings saved");
+      reload();
+    } catch (err) { toast.error(err.message); }
+  };
+  actions.appendChild(slotButton("Make default embedder", enabled, [keySel, modelSel].filter(Boolean), apply));
 
   if (enabled) {
     const test = document.createElement("button");
@@ -570,9 +581,7 @@ function transcribeSection(p, ctx, reload) {
       actions.appendChild(use);
     }
   } else {
-    const save = document.createElement("button");
-    save.textContent = active ? "Save" : "Make default transcriber";
-    save.onclick = busy(save, "Saving…", async () => {
+    const apply = async () => {
       const model = modelSel?.value || p.ai.transcribes.default;
       try {
         await api("POST", "/api/admin/ai-config", {
@@ -583,8 +592,8 @@ function transcribeSection(p, ctx, reload) {
         toast("Transcription settings saved");
         reload();
       } catch (err) { toast.error(err.message); }
-    });
-    actions.appendChild(save);
+    };
+    actions.appendChild(slotButton("Make default transcriber", active, [keySel, modelSel].filter(Boolean), apply));
 
     if (active) {
       const test = document.createElement("button");
