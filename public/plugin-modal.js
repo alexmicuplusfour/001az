@@ -443,23 +443,31 @@ function embedSection(p, ctx, reload) {
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
 
-  const save = document.createElement("button");
-  save.textContent = active && em.enabled ? "Save" : "Make default embedder";
-  save.onclick = busy(save, "Saving…", async () => {
-    const model = modelSel?.value || p.ai.embeds.default;
-    if (active && em.enabled && em.model && em.model !== model &&
-        !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) return;
-    try {
-      await api("POST", "/api/admin/ai-config", p.ai.keyless
-        ? { embedProvider: "local", embedEnabled: true }
-        : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
-      toast("Semantic search settings saved");
-      reload();
-    } catch (err) { toast.error(err.message); }
-  });
-  actions.appendChild(save);
+  // Once this provider is the active embedder, "Save" only means something if
+  // there's a choice to persist — a different key or a different model.
+  // The keyless, single-model local embedder (Xenova) has neither, so Save
+  // would just re-write the current config: drop it and leave Test / Turn off.
+  const enabled = active && em.enabled;
+  const canChange = (!p.ai.keyless && mine.length > 1) || p.ai.embeds.models.length > 1;
+  if (!enabled || canChange) {
+    const save = document.createElement("button");
+    save.textContent = enabled ? "Save" : "Make default embedder";
+    save.onclick = busy(save, "Saving…", async () => {
+      const model = modelSel?.value || p.ai.embeds.default;
+      if (enabled && em.model && em.model !== model &&
+          !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) return;
+      try {
+        await api("POST", "/api/admin/ai-config", p.ai.keyless
+          ? { embedProvider: "local", embedEnabled: true }
+          : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
+        toast("Semantic search settings saved");
+        reload();
+      } catch (err) { toast.error(err.message); }
+    });
+    actions.appendChild(save);
+  }
 
-  if (active && em.enabled) {
+  if (enabled) {
     const test = document.createElement("button");
     test.className = "ghost";
     test.textContent = "Test";
