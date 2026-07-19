@@ -560,13 +560,14 @@ const TRANSCRIBER_TIMEOUT_MS = Number(process.env.TRANSCRIBER_TIMEOUT_MS) || 240
 // Used only to stamp the transcript cache, so a model bump re-transcribes.
 const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "base";
 
-// The local whisper-sidecar engine, wrapped as an interchangeable descriptor
-// { id, model, transcribe } so a provider engine (deferred) slots in the way
-// resolveEmbedder picks local vs a provider. transcribe throws status-less on
-// downtime so the item requeues rather than tagging on empty text.
-function localTranscriber() {
+// The on-server whisper-sidecar engine, wrapped as an interchangeable descriptor
+// { id, model, transcribe } so a provider engine slots in the way resolveEmbedder
+// picks local vs a provider. transcribe throws status-less on downtime so the
+// item requeues rather than tagging on empty text. id "whisper" matches the
+// keyless `whisper` provider — its plugin card and the transcribe_provider sentinel.
+function whisperTranscriber() {
   return {
-    id: "local",
+    id: "whisper",
     model: TRANSCRIBER_MODEL,
     async transcribe(buf) {
       let res;
@@ -588,14 +589,14 @@ function localTranscriber() {
 
 // A board's audio→text engine. An app-wide `transcribe_provider` setting can
 // point at any provider that ADVERTISES `transcribes` (a stored key + installed
-// plugin); everything else — unset, "local", a no-audio provider (Claude has
-// `transcribes: null`), a missing key — falls back to the always-on local
+// plugin); everything else — unset, "whisper", a no-audio provider (Claude has
+// `transcribes: null`), a missing key — falls back to the always-on whisper
 // sidecar. Never fails to resolve: audio must always become taggable. Fully
 // capability-driven — no provider name is hardcoded here. `board` is accepted
 // for a future per-board choice (unused today). Exported for tests + server.
 export async function resolveTranscriber(db, board = null) {
   const provider = await getSetting(db, "transcribe_provider");
-  if (provider && provider !== "local" && PROVIDERS[provider]?.transcribes && (await aiPluginInstalled(db, provider))) {
+  if (provider && provider !== "whisper" && PROVIDERS[provider]?.transcribes && (await aiPluginInstalled(db, provider))) {
     const keyId = Number(await getSetting(db, "transcribe_key_id")) || 0;
     const key = keyId ? await getAiKey(db, keyId) : null;
     if (key) {
@@ -612,7 +613,7 @@ export async function resolveTranscriber(db, board = null) {
       };
     }
   }
-  return localTranscriber();
+  return whisperTranscriber();
 }
 
 export async function documentTextFor(galleryDir, file, transcriber = null) {
@@ -667,11 +668,11 @@ export async function documentTextFor(galleryDir, file, transcriber = null) {
     // local sidecar ignores it (PyAV sniffs the bytes).
     const text = await transcriber.transcribe(buf, file.name); // downtime throws → requeue, never empty
     // Cache the result — EXCEPT an empty transcript from a provider engine. The
-    // local sidecar's empty is trustworthy (VAD silence), so cache it and never
+    // whisper sidecar's empty is trustworthy (VAD silence), so cache it and never
     // re-bill; a provider returning 200-with-empty is ambiguous (a blip vs real
     // silence), so leave it uncached and let a retag re-attempt rather than
     // freezing the clip as speechless.
-    if (text || transcriber.id === "local") {
+    if (text || transcriber.id === "whisper") {
       await fs.promises.writeFile(cachePath, `${stamp}\n\n${text}`);
     }
     return text;

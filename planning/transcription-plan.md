@@ -227,31 +227,37 @@ end to end:
   separate STT service) ships its own wire and advertises the same flag — the
   endpoint heterogeneity lives in the wire, never in core.
 - **Generic everywhere, zero provider names:** a `transcribeAudio()` dispatcher
-  (parallel to `embedTexts`, with `provider === "local"` special-cased to the
-  sidecar the way `embedTexts` special-cases `localEmbed`); `resolveTranscriber`
-  gates on `PROVIDERS[p]?.transcribes` and falls back to local otherwise;
+  (parallel to `embedTexts`) routes provider transcription through the wire;
+  `resolveTranscriber` gates on `PROVIDERS[p]?.transcribes` and otherwise falls
+  back to the whisper sidecar (resolved directly, not through the dispatcher);
   `providerCatalog()` + the admin surface render the picker from the flag.
 - **Loader validation** ([plugin-loader.js:90](../server/plugin-loader.js#L90)):
   widen the "must tag or embed" capability reject to "tag, embed, or transcribe,"
   and require `wire.transcribe` to be a function when `transcribes` is set.
-- **Claude → local is automatic:** Anthropic's descriptor is `transcribes: null`
+- **Claude → whisper is automatic:** Anthropic's descriptor is `transcribes: null`
   (like its `embeds: null`), so a board on a no-audio provider resolves to the
-  local sidecar. The capability field IS the fallback — no special-casing.
-- **Local advertises too:** `local.transcribes = {default: <WHISPER_MODEL>, …}`
-  so the sidecar is a first-class registry engine, not a hardcoded case.
+  whisper sidecar. The capability field IS the fallback — no special-casing.
+- **The sidecar is its own plugin:** a dedicated core, keyless `whisper` provider
+  — "Local Transcriber (Whisper)", the peer of the Xenova embedder "Local Embedder
+  (Xenova)" — advertises `transcribes`, rather than the capability being bolted
+  onto the embedder card. Its engine id is `whisper` (the cache stamps
+  `whisper:base`); the `transcribe_provider` sentinel and the provider-empty cache
+  guard key off it.
 Because the Slice 2 seam already takes `board`, returns an engine descriptor, and
 engine-stamps the cache, a transcribing provider (built-in or plugin) slots in
 with **zero core change** and the `.txt` cache re-transcribes when the engine id
 flips.
 
-**Config UI** mirrors the embedder's "Semantic search" section: enabled toggle,
-provider picker (local + any `transcribes`-capable provider), and — only when a
-*provider* is chosen — a model picker (its `transcribes.models`) + key + Test,
-noting per-minute billing. Selecting **local** shows no model dropdown: the
-`WHISPER_MODEL` is baked (Slice 1), a deploy-time knob not a UI setting — a
-toggle would imply a runtime switch the baked image can't honor. The line: UI
-config is for runtime-swappable engines (provider + key + model param); the local
-model lives in `.env` / `--build-arg`.
+**Config UI** mirrors the embedder's per-provider "Semantic search" section (a
+`transcribeSection` in the plugin modal, gated on `capabilities.transcribe`) —
+not a standalone page, and **no enabled toggle**: transcription is always on (the
+Whisper sidecar is the default), so the provider choice IS the toggle. A
+provider's card offers a model picker (its `transcribes.models`) + key + Test
+(a synthesized tiny WAV probes it e2e); the Whisper card shows its baked model as
+a note. Selecting Whisper shows no model dropdown: `WHISPER_MODEL` is baked
+(Slice 1), a deploy-time knob not a UI setting. The line: UI config is for
+runtime-swappable engines (provider + key + model param); the local model lives
+in `.env` / `--build-arg`.
 
 Resolution scope (app-wide like the embedder vs per-board like the tagger) is the
 one open product call; the seam supports either. Recommended default: **app-wide**

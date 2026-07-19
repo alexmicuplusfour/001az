@@ -366,7 +366,7 @@ const glm = {
 // and models fields are intentionally empty; `keyless` marks it as something
 // that must never appear in the API key registration form.
 const local = {
-  label: "Xenova",
+  label: "Local Embedder (Xenova)",
   description: "On-device embeddings for search — no API key (transformers.js)",
   wire: null,
   defaultModel: null,
@@ -377,11 +377,23 @@ const local = {
     default: LOCAL_EMBED_MODEL,
     models: [{ id: LOCAL_EMBED_MODEL, note: "runs on-server · no API key" }],
   },
-  // The on-server whisper sidecar. Its model is baked into the image and set via
-  // WHISPER_MODEL at deploy (a build-time knob, not a runtime pick), so there's a
-  // single model here mirrored from the app-side TRANSCRIBER_MODEL env — the UI
-  // shows it as a note, not a dropdown. Resolved directly by resolveTranscriber,
-  // not via the wire (local.wire is null).
+};
+
+// The on-server whisper sidecar — its own core, keyless provider (the
+// transcription peer of the Xenova embedder above). The model is baked into the
+// image and set via WHISPER_MODEL at deploy (a build-time knob, not a runtime
+// pick), so the single model here is mirrored from the app-side TRANSCRIBER_MODEL
+// env — the UI shows it as a note, not a dropdown. Resolved directly by
+// resolveTranscriber (wire null), never through the compat wire.
+const whisper = {
+  label: "Local Transcriber (Whisper)",
+  description: "On-device speech-to-text so recordings can be tagged — no API key",
+  wire: null,
+  defaultModel: null,
+  models: [],
+  research: false,
+  keyless: true,
+  embeds: null,
   transcribes: {
     default: process.env.TRANSCRIBER_MODEL || "base",
     models: [{ id: process.env.TRANSCRIBER_MODEL || "base", note: "runs on-server · no API key · set via WHISPER_MODEL at deploy" }],
@@ -410,7 +422,7 @@ const openrouter = {
   embeds: null,
 };
 
-export const PROVIDERS = { local, anthropic, openai, gemini, glm, openrouter };
+export const PROVIDERS = { local, whisper, anthropic, openai, gemini, glm, openrouter };
 for (const [name, desc] of Object.entries(PROVIDERS)) desc.name = name; // self-reference for dispatch
 
 // --- dynamic registration (phase 2) ---

@@ -520,8 +520,8 @@ function transcribeSection(p, ctx, done) {
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
 
   if (p.ai.keyless) {
-    // The local sidecar is the default. Offer "use local" only when a provider
-    // is currently overriding it.
+    // The on-device whisper sidecar is the default. Offer the switch-back only
+    // when a provider is currently overriding it.
     if (active) {
       const note = document.createElement("p");
       note.className = "muted";
@@ -530,11 +530,11 @@ function transcribeSection(p, ctx, done) {
       sec.appendChild(note);
     } else {
       const use = document.createElement("button");
-      use.textContent = "Use local transcriber";
+      use.textContent = "Use Whisper";
       use.onclick = busy(use, "Saving…", async () => {
         try {
-          await api("POST", "/api/admin/ai-config", { transcribeProvider: "local" });
-          toast("Transcription set to the on-server sidecar");
+          await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
+          toast("Transcription set to the on-device Whisper sidecar");
           done();
         } catch (err) { toast.error(err.message); }
       });
@@ -569,11 +569,11 @@ function transcribeSection(p, ctx, done) {
       });
       const off = document.createElement("button");
       off.className = "danger";
-      off.textContent = "Use local instead";
+      off.textContent = "Use Whisper instead";
       off.onclick = busy(off, "Saving…", async () => {
         try {
-          await api("POST", "/api/admin/ai-config", { transcribeProvider: "local" });
-          toast("Transcription reverted to the on-server sidecar");
+          await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
+          toast("Transcription reverted to the on-device Whisper sidecar");
           done();
         } catch (err) { toast.error(err.message); }
       });

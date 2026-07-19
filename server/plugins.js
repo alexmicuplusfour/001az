@@ -35,10 +35,11 @@ function aiDefs() {
     name: p.name,
     label: p.label,
     description: p.description || "",
-    // The on-device embedder (local/Xenova) is a core capability — no account,
-    // always installed. Anthropic is the one connection pre-added, since tagging
-    // (the product's core value) must work out of the box; it's still removable.
-    core: p.name === "local",
+    // The on-device embedder (local/Xenova) and the on-device transcriber
+    // (whisper sidecar) are core capabilities — no account, always installed.
+    // Anthropic is the one connection pre-added, since tagging (the product's
+    // core value) must work out of the box; it's still removable.
+    core: p.name === "local" || p.name === "whisper",
     defaultInstalled: p.name === "anthropic",
     capabilities: { tag: !!PROVIDERS[p.name].wire, embed: !!p.embeds, transcribe: !!p.transcribes, research: p.research },
     configSchema: [],

@@ -60,7 +60,7 @@ test("the waveform producer is registered in the face registry", () => {
 
 // A deterministic stub engine: counts transcribe() calls and returns a fixed
 // transcript, so cache hits/misses are observable without a real sidecar.
-function stubTranscriber(text = "hello world", { id = "local", model = "base" } = {}) {
+function stubTranscriber(text = "hello world", { id = "whisper", model = "base" } = {}) {
   const eng = { id, model, calls: 0, async transcribe() { eng.calls++; return text; } };
   return eng;
 }
@@ -75,7 +75,7 @@ test("documentTextFor(audio): transcribes, returns text, writes a stamped .txt c
   assert.equal(eng.calls, 1);
   assert.equal(
     fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
-    "# engine: local:base\n\nThe quick brown fox.",
+    "# engine: whisper:base\n\nThe quick brown fox.",
     "cache carries the engine stamp then the transcript",
   );
 });
@@ -95,7 +95,7 @@ test("documentTextFor(audio): a cache from a DIFFERENT engine is ignored and re-
   const { galleryDir: dir } = tmpDirs(t);
   fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
   // A stale cache produced by a different model — the flexibility guard.
-  fs.writeFileSync(path.join(dir, "a.mp3.txt"), "# engine: local:small\n\nold transcript");
+  fs.writeFileSync(path.join(dir, "a.mp3.txt"), "# engine: whisper:small\n\nold transcript");
   const eng = stubTranscriber("fresh transcript", { model: "base" });
   const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
 
@@ -103,7 +103,7 @@ test("documentTextFor(audio): a cache from a DIFFERENT engine is ignored and re-
   assert.equal(eng.calls, 1);
   assert.equal(
     fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"),
-    "# engine: local:base\n\nfresh transcript",
+    "# engine: whisper:base\n\nfresh transcript",
     "the cache is re-stamped with the producing engine",
   );
 });
@@ -131,7 +131,7 @@ test("documentTextFor(audio): an empty transcript is a real answer — cached, n
   assert.equal(await documentTextFor(dir, file, eng), "");
   assert.equal(await documentTextFor(dir, file, eng), "");
   assert.equal(eng.calls, 1, "empty transcript is cached like any other");
-  assert.equal(fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"), "# engine: local:base\n\n");
+  assert.equal(fs.readFileSync(path.join(dir, "a.mp3.txt"), "utf8"), "# engine: whisper:base\n\n");
 });
 
 test("documentTextFor(audio): a PROVIDER's empty transcript is NOT cached (a blip must not freeze the clip)", async (t) => {
@@ -150,7 +150,7 @@ test("documentTextFor(audio): a PROVIDER's empty transcript is NOT cached (a bli
 test("documentTextFor(audio): transcriber downtime throws status-less (requeue, never empty)", async (t) => {
   const { galleryDir: dir } = tmpDirs(t);
   fs.writeFileSync(path.join(dir, "a.mp3"), "raw");
-  const eng = { id: "local", model: "base", async transcribe() { throw new Error("transcriber unreachable (ECONNREFUSED) — will retry"); } };
+  const eng = { id: "whisper", model: "base", async transcribe() { throw new Error("transcriber unreachable (ECONNREFUSED) — will retry"); } };
   const file = { kind: "audio", name: "a.mp3", original_name: "clip.mp3" };
 
   await assert.rejects(
@@ -160,14 +160,14 @@ test("documentTextFor(audio): transcriber downtime throws status-less (requeue, 
   assert.equal(fs.existsSync(path.join(dir, "a.mp3.txt")), false, "no cache written on failure");
 });
 
-test("resolveTranscriber: with no provider configured, resolves the local sidecar and maps its HTTP results", async (t) => {
+test("resolveTranscriber: with no provider configured, resolves the whisper sidecar and maps its HTTP results", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
 
-  // A stub db whose settings are all empty → no transcribe_provider → local.
+  // A stub db whose settings are all empty → no transcribe_provider → whisper.
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
-  assert.equal(eng.id, "local");
+  assert.equal(eng.id, "whisper");
   assert.ok(eng.model, "carries a model for the cache stamp");
 
   // healthy: POSTs to the sidecar's /transcribe, returns .text
@@ -193,7 +193,8 @@ test("providerCatalog advertises transcribes per provider (capability, not a har
   assert.ok(cat.openai.transcribes, "openai advertises transcription");
   assert.equal(cat.openai.transcribes.default, "gpt-4o-transcribe");
   assert.equal(cat.anthropic.transcribes, null, "claude advertises none (no audio modality)");
-  assert.ok(cat.local.transcribes, "the on-server sidecar advertises transcription");
+  assert.ok(cat.whisper.transcribes, "the on-device whisper sidecar advertises transcription");
+  assert.equal(cat.local.transcribes, null, "Xenova (local) is the embedder, not the transcriber");
 });
 
 test("transcribeAudio (shared compat wire): multipart POST to /audio/transcriptions; error mapping", async (t) => {
@@ -246,7 +247,7 @@ test("resolveTranscriber: a configured provider with no key falls back to local 
   await setPluginState(db, "ai:openai", { installed: true });
   await setSetting(db, "transcribe_provider", "openai"); // but no transcribe_key_id
   const eng = await resolveTranscriber(db);
-  assert.equal(eng.id, "local", "no usable key → the always-on sidecar, not an error");
+  assert.equal(eng.id, "whisper", "no usable key → the always-on sidecar, not an error");
 });
 
 test("ai-config POST: a transcribe model the provider doesn't advertise is rejected (400, not stored)", async (t) => {

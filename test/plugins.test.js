@@ -18,7 +18,7 @@ const FIELD_TYPES = new Set(["secret", "text", "number", "select", "toggle"]);
 test("defs: one entry per integration, ids unique and namespaced", () => {
   const ids = pluginDefs().map((d) => d.id);
   assert.deepEqual(ids, [
-    "ai:local", "ai:anthropic", "ai:openai", "ai:gemini", "ai:glm", "ai:openrouter",
+    "ai:local", "ai:whisper", "ai:anthropic", "ai:openai", "ai:gemini", "ai:glm", "ai:openrouter",
     "crypto:coingecko", "crypto:coinmarketcap", "stocks:financialmodelingprep",
     "media:image", "media:text", "media:pdf", "media:docx", "media:audio",
     "source:folder", "source:ftp", "source:s3",
@@ -32,19 +32,22 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
     assert.ok(d.description && d.description.trim(), `${d.id}: has a description`);
     for (const f of d.configSchema) assert.ok(FIELD_TYPES.has(f.type), `${d.id}.${f.key}: known field type`);
   }
-  // the embedder is named for what it is, not a vague "Local"
-  assert.equal(getPluginDef("ai:local").label, "Xenova");
+  // the on-device cards name both the capability and the engine behind it
+  assert.equal(getPluginDef("ai:local").label, "Local Embedder (Xenova)");
+  assert.equal(getPluginDef("ai:whisper").label, "Local Transcriber (Whisper)");
   // core = the app's own capabilities (always installed, not removable): every
   // media handler, the on-device embedder, and the local-folder source.
   assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
-    ["ai:local", "media:image", "media:text", "media:pdf", "media:docx", "media:audio", "source:folder"]);
+    ["ai:local", "ai:whisper", "media:image", "media:text", "media:pdf", "media:docx", "media:audio", "source:folder"]);
   // exactly one connection is pre-added — the flagship AI provider.
   assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
 });
 
 test("defs: capabilities mirror the underlying descriptors", () => {
   const local = getPluginDef("ai:local");
-  assert.deepEqual(local.capabilities, { tag: false, embed: true, transcribe: true, research: false });
+  assert.deepEqual(local.capabilities, { tag: false, embed: true, transcribe: false, research: false });
+  const whisper = getPluginDef("ai:whisper");
+  assert.deepEqual(whisper.capabilities, { tag: false, embed: false, transcribe: true, research: false });
   const anthropic = getPluginDef("ai:anthropic");
   assert.deepEqual(anthropic.capabilities, { tag: true, embed: false, transcribe: false, research: true });
   assert.ok(anthropic.ai.models.some((m) => m.id === anthropic.ai.defaultModel));

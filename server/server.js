@@ -1117,7 +1117,7 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
       // Transcription is always on (local sidecar by default); `active` is what
       // actually resolves — a configured provider that lost its key falls to local.
       transcriber: {
-        provider: (await getSetting(db, "transcribe_provider")) || "local",
+        provider: (await getSetting(db, "transcribe_provider")) || "whisper",
         keyId: Number(await getSetting(db, "transcribe_key_id")) || null,
         model: (await getSetting(db, "transcribe_model")) || null,
         active: (await resolveTranscriber(db)).id,
@@ -1430,10 +1430,10 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
   // effect — a configured provider that lost its key falls back to local.
   const transcriber = await resolveTranscriber(db);
   const transcribe = {
-    provider: (await getSetting(db, "transcribe_provider")) || "local",
+    provider: (await getSetting(db, "transcribe_provider")) || "whisper",
     keyId: Number(await getSetting(db, "transcribe_key_id")) || null,
     model: (await getSetting(db, "transcribe_model")) || null,
-    active: transcriber.id, // the engine family actually in effect ("local" or a provider)
+    active: transcriber.id, // the engine family actually in effect ("whisper" or a provider)
   };
   res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe });
 }));
@@ -1490,12 +1490,12 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     }
     await setSetting(db, "embed_enabled", embedEnabled ? "1" : null);
   }
-  // Transcription: `transcribe_provider` names the engine directly — "local"
-  // (the always-on sidecar) or any provider that ADVERTISES `transcribes` with a
-  // matching key. Capability-gated, no provider name special-cased.
+  // Transcription: `transcribe_provider` names the engine directly — "whisper"
+  // (the always-on on-device sidecar) or any provider that ADVERTISES
+  // `transcribes` with a matching key. Capability-gated, no provider name special-cased.
   if (transcribeProvider !== undefined) {
-    if (!transcribeProvider || transcribeProvider === "local") {
-      await setSetting(db, "transcribe_provider", "local");
+    if (!transcribeProvider || transcribeProvider === "whisper") {
+      await setSetting(db, "transcribe_provider", "whisper");
       await setSetting(db, "transcribe_key_id", null);
       await setSetting(db, "transcribe_model", null);
     } else {
