@@ -68,27 +68,36 @@ function keyNote(p) {
   return null;
 }
 
-export async function renderPlugins() {
+// The one fetch that backs both the cards and the config modal: plugins + keys
+// + source connections, with the resolved slot defaults. The modal re-runs this
+// after every mutation so it can rebuild itself against fresh state without
+// closing.
+export async function loadPluginState() {
+  const [data, keys, connections] = await Promise.all([
+    api("GET", "/api/admin/plugins"),
+    api("GET", "/api/admin/ai-keys"),
+    api("GET", "/api/admin/source-connections"),
+  ]);
+  const { plugins, slots } = data;
+  return { plugins, slots, keys, connections, defaults: slotProviders(slots, keys) };
+}
+
+export async function renderPlugins(prefetched) {
   const me = await fetch("/api/me").then((r) => r.json());
   if (!me || !me.is_admin) return;
 
-  let data, keys, srcConnections;
-  try {
-    [data, keys, srcConnections] = await Promise.all([
-      api("GET", "/api/admin/plugins"),
-      api("GET", "/api/admin/ai-keys"),
-      api("GET", "/api/admin/source-connections"),
-    ]);
-  } catch { return; }
-  const { plugins, slots } = data;
-  const defaults = slotProviders(slots, keys);
+  // Callers (the modal's in-place reload) can hand us the state they just
+  // fetched so we don't hit the network twice for the same render.
+  let state = prefetched;
+  if (!state) { try { state = await loadPluginState(); } catch { return; } }
+  const { plugins, slots, keys, connections: srcConnections, defaults } = state;
   const installed = plugins.filter((p) => p.state.installed);
 
   const sec = document.createElement("div");
   sec.className = "section";
   sec.innerHTML = `<h2>Plugins</h2><p class="sub">Capabilities and connections in one place. Add the services you use; core capabilities are always on. Configure keys and options via the gear.</p>`;
 
-  const ctx = { slots, keys, connections: srcConnections, defaults, refresh: renderPlugins };
+  const ctx = { slots, keys, connections: srcConnections, defaults, refresh: renderPlugins, getState: loadPluginState };
 
   // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
   // marking installed ones "Added" — so they stay visible across reopens, not

@@ -43,58 +43,72 @@ export function openPluginModal(p, ctx) {
     title: p.label,
     bodyStyle: "display:flex;flex-direction:column;gap:26px;",
   });
-  const done = () => { close(); ctx.refresh(); };
 
-  // Health lives here now (the row has no status dot): surface the last recorded
-  // error, if any, so a failing integration is legible where you'd fix it.
-  const health = p.state.health;
-  if (health?.lastError?.message) {
-    const banner = document.createElement("div");
-    banner.style.cssText = "background:#fdf0f0;border:1px solid #f3d3d3;color:#8a3535;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.4;";
-    const when = health.lastFailAt ? ` · ${relTime(health.lastFailAt)}` : "";
-    banner.textContent = `Last error${when}: ${health.lastError.message}`;
-    body.appendChild(banner);
+  // Every mutating action re-fetches state and rebuilds the modal in place
+  // rather than closing it — only Close dismisses the modal. So a "Make default
+  // …", a saved slot, or an added key reflects immediately (the button flips,
+  // status text updates) and the cards behind stay in sync. Builders get this
+  // `reload` where they used to get a `done` that closed.
+  async function reload() {
+    let state;
+    try { state = await ctx.getState(); } catch { return; }
+    p = state.plugins.find((x) => x.id === p.id) || p;
+    ctx = { ...ctx, slots: state.slots, keys: state.keys, connections: state.connections, defaults: state.defaults };
+    render();
+    ctx.refresh(state); // repaint the cards behind, reusing the state we just fetched
   }
 
-  // Each builder returns { node, actions }: the section's content plus its
-  // primary action bar (or null). We collect them so the buttons can live in
-  // the footer rather than floating at the bottom of the scrollable body.
-  const built = [];
-  if (p.kind === "connector") {
-    built.push(connectorSection(p, ctx, done));
-  } else if (p.kind === "ai") {
-    if (!p.ai.keyless) built.push(keysSection(p, ctx, done));
-    if (p.capabilities.tag) built.push(taggerSection(p, ctx, done));
-    if (p.capabilities.embed) built.push(embedSection(p, ctx, done));
-    if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, done));
-  } else if (p.kind === "source") {
-    built.push(sourceSection(p, ctx, done));
-  } else {
-    built.push(mediaSection(p, done));
-  }
-  for (const b of built) body.appendChild(b.node);
+  // Builders return { node, footerActions }. footerActions is the modal-level
+  // commit that belongs in the footer — present only for the single-form modals
+  // (connector: Save+Test; media: Save). AI providers are a container of
+  // independent slots, so each slot keeps its own action in its section and the
+  // footer holds just Close; source connections likewise carry their actions in
+  // their own add/edit form.
+  function render() {
+    body.replaceChildren();
+    footer.replaceChildren();
 
-  // One action group → lift it into the footer next to Close. Two or more
-  // (e.g. an AI provider serving both tagger and embedder) stay inline, since
-  // each Save is scoped to its own section and collapsing them would be
-  // ambiguous.
-  const groups = built.map((b) => b.actions).filter(Boolean);
-  if (groups.length === 1) {
-    footer.appendChild(groups[0]);
-  } else {
-    for (const b of built) if (b.actions) b.node.appendChild(b.actions);
+    // Health lives here now (the row has no status dot): surface the last
+    // recorded error, if any, so a failing integration is legible where you'd fix it.
+    const health = p.state.health;
+    if (health?.lastError?.message) {
+      const banner = document.createElement("div");
+      banner.style.cssText = "background:#fdf0f0;border:1px solid #f3d3d3;color:#8a3535;border-radius:8px;padding:9px 12px;font-size:12px;line-height:1.4;";
+      const when = health.lastFailAt ? ` · ${relTime(health.lastFailAt)}` : "";
+      banner.textContent = `Last error${when}: ${health.lastError.message}`;
+      body.appendChild(banner);
+    }
+
+    const built = [];
+    if (p.kind === "connector") {
+      built.push(connectorSection(p, ctx, reload));
+    } else if (p.kind === "ai") {
+      if (!p.ai.keyless) built.push(keysSection(p, ctx, reload));
+      if (p.capabilities.tag) built.push(taggerSection(p, ctx, reload));
+      if (p.capabilities.embed) built.push(embedSection(p, ctx, reload));
+      if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, reload));
+    } else if (p.kind === "source") {
+      built.push(sourceSection(p, ctx, reload));
+    } else {
+      built.push(mediaSection(p, reload));
+    }
+    for (const b of built) body.appendChild(b.node);
+
+    for (const b of built) for (const btn of b.footerActions || []) footer.appendChild(btn);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "ghost";
+    closeBtn.textContent = "Close";
+    closeBtn.onclick = close;
+    footer.appendChild(closeBtn);
   }
 
-  const closeBtn = document.createElement("button");
-  closeBtn.className = "ghost";
-  closeBtn.textContent = "Close";
-  closeBtn.onclick = close;
-  footer.appendChild(closeBtn);
+  render();
 }
 
 // --- connector: schema-driven config + test + domain default ---
 
-function connectorSection(p, ctx, done) {
+function connectorSection(p, ctx, reload) {
   const d = ctx.slots.domains[p.connector.domain] || {};
   const isDefault = (d.setting || d.effective) === p.name;
   const sec = section(
@@ -152,8 +166,29 @@ function connectorSection(p, ctx, done) {
     }
   }
 
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+  // "Make default for {domain}" is a role toggle, separate from saving this
+  // provider's config, so it sits at the bottom of the section (not the footer)
+  // and never closes the modal. We flip it in place rather than reload() so any
+  // unsaved edits in the fields above survive the click.
+  if (!isDefault) {
+    const star = document.createElement("button");
+    star.className = "ghost";
+    star.style.alignSelf = "flex-start";
+    star.textContent = `Make default for ${p.connector.domainLabel}`;
+    star.onclick = busy(star, "Saving…", async () => {
+      try {
+        await api("POST", `/api/admin/plugins/slots/${p.connector.domain}`, { provider: p.name });
+        toast(`${p.label} is now the ${p.connector.domainLabel} default`);
+        star.remove();
+        sec.querySelector(".sub").textContent = `${p.connector.domainLabel} data provider. Currently the default for new adds.`;
+        ctx.refresh(); // repaint the card's default badge behind the modal
+      } catch (err) { toast.error(err.message); }
+    });
+    sec.appendChild(star);
+  }
+
+  // Footer actions. Save commits the config; Test pings the provider with the
+  // typed key (or its stored one), so it reflects the form without a Save first.
   const save = document.createElement("button");
   save.textContent = "Save";
   save.onclick = busy(save, "Saving…", async () => {
@@ -165,12 +200,10 @@ function connectorSection(p, ctx, done) {
     try {
       await api("PATCH", `/api/admin/plugins/${p.id}`, { config });
       toast(`${p.label} saved`);
-      done();
+      reload();
     } catch (err) { toast.error(err.message); }
   });
 
-  // Test pings the provider with the typed key (or its stored one), so it
-  // reflects the form without needing a Save first.
   const test = document.createElement("button");
   test.className = "ghost";
   test.textContent = "Test";
@@ -182,27 +215,13 @@ function connectorSection(p, ctx, done) {
       toast(`✓ ${provider} reachable`);
     } catch (err) { toast.error(err.message); }
   });
-  actions.append(save, test);
 
-  if (!isDefault) {
-    const star = document.createElement("button");
-    star.className = "ghost";
-    star.textContent = `Make default for ${p.connector.domainLabel}`;
-    star.onclick = busy(star, "Saving…", async () => {
-      try {
-        await api("POST", `/api/admin/plugins/slots/${p.connector.domain}`, { provider: p.name });
-        toast(`${p.label} is now the ${p.connector.domainLabel} default`);
-        done();
-      } catch (err) { toast.error(err.message); }
-    });
-    actions.appendChild(star);
-  }
-  return { node: sec, actions };
+  return { node: sec, footerActions: [save, test] };
 }
 
 // --- ai: this provider's keys (add / test / remove) ---
 
-function keysSection(p, ctx, done) {
+function keysSection(p, ctx, reload) {
   const mine = ctx.keys.filter((k) => k.provider === p.name);
   const sec = section("API keys", "Named keys for this provider. Boards can pick any of them; one can be the app default below.");
 
@@ -239,7 +258,7 @@ function keysSection(p, ctx, done) {
         try {
           await api("DELETE", `/api/admin/ai-keys/${k.id}`);
           toast(`Key "${k.name}" removed`);
-          done();
+          reload();
         } catch (err) { toast.error(err.message); }
       };
       act.append(testBtn, delBtn);
@@ -279,19 +298,19 @@ function keysSection(p, ctx, done) {
     try {
       await api("POST", "/api/admin/ai-keys", { name: nameIn.value.trim(), provider: p.name, key: keyIn.value.trim() });
       toast(`Key "${nameIn.value.trim()}" added`);
-      done();
+      reload();
     } catch (err) {
       toast.error(err.message);
       addBtn.disabled = false;
     }
   };
   sec.appendChild(addForm);
-  return { node: sec, actions: null };
+  return { node: sec, footerActions: null };
 }
 
 // --- ai: the default-tagger slot ---
 
-function taggerSection(p, ctx, done) {
+function taggerSection(p, ctx, reload) {
   const mine = ctx.keys.filter((k) => k.provider === p.name);
   const isDefault = ctx.defaults.tagger === p.name;
   const sec = section("Default tagger", "Used by every board that doesn't set its own key.");
@@ -303,7 +322,7 @@ function taggerSection(p, ctx, done) {
     none.style.margin = "0";
     none.textContent = "Add a key above to make this provider the default tagger.";
     sec.appendChild(none);
-    return { node: sec, actions: null };
+    return { node: sec, footerActions: null };
   }
 
   const keySel = document.createElement("select");
@@ -339,7 +358,7 @@ function taggerSection(p, ctx, done) {
         model: modelSel.value,
       });
       toast("Default tagger saved");
-      done();
+      reload();
     } catch (err) { toast.error(err.message); }
   });
   actions.appendChild(save);
@@ -356,12 +375,13 @@ function taggerSection(p, ctx, done) {
     });
     actions.appendChild(test);
   }
-  return { node: sec, actions };
+  sec.appendChild(actions);
+  return { node: sec, footerActions: null };
 }
 
 // --- ai: the embedder slot (semantic search) ---
 
-function embedSection(p, ctx, done) {
+function embedSection(p, ctx, reload) {
   const em = ctx.slots.embedder;
   const active = ctx.defaults.embedder === p.name;
   const mine = ctx.keys.filter((k) => k.provider === p.name);
@@ -373,7 +393,7 @@ function embedSection(p, ctx, done) {
     none.style.margin = "0";
     none.textContent = "Add a key above to embed with this provider.";
     sec.appendChild(none);
-    return { node: sec, actions: null };
+    return { node: sec, footerActions: null };
   }
 
   let keySel = null;
@@ -434,7 +454,7 @@ function embedSection(p, ctx, done) {
         ? { embedProvider: "local", embedEnabled: true }
         : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
       toast("Semantic search settings saved");
-      done();
+      reload();
     } catch (err) { toast.error(err.message); }
   });
   actions.appendChild(save);
@@ -456,12 +476,13 @@ function embedSection(p, ctx, done) {
       try {
         await api("POST", "/api/admin/ai-config", { embedEnabled: false });
         toast("Semantic search turned off");
-        done();
+        reload();
       } catch (err) { toast.error(err.message); }
     });
     actions.append(test, off);
   }
-  return { node: sec, actions };
+  sec.appendChild(actions);
+  return { node: sec, footerActions: null };
 }
 
 // Transcription slot — audio → text so recordings can be tagged. Mirrors
@@ -469,7 +490,7 @@ function embedSection(p, ctx, done) {
 // default), so there's no enable toggle: the provider choice IS the toggle.
 // A provider advertises this via `transcribes`; the keyless local sidecar shows
 // its baked model as a note (WHISPER_MODEL is a deploy knob, not a runtime pick).
-function transcribeSection(p, ctx, done) {
+function transcribeSection(p, ctx, reload) {
   const tr = ctx.slots.transcriber;
   const active = ctx.defaults.transcriber === p.name;
   const mine = ctx.keys.filter((k) => k.provider === p.name);
@@ -481,7 +502,7 @@ function transcribeSection(p, ctx, done) {
     none.style.margin = "0";
     none.textContent = "Add a key above to transcribe with this provider.";
     sec.appendChild(none);
-    return { node: sec, actions: null };
+    return { node: sec, footerActions: null };
   }
 
   // Key picker (non-keyless providers).
@@ -535,7 +556,7 @@ function transcribeSection(p, ctx, done) {
         try {
           await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
           toast("Transcription set to the on-device Whisper sidecar");
-          done();
+          reload();
         } catch (err) { toast.error(err.message); }
       });
       actions.appendChild(use);
@@ -552,7 +573,7 @@ function transcribeSection(p, ctx, done) {
           transcribeModel: model,
         });
         toast("Transcription settings saved");
-        done();
+        reload();
       } catch (err) { toast.error(err.message); }
     });
     actions.appendChild(save);
@@ -574,19 +595,20 @@ function transcribeSection(p, ctx, done) {
         try {
           await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
           toast("Transcription reverted to the on-device Whisper sidecar");
-          done();
+          reload();
         } catch (err) { toast.error(err.message); }
       });
       actions.append(test, off);
     }
   }
 
-  return { node: sec, actions: actions.children.length ? actions : null };
+  if (actions.children.length) sec.appendChild(actions);
+  return { node: sec, footerActions: null };
 }
 
 // --- source: saved connections (add / edit / test / remove) ---
 
-function sourceSection(p, ctx, done) {
+function sourceSection(p, ctx, reload) {
   // The local folder is a core capability — no saved connection, boards pick a
   // subfolder in their own ingestion settings.
   if (!p.capabilities.needsConnection) {
@@ -596,7 +618,7 @@ function sourceSection(p, ctx, done) {
     note.style.margin = "0";
     note.textContent = "Core capability — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
     sec.appendChild(note);
-    return { node: sec, actions: null };
+    return { node: sec, footerActions: null };
   }
 
   const mine = (ctx.connections || []).filter((c) => c.type === p.name);
@@ -645,7 +667,7 @@ function sourceSection(p, ctx, done) {
       delBtn.onclick = async () => {
         const extra = c.boards_using ? ` ${c.boards_using} board(s) use it and will stop refreshing until re-pointed.` : "";
         if (!confirm(`Remove connection "${c.label}"?${extra}`)) return;
-        try { await api("DELETE", `/api/admin/source-connections/${c.id}`); toast(`"${c.label}" removed`); done(); }
+        try { await api("DELETE", `/api/admin/source-connections/${c.id}`); toast(`"${c.label}" removed`); reload(); }
         catch (err) { toast.error(err.message); }
       };
       act.append(testBtn, editBtn, delBtn);
@@ -723,7 +745,7 @@ function sourceSection(p, ctx, done) {
         if (editing) await api("PATCH", `/api/admin/source-connections/${editing.id}`, { label, config });
         else await api("POST", "/api/admin/source-connections", { type: p.name, label, config });
         toast(editing ? "Connection saved" : `"${label}" added`);
-        done();
+        reload();
       } catch (err) { toast.error(err.message); }
     });
     const testBtn = document.createElement("button");
@@ -750,13 +772,13 @@ function sourceSection(p, ctx, done) {
   renderForm(null);
 
   // The add/edit form is rebuilt on demand and carries its own Save/Test/Cancel,
-  // so there's no single primary action to hoist into the footer.
-  return { node: sec, actions: null };
+  // so there's nothing for the footer — it holds just Close.
+  return { node: sec, footerActions: null };
 }
 
 // --- media: accepted extensions + the adjustable per-type upload limit ---
 
-function mediaSection(p, done) {
+function mediaSection(p, reload) {
   const sec = section("File types", null);
   const list = document.createElement("p");
   list.style.cssText = "margin:0;" + MONO_CSS;
@@ -797,11 +819,8 @@ function mediaSection(p, done) {
     try {
       await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { maxBytes } });
       toast(`${p.label} saved`);
-      done();
+      reload();
     } catch (err) { toast.error(err.message); }
   });
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-  actions.appendChild(save);
-  return { node: sec, actions };
+  return { node: sec, footerActions: [save] };
 }
