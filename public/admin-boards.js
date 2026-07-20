@@ -86,7 +86,7 @@ export async function renderBoards() {
     const editBtn = document.createElement("button");
     editBtn.className = "ghost";
     editBtn.textContent = "edit";
-    editBtn.onclick = () => openBoardModal(b, { canEditAI: true, onSaved: renderBoards });
+    editBtn.onclick = () => openBoardModal(b.id, { canEditAI: true, onSaved: renderBoards });
     wrap.appendChild(editBtn);
 
     const accessWrap = document.createElement("div");

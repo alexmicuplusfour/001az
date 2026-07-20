@@ -171,16 +171,18 @@ export function renderToolbar(resultCount) {
     }
 
     // Board admins (global or per-board) get an inline "edit board" pencil that
-    // opens the same board editor as the admin page, content-only.
+    // opens the same board editor as the admin page (content-only + read-only
+    // Mapping view for non-admin board-admins).
     if (state.boardManage) {
-      const editBtn = toolBtn(ICONS.pencil, "board-edit-btn", () => openBoardModal(null, {
+      const editBtn = toolBtn(ICONS.pencil, "board-edit-btn", () => openBoardModal(state.boardId, {
         canEditAI: !!state.me?.is_admin,
-        boardId: state.boardId,
-        withMapping: true,
         onSaved: (payload) => {
           state.boardName = payload.name;
           state.facets = payload.facets;
           state.aiReasoning = payload.ai_reasoning !== false;
+          // `mapping` is present only when the Mapping pane was touched — sync
+          // it so the toolbar's connector chip re-reads mapping.input.
+          if (payload.mapping !== undefined) state.boardMapping = payload.mapping;
           const b = state.boards.find((x) => x.id === state.boardId);
           if (b) b.name = payload.name;
           document.dispatchEvent(new Event('app:render'));

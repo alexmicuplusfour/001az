@@ -43,6 +43,7 @@ import {
   deleteBoard,
   boardExists,
   boardItemStats,
+  boardHasItems,
   boardAiUsage,
   retagBoard,
   releaseHeld,
@@ -455,6 +456,11 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     auto_tag_every_min: b.auto_tag_every_min || 1440,
     auto_tag_skip_weekends: !!b.auto_tag_skip_weekends,
     retag_on_refresh: !!b.retag_on_refresh,
+    // The modal's Mapping pane: the mapping itself (already public via
+    // GET /api/boards/:id) and whether the board has items — templates only
+    // apply while it's empty.
+    mapping: b.mapping || null,
+    has_items: await boardHasItems(db, b.id),
     ingest: b.ingest || null,
     ingest_state: b.ingest_state || null,
     ...(req.user.is_admin ? {
@@ -737,9 +743,28 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   autoTag.nextRunAt = autoTag.enabled && autoTag.periodic
     ? nextAutoTagRun(Date.now(), autoTag.everyMin, autoTag.skipWeekends)
     : null;
-  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, aiResearch);
+  // Mapping + extraction provider can ride the create (the modal's Mapping tab
+  // works on new boards too — templates only apply while a board is empty, so
+  // create-time is the natural moment). No reschedule/backfill side-effects
+  // here: a new board has no entities or items yet.
+  let mapping = null;
+  if (req.body && req.body.mapping !== undefined && req.body.mapping !== null) {
+    if (typeof req.body.mapping !== "object") return res.status(400).json({ error: "mapping must be an object or null" });
+    const err = validateMapping(req.body.mapping);
+    if (err) return res.status(400).json({ error: err });
+    mapping = req.body.mapping;
+  }
+  let extractKeyId = null;
+  if (req.body && req.body.extract_key_id != null) {
+    extractKeyId = Number(req.body.extract_key_id);
+    if (!(await getAiKey(db, extractKeyId))) return res.status(400).json({ error: "unknown extract_key_id" });
+  }
+  const extractModel = extractKeyId && req.body.extract_model ? String(req.body.extract_model) : null;
+  const retagOnRefresh = !!(req.body && req.body.retag_on_refresh);
+  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, aiResearch,
+    { mapping, extractKeyId, extractModel, retagOnRefresh });
   console.log(`created board "${name}" ${id}`);
-  res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch });
+  res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch, mapping });
 }));
 
 const MAPPING_KINDS = new Set(["text", "number", "url", "date"]);

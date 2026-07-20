@@ -1,4 +1,3 @@
-import { state } from './state.js';
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
@@ -12,33 +11,38 @@ const CADENCES = [[0, "Off"], [1, "1 min"], [5, "5 min"], [15, "15 min"], [60, "
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, collect, applySaved }: the host folds collect()'s payload
-// into its one PATCH. Reads/writes the gallery `state` for the current board,
-// which is why board-modal imports this lazily (admin.html never pulls it in).
-export function buildMappingPane({ container }) {
-  const isAdmin = !!state.me?.is_admin;
+// Returns { isDirty, collect }: the host folds collect()'s payload into its one
+// PATCH/POST. Fully parameterized (no gallery-state reads), so it works on
+// admin.html and for not-yet-created boards:
+//   isAdmin  — editable pane + extraction row; false = read-only view
+//   mapping  — the board's current mapping (null for a new/unmapped board)
+//   hasItems — locks the connector-template picker (templates rewire the whole
+//              mapping, only sane while the board is empty)
+//   extract  — { keyId, model } stored extraction override (admin), or null
+export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, extract = null }) {
   // Any user edit flips the pane dirty, so a pure-tagging save omits `mapping`
   // and doesn't needlessly re-run the server's reschedule/backfill.
   let dirty = false;
   const markDirty = () => { dirty = true; };
   // Clone current mapping so edits are buffered until Save.
-  let fields = (state.boardMapping?.fields || []).map((f) => ({ ...f }));
-  let identityFrom = state.boardMapping?.identity?.from || "raw";
-  let identityHint = state.boardMapping?.identity?.hint || "";
-  let inputConnector = state.boardMapping?.input?.connector || null; // set when a connector template is loaded
+  let fields = (mapping?.fields || []).map((f) => ({ ...f }));
+  let identityFrom = mapping?.identity?.from || "raw";
+  let identityHint = mapping?.identity?.hint || "";
+  let inputConnector = mapping?.input?.connector || null; // set when a connector template is loaded
   let connectorCatalog = null;   // the active connector's full field set (manifest.fields)
   let fileFieldCatalog = null;   // file-metadata field catalog (server/media) — file boards only
   let connectorFaces = [];       // the connector's face producers (with per-provider availability)
   let connectorLabel = null;
   let connectorProviders = [];   // [{ name, label, needsKey }] — for naming providers in hints
   let connectorActiveProvider = null; // the backend currently resolving this connector
-  let faceCfg = { ...(state.boardMapping?.face || { from: "raw" }) }; // the entity's card visual
+  let faceCfg = { ...(mapping?.face || { from: "raw" }) }; // the entity's card visual
 
-  // Extraction provider — loaded from /api/boards/:id/settings (admin only).
-  // extractLoaded gates the save payload: until the fetch lands, the PATCH
-  // omits extract fields so a quick Save can't wipe a stored override.
-  let extractKeyId = null;
-  let extractModel = null;
+  // Extraction provider — the stored override arrives via `extract` (the host
+  // already has it); only the key/catalog registry is fetched here. extractLoaded
+  // gates the save payload: until that fetch lands, the save omits extract
+  // fields so a quick Save can't wipe a stored override.
+  let extractKeyId = extract?.keyId ?? null;
+  let extractModel = extract?.model ?? null;
   let extractKeySel = null;
   let extractModelSel = null;
   let extractLoaded = false;
@@ -67,7 +71,7 @@ export function buildMappingPane({ container }) {
     const loadBtn = document.createElement("button");
     loadBtn.className = "mm-template-btn";
     loadBtn.textContent = inputConnector ? `Connector: ${inputConnector}` : "Load template…";
-    if (state.items.length) {
+    if (hasItems) {
       loadBtn.disabled = true;
       const why = inputConnector
         ? "This board already has items, so its connector template can't be changed or removed. Create a new board to use a different template."
@@ -698,12 +702,9 @@ export function buildMappingPane({ container }) {
     Promise.all([
       fetch("/api/admin/ai-keys").then((r) => r.json()),
       loadProviders(),
-      fetch(`/api/boards/${state.boardId}/settings`).then((r) => r.ok ? r.json() : {}),
-    ]).then(([keys, catalog, settings]) => {
+    ]).then(([keys, catalog]) => {
       aiKeys = keys;
       aiCatalog = byName(catalog);
-      extractKeyId = settings.extract_key_id ?? null;
-      extractModel = settings.extract_model ?? null;
       const defOpt = document.createElement("option");
       defOpt.value = "";
       defOpt.textContent = "Board default";
@@ -854,9 +855,5 @@ export function buildMappingPane({ container }) {
     };
   }
 
-  // Reflect a saved mapping back into gallery state so the toolbar re-reads
-  // mapping.input (the host modal dispatches app:render after its onSaved).
-  function applySaved(mapping) { state.boardMapping = mapping; }
-
-  return { isDirty: () => dirty, collect, applySaved };
+  return { isDirty: () => dirty, collect };
 }

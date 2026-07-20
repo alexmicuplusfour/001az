@@ -715,16 +715,19 @@ const BOARD_COLS =
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, " +
   "ingest, ingest_next_run_at, ingest_state, created_at";
 
-export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false) {
+export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false, extras = {}) {
   const id = crypto.randomUUID();
   await db.query(
     `INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model,
-       auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+       auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at,
+       mapping, extract_key_id, extract_model, retag_on_refresh, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
     [
       id, name, JSON.stringify(facets), context, !!aiReasoning, !!aiResearch, aiKeyId, aiModel,
       autoTag.enabled !== false, !!autoTag.periodic, autoTag.everyMin || 1440,
-      !!autoTag.skipWeekends, autoTag.nextRunAt ?? null, Date.now(),
+      !!autoTag.skipWeekends, autoTag.nextRunAt ?? null,
+      extras.mapping ? JSON.stringify(extras.mapping) : null,
+      extras.extractKeyId ?? null, extras.extractModel ?? null, !!extras.retagOnRefresh, Date.now(),
     ]
   );
   return id;
@@ -787,6 +790,11 @@ export async function deleteBoard(db, id) {
 
 export async function boardExists(db, id) {
   const { rows } = await db.query("SELECT 1 FROM boards WHERE id=$1", [id]);
+  return rows.length > 0;
+}
+
+export async function boardHasItems(db, id) {
+  const { rows } = await db.query("SELECT 1 FROM items WHERE board_id=$1 LIMIT 1", [id]);
   return rows.length > 0;
 }
 

@@ -1,7 +1,9 @@
-// The board editor, shared by admin.html (full: create/edit incl. the AI
-// tagger key/model) and the gallery toolbar (content-only, for board-admins).
-// Styling for .switch / .switch-row / .modal-section / .fe-* lives in modal.css,
-// which both pages load. Caches the provider catalog module-side.
+// The board editor — the same Mapping|Tagging modal everywhere it opens:
+// admin.html (edit + create) and the gallery toolbar (pencil + New board).
+// Admins get the full editor; board-admins a content-only Tagging pane and a
+// read-only Mapping view. Styling for .switch / .switch-row / .modal-section /
+// .fe-* / .mm-* lives in modal.css, which both pages load (plus dropdown.css
+// for the pane's menus). Caches the provider catalog module-side.
 import { toast } from "/toast.js";
 import { createModal } from "/modal.js";
 import { api } from "/api.js";
@@ -260,19 +262,24 @@ const STARTER_FACETS = [
   },
 ];
 
-// Open the board editor.
-//   board          — the board object to edit, or null to create / fetch
-//   opts.canEditAI — show the AI key/model picker + save via /api/admin/boards
-//                    (admin). false = content-only, saves via /api/boards/:id.
-//   opts.boardId   — with board=null and canEditAI=false, fetch this board's
-//                    editable settings first (the gallery's manage path).
-//   opts.onSaved   — called with the saved body after a successful save.
-//   opts.withMapping — also show a Mapping/Tagging pane toggle and fold the
-//                    entity mapping into the same Save (gallery pencil only —
-//                    the mapping pane reads gallery state for the current board).
-export async function openBoardModal(board, opts = {}) {
-  const { canEditAI = false, onSaved, boardId, withMapping = false } = opts;
-  if (!board && boardId) {
+// Open the board editor — the ONE board modal, same shape everywhere (admin
+// page, gallery pencil, and both "New board" buttons): a Mapping|Tagging pane
+// toggle over a single Save.
+//   boardId        — the board to edit, or null to create. Existing boards are
+//                    always fetched fresh via /api/boards/:id/settings, which
+//                    carries everything the modal needs (incl. mapping and
+//                    has_items for the Mapping pane).
+//   opts.canEditAI — show the AI key/model picker + extraction provider, allow
+//                    mapping edits, save via /api/admin/boards (admin).
+//                    false = content-only, saves via /api/boards/:id and the
+//                    Mapping pane is read-only.
+//   opts.onSaved   — called with the saved body after a successful save (for
+//                    edits that's the sent payload, incl. `mapping` when the
+//                    pane was touched).
+export async function openBoardModal(boardId, opts = {}) {
+  const { canEditAI = false, onSaved } = opts;
+  let board = null;
+  if (boardId) {
     try { board = await api("GET", `/api/boards/${boardId}/settings`); }
     catch { toast.error("Couldn't load board settings"); return; }
   }
@@ -288,13 +295,13 @@ export async function openBoardModal(board, opts = {}) {
     ? `<label>AI tagger <span style="font-weight:400;color:#9aa0aa">(which API key and model tag this board)</span></label>
        <div id="board-modal-ai" style="display:flex;gap:8px;margin-bottom:14px;"></div>`
     : "";
-  // Mapping|Tagging pane toggle (gallery pencil only). Tagging is the default —
-  // it's the more-touched half — so it's the active (right) segment on open.
-  const paneToggle = withMapping ? `
+  // Mapping|Tagging pane toggle. Tagging is the default — it's the
+  // more-touched half — so it's the active (right) segment on open.
+  const paneToggle = `
     <div class="pane-toggle" id="board-modal-panes">
       <button type="button" class="pane-toggle-btn" data-pane="mapping">Mapping</button>
       <button type="button" class="pane-toggle-btn active" data-pane="tagging">Tagging</button>
-    </div>` : "";
+    </div>`;
   body.innerHTML = `
     <label>Board name</label>
     <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
@@ -314,7 +321,7 @@ export async function openBoardModal(board, opts = {}) {
         <textarea id="board-modal-facets" rows="12"></textarea>
       </div>
     </div>
-    ${withMapping ? '<div id="board-modal-mapping" style="display:none;flex-direction:column;gap:12px;"></div>' : ""}`;
+    <div id="board-modal-mapping" style="display:none;flex-direction:column;gap:12px;"></div>`;
   body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
   body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
   body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
@@ -328,17 +335,16 @@ export async function openBoardModal(board, opts = {}) {
   // point, so nothing user-written is ever overwritten).
   if (isNew) facetEditor.setFacets(STARTER_FACETS);
 
-  // Mapping pane (gallery pencil only). buildMappingPane reads gallery state for
-  // the current board; admin.html loads this file too but never sets withMapping,
-  // so it's built only here. Visibility is via `display` (not the `hidden`
-  // attribute) so the pane's own flex layout can't override it.
+  // Mapping pane. Visibility is via `display` (not the `hidden` attribute) so
+  // the pane's own flex layout can't override it.
   //
   // Built lazily on first reveal: Tagging is the default tab, so a save that
   // never opens Mapping shouldn't pay for the pane's fetches (connectors,
-  // file-fields, ai-keys, settings — the last one already loaded above). A pane
-  // that was never built stays null, so its mapping is never folded into Save.
+  // file-fields, ai-keys). A pane that was never built stays null, so its
+  // mapping is never folded into Save. New boards open an empty pane — that's
+  // where connector templates are most useful (they lock once items exist).
   let mappingPane = null;
-  if (withMapping) {
+  {
     const panes = document.getElementById("board-modal-panes");
     const taggingEl = document.getElementById("board-modal-tagging");
     const mappingEl = document.getElementById("board-modal-mapping");
@@ -349,7 +355,17 @@ export async function openBoardModal(board, opts = {}) {
       panes.querySelectorAll(".pane-toggle-btn").forEach((b) => b.classList.toggle("active", b === btn));
       mappingEl.style.display = showMapping ? "flex" : "none";
       taggingEl.style.display = showMapping ? "none" : "";
-      if (showMapping && !mappingPane) mappingPane = buildMappingPane({ container: mappingEl });
+      if (showMapping && !mappingPane) {
+        mappingPane = buildMappingPane({
+          container: mappingEl,
+          isAdmin: canEditAI,
+          mapping: board?.mapping || null,
+          hasItems: !!board?.has_items,
+          extract: canEditAI
+            ? { keyId: board?.extract_key_id ?? null, model: board?.extract_model ?? null }
+            : null,
+        });
+      }
     });
   }
 
@@ -492,23 +508,21 @@ export async function openBoardModal(board, opts = {}) {
       auto_tag_skip_weekends: at.skipWeekends,
       retag_on_refresh: at.retagOnRefresh,
     };
-    // Fold a touched mapping into the same PATCH. Only when the admin actually
-    // edited it — an untouched pane omits `mapping` so the save stays a light
-    // tagging update (no server-side reschedule/backfill). Mapping only ever
-    // rides the admin endpoint, which is exactly the canEditAI branch below.
-    let savedMapping;
+    // Fold a touched mapping into the same save (create POST or admin PATCH).
+    // Only when the admin actually edited it — an untouched pane omits
+    // `mapping` so an edit stays a light tagging update (no server-side
+    // reschedule/backfill). Mapping only ever rides the admin endpoints,
+    // which is exactly the canEditAI gate below.
     if (mappingPane && canEditAI && mappingPane.isDirty()) {
       const res = mappingPane.collect();
       if (!res.ok) return; // collect() already toasted the reason
       Object.assign(payload, res.payload);
-      savedMapping = res.payload.mapping;
     }
     try {
       let saved = payload;
       if (isNew) saved = await api("POST", "/api/admin/boards", payload);
       else if (canEditAI) await api("PATCH", `/api/admin/boards/${board.id}`, payload);
       else await api("PATCH", `/api/boards/${board.id}`, payload);
-      if (mappingPane && savedMapping !== undefined) mappingPane.applySaved(savedMapping);
       close();
       onSaved?.(saved);
       toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);

@@ -186,6 +186,32 @@ test("mapping PATCH: field key 'identity' → 400 (reserved for the identity slo
   assert.match(r.json.error, /reserved/);
 });
 
+// ── mapping on create (the modal's Mapping tab works on new boards too) ──────
+
+test("create: mapping rides POST /api/admin/boards and lands in GET + settings", async () => {
+  const r = await createBoard("map-on-create", { mapping: MAPPING, retag_on_refresh: true });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.mapping, MAPPING);
+
+  const { json: got } = await getPublicBoard(r.json.id);
+  assert.deepEqual(got.mapping, MAPPING);
+
+  const { json: settings } = await req(base, "GET", `/api/boards/${r.json.id}/settings`, { sid: admin.sid });
+  assert.deepEqual(settings.mapping, MAPPING);
+  assert.equal(settings.has_items, false);
+  assert.equal(settings.retag_on_refresh, true);
+});
+
+test("create: invalid mapping → 400, board not created", async () => {
+  const r = await createBoard("map-on-create-bad", {
+    mapping: { fields: [{ key: "x", kind: "emoji", from: "ai" }] },
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /invalid kind/);
+  const { rows } = await db.query("SELECT 1 FROM boards WHERE name=$1", ["map-on-create-bad"]);
+  assert.equal(rows.length, 0);
+});
+
 // ── ingest routing ───────────────────────────────────────────────────────────
 
 test("ingest: mapped board → pending_extract + payload.mapping stamped", async () => {
@@ -203,6 +229,10 @@ test("ingest: mapped board → pending_extract + payload.mapping stamped", async
   // The upload also created the entity shell, provisionally keyed by the file.
   const { rows: [ent] } = await db.query("SELECT identity FROM entities WHERE id=$1", [uploaded[0].id]);
   assert.equal(ent.identity, uploaded[0].name);
+
+  // …and flips settings.has_items, which locks the modal's template picker.
+  const { json: settings } = await req(base, "GET", `/api/boards/${board.id}/settings`, { sid: admin.sid });
+  assert.equal(settings.has_items, true);
 });
 
 test("ingest: plain board → pending, no payload.mapping", async () => {
