@@ -108,9 +108,24 @@ holds only `sidecarSem` and the AI phase holds only `aiSem[key]`. Everything dow
   board's ready items by age and serves rank-0 of every board first, claimed as one snapshot batch
   per lane (single-row claims collapse to FIFO); `claimNextWork` is the LIMIT-1 wrapper. Fairness
   holds while active boards ≤ lane size, degrades to FIFO beyond.
-- **Stage 3 — Embedding + throughput sweeps into lanes.** Move `embedDue`/`refreshDue` off the
-  coordination tick into `embedSem`/their own bounded loops; only cheap coordination
-  (`recoverStuck`, `retagDue` scheduling, `ingestDue`, prune) stays on a light scheduler tick.
+- **Stage 3 — Embedding + throughput sweeps into their own loops. ✅ DONE.** `embedDue` and
+  `refreshDue` moved off the maintenance tick into dedicated `embedLoop`/`refreshLoop` (mirroring
+  the existing `transcribeLoop`); `maintainLoop` keeps only cheap coordination (`recoverStuck`,
+  `hasDefault`, `retagDue`, `ingestDue`, prune). Both sweeps now **drain fast** — poll ~200 ms
+  after a FULL batch, idle at `POLL_MS` otherwise — so a backlog no longer clears at one batch per
+  tick. Shipped **simpler than the sketch**: NO `embedSem`/`EMBED_CONCURRENCY` knob. It would have
+  defaulted to 1 (today's behavior) → a dead knob (the §5 "unreachable knobs" lesson); the local
+  embedder is CPU-bound single-threaded and a provider embedder is already rate-bounded by the
+  token bucket, so fast-drain gets the throughput without the machinery. Add concurrent batches
+  only if a real IO-bound provider embedder ever wants them. **Also note:** the plan's headline
+  win — "a slow embed batch no longer blocks tag claims" — was *already delivered by Stage 1*
+  (the dispatcher is a separate loop). The real Stage 3 win is narrower: the heavy sweeps no
+  longer block the *coordination* tick (recovery / retag / ingestion) or each other.
+  **Review-pass fix:** `refreshLoop` must `wake()` the dispatcher after each pass — a moved
+  live field can requeue an entity for re-tag (`retag_on_refresh`), and `maintainLoop` used to
+  deliver that nudge when `refreshDue` lived there; pulling it into its own loop dropped it until
+  the second pass caught it. `embedLoop` correctly does NOT wake — embedding writes vectors to
+  already-`tagged` items and never creates claimable work.
 - **Stage 4 — Defer:** per-key AI lanes (`aiSem[key]` — full cross-board isolation when a slow
   provider's paced items hog the global AI lane); the `extractOne` sidecar/AI split (its AI call
   joins the shared AI lane); TPM-aware pacing (the real ceiling for big-input tagging — Anthropic
@@ -124,7 +139,8 @@ runs at its own capacity, pacing is off the critical path, and boards are treate
 
 - Drop `TAG_CONCURRENCY` (keep as a deprecated alias → `AI_INFLIGHT`).
 - `AI_INFLIGHT` (per-key in-flight fuse; memory/cost, default ~6–8), `EXTRACT_CONCURRENCY` (=sidecar
-  replicas, default 1), `EMBED_CONCURRENCY` (default 1), higher `STUCK_MS` default.
+  replicas, default 1). `EMBED_CONCURRENCY` was **not** added (Stage 3): default-1 = today's
+  behavior → a dead knob; `embedLoop`'s fast-drain covers throughput without it.
 - Rate limits are already a config surface (Plugins UI + descriptors) — unchanged.
 - Compose passthrough for the new knobs (the §5 lesson: unreachable knobs are dead knobs).
 
@@ -137,7 +153,11 @@ runs at its own capacity, pacing is off the critical path, and boards are treate
   sidecar→AI→`markExtracted`, and a sidecar failure retries without ever making the AI call.
 - **Stage 2:** the two-board interleave (small board's items claim ahead of a large board's backlog);
   single board stays strict FIFO; the `LIMIT 1` wrapper still returns the globally-oldest row.
-- **Stage 3:** a slow embed batch no longer blocks tag claims.
+- **Stage 3:** ✅ no new test. The would-be assertion (a slow embed batch doesn't block claims) is
+  already covered structurally by Stage 1's separate dispatcher, and a "sweep A doesn't delay
+  sweep B" test is inherently timing-based → flaky. The existing unit tests target `embedBatch` /
+  `refreshDueEntity` directly (untouched by the loop split) and stayed green; the full suite is
+  406/406, and the drain test proves the new loops shut down cleanly.
 - **Throughout:** `startWorker`/`stop` stay the public surface; existing queue/retry/fence tests green;
   drain awaits all lanes.
 

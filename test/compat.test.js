@@ -3,7 +3,14 @@
 // these pin both the common shape and each GLM quirk against the others.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compatRequest } from "../server/providers.js";
+import { PROVIDERS } from "../server/providers.js";
+import { compatRequest as buildRequest } from "../server/ai-providers/wires/compat.js";
+
+// compatRequest takes the descriptor's `compat` quirk block, not a provider
+// name — the wire never reaches into the registry. These tests still pin the
+// shape per BUILT-IN, so resolve each named provider's block through PROVIDERS.
+const compatRequest = ({ provider, ...rest }) =>
+  buildRequest({ compat: PROVIDERS[provider].compat, ...rest });
 
 const schema = { type: "object", properties: { kind: { type: "array" } }, required: ["kind"] };
 const parts = [

@@ -890,23 +890,27 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // Embedding sweep: (re)vectorize tagged items with no current-model vector.
   // This single path covers fresh tags (markTagged clears the vector), manual
   // edits, turning the feature on late, and model changes — one batched API
-  // call per tick (embedBatch isolates poison inputs so one bad item can't
+  // call per pass (embedBatch isolates poison inputs so one bad item can't
   // wedge the backfill). Batch-level failures back off for a minute so a bad
-  // key or outage doesn't turn the poll loop into an API hammer.
+  // key or outage doesn't turn the poll loop into an API hammer. Driven by
+  // embedLoop (Stage 3); returns true after a FULL batch so the loop drains a
+  // backlog fast instead of one batch per tick.
   const EMBED_BATCH = Math.max(1, Number(process.env.EMBED_BATCH) || 64);
   let embedBackoffUntil = 0;
   async function embedDue() {
-    if (Date.now() < embedBackoffUntil) return;
+    if (Date.now() < embedBackoffUntil) return false;
     const embedder = await resolveEmbedder(db);
-    if (!embedder) return;
+    if (!embedder) return false;
     const rows = await itemsNeedingEmbedding(db, embedder.model, EMBED_BATCH);
-    if (!rows.length) return;
+    if (!rows.length) return false;
     try {
       const { embedded, skipped } = await embedBatch(db, embedder, rows);
       console.log(`embedded ${embedded} item(s)${skipped ? `, skipped ${skipped}` : ""} [${embedder.model}]`);
+      return rows.length === EMBED_BATCH; // full batch → more likely waiting, drain fast
     } catch (err) {
       embedBackoffUntil = Date.now() + 60000;
       console.warn(`embed error (retrying in 60s): ${err.message}`);
+      return false;
     }
   }
 
@@ -940,7 +944,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   }
 
   async function refreshDue() {
-    if (Date.now() < refreshBackoffUntil) return;
+    if (Date.now() < refreshBackoffUntil) return false;
     const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
     for (const row of rows) {
       try {
@@ -949,9 +953,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         refreshBackoffUntil = Date.now() + 60000;
         await setEntityRefreshAt(db, row.entity.id, Date.now() + 60000); // retry later, don't wedge the sweep
         console.warn(`refresh error entity #${row.entity.id} (retrying in 60s): ${err.message}`);
-        break;
+        return false; // backed off — nothing to drain fast for
       }
     }
+    return rows.length === REFRESH_BATCH; // full batch → more may be due, drain fast
   }
 
   // Ingestion sweep: run due boards' feeds (the worker tick is the cron — a
@@ -1295,6 +1300,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   let running = true;
   let wake = () => {};          // nudge the dispatcher (a lane freed, or new work)
   let maintainWake = () => {};
+  let embedWake = () => {};
+  let refreshWake = () => {};
   let transcribeWake = () => {};
 
   // Fill one lane that has room with a single board-fair BATCH of its stage, sized to
@@ -1340,9 +1347,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     }
   })();
 
-  // Maintenance: recovery + the sweeps on a cadence, off the dispatcher's path so a
-  // slow sweep can't stall claims. Nudges the dispatcher after, since retag/ingest may
-  // have created claimable work.
+  // Maintenance: recovery + the LIGHT coordination sweeps (retag scheduling, ingestion,
+  // prune) on a cadence, off the dispatcher's path so a slow sweep can't stall claims.
+  // The heavy throughput sweeps (embedding, liveness refresh) moved to their own loops
+  // below (Stage 3), so a big embed backlog or a slow connector can't delay recovery or
+  // ingestion. Nudges the dispatcher after, since retag/ingest may have created work.
   const maintainLoop = (async () => {
     while (running) {
       try {
@@ -1350,8 +1359,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
         hasDefault = !!(await resolveDefaultAi(db));
         await retagDue();
-        await embedDue();
-        await refreshDue();
         await ingestDue();
         await pruneSnapshots();
       } catch (e) { console.error("worker maintain error:", e.message); }
@@ -1360,6 +1367,43 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       await new Promise((r) => {
         const t = setTimeout(r, POLL_MS);
         maintainWake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
+  // Embedding sweep on its own loop (Stage 3): the vector backfill runs off the
+  // coordination tick, so a slow provider or a big backlog can't delay recovery,
+  // ingestion, or the scheduled retag. Drains fast — polls short after a full batch,
+  // idles at POLL_MS otherwise (its own backoff still gates provider errors).
+  const embedLoop = (async () => {
+    while (running) {
+      let more = false;
+      try { more = await embedDue(); }
+      catch (e) { console.error("worker embed error:", e.message); }
+      if (!running) break;
+      await new Promise((r) => {
+        const t = setTimeout(r, more ? 200 : POLL_MS);
+        embedWake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
+  // Liveness refresh on its own loop (Stage 3): same reasoning as embedLoop — a slow
+  // connector refreshing due entities can't stall the coordination tick, and a full
+  // batch drains fast rather than one per maintenance pass. Unlike embedLoop it nudges
+  // the dispatcher after each pass: a moved field can requeue an entity for re-tag
+  // (retag_on_refresh), and maintainLoop used to deliver that wake when refreshDue lived
+  // there. Embedding never creates claimable work, so embedLoop needs no such wake.
+  const refreshLoop = (async () => {
+    while (running) {
+      let more = false;
+      try { more = await refreshDue(); }
+      catch (e) { console.error("worker refresh error:", e.message); }
+      if (!running) break;
+      wake();
+      await new Promise((r) => {
+        const t = setTimeout(r, more ? 200 : POLL_MS);
+        refreshWake = () => { clearTimeout(t); r(); };
       });
     }
   })();
@@ -1431,12 +1475,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     running = false;
     wake();
     maintainWake();
+    embedWake();
+    refreshWake();
     transcribeWake();
     // Drain: let the loops finish their current pass and stop claiming, THEN await the
     // in-flight pipelines (captured after the loops settle, so a final fill's launches
     // are included). server.js caps the total wait.
     return (async () => {
-      await Promise.all([dispatchLoop, maintainLoop, transcribeLoop]);
+      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, transcribeLoop]);
       await Promise.all([...pipelines]);
     })();
   };

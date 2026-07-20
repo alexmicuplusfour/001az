@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, adminSession, seedBoard } from "./helpers.js";
-import { anthropicRequest } from "../server/providers.js";
+import { anthropicRequest } from "../server/ai-providers/wires/anthropic.js";
 import { documentTextFor } from "../server/worker.js";
 import { MANIFESTS, acceptsName } from "../server/sources/index.js";
 import { textSource } from "../server/sources/text.js";

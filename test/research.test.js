@@ -6,7 +6,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, req } from "./helpers.js";
-import { anthropicRequest } from "../server/providers.js";
+import { anthropicRequest } from "../server/ai-providers/wires/anthropic.js";
 import { buildPrompt } from "../server/worker.js";
 
 const facets = [{ key: "kind", label: "Kind", single: true, values: ["a", "b"] }];

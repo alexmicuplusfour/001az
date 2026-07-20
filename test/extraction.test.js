@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
 import { markExtracted } from "../server/db.js";
 import { buildFieldsPrompt, htmlToMarkdown } from "../server/worker.js";
-import { anthropicRequest } from "../server/providers.js";
+import { anthropicRequest } from "../server/ai-providers/wires/anthropic.js";
 
 // ─── pure: buildFieldsPrompt ─────────────────────────────────────────────────
 
