@@ -71,6 +71,10 @@ export function feedAdapter(conn) {
         kind: FILTER_KIND[c.kind] || "text",
         label: c.label,
         display: c.kind,
+        // `preview: true` opts a column into the ingest preview's column set
+        // (see ingest-modal). Kept off the object when unset so the catalog
+        // stays clean and a source that flags none falls back to showing all.
+        ...(c.preview ? { preview: true } : {}),
       })),
       sorts: (browse.sorts || []).map((s) => ({ by: s.key, label: s.label })),
       // No "continuous": that mode is the folder adapter's 30s rescan, which

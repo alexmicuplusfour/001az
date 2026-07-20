@@ -11,6 +11,7 @@ import { getBoard, updateBoard, setIngestNextRun, deleteEntity } from "../server
 import { feedAdapter } from "../server/ingestion/connector.js";
 import { resolveIngestAdapter } from "../server/ingestion/index.js";
 import { manifest as cryptoManifest } from "../server/connectors/crypto/index.js";
+import { manifest as stocksManifest } from "../server/connectors/stocks/index.js";
 import { startWorker } from "../server/worker.js";
 import { createSources } from "../server/sources/index.js";
 
@@ -65,6 +66,32 @@ test("descriptor derives from manifest.browse: display kinds → filter kinds, d
   ], "engine kind narrows usd/percent→number; display preserves the browse kind for formatting");
   assert.deepEqual(d.sorts, [{ by: "rank", label: "Rank" }, { by: "price", label: "Price" }]);
   assert.deepEqual(d.triggerModes, ["manual", "interval", "daily"]);
+});
+
+test("descriptor carries a column's preview flag; unflagged columns omit it", () => {
+  const a = feedAdapter(stubConn({
+    browse: {
+      columns: [
+        { key: "name",  label: "Name",  kind: "text", primary: true },
+        { key: "price", label: "Price", kind: "usd", preview: true },
+        { key: "rank",  label: "#",     kind: "number" },
+      ],
+      sorts: [{ key: "rank", label: "Rank" }],
+      defaultSort: "rank",
+      pageSize: 50,
+    },
+  }));
+  const byFn = Object.fromEntries(a.descriptor().filters.map((f) => [f.fn, f]));
+  assert.equal(byFn.price.preview, true, "a flagged column is marked for the preview list");
+  assert.ok(!("preview" in byFn.rank), "an unflagged column omits the key so the catalog stays clean");
+});
+
+test("crypto/stocks descriptors flag volume for the preview (regression: volume was missing)", () => {
+  for (const [name, manifest] of [["crypto", cryptoManifest], ["stocks", stocksManifest]]) {
+    const d = feedAdapter({ name, manifest, activeProvider: async () => ({}) }).descriptor();
+    const vol = d.filters.find((f) => f.fn === "volume");
+    assert.equal(vol?.preview, true, `${name} preview includes volume`);
+  }
 });
 
 test("a domain without a browse catalog can't feed", () => {

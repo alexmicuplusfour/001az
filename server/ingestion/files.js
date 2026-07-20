@@ -21,12 +21,14 @@ import { pluginInstalled, mediaLimitLookup } from "../plugins.js";
 
 // The file filter catalog + sorts, shared by every file source. `values` a
 // backend fills (name/path/extension/file_size/modified/created) feed these.
+// `preview: true` marks the compact subset the ingest preview shows; the rest
+// stay filterable but off the preview table.
 const FILE_FILTERS = [
   { fn: "name", kind: "text", label: "File name" },
-  { fn: "extension", kind: "text", label: "Extension" },
+  { fn: "extension", kind: "text", label: "Extension", preview: true },
   { fn: "path", kind: "text", label: "Relative path" },
-  { fn: "file_size", kind: "number", label: "File size (bytes)" },
-  { fn: "modified", kind: "date", label: "Modified" },
+  { fn: "file_size", kind: "number", label: "File size (bytes)", preview: true },
+  { fn: "modified", kind: "date", label: "Modified", preview: true },
   { fn: "created", kind: "date", label: "Created" },
 ];
 const FILE_SORTS = [

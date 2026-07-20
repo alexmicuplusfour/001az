@@ -603,11 +603,16 @@ export function openIngestModal() {
     note.style.display = "none"; // .cb-note pads even when empty — hide until it speaks
     resultsView.appendChild(scroll);
 
-    // Columns straight from the catalog: label first, then up to three
-    // non-name fields — agnostic to what the adapter exposes. A trailing
-    // status column marks rows the ledger already holds (a run skips them),
-    // so the "N new" promise on the count button is traceable in the list.
-    const cols = (desc.filters || []).filter((c) => c.fn !== "name").slice(0, 3);
+    // Columns straight from the catalog: the label as "Item", then the fields
+    // the source flagged for preview (`preview` on its browse/file catalog) —
+    // each source owns its own compact set, so nothing arbitrary gets sliced off
+    // and a headline field like volume can't silently vanish. A source that
+    // flags none falls back to every non-name field. A trailing status column
+    // marks rows the ledger already holds (a run skips them), so the "N new"
+    // promise on the count button is traceable in the list.
+    const nonName = (desc.filters || []).filter((c) => c.fn !== "name");
+    const flagged = nonName.filter((c) => c.preview);
+    const cols = flagged.length ? flagged : nonName;
     {
       const tr = document.createElement("tr");
       for (const h of ["Item", ...cols.map((c) => c.label), ""]) {

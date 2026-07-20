@@ -61,15 +61,16 @@ export const manifest = {
   // offers. Domain-level and canonical — every provider's list() fills the same
   // column keys and maps these sort keys to its own API (falling back to its
   // default for any it can't honor). `kind` drives agnostic client formatting
-  // (usd/percent/number/text); `primary` pairs the name with its symbol.
+  // (usd/percent/number/text); `primary` pairs the name with its symbol;
+  // `preview: true` picks the compact subset the ingest preview shows.
   browse: {
     columns: [
       { key: "rank",       label: "#",       kind: "number", width: 40 },
       { key: "name",       label: "Name",    kind: "text", primary: true },
-      { key: "price",      label: "Price",   kind: "usd" },
+      { key: "price",      label: "Price",   kind: "usd", preview: true },
       { key: "change_24h", label: "24h",     kind: "percent" },
-      { key: "market_cap", label: "Mkt cap", kind: "usd" },
-      { key: "volume",     label: "Volume",  kind: "usd" },
+      { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true },
+      { key: "volume",     label: "Volume",  kind: "usd", preview: true },
     ],
     sorts: [
       { key: "market_cap", label: "Market cap" },

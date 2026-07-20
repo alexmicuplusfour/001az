@@ -60,13 +60,14 @@ export const manifest = {
     // intraday change, so it would always render blank. The field still exists
     // on the board, fed live by the quote refresh. `rank` is the universe's
     // market-cap rank (computed at screener load) — it's what lets a feed say
-    // "top 50" as a filter.
+    // "top 50" as a filter. `preview: true` picks the compact set the ingest
+    // preview shows (volume among them — it's a headline metric, not filler).
     columns: [
       { key: "rank",       label: "#",       kind: "number", width: 40 },
       { key: "name",       label: "Name",    kind: "text", primary: true },
-      { key: "price",      label: "Price",   kind: "usd" },
-      { key: "market_cap", label: "Mkt cap", kind: "usd" },
-      { key: "volume",     label: "Volume",  kind: "number" },
+      { key: "price",      label: "Price",   kind: "usd", preview: true },
+      { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true },
+      { key: "volume",     label: "Volume",  kind: "number", preview: true },
       { key: "sector",     label: "Sector",  kind: "text" },
       { key: "exchange",   label: "Exchange", kind: "text" },
     ],
