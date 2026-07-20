@@ -125,6 +125,14 @@
       .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
       .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
       .gear:hover { background: #f1f1f3; color: #111; }
+      /* kind filter chips between Add and the list — the gallery's pill look,
+         colors inlined since this page doesn't load styles.css */
+      .plugin-filters { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 6px; }
+      .plugin-filters .pill { border: 1px solid #0a0a181a; background: #fff; color: #111; border-radius: 999px; padding: 4px 11px; font-size: 12px; white-space: nowrap; user-select: none; transition: background .12s, color .12s, border-color .12s; }
+      .plugin-filters .pill:hover { background: #f1f1f3; }
+      .plugin-filters .pill .count { color: #6b6b72; font-size: 11px; margin-left: 5px; }
+      .plugin-filters .pill.active { background: #111; color: #fff; border-color: #111; }
+      .plugin-filters .pill.active .count { color: rgba(255, 255, 255, .7); }
       .plugin-add { margin-top: 16px; }
       /* deliberately a dashed "add zone", not a primary button */
       .plugin-add button { border-style: dashed; border-color: #cfcfd6; background: #fff; color: #444; }

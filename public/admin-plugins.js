@@ -10,6 +10,12 @@ import { api } from "/api.js";
 import { openPluginModal } from "/plugin-modal.js";
 import { openAddPluginModal } from "/plugin-add-modal.js";
 
+// The kind filter above the list: chip labels per card family, in display
+// order. "all" is the default; the selection lives at module level so the
+// modal's refresh-after-mutation re-renders keep the narrowed view.
+const KIND_FILTERS = [["ai", "AI"], ["connector", "Data"], ["media", "Media"], ["source", "Sources"]];
+let activeKind = "all";
+
 const GEAR_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 const KEY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
 
@@ -114,12 +120,43 @@ export async function renderPlugins(prefetched) {
   add.appendChild(addBtn);
   sec.appendChild(add);
 
+  // Removing the last card of the selected kind (via ctx.refresh) would leave
+  // an empty list behind a chip that no longer renders — fall back to All.
+  const kindCount = (k) => installed.filter((p) => p.kind === k).length;
+  if (activeKind !== "all" && kindCount(activeKind) === 0) activeKind = "all";
+
+  const filters = document.createElement("div");
+  filters.className = "plugin-filters";
+  const setKind = (k) => { activeKind = k; renderPlugins(state); };
+  filters.appendChild(filterPill("All", installed.length, activeKind === "all", () => setKind("all")));
+  for (const [kind, label] of KIND_FILTERS) {
+    const n = kindCount(kind);
+    if (n) filters.appendChild(filterPill(label, n, activeKind === kind, () => setKind(kind)));
+  }
+  sec.appendChild(filters);
+
+  const visible = activeKind === "all" ? installed : installed.filter((p) => p.kind === activeKind);
   const list = document.createElement("div");
   list.className = "plugin-list";
-  for (const p of installed) list.appendChild(pluginRow(p, ctx));
+  for (const p of visible) list.appendChild(pluginRow(p, ctx));
   sec.appendChild(list);
 
   document.getElementById("plugins-content").replaceChildren(sec);
+}
+
+// A gallery-style filter chip: label + dim count, dark when active. Clicking
+// a chip selects it outright (single-select — "All" is how you widen back).
+function filterPill(label, count, active, onClick) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "pill" + (active ? " active" : "");
+  b.textContent = label;
+  const c = document.createElement("span");
+  c.className = "count";
+  c.textContent = count;
+  b.appendChild(c);
+  b.onclick = onClick;
+  return b;
 }
 
 function badge(text, cls = "") {
