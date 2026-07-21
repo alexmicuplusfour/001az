@@ -13,6 +13,7 @@ import {
   stampJobLog,
   listJobLog,
   listRunningJobs,
+  latestSettledJob,
   markInterruptedJobs,
   pruneJobLog,
   createEntity,
@@ -146,6 +147,22 @@ test("listJobLog: newest first, keyset cursor, kind/outcome filters", async () =
   assert.deepEqual(onlyFailed.jobs.map((j) => Number(j.started_at)), [T + 2000]);
 });
 
+test("latestSettledJob: newest settled row, board-level vs per-item", async () => {
+  const board = await seedBoard(db, "jobs-latest");
+  const T = Date.now() - 60000;
+  await addJobLog(db, { boardId: board, kind: "ingest", outcome: "ok", startedAt: T + 1000, endedAt: T + 1001 });
+  const newest = await addJobLog(db, { boardId: board, kind: "ingest", outcome: "failed", error: "boom", startedAt: T + 2000, endedAt: T + 2001 });
+  const running = await addJobLog(db, { boardId: board, kind: "ingest", startedAt: T + 3000 }); // running — never the answer
+  await addJobLog(db, { boardId: board, itemId: 7, kind: "transcribe", outcome: "requeued", startedAt: T + 4000, endedAt: T + 4001 });
+
+  const boardLevel = await latestSettledJob(db, board, "ingest");
+  assert.equal(Number(boardLevel.id), Number(newest)); // settled only; per-item rows excluded
+  assert.equal((await latestSettledJob(db, board, "transcribe", 7)).outcome, "requeued");
+  assert.equal(await latestSettledJob(db, board, "transcribe", 8), null);
+  // Settle the running row — the boot-sweep test below counts globally.
+  await stampJobLog(db, running, { outcome: "ok" });
+});
+
 test("markInterruptedJobs flips only running rows from before the boot fence", async () => {
   const board = await seedBoard(db, "jobs-interrupt");
   const bootAt = Date.now();
@@ -249,6 +266,49 @@ test("transcription transient failure: requeued row; the retry is a fresh row (p
   assert.match(rows[0].error, /unreachable/);
 });
 
+test("transcription: repeated transient failures fold into one requeued row", async () => {
+  const board = await seedBoard(db, "jobs-transcribe-fold");
+  const { iid } = await seedAudio(board, "outage.mp3");
+
+  // Attempt 1 (sidecar down): the first failure writes its own row.
+  let restore = stubFetch(sidecarDown());
+  let stop = runWorker();
+  try {
+    await until(async () => (await jobsFor(board)).some((r) => r.outcome === "requeued"));
+  } finally {
+    await stop();
+    restore();
+  }
+
+  // Attempt 2 (a new worker = fresh backoff, still down): folds into the same
+  // row — attempts bumped, no second row. Restarting between attempts also
+  // proves the fold finds the prior row in the ledger, not in memory.
+  restore = stubFetch(sidecarDown());
+  stop = runWorker();
+  try {
+    await until(async () => (await jobsFor(board)).some((r) => Number(r.detail?.attempts) === 2));
+  } finally {
+    await stop();
+    restore();
+  }
+  let rows = await jobsFor(board);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].outcome, "requeued");
+
+  // The recovery still gets its own row: [folded retry story, ok].
+  restore = stubFetch(sidecarOk("back"));
+  stop = runWorker();
+  try {
+    await until(async () => (await itemPayload(iid))?.transcript);
+  } finally {
+    await stop();
+    restore();
+  }
+  rows = await jobsFor(board);
+  assert.deepEqual(rows.map((r) => r.outcome), ["requeued", "ok"]);
+  assert.equal(Number(rows[0].detail.attempts), 2);
+});
+
 // --- the ingest write point ---
 
 test("ingest run: ok row with the run's counts", async () => {
@@ -322,6 +382,64 @@ test("ingest run failure: failed row with the run's error", async () => {
   const stop = runWorker({ sources });
   try {
     await until(async () => (await jobsFor(board)).some((r) => r.outcome !== "running"));
+  } finally {
+    await stop();
+  }
+  const rows = await jobsFor(board);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].outcome, "failed");
+  assert.match(rows[0].error, /unreadable/);
+});
+
+test("a scheduled scan that ledgers a skip keeps its row and names the file", async () => {
+  // A .png whose bytes aren't an image passes the extension gate, fails the
+  // sniff at admit → err.skip → ledgered out of every future scan. The run
+  // row is the only trace that ever happened, so it must not be retracted.
+  const p = path.join(root, "skips", "fake.png");
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, "not a png at all");
+  fs.utimesSync(p, new Date(OLD), new Date(OLD));
+  const board = await seedBoard(db, "jobs-ingest-skip");
+  await updateBoard(db, board, {
+    ingest: { enabled: true, source: { folder: "skips" }, trigger: { mode: "continuous" } },
+  });
+  await setIngestNextRun(db, board, Date.now() - 1000);
+
+  const runAt = async () =>
+    Number((await db.query("SELECT ingest_state FROM boards WHERE id=$1", [board])).rows[0].ingest_state?.last_run_at || 0);
+  const stop = runWorker({ sources });
+  try {
+    await until(async () => (await jobsFor(board)).some((r) => r.outcome === "ok"));
+    // Scan 2: the key is now ledgered, nothing is fresh — a true flat tick
+    // again, retracted as usual.
+    const t1 = await runAt();
+    await setIngestNextRun(db, board, Date.now() - 1000);
+    await until(async () => (await runAt()) > t1);
+  } finally {
+    await stop();
+  }
+  const rows = await jobsFor(board);
+  assert.equal(rows.length, 1);
+  const d = rows[0].detail;
+  assert.equal(d.admitted, 0);
+  assert.equal(d.skipped, 1);
+  assert.deepEqual(d.skipped_labels, ["fake.png"]);
+});
+
+test("a scheduled run failing the same way folds into one row per outage", async () => {
+  const board = await seedBoard(db, "jobs-ingest-failfold");
+  await updateBoard(db, board, {
+    ingest: { enabled: true, source: { folder: "gone" }, trigger: { mode: "continuous" } },
+  });
+  await setIngestNextRun(db, board, Date.now() - 1000);
+
+  const stop = runWorker({ sources });
+  try {
+    await until(async () => (await jobsFor(board)).some((r) => r.outcome === "failed"));
+    // Pull the 5-minute backoff forward: the retry hits the same missing
+    // folder and folds instead of stacking a second identical row.
+    await setIngestNextRun(db, board, Date.now() - 1000);
+    await until(async () => (await jobsFor(board)).some((r) => Number(r.detail?.attempts) === 2));
   } finally {
     await stop();
   }

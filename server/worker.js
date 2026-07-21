@@ -38,6 +38,7 @@ import {
   addJobLog,
   stampJobLog,
   deleteJobLog,
+  latestSettledJob,
   markInterruptedJobs,
   pruneJobLog,
   requeueItemForTag,
@@ -1018,10 +1019,28 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // failures land in ingest_state with a 5-minute backoff — never the loop.
   const INGEST_CONTINUOUS_MS = Math.max(5000, Number(process.env.INGEST_CONTINUOUS_MS) || 30000);
   const INGEST_RUN_CAP = Math.max(1, Number(process.env.INGEST_RUN_CAP) || 25);
+
+  // Fold a repeating non-event into its prior row: attempts up, error and
+  // detail refreshed, this attempt's fresh row retracted. Without the fold a
+  // failure repeating on its retry cadence is the flat-tick trap in failure
+  // clothes — a transcriber outage writes a `requeued` row per 60 s backoff,
+  // a wedged ingest scan one per 30 s tick (a weekend ≈ 3k identical rows).
+  // The first occurrence and any CHANGE (a different error, something
+  // admitted, the eventual resolution) still get their own rows.
+  const foldJobRepeat = async (prior, freshId, { outcome, error = null, detail = {} }) => {
+    await jobLogWrite(() => stampJobLog(db, prior.id, {
+      outcome, error,
+      detail: { ...detail, attempts: (Number(prior.detail?.attempts) || 1) + 1 },
+      endedAt: Date.now(),
+    }));
+    if (freshId != null) await jobLogWrite(() => deleteJobLog(db, freshId));
+  };
+
   async function ingestDue() {
     for (const b of await dueIngestBoards(db, Date.now())) {
       const cfg = b.ingest;
       const now = Date.now();
+      const manual = cfg?.trigger?.mode === "manual";
       // One run = one job-log row, `running` while the feed is enumerated and
       // admitted — ingest has no other in-flight representation. ingest_state
       // keeps only the LAST run; these rows are where the history lives.
@@ -1045,7 +1064,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         const picked = applyLimit(applySort(applyFilters(fresh, cfg.filters, catalog), cfg.sort, catalog), budget);
         const batch = picked.slice(0, INGEST_RUN_CAP);
         let added = 0;
+        let dups = 0;
         const errors = [];
+        const skips = []; // labels — the "why did my file never get picked up" answer
         for (const c of batch) {
           try {
             await adapter.admit(db, b, c, { sources });
@@ -1054,8 +1075,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
             // duplicate (already on the board) and skip (unsupported bytes)
             // are ledger-and-forget: stop rescanning them. Real errors stay
             // unledgered so the next run retries them.
-            if (err.duplicate || err.skip) await recordIngest(db, b.id, c.key, Date.now());
-            else errors.push(`${c.label}: ${err.message}`);
+            if (err.duplicate || err.skip) {
+              await recordIngest(db, b.id, c.key, Date.now());
+              if (err.skip) skips.push(c.label);
+              else dups++;
+            } else errors.push(`${c.label}: ${err.message}`);
           }
         }
         const remaining = picked.length - batch.length;
@@ -1070,19 +1094,44 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         // A completed run is `ok` even with per-item errors (they're the run's
         // findings, carried in error/skipped) — `failed` means the run itself
         // died (the catch below). But an idle SCHEDULED scan (admitted
-        // nothing, erred nothing, nothing draining) is a flat tick, and a
-        // continuous watch flat-ticks every 30 seconds — the tag_snapshots
-        // volume lesson. Retract its running row instead of stamping it. A
-        // MANUAL run always keeps its row: the user asked, and "0 admitted"
-        // is the answer.
-        const eventful = added > 0 || errors.length > 0 || remaining > 0;
-        if (!eventful && cfg?.trigger?.mode !== "manual" && jobId != null) {
+        // nothing, ledgered nothing, erred nothing, nothing draining) is a
+        // flat tick, and a continuous watch flat-ticks every 30 seconds — the
+        // tag_snapshots volume lesson. Retract its running row instead of
+        // stamping it. A MANUAL run always keeps its row: the user asked, and
+        // "0 admitted" is the answer. Skips and duplicates COUNT as events:
+        // both ledger the file out of every future scan permanently, and the
+        // row naming it is the only trace that ever happened.
+        const eventful = added > 0 || errors.length > 0 || remaining > 0 || skips.length > 0 || dups > 0;
+        if (!eventful && !manual && jobId != null) {
           await jobLogWrite(() => deleteJobLog(db, jobId));
         } else {
-          await stamp({
-            outcome: "ok", error: errors[0] ?? null,
-            detail: { scanned: candidates.length, fresh: fresh.length, admitted: added, skipped: batch.length - added, drain_left: remaining > 0 ? remaining : 0 },
-          });
+          // A scan whose ONLY news is the same per-item error as the prior
+          // row's is a flat tick too (a wedged file on a continuous watch
+          // ≈ 2,880 rows/day) — fold it instead of stamping a fresh row.
+          const errorOnly = errors.length > 0 && !added && !skips.length && !dups && remaining === 0;
+          const prior = errorOnly && !manual && jobId != null
+            ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
+            : null;
+          // Compare the STORED form — addJobLog caps error at 500 chars.
+          const sameStory = prior?.outcome === "ok" && prior.error === String(errors[0] ?? "").slice(0, 500) &&
+            !Number(prior.detail?.admitted) && !Number(prior.detail?.skipped) &&
+            !Number(prior.detail?.duplicates) && !Number(prior.detail?.drain_left);
+          if (sameStory) {
+            await foldJobRepeat(prior, jobId, {
+              outcome: "ok", error: errors[0],
+              detail: { scanned: candidates.length, fresh: fresh.length },
+            });
+          } else {
+            await stamp({
+              outcome: "ok", error: errors[0] ?? null,
+              detail: {
+                scanned: candidates.length, fresh: fresh.length, admitted: added,
+                skipped: skips.length, drain_left: remaining > 0 ? remaining : 0,
+                ...(skips.length ? { skipped_labels: skips.slice(0, 20) } : {}),
+                ...(dups ? { duplicates: dups } : {}),
+              },
+            });
+          }
         }
         if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
       } catch (err) {
@@ -1093,7 +1142,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         // Settle the schedule BEFORE publishing the error: last_error is what
         // observers poll for, so everything it implies (disarmed/backed off)
         // must already be true when it lands.
-        const manual = cfg?.trigger?.mode === "manual";
         await setIngestNextRun(db, b.id, manual ? null : Date.now() + 5 * 60000).catch(() => {});
         // Preserve a mid-drain budget across the failure — wiping it would
         // hand the retry a fresh `limit` and over-admit the logical run.
@@ -1104,7 +1152,17 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
           last_error: err.message,
           ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
         }).catch(() => {});
-        await stamp({ outcome: "failed", error: err.message });
+        // The same failure repeating on the retry cadence (a dead source =
+        // one row per 5-minute backoff) folds into its prior row; a manual
+        // run was asked for, so its row always stands alone.
+        const prior = !manual && jobId != null
+          ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
+          : null;
+        if (prior?.outcome === "failed" && prior.error === String(err.message).slice(0, 500)) {
+          await foldJobRepeat(prior, jobId, { outcome: "failed", error: err.message });
+        } else {
+          await stamp({ outcome: "failed", error: err.message });
+        }
         console.warn(`ingest error board "${b.name}" (${manual ? "manual — not retried" : "retrying in 5m"}): ${err.message}`);
       }
     }
@@ -1593,7 +1651,19 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
               if (transient) {
                 transcribeBackoffUntil = Date.now() + 60000;
                 did = false;
-                await stamp({ outcome: "requeued", error: err.message });
+                // Consecutive transient retries of one clip are one story,
+                // not one row per backoff tick: fold into the clip's prior
+                // `requeued` row — attempts up, error and end time refreshed.
+                // The first failure and the eventual resolution (ok/failed)
+                // keep their own rows, and the fold survives restarts because
+                // the prior row is found in the ledger, not in memory.
+                const prior = jobId == null ? null
+                  : await jobLogWrite(() => latestSettledJob(db, row.board_id, "transcribe", row.id));
+                if (prior?.outcome === "requeued") {
+                  await foldJobRepeat(prior, jobId, { outcome: "requeued", error: err.message });
+                } else {
+                  await stamp({ outcome: "requeued", error: err.message });
+                }
                 console.warn(`transcribe: transient error (retry in 60s): ${err.message}`);
               } else {
                 // Permanent for this clip. Mark it so the queue moves on; it'll

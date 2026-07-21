@@ -234,6 +234,29 @@ nothing, erred nothing, nothing draining) now retracts its running row via
 the user asked, and "0 admitted" is the answer. Failures are never
 suppressed. Suite 429/429.
 
+**Deep-dive pass (2026-07-21, later the same day).** Three more holes, all
+the flat-tick lesson wearing different clothes. (1) **A transcriber outage
+wrote a `requeued` row per 60-second backoff tick** — same clip, same error,
+~3k near-identical rows over a weekend. Consecutive transient retries now
+FOLD into the clip's prior `requeued` row (`latestSettledJob` +
+`foldJobRepeat`): attempts count in detail, error and end time refreshed,
+the fresh attempt's row retracted. The first failure and the eventual
+resolution keep their own rows, and the fold survives restarts because the
+prior row is found in the ledger, not memory. (2) **Skip-only scheduled
+scans were retracted — but their effect is permanent.** A ledgered skip
+(unsupported bytes) excludes the file from every future scan, and the
+retracted row was the only trace it was ever seen. Skips and duplicates now
+count as eventful, are tallied separately (`skipped` no longer conflates
+errored items), and the row freezes `skipped_labels` — the "why did my file
+never get picked up" answer, named in the modal. (3) **The same error
+repeating on its retry cadence re-logged forever** (a wedged file: one
+ok-with-error row per 30 s scan; a dead source: one failed row per 5-minute
+backoff). A scheduled run whose only news is the same error as its prior
+row folds the same way; anything new — an admission, a skip, a different
+error — breaks the fold, and manual runs never fold. The modal reads the
+count back ("12 attempts · …") and ingest ok-rows now show their per-item
+error text. Suite 433/433.
+
 ## Config surface
 
 `JOB_LOG_RETENTION_DAYS` (default 30) — .env.example entry + compose passthrough

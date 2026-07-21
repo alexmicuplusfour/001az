@@ -51,8 +51,13 @@ function summaryFor(j) {
     if (j.kind === "transcribe") return d.chars != null ? `${d.chars.toLocaleString()} chars` : "";
     if (j.kind === "ingest") {
       const bits = [`+${d.admitted ?? 0} admitted`, `${d.scanned ?? 0} scanned`];
-      if (d.skipped) bits.push(`${d.skipped} skipped`);
+      // Skips are permanent (the file is ledgered out of every future scan) —
+      // name them: this row is the only trace the file was ever seen.
+      if (d.skipped) bits.push(`${d.skipped} skipped${d.skipped_labels?.length ? ` (${d.skipped_labels.slice(0, 3).join(", ")}${d.skipped_labels.length > 3 ? ", …" : ""})` : ""}`);
+      if (d.duplicates) bits.push(`${d.duplicates} duplicate${d.duplicates === 1 ? "" : "s"}`);
       if (d.drain_left) bits.push(`${d.drain_left} to drain`);
+      if (j.error) bits.push(j.error); // per-item findings ride the ok row
+      if (d.attempts > 1) bits.push(`${d.attempts} attempts`);
       return bits.join(" · ");
     }
     if (j.kind === "retag") return d.skipped ? `skipped (${d.skipped})` : `queued ${d.queued ?? 0} item${d.queued === 1 ? "" : "s"}`;
@@ -66,7 +71,9 @@ function summaryFor(j) {
     if (d.fields != null) return `${d.fields} field${d.fields === 1 ? "" : "s"}`;
     return "";
   }
-  return j.error || "";
+  // A folded repeat (the same failure re-attempted on its backoff cadence)
+  // carries its count — "12 attempts · unreachable…" is the ongoing story.
+  return (Number(d.attempts) > 1 ? `${d.attempts} attempts · ` : "") + (j.error || "");
 }
 
 function jobRow(j) {

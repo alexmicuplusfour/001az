@@ -1614,6 +1614,22 @@ export async function deleteJobLog(db, id) {
   await db.query("DELETE FROM job_log WHERE id=$1", [id]);
 }
 
+// The newest settled row for one job family — the fold check for repeating
+// non-events: a transient transcribe retry every backoff tick, or a scheduled
+// scan re-finding the same error every 30 s, stamps its prior row (attempts
+// in detail) instead of writing a near-identical row per cycle. itemId=null
+// means board-level rows (an ingest or retag run).
+export async function latestSettledJob(db, boardId, kind, itemId = null) {
+  const cond = ["board_id=$1", "kind=$2", "outcome <> 'running'",
+    itemId == null ? "item_id IS NULL" : "item_id=$3"];
+  const { rows } = await db.query(
+    `SELECT * FROM job_log WHERE ${cond.join(" AND ")}
+      ORDER BY started_at DESC, id DESC LIMIT 1`,
+    itemId == null ? [boardId, kind] : [boardId, kind, itemId]
+  );
+  return rows[0] || null;
+}
+
 // Boot sweep: a row still `running` from before this boot was orphaned by a
 // crash/stop — nothing else can own it (single worker process). The
 // started_at fence keeps this boot's own fresh rows out of the sweep
