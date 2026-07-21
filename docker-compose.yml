@@ -29,11 +29,22 @@ services:
       args:
         # one knob bakes AND serves the model — see transcriber/Dockerfile.
         # changing it needs a rebuild (baked model), so it's build-time, not UI.
-        WHISPER_MODEL: ${WHISPER_MODEL:-base}
+        WHISPER_MODEL: ${WHISPER_MODEL:-small}
     restart: unless-stopped
     environment:
-      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_BEAM: ${WHISPER_BEAM:-5}
+      # optional language pin (e.g. "ro") — skips per-file auto-detect, which
+      # can misroute a transcript off a musical/silent first 30 seconds
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
+    # detects a dead process (restart: unless-stopped revives it); a hung model
+    # is caught separately by the sidecar's own progress watchdog, which exits
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3003/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   app:
     build: .
@@ -54,7 +65,7 @@ services:
       TRANSCRIBER_URL: http://transcriber:3003
       # names the sidecar's baked model so the app can stamp the transcript
       # cache with it (same ${WHISPER_MODEL} as the transcriber → no drift)
-      TRANSCRIBER_MODEL: ${WHISPER_MODEL:-base}
+      TRANSCRIBER_MODEL: ${WHISPER_MODEL:-small}
       # outbound tuning — code owns the defaults (empty passes through safely);
       # set in .env only when a provider's pace or latency demands it
       CONNECTOR_RPM: ${CONNECTOR_RPM:-}
@@ -71,7 +82,10 @@ services:
       AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
       AI_TRANSCRIBE_TIMEOUT_MS: ${AI_TRANSCRIBE_TIMEOUT_MS:-}
       EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
-      TRANSCRIBER_TIMEOUT_MS: ${TRANSCRIBER_TIMEOUT_MS:-}
+      # transcription is an async job (submit + poll) — these bound one HTTP
+      # exchange and the no-progress stall window, NEVER the job's duration
+      TRANSCRIBER_HTTP_TIMEOUT_MS: ${TRANSCRIBER_HTTP_TIMEOUT_MS:-}
+      TRANSCRIBER_STALL_MS: ${TRANSCRIBER_STALL_MS:-}
       # automatic ingestion: watched folders live under this root (bind-mounted
       # below — drop files into ./ingest-root on the host). The tunables are
       # code-owned defaults; set in .env only to deviate.

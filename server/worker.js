@@ -580,50 +580,143 @@ const noTextError = (file) => {
   return e;
 };
 // The audio transcriber sidecar (faster-whisper) — audio's equivalent of the
-// extractor: raw bytes in, text out. Same failure contract as the extractor
-// (downtime throws status-less → failOrRequeue waits it out).
+// extractor, but the exchange is ASYNC: POST /transcribe returns 202 + a
+// content-hash job id immediately, and we poll GET /jobs/<id> until it settles.
+// No HTTP request ever spans inference (a 2h clip is ~real-time on CPU), so a
+// timeout can never orphan completed work — the failure that used to grind the
+// old sync sidecar forever. Because the id hashes the bytes, a retry or an app
+// restart RE-JOINS the same in-flight job instead of duplicating it, and a
+// finished result stays claimable sidecar-side for ~1h.
 const TRANSCRIBER_URL = process.env.TRANSCRIBER_URL || "http://transcriber:3003";
-// Generous like the extractor: the sidecar is single-threaded and a clip
-// transcribes at ~2x real-time, so a queued request can sit behind others.
-const TRANSCRIBER_TIMEOUT_MS = Number(process.env.TRANSCRIBER_TIMEOUT_MS) || 240000;
+// Bounds ONE HTTP exchange (a poll), never the job. Submit gets a higher floor
+// below — it ships the whole file.
+const TRANSCRIBER_HTTP_TIMEOUT_MS = Number(process.env.TRANSCRIBER_HTTP_TIMEOUT_MS) || 30000;
+// Job liveness is judged by progress, not wall time: a job whose transcribed
+// seconds haven't advanced in this long is declared hung (transient — the next
+// attempt re-joins or restarts it; the sidecar's own watchdog restarts a truly
+// frozen model). Covers the pre-segment decode+VAD phase of a long clip too.
+const TRANSCRIBER_STALL_MS = Number(process.env.TRANSCRIBER_STALL_MS) || 900000;
 // Names the model the sidecar bakes (compose feeds both from one ${WHISPER_MODEL}).
 // Used only to stamp the transcript cache, so a model bump re-transcribes.
-const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "base";
+const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "small";
 
 // The on-server whisper-sidecar engine, wrapped as an interchangeable descriptor
 // { id, model, transcribe } so a provider engine slots in the way resolveEmbedder
-// picks local vs a provider. transcribe throws status-less when the sidecar is
-// unreachable (transient), and status-tagged (422 undecodable / 5xx fault) on a
-// non-OK response, so the transcription loop can back off vs mark permanent. id
-// "whisper" matches the keyless `whisper` provider — its plugin card and the
+// picks local vs a provider. Failure taxonomy for the transcription loop:
+//   - `transient: true`, no scope — the sidecar itself is unwell (down, queue
+//     full): back off the LANE, no clip is at fault.
+//   - `scope: "job"` — this clip's job failed/stalled/vanished: transient for
+//     the ITEM (per-item backoff + attempt cap), the lane moves on.
+//   - `status: 422` — undecodable input: the loop parks it permanently.
+// id "whisper" matches the keyless `whisper` provider — its plugin card and the
 // transcribe_provider sentinel.
 function whisperTranscriber() {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   return {
     id: "whisper",
     model: TRANSCRIBER_MODEL,
-    async transcribe(buf) {
-      let res;
+    // opts.deadlineMs: give up (transient) if the job hasn't settled by then —
+    // for interactive callers like the admin probe, not the worker loop.
+    // opts.stallMs: test override for the no-progress window.
+    async transcribe(buf, _filename, { deadlineMs = 0, stallMs = TRANSCRIBER_STALL_MS } = {}) {
+      const started = Date.now();
+      let sub;
       try {
-        res = await fetch(`${TRANSCRIBER_URL}/transcribe`, {
+        sub = await fetch(`${TRANSCRIBER_URL}/transcribe`, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: buf,
-          signal: AbortSignal.timeout(TRANSCRIBER_TIMEOUT_MS),
+          // covers shipping a 500MB body across the compose network, not the job
+          signal: AbortSignal.timeout(Math.max(TRANSCRIBER_HTTP_TIMEOUT_MS, 120000)),
         });
       } catch (e) {
-        throw new Error(`transcriber unreachable (${e.message}) — will retry`);
+        const err = new Error(`transcriber unreachable (${e.message}) — will retry`);
+        err.transient = true;
+        throw err;
       }
-      if (!res.ok) {
-        // Attach the status so the transcription loop can tell a transient
-        // server fault (5xx → back off and retry) from bad input (422 → mark
-        // permanent). `unreachable` above stays status-less (also transient).
-        const e = new Error(`transcriber failed (HTTP ${res.status})`);
-        e.status = res.status;
+      if (!sub.ok) {
+        // 503 = queue full (lane-wide, transient via 5xx); 422 = bad input.
+        const e = new Error(`transcriber failed (HTTP ${sub.status})`);
+        e.status = sub.status;
         throw e;
       }
-      return (await res.json()).text || "";
+      const jobId = (await sub.json()).job;
+      // Poll until settled: immediately once (tiny probes finish in seconds),
+      // then backing off 250ms → 30s. Network blips mid-poll are tolerated for
+      // a few rounds — the job keeps running through them.
+      let lastDone = -1, lastAdvance = Date.now(), pollFailures = 0, delay = 0;
+      for (;;) {
+        if (delay) await sleep(delay);
+        delay = Math.min(delay ? delay * 2 : 250, 30000);
+        if (deadlineMs && Date.now() - started > deadlineMs) {
+          const e = new Error("transcriber busy — a longer job holds the queue");
+          e.transient = true;
+          e.scope = "job";
+          throw e;
+        }
+        let res;
+        try {
+          res = await fetch(`${TRANSCRIBER_URL}/jobs/${jobId}`, { signal: AbortSignal.timeout(TRANSCRIBER_HTTP_TIMEOUT_MS) });
+        } catch (e) {
+          if (++pollFailures < 5) continue;
+          const err = new Error(`transcriber unreachable mid-job (${e.message}) — will retry`);
+          err.transient = true;
+          throw err;
+        }
+        pollFailures = 0;
+        if (res.status === 404) {
+          // The sidecar restarted (jobs are in-memory) — resubmitting on the
+          // next attempt is the recovery, and the content hash dedupes it.
+          const e = new Error("transcriber lost the job (restarted?) — will retry");
+          e.transient = true;
+          e.scope = "job";
+          throw e;
+        }
+        if (!res.ok) {
+          const e = new Error(`transcriber failed (HTTP ${res.status})`);
+          e.status = res.status;
+          e.scope = "job";
+          throw e;
+        }
+        const job = await res.json();
+        if (job.status === "done") return job.text || "";
+        if (job.status === "failed") {
+          const e = new Error(`transcriber: ${job.error || "unknown failure"}`);
+          e.status = job.permanent ? 422 : 500; // permanent = undecodable input
+          e.scope = "job";
+          throw e;
+        }
+        const done = Number(job.progress?.done_s) || 0;
+        if (done > lastDone) {
+          lastDone = done;
+          lastAdvance = Date.now();
+        } else if (Date.now() - lastAdvance > stallMs) {
+          const e = new Error(`transcriber stalled (no progress in ${Math.round(stallMs / 60000)}m) — will retry`);
+          e.transient = true;
+          e.scope = "job";
+          throw e;
+        }
+      }
     },
   };
+}
+
+// Transient attempts per clip before parking it (reprocess un-parks). Bounds the
+// pathological clip; a healthy lane never gets near it.
+const TRANSCRIBE_MAX_ATTEMPTS = Number(process.env.TRANSCRIBE_MAX_ATTEMPTS) || 5;
+
+// How the transcription loop answers a failure — pure, exported for tests.
+//   park          a permanent fault of the clip (undecodable, provider 4xx)
+//   park-capped   transiently failing clip out of attempts — stop poisoning the lane
+//   backoff-item  this clip's job faulted/stalled — retry IT later, lane moves on
+//   backoff-lane  the engine itself is unwell (down, 429/5xx) — nothing would succeed
+export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_MAX_ATTEMPTS) {
+  const s = Number(err?.status);
+  const transient = err?.transient === true || s === 429 || s === 408 || (s >= 500 && s < 600)
+    || /unreachable/.test(String(err?.message));
+  if (!transient) return "park";
+  if (err?.scope !== "job") return "backoff-lane";
+  return attempts + 1 >= maxAttempts ? "park-capped" : "backoff-item";
 }
 
 // A board's audio→text engine. An app-wide `transcribe_provider` setting can
@@ -1614,13 +1707,19 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // sidecar), so it runs concurrently. It queries audio by payload (not status),
   // so EVERY audio item is transcribed regardless of tagging; the transcript
   // lands on payload.transcript for the tagger, the embedder, and the lightbox.
-  let transcribeBackoffUntil = 0;
+  let transcribeBackoffUntil = 0; // lane-wide: the engine itself is unwell
+  // Per-clip retry ledger: itemId → { attempts, until }. A fault tied to ONE
+  // clip (its job stalled, vanished, or hit an inference error) backs off and
+  // caps here, so a pathological clip can't freeze the whole audio lane the way
+  // the old single global backoff did — the query below skips clips in backoff.
+  const transcribeRetry = new Map();
   const transcribeLoop = (async () => {
     while (running) {
       let did = false;
       try {
         if (Date.now() >= transcribeBackoffUntil) {
-          const row = await oneAudioNeedingTranscription(db);
+          const waiting = [...transcribeRetry.entries()].filter(([, r]) => r.until > Date.now()).map(([id]) => id);
+          const row = await oneAudioNeedingTranscription(db, waiting);
           if (row) {
             did = true;
             const file = row.payload.files?.[0];
@@ -1638,19 +1737,19 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
               const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
               const text = await transcriber.transcribe(buf, file.name);
               await updateItemPayload(db, row.id, { transcript: text });
+              transcribeRetry.delete(row.id);
               await stamp({ outcome: "ok", detail: { chars: text.length, engine: `${transcriber.id}:${transcriber.model}` } });
               console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
             } catch (err) {
-              // Transient (back off, don't mark): the sidecar unreachable, or a
-              // 5xx from either the sidecar (internal fault) or a provider, or a
-              // provider rate-limit/timeout. Permanent (mark, skip): a real
-              // bad-request — a provider 4xx, or the sidecar's 422 on undecodable
-              // bytes. A reprocess clears transcript_error to retry a permanent.
-              const s = Number(err?.status);
-              const transient = /unreachable/.test(err.message) || s === 429 || s === 408 || (s >= 500 && s < 600);
-              if (transient) {
-                transcribeBackoffUntil = Date.now() + 60000;
-                did = false;
+              const attempts = transcribeRetry.get(row.id)?.attempts || 0;
+              const action = transcribeFailurePolicy(err, attempts);
+              if (action === "backoff-lane" || action === "backoff-item") {
+                if (action === "backoff-lane") {
+                  transcribeBackoffUntil = Date.now() + 60000;
+                  did = false; // nothing else would succeed either — sleep the full poll
+                } else {
+                  transcribeRetry.set(row.id, { attempts: attempts + 1, until: Date.now() + 60000 });
+                }
                 // Consecutive transient retries of one clip are one story,
                 // not one row per backoff tick: fold into the clip's prior
                 // `requeued` row — attempts up, error and end time refreshed.
@@ -1664,13 +1763,18 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
                 } else {
                   await stamp({ outcome: "requeued", error: err.message });
                 }
-                console.warn(`transcribe: transient error (retry in 60s): ${err.message}`);
+                console.warn(`transcribe: transient ${action === "backoff-lane" ? "engine" : `clip #${row.id}`} error (retry in 60s): ${err.message}`);
               } else {
-                // Permanent for this clip. Mark it so the queue moves on; it'll
-                // tag from its filename, like a textless document.
-                await updateItemPayload(db, row.id, { transcript_error: String(err.message).slice(0, 300) });
-                await stamp({ outcome: "failed", error: err.message });
-                console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${err.message}`);
+                // Park the clip — a permanent fault (undecodable, provider 4xx)
+                // or a transient one out of attempts. The queue moves on; it'll
+                // tag from its filename, like a textless document. A reprocess
+                // clears transcript_error to grant a fresh set of attempts.
+                const note = action === "park-capped"
+                  ? `gave up after ${attempts + 1} attempts: ${err.message}` : err.message;
+                await updateItemPayload(db, row.id, { transcript_error: String(note).slice(0, 300) });
+                transcribeRetry.delete(row.id);
+                await stamp({ outcome: "failed", error: note });
+                console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${note}`);
               }
             }
           }

@@ -89,8 +89,12 @@ function stubFetch(handler) {
     global.fetch = real;
   };
 }
-const sidecarOk = (text) => async () =>
-  new Response(JSON.stringify({ text }), { status: 200 });
+// The sidecar speaks the async job protocol: POST /transcribe → 202 {job},
+// then GET /jobs/<id> polls until settled. sidecarOk settles on the first poll.
+const sidecarOk = (text) => async (url, opts = {}) =>
+  opts.method === "POST"
+    ? new Response(JSON.stringify({ job: "stub", status: "queued" }), { status: 202 })
+    : new Response(JSON.stringify({ status: "done", progress: { done_s: 1, total_s: 1 }, text }), { status: 200 });
 const sidecarStatus = (status) => async () => new Response("nope", { status });
 const sidecarDown = () => async () => {
   throw new TypeError("fetch failed");
@@ -213,7 +217,7 @@ test("transcription success: one row, running→ok, chars + engine detail", asyn
   assert.equal(Number(r.item_id), iid);
   assert.equal(Number(r.entity_id), eid);
   assert.equal(r.target, "interview.mp3");
-  assert.deepEqual(r.detail, { chars: 11, engine: "whisper:base" });
+  assert.deepEqual(r.detail, { chars: 11, engine: "whisper:small" });
   assert.ok(Number(r.ended_at) >= Number(r.started_at));
 });
 

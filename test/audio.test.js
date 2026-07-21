@@ -18,7 +18,7 @@ import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
-import { resolveTranscriber, embedTextFor } from "../server/worker.js";
+import { resolveTranscriber, transcribeFailurePolicy, embedTextFor } from "../server/worker.js";
 import { transcribeAudio, providerCatalog } from "../server/providers.js";
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
@@ -59,7 +59,7 @@ test("the waveform producer is registered in the face registry", () => {
   assert.equal(typeof getFaceProducer("waveform"), "function");
 });
 
-test("resolveTranscriber: with no provider configured, resolves the whisper sidecar and maps its HTTP results", async (t) => {
+test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 202 → poll → text)", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
 
@@ -69,25 +69,97 @@ test("resolveTranscriber: with no provider configured, resolves the whisper side
   assert.equal(eng.id, "whisper");
   assert.ok(eng.model, "carries a model for the cache stamp");
 
-  // healthy: POSTs to the sidecar's /transcribe, returns .text
-  let seen;
-  globalThis.fetch = async (url, opts) => { seen = { url: String(url), opts }; return { ok: true, status: 200, json: async () => ({ text: "hi there" }) }; };
+  // healthy: submit POSTs the bytes, gets a job id; polls ride it to done.
+  const calls = [];
+  const states = [
+    { status: "queued", progress: { done_s: 0, total_s: null } },
+    { status: "running", progress: { done_s: 12.5, total_s: 60 } },
+    { status: "done", progress: { done_s: 60, total_s: 60 }, text: "hi there" },
+  ];
+  globalThis.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), method: opts.method || "GET" });
+    if (opts.method === "POST") return { ok: true, status: 202, json: async () => ({ job: "abc123", status: "queued" }) };
+    return { ok: true, status: 200, json: async () => states.shift() };
+  };
   assert.equal(await eng.transcribe(Buffer.from("x")), "hi there");
-  assert.match(seen.url, /\/transcribe$/);
-  assert.equal(seen.opts.method, "POST");
+  assert.match(calls[0].url, /\/transcribe$/);
+  assert.equal(calls[0].method, "POST");
+  assert.match(calls[1].url, /\/jobs\/abc123$/, "polls the job id the submit returned");
+  assert.equal(calls.length, 4, "submit + one poll per state");
+});
 
-  // non-OK carries the HTTP status so the transcription loop can classify it:
-  // a 5xx is a transient server fault (back off + retry)...
-  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({}) });
-  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber failed/.test(e.message) && e.status === 500);
+test("whisper client: failure taxonomy — lane-scope vs job-scope vs permanent", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+  const submitOk = { ok: true, status: 202, json: async () => ({ job: "j1", status: "queued" }) };
 
-  // ...a 422 is undecodable input (the loop marks it a permanent transcript_error)
-  globalThis.fetch = async () => ({ ok: false, status: 422, json: async () => ({}) });
-  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => e.status === 422);
-
-  // unreachable (deploy blip) → same shape
+  // submit refused (sidecar down) → transient, NO job scope → lane backoff
   globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
-  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => /transcriber unreachable/.test(e.message) && e.status === undefined);
+  await assert.rejects(eng.transcribe(Buffer.from("x")),
+    (e) => /transcriber unreachable/.test(e.message) && e.transient === true && e.scope === undefined);
+
+  // submit 503 (queue full) → status carries through, no job scope
+  globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
+  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => e.status === 503 && e.scope === undefined);
+
+  // the job failed on undecodable input → 422, job-scope → the clip parks
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST" ? submitOk
+    : { ok: true, status: 200, json: async () => ({ status: "failed", error: "bad container", permanent: true }) });
+  await assert.rejects(eng.transcribe(Buffer.from("x")),
+    (e) => /bad container/.test(e.message) && e.status === 422 && e.scope === "job");
+
+  // the job failed on an internal fault → 500, job-scope → per-item retry
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST" ? submitOk
+    : { ok: true, status: 200, json: async () => ({ status: "failed", error: "boom", permanent: false }) });
+  await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => e.status === 500 && e.scope === "job");
+
+  // the job vanished (sidecar restarted, in-memory queue lost) → transient job-scope;
+  // the retry resubmits and the content hash dedupes it
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST" ? submitOk
+    : { ok: false, status: 404, json: async () => ({}) });
+  await assert.rejects(eng.transcribe(Buffer.from("x")),
+    (e) => /lost the job/.test(e.message) && e.transient === true && e.scope === "job");
+});
+
+test("whisper client: a running job whose progress freezes is declared stalled (transient, job-scope)", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
+    ? { ok: true, status: 202, json: async () => ({ job: "j2", status: "queued" }) }
+    : { ok: true, status: 200, json: async () => ({ status: "running", progress: { done_s: 33.3, total_s: 7200 } }) });
+  await assert.rejects(eng.transcribe(Buffer.from("x"), "clip.mp3", { stallMs: 300 }),
+    (e) => /stalled/.test(e.message) && e.transient === true && e.scope === "job");
+});
+
+test("whisper client: deadlineMs bounds an interactive caller's wait (the admin probe)", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
+    ? { ok: true, status: 202, json: async () => ({ job: "j3", status: "queued" }) }
+    : { ok: true, status: 200, json: async () => ({ status: "queued", progress: { done_s: 0, total_s: null } }) });
+  await assert.rejects(eng.transcribe(Buffer.from("x"), "probe.wav", { deadlineMs: 100 }),
+    (e) => /busy/.test(e.message) && e.transient === true && e.scope === "job");
+});
+
+test("transcribeFailurePolicy: park / park-capped / backoff-item / backoff-lane", () => {
+  const mk = (over) => Object.assign(new Error(over.message || "x"), over);
+  // permanent input fault (sidecar 422 or provider 4xx) → park, regardless of attempts
+  assert.equal(transcribeFailurePolicy(mk({ status: 422 }), 0), "park");
+  assert.equal(transcribeFailurePolicy(mk({ status: 400 }), 0), "park");
+  // engine-wide transients → lane backoff (no clip is at fault)
+  assert.equal(transcribeFailurePolicy(mk({ message: "transcriber unreachable (x) — will retry", transient: true }), 0), "backoff-lane");
+  assert.equal(transcribeFailurePolicy(mk({ status: 503 }), 0), "backoff-lane");
+  assert.equal(transcribeFailurePolicy(mk({ status: 429 }), 0), "backoff-lane");
+  // job-scope transients retry the item... until the cap parks it
+  assert.equal(transcribeFailurePolicy(mk({ status: 500, scope: "job" }), 0), "backoff-item");
+  assert.equal(transcribeFailurePolicy(mk({ transient: true, scope: "job" }), 3, 5), "backoff-item");
+  assert.equal(transcribeFailurePolicy(mk({ transient: true, scope: "job" }), 4, 5), "park-capped");
 });
 
 // ── Slice 3: capability-advertised provider transcription ────────────────────
@@ -199,6 +271,10 @@ test("oneAudioNeedingTranscription: picks audio lacking a transcript; skips tran
   const row = await oneAudioNeedingTranscription(db);
   assert.equal(row.id, need, "the one audio item with neither a transcript nor an error");
   assert.equal(row.payload.files[0].name, "d.mp3");
+
+  // A clip in per-item retry backoff is skipped, so a repeatedly-failing clip
+  // can't head-of-line-block the lane while it waits out its backoff.
+  assert.equal(await oneAudioNeedingTranscription(db, [need]), null);
 });
 
 test("reprocess clears a transcript_error so a failed transcription retries; a good transcript survives", async (t) => {

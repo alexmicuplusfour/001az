@@ -1859,13 +1859,17 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 // `transcript` nor a permanent `transcript_error` qualifies, newest first so
 // fresh uploads transcribe before a backlog. `payload ? 'key'` is the jsonb
 // key-exists test (an empty-string transcript for a silent clip still counts).
-export async function oneAudioNeedingTranscription(db) {
+// excludeIds: clips in per-item retry backoff (the worker's in-memory ledger) —
+// skipped so one repeatedly-failing clip doesn't head-of-line-block the lane.
+export async function oneAudioNeedingTranscription(db, excludeIds = []) {
   const { rows } = await db.query(
     `SELECT id, board_id, entity_id, payload FROM items
      WHERE payload->'files'->0->>'kind'='audio'
        AND NOT (payload ? 'transcript')
        AND NOT (payload ? 'transcript_error')
-     ORDER BY created_at DESC LIMIT 1`
+       AND NOT (id = ANY($1::bigint[]))
+     ORDER BY created_at DESC LIMIT 1`,
+    [excludeIds]
   );
   return rows[0] || null;
 }

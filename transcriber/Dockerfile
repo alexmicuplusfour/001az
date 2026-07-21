@@ -9,7 +9,10 @@ RUN pip install --no-cache-dir faster-whisper
 # --build-arg WHISPER_MODEL=small to bake a beefier one and the runtime picks up
 # the same name. HF_HOME (set before the pre-download) pins the cache to an
 # inspectable path. Mirrors the app image's embedder pre-download.
-ARG WHISPER_MODEL=base
+# `small` default: `base` proved too weak for non-English speech (unstable,
+# fallback-heavy output on Romanian); small is the lean end of usable. Still one
+# knob — --build-arg WHISPER_MODEL=base to go back to the lighter model.
+ARG WHISPER_MODEL=small
 ENV HF_HOME=/models
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')"
 ENV WHISPER_MODEL=${WHISPER_MODEL}

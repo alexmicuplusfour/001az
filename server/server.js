@@ -1659,8 +1659,10 @@ app.post("/api/admin/ai-config/transcribe-test", requireAdmin, wrap(async (_req,
   const provider = t.id; // the engine family ("local" or a provider name)
   try {
     // The provider engine already wraps itself in the plugin-health ledger
-    // (resolveTranscriber); local has none, same as the sidecar path.
-    await t.transcribe(tinyWav(), "probe.wav");
+    // (resolveTranscriber); local has none, same as the sidecar path. The
+    // deadline keeps this admin-facing probe from waiting behind a long job —
+    // the sidecar's express lane answers tiny clips in seconds when healthy.
+    await t.transcribe(tinyWav(), "probe.wav", { deadlineMs: 30000 });
     res.json({ ok: true, provider, model: t.model });
   } catch (err) {
     res.status(400).json({ error: err.message });

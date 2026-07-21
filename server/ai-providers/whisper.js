@@ -17,7 +17,7 @@ export default () => ({
   keyless: true,
   embeds: null,
   transcribes: {
-    default: process.env.TRANSCRIBER_MODEL || "base",
-    models: [{ id: process.env.TRANSCRIBER_MODEL || "base", note: "runs on-server · no API key · set via WHISPER_MODEL at deploy" }],
+    default: process.env.TRANSCRIBER_MODEL || "small",
+    models: [{ id: process.env.TRANSCRIBER_MODEL || "small", note: "runs on-server · no API key · set via WHISPER_MODEL at deploy" }],
   },
 });
