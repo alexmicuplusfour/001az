@@ -1242,7 +1242,7 @@ a.tool-btn {
 }
 
 /* jobs modal — two sections (In progress / History) of compact log rows */
-#jobs-modal .modal-dialog { width: 660px; max-width: calc(100vw - 32px); }
+#jobs-modal .modal-dialog { width: 900px; max-width: calc(100vw - 32px); }
 .jobs-section h3 { margin: 16px 0 6px; font-size: 13px; }
 .jobs-section:first-child h3 { margin-top: 0; }
 .jobs-filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 8px; }
