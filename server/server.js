@@ -456,8 +456,10 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
   const pick = (j) => ({
     id: j.id, kind: j.kind, outcome: j.outcome, error: j.error, detail: j.detail,
     target: j.target, entity_id: j.entity_id, item_id: j.item_id,
-    // Live entities show their current name; deleted ones keep the frozen label.
-    entity_display: j.entity_display || j.entity_identity || j.target,
+    // A real display name wins; then the frozen target (the ORIGINAL
+    // filename) — a provisional upload entity's identity is the stored hex
+    // name, so it comes last, not ahead of the label people recognize.
+    entity_display: j.entity_display || j.target || j.entity_identity,
     started_at: j.started_at, ended_at: j.ended_at,
   });
   // kind=refresh serves field_snapshots wearing the same row shape — refresh

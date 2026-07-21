@@ -182,7 +182,9 @@ export function openJobsModal() {
   more.type = "button";
   more.className = "tool-btn jobs-more";
   more.textContent = "Load more";
-  more.hidden = true;
+  // Not the `hidden` attribute: .tool-btn's `display` out-specifies the UA's
+  // [hidden] rule, which kept this button visible with no page behind it.
+  more.style.display = "none";
   histSec.append(filters, histList, more);
   body.append(liveSec, histSec);
 
@@ -239,7 +241,7 @@ export function openJobsModal() {
     histList.replaceChildren();
     for (const j of jobs) histList.appendChild(jobRow(j));
     if (!jobs.length) note(histList, "No jobs recorded yet.");
-    more.hidden = !cursor;
+    more.style.display = cursor ? "" : "none";
   }
 
   async function fetchPage(after) {
@@ -252,8 +254,14 @@ export function openJobsModal() {
   }
 
   // reset=true replaces the list (open, filter switch, interval refresh of
-  // page one); reset=false appends the next Load-more page.
+  // page one); reset=false appends the next Load-more page. Guards: never
+  // append without a cursor (that would concat page one onto itself), and
+  // never overlap two loads (a slow fetch racing the interval would
+  // double-append or clobber a Load-more mid-flight).
+  let loading = false;
   async function load(reset) {
+    if (loading || (!reset && !cursor)) return;
+    loading = true;
     try {
       const data = await fetchPage(reset ? null : cursor);
       running = data.running;
@@ -270,6 +278,8 @@ export function openJobsModal() {
       renderHistory();
     } catch {
       if (!jobs.length) { histList.replaceChildren(); note(histList, "Failed to load — retrying…"); }
+    } finally {
+      loading = false;
     }
   }
 

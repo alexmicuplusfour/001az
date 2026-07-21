@@ -444,7 +444,7 @@ export async function embedBatch(db, embedder, rows) {
     // item silently vanishes from the search corpus — that gets a job row.
     await jobLogWrite(() => addJobLog(db, {
       boardId: r.board_id, entityId: r.entity_id ?? null, itemId: r.id,
-      target: r.payload?.identity || r.payload?.files?.[0]?.original_name || null,
+      target: r.payload?.files?.[0]?.original_name || r.payload?.identity || null,
       kind: "embed", outcome: "failed", error: message,
       detail: { model: embedder.model }, startedAt: t0, endedAt: Date.now(),
     }));
@@ -1107,7 +1107,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   const legLog = (row, kind, t0, outcome, error = null, detail = {}) =>
     jobLogWrite(() => addJobLog(db, {
       boardId: row.board_id, entityId: row.entity_id ?? null, itemId: row.id,
-      target: row.payload?.identity || row.payload?.files?.[0]?.original_name || null,
+      // The original filename, not payload.identity — for uploads the
+      // identity is the vestigial STORED name (a hex string nobody recognizes).
+      target: row.payload?.files?.[0]?.original_name || row.payload?.identity || null,
       kind, outcome, error, detail, startedAt: t0, endedAt: Date.now(),
     }));
 

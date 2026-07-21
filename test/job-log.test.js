@@ -340,7 +340,9 @@ test("face leg: a keyless render-nothing advance writes an ok row", async () => 
 test("tag leg: the facet-less completion is a real ok row with zero tags", async () => {
   const keyId = await createAiKey(db, "jobs-k1", "openai", "sk-test");
   const board = await createBoard(db, "jobs-tag-nofacets", [], "", true, keyId); // key only opens the claim gate — no call is made
-  const { iid } = await seedLegItem(board, "doc", "pending");
+  const { iid } = await seedLegItem(board, "beef1234deadbeef.png", "pending", {
+    files: [{ name: "beef1234deadbeef.png", original_name: "holiday.png", kind: "image" }],
+  });
   const stop = runWorker();
   try {
     await until(async () => (await itemStatus(iid)) === "tagged");
@@ -351,6 +353,7 @@ test("tag leg: the facet-less completion is a real ok row with zero tags", async
   assert.equal(rows.length, 1);
   assert.equal(rows[0].kind, "tag");
   assert.equal(rows[0].outcome, "ok");
+  assert.equal(rows[0].target, "holiday.png"); // the ORIGINAL name, not the stored hex name
   assert.deepEqual(rows[0].detail, { tags: 0 });
 });
 
@@ -515,12 +518,22 @@ test("GET /api/boards/:id/jobs: running + paged history, member-visible, 404 out
   assert.equal((await req(srv.base, "GET", `/api/boards/${board}/jobs`)).status, 401);
   assert.equal((await req(srv.base, "GET", `/api/boards/${board}/jobs`, { sid: outsider.sid })).status, 404);
 
+  // A provisional upload entity: identity is the stored hex name, no display
+  // name — the label must fall to the frozen target (the original filename),
+  // never the hex identity.
+  const hexEntity = await createEntity(db, board, { identity: "ab12cd34ef56.png" });
+  await addJobLog(db, {
+    boardId: board, entityId: hexEntity, itemId: 9, target: "photo.png",
+    kind: "tag", outcome: "ok", startedAt: T + 150, endedAt: T + 160, detail: { tags: 2 },
+  });
+
   const r = await req(srv.base, "GET", `/api/boards/${board}/jobs`, { sid: member.sid });
   assert.equal(r.status, 200);
   assert.equal(r.json.running.length, 1);
   assert.equal(r.json.running[0].kind, "transcribe");
   assert.equal(r.json.running[0].entity_display, "clip.mp3"); // no entity → frozen target
-  assert.deepEqual(r.json.jobs.map((j) => j.outcome), ["failed", "ok"]); // newest first, running excluded
+  assert.equal(r.json.jobs.find((j) => j.kind === "tag").entity_display, "photo.png");
+  assert.deepEqual(r.json.jobs.map((j) => j.outcome), ["failed", "ok", "ok"]); // newest first, running excluded
   assert.equal(r.json.jobs[0].error, "boom"); // error detail for every member
   assert.equal(r.json.nextCursor, null);
   assert.equal(typeof r.json.now, "number");
