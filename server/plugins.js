@@ -102,8 +102,9 @@ function mediaDefs() {
     // don't upload one." poppler/mammoth already degrade gracefully when absent.
     core: true,
     // maxBytes is the manifest default; the effective per-type limit (default ⊕
-    // admin override) is composed by mediaLimits() below.
-    capabilities: { extensions: m.extensions, kinds: m.kinds, maxBytes: m.maxBytes },
+    // admin override) is composed by mediaLimits() below. ceilingBytes rides
+    // along so the admin modal can show the cap an over-large override clamps to.
+    capabilities: { extensions: m.extensions, kinds: m.kinds, maxBytes: m.maxBytes, ceilingBytes: UPLOAD_HARD_CEILING },
     // The one adjustable knob: the per-type upload limit, stored in bytes (the
     // admin modal shows MB). No `default` here — an absent override falls to the
     // manifest maxBytes in mediaLimits(), so the manifest stays the single default.

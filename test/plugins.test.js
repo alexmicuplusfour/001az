@@ -62,7 +62,8 @@ test("defs: capabilities mirror the underlying descriptors", () => {
   assert.ok(rpm.default >= 1, "rpm default comes from the provider descriptor");
 
   const pdf = getPluginDef("media:pdf");
-  assert.deepEqual(pdf.capabilities, { extensions: ["pdf"], kinds: ["pdf"], maxBytes: 10 * 1024 * 1024 });
+  assert.deepEqual(pdf.capabilities,
+    { extensions: ["pdf"], kinds: ["pdf"], maxBytes: 10 * 1024 * 1024, ceilingBytes: UPLOAD_HARD_CEILING });
 });
 
 // --- state + the served catalog ---

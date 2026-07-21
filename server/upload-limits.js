@@ -9,4 +9,4 @@
 // a single type past the ceiling means raising the ceiling too (this env var),
 // which also widens multer — a deliberate two-step, because the ceiling likewise
 // bounds the worst-case tmp spool of one request (ceiling × MAX_FILES).
-export const UPLOAD_HARD_CEILING = Number(process.env.UPLOAD_HARD_CEILING) || 100 * 1024 * 1024;
+export const UPLOAD_HARD_CEILING = Number(process.env.UPLOAD_HARD_CEILING) || 500 * 1024 * 1024;

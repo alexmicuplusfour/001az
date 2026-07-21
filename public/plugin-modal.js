@@ -837,6 +837,7 @@ function mediaSection(p, reload) {
   // stored as bytes in the plugin config, which the server reads in mediaLimits.
   const MB = 1024 * 1024;
   const defaultMB = Math.round((p.capabilities.maxBytes || 0) / MB);
+  const ceilingMB = Math.round((p.capabilities.ceilingBytes || 0) / MB);
   const input = document.createElement("input");
   input.type = "number";
   input.min = "1";
@@ -845,7 +846,7 @@ function mediaSection(p, reload) {
   input.value = p.state.config.maxBytes != null ? String(Math.round(p.state.config.maxBytes / MB)) : "";
   input.placeholder = `${defaultMB} (default)`;
   sec.appendChild(labeled(
-    `Max upload size (MB) <span style="color:#b6b6bd;font-weight:400;">· blank = default (${defaultMB} MB)</span>`,
+    `Max upload size (MB) <span style="color:#b6b6bd;font-weight:400;">· blank = default (${defaultMB} MB)${ceilingMB ? ` · server ceiling ${ceilingMB} MB` : ""}</span>`,
     input,
   ));
 
@@ -861,7 +862,12 @@ function mediaSection(p, reload) {
     }
     try {
       await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { maxBytes } });
-      toast(`${p.label} saved`);
+      // An over-ceiling override stores as-is (it takes effect if the env
+      // ceiling is later raised) but the server clamps it in mediaLimits —
+      // say what actually applies rather than silently saving a bigger number.
+      toast(ceilingMB && maxBytes > p.capabilities.ceilingBytes
+        ? `${p.label} saved — uploads cap at the ${ceilingMB} MB server ceiling (UPLOAD_HARD_CEILING)`
+        : `${p.label} saved`);
       reload();
     } catch (err) { toast.error(err.message); }
   });
