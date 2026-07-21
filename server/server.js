@@ -100,7 +100,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, nextAutoTagRun } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun } from "./worker.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -1190,6 +1190,17 @@ app.get("/api/admin/ai-providers", requireAdmin, wrap(async (_req, res) => {
 // legacy per-layer routes use, just composed.
 app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   const plugins = await pluginCatalog(db);
+  // The whisper card shows the model the sidecar ITSELF reports (its /health):
+  // the model is baked into the sidecar image, so the app never names it — an
+  // unreachable sidecar leaves the list empty and the card notes the fallback.
+  const whisper = plugins.find((p) => p.id === "ai:whisper");
+  if (whisper) {
+    const live = await transcriberSidecarModel();
+    whisper.ai = {
+      ...whisper.ai, // don't mutate: `ai` is shared with the memoized plugin defs
+      transcribes: { default: live, models: live ? [{ id: live, note: "runs on-server · no API key · baked at deploy (WHISPER_MODEL)" }] : [] },
+    };
+  }
   const embedder = await resolveEmbedder(db);
   const domains = {};
   for (const c of listConnectors()) {

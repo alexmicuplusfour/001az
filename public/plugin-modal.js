@@ -543,7 +543,8 @@ function embedSection(p, ctx, reload) {
 // embedSection, but transcription is always on (the whisper sidecar is the
 // default), so there's no enable toggle: the provider choice IS the toggle.
 // A provider advertises this via `transcribes`; the keyless whisper sidecar
-// shows its baked model as a note (WHISPER_MODEL is a deploy knob, not runtime).
+// shows the model it reports live (via the server's /health probe) as a note —
+// the model is baked into the sidecar image at deploy, not picked here.
 function transcribeSection(p, ctx, reload) {
   const tr = ctx.slots.transcriber;
   const active = ctx.defaults.transcriber === p.name;
@@ -583,11 +584,13 @@ function transcribeSection(p, ctx, reload) {
     fillModelSelect(modelSel, { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default }, active ? tr.model : null);
     sec.appendChild(labeled("Transcription model", modelSel));
   } else {
+    // `one` is whisper's live self-report (or a provider's single model); an
+    // absent entry means the sidecar didn't answer — the baked model still serves.
     const one = p.ai.transcribes.models[0];
     const note = document.createElement("p");
     note.className = "muted";
     note.style.margin = "0";
-    note.textContent = one.id + " — " + one.note;
+    note.textContent = one ? one.id + " — " + one.note : "model baked at deploy (WHISPER_MODEL) — sidecar not reachable right now";
     sec.appendChild(note);
   }
 

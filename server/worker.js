@@ -596,9 +596,24 @@ const TRANSCRIBER_HTTP_TIMEOUT_MS = Number(process.env.TRANSCRIBER_HTTP_TIMEOUT_
 // attempt re-joins or restarts it; the sidecar's own watchdog restarts a truly
 // frozen model). Covers the pre-segment decode+VAD phase of a long clip too.
 const TRANSCRIBER_STALL_MS = Number(process.env.TRANSCRIBER_STALL_MS) || 900000;
-// Names the model the sidecar bakes (compose feeds both from one ${WHISPER_MODEL}).
-// Used only to stamp the transcript cache, so a model bump re-transcribes.
-const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "small";
+
+// The sidecar's live model, read off its /health and cached briefly — for
+// display surfaces (the Plugins page whisper card). The sidecar is the ONLY
+// place that names its model (baked at image build); nothing app-side mirrors
+// WHISPER_MODEL, so nothing can drift. Null when unreachable — callers show a
+// "baked at deploy" fallback. Failures cache too, so an admin page reload
+// doesn't re-time-out against a down sidecar on every hit.
+let sidecarModelCache = { at: 0, model: null };
+export async function transcriberSidecarModel() {
+  if (Date.now() - sidecarModelCache.at < 60000) return sidecarModelCache.model;
+  let model = null;
+  try {
+    const res = await fetch(`${TRANSCRIBER_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) model = (await res.json()).model || null;
+  } catch { /* down/unreachable — display-only, fall back */ }
+  sidecarModelCache = { at: Date.now(), model };
+  return model;
+}
 
 // The on-server whisper-sidecar engine, wrapped as an interchangeable descriptor
 // { id, model, transcribe } so a provider engine slots in the way resolveEmbedder
@@ -612,9 +627,14 @@ const TRANSCRIBER_MODEL = process.env.TRANSCRIBER_MODEL || "small";
 // transcribe_provider sentinel.
 function whisperTranscriber() {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // The sidecar names its own model: the done payload carries it, and `model`
+  // fills in from there — null until a job completes. The cache stamp thus
+  // records the model that actually produced the text, even across a mid-job
+  // sidecar redeploy.
+  let model = null;
   return {
     id: "whisper",
-    model: TRANSCRIBER_MODEL,
+    get model() { return model; },
     // opts.deadlineMs: give up (transient) if the job hasn't settled by then —
     // for interactive callers like the admin probe, not the worker loop.
     // opts.stallMs: test override for the no-progress window.
@@ -679,7 +699,10 @@ function whisperTranscriber() {
           throw e;
         }
         const job = await res.json();
-        if (job.status === "done") return job.text || "";
+        if (job.status === "done") {
+          if (job.model) model = job.model;
+          return job.text || "";
+        }
         if (job.status === "failed") {
           const e = new Error(`transcriber: ${job.error || "unknown failure"}`);
           e.status = job.permanent ? 422 : 500; // permanent = undecodable input
@@ -1738,7 +1761,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
               const text = await transcriber.transcribe(buf, file.name);
               await updateItemPayload(db, row.id, { transcript: text });
               transcribeRetry.delete(row.id);
-              await stamp({ outcome: "ok", detail: { chars: text.length, engine: `${transcriber.id}:${transcriber.model}` } });
+              // whisper's model is the sidecar's own answer (null if it predates self-reporting)
+              await stamp({ outcome: "ok", detail: { chars: text.length, engine: [transcriber.id, transcriber.model].filter(Boolean).join(":") } });
               console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
             } catch (err) {
               const attempts = transcribeRetry.get(row.id)?.attempts || 0;

@@ -94,7 +94,7 @@ function stubFetch(handler) {
 const sidecarOk = (text) => async (url, opts = {}) =>
   opts.method === "POST"
     ? new Response(JSON.stringify({ job: "stub", status: "queued" }), { status: 202 })
-    : new Response(JSON.stringify({ status: "done", progress: { done_s: 1, total_s: 1 }, text }), { status: 200 });
+    : new Response(JSON.stringify({ status: "done", progress: { done_s: 1, total_s: 1 }, text, model: "small" }), { status: 200 });
 const sidecarStatus = (status) => async () => new Response("nope", { status });
 const sidecarDown = () => async () => {
   throw new TypeError("fetch failed");

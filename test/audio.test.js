@@ -67,14 +67,14 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
   assert.equal(eng.id, "whisper");
-  assert.ok(eng.model, "carries a model for the cache stamp");
+  assert.equal(eng.model, null, "no env mirror — the model arrives with the sidecar's job payload");
 
   // healthy: submit POSTs the bytes, gets a job id; polls ride it to done.
   const calls = [];
   const states = [
     { status: "queued", progress: { done_s: 0, total_s: null } },
     { status: "running", progress: { done_s: 12.5, total_s: 60 } },
-    { status: "done", progress: { done_s: 60, total_s: 60 }, text: "hi there" },
+    { status: "done", progress: { done_s: 60, total_s: 60 }, text: "hi there", model: "small" },
   ];
   globalThis.fetch = async (url, opts = {}) => {
     calls.push({ url: String(url), method: opts.method || "GET" });
@@ -82,6 +82,7 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
     return { ok: true, status: 200, json: async () => states.shift() };
   };
   assert.equal(await eng.transcribe(Buffer.from("x")), "hi there");
+  assert.equal(eng.model, "small", "the cache stamp's model is the sidecar's own answer");
   assert.match(calls[0].url, /\/transcribe$/);
   assert.equal(calls[0].method, "POST");
   assert.match(calls[1].url, /\/jobs\/abc123$/, "polls the job id the submit returned");

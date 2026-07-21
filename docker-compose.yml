@@ -27,12 +27,13 @@ services:
     build:
       context: ./transcriber
       args:
-        # one knob bakes AND serves the model — see transcriber/Dockerfile.
-        # changing it needs a rebuild (baked model), so it's build-time, not UI.
+        # THE one place the model is set — baked into the image (see
+        # transcriber/Dockerfile), served from the baked ENV, and self-reported
+        # to the app (/health + job payloads). Changing it is a rebuild
+        # (`docker compose build transcriber`), not an .env-only flip.
         WHISPER_MODEL: ${WHISPER_MODEL:-small}
     restart: unless-stopped
     environment:
-      WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_BEAM: ${WHISPER_BEAM:-5}
       # optional language pin (e.g. "ro") — skips per-file auto-detect, which
       # can misroute a transcript off a musical/silent first 30 seconds
@@ -63,9 +64,6 @@ services:
       JOB_LOG_RETENTION_DAYS: ${JOB_LOG_RETENTION_DAYS:-30}
       EXTRACTOR_URL: http://extractor:3002
       TRANSCRIBER_URL: http://transcriber:3003
-      # names the sidecar's baked model so the app can stamp the transcript
-      # cache with it (same ${WHISPER_MODEL} as the transcriber → no drift)
-      TRANSCRIBER_MODEL: ${WHISPER_MODEL:-small}
       # outbound tuning — code owns the defaults (empty passes through safely);
       # set in .env only when a provider's pace or latency demands it
       CONNECTOR_RPM: ${CONNECTOR_RPM:-}

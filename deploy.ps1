@@ -29,9 +29,9 @@ $appImage = "001az-app:$tag"
 $extractorImage = "001az-extractor:$tag"
 $transcriberImage = "001az-transcriber:$tag"
 # The whisper model is baked into the transcriber image at build time (see
-# transcriber/Dockerfile), so it's a build knob, not a runtime one. Keep this in
-# sync with WHISPER_MODEL in the droplet's .env — the app stamps the transcript
-# cache with ${WHISPER_MODEL:-base}, so a mismatch would misreport the model.
+# transcriber/Dockerfile). Deploys build "base" unless $env:WHISPER_MODEL says
+# otherwise; nothing needs syncing on the droplet — the sidecar tells the app
+# which model it runs, so the rest of the system just follows this choice.
 $whisperModel = if ($env:WHISPER_MODEL) { $env:WHISPER_MODEL } else { "base" }
 
 Write-Host "==> building $appImage" -ForegroundColor Cyan

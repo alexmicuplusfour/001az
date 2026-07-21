@@ -223,6 +223,10 @@ class Handler(BaseHTTPRequestHandler):
                                    "progress": {"done_s": job["done_s"], "total_s": job["total_s"]}}, 200
                     if job["status"] == "done":
                         out["text"] = job["text"]
+                        # The sidecar owns its model name: callers stamp
+                        # transcripts from this (never from a mirrored env),
+                        # so the stamp can't drift from the serving model.
+                        out["model"] = MODEL
                     elif job["status"] == "failed":
                         out["error"], out["permanent"] = job["error"], job["permanent"]
             self._json(status, out)
