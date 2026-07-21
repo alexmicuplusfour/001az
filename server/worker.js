@@ -35,6 +35,10 @@ import {
   addFieldSnapshot,
   pruneFieldSnapshots,
   pruneTagSnapshots,
+  addJobLog,
+  stampJobLog,
+  markInterruptedJobs,
+  pruneJobLog,
   requeueItemForTag,
   advanceFaced,
   dueIngestBoards,
@@ -401,6 +405,7 @@ export function invalidateAllBoardCaches() {
 // of wrongly marking a whole batch. Returns { embedded, skipped }; throws for
 // batch-level failures. Exported so the sweep and tests share one path.
 export async function embedBatch(db, embedder, rows) {
+  const t0 = Date.now();
   const { rpm, burst } = await aiRate(db, embedder.provider); // per-provider pacing (local: none)
   const call = (rs) =>
     withPluginHealth(db, `ai:${embedder.provider}`, () =>
@@ -429,13 +434,21 @@ export async function embedBatch(db, embedder, rows) {
       await setItemEmbedding(db, r.id, vectors[0], embedder.model);
       embedded++;
     } catch (e) {
-      failures.push({ id: r.id, message: String(e?.message ?? e) });
+      failures.push({ row: r, message: String(e?.message ?? e) });
     }
   }
   if (!embedded) throw new Error(failures[0].message);
-  for (const f of failures) {
-    await setItemEmbedError(db, f.id, f.message);
-    console.warn(`embed: skipping item #${f.id} (${f.message}) — re-tagging retries it`);
+  for (const { row: r, message } of failures) {
+    await setItemEmbedError(db, r.id, message);
+    // Embed successes are plumbing nobody watches, but a marked-and-skipped
+    // item silently vanishes from the search corpus — that gets a job row.
+    await jobLogWrite(() => addJobLog(db, {
+      boardId: r.board_id, entityId: r.entity_id ?? null, itemId: r.id,
+      target: r.payload?.identity || r.payload?.files?.[0]?.original_name || null,
+      kind: "embed", outcome: "failed", error: message,
+      detail: { model: embedder.model }, startedAt: t0, endedAt: Date.now(),
+    }));
+    console.warn(`embed: skipping item #${r.id} (${message}) — re-tagging retries it`);
   }
   return { embedded, skipped: failures.length };
 }
@@ -641,6 +654,18 @@ export async function resolveTranscriber(db, board = null) {
   return whisperTranscriber();
 }
 
+// The job log observes; it must never break the job it observes. Every ledger
+// write goes through here — a failure is a warn, never a throw into the leg
+// or sweep being recorded. Returns the write's result, or null on failure.
+async function jobLogWrite(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    console.warn("job log write failed:", e.message);
+    return null;
+  }
+}
+
 export async function documentTextFor(galleryDir, file) {
   if (file.kind === "pdf") {
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
@@ -688,6 +713,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   const EXTRACT_CONCURRENCY = Math.max(1, Number(process.env.EXTRACT_CONCURRENCY) || 2);
   const FACE_CONCURRENCY = Math.max(1, Number(process.env.FACE_CONCURRENCY) || 2);
   const TEXT_DOC_MAX_CHARS = 50000; // ~12k tokens; plenty for tagging judgment
+
+  // Job-log rows still `running` were orphaned by the previous process (a
+  // crash or stop mid-transcription/mid-ingest) — stamp them interrupted so
+  // the jobs view never shows a ghost in flight. The bootAt fence in the
+  // UPDATE keeps this boot's own fresh rows safe from the sweep.
+  jobLogWrite(() => markInterruptedJobs(db, Date.now())).then((n) => {
+    if (n) console.log(`job log: ${n} job(s) from the previous run marked interrupted`);
+  });
 
   // What the model sees for an item: parts built from its files by kind.
   // Images: the thumbnail (cheap) rather than the original. Documents: their
@@ -882,6 +915,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       const skipped = b.auto_tag_skip_weekends && isWeekend(now);
       const queued = skipped ? 0 : await retagBoard(db, b.id);
       await setBoardNextRun(db, b.id, nextAutoTagRun(now, b.auto_tag_every_min, b.auto_tag_skip_weekends));
+      // One board-run row per pass — the answer to "why did 300 items just
+      // queue" (and to "why didn't my retag run" on a skipped weekend). The
+      // queued items each write their own tag rows as they process.
+      await jobLogWrite(() => addJobLog(db, {
+        boardId: b.id, kind: "retag", outcome: "ok",
+        detail: { queued, ...(skipped ? { skipped: "weekend" } : {}) },
+        startedAt: now, endedAt: Date.now(),
+      }));
       if (queued) console.log(`scheduled retag: queued ${queued} item(s) in board "${b.name}"`);
       else if (skipped) console.log(`scheduled retag: board "${b.name}" skipped (weekend) — rescheduled`);
     }
@@ -929,9 +970,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // then-vs-now data itself, so age-pruning it is opt-in.
   const SNAPSHOT_RETENTION_DAYS = Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 90);
   const TAG_SNAPSHOT_RETENTION_DAYS = Number(process.env.TAG_SNAPSHOT_RETENTION_DAYS ?? 0);
+  // The job log (execution history, one row per attempt) defaults to 30 days —
+  // it's operational transparency, not the product's data like the snapshots.
+  const JOB_LOG_RETENTION_DAYS = Number(process.env.JOB_LOG_RETENTION_DAYS ?? 30);
   let nextPruneAt = 0;
   async function pruneSnapshots() {
-    if ((!SNAPSHOT_RETENTION_DAYS && !TAG_SNAPSHOT_RETENTION_DAYS) || Date.now() < nextPruneAt) return;
+    if ((!SNAPSHOT_RETENTION_DAYS && !TAG_SNAPSHOT_RETENTION_DAYS && !JOB_LOG_RETENTION_DAYS) || Date.now() < nextPruneAt) return;
     nextPruneAt = Date.now() + 3600000;
     if (SNAPSHOT_RETENTION_DAYS) {
       const n = await pruneFieldSnapshots(db, Date.now() - SNAPSHOT_RETENTION_DAYS * 86400000);
@@ -940,6 +984,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     if (TAG_SNAPSHOT_RETENTION_DAYS) {
       const n = await pruneTagSnapshots(db, Date.now() - TAG_SNAPSHOT_RETENTION_DAYS * 86400000);
       if (n) console.log(`pruned ${n} tag snapshot(s) older than ${TAG_SNAPSHOT_RETENTION_DAYS}d`);
+    }
+    if (JOB_LOG_RETENTION_DAYS) {
+      const n = await pruneJobLog(db, Date.now() - JOB_LOG_RETENTION_DAYS * 86400000);
+      if (n) console.log(`pruned ${n} job log row(s) older than ${JOB_LOG_RETENTION_DAYS}d`);
     }
   }
 
@@ -973,6 +1021,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     for (const b of await dueIngestBoards(db, Date.now())) {
       const cfg = b.ingest;
       const now = Date.now();
+      // One run = one job-log row, `running` while the feed is enumerated and
+      // admitted — ingest has no other in-flight representation. ingest_state
+      // keeps only the LAST run; these rows are where the history lives.
+      const jobId = await jobLogWrite(() => addJobLog(db, {
+        boardId: b.id, kind: "ingest", startedAt: now,
+        detail: { trigger: cfg?.trigger?.mode || null },
+      }));
+      const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
       try {
         const adapter = resolveIngestAdapter(b);
         if (!adapter) throw new Error("ingestion is not available for this board");
@@ -1010,8 +1066,24 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         });
         await setIngestNextRun(db, b.id,
           remaining > 0 ? Date.now() : nextIngestRunAt(cfg.trigger, Date.now(), { continuousMs: INGEST_CONTINUOUS_MS }));
+        // A completed run is `ok` even with per-item errors (they're the run's
+        // findings, carried in error/skipped) — `failed` means the run itself
+        // died (the catch below).
+        await stamp({
+          outcome: "ok", error: errors[0] ?? null,
+          detail: { scanned: candidates.length, fresh: fresh.length, admitted: added, skipped: batch.length - added, drain_left: remaining > 0 ? remaining : 0 },
+        });
         if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
       } catch (err) {
+        // Scheduled triggers back off 5 minutes and retry; a manual run was
+        // asked for ONCE — its outcome is this error (visible in the modal
+        // status line), not a silent retry loop that runs forever until the
+        // source heals. "Run now" re-arms it whenever the user wants.
+        // Settle the schedule BEFORE publishing the error: last_error is what
+        // observers poll for, so everything it implies (disarmed/backed off)
+        // must already be true when it lands.
+        const manual = cfg?.trigger?.mode === "manual";
+        await setIngestNextRun(db, b.id, manual ? null : Date.now() + 5 * 60000).catch(() => {});
         // Preserve a mid-drain budget across the failure — wiping it would
         // hand the retry a fresh `limit` and over-admit the logical run.
         const drainLeft = Number(b.ingest_state?.drain_left) || 0;
@@ -1021,31 +1093,45 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
           last_error: err.message,
           ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
         }).catch(() => {});
-        // Scheduled triggers back off 5 minutes and retry; a manual run was
-        // asked for ONCE — its outcome is this error (visible in the modal
-        // status line), not a silent retry loop that runs forever until the
-        // source heals. "Run now" re-arms it whenever the user wants.
-        const manual = cfg?.trigger?.mode === "manual";
-        await setIngestNextRun(db, b.id, manual ? null : Date.now() + 5 * 60000).catch(() => {});
+        await stamp({ outcome: "failed", error: err.message });
         console.warn(`ingest error board "${b.name}" (${manual ? "manual — not retried" : "retrying in 5m"}): ${err.message}`);
       }
     }
   }
 
+  // One completed job-log row per pipeline-leg attempt (tag/extract/face).
+  // The legs are visible via items.status while in flight, so they write no
+  // `running` rows — started_at is the leg's entry time, one row per
+  // execution at resolution. noCount waits (missing key, awaiting a
+  // transcript) are gates, not attempts — the callers skip logging those.
+  const legLog = (row, kind, t0, outcome, error = null, detail = {}) =>
+    jobLogWrite(() => addJobLog(db, {
+      boardId: row.board_id, entityId: row.entity_id ?? null, itemId: row.id,
+      target: row.payload?.identity || row.payload?.files?.[0]?.original_name || null,
+      kind, outcome, error, detail, startedAt: t0, endedAt: Date.now(),
+    }));
+
   async function processOne(row) {
     const label = row.payload?.identity || `item ${row.id}`;
+    const t0 = Date.now();
     let result;
     try {
       // Facet-less board: nothing to tag. Complete the item instead of failing
       // it — extraction-only boards (mapping, no facets) are a supported shape.
       if (!(await getBoardPrompt(db, row.board_id))) {
-        if (await markTagged(db, row.id, [], false, {})) console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
-        else console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
+        if (await markTagged(db, row.id, [], false, {})) {
+          await legLog(row, "tag", t0, "ok", null, { tags: 0 });
+          console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
+        } else {
+          await legLog(row, "tag", t0, "discarded");
+          console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
+        }
         return;
       }
       result = await tagOne(row);
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS);
+      if (!err.noCount) await legLog(row, "tag", t0, failed ? "failed" : "requeued", err.message);
       console.warn(`tag error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
       return;
     }
@@ -1059,9 +1145,16 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       const { tags, undecided, reasoning, usage, model } = result;
       const landed = await markTagged(db, row.id, tags, undecided, reasoning);
       await bumpUsage(db, row.board_id, usage);
-      if (landed) console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
-      else console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
+      if (landed) {
+        await legLog(row, "tag", t0, "ok", null, { tags: tags.length, model, ...(undecided ? { undecided: true } : {}) });
+        console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
+      } else {
+        await legLog(row, "tag", t0, "discarded", null, { model });
+        console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
+      }
     } catch (err) {
+      // The execution happened, the result was lost — say exactly that.
+      await legLog(row, "tag", t0, "failed", `post-tag write failed — left for recovery: ${err.message}`);
       console.warn(`post-tag write failed #${row.id} ${label}: ${err.message} (left for recovery)`);
     }
   }
@@ -1099,6 +1192,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // same way tagOne does; writes payload.fields and advances to pending so the
   // normal tag leg picks it up next. When the mapping has derived identity,
   // resolves collisions by merging into the existing entity instead.
+  // Returns a job-log summary for processExtractOne — { landed, fields,
+  // identity, model } — or null for the no-AI passthrough (a status flip is
+  // not an execution worth a history row).
   async function extractOne(row) {
     const mapping = row.payload.mapping;
     const aiWork =
@@ -1110,7 +1206,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       // release). Advance without an AI call, keeping the fields the payload
       // already carries.
       await stampExtracted(row, row.payload.fields || {});
-      return;
+      return null;
     }
     const board = await getBoard(db, row.board_id);
     // Extraction uses its own provider override when set; otherwise falls back
@@ -1159,20 +1255,26 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
 
     // Derived identity: resolve against the parent entity before advancing.
     // The instance's fields are written either way — they're its own.
+    // `landed`/`disposition` feed the job-log summary: how the identity
+    // resolved (derived / merged / split / kept) and whether the stamp beat
+    // the fence.
+    let landed = false;
+    let disposition = null;
     if (mapping.identity?.from === "ai") {
       const entity = await getEntity(db, row.entity_id);
       const rawIdentity = input.identity?.value;
       if (!entity) {
         // Orphan instance (shouldn't happen) — extract what we can and move on.
-        await stampExtracted(row, fields);
+        landed = await stampExtracted(row, fields);
         console.warn(`extracted #${row.id} [no parent entity — skipped identity resolution] [${ai.model}]`);
       } else if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
         // AI couldn't derive an identity. Only flag provisional on entities
         // that were never identified (no display_name); established entities
         // keep their identity — this instance just didn't add evidence.
         const established = !!entity.display_name;
+        disposition = "kept";
         if (!established) await markEntityProvisional(db, entity.id);
-        if (await stampExtracted(row, fields))
+        if ((landed = await stampExtracted(row, fields)))
           console.log(`extracted #${row.id} [no identity derived${established ? " — keeping entity identity" : " — provisional"}] [${ai.model}]`);
       } else {
         // The display name is the model's output verbatim — identity can be
@@ -1185,7 +1287,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
           // Same key — refresh the display name to this derivation and make
           // sure the provisional flag is gone.
           await setEntityIdentity(db, entity.id, derived, newDisplayName);
-          if (await stampExtracted(row, fields))
+          disposition = "derived";
+          if ((landed = await stampExtracted(row, fields)))
             console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
         } else {
           const other = await getEntityByIdentity(db, row.board_id, derived);
@@ -1193,7 +1296,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
             // Another entity already holds this identity — merge (or split
             // away from a multi-instance entity): re-parent this instance.
             await reparentInto(row, other, newDisplayName, entity.id);
-            await stampExtracted(row, fields);
+            disposition = "merged";
+            landed = await stampExtracted(row, fields);
           } else if ((await entityInstanceCount(db, entity.id)) <= 1) {
             // Sole instance and nobody holds the derived key: establish a
             // provisional entity, or rename an established one whose identity
@@ -1201,7 +1305,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
             // crate membership survive.
             try {
               await setEntityIdentity(db, entity.id, derived, newDisplayName);
-              if (await stampExtracted(row, fields))
+              disposition = "derived";
+              if ((landed = await stampExtracted(row, fields)))
                 console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
             } catch (err) {
               if (err.code !== "23505") throw err;
@@ -1209,7 +1314,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
               const winner = await getEntityByIdentity(db, row.board_id, derived);
               if (!winner) throw err;
               await reparentInto(row, winner, newDisplayName, entity.id);
-              await stampExtracted(row, fields);
+              disposition = "merged";
+              landed = await stampExtracted(row, fields);
             }
           } else {
             // Split: this instance belongs to someone new; the rest of the
@@ -1227,26 +1333,35 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
             // The old entity keeps its other instances here — stamp it so
             // delta polls see its aggregate change (mirrors reparentInstance).
             await touchEntity(db, entity.id);
-            if (await stampExtracted(row, fields))
+            disposition = "split";
+            if ((landed = await stampExtracted(row, fields)))
               console.log(`split: instance #${row.id} detached from entity #${entity.id} into #${targetId} ("${derived}")`);
           }
         }
       }
     } else {
       const label = row.payload?.identity || `item ${row.id}`;
-      if (await stampExtracted(row, fields))
+      if ((landed = await stampExtracted(row, fields)))
         console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
     }
 
     await bumpUsage(db, row.board_id, usage);
+    return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai.model };
   }
 
   async function processExtractOne(row) {
     const label = row.payload?.identity || `item ${row.id}`;
+    const t0 = Date.now();
     try {
-      await extractOne(row);
+      const r = await extractOne(row);
+      // null = the no-AI passthrough (a connector stamp; a status flip is not
+      // an execution). Otherwise one row per attempt; `discarded` when the
+      // fence dropped a stale result.
+      if (r) await legLog(row, "extract", t0, r.landed ? "ok" : "discarded", null,
+        { fields: r.fields, ...(r.identity ? { identity: r.identity } : {}), model: r.model });
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_extract");
+      if (!err.noCount) await legLog(row, "extract", t0, failed ? "failed" : "requeued", err.message);
       console.warn(`extract error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
     }
   }
@@ -1256,24 +1371,39 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   // advance to the tag leg.
   async function processFaceOne(row) {
     const label = row.payload?.identity || `entity ${row.entity_id}`;
+    const t0 = Date.now();
     try {
       const now = Date.now();
       const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
       const board = await getBoard(db, row.board_id);
+      let rendered = false;
+      let renderError = null;
       if (entity && board) {
         let face = null;
         // A face render failure isn't fatal — proceed to tag with the tile; the
         // sweep's self-heal retries the first render later.
         try { face = await generateFace(db, { galleryDir, thumbsDir }, entity, { id: row.id, payload: row.payload }, board, now); }
-        catch (e) { console.warn(`face render failed for #${row.entity_id} ${label}: ${e.message} (tile)`); }
+        catch (e) { renderError = e.message; console.warn(`face render failed for #${row.entity_id} ${label}: ${e.message} (tile)`); }
+        rendered = !!face;
         await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : entity.face_at, board.mapping, now));
       }
+      // rendered:false + render_error is the "why is my chart a tile" answer —
+      // the leg still advances (outcome ok), but the log says what happened.
+      const detail = {
+        provider: board?.mapping?.input?.connector ?? null, rendered,
+        ...(renderError ? { render_error: renderError } : {}),
+      };
       // → pending (tag leg), or held when parked; false = fence discarded a
       // stale advance (the row was re-routed or deleted mid-render).
-      if (!(await advanceFaced(db, row.id)))
+      if (await advanceFaced(db, row.id)) {
+        await legLog(row, "face", t0, "ok", null, detail);
+      } else {
+        await legLog(row, "face", t0, "discarded", null, detail);
         console.warn(`stale face advance for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
+      }
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_face");
+      if (!err.noCount) await legLog(row, "face", t0, failed ? "failed" : "requeued", err.message);
       console.warn(`face error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
     }
   }
@@ -1423,12 +1553,21 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
           if (row) {
             did = true;
             const file = row.payload.files?.[0];
+            // A `running` job-log row is the only place "transcribing now"
+            // exists — this sweep has no items.status leg. Each attempt is its
+            // own row (a transient retry after the backoff opens a fresh one).
+            const jobId = await jobLogWrite(() => addJobLog(db, {
+              boardId: row.board_id, entityId: row.entity_id, itemId: row.id,
+              target: file?.original_name || file?.name || null, kind: "transcribe",
+            }));
+            const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
             try {
               if (!file) throw new Error("no file on the item");
               const transcriber = await resolveTranscriber(db);
               const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
               const text = await transcriber.transcribe(buf, file.name);
               await updateItemPayload(db, row.id, { transcript: text });
+              await stamp({ outcome: "ok", detail: { chars: text.length, engine: `${transcriber.id}:${transcriber.model}` } });
               console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
             } catch (err) {
               // Transient (back off, don't mark): the sidecar unreachable, or a
@@ -1441,11 +1580,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
               if (transient) {
                 transcribeBackoffUntil = Date.now() + 60000;
                 did = false;
+                await stamp({ outcome: "requeued", error: err.message });
                 console.warn(`transcribe: transient error (retry in 60s): ${err.message}`);
               } else {
                 // Permanent for this clip. Mark it so the queue moves on; it'll
                 // tag from its filename, like a textless document.
                 await updateItemPayload(db, row.id, { transcript_error: String(err.message).slice(0, 300) });
+                await stamp({ outcome: "failed", error: err.message });
                 console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${err.message}`);
               }
             }

@@ -48,6 +48,8 @@ services:
       SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:-90}
       # judgment history (tag_snapshots) — deduped upstream, so 0 = keep forever
       TAG_SNAPSHOT_RETENTION_DAYS: ${TAG_SNAPSHOT_RETENTION_DAYS:-0}
+      # per-board job history (job_log) — execution attempts, 0 = keep forever
+      JOB_LOG_RETENTION_DAYS: ${JOB_LOG_RETENTION_DAYS:-30}
       EXTRACTOR_URL: http://extractor:3002
       TRANSCRIBER_URL: http://transcriber:3003
       # names the sidecar's baked model so the app can stamp the transcript

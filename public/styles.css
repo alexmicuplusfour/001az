@@ -1222,6 +1222,64 @@ a.tool-btn {
   height: 13px;
   flex-shrink: 0;
 }
+/* jobs chip — ambient "work is happening" signal beside the board controls;
+   pulses with the client's in-flight count, opens the job log modal */
+.jobs-chip {
+  gap: 5px;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.jobs-chip:hover { background: var(--pill-bg-hover); }
+.jobs-chip-icon { display: inline-flex; }
+.jobs-chip-icon svg { width: 12px; height: 12px; }
+.jobs-chip.busy { color: var(--text); }
+.jobs-chip.busy .jobs-chip-icon svg { animation: jobs-pulse 1.6s ease-in-out infinite; }
+@keyframes jobs-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .jobs-chip.busy .jobs-chip-icon svg { animation: none; }
+}
+
+/* jobs modal — two sections (In progress / History) of compact log rows */
+#jobs-modal .modal-dialog { width: 660px; max-width: calc(100vw - 32px); }
+.jobs-section h3 { margin: 16px 0 6px; font-size: 13px; }
+.jobs-section:first-child h3 { margin-top: 0; }
+.jobs-filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 8px; }
+.jobs-list { display: flex; flex-direction: column; }
+.job-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--pill-bg);
+  font-size: 12.5px;
+}
+.job-row:first-child { border-top: none; }
+.job-kind { flex: none; width: 86px; color: var(--text-dim); }
+.job-label {
+  flex: 0 1 auto;
+  min-width: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-outcome { flex: none; color: var(--text-dim); }
+.job-outcome-failed { color: #b3261e; }
+.job-outcome-running { color: var(--text); }
+.job-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+.job-err { color: #b3261e; }
+.job-when { flex: none; margin-left: auto; color: var(--text-dim); white-space: nowrap; }
+.jobs-note { margin: 6px 0; color: var(--text-dim); font-size: 12.5px; }
+.jobs-sched { margin: 8px 0 0; color: var(--text-dim); font-size: 12px; }
+.jobs-more { margin-top: 10px; align-self: flex-start; }
 
 /* Live rolling token count. Each digit lives in a 1em-tall window; on change a
    two-row ribbon (old over new) slides up so the old glyph exits the top and

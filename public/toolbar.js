@@ -1,6 +1,7 @@
 import { state } from './state.js';
-import { refreshBoardIngest } from './data.js';
+import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration } from './utils.js';
+import { openJobsModal } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer } from './filters.js';
@@ -70,6 +71,31 @@ function ingestChip() {
       if (!(at && at > Date.now())) ingestEtaBackoff = Math.min(ingestEtaBackoff * 2, 60000);
     }
   }, 1000);
+  return chip;
+}
+
+// ── jobs chip: ambient "work is happening" signal + the door to the job log ──
+// The count is the client's own in-flight items (the statuses the delta poll
+// already streams), so it refreshes for free on every toolbar rebuild — no
+// extra requests. Sweep jobs the client can't see (a transcription, an ingest
+// run) live inside the modal, which does its own fetching.
+function jobsChip() {
+  const n = state.items.reduce((k, i) => k + (ACTIVE.has(i.status) || QUEUED.has(i.status) ? 1 : 0), 0);
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "mapping-chip jobs-chip" + (n > 0 ? " busy" : "");
+  chip.title = n > 0 ? `${n} item${n === 1 ? "" : "s"} in the pipeline — click for the job log` : "Job log";
+  chip.setAttribute("aria-label", "Job log");
+  const icon = document.createElement("span");
+  icon.className = "jobs-chip-icon";
+  icon.innerHTML = ICONS.activity;
+  chip.appendChild(icon);
+  if (n > 0) {
+    const count = document.createElement("span");
+    count.textContent = n;
+    chip.appendChild(count);
+  }
+  chip.addEventListener("click", () => openJobsModal());
   return chip;
 }
 
@@ -209,6 +235,8 @@ export function renderToolbar(resultCount) {
       // No edit pencil (non-manager) — still show the data-source chip.
       boardGroup.appendChild(templateChip);
     }
+    // Jobs chip for every member (the log is transparency, not management).
+    if (state.me) boardGroup.appendChild(jobsChip());
     elToolbar.appendChild(boardGroup);
   }
 

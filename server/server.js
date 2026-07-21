@@ -73,6 +73,11 @@ import {
   rescheduleEntityRefreshes,
   boardEntityIdentities,
   getBoardTokenTotal,
+  listJobLog,
+  listRunningJobs,
+  listRefreshHistory,
+  boardHasRefreshHistory,
+  boardNextRefreshAt,
   setIngestNextRun,
   setIngestState,
   clearIngestDrain,
@@ -437,6 +442,65 @@ app.get("/api/boards/:id/tokens", requireAuth, wrap(async (req, res) => {
   if (!board || !(await canAccessBoard(db, board.id, req.user)))
     return res.status(404).json({ error: "not found" });
   res.json({ token_total: await getBoardTokenTotal(db, board.id) });
+}));
+
+// The board's job log (planning/job-log-plan.md): running sweep jobs (a
+// transcription or ingest run in flight) plus settled history, newest first
+// behind a keyset cursor. Deliberately member-visible like /tokens, errors
+// included — the log is transparency, not management.
+app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  const pick = (j) => ({
+    id: j.id, kind: j.kind, outcome: j.outcome, error: j.error, detail: j.detail,
+    target: j.target, entity_id: j.entity_id, item_id: j.item_id,
+    // Live entities show their current name; deleted ones keep the frozen label.
+    entity_display: j.entity_display || j.entity_identity || j.target,
+    started_at: j.started_at, ended_at: j.ended_at,
+  });
+  // kind=refresh serves field_snapshots wearing the same row shape — refresh
+  // ticks are deliberately not in job_log (volume); movement already is. The
+  // has_refresh flag tells the client whether the Refresh pill has anything
+  // behind it.
+  const historyP = req.query.kind === "refresh"
+    ? listRefreshHistory(db, board.id, { after: req.query.after || null, limit }).then(({ rows, nextCursor }) => ({
+        jobs: rows.map((s) => ({
+          id: s.id, kind: "refresh", outcome: "ok", error: null,
+          detail: { fields: s.fields, provider: s.source },
+          target: null, entity_id: s.entity_id, item_id: null,
+          entity_display: s.entity_display || s.entity_identity,
+          started_at: s.refreshed_at, ended_at: null,
+        })),
+        nextCursor,
+      }))
+    : listJobLog(db, board.id, {
+        after: req.query.after || null,
+        kind: req.query.kind || null,
+        outcome: req.query.outcome || null,
+        limit,
+      }).then((page) => ({ jobs: page.jobs.map(pick), nextCursor: page.nextCursor }));
+  const [running, history, hasRefresh, nextRefreshAt] = await Promise.all([
+    listRunningJobs(db, board.id),
+    historyP,
+    boardHasRefreshHistory(db, board.id),
+    boardNextRefreshAt(db, board.id),
+  ]);
+  res.json({
+    running: running.map(pick),
+    jobs: history.jobs,
+    nextCursor: history.nextCursor,
+    has_refresh: hasRefresh,
+    // Upcoming automatic work — the modal's "scheduled" strip. Null = that
+    // family isn't scheduled on this board.
+    scheduled: {
+      ingest_next_run_at: board.ingest && board.ingest.enabled !== false ? board.ingest_next_run_at ?? null : null,
+      retag_next_run_at: board.auto_tag !== false && board.auto_tag_periodic ? board.auto_tag_next_run_at ?? null : null,
+      refresh_next_at: nextRefreshAt,
+    },
+    now: Date.now(),
+  });
 }));
 
 // Board-manager content editing — the gallery's "edit board" modal. A global

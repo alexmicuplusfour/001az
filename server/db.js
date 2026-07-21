@@ -1540,6 +1540,139 @@ export async function pruneTagSnapshots(db, cutoff) {
   return rowCount;
 }
 
+// --- job log (the per-board transparency ledger, planning/job-log-plan.md) ---
+// One row per execution attempt. `running` rows exist only for the sweep
+// families (transcribe, ingest) — the pipeline legs are visible via
+// items.status while in flight and write one completed row at resolution.
+// Writers never throw into the job they observe: the worker wraps every call
+// in jobLogWrite (warn, not throw).
+
+export async function addJobLog(db, {
+  boardId, entityId = null, itemId = null, target = null, kind,
+  outcome = "running", error = null, detail = {}, startedAt = Date.now(), endedAt = null,
+}) {
+  const { rows } = await db.query(
+    `INSERT INTO job_log (board_id, entity_id, item_id, target, kind, outcome, error, detail, started_at, ended_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    [boardId, entityId, itemId, target, kind, outcome,
+     error ? String(error).slice(0, 500) : null, JSON.stringify(detail || {}), startedAt, endedAt]
+  );
+  return rows[0].id;
+}
+
+// Resolve a running row. Detail merges over what the row already carries, so
+// a stamp can add outcome facts without re-sending the start-time context.
+export async function stampJobLog(db, id, { outcome, error = null, detail = null, endedAt = Date.now() }) {
+  await db.query(
+    "UPDATE job_log SET outcome=$1, error=$2, detail=detail || $3, ended_at=$4 WHERE id=$5",
+    [outcome, error ? String(error).slice(0, 500) : null, JSON.stringify(detail || {}), endedAt, id]
+  );
+}
+
+// History page for the jobs view: newest first, keyset on (started_at, id) —
+// the /api/items cursor pattern. Settled rows only; running rows are a
+// separate, tiny, unpaginated fetch (listRunningJobs). The entity join is for
+// display: live rows get the current name, deleted ones fall back to `target`.
+export async function listJobLog(db, boardId, { after = null, kind = null, outcome = null, limit = 50 } = {}) {
+  const cond = ["j.board_id=$1", "j.outcome <> 'running'"];
+  const args = [boardId];
+  if (kind) { args.push(kind); cond.push(`j.kind=$${args.length}`); }
+  if (outcome) { args.push(outcome); cond.push(`j.outcome=$${args.length}`); }
+  if (after) {
+    const [at, id] = String(after).split("_").map(Number);
+    if (Number.isFinite(at) && Number.isFinite(id)) {
+      args.push(at, id);
+      cond.push(`(j.started_at, j.id) < ($${args.length - 1}, $${args.length})`);
+    }
+  }
+  args.push(limit);
+  const { rows } = await db.query(
+    `SELECT j.*, e.display_name AS entity_display, e.identity AS entity_identity
+       FROM job_log j LEFT JOIN entities e ON e.id = j.entity_id
+      WHERE ${cond.join(" AND ")}
+      ORDER BY j.started_at DESC, j.id DESC LIMIT $${args.length}`,
+    args
+  );
+  const last = rows[rows.length - 1];
+  return { jobs: rows, nextCursor: rows.length === limit ? `${last.started_at}_${last.id}` : null };
+}
+
+export async function listRunningJobs(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT j.*, e.display_name AS entity_display, e.identity AS entity_identity
+       FROM job_log j LEFT JOIN entities e ON e.id = j.entity_id
+      WHERE j.board_id=$1 AND j.outcome='running'
+      ORDER BY j.started_at ASC`,
+    [boardId]
+  );
+  return rows;
+}
+
+// Boot sweep: a row still `running` from before this boot was orphaned by a
+// crash/stop — nothing else can own it (single worker process). The
+// started_at fence keeps this boot's own fresh rows out of the sweep
+// regardless of query ordering at startup. Returns rows flipped.
+export async function markInterruptedJobs(db, bootAt = Date.now()) {
+  const { rowCount } = await db.query(
+    "UPDATE job_log SET outcome='interrupted', error='interrupted by a restart', ended_at=$1 WHERE outcome='running' AND started_at < $1",
+    [bootAt]
+  );
+  return rowCount;
+}
+
+// Retention backstop (JOB_LOG_RETENTION_DAYS in the worker). Running rows are
+// exempt — the boot sweep owns those. Returns rows removed.
+export async function pruneJobLog(db, cutoff) {
+  const { rowCount } = await db.query("DELETE FROM job_log WHERE started_at < $1 AND outcome <> 'running'", [cutoff]);
+  return rowCount;
+}
+
+// Refresh history for the jobs view: field_snapshots wearing the log's page
+// shape. Refresh ticks are deliberately NOT in job_log (a 1-minute live board
+// would be 1,440 rows/day/entity of mostly nothing) — the snapshots already
+// record the informative subset, movement, so the jobs endpoint serves them
+// under kind=refresh instead of duplicating them. Keyset on (refreshed_at, id).
+export async function listRefreshHistory(db, boardId, { after = null, limit = 50 } = {}) {
+  const cond = ["e.board_id=$1"];
+  const args = [boardId];
+  if (after) {
+    const [at, id] = String(after).split("_").map(Number);
+    if (Number.isFinite(at) && Number.isFinite(id)) {
+      args.push(at, id);
+      cond.push(`(s.refreshed_at, s.id) < ($${args.length - 1}, $${args.length})`);
+    }
+  }
+  args.push(limit);
+  const { rows } = await db.query(
+    `SELECT s.id, s.entity_id, s.fields, s.source, s.refreshed_at,
+            e.display_name AS entity_display, e.identity AS entity_identity
+       FROM field_snapshots s JOIN entities e ON e.id = s.entity_id
+      WHERE ${cond.join(" AND ")}
+      ORDER BY s.refreshed_at DESC, s.id DESC LIMIT $${args.length}`,
+    args
+  );
+  const last = rows[rows.length - 1];
+  return { rows, nextCursor: rows.length === limit ? `${last.refreshed_at}_${last.id}` : null };
+}
+
+// Whether the board has any refresh history at all — drives the Refresh pill.
+export async function boardHasRefreshHistory(db, boardId) {
+  const { rows } = await db.query(
+    "SELECT EXISTS (SELECT 1 FROM field_snapshots s JOIN entities e ON e.id = s.entity_id WHERE e.board_id=$1) AS has",
+    [boardId]
+  );
+  return rows[0].has;
+}
+
+// The board's soonest live-field refresh — the jobs view's "next refresh" stamp.
+export async function boardNextRefreshAt(db, boardId) {
+  const { rows } = await db.query(
+    "SELECT MIN(refresh_at) AS at FROM entities WHERE board_id=$1 AND refresh_at IS NOT NULL",
+    [boardId]
+  );
+  return rows[0].at ?? null;
+}
+
 // Send one instance back to the tag queue (the opt-in retag-on-new-data path).
 // Only settled items: the refresh cascade must not yank a row out of the
 // definition legs or a user's mid-flight run. Returns whether it requeued.
@@ -1675,7 +1808,7 @@ export async function setItemEmbedError(db, id, message) {
 // (embed_error) are skipped until they get fresh text.
 export async function itemsNeedingEmbedding(db, model, limit) {
   const { rows } = await db.query(
-    `SELECT id, tags, tag_reasoning, payload FROM items
+    `SELECT id, board_id, entity_id, tags, tag_reasoning, payload FROM items
      WHERE embed_error IS NULL
        AND (embedding IS NULL OR embedding_model IS DISTINCT FROM $1)
        AND (status='tagged'
@@ -1693,7 +1826,7 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 // key-exists test (an empty-string transcript for a silent clip still counts).
 export async function oneAudioNeedingTranscription(db) {
   const { rows } = await db.query(
-    `SELECT id, payload FROM items
+    `SELECT id, board_id, entity_id, payload FROM items
      WHERE payload->'files'->0->>'kind'='audio'
        AND NOT (payload ? 'transcript')
        AND NOT (payload ? 'transcript_error')

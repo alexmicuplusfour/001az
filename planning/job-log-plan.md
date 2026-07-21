@@ -1,0 +1,237 @@
+# Job log — per-board transparency for finished and in-flight work (2026-07-21)
+
+The app has no job history because the queue IS the work product: an item's job state
+lives in `items.status/attempts/error/retry_at` and every one of those is overwritten
+in place — success erases its own evidence. The pipeline legs (extract → face → tag)
+are at least visible *while* running via their statuses; the sweep families are not
+visible at all: **transcription** (the longest job in the system — minutes per clip,
+single-threaded sidecar) has no status while running and only `payload.transcript` /
+`transcript_error` after; **ingestion** keeps only the LAST run in
+`boards.ingest_state`; **refresh** and **embed** surface nothing outside admin stats.
+
+What we're building: a per-board job log — a modal opened from within the board —
+showing in-progress and finished work, grouped by entity/instance where the job has
+one. Decisions made up front:
+
+- **Everything for everyone.** The endpoint is `requireAuth` like
+  `/api/boards/:id/tokens` (server.js ~435) — no manager gate, error text included.
+- **One row per execution attempt**, not per job. The retry/backoff story ("failed
+  429 at 14:31, retried 14:36, ok") IS the transparency being asked for; retention
+  keeps the volume honest.
+- **The ledger never breaks the job.** Every job-log write is wrapped; a failure is
+  a `console.warn`, never a thrown error into the leg/sweep it's observing.
+
+## What's already in place (and why it isn't enough)
+
+- `items.status/attempts/error/retry_at` — a live view of the pipeline legs, reset
+  on every success and every explicit requeue. The frontend delta poll (data.js,
+  4 s while work is in flight) already streams these transitions — the in-progress
+  half of the UI needs **no new machinery** for the legs.
+- `tag_snapshots` / `field_snapshots` — *judgment/movement* history, deliberately
+  write-on-change (the #9 dedupe lesson). Not execution history — a retag that
+  confirms the same tags writes nothing, and that's correct for them. The lesson
+  carries over: don't log ticks that carry no information.
+- `boards.ingest_state` `{ last_run_at, last_added, last_error, drain_left }` —
+  last run only; previous runs are gone.
+- `ai_board_usage` — per-day token totals, no per-job attribution.
+- `/api/logs/stream` — an admin-only unstructured console ring buffer. Not this.
+
+## The three job shapes
+
+1. **Instance legs** — tag, extract, face, transcribe. One instance, one execution,
+   clear start/end. Group under entity → instance in the UI.
+2. **Board runs** — an ingestion run ("scanned 120, admitted 5"). Own rows,
+   `entity_id/item_id` NULL. (A scheduled-retag pass row is a Stage 4 nicety — its
+   per-item tag rows carry the story meanwhile.)
+3. **Entity ticks** — connector field refresh. **Excluded from the ledger.** A
+   1-minute live board is 1,440 ticks/day/entity — the exact tag_snapshots mistake.
+   `field_snapshots` already records the informative subset (movement); Stage 4 can
+   surface those rows in the modal instead of duplicating them.
+
+## The ledger: `job_log` (migration `0021_job_log.sql`)
+
+```sql
+CREATE TABLE job_log (
+  id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  board_id   TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+  entity_id  BIGINT,            -- deliberately NOT an FK: history outlives deletion
+  item_id    BIGINT,            -- same (the ingest_log stance)
+  target     TEXT,              -- display label frozen at execution time
+  kind       TEXT NOT NULL,     -- 'tag'|'extract'|'face'|'transcribe'|'ingest'
+  outcome    TEXT NOT NULL,     -- 'running'|'ok'|'failed'|'requeued'|'discarded'|'interrupted'
+  error      TEXT,              -- 500-char cap, mirroring items.error
+  detail     JSONB NOT NULL DEFAULT '{}',
+  started_at BIGINT NOT NULL,
+  ended_at   BIGINT
+);
+CREATE INDEX idx_job_log_board ON job_log (board_id, started_at DESC, id DESC);
+```
+
+- `board_id` cascades (deleting a board purges its log); `entity_id/item_id` are
+  plain columns + the frozen `target` label so "transcribed interview.mp3, later
+  deleted" still reads. Live rows join `entities` for the current display name and
+  fall back to `target`.
+- **`running` rows exist only for the sweep families** (transcribe, ingest) — that
+  is precisely their missing in-flight visibility. The legs are already visible via
+  `items.status`, so they write **one completed row at resolution** (`started_at`
+  captured at function entry) — no dangling-row problem for the common case.
+- Boot sweep: `startWorker` marks any leftover `running` rows `interrupted`
+  (single-process invariant makes this correct — nothing else can own them).
+
+db.js helpers: `addJobLog(db, fields) -> id` (running rows),
+`stampJobLog(db, id, { outcome, error, detail, ended_at })`,
+`logJobDone(db, fields)` (one-shot completed row),
+`listJobLog(db, boardId, { after, kind, outcome, limit })` — keyset on
+`(started_at, id)`, the `/api/items` house pattern —
+`markInterruptedJobs(db)`, `pruneJobLog(db, cutoff)`.
+
+## What gets logged — and what deliberately doesn't
+
+| kind | write point | outcomes | detail |
+|---|---|---|---|
+| `transcribe` | transcribeLoop (worker.js ~1417): `running` when a clip is picked, stamped on resolution | ok / failed / requeued (transient 60 s backoff) | `{ chars, engine }`; target = `original_name` |
+| `ingest` | ingestDue (~972): `running` at board-run entry, stamped at the `setIngestState` sites (~1005, ~1018) | ok / failed | `{ scanned, fresh, admitted, skipped, drain_left, trigger }` |
+| `tag` | processOne resolution paths (~1035) | ok / failed / requeued / discarded | `{ tags: n, model, undecided }` |
+| `extract` | extractOne resolution (~1102, via the `stampExtracted` sites) | ok / failed / requeued / discarded | `{ fields: n, identity: 'derived'\|'merged'\|'split'\|'kept', model }` |
+| `face` | processFaceOne (~1257) | ok / failed / requeued / discarded | `{ provider }` |
+
+Leg notes (Stage 3): `failOrRequeue`'s boolean already distinguishes failed vs
+requeued (~1048); the fence-discard branches (~1043, ~1063) log `discarded`; the
+facet-less completion (~1042) is a real `ok` with `{ tags: 0 }`; the
+left-for-recovery branch (~1065) logs `failed` with error `"post-tag write failed —
+left for recovery"` (the paid call happened; the result was lost — say so).
+
+**Not logged:** refresh ticks (above), embed successes (plumbing nobody watches —
+embed *failures* are a Stage 4 add), ingest-time thumbnails/faces (milliseconds;
+the ingest run row is the visible event), recoverStuck/prunes (maintenance noise).
+
+Volume, honestly: a daily scheduled retag of a 300-item board ≈ 300 rows/day; a
+50-file upload on a mapped board ≈ 150 leg rows. Trivial next to the excluded
+refresh trap. Backstop: `JOB_LOG_RETENTION_DAYS` (default 30; 0 = keep forever),
+pruned in the existing hourly `pruneSnapshots` block (~933).
+
+## API
+
+`GET /api/boards/:id/jobs` — `requireAuth` (the tokens-endpoint precedent).
+Query: `after` (cursor `startedAt_id`), `kind`, `outcome`, `limit` (default 50,
+cap 200). Returns:
+
+```
+{ running: [...],            // all outcome='running' rows for the board (tiny, unpaginated)
+  jobs: [...], nextCursor, now }
+```
+
+Rows carry `entity_display` (live join, `target` fallback) so the client renders
+without a second fetch.
+
+## UI
+
+- **Entry: an activity chip** in the toolbar board group (toolbar.js ~124–213),
+  next to the ingestion-countdown chip and token odometer — the established ambient
+  slots. The chip shows a pulse + count while work is in flight, derived
+  client-side from `state.items` IN_FLIGHT statuses (data.js already computes
+  exactly this for `needsPoll`) — zero extra requests. Click → `openJobsModal()`.
+- **Modal** via `createModal` (modal.js ~37), two sections:
+  - **In progress** — merged view: client-side items in IN_FLIGHT statuses, grouped
+    by entity (live for free off the existing `app:render`/poll cycle), plus the
+    endpoint's `running` rows — a transcription with elapsed time ("transcribing —
+    3m 12s"), an ingest run in flight. Re-fetch `running` on the poll tick while
+    the modal is open.
+  - **History** — paged list (`paged-table` style), **kind filter chips** across
+    the top (the admin-plugins chip pattern, 24ccfb2). Grouped under entity where
+    `entity_id` is set; ingest runs render as their own board-level entries. Per
+    row: kind badge, target, outcome, relative time, duration, error text (for
+    everyone — decision above). `requeued` rows read as the retry story in
+    sequence with their successor attempt.
+
+## Stages (each independently shippable; stop anywhere)
+
+- **Stage 1 — the ledger + the invisible families. ✅ DONE.** Migration 0021, db.js
+  helpers, prune wiring + `JOB_LOG_RETENTION_DAYS`, boot interrupted-sweep, and the
+  two sweep write points: transcribeLoop and ingestDue. No UI yet; data accrues.
+  Shipped simpler than the sketch: no `logJobDone` — `addJobLog` covers the
+  one-shot completed shape via its `outcome`/`endedAt` params, so a separate
+  wrapper was a dead layer; `listRunningJobs` split out as its own tiny helper
+  (running rows are unpaginated by design). `oneAudioNeedingTranscription` grew
+  `board_id`/`entity_id` in its SELECT — the row it hands the loop is now enough
+  to attribute the job. 10 new tests in test/job-log.test.js incl. the cardinal
+  rule pinned by dropping the table mid-run; full suite 420/420.
+- **Stage 2 — the surface. ✅ DONE.** `GET /api/boards/:id/jobs`, the jobs modal, the
+  toolbar chip. In-progress fully derived (items statuses + running rows); history
+  shows transcribe + ingest. This is already the biggest win — the two invisible
+  families become visible, live and historical.
+  Shipped with three deliberate deviations from the sketch: **history is a
+  chronological flat list** with a per-row entity/target label, not grouped under
+  entities — chronology is a log's truth, and grouping would reorder it (the
+  in-progress section does group naturally: one row per in-flight entity card);
+  **filter pills appear as their kinds show up in fetched data** (a paged log
+  can't know its kind counts up front; pills for kinds with no rows would filter
+  to an empty list); and the modal's 5 s interval **re-pulls only page one, and
+  only while the reader hasn't paged deeper** — Load-more readers aren't yanked
+  back to the top, they just pause live history (running rows still refresh).
+  The chip counts the client's own pipeline items (zero extra requests, rebuilt
+  every poll tick); sweep jobs appear inside the modal, which fetches for
+  itself. Endpoint mirrors /tokens: requireAuth + canAccessBoard → 404, errors
+  included for every member. Full suite 421/421.
+- **Stage 3 — the pipeline legs. ✅ DONE.** One `legLog` helper; each leg writes one
+  completed row per attempt at resolution, started_at from leg entry. The modal
+  needed no changes — kinds are data-driven. Decisions made while shipping:
+  `extractOne` returns a summary `{ landed, fields, identity, model }` and
+  `processExtractOne` writes the single row — one write point instead of nine
+  stampExtracted sites; the **no-AI extract passthrough writes nothing** (a
+  connector stamp's status flip is not an execution worth a history row);
+  **noCount waits write nothing** (a missing key or awaiting-transcription gate
+  would otherwise drip a `requeued` row per claim cycle while a clip
+  transcribes — gates, not attempts); the face detail gained
+  `rendered`/`render_error` — a render failure still advances (outcome ok), and
+  the row is the "why is my chart a tile" answer; the post-tag
+  write-failure path logs `failed` with an explicit "left for recovery" error
+  (the paid call happened, the result was lost — say so). Tests drive all three
+  legs through a real worker: face keyless (queue.test pattern), extract→tag
+  end-to-end against a stubbed compat wire (one tool-call response serves both
+  record_fields and record_tags; asserts fields/identity='derived'/tags detail
+  AND the entity rename), facet-less ok {tags:0}, permanent 400 → failed.
+  Full suite 425/425.
+- **Stage 4 — defer/polish. ✅ DONE (except the progress door).** Shipped:
+  **embed-failure rows** — written exactly where an item is marked-and-skipped
+  in embedBatch (the moment it silently vanishes from the search corpus);
+  batch-level config failures stay unlogged (no item attribution, and the
+  admin embedding stats already carry them). **Retag-sweep run rows** — one
+  per pass with `{ queued }` (weekend skips included: the answer to "why
+  didn't my retag run"); the queued items write their own tag rows.
+  **Refresh history** — served under `kind=refresh` straight from
+  `field_snapshots` wearing the job-row shape (never duplicated into
+  job_log); a `has_refresh` flag on every response drives the modal's pill,
+  and refresh rows read "moved" instead of "done" — a flat tick is never
+  recorded, so every row IS a movement. **The scheduled strip** — the
+  endpoint returns `scheduled { ingest_next_run_at, retag_next_run_at,
+  refresh_next_at }` (the last via MIN(entities.refresh_at)); the modal
+  renders "Scheduled: next feed run in 12m · next refresh in 40s" under
+  In progress. **Still deferred:** the transcription progress door — true
+  percent needs the sidecar to report chunks (streaming from a stdlib
+  HTTPServer); the elapsed-time display on running rows covers the need
+  meanwhile. Bonus fix caught by a test going flaky: ingestDue's failure
+  path now settles the schedule (disarm/back off) BEFORE publishing
+  last_error — observers poll for the error, so everything it implies must
+  already be true when it lands. Full suite 428/428.
+
+## Config surface
+
+`JOB_LOG_RETENTION_DAYS` (default 30) — .env.example entry + compose passthrough
+(the §5 lesson: unreachable knobs are dead knobs). No concurrency/behavior knobs —
+the ledger observes, it doesn't schedule.
+
+## Tests (`test/job-log.test.js`)
+
+- Helpers: add/stamp roundtrip; keyset order + cursor; kind/outcome filters; prune
+  cutoff; `markInterruptedJobs` flips only `running` rows.
+- Transcribe: success → running→ok with `{ chars, engine }`; permanent → failed
+  with error; transient → requeued, and the retry opens a FRESH row (per-attempt
+  invariant).
+- Ingest: ok row with counts; failure row with error; a drain tick writes its own
+  row.
+- Stage 3: each leg's outcome mapping — ok (tags count), failed vs requeued (the
+  `failOrRequeue` boolean), discarded (fence), facet-less ok.
+- Endpoint: auth required; pagination; `running` array shape.
+- **The cardinal rule pinned:** stub `addJobLog` to throw → transcription and
+  ingestion still complete (the ledger can never break the job).
