@@ -1630,6 +1630,19 @@ export async function latestSettledJob(db, boardId, kind, itemId = null) {
   return rows[0] || null;
 }
 
+// The modal's Clear button: drop the board's settled history in one go.
+// Running rows survive — they're live work whose stamp is still coming (and
+// the worker's fold lookups tolerate a vanished prior row: the next attempt
+// simply opens a fresh one). Refresh history is field_snapshots — movement
+// data, not this ledger — so it isn't touched either. Returns rows removed.
+export async function clearJobLog(db, boardId) {
+  const { rowCount } = await db.query(
+    "DELETE FROM job_log WHERE board_id=$1 AND outcome <> 'running'",
+    [boardId]
+  );
+  return rowCount;
+}
+
 // Boot sweep: a row still `running` from before this boot was orphaned by a
 // crash/stop — nothing else can own it (single worker process). The
 // started_at fence keeps this boot's own fresh rows out of the sweep

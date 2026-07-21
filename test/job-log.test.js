@@ -7,7 +7,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { startServer, seedBoard, seedUser, req } from "./helpers.js";
+import { startServer, seedBoard, seedUser, adminSession, req } from "./helpers.js";
 import {
   addJobLog,
   stampJobLog,
@@ -696,6 +696,27 @@ test("GET /api/boards/:id/jobs: running + paged history, member-visible, 404 out
   assert.ok(page1.json.nextCursor);
   const page2 = await req(srv.base, "GET", `/api/boards/${board}/jobs?limit=1&after=${page1.json.nextCursor}`, { sid: member.sid });
   assert.deepEqual(page2.json.jobs.map((j) => j.outcome), ["ok"]);
+});
+
+test("DELETE /api/boards/:id/jobs: manager clears settled rows, running survives, member 403", async () => {
+  const member = await seedUser(db, "jobs-clear-member@test.local");
+  const admin = await adminSession(db);
+  const board = await seedBoard(db, "jobs-clear", [member.id]);
+  const T = Date.now() - 30000;
+  await addJobLog(db, { boardId: board, kind: "ingest", outcome: "ok", startedAt: T + 100, endedAt: T + 200 });
+  await addJobLog(db, { boardId: board, kind: "tag", outcome: "failed", error: "boom", startedAt: T + 300, endedAt: T + 400 });
+  const live = await addJobLog(db, { boardId: board, kind: "transcribe", target: "clip.mp3", startedAt: T + 500 });
+
+  // Reading the log is member transparency; destroying it is management.
+  assert.equal((await req(srv.base, "DELETE", `/api/boards/${board}/jobs`, { sid: member.sid })).status, 403);
+
+  const r = await req(srv.base, "DELETE", `/api/boards/${board}/jobs`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.cleared, 2);
+  const left = await jobsFor(board);
+  assert.equal(left.length, 1);
+  assert.equal(Number(left[0].id), Number(live)); // in-flight work survives the wipe
+  await stampJobLog(db, live, { outcome: "ok" }); // settle — don't leak a running row
 });
 
 // --- the cardinal rule (keep this test last: it drops the table) ---

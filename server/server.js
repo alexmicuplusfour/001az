@@ -75,6 +75,7 @@ import {
   getBoardTokenTotal,
   listJobLog,
   listRunningJobs,
+  clearJobLog,
   listRefreshHistory,
   boardHasRefreshHistory,
   boardNextRefreshAt,
@@ -503,6 +504,15 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
     },
     now: Date.now(),
   });
+}));
+
+// Clear the board's job history — the modal's red button. Manager-gated:
+// READING the log is transparency for every member, but destroying it is
+// management. Settled rows only; running rows are live work whose stamp is
+// still coming, and refresh history (field_snapshots) is movement data, not
+// this ledger — both survive.
+app.delete("/api/boards/:id/jobs", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  res.json({ cleared: await clearJobLog(db, req.board.id) });
 }));
 
 // Board-manager content editing — the gallery's "edit board" modal. A global

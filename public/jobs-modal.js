@@ -164,9 +164,15 @@ export function openJobsModal() {
   modalEl = overlay;
 
   // ── In progress ──
+  // Both sections share one skeleton: .jobs-section > .jobs-head > h3, then
+  // content. The head is a flex row either way (History puts Clear in its
+  // right slot) so the two headings box and space identically.
   const liveSec = document.createElement("div");
   liveSec.className = "jobs-section";
-  liveSec.innerHTML = `<h3>In progress</h3>`;
+  const liveHead = document.createElement("div");
+  liveHead.className = "jobs-head";
+  liveHead.innerHTML = `<h3>In progress</h3>`;
+  liveSec.appendChild(liveHead);
   const liveList = document.createElement("div");
   liveList.className = "jobs-list";
   liveSec.appendChild(liveList);
@@ -180,7 +186,32 @@ export function openJobsModal() {
   // ── History ──
   const histSec = document.createElement("div");
   histSec.className = "jobs-section";
-  histSec.innerHTML = `<h3>History</h3>`;
+  const histHead = document.createElement("div");
+  histHead.className = "jobs-head";
+  histHead.innerHTML = `<h3>History</h3>`;
+  // Managers get a Clear button: reading the log is for every member,
+  // destroying it is management (the endpoint enforces the same line).
+  let clearBtn = null;
+  if (state.boardManage) {
+    clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "tool-btn jobs-clear";
+    clearBtn.textContent = "Clear";
+    clearBtn.title = "Delete this board's job history (in-flight rows are kept)";
+    clearBtn.style.display = "none"; // shown once there's history to clear
+    clearBtn.addEventListener("click", async () => {
+      if (!confirm("Clear this board's job history? This can't be undone.")) return;
+      try {
+        const r = await fetch(`/api/boards/${state.boardId}/jobs`, { method: "DELETE" });
+        if (!r.ok) throw new Error(String(r.status));
+        seenKinds.clear();
+        activeKind = "all";
+        load(true); // repopulates from what survives: running rows, refresh history
+      } catch {} // leave the list as-is; the interval re-syncs either way
+    });
+    histHead.appendChild(clearBtn);
+  }
+  histSec.appendChild(histHead);
   const filters = document.createElement("div");
   filters.className = "jobs-filters";
   const histList = document.createElement("div");
@@ -249,6 +280,7 @@ export function openJobsModal() {
     for (const j of jobs) histList.appendChild(jobRow(j));
     if (!jobs.length) note(histList, "No jobs recorded yet.");
     more.style.display = cursor ? "" : "none";
+    if (clearBtn) clearBtn.style.display = jobs.length ? "" : "none";
   }
 
   async function fetchPage(after) {

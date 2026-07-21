@@ -257,6 +257,15 @@ error — breaks the fold, and manual runs never fold. The modal reads the
 count back ("12 attempts · …") and ingest ok-rows now show their per-item
 error text. Suite 433/433.
 
+**Clear button (2026-07-21).** `DELETE /api/boards/:id/jobs` +
+a red Clear in the History header. Manager-gated (`requireBoardManager`):
+READING the log is transparency for every member; destroying it is
+management. Settled rows only — running rows are live work whose stamp is
+still coming (the fold lookups tolerate a vanished prior), and refresh
+history is field_snapshots (movement data, not this ledger) — both survive
+the wipe. The button renders only for managers (`state.boardManage`) and
+only when there's history behind it. Suite 438/438.
+
 ## Config surface
 
 `JOB_LOG_RETENTION_DAYS` (default 30) — .env.example entry + compose passthrough
