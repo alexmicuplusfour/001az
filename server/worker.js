@@ -37,6 +37,7 @@ import {
   pruneTagSnapshots,
   addJobLog,
   stampJobLog,
+  deleteJobLog,
   markInterruptedJobs,
   pruneJobLog,
   requeueItemForTag,
@@ -1068,11 +1069,21 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
           remaining > 0 ? Date.now() : nextIngestRunAt(cfg.trigger, Date.now(), { continuousMs: INGEST_CONTINUOUS_MS }));
         // A completed run is `ok` even with per-item errors (they're the run's
         // findings, carried in error/skipped) — `failed` means the run itself
-        // died (the catch below).
-        await stamp({
-          outcome: "ok", error: errors[0] ?? null,
-          detail: { scanned: candidates.length, fresh: fresh.length, admitted: added, skipped: batch.length - added, drain_left: remaining > 0 ? remaining : 0 },
-        });
+        // died (the catch below). But an idle SCHEDULED scan (admitted
+        // nothing, erred nothing, nothing draining) is a flat tick, and a
+        // continuous watch flat-ticks every 30 seconds — the tag_snapshots
+        // volume lesson. Retract its running row instead of stamping it. A
+        // MANUAL run always keeps its row: the user asked, and "0 admitted"
+        // is the answer.
+        const eventful = added > 0 || errors.length > 0 || remaining > 0;
+        if (!eventful && cfg?.trigger?.mode !== "manual" && jobId != null) {
+          await jobLogWrite(() => deleteJobLog(db, jobId));
+        } else {
+          await stamp({
+            outcome: "ok", error: errors[0] ?? null,
+            detail: { scanned: candidates.length, fresh: fresh.length, admitted: added, skipped: batch.length - added, drain_left: remaining > 0 ? remaining : 0 },
+          });
+        }
         if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
       } catch (err) {
         // Scheduled triggers back off 5 minutes and retry; a manual run was

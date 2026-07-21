@@ -114,7 +114,7 @@ function runningRow(j) {
   label.textContent = j.kind === "ingest" ? "Feed run" : (j.entity_display || j.target || "");
   const status = document.createElement("span");
   status.className = "job-outcome job-outcome-running";
-  status.textContent = j.kind === "ingest" ? "running" : "transcribing";
+  status.textContent = j.kind === "transcribe" ? "transcribing" : "running";
   const when = document.createElement("span");
   when.className = "job-when";
   when.textContent = `for ${fmtDuration(Date.now() - j.started_at)}`;
@@ -255,15 +255,17 @@ export function openJobsModal() {
 
   // reset=true replaces the list (open, filter switch, interval refresh of
   // page one); reset=false appends the next Load-more page. Guards: never
-  // append without a cursor (that would concat page one onto itself), and
-  // never overlap two loads (a slow fetch racing the interval would
-  // double-append or clobber a Load-more mid-flight).
-  let loading = false;
+  // append without a cursor (that would concat page one onto itself), and a
+  // generation counter so the NEWEST call wins — a filter click or Load more
+  // landing while the interval's refresh is in flight supersedes it instead
+  // of being dropped (or double-applied when the stale fetch resolves late).
+  let gen = 0;
   async function load(reset) {
-    if (loading || (!reset && !cursor)) return;
-    loading = true;
+    if (!reset && !cursor) return;
+    const g = ++gen;
     try {
       const data = await fetchPage(reset ? null : cursor);
+      if (g !== gen) return; // a newer load took over while this one was in flight
       running = data.running;
       if (reset) { jobs = data.jobs; pages = 1; }
       else { jobs = jobs.concat(data.jobs); pages++; }
@@ -277,9 +279,7 @@ export function openJobsModal() {
       renderFilters();
       renderHistory();
     } catch {
-      if (!jobs.length) { histList.replaceChildren(); note(histList, "Failed to load — retrying…"); }
-    } finally {
-      loading = false;
+      if (g === gen && !jobs.length) { histList.replaceChildren(); note(histList, "Failed to load — retrying…"); }
     }
   }
 

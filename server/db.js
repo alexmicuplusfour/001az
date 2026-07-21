@@ -1608,6 +1608,12 @@ export async function listRunningJobs(db, boardId) {
   return rows;
 }
 
+// Remove one row — the ingest sweep retracts a boring run's `running` row
+// (an idle scan is a flat tick, not history) instead of stamping it.
+export async function deleteJobLog(db, id) {
+  await db.query("DELETE FROM job_log WHERE id=$1", [id]);
+}
+
 // Boot sweep: a row still `running` from before this boot was orphaned by a
 // crash/stop — nothing else can own it (single worker process). The
 // started_at fence keeps this boot's own fresh rows out of the sweep

@@ -215,6 +215,25 @@ without a second fetch.
   last_error — observers poll for the error, so everything it implies must
   already be true when it lands. Full suite 428/428.
 
+**Loose-ends pass (2026-07-21, post-ship).** First real use surfaced three
+things. (1) **Load more never hid**: `.tool-btn`'s `display` out-specifies the
+UA's `[hidden]` rule, so with no next page a click re-fetched page one and
+concatenated it — history repeated on every click. Visibility now toggles
+`style.display`, `load()` refuses to append without a cursor, and a
+generation counter makes the newest call win (a filter click or Load more
+during the interval's in-flight refresh supersedes it instead of being
+dropped). (2) **Rows labeled uploads by the stored hex name** —
+`payload.identity` is the vestigial stored filename; targets now freeze
+`original_name` first, and the endpoint's display chain runs display name →
+target → identity (a provisional entity's identity IS the hex name).
+(3) **Idle continuous scans were the flat-tick trap in the one family we DID
+log**: a 30-second folder watch wrote an `ok` row per scan (~2,880/day —
+34 real rows accrued in a day of dev use). An idle SCHEDULED run (admitted
+nothing, erred nothing, nothing draining) now retracts its running row via
+`deleteJobLog` instead of stamping it; a MANUAL run always keeps its row —
+the user asked, and "0 admitted" is the answer. Failures are never
+suppressed. Suite 429/429.
+
 ## Config surface
 
 `JOB_LOG_RETENTION_DAYS` (default 30) — .env.example entry + compose passthrough

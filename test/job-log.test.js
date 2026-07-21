@@ -280,6 +280,38 @@ test("ingest run: ok row with the run's counts", async () => {
   assert.deepEqual(r.detail, { trigger: "manual", scanned: 3, fresh: 3, admitted: 3, skipped: 0, drain_left: 0 });
 });
 
+test("idle scheduled scans leave no history; a manual no-op run keeps its row", async () => {
+  fs.mkdirSync(path.join(root, "idle"), { recursive: true });
+  const auto = await seedBoard(db, "jobs-ingest-idle");
+  await updateBoard(db, auto, {
+    ingest: { enabled: true, source: { folder: "idle" }, trigger: { mode: "continuous" } },
+  });
+  await setIngestNextRun(db, auto, Date.now() - 1000);
+  const manual = await seedBoard(db, "jobs-ingest-manual-noop");
+  await updateBoard(db, manual, {
+    ingest: { enabled: true, source: { folder: "idle" }, trigger: { mode: "manual" } },
+  });
+  await setIngestNextRun(db, manual, Date.now() - 1000);
+
+  const stop = runWorker({ sources });
+  try {
+    // Manual: the user asked, so "0 admitted" IS the answer — the row stays.
+    await until(async () => (await jobsFor(manual)).some((r) => r.outcome === "ok"));
+    // Continuous: the run really happened (state stamped) but its flat tick
+    // retracts the running row — no history residue.
+    await until(async () => {
+      const { rows: [b] } = await db.query("SELECT ingest_state FROM boards WHERE id=$1", [auto]);
+      return b.ingest_state?.last_run_at;
+    });
+    await until(async () => (await jobsFor(auto)).length === 0);
+  } finally {
+    await stop();
+  }
+  const kept = (await jobsFor(manual)).filter((r) => r.kind === "ingest");
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].detail.admitted, 0);
+});
+
 test("ingest run failure: failed row with the run's error", async () => {
   const board = await seedBoard(db, "jobs-ingest-fail");
   await updateBoard(db, board, {
