@@ -349,7 +349,7 @@ export function renderToolbar(resultCount) {
       clearBtn.className = "search-clear";
       clearBtn.title = "Clear search";
       clearBtn.setAttribute("aria-label", "Clear search");
-      clearBtn.textContent = "×";
+      clearBtn.innerHTML = ICONS.x;
       clearBtn.addEventListener("click", clearSearch);
       box.appendChild(clearBtn);
     }
@@ -389,7 +389,7 @@ export function renderToolbar(resultCount) {
       elToolbarSub.appendChild(cratesBtn);
 
       if (activeCrate) {
-        const clearCrateBtn = toolBtn("×", "crates-clear", () => {
+        const clearCrateBtn = toolBtn(ICONS.x, "crates-clear", () => {
           state.selectedCrateId = null;
           document.dispatchEvent(new Event('app:render'));
         });

@@ -110,29 +110,32 @@ header {
   width: 170px;
 }
 .search-box input::-webkit-search-cancel-button {
-  display: none; /* the × button handles clearing */
+  display: none; /* the clear button handles clearing */
 }
 .search-clear {
   border: none;
   background: var(--pill-active);
   color: #fff;
   cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
   width: 18px;
   height: 18px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 0 1px; /* optical centering — the × glyph sits high */
+  padding: 0;
   margin-right: 5px;
   flex: none;
+}
+.search-clear svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 3; /* the 2px shared default reads too thin at this size */
 }
 .search-clear:hover {
   background: #333;
 }
-/* occupies the × button's exact footprint while a search is in flight */
+/* occupies the clear button's exact footprint while a search is in flight */
 .search-spinner {
   width: 18px;
   height: 18px;
@@ -1143,12 +1146,16 @@ body.bulk-mode .heart {
 }
 .tool-btn.crates-clear {
   margin-left: -4px;
-  padding: 4px 7px;
+  padding: 0 7px;
   background: var(--pill-active);
   border-color: var(--pill-active);
   color: rgba(255, 255, 255, 0.7);
-  font-size: 15px;
-  line-height: 1;
+}
+.tool-btn.crates-clear svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  stroke-width: 3; /* the 2px shared default reads too thin at this size */
 }
 .tool-btn.crates-clear:hover {
   background: #333;
