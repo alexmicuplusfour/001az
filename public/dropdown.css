@@ -142,15 +142,16 @@
   flex-shrink: 0;
   display: inline-flex;
   line-height: 0;
-  color: #8a90a0;
-  pointer-events: none;
+  pointer-events: none; /* color inherits from the row text */
 }
 .dd-icon svg {
   width: 13px;
   height: 13px;
 }
 
-/* new-matches count on an alert row */
+/* new-matches count on an alert row. line-height = height centers the digit
+   vertically — flex centering kept landing it a hair high (baseline drift of
+   the small glyph inside its line box). */
 .dd-unseen {
   flex-shrink: 0;
   min-width: 16px;
@@ -161,10 +162,9 @@
   color: #fff;
   font-size: 10.5px;
   font-weight: 600;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  line-height: 16px;
+  text-align: center;
+  display: inline-block;
   box-sizing: border-box;
 }
 /* a disabled (paused) alert row reads dimmer */
