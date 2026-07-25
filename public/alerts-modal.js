@@ -33,14 +33,22 @@ export function appendAlertMenu(body, close) {
     return;
   }
   for (const a of state.alerts) {
-    const actions = document.createElement("span");
-    actions.className = "dd-actions";
+    // The count is information about the alert, not an action — it rides in
+    // the label group beside the name, not in the trailing action cluster.
+    const nameEl = document.createElement("span");
+    nameEl.className = "dd-label";
+    nameEl.textContent = a.name;
+    let labelEl = nameEl;
     if (a.unseen > 0) {
       const badge = document.createElement("span");
       badge.className = "dd-unseen";
       badge.textContent = a.unseen > 99 ? "99+" : String(a.unseen);
-      actions.appendChild(badge);
+      labelEl = document.createElement("span");
+      labelEl.className = "dd-label-group";
+      labelEl.append(nameEl, badge);
     }
+    const actions = document.createElement("span");
+    actions.className = "dd-actions";
     const edit = document.createElement("button");
     edit.className = "dd-vis";
     edit.title = "Edit alert";
@@ -72,7 +80,7 @@ export function appendAlertMenu(body, close) {
     icon.className = "dd-icon";
     icon.innerHTML = ICONS.bell;
     const row = ddRow({
-      label: a.name,
+      labelEl,
       leading: icon,
       trailing: actions,
       onClick: () => { close(); openAlertHistory(a); },

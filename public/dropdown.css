@@ -149,6 +149,20 @@
   height: 13px;
 }
 
+/* label + count as one group: the badge is information about the row, not an
+   action, so it sits beside the name — the row's flex gap then spaces the
+   whole group from the trailing action cluster */
+.dd-label-group {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dd-label-group .dd-label {
+  flex: 0 1 auto; /* natural width — the badge hugs the name */
+}
+
 /* new-matches count on an alert row. line-height = height centers the digit
    vertically — flex centering kept landing it a hair high (baseline drift of
    the small glyph inside its line box). */
