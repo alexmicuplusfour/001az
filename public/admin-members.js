@@ -58,7 +58,7 @@ export async function renderMembers() {
         if (!u.link) {
           const { link } = await api("POST", `/api/admin/users/${u.id}/link`);
           u.link = link;
-          toast.info("New login link copied — the old one no longer works");
+          toast("New login link copied — the old one no longer works");
         }
         copy(u.link, copyBtn);
       } catch (err) {
