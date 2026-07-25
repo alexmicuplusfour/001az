@@ -444,6 +444,10 @@ export async function setPassword(db, userId, passwordHash) {
   await db.query("UPDATE users SET password_hash=$1 WHERE id=$2", [passwordHash, userId]);
 }
 
+export async function setUserName(db, userId, name) {
+  await db.query("UPDATE users SET name=$1 WHERE id=$2", [name, userId]);
+}
+
 export async function listUsers(db) {
   // No invite token here: it's a bearer credential and only its hash is stored
   // now anyway. The admin mints a fresh link on demand (POST /users/:id/link).

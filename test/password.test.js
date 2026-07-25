@@ -170,6 +170,20 @@ test("changing the password kills an outstanding invite link", async () => {
   assert.equal(redeem.headers.get("location"), "/login.html?error=invalid");
 });
 
+test("display name: set trims, long input is capped, empty clears", async () => {
+  const u = await seedUser(db, "name@test.local");
+  const set = await req(base, "PATCH", "/api/account", { sid: u.sid, body: { name: "  Maya Chen  " } });
+  assert.equal(set.status, 200);
+  assert.equal(set.json.name, "Maya Chen");
+  assert.equal((await req(base, "GET", "/api/me", { sid: u.sid })).json.name, "Maya Chen");
+  const long = await req(base, "PATCH", "/api/account", { sid: u.sid, body: { name: "x".repeat(200) } });
+  assert.equal(long.json.name.length, 80);
+  const cleared = await req(base, "PATCH", "/api/account", { sid: u.sid, body: { name: "" } });
+  assert.equal(cleared.json.name, null);
+  assert.equal((await req(base, "PATCH", "/api/account", { sid: u.sid, body: {} })).status, 400);
+  assert.equal((await req(base, "PATCH", "/api/account", { body: { name: "anon" } })).status, 401);
+});
+
 test("brute force against one account trips the per-email limiter", async () => {
   // Own server: fresh rate-limit windows, so the 11 attempts here don't eat
   // the shared per-IP budget of the tests above (and vice versa).

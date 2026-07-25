@@ -105,8 +105,9 @@ function openUserMenu(anchorEl) {
     build: (body, { close }) => {
       if (state.me && state.me.is_admin) {
         body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
-        body.appendChild(ddSep());
       }
+      body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
+      body.appendChild(ddSep());
       body.appendChild(ddRow({
         label: "Sign out",
         onClick: async () => {

@@ -24,6 +24,7 @@ import {
   getUserById,
   getUserByEmail,
   setPassword,
+  setUserName,
   mintInvite,
   consumeInvite,
   deleteUnredeemedInvites,
@@ -336,6 +337,14 @@ app.post("/api/account/password", authLimiter, requireAuth, wrap(async (req, res
   await deleteUnredeemedInvites(db, req.user.id);
   console.log(`password ${req.user.password_hash ? "changed" : "set"}: user #${req.user.id}`);
   res.json({ ok: true });
+}));
+
+// Profile settings (currently just the display name). Empty clears it.
+app.patch("/api/account", requireAuth, wrap(async (req, res) => {
+  if (typeof req.body?.name !== "string") return res.status(400).json({ error: "name required" });
+  const name = req.body.name.trim().slice(0, 80) || null;
+  await setUserName(db, req.user.id, name);
+  res.json({ ok: true, name });
 }));
 
 app.get("/auth/:token", authLimiter, wrap(async (req, res) => {
