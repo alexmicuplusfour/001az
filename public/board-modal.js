@@ -5,7 +5,7 @@
 // .fe-* / .mm-* lives in modal.css, which both pages load (plus dropdown.css
 // for the pane's menus). Caches the provider catalog module-side.
 import { toast } from "/toast.js";
-import { createModal } from "/modal.js";
+import { createModal, sectionHeading } from "/modal.js";
 import { api } from "/api.js";
 import { buildMappingPane } from "/mapping-modal.js";
 
@@ -308,16 +308,17 @@ export async function openBoardModal(boardId, opts = {}) {
     ${paneToggle}
     <div id="board-modal-tagging">
       <div class="modal-section" style="border-top:none;margin-top:0;padding-top:0;">
-        <div class="modal-section-title">AI tagging</div>
+        ${sectionHeading("Tagging Settings", null, "margin-bottom:12px;")}
         ${aiKeyBlock}
         <div id="board-modal-reasoning" style="margin:0 0 10px;font-size:13px"></div>
         <div id="board-modal-research" style="margin:0 0 10px;font-size:13px"></div>
         <div id="board-modal-autotag" style="font-size:13px"></div>
       </div>
-      <label style="display:block;font-size:12px;color:#6b6b72;margin:18px 0 4px;">AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
-      <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
       <div class="modal-section">
-        <div class="modal-section-title">Facets</div>
+        ${sectionHeading("Tagging Guidance", null, "margin-bottom:12px;")}
+        <label style="display:block;font-size:12px;color:#6b6b72;margin:0 0 4px;">AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
+        <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
+        <div class="modal-section-title" style="margin-top:18px;">Taxonomy</div>
         <textarea id="board-modal-facets" rows="12"></textarea>
       </div>
     </div>

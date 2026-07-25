@@ -8,7 +8,7 @@
 // ai-keys/ai-config routes — this file owns no state of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { createModal } from "/modal.js";
+import { createModal, sectionHeading } from "/modal.js";
 import { fillModelSelect, switchRow } from "/board-modal.js";
 import { fmtDuration } from "/utils.js";
 
@@ -20,7 +20,7 @@ const MONO_CSS = "font-family:'SF Mono',Consolas,monospace;font-size:13px;";
 function section(title, sub) {
   const box = document.createElement("div");
   box.style.cssText = "display:flex;flex-direction:column;gap:12px;";
-  box.innerHTML = `<div><h2 style="font-size:14px;margin:0 0 2px;">${title}</h2>${sub ? `<p class="sub" style="margin:0;">${sub}</p>` : ""}</div>`;
+  box.innerHTML = sectionHeading(title, sub);
   return box;
 }
 

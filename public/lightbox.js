@@ -6,6 +6,7 @@ import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
 import { fullUrl, thumbUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
+import { sectionHeading } from './modal.js';
 
 // MIRROR of server/faces/select.js — which instance backs an entity's card face,
 // per the board's mapping.face { prefer, pick }. Kept byte-identical to the
@@ -134,10 +135,7 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
   sec.className = "lbp-fields";
   const secHead = document.createElement("div");
   secHead.className = "lbp-fields-head";
-  const secLabel = document.createElement("span");
-  secLabel.className = "lbp-fields-label";
-  secLabel.textContent = label;
-  secHead.appendChild(secLabel);
+  secHead.innerHTML = sectionHeading(label);
   if (reextract) secHead.appendChild(reextract);
   sec.appendChild(secHead);
   for (const key of fieldKeys) {
@@ -371,10 +369,7 @@ function paintPanel(img, inst, reasoning, fields) {
   if (inst && state.me && state.facets.length) {
     const tagsHead = document.createElement("div");
     tagsHead.className = "lbp-fields-head";
-    const tagsLabel = document.createElement("span");
-    tagsLabel.className = "lbp-fields-label";
-    tagsLabel.textContent = "Tags";
-    tagsHead.appendChild(tagsLabel);
+    tagsHead.innerHTML = sectionHeading("Tags");
     const retagBtn = document.createElement("button");
     retagBtn.className = "lbp-reextract";
     retagBtn.textContent = "Retag";

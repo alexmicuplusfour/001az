@@ -1511,7 +1511,7 @@ a.tool-btn {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 340px;
+  width: 400px;
   background: #fff;
   border-left: 1px solid #ececf1;
   box-shadow: -8px 0 30px rgba(0, 0, 0, 0.08);
@@ -1525,16 +1525,16 @@ a.tool-btn {
 }
 /* Shift the stage left so the image and its chrome stay clear of the panel. */
 .lightbox.panel-open {
-  padding-right: 372px;
+  padding-right: 432px;
 }
 .lightbox.panel-open .lightbox-nav.next {
-  right: 358px;
+  right: 418px;
 }
 .lightbox.panel-open .lightbox-controls {
-  right: 364px;
+  right: 424px;
 }
 .lightbox.panel-open .lightbox-count {
-  left: calc((100% - 340px) / 2);
+  left: calc((100% - 400px) / 2);
 }
 .lbp-head {
   display: flex;
