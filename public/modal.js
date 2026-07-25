@@ -122,3 +122,13 @@ export function sectionHeading(title, sub, style = "") {
   return `<div${style ? ` style="${style}"` : ""}><h2 style="font-size:16px;margin:0 0 2px;">${title}</h2>${
     sub ? `<p style="margin:0;color:#6b6b72;">${sub}</p>` : ""}</div>`;
 }
+
+// Element-building variant: returns the heading node with the title applied
+// via textContent — use when the title carries user-named text.
+export function sectionHeadingEl(title, sub) {
+  const host = document.createElement("div");
+  host.innerHTML = sectionHeading("", sub);
+  const el = host.firstElementChild;
+  el.querySelector("h2").textContent = title;
+  return el;
+}

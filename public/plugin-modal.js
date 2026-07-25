@@ -8,7 +8,7 @@
 // ai-keys/ai-config routes — this file owns no state of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { createModal, sectionHeading } from "/modal.js";
+import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
 import { fillModelSelect, switchRow } from "/board-modal.js";
 import { fmtDuration } from "/utils.js";
 
@@ -740,10 +740,7 @@ function sourceSection(p, ctx, reload) {
     formHost.replaceChildren();
     const box = document.createElement("div");
     box.style.cssText = "display:flex;flex-direction:column;gap:10px;border-top:1px solid #eee;padding-top:12px;";
-    const title = document.createElement("div");
-    title.style.cssText = "font-size:13px;font-weight:600;";
-    title.textContent = editing ? `Edit "${editing.label}"` : "Add a connection";
-    box.appendChild(title);
+    box.appendChild(sectionHeadingEl(editing ? `Edit "${editing.label}"` : "Add a connection"));
 
     const labelIn = document.createElement("input");
     labelIn.placeholder = "Name (e.g. Client server)";

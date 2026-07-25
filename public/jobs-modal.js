@@ -9,7 +9,7 @@
 // while the modal is open — history only re-pulls page one, so a reader deep
 // in Load-more pages isn't yanked back to the top.
 import { state } from './state.js';
-import { createModal } from './modal.js';
+import { createModal, sectionHeadingEl } from './modal.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { fmtDuration, pill } from './utils.js';
 
@@ -171,7 +171,7 @@ export function openJobsModal() {
   liveSec.className = "jobs-section";
   const liveHead = document.createElement("div");
   liveHead.className = "jobs-head";
-  liveHead.innerHTML = `<h3>In progress</h3>`;
+  liveHead.appendChild(sectionHeadingEl("In progress"));
   liveSec.appendChild(liveHead);
   const liveList = document.createElement("div");
   liveList.className = "jobs-list";
@@ -188,7 +188,7 @@ export function openJobsModal() {
   histSec.className = "jobs-section";
   const histHead = document.createElement("div");
   histHead.className = "jobs-head";
-  histHead.innerHTML = `<h3>History</h3>`;
+  histHead.appendChild(sectionHeadingEl("History"));
   // Managers get a Clear button: reading the log is for every member,
   // destroying it is management (the endpoint enforces the same line).
   let clearBtn = null;

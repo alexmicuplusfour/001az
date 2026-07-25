@@ -1250,11 +1250,10 @@ a.tool-btn {
 
 /* jobs modal — two sections (In progress / History) of compact log rows */
 #jobs-modal .modal-dialog { width: 900px; max-width: calc(100vw - 32px); }
-/* Section spacing lives on the head row, not the h3 — inside a flex row the
-   heading's margins don't collapse, they inflate the row and shove the text
-   off-center against the Clear button. */
+/* Section spacing lives on the head row, not the heading — inside a flex row
+   the heading's margins don't collapse, they inflate the row and shove the
+   text off-center against the Clear button. */
 .jobs-head { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; }
-.jobs-head h3 { margin: 0; font-size: 13px; }
 .jobs-section:first-child .jobs-head { margin-top: 0; }
 /* the History section's Clear — red like .job-outcome-failed: it destroys */
 .jobs-clear { color: #b3261e; border-color: #ecc7c5; }

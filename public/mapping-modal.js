@@ -2,7 +2,7 @@ import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
 import { loadProviders, byName, fillModelSelect } from './board-modal.js';
-import { sectionHeading } from './modal.js';
+import { sectionHeadingEl } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date"];
 // Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
@@ -566,10 +566,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   }
 
   function sectionTitle(text) {
-    const h = document.createElement("div");
-    h.innerHTML = sectionHeading("");
-    const el = h.firstElementChild;
-    el.querySelector("h2").textContent = text; // not via innerHTML — the connector label rides in here
+    const el = sectionHeadingEl(text); // textContent path — the connector label rides in here
     // Siblings in the mm-fields gap:12 column — extra top margin pulls the
     // heading away from the section above so it binds to its own group.
     el.style.marginTop = "10px";
