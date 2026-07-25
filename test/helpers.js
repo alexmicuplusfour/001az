@@ -50,6 +50,11 @@ export async function startServer() {
   // get a fresh module bound to their own DATABASE_URL.
   const mod = await import("../server/server.js?bust=" + name);
   const { app, db } = mod;
+  // entities.id and items.id are separate sequences that advance nearly in
+  // lockstep, so a lookup against the wrong table usually finds a same-numbered
+  // row and passes by coincidence (the crate-route bug hid this way for a long
+  // time). Desync them so any wrong-table id use fails loudly in every test.
+  await db.query("ALTER TABLE entities ALTER COLUMN id RESTART WITH 500001");
   // DROP DATABASE ... WITH (FORCE) in close() can race db.end() and terminate
   // an idle pool client; pg emits that as a pool 'error' event, which is an
   // uncaughtException when unhandled (a rare CI flake). Queries in flight
