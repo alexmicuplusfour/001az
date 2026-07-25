@@ -6,8 +6,9 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import { startServer, adminSession, seedUser, seedItem, req } from "./helpers.js";
-import { createBoard, createEntity, insertItem, setBoardMembers } from "../server/db.js";
+import { createBoard, createEntity, insertItem, setBoardMembers, reparentInstance } from "../server/db.js";
 import {
   matchesCondition,
   nextDailyAt,
@@ -57,8 +58,13 @@ after(async () => {
 
 // --- helpers ---
 
+// What detection recorded (pending + delivered). Baseline rows — the
+// already-matching set seeded at create/edit, claimed under firing_id 0 —
+// are the silent floor, asserted through baselineOf instead.
 const matchesOf = async (alertId) =>
-  (await db.query("SELECT * FROM alert_matches WHERE alert_id=$1 ORDER BY entity_id", [alertId])).rows;
+  (await db.query("SELECT * FROM alert_matches WHERE alert_id=$1 AND (firing_id IS NULL OR firing_id <> 0) ORDER BY entity_id", [alertId])).rows;
+const baselineOf = async (alertId) =>
+  (await db.query("SELECT * FROM alert_matches WHERE alert_id=$1 AND firing_id = 0 ORDER BY entity_id", [alertId])).rows;
 const firingsOf = async (alertId) =>
   (await db.query("SELECT * FROM alert_firings WHERE alert_id=$1 ORDER BY id", [alertId])).rows;
 const backdate = (alertId, ms) =>
@@ -160,6 +166,81 @@ test("the union tag set across instances is what matches, not one instance's tag
   assert.equal(rows[0].entity_id, entityId);
 });
 
+test("creating an alert baselines the already-matching set — a retag re-landing stays silent", async () => {
+  // This entity is on the board BEFORE the alert exists — the backlog a
+  // periodic retag (retagBoard -> markTagged -> evaluateItemAlerts) would
+  // otherwise re-announce wholesale.
+  const { id: oldEntity, instanceId } = await taggedEntity(["kind/a", "color/blue"]);
+  const alert = await makeAlert({ name: "baseline", condition: { kind: ["a"], color: ["blue"] }, webhook_url: hookUrl });
+
+  // Seeded claimed, not pending: invisible to the sweep and to history.
+  assert.equal((await matchesOf(alert.id)).length, 0);
+  const seeded = await baselineOf(alert.id);
+  assert.equal(seeded.length, 1);
+  assert.equal(seeded[0].entity_id, oldEntity);
+
+  // Tags land again on the old entity (what a board retag does) — the
+  // baseline row absorbs the re-landing, and the sweep has nothing to say.
+  await req(base, "PATCH", `/api/instances/${instanceId}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "color/blue"] } });
+  assert.equal((await matchesOf(alert.id)).length, 0);
+  hookState.requests.length = 0;
+  await backdate(alert.id, 120000);
+  await deliverDueAlerts(db);
+  assert.equal((await firingsOf(alert.id)).length, 0);
+  assert.equal(hookState.requests.length, 0);
+
+  // A genuinely new arrival is still news.
+  await taggedEntity(["kind/a", "color/blue"]);
+  await backdate(alert.id, 120000);
+  await deliverDueAlerts(db);
+  const firings = await firingsOf(alert.id);
+  assert.equal(firings.length, 1);
+  assert.equal(firings[0].entity_count, 1);
+});
+
+test("a condition edit re-baselines: widening doesn't announce the newly-covered backlog", async () => {
+  const { id: oldEntity, instanceId } = await taggedEntity(["kind/b", "color/red"]);
+  // kind/b doesn't match yet — the alert watches kind/a.
+  const alert = await makeAlert({ name: "widen", condition: { kind: ["a"], color: ["red"] } });
+  assert.ok(!(await baselineOf(alert.id)).some((m) => m.entity_id === oldEntity));
+
+  // Widen kind to cover b — the old entity now matches, but it isn't news.
+  const r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { condition: { kind: ["a", "b"], color: ["red"] } } });
+  assert.equal(r.status, 200, r.text);
+  assert.ok((await baselineOf(alert.id)).some((m) => m.entity_id === oldEntity));
+  assert.equal((await matchesOf(alert.id)).length, 0);
+
+  // Its next landing stays silent; a fresh arrival under the widened
+  // condition still records.
+  await req(base, "PATCH", `/api/instances/${instanceId}/tags`, { sid: admin.sid, body: { tags: ["kind/b", "color/red"] } });
+  assert.equal((await matchesOf(alert.id)).length, 0);
+  const fresh = await taggedEntity(["kind/b", "color/red"]);
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, fresh.id);
+});
+
+test("a merge re-parent completes the union — evaluating at the move records the match", async () => {
+  const alert = await makeAlert({ name: "merge-across", condition: { kind: ["a"], color: ["red"] } });
+  // Two entities, each holding half the condition — neither landing records.
+  const half1 = await taggedEntity(["kind/a"]);
+  const half2 = await taggedEntity(["color/red"]);
+  assert.equal((await matchesOf(alert.id)).length, 0);
+
+  // The extract leg derives the same identity for half2's instance and merges
+  // it into half1's entity; the instance keeps its tags through the move, so
+  // the union now satisfies the condition. This is the reparentInstance +
+  // evaluateItemAlerts sequence extractOne runs on a merge/split.
+  const { rows: [target] } = await db.query("SELECT id, identity, display_name FROM entities WHERE id=$1", [half1.id]);
+  await reparentInstance(db, half2.instanceId, target, target.display_name, half2.id);
+  await evaluateItemAlerts(db, half2.instanceId);
+
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, half1.id);
+  assert.equal(rows[0].item_id, half2.instanceId);
+});
+
 test("a disabled alert stops matching", async () => {
   const alert = await makeAlert({ name: "toggled", condition: { kind: ["a"] } });
   const r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { enabled: false } });
@@ -207,10 +288,12 @@ test("the max-wait cap fires a trickle even while its newest match is fresh", as
   const alert = await makeAlert({ name: "trickle", condition: { kind: ["b"] }, webhook_url: hookUrl });
   await taggedEntity(["kind/b"]);
   await taggedEntity(["kind/b"]);
-  // Oldest past MAX_WAIT, newest just now: the trickle still delivers.
+  // Oldest PENDING past MAX_WAIT, newest just now: the trickle still
+  // delivers. (Pending only — the baseline rows seeded at creation carry
+  // lower entity ids and aren't the sweep's to see.)
   await db.query(
     `UPDATE alert_matches SET matched_at = matched_at - 700000
-     WHERE alert_id=$1 AND entity_id = (SELECT MIN(entity_id) FROM alert_matches WHERE alert_id=$1)`,
+     WHERE alert_id=$1 AND entity_id = (SELECT MIN(entity_id) FROM alert_matches WHERE alert_id=$1 AND firing_id IS NULL)`,
     [alert.id]
   );
   await deliverDueAlerts(db);
@@ -260,20 +343,39 @@ test("daily fires at its stamp and re-arms; an empty due stamp re-arms without f
 
 // --- delivery: webhook failure, retry, signature ---
 
-test("a failing webhook retries once per sweep and lands on 'failed' with the error kept", async () => {
+test("a failing webhook retries on a spaced schedule and lands on 'failed' with the error kept", async () => {
   const alert = await makeAlert({ name: "failing", condition: { kind: ["a"], color: ["red"] }, webhook_url: hookUrl });
   await taggedEntity(["kind/a", "color/red"]);
   await backdate(alert.id, 120000);
 
+  // Pull the retry stamp into the past — the test's clock control, like
+  // backdate() is for the settle window.
+  const retryDue = () => db.query("UPDATE alert_firings SET retry_at = retry_at - 700000 WHERE alert_id=$1", [alert.id]);
+
   hookState.status = 500;
   try {
+    const t0 = Date.now();
     await deliverDueAlerts(db);
     let [f] = await firingsOf(alert.id);
     assert.equal(f.webhook_status, "pending");
     assert.equal(f.attempts, 1);
     assert.equal(f.webhook_error, "HTTP 500");
+    assert.ok(f.retry_at >= t0 + 60000); // spaced, not tick-paced
 
+    // Not due yet: an immediate next sweep must not burn another attempt —
+    // tick-paced retries would exhaust all three inside ~6 seconds.
     await deliverDueAlerts(db);
+    [f] = await firingsOf(alert.id);
+    assert.equal(f.attempts, 1);
+
+    await retryDue();
+    await deliverDueAlerts(db);
+    [f] = await firingsOf(alert.id);
+    assert.equal(f.attempts, 2);
+    assert.equal(f.webhook_status, "pending");
+    assert.ok(f.retry_at >= t0 + 300000); // the second gap is the long one
+
+    await retryDue();
     await deliverDueAlerts(db);
     [f] = await firingsOf(alert.id);
     assert.equal(f.webhook_status, "failed");
@@ -286,6 +388,39 @@ test("a failing webhook retries once per sweep and lands on 'failed' with the er
   } finally {
     hookState.status = 200;
   }
+});
+
+test("disabling an alert freezes its pending webhook; re-enable thaws and delivers", async () => {
+  const alert = await makeAlert({ name: "paused-hook", condition: { kind: ["b"], color: ["blue"] }, webhook_url: hookUrl });
+  await taggedEntity(["kind/b", "color/blue"]);
+  await backdate(alert.id, 120000);
+
+  // First attempt fails — the firing is owed a retry.
+  hookState.status = 500;
+  try {
+    await deliverDueAlerts(db);
+  } finally {
+    hookState.status = 200;
+  }
+  let [f] = await firingsOf(alert.id);
+  assert.equal(f.webhook_status, "pending");
+  assert.equal(f.attempts, 1);
+
+  // Off pauses delivery — due or not, nothing sends while disabled ("off
+  // pauses matching and delivery" is the switch's whole promise).
+  await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { enabled: false } });
+  await db.query("UPDATE alert_firings SET retry_at = NULL WHERE alert_id=$1", [alert.id]);
+  hookState.requests.length = 0;
+  await deliverDueAlerts(db);
+  assert.equal(hookState.requests.length, 0);
+  [f] = await firingsOf(alert.id);
+  assert.equal(f.attempts, 1);
+
+  // Re-enable thaws it — the send completes.
+  await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { enabled: true } });
+  await deliverDueAlerts(db);
+  [f] = await firingsOf(alert.id);
+  assert.equal(f.webhook_status, "ok");
 });
 
 test("a secret signs the body with X-Alert-Signature", async () => {
@@ -444,4 +579,23 @@ test("edit recomputes the daily stamp and can clear the webhook", async () => {
   assert.equal(row2.next_delivery_at, null);
   assert.equal(row2.webhook_url, null);
   assert.equal(row2.webhook_secret, null);
+});
+
+test("migration 0024 heals a pre-baseline alert by seeding today's matching set", async () => {
+  const alert = await makeAlert({ name: "pre-fix", condition: { kind: ["a"], color: ["blue"] } });
+  // Simulate an alert born before the fix: strip the baseline the route seeded.
+  await db.query("DELETE FROM alert_matches WHERE alert_id=$1", [alert.id]);
+  const sql = readFileSync(new URL("../server/migrations/0024_alert_baseline.sql", import.meta.url), "utf8");
+  await db.query(sql);
+
+  // The kind/a+color/blue backlog from earlier tests comes back as baseline —
+  // claimed, invisible to the sweep.
+  const seeded = await baselineOf(alert.id);
+  assert.ok(seeded.length >= 2, `expected the existing backlog seeded, got ${seeded.length}`);
+  assert.equal((await matchesOf(alert.id)).length, 0);
+
+  // And it absorbs a retag re-landing exactly like a route-seeded baseline.
+  const { rows: [item] } = await db.query("SELECT id FROM items WHERE entity_id=$1 LIMIT 1", [seeded[0].entity_id]);
+  await req(base, "PATCH", `/api/instances/${item.id}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "color/blue"] } });
+  assert.equal((await matchesOf(alert.id)).length, 0);
 });

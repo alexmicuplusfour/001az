@@ -116,7 +116,7 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun } from "./worker.js";
-import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt } from "./alerts.js";
+import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -547,6 +547,16 @@ app.post("/api/alerts", requireAuth, wrap(async (req, res) => {
   if (parsed.error) return res.status(400).json({ error: parsed.error });
   const id = await createAlert(db, req.user.id, boardId, parsed);
   if (id == null) return res.status(400).json({ error: "an alert with that name already exists" });
+  // Baseline what already matches, so only entities entering the set from now
+  // on count as new (a board retag re-lands every old entity's tags). If the
+  // seed fails the alert must not survive unseeded — it would lie in wait and
+  // mass-fire on the next retag; drop it and let the client retry.
+  try {
+    await seedAlertBaseline(db, id, boardId, parsed.condition);
+  } catch (err) {
+    await deleteAlert(db, req.user.id, id).catch(() => {});
+    throw err;
+  }
   res.json({ alert: alertJson({ id, ...parsed, has_secret: !!parsed.webhook_secret, unseen: 0 }) });
 }));
 
@@ -558,6 +568,11 @@ app.patch("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
   const ok = await updateAlert(db, alert.id, parsed);
   if (ok == null) return res.status(400).json({ error: "an alert with that name already exists" });
   if (!ok) return res.status(404).json({ error: "not found" });
+  // A changed condition covers new ground — re-baseline it, or the first
+  // retag after a widening edit announces the newly-covered backlog as new.
+  // Idempotent, so a failure here heals on the client's retry.
+  if (!sameCondition(alert.condition, parsed.condition))
+    await seedAlertBaseline(db, alert.id, alert.board_id, parsed.condition);
   res.json({ alert: alertJson({ id: alert.id, ...parsed, has_secret: !!parsed.webhook_secret }) });
 }));
 

@@ -32,6 +32,19 @@ Decisions made up front:
   no-ops; drifting out and back in doesn't re-fire. (If instance-level "new post
   from a watched person" firing is ever wanted, it's a constraint flip — noted,
   not built.)
+- **Creation baselines the already-matching set.** Detection only runs at tag
+  landings, and boards re-land old tags all the time — periodic auto-tag,
+  admin retag, retag-on-refresh all push settled items back through the tag
+  leg. Without a baseline, the once-ever dedupe has a hole at birth: the first
+  retag after creating an alert would announce the entire pre-existing
+  matching set as one giant "N new items". So create (and any condition
+  change — widening covers old ground) records every currently-matching
+  entity as a claimed row under `firing_id = 0`, a sentinel no real firing
+  carries: the primary key is occupied, the re-landings are ON CONFLICT
+  no-ops, and only entities that enter the set afterwards read as news.
+  Baseline rows are invisible everywhere — pending queries filter
+  `firing_id IS NULL`, display queries join a real firing. Migration `0024`
+  heals alerts created before this by baselining whatever matches today.
 - **The ledger never breaks the job** (the job_log lesson): evaluation is wrapped
   try/catch-warn at its call sites; a webhook timeout is a recorded failure,
   never a thrown error into tagging or the worker sweep.
@@ -57,7 +70,11 @@ Decisions made up front:
 - **Tags land in exactly two places.** AI: `markTagged()` (db.js:1833, fenced on
   `status='processing'`, called from `tagOne` in worker.js). User: `setItemTags()`
   (db.js:302, from `PATCH /api/instances/:id/tags`, server.js ~1882). Two call
-  sites to hook — no third door.
+  sites to hook — plus one door where the union moves WITHOUT a tag landing:
+  a merge/split re-parent (extractOne) carries the instance's kept tags into
+  the target entity, growing its union. The tag leg that follows usually
+  re-evaluates the final entity, but a failed or fence-discarded tag run would
+  strand it — so the move evaluates too.
 - **Matching semantics are already defined** by `matchesExcept()` (filters.js:17):
   OR within a facet's values, AND across facets, membership tested against the
   `facet/value` tag strings. The server-side matcher is a 10-line mirror of this.
@@ -103,7 +120,7 @@ CREATE TABLE alert_matches (
   entity_id  BIGINT NOT NULL,   -- deliberately NOT an FK: history outlives deletion (job_log stance)
   item_id    BIGINT,            -- the instance whose tagging triggered it (same stance)
   label      TEXT,              -- display name frozen at match time (job_log's `target`)
-  firing_id  BIGINT,            -- NULL until a delivery sweep groups it
+  firing_id  BIGINT,            -- NULL = pending; 0 = baseline (matched before the alert); else the grouping firing
   matched_at BIGINT NOT NULL,
   PRIMARY KEY (alert_id, entity_id)
 );
@@ -116,9 +133,10 @@ CREATE TABLE alert_firings (
   alert_id       BIGINT NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
   fired_at       BIGINT NOT NULL,
   entity_count   INTEGER NOT NULL,
-  webhook_status TEXT,           -- NULL (record-only) | 'ok' | 'failed'
+  webhook_status TEXT,           -- NULL (record-only) | 'pending' | 'ok' | 'failed'
   webhook_error  TEXT,
   attempts       INTEGER NOT NULL DEFAULT 0,
+  retry_at       BIGINT,         -- next attempt due; NULL = now (0025)
   seen           BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX idx_alert_firings_alert ON alert_firings(alert_id, fired_at DESC);
@@ -137,19 +155,33 @@ New module `server/alerts.js`:
   freezing `label` from the entity's display name. Tag landings are AI-paced
   (rate-limited singles), so a per-landing alerts query is fine — no cache.
 
-Call sites, both wrapped try/catch-warn:
+Call sites, all wrapped try/catch-warn (evaluateItemAlerts never throws):
 
 - worker.js `tagOne` — after `markTagged` returns true (the row in hand has
   `board_id`/`entity_id`).
 - server.js `PATCH /api/instances/:id/tags` — after `setItemTags`, so manual
   tagging can trigger an alert too (an OSINT user hand-tagging an entity into a
   watched set *is* the event).
+- worker.js `extractOne` — after a merged/split disposition: the re-parent
+  grows the target entity's union with the tags the instance keeps through
+  the move (the across-instances case the matcher exists for). Usually the
+  subsequent tag leg re-evaluates the final entity anyway; evaluating at the
+  move removes the "usually" (a failed tag run must not strand a grown
+  union), and dedupe makes the double evaluation free.
 
 Not hooked: `insertItem` (items are born tagless — nothing can match before the
 tag leg), untagging paths (leaving the set is not an event).
 
+Creation seeds the baseline (`seedAlertBaseline`): every entity whose union
+already matches is recorded pre-claimed under the `firing_id = 0` sentinel, so
+the re-landings a board retag produces are dedupe no-ops instead of a mass
+firing. Condition-changing edits re-seed; the seed is idempotent (ON CONFLICT
+leaves real match rows alone), and a create whose seed fails is rolled back
+rather than left lying in wait.
+
 Tests: matcher semantics (AND/OR, empty facet, slash values), union-across-
-instances matching, once-ever dedupe, both call-site triggers.
+instances matching, once-ever dedupe, both call-site triggers, baseline at
+create and at widening edits, the 0024 healing migration.
 
 ## Stage 2 — delivery: the sweep, three policies, one webhook shape
 
@@ -173,10 +205,15 @@ Firing = insert `alert_firings` row, claim matches with
 `UPDATE alert_matches SET firing_id=$1 WHERE alert_id=$2 AND firing_id IS NULL`
 (single worker process — the house concurrency assumption), then deliver.
 
-Webhook: `POST webhook_url`, JSON, `ALERT_WEBHOOK_TIMEOUT_MS` (default 10 s),
-one attempt per sweep tick, max 3 attempts then `failed` with the error recorded
-— transparency over cleverness, the history row is the receipt. When
-`webhook_secret` is set, `X-Alert-Signature: sha256=<hmac of body>`.
+Webhook: `POST webhook_url`, JSON, `ALERT_WEBHOOK_TIMEOUT_MS` (default 10 s).
+Max 3 attempts spaced by a `retry_at` stamp — immediate, +1 min, +5 min
+(0025; the sweep ticks every ~3 s, so tick-paced retries would burn all
+three attempts in seconds and turn any endpoint restart into a permanent
+failure) — then `failed` with the error recorded: transparency over
+cleverness, the history row is the receipt. Delivery is gated on `enabled`
+like grouping is — off freezes a pending send mid-retry, re-enable thaws it
+(the dormancy stance, one toggle down). When `webhook_secret` is set,
+`X-Alert-Signature: sha256=<hmac of body>`.
 
 ```json
 {

@@ -10,6 +10,8 @@ import {
   entityForAlerts,
   getItemEntity,
   addAlertMatch,
+  boardEntityTagUnions,
+  addAlertBaselineMatches,
   alertsWithPendingMatches,
   dueDailyAlerts,
   setAlertNextDelivery,
@@ -26,7 +28,12 @@ import {
 const SETTLE_MS = Number(process.env.ALERT_SETTLE_MS) || 60000;
 const MAX_WAIT_MS = Number(process.env.ALERT_MAX_WAIT_MS) || 600000;
 const WEBHOOK_TIMEOUT_MS = Number(process.env.ALERT_WEBHOOK_TIMEOUT_MS) || 10000;
-const WEBHOOK_MAX_ATTEMPTS = 3; // one attempt per sweep tick, then 'failed' with the error kept
+const WEBHOOK_MAX_ATTEMPTS = 3; // then 'failed' with the error kept
+// Spacing between attempts (retry_at). The sweep ticks every POLL_MS (~3s) —
+// tick-paced retries would burn all three attempts in seconds, turning any
+// endpoint blip longer than that (a restart, a deploy) into a permanent
+// 'failed'. Immediate, +1 min, +5 min rides out ~6 minutes of outage.
+const WEBHOOK_RETRY_BACKOFF_MS = [60000, 300000];
 const PAYLOAD_ENTITY_CAP = 20;  // entity_count carries the real total
 
 // The matchesExcept mirror (filters.js:17): OR within a facet's values, AND
@@ -68,6 +75,37 @@ export async function evaluateItemAlerts(db, itemId) {
   } catch (err) {
     console.warn(`alert evaluation failed for item #${itemId}: ${err.message}`);
   }
+}
+
+// The birth certificate: record every entity that ALREADY matches as a
+// claimed baseline row (ALERT_BASELINE_FIRING), so only entities entering
+// the set after this moment read as news. Without it, detection-at-landing
+// plus once-ever dedupe has a hole at birth — the next board retag
+// (periodic auto-tag, admin retag, retag-on-refresh) re-lands every old
+// entity's tags and fires the entire pre-existing matching set as one giant
+// "N new items". Runs at create and on any condition change (widening
+// re-covers old ground); idempotent — ON CONFLICT leaves real match rows
+// alone, so re-seeding never demotes a recorded detection.
+export async function seedAlertBaseline(db, alertId, boardId, condition) {
+  const unions = await boardEntityTagUnions(db, boardId);
+  const ids = [];
+  for (const [entityId, tagSet] of unions) {
+    if (matchesCondition(tagSet, condition)) ids.push(entityId);
+  }
+  if (ids.length) {
+    await addAlertBaselineMatches(db, alertId, ids);
+    console.log(`alert #${alertId} baseline: ${ids.length} already-matching entities recorded`);
+  }
+  return ids.length;
+}
+
+// Canonical condition equality — JSONB reorders object keys and the client
+// may reorder values, neither of which changes what matches. Decides whether
+// an edit needs a fresh baseline pass.
+const canonCondition = (c) =>
+  JSON.stringify(Object.keys(c || {}).sort().map((k) => [k, [...c[k]].sort()]));
+export function sameCondition(a, b) {
+  return canonCondition(a) === canonCondition(b);
 }
 
 // Next "daily at HH:MM" stamp after `from` — the nextIngestRunAt daily case
@@ -163,14 +201,15 @@ export async function deliverDueAlerts(db, now = Date.now()) {
     // would deliver the moment a match landed, at whatever time that is.
     await setAlertNextDelivery(db, a.id, nextDailyAt(a.daily_at_min, now));
   }
-  for (const f of await pendingWebhookFirings(db)) {
+  for (const f of await pendingWebhookFirings(db, now)) {
     const { ok, error } = await sendAlertWebhook(f, await firingMatches(db, f.id));
     if (ok) {
       await stampFiringWebhook(db, f.id, "ok", null);
     } else {
       const final = f.attempts + 1 >= WEBHOOK_MAX_ATTEMPTS;
-      await stampFiringWebhook(db, f.id, final ? "failed" : "pending", error);
-      console.warn(`alert webhook ${final ? "failed" : "retrying"} (firing #${f.id}, attempt ${f.attempts + 1}): ${error}`);
+      const backoff = WEBHOOK_RETRY_BACKOFF_MS[Math.min(f.attempts, WEBHOOK_RETRY_BACKOFF_MS.length - 1)];
+      await stampFiringWebhook(db, f.id, final ? "failed" : "pending", error, final ? null : now + backoff);
+      console.warn(`alert webhook ${final ? "failed" : `retrying in ${Math.round(backoff / 1000)}s`} (firing #${f.id}, attempt ${f.attempts + 1}): ${error}`);
     }
   }
 }

@@ -2178,6 +2178,40 @@ export async function addAlertMatch(db, alertId, entityId, itemId, label) {
   return rowCount > 0;
 }
 
+// Baseline rows: matches recorded pre-claimed under a sentinel firing_id no
+// alert_firings row ever carries (identities start at 1). They occupy the
+// (alert, entity) primary key for everything that matched BEFORE the alert
+// existed, so detection's ON CONFLICT swallows the re-landings a board retag
+// (periodic auto-tag, admin retag, retag-on-refresh) would otherwise
+// announce as "new". Never delivered, never listed: pending queries filter
+// firing_id IS NULL and display queries join a real firing.
+export const ALERT_BASELINE_FIRING = 0;
+
+// Every entity's union tag set on a board, for the baseline pass — the
+// entityForAlerts union, board-wide in one read.
+export async function boardEntityTagUnions(db, boardId) {
+  const { rows } = await db.query(
+    "SELECT entity_id, tags FROM items WHERE board_id=$1 AND entity_id IS NOT NULL",
+    [boardId]
+  );
+  const unions = new Map();
+  for (const r of rows) {
+    let set = unions.get(r.entity_id);
+    if (!set) unions.set(r.entity_id, (set = new Set()));
+    for (const t of r.tags || []) set.add(t);
+  }
+  return unions;
+}
+
+export async function addAlertBaselineMatches(db, alertId, entityIds) {
+  await db.query(
+    `INSERT INTO alert_matches (alert_id, entity_id, firing_id, matched_at)
+     SELECT $1, eid, ${ALERT_BASELINE_FIRING}, $3 FROM unnest($2::bigint[]) AS eid
+     ON CONFLICT (alert_id, entity_id) DO NOTHING`,
+    [alertId, entityIds, Date.now()]
+  );
+}
+
 // Alerts holding ungrouped matches, with the window stats the settle logic
 // reads (deliverDueAlerts). Daily alerts are excluded — their grouping is
 // stamp-driven, not settle-driven (dueDailyAlerts below).
@@ -2234,24 +2268,29 @@ export async function createAlertFiring(db, alertId, withWebhook) {
   });
 }
 
-// Firings still owed a webhook — one send attempt per sweep pass each, the
-// pass capped so a hung endpoint (attempts × timeout) bounds a single tick.
-export async function pendingWebhookFirings(db, limit = 10) {
+// Firings still owed a webhook and due for it — retry_at spaces the attempts
+// (NULL = due now), the pass capped so a hung endpoint (attempts × timeout)
+// bounds a single tick. Gated on a.enabled like grouping is: the switch says
+// "off pauses matching and delivery", so a pending send freezes with the
+// alert and thaws on re-enable — the dormancy stance, one toggle down.
+export async function pendingWebhookFirings(db, now, limit = 10) {
   const { rows } = await db.query(
     `SELECT f.id, f.alert_id, f.fired_at, f.entity_count, f.attempts,
        a.name, a.board_id, a.webhook_url, a.webhook_secret, a.condition
      FROM alert_firings f JOIN alerts a ON a.id = f.alert_id
-     WHERE f.webhook_status = 'pending' AND ${ALERT_OWNER_ACCESS}
-     ORDER BY f.fired_at ASC LIMIT $1`,
-    [limit]
+     WHERE f.webhook_status = 'pending' AND a.enabled
+       AND (f.retry_at IS NULL OR f.retry_at <= $1)
+       AND ${ALERT_OWNER_ACCESS}
+     ORDER BY f.fired_at ASC LIMIT $2`,
+    [now, limit]
   );
   return rows;
 }
 
-export async function stampFiringWebhook(db, id, status, error) {
+export async function stampFiringWebhook(db, id, status, error, retryAt = null) {
   await db.query(
-    "UPDATE alert_firings SET webhook_status=$2, webhook_error=$3, attempts=attempts+1 WHERE id=$1",
-    [id, status, error ? String(error).slice(0, 500) : null]
+    "UPDATE alert_firings SET webhook_status=$2, webhook_error=$3, attempts=attempts+1, retry_at=$4 WHERE id=$1",
+    [id, status, error ? String(error).slice(0, 500) : null, retryAt]
   );
 }
 

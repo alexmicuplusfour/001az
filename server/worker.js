@@ -1534,6 +1534,16 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
     }
 
+    // A merge/split re-parent grows the TARGET entity's union with the tags
+    // the instance keeps through the move — the across-instances case the
+    // matcher exists for. The tag leg that follows usually re-evaluates the
+    // final entity anyway, but that leans on the leg landing (a failed or
+    // fence-discarded tag run would strand the grown union unexamined), so
+    // the move itself is the event. Dedupe makes the double evaluation free.
+    if (disposition === "merged" || disposition === "split") {
+      await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
+    }
+
     await bumpUsage(db, row.board_id, usage);
     return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai.model };
   }
