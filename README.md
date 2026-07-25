@@ -62,7 +62,7 @@ a live connector.
   batches as you scroll, so filters, counts, and the lightbox always see the
   full collection.
 - **Invite-only auth** — password sign-in (scrypt-hashed, no deps) with
-  single-use 7-day invite links as the onboarding and password-reset path:
+  single-use 30-day invite links as the onboarding and password-reset path:
   an admin mints a link, it logs the member in once to set their password.
   Sessions are HttpOnly cookies. No email infrastructure needed.
 - **Admin panel** — user management, board management, AI provider/model/key

@@ -1,5 +1,5 @@
 // Mint a single-use login link for an email (creates the user if needed).
-// Valid 7 days; replaces any outstanding unredeemed link for that user.
+// Valid 30 days; replaces any outstanding unredeemed link for that user.
 // Usage: node server/mintlink.js <email>
 import { openDb, getUserByEmail, createUser, mintInvite } from "./db.js";
 

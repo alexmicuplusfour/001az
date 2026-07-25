@@ -471,7 +471,7 @@ export async function consumeInvite(db, token) {
 
 // Single-use onboarding/reset link. Minting replaces any outstanding
 // unredeemed link for the user, so a leaked older link dies with the new mint.
-export async function mintInvite(db, userId, ttlMs = 7 * 24 * 3600 * 1000) {
+export async function mintInvite(db, userId, ttlMs = 30 * 24 * 3600 * 1000) {
   const token = crypto.randomBytes(24).toString("hex");
   const now = Date.now();
   await withTx(db, async (client) => {

@@ -51,7 +51,7 @@ export async function renderMembers() {
     const copyBtn = document.createElement("button");
     copyBtn.className = "ghost";
     copyBtn.textContent = "copy link";
-    copyBtn.title = "Copies a fresh single-use login link (valid 7 days — replaces any previous link)";
+    copyBtn.title = "Copies a fresh single-use login link (valid 30 days — replaces any previous link)";
     copyBtn.onclick = async () => {
       copyBtn.disabled = true;
       try {
