@@ -92,6 +92,13 @@ test("poll cadence: fast while work is in flight, slow on a live board, off othe
   assert.equal(pollDelay(), 30000, "ingestion-enabled board: slow poll");
   state.boardIngest = false;
 
+  // Alerts fire in the worker sweep (and off a teammate's manual tag) — a
+  // tab holding one must keep listening or the unseen dot never lights.
+  state.alerts = [{ id: 1, name: "watch", unseen: 0 }];
+  assert.equal(pollDelay(), 30000, "a held alert: slow poll");
+  state.alerts = [];
+  assert.equal(pollDelay(), 0, "no alerts, nothing live: back off");
+
   state.items = [{ id: 1, status: "processing", tags: [] }];
   assert.equal(pollDelay(), 4000, "in-flight work: fast poll wins regardless of liveness");
 

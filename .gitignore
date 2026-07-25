@@ -29,3 +29,4 @@ deploy.local.json
 # personal working files — kept locally, not part of the published project
 ui-redesign-taxonomy.md
 tags.json
+*.zip

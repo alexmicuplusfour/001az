@@ -92,7 +92,8 @@ services:
       INGEST_SETTLE_MS: ${INGEST_SETTLE_MS:-}
       INGEST_RUN_CAP: ${INGEST_RUN_CAP:-}
       INGEST_FEED_CACHE_MS: ${INGEST_FEED_CACHE_MS:-}
-      # scheduled auto-tagging (weekend detection, run times) uses server-local time
+      # scheduled auto-tagging (weekend detection, run times) and daily alert
+      # digests ("daily at 09:00") use server-local time
       TZ: ${TZ:-UTC}
     volumes:
       - appdata:/data

@@ -12,6 +12,7 @@ import {
   addAlertMatch,
   boardEntityTagUnions,
   addAlertBaselineMatches,
+  pruneAlertStaleClaims,
   alertsWithPendingMatches,
   dueDailyAlerts,
   setAlertNextDelivery,
@@ -85,13 +86,20 @@ export async function evaluateItemAlerts(db, itemId) {
 // entity's tags and fires the entire pre-existing matching set as one giant
 // "N new items". Runs at create and on any condition change (widening
 // re-covers old ground); idempotent — ON CONFLICT leaves real match rows
-// alone, so re-seeding never demotes a recorded detection.
+// alone, so re-seeding never demotes a recorded detection. A condition
+// change also prunes the claims the old condition strands OUTSIDE the new
+// matching set (pruneAlertStaleClaims): a narrowed alert must not deliver
+// the old backlog, and a stale baseline must not swallow a real entry
+// later. At create there is nothing to prune — the pass is a no-op.
 export async function seedAlertBaseline(db, alertId, boardId, condition) {
+  const t0 = Date.now(); // fences the prune: claims from before this pass only
   const unions = await boardEntityTagUnions(db, boardId);
   const ids = [];
   for (const [entityId, tagSet] of unions) {
     if (matchesCondition(tagSet, condition)) ids.push(entityId);
   }
+  const pruned = await pruneAlertStaleClaims(db, alertId, ids, t0);
+  if (pruned) console.log(`alert #${alertId} pruned ${pruned} stale claims outside the edited condition`);
   if (ids.length) {
     await addAlertBaselineMatches(db, alertId, ids);
     console.log(`alert #${alertId} baseline: ${ids.length} already-matching entities recorded`);

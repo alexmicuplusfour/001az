@@ -154,7 +154,7 @@ service on every push and PR (`.github/workflows/ci.yml`).
 | `ANTHROPIC_API_KEY` | — | enables the tagging worker (admin-panel keys, for any provider, override) |
 | `MODEL` | per board | tagging model; normally set per board in the admin panel |
 | `DATABASE_URL` | `postgres://gallery:gallery@127.0.0.1:5433/gallery` | Postgres connection string |
-| `BASE_URL` | `http://127.0.0.1:3001` | used in minted login links |
+| `BASE_URL` | `http://127.0.0.1:3001` | used in minted login links and alert webhook links |
 | `COOKIE_SECURE` | `1` | set `0` for plain-http local dev |
 | `PORT` / `HOST` | `3001` / `127.0.0.1` | listen address |
 | `STATIC_DIR` | `./public` | frontend assets directory |
@@ -162,8 +162,9 @@ service on every push and PR (`.github/workflows/ci.yml`).
 
 Tuning knobs (`TAG_CONCURRENCY`, `POLL_MS`, `MAX_ATTEMPTS`, `STUCK_MS`,
 `EMBED_BATCH`, `REFRESH_BATCH`, `INGEST_CONTINUOUS_MS`, `INGEST_SETTLE_MS`,
-`INGEST_RUN_CAP`, connector rate limits) have sensible defaults; see the top
-of `server/server.js` and `server/worker.js`.
+`INGEST_RUN_CAP`, `ALERT_SETTLE_MS`, `ALERT_MAX_WAIT_MS`,
+`ALERT_WEBHOOK_TIMEOUT_MS`, connector rate limits) have sensible defaults; see
+the top of `server/server.js`, `server/worker.js`, and `server/alerts.js`.
 
 ## Deployment
 

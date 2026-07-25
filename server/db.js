@@ -2212,6 +2212,26 @@ export async function addAlertBaselineMatches(db, alertId, entityIds) {
   );
 }
 
+// The other half of a condition edit: unfired claims — pending matches and
+// baseline rows — for entities OUTSIDE the edited condition's matching set
+// are stale under the new reading. Pending ones would deliver the old
+// condition's backlog on the next sweep; baseline ones squat on the (alert,
+// entity) key and swallow the entity's real entry into the new set forever.
+// Deleted, not demoted: freeing the key keeps the entity announceable when
+// it genuinely enters the set the alert NOW watches. Fired rows stay —
+// history, announced under the reading of their day. `before` fences the
+// concurrent sweep: a match landing mid-reseed was already evaluated against
+// the updated condition and is real news, not a stale claim.
+export async function pruneAlertStaleClaims(db, alertId, keepEntityIds, before) {
+  const { rowCount } = await db.query(
+    `DELETE FROM alert_matches
+      WHERE alert_id=$1 AND (firing_id IS NULL OR firing_id = ${ALERT_BASELINE_FIRING})
+        AND matched_at <= $3 AND NOT (entity_id = ANY($2::bigint[]))`,
+    [alertId, keepEntityIds, before]
+  );
+  return rowCount;
+}
+
 // Alerts holding ungrouped matches, with the window stats the settle logic
 // reads (deliverDueAlerts). Daily alerts are excluded — their grouping is
 // stamp-driven, not settle-driven (dueDailyAlerts below).

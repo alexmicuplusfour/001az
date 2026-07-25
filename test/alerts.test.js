@@ -534,6 +534,22 @@ test("create validates its body", async () => {
   assert.equal(r.status, 404);
 });
 
+test("junk :id params read as not-found, never a bigint cast 500", async () => {
+  for (const id of ["abc", "0", "1.5"]) {
+    for (const [method, path] of [
+      ["PATCH", `/api/alerts/${id}`],
+      ["DELETE", `/api/alerts/${id}`],
+      ["GET", `/api/alerts/${id}/firings`],
+      ["POST", `/api/alerts/${id}/seen`],
+      ["POST", `/api/alerts/${id}/test`],
+      ["GET", `/api/alert-firings/${id}`],
+    ]) {
+      const r = await req(base, method, path, { sid: admin.sid, body: method === "PATCH" ? {} : undefined });
+      assert.equal(r.status, 404, `${method} ${path}`);
+    }
+  }
+});
+
 test("alerts are private to their owner; the secret never echoes", async () => {
   const other = await seedUser(db, "other@test.local");
   await setBoardMembers(db, boardId, [other.id]);
@@ -737,6 +753,51 @@ test("switching delivery away from daily and back remembers the digest time", as
   assert.equal(r.json.alert.daily_at, "07:45");
   ({ rows: [row] } = await db.query("SELECT next_delivery_at FROM alerts WHERE id=$1", [alert.id]));
   assert.ok(row.next_delivery_at > Date.now());
+});
+
+test("narrowing a condition drops the no-longer-matching pending backlog", async () => {
+  const alert = await makeAlert({ name: "narrowed", condition: { kind: ["a"] }, webhook_url: hookUrl });
+  const { id: entityId, instanceId } = await taggedEntity(["kind/a"]);
+  assert.equal((await matchesOf(alert.id)).length, 1);
+
+  // Narrow to kind/b before the settle window delivers: the pending kind/a
+  // match is stale under the new reading and must not fire.
+  const r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { condition: { kind: ["b"] } } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await matchesOf(alert.id)).length, 0);
+  // Deleted, not demoted — the freed key is the point (the test below).
+  assert.ok(!(await baselineOf(alert.id)).some((m) => m.entity_id === entityId));
+
+  hookState.requests.length = 0;
+  await backdate(alert.id, 120000);
+  await deliverDueAlerts(db);
+  assert.equal((await firingsOf(alert.id)).length, 0);
+  assert.equal(hookState.requests.length, 0);
+
+  // The entity is still honest news when it ENTERS the narrowed set.
+  await req(base, "PATCH", `/api/instances/${instanceId}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "kind/b"] } });
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, entityId);
+});
+
+test("a condition edit releases stale baseline claims — entering the new set later is news", async () => {
+  // Already-matching at create: claimed as baseline under kind/a.
+  const { id: entityId, instanceId } = await taggedEntity(["kind/a"]);
+  const alert = await makeAlert({ name: "released", condition: { kind: ["a"] } });
+  assert.ok((await baselineOf(alert.id)).some((m) => m.entity_id === entityId));
+
+  // Rewatch color/red: the kind/a claim is stale — left in place it would
+  // squat on the (alert, entity) key and swallow the entity's real entry.
+  const r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { condition: { color: ["red"] } } });
+  assert.equal(r.status, 200, r.text);
+  assert.ok(!(await baselineOf(alert.id)).some((m) => m.entity_id === entityId));
+
+  // The entity genuinely enters the watched set — announced, not swallowed.
+  await req(base, "PATCH", `/api/instances/${instanceId}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "color/red"] } });
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, entityId);
 });
 
 test("migration 0024 heals a pre-baseline alert by seeding today's matching set", async () => {

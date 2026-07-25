@@ -475,6 +475,12 @@ app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
 // matcher/sweep live in alerts.js, detection hooks at the two tag landings) ---
 
 const ALERT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+// :id is a bigint — junk ("abc", 0, 1.5) must read as "not found", not reach
+// Postgres and 500 on the cast (the requireItemAccess guard, family-wide).
+const alertIdParam = (req) => {
+  const id = Number(req.params.id);
+  return Number.isInteger(id) && id > 0 ? id : null;
+};
 const alertMin = (hhmm) => { const [h, m] = hhmm.split(":").map(Number); return h * 60 + m; };
 const alertHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
 
@@ -577,29 +583,34 @@ app.post("/api/alerts", requireAuth, wrap(async (req, res) => {
 }));
 
 app.patch("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
-  const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
+  const id = alertIdParam(req);
+  const alert = id ? await getAlertOwned(db, req.user.id, id) : null;
   if (!alert) return res.status(404).json({ error: "not found" });
   const parsed = parseAlertBody(req.body, alert);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
   const ok = await updateAlert(db, alert.id, parsed);
   if (ok == null) return res.status(400).json({ error: "an alert with that name already exists" });
   if (!ok) return res.status(404).json({ error: "not found" });
-  // A changed condition covers new ground — re-baseline it, or the first
-  // retag after a widening edit announces the newly-covered backlog as new.
-  // Idempotent, so a failure here heals on the client's retry.
+  // A changed condition covers new ground and abandons old: re-baseline what
+  // it covers (or the first retag after a widening edit announces the
+  // newly-covered backlog as new) and prune the unfired claims it left
+  // behind (or a narrowed alert delivers the old condition's pending
+  // backlog). Idempotent, so a failure here heals on the client's retry.
   if (!sameCondition(alert.condition, parsed.condition))
     await seedAlertBaseline(db, alert.id, alert.board_id, parsed.condition);
   res.json({ alert: alertJson({ id: alert.id, ...parsed, has_secret: !!parsed.webhook_secret }) });
 }));
 
 app.delete("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
-  if (!(await deleteAlert(db, req.user.id, Number(req.params.id))))
+  const id = alertIdParam(req);
+  if (!id || !(await deleteAlert(db, req.user.id, id)))
     return res.status(404).json({ error: "not found" });
   res.json({ ok: true });
 }));
 
 app.get("/api/alerts/:id/firings", requireAuth, wrap(async (req, res) => {
-  const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
+  const id = alertIdParam(req);
+  const alert = id ? await getAlertOwned(db, req.user.id, id) : null;
   if (!alert) return res.status(404).json({ error: "not found" });
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
   res.json(await listAlertFirings(db, alert.id, { after: req.query.after || null, limit }));
@@ -607,14 +618,17 @@ app.get("/api/alerts/:id/firings", requireAuth, wrap(async (req, res) => {
 
 // Opening the history modal is the acknowledgement — one call, not per-row.
 app.post("/api/alerts/:id/seen", requireAuth, wrap(async (req, res) => {
-  await markAlertFiringsSeen(db, req.user.id, Number(req.params.id));
+  const id = alertIdParam(req);
+  if (!id) return res.status(404).json({ error: "not found" });
+  await markAlertFiringsSeen(db, req.user.id, id);
   res.json({ ok: true });
 }));
 
 // Fire a sample payload at the stored URL right now — debugging webhooks
 // blind is miserable. Owner-only; the verdict comes straight back.
 app.post("/api/alerts/:id/test", requireAuth, wrap(async (req, res) => {
-  const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
+  const id = alertIdParam(req);
+  const alert = id ? await getAlertOwned(db, req.user.id, id) : null;
   if (!alert) return res.status(404).json({ error: "not found" });
   if (!alert.webhook_url) return res.status(400).json({ error: "no webhook url on this alert" });
   const result = await sendAlertWebhook(
@@ -629,7 +643,8 @@ app.post("/api/alerts/:id/test", requireAuth, wrap(async (req, res) => {
 // The ?event= fetch: a firing plus its matched entity ids. Board ACCESS, not
 // ownership — a webhook link pasted in a team channel opens for every member.
 app.get("/api/alert-firings/:id", requireAuth, wrap(async (req, res) => {
-  const firing = await getAlertFiring(db, Number(req.params.id));
+  const id = alertIdParam(req);
+  const firing = id ? await getAlertFiring(db, id) : null;
   if (!firing || !(await canAccessBoard(db, firing.board_id, req.user)))
     return res.status(404).json({ error: "not found" });
   const matches = await firingMatches(db, firing.id);

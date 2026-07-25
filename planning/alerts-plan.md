@@ -177,7 +177,13 @@ already matches is recorded pre-claimed under the `firing_id = 0` sentinel, so
 the re-landings a board retag produces are dedupe no-ops instead of a mass
 firing. Condition-changing edits re-seed; the seed is idempotent (ON CONFLICT
 leaves real match rows alone), and a create whose seed fails is rolled back
-rather than left lying in wait.
+rather than left lying in wait. An edit also prunes what the old condition
+strands: unfired claims — pending matches and baseline rows — for entities
+outside the new matching set are deleted, or a narrowed alert would deliver
+the old backlog on its next sweep and a stale baseline would squat on the
+(alert, entity) key, swallowing that entity's real entry into the new set
+forever. Deleted rather than demoted for exactly that second reason; fired
+rows stay — history is announced under the reading of its day.
 
 Tests: matcher semantics (AND/OR, empty facet, slash values), union-across-
 instances matching, once-ever dedupe, both call-site triggers, baseline at

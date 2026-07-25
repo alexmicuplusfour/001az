@@ -161,7 +161,9 @@ async function refreshTokens() {
 let alertsFetchAt = 0;
 async function refreshAlerts() {
   if (!state.boardId) return;
-  if (Date.now() - alertsFetchAt < 30000) return;
+  // Under the tick cadence, not at it: a 30s throttle under the 30s slow poll
+  // would alias — ticks landing a hair early skip, and "within 30s" doubles.
+  if (Date.now() - alertsFetchAt < 25000) return;
   alertsFetchAt = Date.now();
   try {
     const r = await fetch(`/api/alerts?board=${state.boardId}`, { cache: "no-store" });
@@ -184,10 +186,14 @@ function liveBoard() {
 
 // Exported for tests: the cadence decision in one place. Ingestion-enabled
 // boards keep the slow poll too — the sweep admits items server-side, so a
-// quiet tab would otherwise never see them arrive.
+// quiet tab would otherwise never see them arrive. Alerts hold it for the
+// same reason: firings happen in the worker sweep (and off a teammate's
+// manual tag), so a tab with alerts but no poll would never light the dot.
+// A zero-alert tab still stops — refreshAlerts can only DISCOVER an alert
+// created elsewhere while something else keeps the tick alive (or on boot).
 export function pollDelay() {
   if (needsPoll()) return 4000;
-  if (liveBoard() || state.boardIngest) return 30000;
+  if (liveBoard() || state.boardIngest || state.alerts.length) return 30000;
   return 0;
 }
 
