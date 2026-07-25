@@ -110,6 +110,26 @@ test("crates are pinned to their own board", async () => {
   assert.equal(cross.status, 404);
 });
 
+// Regression: the crate route once validated :itemId against the items table,
+// though the client sends entity ids. The two id sequences overlap and advance
+// nearly in lockstep, so a same-numbered item row usually exists and the wrong
+// lookup passed by coincidence — until deletions desynced the sequences in
+// prod. Desync them here so the coincidence can't mask the bug again.
+test("crating works for an entity id with no same-numbered item row", async () => {
+  await db.query(
+    "SELECT setval(pg_get_serial_sequence('entities','id'), (SELECT GREATEST(MAX(id), 1) FROM items) + 1000)"
+  );
+  const lone = await seedItem(db, boardA);
+  const noTwin = await db.query("SELECT 1 FROM items WHERE id = $1", [lone.id]);
+  assert.equal(noTwin.rows.length, 0, "test premise: no item row shares the entity id");
+
+  const create = await req(base, "POST", "/api/crates", { sid: member.sid, body: { name: "desync", board_id: boardA } });
+  assert.equal(create.status, 200);
+  const r = await req(base, "POST", `/api/crates/${create.json.crate.id}/items/${lone.id}`, { sid: member.sid });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.added, true);
+});
+
 test("crate cannot be created on an inaccessible board", async () => {
   const r = await req(base, "POST", "/api/crates", { sid: outsider.sid, body: { name: "x", board_id: boardA } });
   assert.equal(r.status, 404);

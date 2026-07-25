@@ -431,9 +431,11 @@ app.patch("/api/crates/:id", requireAuth, wrap(async (req, res) => {
 }));
 
 app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => {
+  // :itemId is an entity id (crates hold cards) — resolve it against entities,
+  // not items; the two id sequences overlap, so the wrong table can coincide.
   const itemId = Number(req.params.itemId);
-  const item = Number.isInteger(itemId) && itemId > 0 ? await getItemBoard(db, itemId) : null;
-  if (!item || !(await canAccessBoard(db, item.board_id, req.user)))
+  const ent = Number.isInteger(itemId) && itemId > 0 ? await getEntityBoard(db, itemId) : null;
+  if (!ent || !(await canAccessBoard(db, ent.board_id, req.user)))
     return res.status(404).json({ error: "not found" });
   const result = await toggleCrateItem(db, req.user.id, Number(req.params.id), itemId);
   if (!result) return res.status(404).json({ error: "not found" });
