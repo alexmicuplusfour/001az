@@ -163,6 +163,7 @@
   font-size: 10.5px;
   font-weight: 600;
   line-height: 16px;
+  padding-top: 1px; /* optical: the digit's cap sits high at this size */
   text-align: center;
   display: inline-block;
   box-sizing: border-box;
