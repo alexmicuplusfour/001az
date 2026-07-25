@@ -460,6 +460,12 @@ export async function deleteUser(db, id) {
   await db.query("DELETE FROM users WHERE id=$1 AND NOT is_admin", [id]);
 }
 
+// A password change revokes any outstanding invite link: an unredeemed
+// invite is a live login, so it must die with the other sessions.
+export async function deleteUnredeemedInvites(db, userId) {
+  await db.query("DELETE FROM invites WHERE user_id=$1 AND used_at IS NULL", [userId]);
+}
+
 export async function consumeInvite(db, token) {
   const hash = hashToken(token);
   const { rows } = await db.query("SELECT * FROM invites WHERE token=$1", [hash]);

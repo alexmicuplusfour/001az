@@ -26,6 +26,7 @@ import {
   setPassword,
   mintInvite,
   consumeInvite,
+  deleteUnredeemedInvites,
   createSession,
   deleteSession,
   deleteOtherSessions,
@@ -303,8 +304,11 @@ app.post("/api/login", authLimiter, loginEmailLimiter, wrap(async (req, res) => 
     : await dummyVerify(password);
   if (!ok) {
     // Feeds the live log viewer and docker logs (fail2ban-able). Email is
-    // attacker-controlled: normalize and cap it so the line can't be abused.
-    console.log(`login rejected: ${email.toLowerCase().slice(0, 100) || "(no email)"} from ${req.ip}`);
+    // attacker-controlled: strip to printable ASCII and cap it, so a crafted
+    // "email" can't forge log lines or smuggle a bogus `from <ip>` past a
+    // fail2ban regex.
+    const safeEmail = email.toLowerCase().replace(/[^\x20-\x7e]/g, "").slice(0, 100);
+    console.log(`login rejected: ${safeEmail || "(no email)"} from ${req.ip}`);
     return res.status(401).json({ error: "invalid credentials" });
   }
   if (req.sid) await deleteSession(db, req.sid); // rotate: never keep a pre-login session
@@ -327,6 +331,9 @@ app.post("/api/account/password", authLimiter, requireAuth, wrap(async (req, res
     return res.status(403).json({ error: "current password is incorrect" });
   await setPassword(db, req.user.id, await hashPassword(next));
   await deleteOtherSessions(db, req.user.id, req.sid);
+  // An unredeemed invite link is a live login too — a password change must
+  // revoke it along with the other sessions.
+  await deleteUnredeemedInvites(db, req.user.id);
   console.log(`password ${req.user.password_hash ? "changed" : "set"}: user #${req.user.id}`);
   res.json({ ok: true });
 }));
@@ -334,6 +341,7 @@ app.post("/api/account/password", authLimiter, requireAuth, wrap(async (req, res
 app.get("/auth/:token", authLimiter, wrap(async (req, res) => {
   const userId = await consumeInvite(db, req.params.token);
   if (!userId) return res.redirect("/login.html?error=invalid");
+  if (req.sid) await deleteSession(db, req.sid); // rotate: never keep a pre-login session
   const sid = await createSession(db, userId);
   await touchLogin(db, userId);
   setSessionCookie(res, sid);

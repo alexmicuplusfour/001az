@@ -16,11 +16,16 @@ function showError(msg) {
   errorEl.hidden = !msg;
 }
 
-// ?next= comes from app.js preserving the interrupted URL. Same-origin paths
-// only: anything not starting with a single "/" falls back to home.
+// ?next= comes from app.js preserving the interrupted URL. Same-origin only,
+// enforced by resolving through the URL parser — a startsWith("/") check
+// misses browser normalization ("/\evil.com" and "/\t/evil.com" both resolve
+// protocol-relative to https://evil.com).
 function nextTarget() {
-  const next = params.get("next") || "";
-  return next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  try {
+    const u = new URL(params.get("next") || "", location.origin);
+    if (u.origin === location.origin) return u.pathname + u.search + u.hash;
+  } catch {}
+  return "/";
 }
 
 async function submit(form, fn) {

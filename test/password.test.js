@@ -149,6 +149,27 @@ test("invite links are single-use and route by password state", async () => {
   assert.equal(r3.headers.get("location"), "/");
 });
 
+test("invite redemption rotates a pre-existing session", async () => {
+  const u = await seedUser(db, "inv-rotate@test.local");
+  const preSid = u.sid;
+  const r = await fetch(base + `/auth/${await mintInvite(db, u.id)}`, {
+    redirect: "manual",
+    headers: { Cookie: `sid=${preSid}` },
+  });
+  assert.equal(r.status, 302);
+  assert.notEqual(sidFrom(r), preSid);
+  assert.equal((await req(base, "GET", "/api/me", { sid: preSid })).json, null);
+});
+
+test("changing the password kills an outstanding invite link", async () => {
+  const u = await seedUser(db, "inv-revoked@test.local");
+  const token = await mintInvite(db, u.id);
+  const r = await req(base, "POST", "/api/account/password", { sid: u.sid, body: { password: "fresh-password-2" } });
+  assert.equal(r.status, 200);
+  const redeem = await fetch(base + `/auth/${token}`, { redirect: "manual" });
+  assert.equal(redeem.headers.get("location"), "/login.html?error=invalid");
+});
+
 test("brute force against one account trips the per-email limiter", async () => {
   // Own server: fresh rate-limit windows, so the 11 attempts here don't eat
   // the shared per-IP budget of the tests above (and vice versa).
