@@ -21,10 +21,14 @@ import {
   listUsers,
   deleteUser,
   userExists,
-  mintPermanentInvite,
+  getUserById,
+  getUserByEmail,
+  setPassword,
+  mintInvite,
   consumeInvite,
   createSession,
   deleteSession,
+  deleteOtherSessions,
   touchLogin,
   toggleFavorite,
   heartNames,
@@ -104,6 +108,7 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDef
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
+import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./password.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
@@ -268,17 +273,74 @@ app.get("/api/health", wrap(async (_req, res) => {
 
 // --- auth ---
 app.get("/api/me", (req, res) => {
-  res.json(req.user ? { email: req.user.email, name: req.user.name, is_admin: !!req.user.is_admin } : null);
+  res.json(req.user ? {
+    email: req.user.email,
+    name: req.user.name,
+    is_admin: !!req.user.is_admin,
+    needs_password: !req.user.password_hash,
+  } : null);
 });
+
+// Second login window keyed by the submitted email (whether or not it exists —
+// keying only real accounts would leak which emails are registered). The per-IP
+// authLimiter alone lets an attacker with many IPs take 30 guesses per IP per
+// window at ONE account; this caps the account itself no matter the source.
+const loginEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  key: (req) =>
+    typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase().slice(0, 200) : "",
+});
+
+app.post("/api/login", authLimiter, loginEmailLimiter, wrap(async (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  const user = email && password ? await getUserByEmail(db, email) : null;
+  // Unknown email and passwordless account burn the same scrypt as a wrong
+  // password, so the generic 401 can't be timed into an email oracle.
+  const ok = user?.password_hash
+    ? await verifyPassword(password, user.password_hash)
+    : await dummyVerify(password);
+  if (!ok) {
+    // Feeds the live log viewer and docker logs (fail2ban-able). Email is
+    // attacker-controlled: normalize and cap it so the line can't be abused.
+    console.log(`login rejected: ${email.toLowerCase().slice(0, 100) || "(no email)"} from ${req.ip}`);
+    return res.status(401).json({ error: "invalid credentials" });
+  }
+  if (req.sid) await deleteSession(db, req.sid); // rotate: never keep a pre-login session
+  const sid = await createSession(db, user.id);
+  await touchLogin(db, user.id);
+  setSessionCookie(res, sid);
+  console.log(`login: user #${user.id}`);
+  res.json({ ok: true });
+}));
+
+// Change (or first-time set, when no hash exists yet — the invite flow lands
+// there) the password. Rate-limited too: a stolen session shouldn't get free
+// guesses at the current password.
+app.post("/api/account/password", authLimiter, requireAuth, wrap(async (req, res) => {
+  const current = typeof req.body?.current === "string" ? req.body.current : "";
+  const next = typeof req.body?.password === "string" ? req.body.password : "";
+  if (next.length < MIN_PASSWORD_LEN)
+    return res.status(400).json({ error: `password must be at least ${MIN_PASSWORD_LEN} characters` });
+  if (req.user.password_hash && !(await verifyPassword(current, req.user.password_hash)))
+    return res.status(403).json({ error: "current password is incorrect" });
+  await setPassword(db, req.user.id, await hashPassword(next));
+  await deleteOtherSessions(db, req.user.id, req.sid);
+  console.log(`password ${req.user.password_hash ? "changed" : "set"}: user #${req.user.id}`);
+  res.json({ ok: true });
+}));
 
 app.get("/auth/:token", authLimiter, wrap(async (req, res) => {
   const userId = await consumeInvite(db, req.params.token);
-  if (!userId) return res.redirect("/?login=invalid");
+  if (!userId) return res.redirect("/login.html?error=invalid");
   const sid = await createSession(db, userId);
   await touchLogin(db, userId);
   setSessionCookie(res, sid);
   console.log(`login: user #${userId}`);
-  res.redirect("/");
+  const user = await getUserById(db, userId);
+  // No password yet → straight to the set-password screen.
+  res.redirect(user?.password_hash ? "/" : "/login.html");
 }));
 
 app.post("/api/logout", wrap(async (req, res) => {
@@ -384,7 +446,7 @@ app.post("/api/admin/users", requireAdmin, wrap(async (req, res) => {
   const email = (req.body && req.body.email ? String(req.body.email) : "").trim();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "invalid email" });
   const user = await createUser(db, email, req.body.name ? String(req.body.name).trim() : null);
-  const token = await mintPermanentInvite(db, user.id);
+  const token = await mintInvite(db, user.id);
   console.log(`invited ${user.email}`);
   res.json({ user: { id: user.id, email: user.email, name: user.name }, link: inviteLink(token) });
 }));
@@ -392,7 +454,7 @@ app.post("/api/admin/users", requireAdmin, wrap(async (req, res) => {
 app.post("/api/admin/users/:id/link", requireAdmin, wrap(async (req, res) => {
   const id = Number(req.params.id);
   if (!(await userExists(db, id))) return res.status(404).json({ error: "not found" });
-  res.json({ link: inviteLink(await mintPermanentInvite(db, id)) });
+  res.json({ link: inviteLink(await mintInvite(db, id)) });
 }));
 
 app.delete("/api/admin/users/:id", requireAdmin, wrap(async (req, res) => {

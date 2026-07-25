@@ -45,6 +45,23 @@ test("limits are per-IP", () => {
   assert.equal(sa2.statusCode, 429);
 });
 
+test("a custom key groups requests across IPs", () => {
+  // The login route keys a second limiter on the submitted email, so brute
+  // force against one account can't be spread across source addresses.
+  const limiter = rateLimit({ windowMs: 1000, max: 2, key: (req) => req.body?.email || "" });
+  for (const [ip, expected] of [["a", 200], ["b", 200], ["c", 429]]) {
+    const [req, res] = mock(ip);
+    req.body = { email: "victim@x" };
+    limiter(req, res, () => {});
+    assert.equal(res.statusCode, expected, `ip ${ip}`);
+  }
+  // A different email is its own window even from a throttled IP.
+  const [req, res] = mock("c");
+  req.body = { email: "other@x" };
+  limiter(req, res, () => {});
+  assert.equal(res.statusCode, 200);
+});
+
 test("the window resets after windowMs", async () => {
   const limiter = rateLimit({ windowMs: 30, max: 1 });
   const [r1, s1] = mock("x");

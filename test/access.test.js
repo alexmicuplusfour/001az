@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { startServer, adminSession, seedUser, seedBoard, seedItem, req } from "./helpers.js";
-import { mintPermanentInvite, setBoardMembers, createAiKey, setSetting, setPluginState } from "../server/db.js";
+import { mintInvite, setBoardMembers, createAiKey, setSetting, setPluginState } from "../server/db.js";
 
 let srv, db, base;
 let admin, member, outsider;
@@ -232,10 +232,10 @@ test("static image bytes require a session", async () => {
 
 test("invite token is stored hashed but still redeems into a session", async () => {
   const invitee = await seedUser(db, "invitee@test.local");
-  const token = await mintPermanentInvite(db, invitee.id); // raw, returned once
+  const token = await mintInvite(db, invitee.id); // raw, returned once
 
   // Stored value is the SHA-256, never the raw token.
-  const stored = await db.query("SELECT token FROM invites WHERE user_id=$1 AND permanent", [invitee.id]);
+  const stored = await db.query("SELECT token FROM invites WHERE user_id=$1 AND used_at IS NULL", [invitee.id]);
   assert.equal(stored.rows[0].token, crypto.createHash("sha256").update(token).digest("hex"));
   assert.notEqual(stored.rows[0].token, token);
 

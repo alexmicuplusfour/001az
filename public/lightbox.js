@@ -698,7 +698,8 @@ export function initLightbox() {
     if (!lightboxImg) return;
     try {
       const r = await fetch(`/api/items/${lightboxImg.id}/favorite`, { method: "POST" });
-      if (r.status === 401) return toast.info("Sign in to favorite");
+      // Session gone (expired, or revoked by a password change elsewhere).
+      if (r.status === 401) return location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
       const { favorited, count } = await r.json();
       lightboxImg.favoritedByMe = favorited;
       lightboxImg.hearts = count;

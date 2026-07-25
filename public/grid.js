@@ -171,7 +171,8 @@ function heartControl(img) {
     e.stopPropagation();
     try {
       const r = await fetch(`/api/items/${img.id}/favorite`, { method: "POST" });
-      if (r.status === 401) return toast.info("Sign in to favorite");
+      // Session gone (expired, or revoked by a password change elsewhere).
+      if (r.status === 401) return location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
 const { favorited, count: n } = await r.json();
       img.favoritedByMe = favorited;
       img.hearts = n;

@@ -1,6 +1,5 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
-import { toast } from './toast.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl } from './filters.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoardIngest } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
@@ -80,6 +79,16 @@ async function main() {
   state.boardTokens = boardData?.token_total ?? null;
   state.searchAvailable = !!boardData?.search;
   state.me = meData;
+  // No session → login page (preserving the interrupted URL); a session that
+  // hasn't set a password yet (fresh invite) → set-password screen.
+  if (!state.me) {
+    location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
+    return;
+  }
+  if (state.me.needs_password) {
+    location.replace("/login.html");
+    return;
+  }
   // First page ({ items, nextCursor, now }) — or a bare array from a server
   // that predates pagination, which boots identically and skips the drain.
   const firstPage = Array.isArray(itemsData) ? { items: itemsData, nextCursor: null, now: null } : itemsData;
@@ -94,11 +103,6 @@ async function main() {
   // Rest of the board streams in behind the first paint.
   drainItems(firstPage.nextCursor);
 
-  const loginErr = params.get("login");
-  if (loginErr === "invalid") {
-    toast.warn("Login link has expired or already been used — ask for a new one.");
-    history.replaceState(null, "", state.boardId ? `/?board=${state.boardId}` : "/");
-  }
 }
 
 main();

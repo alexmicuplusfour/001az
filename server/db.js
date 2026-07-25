@@ -435,6 +435,15 @@ export async function userExists(db, id) {
   return rows.length > 0;
 }
 
+export async function getUserById(db, id) {
+  const { rows } = await db.query("SELECT * FROM users WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+export async function setPassword(db, userId, passwordHash) {
+  await db.query("UPDATE users SET password_hash=$1 WHERE id=$2", [passwordHash, userId]);
+}
+
 export async function listUsers(db) {
   // No invite token here: it's a bearer credential and only its hash is stored
   // now anyway. The admin mints a fresh link on demand (POST /users/:id/link).
@@ -455,23 +464,22 @@ export async function consumeInvite(db, token) {
   const hash = hashToken(token);
   const { rows } = await db.query("SELECT * FROM invites WHERE token=$1", [hash]);
   const row = rows[0];
-  if (!row || row.expires_at < Date.now()) return null;
-  if (!row.permanent) {
-    if (row.used_at) return null;
-    await db.query("UPDATE invites SET used_at=$1 WHERE token=$2", [Date.now(), hash]);
-  }
+  if (!row || row.expires_at < Date.now() || row.used_at) return null;
+  await db.query("UPDATE invites SET used_at=$1 WHERE token=$2", [Date.now(), hash]);
   return row.user_id;
 }
 
-export async function mintPermanentInvite(db, userId) {
+// Single-use onboarding/reset link. Minting replaces any outstanding
+// unredeemed link for the user, so a leaked older link dies with the new mint.
+export async function mintInvite(db, userId, ttlMs = 7 * 24 * 3600 * 1000) {
   const token = crypto.randomBytes(24).toString("hex");
   const now = Date.now();
   await withTx(db, async (client) => {
-    await client.query("DELETE FROM invites WHERE user_id=$1 AND permanent", [userId]);
+    await client.query("DELETE FROM invites WHERE user_id=$1 AND used_at IS NULL", [userId]);
     await client.query(
       `INSERT INTO invites (token, user_id, expires_at, used_at, created_at, permanent)
-       VALUES ($1, $2, $3, NULL, $4, TRUE)`,
-      [hashToken(token), userId, now + 100 * 365 * 24 * 3600 * 1000, now]
+       VALUES ($1, $2, $3, NULL, $4, FALSE)`,
+      [hashToken(token), userId, now + ttlMs, now]
     );
   });
   return token; // raw token — returned once, only its hash is stored
@@ -499,6 +507,11 @@ export async function getSessionUser(db, sid) {
 
 export async function deleteSession(db, sid) {
   if (sid) await db.query("DELETE FROM sessions WHERE id=$1", [hashToken(sid)]);
+}
+
+// Password change revokes every other session; the caller's own sid survives.
+export async function deleteOtherSessions(db, userId, keepSid) {
+  await db.query("DELETE FROM sessions WHERE user_id=$1 AND id <> $2", [userId, hashToken(keepSid || "")]);
 }
 
 // Sliding expiry: renew the session to now+ttl, but only write if it hasn't

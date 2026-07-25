@@ -11,7 +11,8 @@ const adminUi = document.getElementById("admin-ui");
 
 export async function renderMembers() {
   const me = await fetch("/api/me").then((r) => r.json());
-  if (!me || !me.is_admin) {
+  if (!me) return location.replace("/login.html?next=" + encodeURIComponent("/admin.html"));
+  if (!me.is_admin) {
     gate.innerHTML = 'Not authorized. <a href="/">Back to gallery</a>';
     return;
   }
@@ -32,9 +33,10 @@ export async function renderMembers() {
   const rows = document.getElementById("rows");
   for (const u of users) {
     // The server stores only token hashes, so an existing link can't be
-    // shown back. "copy link" mints a fresh one on first use (replacing
-    // the user's previous link) and copies from cache after that;
-    // "new link" forces a re-mint.
+    // shown back. "copy link" mints a fresh single-use link on first use
+    // (replacing the user's previous link) and copies from cache after that.
+    // Links are the onboarding/password-reset path: they log in once, then
+    // the user sets a password.
     u.link = null;
 
     const tr = document.createElement("tr");
@@ -49,7 +51,7 @@ export async function renderMembers() {
     const copyBtn = document.createElement("button");
     copyBtn.className = "ghost";
     copyBtn.textContent = "copy link";
-    copyBtn.title = "Copies the login link (mints a fresh one first if needed — the previous link stops working)";
+    copyBtn.title = "Copies a fresh single-use login link (valid 7 days — replaces any previous link)";
     copyBtn.onclick = async () => {
       copyBtn.disabled = true;
       try {

@@ -61,8 +61,10 @@ a live connector.
 - **Infinite scroll** — metadata loads in one shot; cards mount and recycle in
   batches as you scroll, so filters, counts, and the lightbox always see the
   full collection.
-- **Invite-only auth** — passwordless: an admin mints one-time login links;
-  sessions are HttpOnly cookies. No email infrastructure needed.
+- **Invite-only auth** — password sign-in (scrypt-hashed, no deps) with
+  single-use 7-day invite links as the onboarding and password-reset path:
+  an admin mints a link, it logs the member in once to set their password.
+  Sessions are HttpOnly cookies. No email infrastructure needed.
 - **Admin panel** — user management, board management, AI provider/model/key
   config, connector config, and live server logs over SSE.
 
@@ -103,7 +105,7 @@ Caddy ── TLS + reverse-proxy ──► Node/Express (server/server.js)
 | `server/ingestion/` | automatic-ingestion adapters (folder watching, connector feeds) + shared filter engine |
 | `server/sources/` | per-format file handling (image/PDF/docx/text) |
 | `server/auth.js` | session-cookie middleware |
-| `server/mintlink.js` | CLI: print a login link for an email |
+| `server/mintlink.js` | CLI: print a single-use login link for an email (onboarding / password reset) |
 | `server/migrations/` | versioned schema migrations |
 | `test/` | `node:test` suite |
 | `scripts/` | one-off utilities (e.g. sqlite→pg import) |

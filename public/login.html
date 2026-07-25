@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sign in · 001az</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="toast.css" />
+    <style>
+      body { align-items: center; justify-content: center; }
+      .login-card {
+        width: min(360px, calc(100vw - 48px));
+        padding: 32px 28px 28px;
+        border: 1px solid #e2e2e6;
+        border-radius: 12px;
+        box-shadow: 0 1px 12px rgba(0, 0, 0, 0.04);
+      }
+      .login-card h1 { margin: 0 0 4px; font-size: 18px; font-weight: 600; }
+      .login-card .sub { margin: 0 0 20px; color: var(--text-dim); font-size: 13px; }
+      /* :not([hidden]) — display:flex would otherwise override the hidden attribute */
+      .login-card form:not([hidden]) { display: flex; flex-direction: column; gap: 10px; }
+      /* :not([hidden]) — display:flex would otherwise override the hidden attribute */
+      .login-card label:not([hidden]) { font-size: 12px; color: var(--text-dim); display: flex; flex-direction: column; gap: 4px; }
+      .login-card input {
+        border: 1px solid #e2e2e6;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 14px;
+        color: var(--text);
+      }
+      .login-card input:focus { outline: none; border-color: #b9b9c2; }
+      .login-card button[type="submit"] {
+        margin-top: 8px;
+        border: none;
+        border-radius: 6px;
+        background: var(--pill-active);
+        color: #fff;
+        padding: 9px 10px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .login-card button[type="submit"]:disabled { opacity: 0.6; cursor: default; }
+      .login-error { margin: 12px 0 0; font-size: 12.5px; color: #b3261e; }
+    </style>
+  </head>
+  <body>
+    <main class="login-card">
+      <h1 id="login-title"></h1>
+      <p class="sub" id="login-sub" hidden></p>
+      <form id="login-form" hidden>
+        <label>Email
+          <input id="login-email" type="email" autocomplete="username" required autofocus />
+        </label>
+        <label>Password
+          <input id="login-password" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit">Sign in</button>
+      </form>
+      <form id="set-form" hidden>
+        <label id="set-current-label" hidden>Current password
+          <input id="set-current" type="password" autocomplete="current-password" />
+        </label>
+        <label>New password
+          <input id="set-password" type="password" autocomplete="new-password" minlength="8" required autofocus />
+        </label>
+        <label>Confirm password
+          <input id="set-confirm" type="password" autocomplete="new-password" minlength="8" required />
+        </label>
+        <button type="submit" id="set-submit">Set password</button>
+      </form>
+      <p id="login-error" class="login-error" hidden></p>
+    </main>
+    <script src="login.js" type="module"></script>
+  </body>
+</html>
