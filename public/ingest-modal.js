@@ -13,7 +13,7 @@
 import { state } from './state.js';
 import { fmtDuration } from './utils.js';
 import { toast } from './toast.js';
-import { createModal } from './modal.js';
+import { createModal, sectionHeadingEl } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { openSourceBrowse } from './source-browse-modal.js';
@@ -796,9 +796,8 @@ export function openIngestModal() {
   function section(title) {
     const el = document.createElement("div");
     el.className = "modal-section";
-    const t = document.createElement("div");
-    t.className = "modal-section-title";
-    t.textContent = title;
+    const t = sectionHeadingEl(title);
+    t.style.marginBottom = "12px"; // the caps title's old spacing to the section content
     el.appendChild(t);
     return el;
   }
