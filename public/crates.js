@@ -143,6 +143,10 @@ async function createCrateWithItem(name, img, anchorEl) {
       const found = state.crates.find((c) => c.id === crate.id);
       if (found) found.item_count = count;
     }
+    // The toolbar's Crates button only exists while state.crates is non-empty,
+    // so the first crate needs a full render to surface it. Cards are reused
+    // (crate membership isn't in cardSig), so anchorEl survives the render.
+    document.dispatchEvent(new Event('app:render'));
     // Reopen so the new crate shows up as a row; keep the card's hover chrome.
     closeCratePop(true);
     openCratePop(anchorEl, img);
