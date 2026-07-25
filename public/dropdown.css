@@ -136,7 +136,7 @@
   align-items: center;
 }
 
-/* unseen-firings count on an alert row */
+/* new-matches count on an alert row */
 .dd-unseen {
   flex-shrink: 0;
   min-width: 16px;
@@ -147,8 +147,10 @@
   color: #fff;
   font-size: 10.5px;
   font-weight: 600;
-  display: grid;
-  place-items: center;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   box-sizing: border-box;
 }
 /* a disabled (paused) alert row reads dimmer */

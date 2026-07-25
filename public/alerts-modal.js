@@ -12,7 +12,7 @@ import { createModal, sectionHeadingEl } from './modal.js';
 import { ddRow, ddSep } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig } from './filters.js';
 import { switchRow } from './board-modal.js';
-import { openAlertEvent, clearAlertEvent } from './alert-event.js';
+import { openAlertEvent, clearAlertEvent, resetListFilters } from './alert-event.js';
 
 export const alertsUnseen = () => state.alerts.reduce((n, a) => n + (a.unseen || 0), 0);
 
@@ -425,7 +425,10 @@ export function openAlertHistory(alert) {
   viewBtn.textContent = "Show all matching items";
   viewBtn.addEventListener("click", () => {
     close();
-    clearAlertEvent(); // a lingering ?event= view would intersect the filter
+    // The alert's view replaces whatever the list was showing — a lingering
+    // crate, search, ?event= view or extra pills would intersect it.
+    resetListFilters();
+    clearAlertEvent();
     applyFilterConfig(alert.condition);
   });
   footer.appendChild(viewBtn);

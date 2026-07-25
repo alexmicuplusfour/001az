@@ -192,9 +192,9 @@ one attempt per sweep tick, max 3 attempts then `failed` with the error recorded
 }
 ```
 
-Absolute links need a base: new env `APP_URL` (unset → links omitted, payload
-still useful). `entities` capped at ~20 with `entity_count` carrying the truth —
-log nothing silently.
+Absolute links ride `BASE_URL` — the same knob invite links mint from, so no
+new configuration (unset → links omitted, payload still useful). `entities`
+capped at ~20 with `entity_count` carrying the truth — log nothing silently.
 
 API (all `requireAuth` + `canAccessBoard`, owner-scoped like filter-configs,
 server.js:427-457 as the template):
@@ -217,7 +217,8 @@ recording, HMAC, test-fire — webhook target is an in-test `http.createServer`.
   and what it's tied to. With no facet pills active it's replaced by the
   filterconfigs-style `dd-empty` hint ("Pick some filters, then create an alert
   here." — the same teaching trick as saved filters). Alert rows carry an
-  unseen-firings count badge and trailing edit-pencil + delete
+  unseen new-match count badge (entities across unseen firings — "5" means
+  five new items, the number the user is owed) and trailing edit-pencil + delete
   (`configDelBtn` pattern, filterconfigs.js:26); **row click opens history** —
   an alert's primary payload is "what happened", and the count badge makes that
   the natural read. (Deliberate divergence from saved-filter rows, whose click

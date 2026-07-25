@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
-import { ICONS, toolBtn, formatTokens, fmtDuration } from './utils.js';
+import { ICONS, toolBtn, formatTokens, fmtDuration, attachBtnDot } from './utils.js';
 import { openJobsModal } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
@@ -277,11 +277,7 @@ export function renderToolbar(resultCount) {
       plusMenu.innerHTML = ICONS.chevron;
       // The ambient "an alert fired while you were away" signal — without it
       // a record-only alert is invisible until you think to look.
-      if (alertsUnseen() > 0) {
-        const dot = document.createElement("span");
-        dot.className = "alert-dot";
-        plusMenu.appendChild(dot);
-      }
+      if (alertsUnseen() > 0) attachBtnDot(plusMenu);
       plusMenu.addEventListener("click", () => openDropdown(plusMenu, {
         align: "end",
         minWidth: 200,

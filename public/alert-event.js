@@ -4,6 +4,21 @@
 // like a crate does; the URL param makes webhook links land here directly.
 import { state } from './state.js';
 import { toast } from './toast.js';
+import { clearSearch } from './search.js';
+
+// An alert view replaces the current view: pills, status toggles, favorites,
+// uploader picks, crate and search would otherwise silently intersect with
+// the firing's entities and show fewer items than the chip claims.
+export function resetListFilters() {
+  clearSearch(); // owns its in-flight invalidation
+  state.selected = new Map();
+  state.showFavorites = false;
+  state.showUntagged = false;
+  state.showProcessing = false;
+  state.showUnprocessed = false;
+  state.selectedUploaderIds = new Set();
+  state.selectedCrateId = null;
+}
 
 function setEventParam(id) {
   const url = new URL(location.href);
@@ -26,6 +41,7 @@ export async function openAlertEvent(firingId) {
     }
     // count states the original truth — entities deleted since simply don't
     // render, and the chip's number says how many the firing was.
+    resetListFilters();
     state.alertEvent = { id: firing.id, name: firing.name, count: firing.entity_count, ids: new Set(entityIds) };
     setEventParam(firing.id);
     document.dispatchEvent(new Event('app:render'));

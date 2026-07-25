@@ -2263,13 +2263,15 @@ export async function firingMatches(db, firingId) {
   return rows;
 }
 
-// The owner's alerts on a board, each carrying its unseen-firings count (the
-// dropdown row badge; the client sums them for the caret dot).
+// The owner's alerts on a board, each carrying its unseen NEW-MATCH count —
+// entities across unseen firings, not the firing count: "5" means five new
+// items arrived, which is the number the user is owed (the dropdown row
+// badge; the client sums them for the caret dot).
 export async function listAlerts(db, userId, boardId) {
   const { rows } = await db.query(
     `SELECT a.id, a.name, a.condition, a.delivery, a.daily_at_min, a.webhook_url,
        (a.webhook_secret IS NOT NULL) AS has_secret, a.enabled,
-       (SELECT COUNT(*)::int FROM alert_firings f WHERE f.alert_id = a.id AND NOT f.seen) AS unseen
+       (SELECT COALESCE(SUM(f.entity_count), 0)::int FROM alert_firings f WHERE f.alert_id = a.id AND NOT f.seen) AS unseen
      FROM alerts a WHERE a.user_id=$1 AND a.board_id=$2 ORDER BY a.created_at ASC`,
     [userId, boardId]
   );

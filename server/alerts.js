@@ -88,7 +88,10 @@ export function encodeConditionF(condition) {
   ).join(";");
 }
 
-const appUrl = () => String(process.env.APP_URL || "").replace(/\/+$/, "");
+// The same absolute base invite links mint from (server.js BASE_URL) — one
+// "where does this app live" knob, not two. Unset/blank → payloads carry
+// ids and labels but no links.
+const appUrl = () => String(process.env.BASE_URL || "").replace(/\/+$/, "");
 
 // The webhook body. `target` is a pendingWebhookFirings row (alert fields
 // flattened in); entities beyond the cap are counted, not listed — the cap is

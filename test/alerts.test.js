@@ -14,6 +14,7 @@ import {
   encodeConditionF,
   evaluateItemAlerts,
   deliverDueAlerts,
+  buildFiringPayload,
 } from "../server/alerts.js";
 
 let srv, db, base, admin, boardId;
@@ -29,6 +30,7 @@ const FACETS = [
 ];
 
 before(async () => {
+  process.env.BASE_URL = ""; // links assertions below assume no base is set
   srv = await startServer();
   db = srv.db;
   base = srv.base;
@@ -99,6 +101,21 @@ test("nextDailyAt: today when the time is ahead, tomorrow when it passed", () =>
 
 test("encodeConditionF mirrors the client's encodeSelected", () => {
   assert.equal(encodeConditionF({ kind: ["b", "a"], color: ["red"] }), "color:red;kind:a,b");
+});
+
+test("webhook links ride BASE_URL — the invite-link knob, not a new one", () => {
+  process.env.BASE_URL = "http://x.local/";
+  try {
+    const p = buildFiringPayload(
+      { id: 9, alert_id: 1, name: "n", board_id: "b", fired_at: 1, entity_count: 1, condition: { kind: ["a"] } },
+      [{ entity_id: 5, label: "L" }]
+    );
+    assert.equal(p.links.event, "http://x.local/?board=b&event=9");
+    assert.equal(p.links.filter, "http://x.local/?board=b&f=" + encodeURIComponent("kind:a"));
+    assert.equal(p.entities[0].url, "http://x.local/?board=b&item=5");
+  } finally {
+    process.env.BASE_URL = "";
+  }
 });
 
 // --- detection ---
