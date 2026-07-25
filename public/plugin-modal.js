@@ -145,7 +145,9 @@ function connectorSection(p, ctx, reload) {
     if (f.type === "secret") {
       const input = document.createElement("input");
       input.type = "password";
-      input.autocomplete = "off";
+      // "new-password", not "off": Chrome ignores "off" on password fields once
+      // a login is saved for the site, and autofills credentials into key forms.
+      input.autocomplete = "new-password";
       input.style.cssText = `width:100%;box-sizing:border-box;${MONO_CSS}`;
       input.placeholder = p.state.hasKey
         ? "•••• stored — leave blank to keep"
@@ -339,10 +341,13 @@ function keysSection(p, ctx, reload) {
   const nameIn = document.createElement("input");
   nameIn.placeholder = "Name (e.g. Personal)";
   nameIn.required = true;
+  nameIn.autocomplete = "off";
   const keyIn = document.createElement("input");
   keyIn.type = "password";
   keyIn.placeholder = "sk-…";
-  keyIn.autocomplete = "off";
+  // "new-password", not "off": Chrome ignores "off" on password fields once a
+  // login is saved for the site, and autofills email+password into name+key.
+  keyIn.autocomplete = "new-password";
   keyIn.required = true;
   keyIn.style.cssText = MONO_CSS;
   const addBtn = document.createElement("button");
@@ -759,7 +764,7 @@ function sourceSection(p, ctx, reload) {
       if (f.type === "number") { input.type = "number"; if (f.min !== undefined) input.min = String(f.min); }
       if (f.type === "secret") {
         input.type = "password";
-        input.autocomplete = "off";
+        input.autocomplete = "new-password"; // "off" is ignored for password fields
         input.placeholder = editing?.hasSecret?.[f.key] ? "•••• stored — leave blank to keep" : (f.required ? "required" : f.help || "");
       } else {
         input.value = editing?.config?.[f.key] ?? (f.default ?? "");
