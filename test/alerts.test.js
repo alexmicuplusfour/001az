@@ -114,8 +114,9 @@ test("webhook links ride BASE_URL — the invite-link knob, not a new one", () =
   try {
     const p = buildFiringPayload(
       { id: 9, alert_id: 1, name: "n", board_id: "b", fired_at: 1, entity_count: 1, condition: { kind: ["a"] } },
-      [{ entity_id: 5, label: "L" }]
+      [{ entity_id: 5, live_entity_id: 5, label: "L" }]
     );
+    assert.equal(p.firing_id, 9); // the at-least-once dedupe key, first-class
     assert.equal(p.links.event, "http://x.local/?board=b&event=9");
     assert.equal(p.links.filter, "http://x.local/?board=b&f=" + encodeURIComponent("kind:a"));
     assert.equal(p.entities[0].url, "http://x.local/?board=b&item=5");
@@ -272,6 +273,7 @@ test("fresh matches sit through the settle window; settled ones group into one f
 
   assert.equal(hookState.requests.length, 1);
   const payload = JSON.parse(hookState.requests[0].body);
+  assert.equal(payload.firing_id, firings[0].id); // resend-stable dedupe key
   assert.equal(payload.alert.name, "settled");
   assert.equal(payload.board, boardId);
   assert.equal(payload.entity_count, 2);
@@ -445,11 +447,71 @@ test("test-fire sends a sample payload and reports the verdict", async () => {
   assert.equal(hookState.requests.length, 1);
   const payload = JSON.parse(hookState.requests[0].body);
   assert.equal(payload.test, true);
+  assert.equal(payload.firing_id, undefined); // a sample has no firing row
   assert.equal(payload.alert.name, "testfire");
 
   const bare = await makeAlert({ name: "no-hook", condition: { kind: ["a"] } });
   const r2 = await req(base, "POST", `/api/alerts/${bare.id}/test`, { sid: admin.sid });
   assert.equal(r2.status, 400);
+});
+
+test("a merged-away match delivers a link to the card that now holds the content", async () => {
+  const alert = await makeAlert({ name: "merge-links", condition: { color: ["red"], kind: ["b"] }, webhook_url: hookUrl });
+  // E matches and sits pending; T doesn't match on its own.
+  const e = await taggedEntity(["color/red", "kind/b"]);
+  const t = await taggedEntity(["kind/a"]);
+  // The extract leg merges E's instance into T; emptied, E is deleted. The
+  // match row keeps the recorded entity_id and frozen label.
+  const { rows: [target] } = await db.query("SELECT id, identity, display_name FROM entities WHERE id=$1", [t.id]);
+  await reparentInstance(db, e.instanceId, target, target.display_name, e.id);
+  assert.equal((await db.query("SELECT 1 FROM entities WHERE id=$1", [e.id])).rowCount, 0);
+
+  hookState.requests.length = 0;
+  process.env.BASE_URL = "http://x.local";
+  try {
+    await backdate(alert.id, 120000);
+    await deliverDueAlerts(db);
+  } finally {
+    process.env.BASE_URL = "";
+  }
+  assert.equal(hookState.requests.length, 1);
+  const payload = JSON.parse(hookState.requests[0].body);
+  assert.equal(payload.entities.length, 1);
+  assert.equal(payload.entities[0].id, e.id); // the recorded fact
+  assert.ok(payload.entities[0].label); // frozen at match time
+  assert.equal(payload.entities[0].url, `http://x.local/?board=${boardId}&item=${t.id}`); // the living card
+
+  // The ?event= view follows the merge too.
+  const firingId = (await firingsOf(alert.id))[0].id;
+  const ev = await req(base, "GET", `/api/alert-firings/${firingId}`, { sid: admin.sid });
+  assert.deepEqual(ev.json.entityIds, [t.id]);
+});
+
+test("a hard-deleted match keeps its frozen label but drops the link", async () => {
+  const alert = await makeAlert({ name: "gone-links", condition: { color: ["blue"], kind: ["b"] }, webhook_url: hookUrl });
+  const e = await taggedEntity(["color/blue", "kind/b"]);
+  await db.query("DELETE FROM items WHERE id=$1", [e.instanceId]);
+  await db.query("DELETE FROM entities WHERE id=$1", [e.id]);
+
+  hookState.requests.length = 0;
+  process.env.BASE_URL = "http://x.local";
+  try {
+    await backdate(alert.id, 120000);
+    await deliverDueAlerts(db);
+  } finally {
+    process.env.BASE_URL = "";
+  }
+  assert.equal(hookState.requests.length, 1);
+  const payload = JSON.parse(hookState.requests[0].body);
+  assert.equal(payload.entities.length, 1);
+  assert.equal(payload.entities[0].id, e.id);
+  assert.ok(payload.entities[0].label); // the payload still says WHAT it was
+  assert.equal(payload.entities[0].url, undefined); // no link into an empty hunt
+
+  const firingId = (await firingsOf(alert.id))[0].id;
+  const ev = await req(base, "GET", `/api/alert-firings/${firingId}`, { sid: admin.sid });
+  assert.deepEqual(ev.json.entityIds, []); // dropped from the view; the count keeps the original truth
+  assert.equal(ev.json.firing.entity_count, 1);
 });
 
 // --- the API: validation, ownership, history ---
@@ -511,8 +573,9 @@ test("history: unseen counts, seen acknowledgement, and the ?event= fetch by boa
 
   const firings = await req(base, "GET", `/api/alerts/${alert.id}/firings`, { sid: admin.sid });
   assert.equal(firings.status, 200);
-  assert.equal(firings.json.length, 1);
-  const firingId = firings.json[0].id;
+  assert.equal(firings.json.firings.length, 1);
+  assert.equal(firings.json.nextCursor, null); // one row, no more pages
+  const firingId = firings.json.firings[0].id;
 
   await req(base, "POST", `/api/alerts/${alert.id}/seen`, { sid: admin.sid });
   const after = await req(base, "GET", `/api/alerts?board=${boardId}`, { sid: admin.sid });
@@ -526,6 +589,54 @@ test("history: unseen counts, seen acknowledgement, and the ?event= fetch by boa
   assert.deepEqual(asMember.json.entityIds, [entityId]);
   const asOutsider = await req(base, "GET", `/api/alert-firings/${firingId}`, { sid: outsider.sid });
   assert.equal(asOutsider.status, 404);
+});
+
+test("firing history pages on a keyset cursor, newest first", async () => {
+  const alert = await makeAlert({ name: "paged", condition: { color: ["blue"], kind: ["a"] } });
+  // Three firings, one per settle cycle.
+  for (let i = 0; i < 3; i++) {
+    await taggedEntity(["color/blue", "kind/a"]);
+    await backdate(alert.id, 120000);
+    await deliverDueAlerts(db);
+  }
+  assert.equal((await firingsOf(alert.id)).length, 3);
+
+  const page1 = await req(base, "GET", `/api/alerts/${alert.id}/firings?limit=2`, { sid: admin.sid });
+  assert.equal(page1.status, 200);
+  assert.equal(page1.json.firings.length, 2);
+  assert.ok(page1.json.nextCursor); // exactly full — more behind it
+
+  const page2 = await req(base, "GET", `/api/alerts/${alert.id}/firings?limit=2&after=${page1.json.nextCursor}`, { sid: admin.sid });
+  assert.equal(page2.status, 200);
+  assert.equal(page2.json.firings.length, 1);
+  assert.equal(page2.json.nextCursor, null); // short page — the well is dry
+
+  // Newest first across the walk, no overlap between pages.
+  const walked = [...page1.json.firings, ...page2.json.firings];
+  assert.equal(new Set(walked.map((f) => f.id)).size, 3);
+  for (let i = 1; i < walked.length; i++) {
+    assert.ok(walked[i - 1].fired_at > walked[i].fired_at
+      || (walked[i - 1].fired_at === walked[i].fired_at && walked[i - 1].id > walked[i].id));
+  }
+});
+
+test("the unseen badge counts new MATCHES across unseen firings, not firings", async () => {
+  const alert = await makeAlert({ name: "badge-sum", condition: { kind: ["b"], color: ["blue"] } });
+  // Firing one carries two entities, firing two carries one more.
+  await taggedEntity(["kind/b", "color/blue"]);
+  await taggedEntity(["kind/b", "color/blue"]);
+  await backdate(alert.id, 120000);
+  await deliverDueAlerts(db);
+  await taggedEntity(["kind/b", "color/blue"]);
+  await backdate(alert.id, 120000);
+  await deliverDueAlerts(db);
+  assert.equal((await firingsOf(alert.id)).length, 2);
+
+  // "3" — the number of new items the user is owed. A COUNT(firings)
+  // regression would say 2; a single-entity single-firing test can't tell
+  // the two apart, which is why this one exists.
+  const list = await req(base, "GET", `/api/alerts?board=${boardId}`, { sid: admin.sid });
+  assert.equal(list.json.find((a) => a.id === alert.id).unseen, 3);
 });
 
 test("an alert goes dormant when its owner loses board access, and resumes when re-added", async () => {
@@ -579,6 +690,53 @@ test("edit recomputes the daily stamp and can clear the webhook", async () => {
   assert.equal(row2.next_delivery_at, null);
   assert.equal(row2.webhook_url, null);
   assert.equal(row2.webhook_secret, null);
+});
+
+test("an unrelated edit leaves the daily stamp alone — an overdue digest isn't skipped", async () => {
+  const alert = await makeAlert({ name: "steady-digest", condition: { kind: ["a"] }, delivery: "daily", daily_at: "09:00", webhook_url: hookUrl });
+  // The digest is overdue — the worker was down over the due minute.
+  const overdue = Date.now() - 60000;
+  await db.query("UPDATE alerts SET next_delivery_at=$2 WHERE id=$1", [alert.id, overdue]);
+
+  // Rename + webhook tweak: the schedule didn't change, so the stamp must
+  // not move — recomputing from "now" would push today's digest to tomorrow.
+  const r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { name: "steady digest", webhook_url: hookUrl + "?v2" } });
+  assert.equal(r.status, 200, r.text);
+  let { rows: [row] } = await db.query("SELECT next_delivery_at FROM alerts WHERE id=$1", [alert.id]);
+  assert.equal(row.next_delivery_at, overdue);
+
+  // Pause/resume is schedule-neutral too — the overdue digest stays the
+  // sweep's to resolve on resume, like a dormancy thaw.
+  await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { enabled: false } });
+  await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { enabled: true } });
+  ({ rows: [row] } = await db.query("SELECT next_delivery_at FROM alerts WHERE id=$1", [alert.id]));
+  assert.equal(row.next_delivery_at, overdue);
+
+  // Changing the time IS a schedule change: re-arm to its next occurrence.
+  const r2 = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { daily_at: "23:58" } });
+  assert.equal(r2.status, 200, r2.text);
+  ({ rows: [row] } = await db.query("SELECT next_delivery_at FROM alerts WHERE id=$1", [alert.id]));
+  assert.ok(row.next_delivery_at > Date.now());
+});
+
+test("switching delivery away from daily and back remembers the digest time", async () => {
+  const alert = await makeAlert({ name: "remembers", condition: { kind: ["a"] }, delivery: "daily", daily_at: "07:45" });
+
+  // The modal omits daily_at on non-daily saves — absent means keep (the
+  // secret pattern), so the time is remembered while nothing is scheduled.
+  let r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { delivery: "immediate" } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.alert.daily_at, "07:45");
+  let { rows: [row] } = await db.query("SELECT daily_at_min, next_delivery_at FROM alerts WHERE id=$1", [alert.id]);
+  assert.equal(row.daily_at_min, 7 * 60 + 45);
+  assert.equal(row.next_delivery_at, null);
+
+  // Back to daily with no time sent: the remembered HH:MM re-arms.
+  r = await req(base, "PATCH", `/api/alerts/${alert.id}`, { sid: admin.sid, body: { delivery: "daily" } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.alert.daily_at, "07:45");
+  ({ rows: [row] } = await db.query("SELECT next_delivery_at FROM alerts WHERE id=$1", [alert.id]));
+  assert.ok(row.next_delivery_at > Date.now());
 });
 
 test("migration 0024 heals a pre-baseline alert by seeding today's matching set", async () => {

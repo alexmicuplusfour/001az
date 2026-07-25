@@ -2294,9 +2294,21 @@ export async function stampFiringWebhook(db, id, status, error, retryAt = null) 
   );
 }
 
+// A firing's matches, each resolved to where its content lives NOW: entities
+// merge (the instance re-parents, the emptied entity is deleted), and a
+// match can outlive its recorded entity_id. live_entity_id is the card a
+// link should open — the recorded entity while it exists, else the
+// triggering instance's current parent, else NULL (hard-deleted: label-only
+// in the payload, absent from the ?event= view). Resolved at read time, so
+// a webhook retry can even heal a link that was dead a tick earlier.
 export async function firingMatches(db, firingId) {
   const { rows } = await db.query(
-    "SELECT entity_id, item_id, label, matched_at FROM alert_matches WHERE firing_id=$1 ORDER BY matched_at ASC, entity_id ASC",
+    `SELECT m.entity_id, m.item_id, m.label, m.matched_at,
+       COALESCE(e.id, i.entity_id) AS live_entity_id
+     FROM alert_matches m
+       LEFT JOIN entities e ON e.id = m.entity_id
+       LEFT JOIN items i ON i.id = m.item_id
+     WHERE m.firing_id=$1 ORDER BY m.matched_at ASC, m.entity_id ASC`,
     [firingId]
   );
   return rows;
@@ -2357,13 +2369,28 @@ export async function deleteAlert(db, userId, id) {
   return result.rowCount > 0;
 }
 
-export async function listAlertFirings(db, alertId, limit = 50) {
+// History page for the alert modal: newest first, keyset on (fired_at, id) —
+// the listJobLog cursor pattern ("at_id"). nextCursor only on an exactly-full
+// page, so the client's Load more knows when the well is dry.
+export async function listAlertFirings(db, alertId, { after = null, limit = 50 } = {}) {
+  const cond = ["alert_id=$1"];
+  const args = [alertId];
+  if (after) {
+    const [at, id] = String(after).split("_").map(Number);
+    if (Number.isFinite(at) && Number.isFinite(id)) {
+      args.push(at, id);
+      cond.push(`(fired_at, id) < ($${args.length - 1}, $${args.length})`);
+    }
+  }
+  args.push(limit);
   const { rows } = await db.query(
     `SELECT id, fired_at, entity_count, webhook_status, webhook_error, seen
-     FROM alert_firings WHERE alert_id=$1 ORDER BY fired_at DESC, id DESC LIMIT $2`,
-    [alertId, limit]
+       FROM alert_firings WHERE ${cond.join(" AND ")}
+      ORDER BY fired_at DESC, id DESC LIMIT $${args.length}`,
+    args
   );
-  return rows;
+  const last = rows[rows.length - 1];
+  return { firings: rows, nextCursor: rows.length === limit ? `${last.fired_at}_${last.id}` : null };
 }
 
 // A firing with its alert's board/owner — auth happens at the route: board

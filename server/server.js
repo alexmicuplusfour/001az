@@ -290,6 +290,13 @@ app.get("/api/me", (req, res) => {
     name: req.user.name,
     is_admin: !!req.user.is_admin,
     needs_password: !req.user.password_hash,
+    // The server's clock identity. Daily stamps (alert digests, the
+    // ingestion daily trigger) are computed in server-local time
+    // (nextDailyAt/nextIngestRunAt), and a Docker host is usually UTC while
+    // the person is not — the client shows the delta instead of letting
+    // "09:00" silently mean some other hour.
+    server_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    server_tz_offset_min: -new Date().getTimezoneOffset(),
   } : null);
 });
 
@@ -526,11 +533,20 @@ function parseAlertBody(body, base) {
 
   const enabled = b.enabled !== undefined ? !!b.enabled : (base.enabled ?? true);
 
+  // Daily delivery runs off its stamp, and the stamp moves only when the
+  // SCHEDULE does (delivery mode or HH:MM — a changed time must re-arm to
+  // its next occurrence). A rename, webhook tweak or pause/resume keeps it:
+  // recomputing from "now" would silently push an overdue digest — worker
+  // mid-outage, or the edit racing the due minute — to tomorrow. An overdue
+  // stamp is the sweep's to resolve (fire what's pending, re-arm), not the
+  // editor's.
+  const scheduleChanged =
+    delivery !== (base.delivery || "immediate") || dailyAtMin !== (base.daily_at_min ?? null);
+
   return {
     name, condition, delivery, daily_at_min: dailyAtMin,
-    // Daily delivery runs off its stamp; anything else settles. Recomputed on
-    // every edit — a changed HH:MM must move the pending stamp too.
-    next_delivery_at: delivery === "daily" ? nextDailyAt(dailyAtMin) : null,
+    next_delivery_at: delivery !== "daily" ? null
+      : (scheduleChanged || base.next_delivery_at == null) ? nextDailyAt(dailyAtMin) : base.next_delivery_at,
     webhook_url: webhookUrl, webhook_secret: webhookSecret, enabled,
   };
 }
@@ -585,7 +601,8 @@ app.delete("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
 app.get("/api/alerts/:id/firings", requireAuth, wrap(async (req, res) => {
   const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
   if (!alert) return res.status(404).json({ error: "not found" });
-  res.json(await listAlertFirings(db, alert.id));
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  res.json(await listAlertFirings(db, alert.id, { after: req.query.after || null, limit }));
 }));
 
 // Opening the history modal is the acknowledgement — one call, not per-row.
@@ -603,7 +620,7 @@ app.post("/api/alerts/:id/test", requireAuth, wrap(async (req, res) => {
   const result = await sendAlertWebhook(
     { id: null, alert_id: alert.id, name: alert.name, board_id: alert.board_id, condition: alert.condition,
       fired_at: Date.now(), entity_count: 1, webhook_url: alert.webhook_url, webhook_secret: alert.webhook_secret },
-    [{ entity_id: 0, label: "Sample entity", item_id: 0, matched_at: Date.now() }],
+    [{ entity_id: 0, live_entity_id: 0, label: "Sample entity", item_id: 0, matched_at: Date.now() }],
     { test: true }
   );
   res.json(result);
@@ -621,7 +638,10 @@ app.get("/api/alert-firings/:id", requireAuth, wrap(async (req, res) => {
       id: firing.id, alert_id: firing.alert_id, name: firing.name, board_id: firing.board_id,
       fired_at: firing.fired_at, entity_count: firing.entity_count,
     },
-    entityIds: matches.map((m) => m.entity_id),
+    // Where the content lives now — a merged-away match follows its instance
+    // to its current card; hard-deleted ones drop out (the chip's count
+    // still states the original truth).
+    entityIds: [...new Set(matches.map((m) => m.live_entity_id).filter((id) => id != null))],
   });
 }));
 

@@ -104,7 +104,7 @@ CREATE TABLE alerts (
   name             TEXT NOT NULL,
   condition        JSONB NOT NULL DEFAULT '{}',  -- { facetKey: [values] }, ≥1 facet enforced at API
   delivery         TEXT NOT NULL DEFAULT 'immediate',  -- 'immediate' | 'daily' | 'record'
-  daily_at_min     INTEGER,                      -- minutes-of-day, delivery='daily' only
+  daily_at_min     INTEGER,                      -- minutes-of-day; kept across delivery switches (the remembered digest time)
   next_delivery_at BIGINT,                       -- daily: next due; stamped after each run
   webhook_url      TEXT,                         -- NULL for record-only
   webhook_secret   TEXT,                         -- optional; X-Alert-Signature HMAC-SHA256 when set
@@ -197,7 +197,11 @@ additionally capped per pass):
   500-file drop into one notification instead of 500, with bounded latency.
 - **daily** — when `now >= next_delivery_at`: group whatever is pending (if
   nothing, skip — no empty notifications), stamp the next run via a
-  `nextIngestRunAt`-style daily computation from `daily_at_min`.
+  `nextIngestRunAt`-style daily computation from `daily_at_min`. Edits move
+  the stamp only when the schedule itself changes (mode or HH:MM) — a rename
+  or pause/resume keeps it, so an unrelated edit can't silently push an
+  overdue digest to tomorrow; the sweep resolves overdue stamps (fire
+  what's pending, re-arm).
 - **record** — same settle grouping (uniform history and `?event=` links),
   `webhook_status` stays NULL, no send.
 
@@ -213,10 +217,15 @@ failure) — then `failed` with the error recorded: transparency over
 cleverness, the history row is the receipt. Delivery is gated on `enabled`
 like grouping is — off freezes a pending send mid-retry, re-enable thaws it
 (the dormancy stance, one toggle down). When `webhook_secret` is set,
-`X-Alert-Signature: sha256=<hmac of body>`.
+`X-Alert-Signature: sha256=<hmac of body>`. Delivery is **at-least-once**:
+the sweep sends, then stamps — a crash between the two resends the firing
+next tick, because the reverse order would turn the same crash into a
+silently lost alert. `firing_id` (and `fired_at`) are stable across resends;
+an idempotent receiver dedupes on them.
 
 ```json
 {
+  "firing_id": 93,
   "alert": { "id": 7, "name": "new logos" },
   "board": "abc",
   "fired_at": 1785000000000,
@@ -267,13 +276,18 @@ recording, HMAC, test-fire — webhook target is an in-test `http.createServer`.
   modal.js): condition prefilled from `state.selected`, rendered as the
   tag-editor's facet pill groups (tag-editor.js) read-only-with-remove; name,
   delivery mode (immediate / daily at HH:MM / record only), webhook URL +
-  optional secret + Test button. The pencil reopens the same modal — "rename"
+  optional secret + Test button. The daily hint names the server's clock
+  (zone, current time, offset) when it disagrees with the viewer's — the
+  stamp is server-local (a Docker host is usually UTC), and "09:00" must
+  not silently mean some other hour; /api/me carries the server's tz. The pencil reopens the same modal — "rename"
   is just the name field, and the webhook/mode need an edit surface anyway;
   a bespoke inline rename would strand them.
 - **History modal** (jobs-modal layout, jobs-modal.js): one row per firing —
   fired_at, entity count, webhook status (failed shows the error text —
   everything for everyone). Row click → gallery `?event=<firingId>` (Stage 4's
-  chip) and closes the modal. Opening marks the alert's firings seen.
+  chip) and closes the modal. Opening marks the alert's firings seen. History
+  pages on the jobs-modal keyset cursor (`fired_at_id`, Load more while a
+  cursor comes back) — a long-lived alert's log is never silently capped.
 - Alerts + unseen counts fetched with the boot `Promise.all` (app.js:54).
 
 ## Stage 4 — gallery as the alert viewer
@@ -282,8 +296,11 @@ recording, HMAC, test-fire — webhook target is an in-test `http.createServer`.
   `/api/alert-firings/:id`, sets `state.alertEventIds` (a Set) + a dismissible
   chip ("⚠ new logos — 12 new"); `taggedFiltered()` gains one clause beside
   `selectedCrateId` (filters.js:59); include it in `filterKey()` (filters.js:14).
-  Deleted entities in an old firing simply don't render — the chip count states
-  the original truth.
+  Matches follow the content (firingMatches.live_entity_id): a merged-away
+  entity's view row and webhook link point at the card its instance now
+  lives under, resolved at read time. Only hard-deleted entities drop out of
+  the view and lose their link (the payload keeps the frozen label) — and
+  the chip count still states the original truth.
 - **`?item=<entityId>`** — after boot, open the lightbox on that entity. Small,
   generally useful, and it's what makes per-entity webhook links land somewhere.
 - Unseen-count refresh (the plus-caret dot and the dropdown row badges)

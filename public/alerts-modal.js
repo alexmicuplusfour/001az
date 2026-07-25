@@ -114,6 +114,25 @@ const DELIVERY_HINTS = {
   record: "No notification — matches only show up in the alert's history here.",
 };
 
+// "09:00" is the SERVER's 09:00 — the daily stamp is computed in
+// server-local time (nextDailyAt; the ingestion daily trigger works the
+// same), and a Docker host is usually UTC while the person is not. When the
+// two wall clocks agree this says nothing; when they differ, it names the
+// server's zone, its current time, and the offset — enough to pick the hour
+// without doing timezone arithmetic blind.
+function serverClockNote() {
+  const off = state.me?.server_tz_offset_min;
+  if (off == null) return "";
+  const diff = off + new Date().getTimezoneOffset(); // server minus you, in minutes
+  if (!diff) return "";
+  const wall = new Date(Date.now() + off * 60000);
+  const hhmm = `${String(wall.getUTCHours()).padStart(2, "0")}:${String(wall.getUTCMinutes()).padStart(2, "0")}`;
+  const mins = Math.abs(diff);
+  const span = [Math.floor(mins / 60) ? `${Math.floor(mins / 60)}h` : "", mins % 60 ? `${mins % 60}m` : ""].filter(Boolean).join(" ");
+  const zone = state.me?.server_tz ? ` (${state.me.server_tz})` : "";
+  return ` The time is the server's clock${zone} — now ${hhmm}, ${span} ${diff > 0 ? "ahead of" : "behind"} you.`;
+}
+
 export function openAlertEditor(existing) {
   const isNew = !existing;
   // The condition starts as the current pills (create) or the stored one
@@ -229,7 +248,7 @@ export function openAlertEditor(existing) {
   delHint.className = "im-hint";
   const syncDelivery = () => {
     atInput.style.display = modeSel.value === "daily" ? "" : "none";
-    delHint.textContent = DELIVERY_HINTS[modeSel.value];
+    delHint.textContent = DELIVERY_HINTS[modeSel.value] + (modeSel.value === "daily" ? serverClockNote() : "");
   };
   modeSel.addEventListener("change", syncDelivery);
   syncDelivery();
@@ -338,7 +357,9 @@ export function openAlertEditor(existing) {
       name,
       condition,
       delivery: modeSel.value,
-      daily_at: modeSel.value === "daily" ? atInput.value : null,
+      // daily_at only travels on daily saves — absent means keep (the secret
+      // pattern), so flipping to immediate and back doesn't forget the HH:MM.
+      ...(modeSel.value === "daily" ? { daily_at: atInput.value } : {}),
       webhook_url: urlInput.value.trim(),
       enabled,
     };
@@ -402,34 +423,61 @@ export function openAlertHistory(alert) {
   };
   note("Loading…");
   body.appendChild(list);
+  // Load more — the jobs-modal pattern: keyset pages append, the button shows
+  // while the server still hands back a cursor. (display, not [hidden]:
+  // .tool-btn's display out-specifies the UA's [hidden] rule.)
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "tool-btn jobs-more";
+  more.textContent = "Load more";
+  more.style.display = "none";
+  body.appendChild(more);
 
   const HOOK_LABELS = { ok: "sent", failed: "webhook failed", pending: "sending…" };
-  fetch(`/api/alerts/${alert.id}/firings`, { cache: "no-store" })
-    .then((r) => (r.ok ? r.json() : Promise.reject()))
-    .then((firings) => {
-      if (!firings.length) return note("Nothing yet — new matches appear here as they arrive.");
-      list.replaceChildren();
-      for (const f of firings) {
-        const row = document.createElement("div");
-        row.className = "job-row al-firing" + (f.seen ? "" : " al-new");
-        row.title = "Show these items in the gallery";
-        const label = document.createElement("span");
-        label.className = "job-label";
-        label.textContent = `${f.entity_count} new item${f.entity_count === 1 ? "" : "s"}`;
-        const status = document.createElement("span");
-        status.className = "job-outcome" + (f.webhook_status === "failed" ? " job-outcome-failed" : "");
-        status.textContent = f.webhook_status ? (HOOK_LABELS[f.webhook_status] || f.webhook_status) : "recorded";
-        if (f.webhook_error) status.title = f.webhook_error;
-        const when = document.createElement("span");
-        when.className = "job-when";
-        when.textContent = relTime(f.fired_at);
-        when.title = new Date(f.fired_at).toLocaleString();
-        row.append(label, status, when);
-        row.addEventListener("click", () => { close(); openAlertEvent(f.id); });
-        list.appendChild(row);
-      }
-    })
-    .catch(() => note("Failed to load the history."));
+  function firingRow(f) {
+    const row = document.createElement("div");
+    row.className = "job-row al-firing" + (f.seen ? "" : " al-new");
+    row.title = "Show these items in the gallery";
+    const label = document.createElement("span");
+    label.className = "job-label";
+    label.textContent = `${f.entity_count} new item${f.entity_count === 1 ? "" : "s"}`;
+    const status = document.createElement("span");
+    status.className = "job-outcome" + (f.webhook_status === "failed" ? " job-outcome-failed" : "");
+    status.textContent = f.webhook_status ? (HOOK_LABELS[f.webhook_status] || f.webhook_status) : "recorded";
+    if (f.webhook_error) status.title = f.webhook_error;
+    const when = document.createElement("span");
+    when.className = "job-when";
+    when.textContent = relTime(f.fired_at);
+    when.title = new Date(f.fired_at).toLocaleString();
+    row.append(label, status, when);
+    row.addEventListener("click", () => { close(); openAlertEvent(f.id); });
+    return row;
+  }
+
+  let firings = [];
+  let cursor = null;
+  function render() {
+    if (!firings.length) return note("Nothing yet — new matches appear here as they arrive.");
+    list.replaceChildren();
+    for (const f of firings) list.appendChild(firingRow(f));
+    more.style.display = cursor ? "" : "none";
+  }
+  async function load() {
+    const params = new URLSearchParams();
+    if (cursor) params.set("after", cursor);
+    const r = await fetch(`/api/alerts/${alert.id}/firings?${params}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(String(r.status));
+    const data = await r.json();
+    firings = firings.concat(data.firings);
+    cursor = data.nextCursor;
+    render();
+  }
+  load().catch(() => note("Failed to load the history."));
+  more.addEventListener("click", async () => {
+    more.disabled = true; // one page per click — a double-click must not fetch the same cursor twice
+    try { await load(); } catch { /* the button stays; another click retries */ }
+    more.disabled = false;
+  });
 
   // The living view: everything currently matching, not just a firing's delta.
   const viewBtn = document.createElement("button");

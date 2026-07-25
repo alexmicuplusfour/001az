@@ -138,14 +138,23 @@ export function buildFiringPayload(target, entities, { test = false } = {}) {
   const base = appUrl();
   const payload = {
     ...(test ? { test: true } : {}),
+    // The dedupe key for idempotent receivers: delivery is at-least-once
+    // (see the send loop), and firing_id + fired_at are stable across
+    // resends. Absent only on test-fires, which have no firing row.
+    ...(target.id != null ? { firing_id: target.id } : {}),
     alert: { id: target.alert_id, name: target.name },
     board: target.board_id,
     fired_at: target.fired_at,
     entity_count: target.entity_count,
+    // id is the recorded fact; the url follows the content — live_entity_id
+    // tracks a merge to the card that now holds it, and a hard-deleted match
+    // keeps its frozen label but carries no link to hunt for.
     entities: entities.slice(0, PAYLOAD_ENTITY_CAP).map((e) => ({
       id: e.entity_id,
       label: e.label,
-      ...(base ? { url: `${base}/?board=${encodeURIComponent(target.board_id)}&item=${e.entity_id}` } : {}),
+      ...(base && e.live_entity_id != null
+        ? { url: `${base}/?board=${encodeURIComponent(target.board_id)}&item=${e.live_entity_id}` }
+        : {}),
     })),
   };
   if (base) {
@@ -201,6 +210,11 @@ export async function deliverDueAlerts(db, now = Date.now()) {
     // would deliver the moment a match landed, at whatever time that is.
     await setAlertNextDelivery(db, a.id, nextDailyAt(a.daily_at_min, now));
   }
+  // Send-then-stamp: a crash between the two resends this firing on the next
+  // sweep — at-least-once, deliberately. Stamp-then-send would turn the same
+  // crash into a silently LOST delivery, and for an alerting system a
+  // repeated notification beats a missing one. Receivers that care dedupe on
+  // payload.firing_id, which is stable across resends.
   for (const f of await pendingWebhookFirings(db, now)) {
     const { ok, error } = await sendAlertWebhook(f, await firingMatches(db, f.id));
     if (ok) {

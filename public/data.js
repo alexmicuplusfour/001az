@@ -153,11 +153,14 @@ async function refreshTokens() {
 
 // Alert firings happen server-side (the worker sweep), so unseen counts only
 // move while arrivals do — exactly when we're already polling. Piggyback the
-// tick, throttled: the counts drive an ambient dot, not a live feed. Skipped
-// entirely for users with no alerts on the board.
+// tick, throttled: the counts drive an ambient dot, not a live feed. No
+// zero-alert skip: this poll is also how a tab DISCOVERS alerts — a first
+// alert created in another tab (or missed by a failed boot fetch) must still
+// light the dot here, and what the skip saved was one owner-scoped SELECT
+// every 30s.
 let alertsFetchAt = 0;
 async function refreshAlerts() {
-  if (!state.boardId || !state.alerts.length) return;
+  if (!state.boardId) return;
   if (Date.now() - alertsFetchAt < 30000) return;
   alertsFetchAt = Date.now();
   try {
