@@ -136,6 +136,18 @@
   align-items: center;
 }
 
+/* leading row icon (e.g. the bell on alert rows) */
+.dd-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  line-height: 0;
+  color: #8a90a0;
+}
+.dd-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
 /* new-matches count on an alert row */
 .dd-unseen {
   flex-shrink: 0;

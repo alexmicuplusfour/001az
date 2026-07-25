@@ -68,8 +68,12 @@ export function appendAlertMenu(body, close) {
       }
     });
     actions.append(edit, del);
+    const icon = document.createElement("span");
+    icon.className = "dd-icon";
+    icon.innerHTML = ICONS.bell;
     const row = ddRow({
       label: a.name,
+      leading: icon,
       trailing: actions,
       onClick: () => { close(); openAlertHistory(a); },
     });
