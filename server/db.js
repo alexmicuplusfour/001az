@@ -2121,3 +2121,228 @@ export async function cancelBoardQueue(db, boardId) {
   });
 }
 
+// --- alerts (watched facet conditions; the matcher and sweep live in alerts.js) ---
+
+// Every alert query below carries the owner-access clause: an alert whose
+// owner has been removed from the board goes dormant — it stops matching AND
+// stops delivering (a webhook is an open pipe out of the board; revoking
+// membership must close it, not just the UI). Matches and pending firings
+// freeze in place and resume if the owner is re-added.
+const ALERT_OWNER_ACCESS = `(
+  (SELECT u.is_admin FROM users u WHERE u.id = a.user_id)
+  OR EXISTS (SELECT 1 FROM board_members bm WHERE bm.board_id = a.board_id AND bm.user_id = a.user_id)
+)`;
+
+export async function boardAlerts(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT a.id, a.condition FROM alerts a WHERE a.board_id=$1 AND a.enabled AND ${ALERT_OWNER_ACCESS}`,
+    [boardId]
+  );
+  return rows;
+}
+
+// The entity as the matcher sees it: the union tag set across instances (the
+// listItems union stance — what the grid filters on) plus a display label to
+// freeze into the match row. Label preference mirrors legLog's: display_name
+// (connector/derived), else the first instance's original filename — for
+// uploads the identity is the vestigial STORED name nobody recognizes.
+export async function entityForAlerts(db, entityId) {
+  const { rows: [ent] } = await db.query(
+    `SELECT e.display_name, e.identity,
+       (SELECT i.payload->'files'->0->>'original_name' FROM items i
+         WHERE i.entity_id = e.id ORDER BY i.created_at ASC, i.id ASC LIMIT 1) AS first_file
+     FROM entities e WHERE e.id=$1`,
+    [entityId]
+  );
+  if (!ent) return null;
+  const { rows: insts } = await db.query("SELECT tags FROM items WHERE entity_id=$1", [entityId]);
+  const tagSet = new Set();
+  for (const r of insts) for (const t of r.tags || []) tagSet.add(t);
+  return { tagSet, label: ent.display_name || ent.first_file || ent.identity || null };
+}
+
+export async function getItemEntity(db, id) {
+  const { rows } = await db.query("SELECT board_id, entity_id FROM items WHERE id=$1", [id]);
+  return rows[0] || null;
+}
+
+// The once-only dedupe: (alert_id, entity_id) is the primary key, so an
+// entity that already fired this alert inserts nothing. Returns whether the
+// match is new.
+export async function addAlertMatch(db, alertId, entityId, itemId, label) {
+  const { rowCount } = await db.query(
+    `INSERT INTO alert_matches (alert_id, entity_id, item_id, label, matched_at)
+     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (alert_id, entity_id) DO NOTHING`,
+    [alertId, entityId, itemId, label, Date.now()]
+  );
+  return rowCount > 0;
+}
+
+// Alerts holding ungrouped matches, with the window stats the settle logic
+// reads (deliverDueAlerts). Daily alerts are excluded — their grouping is
+// stamp-driven, not settle-driven (dueDailyAlerts below).
+export async function alertsWithPendingMatches(db) {
+  const { rows } = await db.query(
+    `SELECT a.id, a.delivery, a.webhook_url,
+       COUNT(*)::int AS pending, MIN(m.matched_at) AS oldest, MAX(m.matched_at) AS newest
+     FROM alerts a JOIN alert_matches m ON m.alert_id = a.id AND m.firing_id IS NULL
+     WHERE a.enabled AND a.delivery != 'daily' AND ${ALERT_OWNER_ACCESS}
+     GROUP BY a.id`
+  );
+  return rows;
+}
+
+// Daily alerts whose stamp has passed, with their pending-match count. The
+// sweep re-arms next_delivery_at for every row returned — matches or not —
+// so an overdue stamp can't turn into fire-on-next-match.
+export async function dueDailyAlerts(db, now) {
+  const { rows } = await db.query(
+    `SELECT a.id, a.daily_at_min, a.webhook_url,
+       (SELECT COUNT(*)::int FROM alert_matches m WHERE m.alert_id = a.id AND m.firing_id IS NULL) AS pending
+     FROM alerts a
+     WHERE a.enabled AND a.delivery = 'daily' AND a.next_delivery_at IS NOT NULL AND a.next_delivery_at <= $1
+       AND ${ALERT_OWNER_ACCESS}`,
+    [now]
+  );
+  return rows;
+}
+
+export async function setAlertNextDelivery(db, id, at) {
+  await db.query("UPDATE alerts SET next_delivery_at=$1 WHERE id=$2", [at, id]);
+}
+
+// Group every pending match into one firing (one tx — a crash can't strand a
+// firing without matches or claim matches into nothing). Returns the firing
+// id, or null when nothing was pending after all.
+export async function createAlertFiring(db, alertId, withWebhook) {
+  return withTx(db, async (client) => {
+    const { rows: [f] } = await client.query(
+      `INSERT INTO alert_firings (alert_id, fired_at, entity_count, webhook_status)
+       VALUES ($1, $2, 0, $3) RETURNING id`,
+      [alertId, Date.now(), withWebhook ? "pending" : null]
+    );
+    const { rowCount } = await client.query(
+      "UPDATE alert_matches SET firing_id=$1 WHERE alert_id=$2 AND firing_id IS NULL",
+      [f.id, alertId]
+    );
+    if (!rowCount) {
+      await client.query("DELETE FROM alert_firings WHERE id=$1", [f.id]);
+      return null;
+    }
+    await client.query("UPDATE alert_firings SET entity_count=$1 WHERE id=$2", [rowCount, f.id]);
+    return f.id;
+  });
+}
+
+// Firings still owed a webhook — one send attempt per sweep pass each, the
+// pass capped so a hung endpoint (attempts × timeout) bounds a single tick.
+export async function pendingWebhookFirings(db, limit = 10) {
+  const { rows } = await db.query(
+    `SELECT f.id, f.alert_id, f.fired_at, f.entity_count, f.attempts,
+       a.name, a.board_id, a.webhook_url, a.webhook_secret, a.condition
+     FROM alert_firings f JOIN alerts a ON a.id = f.alert_id
+     WHERE f.webhook_status = 'pending' AND ${ALERT_OWNER_ACCESS}
+     ORDER BY f.fired_at ASC LIMIT $1`,
+    [limit]
+  );
+  return rows;
+}
+
+export async function stampFiringWebhook(db, id, status, error) {
+  await db.query(
+    "UPDATE alert_firings SET webhook_status=$2, webhook_error=$3, attempts=attempts+1 WHERE id=$1",
+    [id, status, error ? String(error).slice(0, 500) : null]
+  );
+}
+
+export async function firingMatches(db, firingId) {
+  const { rows } = await db.query(
+    "SELECT entity_id, item_id, label, matched_at FROM alert_matches WHERE firing_id=$1 ORDER BY matched_at ASC, entity_id ASC",
+    [firingId]
+  );
+  return rows;
+}
+
+// The owner's alerts on a board, each carrying its unseen-firings count (the
+// dropdown row badge; the client sums them for the caret dot).
+export async function listAlerts(db, userId, boardId) {
+  const { rows } = await db.query(
+    `SELECT a.id, a.name, a.condition, a.delivery, a.daily_at_min, a.webhook_url,
+       (a.webhook_secret IS NOT NULL) AS has_secret, a.enabled,
+       (SELECT COUNT(*)::int FROM alert_firings f WHERE f.alert_id = a.id AND NOT f.seen) AS unseen
+     FROM alerts a WHERE a.user_id=$1 AND a.board_id=$2 ORDER BY a.created_at ASC`,
+    [userId, boardId]
+  );
+  return rows;
+}
+
+export async function getAlertOwned(db, userId, id) {
+  const { rows } = await db.query("SELECT * FROM alerts WHERE id=$1 AND user_id=$2", [id, userId]);
+  return rows[0] || null;
+}
+
+// Duplicate name → null (unlike saveFilterConfig's upsert: silently replacing
+// an alert's webhook under a reused name would be a surprise, not a save).
+export async function createAlert(db, userId, boardId, a) {
+  try {
+    const { rows } = await db.query(
+      `INSERT INTO alerts (user_id, board_id, name, condition, delivery, daily_at_min, next_delivery_at, webhook_url, webhook_secret, enabled, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10) RETURNING id`,
+      [userId, boardId, a.name, JSON.stringify(a.condition), a.delivery, a.daily_at_min, a.next_delivery_at, a.webhook_url, a.webhook_secret, Date.now()]
+    );
+    return rows[0].id;
+  } catch (err) {
+    if (err.code === "23505") return null; // unique_violation on (user, board, name)
+    throw err;
+  }
+}
+
+export async function updateAlert(db, id, a) {
+  try {
+    const { rowCount } = await db.query(
+      `UPDATE alerts SET name=$2, condition=$3, delivery=$4, daily_at_min=$5, next_delivery_at=$6, webhook_url=$7, webhook_secret=$8, enabled=$9
+       WHERE id=$1`,
+      [id, a.name, JSON.stringify(a.condition), a.delivery, a.daily_at_min, a.next_delivery_at, a.webhook_url, a.webhook_secret, a.enabled]
+    );
+    return rowCount > 0;
+  } catch (err) {
+    if (err.code === "23505") return null;
+    throw err;
+  }
+}
+
+export async function deleteAlert(db, userId, id) {
+  const result = await db.query("DELETE FROM alerts WHERE id=$1 AND user_id=$2", [id, userId]);
+  return result.rowCount > 0;
+}
+
+export async function listAlertFirings(db, alertId, limit = 50) {
+  const { rows } = await db.query(
+    `SELECT id, fired_at, entity_count, webhook_status, webhook_error, seen
+     FROM alert_firings WHERE alert_id=$1 ORDER BY fired_at DESC, id DESC LIMIT $2`,
+    [alertId, limit]
+  );
+  return rows;
+}
+
+// A firing with its alert's board/owner — auth happens at the route: board
+// ACCESS, not ownership, so a webhook link pasted in a team channel opens
+// for every member of the board.
+export async function getAlertFiring(db, id) {
+  const { rows } = await db.query(
+    `SELECT f.id, f.alert_id, f.fired_at, f.entity_count, f.webhook_status, f.webhook_error,
+       a.name, a.board_id, a.user_id, a.condition
+     FROM alert_firings f JOIN alerts a ON a.id = f.alert_id WHERE f.id=$1`,
+    [id]
+  );
+  return rows[0] || null;
+}
+
+export async function markAlertFiringsSeen(db, userId, alertId) {
+  await db.query(
+    `UPDATE alert_firings f SET seen=TRUE FROM alerts a
+     WHERE f.alert_id=$1 AND a.id=f.alert_id AND a.user_id=$2 AND NOT f.seen`,
+    [alertId, userId]
+  );
+}
+

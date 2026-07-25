@@ -87,6 +87,7 @@ export const ICONS = {
   download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>',
   coin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="14.813" cy="11.997" rx="6.813" ry="9.997"/><path d="M14.654,2h-4.581c-3.762,0-6.813,4.476-6.813,9.997s3.05,9.997,6.813,9.997h4.739"/><line x1="5.195" y1="5.281" x2="9.46" y2="5.281"/><line x1="3.707" y1="9.587" x2="7.972" y2="9.587"/><line x1="3.659" y1="13.894" x2="7.925" y2="13.894"/><line x1="5.055" y1="18.202" x2="9.321" y2="18.202"/></svg>',
   activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
 };
 
 export function actionBtn(icon, cls, title, onClick) {

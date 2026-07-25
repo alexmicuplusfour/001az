@@ -42,6 +42,15 @@ import {
   listFilterConfigs,
   saveFilterConfig,
   deleteFilterConfig,
+  listAlerts,
+  getAlertOwned,
+  createAlert,
+  updateAlert,
+  deleteAlert,
+  listAlertFirings,
+  getAlertFiring,
+  firingMatches,
+  markAlertFiringsSeen,
   createBoard,
   listBoards,
   getBoard,
@@ -107,6 +116,7 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun } from "./worker.js";
+import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt } from "./alerts.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -452,6 +462,152 @@ app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
   if (!(await deleteFilterConfig(db, req.user.id, Number(req.params.id))))
     return res.status(404).json({ error: "not found" });
   res.json({ ok: true });
+}));
+
+// --- alerts (watched facet conditions — per-user like filter configs; the
+// matcher/sweep live in alerts.js, detection hooks at the two tag landings) ---
+
+const ALERT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const alertMin = (hhmm) => { const [h, m] = hhmm.split(":").map(Number); return h * 60 + m; };
+const alertHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+
+// What the client sees: the secret never echoes (has_secret drives the "keep /
+// replace / clear" edit affordance), daily_at travels as "HH:MM".
+const alertJson = (a) => ({
+  id: a.id, name: a.name, condition: a.condition, delivery: a.delivery,
+  daily_at: a.daily_at_min != null ? alertHHMM(a.daily_at_min) : null,
+  webhook_url: a.webhook_url, has_secret: !!a.has_secret, enabled: a.enabled,
+  ...(a.unseen != null ? { unseen: a.unseen } : {}),
+});
+
+// Validate + normalise an alert body over an existing row (POST: empty base).
+// Returns { error } or the full field set updateAlert/createAlert writes.
+// Secret semantics: absent = keep, "" = clear, value = set — has_secret is
+// all the client ever sees, so "absent" must not mean "clear".
+function parseAlertBody(body, base) {
+  const b = body || {};
+  const name = b.name !== undefined ? String(b.name).trim().slice(0, 64) : base.name;
+  if (!name) return { error: "name required" };
+
+  let condition = base.condition || {};
+  if (b.condition !== undefined) {
+    // { facetKey: [values] } — the filter-configs cleaning, ≥1 facet kept.
+    const raw = typeof b.condition === "object" && b.condition && !Array.isArray(b.condition) ? b.condition : {};
+    condition = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (!Array.isArray(v)) continue;
+      const values = v.filter((x) => typeof x === "string").slice(0, 100);
+      if (values.length) condition[String(k).slice(0, 100)] = values;
+    }
+  }
+  if (!Object.keys(condition).length) return { error: "empty condition" };
+
+  const delivery = b.delivery !== undefined ? String(b.delivery) : (base.delivery || "immediate");
+  if (!["immediate", "daily", "record"].includes(delivery)) return { error: "invalid delivery" };
+
+  let dailyAtMin = base.daily_at_min ?? null;
+  if (b.daily_at !== undefined) {
+    if (b.daily_at === null || b.daily_at === "") dailyAtMin = null;
+    else if (ALERT_TIME_RE.test(String(b.daily_at))) dailyAtMin = alertMin(String(b.daily_at));
+    else return { error: "daily_at must be HH:MM" };
+  }
+  if (delivery === "daily" && dailyAtMin == null) return { error: "daily_at required for daily delivery" };
+
+  let webhookUrl = base.webhook_url ?? null;
+  if (b.webhook_url !== undefined) {
+    const url = String(b.webhook_url || "").trim().slice(0, 2048);
+    if (url && !/^https?:\/\//i.test(url)) return { error: "webhook_url must be http(s)" };
+    webhookUrl = url || null;
+  }
+
+  let webhookSecret = base.webhook_secret ?? null;
+  if (b.webhook_secret !== undefined)
+    webhookSecret = String(b.webhook_secret || "").slice(0, 256) || null;
+
+  const enabled = b.enabled !== undefined ? !!b.enabled : (base.enabled ?? true);
+
+  return {
+    name, condition, delivery, daily_at_min: dailyAtMin,
+    // Daily delivery runs off its stamp; anything else settles. Recomputed on
+    // every edit — a changed HH:MM must move the pending stamp too.
+    next_delivery_at: delivery === "daily" ? nextDailyAt(dailyAtMin) : null,
+    webhook_url: webhookUrl, webhook_secret: webhookSecret, enabled,
+  };
+}
+
+app.get("/api/alerts", requireAuth, wrap(async (req, res) => {
+  res.json((await listAlerts(db, req.user.id, req.query.board || "")).map(alertJson));
+}));
+
+app.post("/api/alerts", requireAuth, wrap(async (req, res) => {
+  const boardId = (req.body && req.body.board_id ? String(req.body.board_id) : "").trim();
+  if (!boardId || !(await boardExists(db, boardId)) || !(await canAccessBoard(db, boardId, req.user)))
+    return res.status(404).json({ error: "board not found" });
+  const parsed = parseAlertBody(req.body, {});
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const id = await createAlert(db, req.user.id, boardId, parsed);
+  if (id == null) return res.status(400).json({ error: "an alert with that name already exists" });
+  res.json({ alert: alertJson({ id, ...parsed, has_secret: !!parsed.webhook_secret, unseen: 0 }) });
+}));
+
+app.patch("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
+  const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
+  if (!alert) return res.status(404).json({ error: "not found" });
+  const parsed = parseAlertBody(req.body, alert);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const ok = await updateAlert(db, alert.id, parsed);
+  if (ok == null) return res.status(400).json({ error: "an alert with that name already exists" });
+  if (!ok) return res.status(404).json({ error: "not found" });
+  res.json({ alert: alertJson({ id: alert.id, ...parsed, has_secret: !!parsed.webhook_secret }) });
+}));
+
+app.delete("/api/alerts/:id", requireAuth, wrap(async (req, res) => {
+  if (!(await deleteAlert(db, req.user.id, Number(req.params.id))))
+    return res.status(404).json({ error: "not found" });
+  res.json({ ok: true });
+}));
+
+app.get("/api/alerts/:id/firings", requireAuth, wrap(async (req, res) => {
+  const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
+  if (!alert) return res.status(404).json({ error: "not found" });
+  res.json(await listAlertFirings(db, alert.id));
+}));
+
+// Opening the history modal is the acknowledgement — one call, not per-row.
+app.post("/api/alerts/:id/seen", requireAuth, wrap(async (req, res) => {
+  await markAlertFiringsSeen(db, req.user.id, Number(req.params.id));
+  res.json({ ok: true });
+}));
+
+// Fire a sample payload at the stored URL right now — debugging webhooks
+// blind is miserable. Owner-only; the verdict comes straight back.
+app.post("/api/alerts/:id/test", requireAuth, wrap(async (req, res) => {
+  const alert = await getAlertOwned(db, req.user.id, Number(req.params.id));
+  if (!alert) return res.status(404).json({ error: "not found" });
+  if (!alert.webhook_url) return res.status(400).json({ error: "no webhook url on this alert" });
+  const result = await sendAlertWebhook(
+    { id: null, alert_id: alert.id, name: alert.name, board_id: alert.board_id, condition: alert.condition,
+      fired_at: Date.now(), entity_count: 1, webhook_url: alert.webhook_url, webhook_secret: alert.webhook_secret },
+    [{ entity_id: 0, label: "Sample entity", item_id: 0, matched_at: Date.now() }],
+    { test: true }
+  );
+  res.json(result);
+}));
+
+// The ?event= fetch: a firing plus its matched entity ids. Board ACCESS, not
+// ownership — a webhook link pasted in a team channel opens for every member.
+app.get("/api/alert-firings/:id", requireAuth, wrap(async (req, res) => {
+  const firing = await getAlertFiring(db, Number(req.params.id));
+  if (!firing || !(await canAccessBoard(db, firing.board_id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const matches = await firingMatches(db, firing.id);
+  res.json({
+    firing: {
+      id: firing.id, alert_id: firing.alert_id, name: firing.name, board_id: firing.board_id,
+      fired_at: firing.fired_at, entity_count: firing.entity_count,
+    },
+    entityIds: matches.map((m) => m.entity_id),
+  });
 }));
 
 // --- admin: manage members ---
@@ -1887,6 +2043,8 @@ app.patch("/api/instances/:id/tags", requireAuth, requireItemAccess, wrap(async 
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
   await setItemTags(db, req.itemId, clean);
+  // A human tagging an entity into a watched set is an arrival too.
+  await evaluateItemAlerts(db, req.itemId); // never throws
   res.json({ ok: true, tags: clean });
 }));
 

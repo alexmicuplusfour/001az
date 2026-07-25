@@ -4,7 +4,7 @@ import { ICONS, toolBtn, formatTokens, fmtDuration } from './utils.js';
 import { openJobsModal } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
-import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer } from './filters.js';
+import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
@@ -12,6 +12,8 @@ import { triggerFilePicker } from './upload.js';
 import { openIngestModal } from './ingest-modal.js';
 import { openBoardModal } from './board-modal.js';
 import { openConnectorBrowse } from './connector-browse.js';
+import { appendAlertMenu, appendAlertFooter, alertsUnseen } from './alerts-modal.js';
+import { clearAlertEvent } from './alert-event.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -270,18 +272,31 @@ export function renderToolbar(resultCount) {
       plusWrap.appendChild(plusBtn);
       const plusMenu = document.createElement("button");
       plusMenu.className = "tool-btn plus-caret";
-      plusMenu.title = "More ingestion options";
-      plusMenu.setAttribute("aria-label", "More ingestion options");
+      plusMenu.title = "Ingestion & alerts";
+      plusMenu.setAttribute("aria-label", "Ingestion & alerts");
       plusMenu.innerHTML = ICONS.chevron;
+      // The ambient "an alert fired while you were away" signal — without it
+      // a record-only alert is invisible until you think to look.
+      if (alertsUnseen() > 0) {
+        const dot = document.createElement("span");
+        dot.className = "alert-dot";
+        plusMenu.appendChild(dot);
+      }
       plusMenu.addEventListener("click", () => openDropdown(plusMenu, {
         align: "end",
-        minWidth: 180,
+        minWidth: 200,
         build: (body, { close }) => {
           body.appendChild(ddRow({
             label: "Automatic ingestion…",
             onClick: () => { close(); openIngestModal(); },
           }));
+          appendAlertMenu(body, close);
         },
+        // The create door needs a selection to watch — no pills, no footer
+        // (the body's empty-state hint teaches the flow instead).
+        footer: Object.keys(selectedAsConfig()).length
+          ? (foot, { close }) => appendAlertFooter(foot, close)
+          : undefined,
       }));
       plusWrap.appendChild(plusMenu);
       auth.appendChild(plusWrap);
@@ -398,6 +413,22 @@ export function renderToolbar(resultCount) {
         elToolbarSub.appendChild(clearCrateBtn);
       }
     }
+  }
+
+  // The ?event= view chip: the gallery is showing one alert firing's entities.
+  if (state.alertEvent) {
+    const ev = document.createElement("span");
+    ev.className = "tool-btn alert-event-chip active";
+    const icon = document.createElement("span");
+    icon.className = "alert-event-icon";
+    icon.innerHTML = ICONS.bell;
+    const lbl = document.createElement("span");
+    lbl.textContent = `${state.alertEvent.name} — ${state.alertEvent.count} new`;
+    ev.append(icon, lbl);
+    elToolbarSub.appendChild(ev);
+    const clearEvBtn = toolBtn(ICONS.x, "crates-clear", clearAlertEvent);
+    clearEvBtn.title = "Show all items";
+    elToolbarSub.appendChild(clearEvBtn);
   }
 
   const count = document.createElement("span");

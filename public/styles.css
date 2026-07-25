@@ -372,11 +372,22 @@ main#grid {
   display: inline-flex;
   align-items: center;
   line-height: 0;
+  position: relative; /* anchors the unseen-alerts dot */
 }
 .tool-btn.plus-caret svg {
   width: 12px;
   height: 12px;
   opacity: 0.65;
+}
+/* unseen alert firings live behind this menu */
+.plus-caret .alert-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e5484d;
 }
 
 .card.loading {
@@ -1129,6 +1140,21 @@ body.bulk-mode .heart {
   gap: 5px;
 }
 .tool-btn.crates-btn svg {
+  width: 13px;
+  height: 13px;
+}
+/* the ?event= view chip: one alert firing's entities in the grid */
+.tool-btn.alert-event-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: default;
+}
+.alert-event-icon {
+  display: inline-flex;
+  line-height: 0;
+}
+.alert-event-icon svg {
   width: 13px;
   height: 13px;
 }

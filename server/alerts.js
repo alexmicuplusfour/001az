@@ -1,0 +1,173 @@
+// Alerts: watched facet conditions (planning/alerts-plan.md). This module owns
+// the matcher — the server mirror of filters.js matchesExcept — the
+// tag-landing evaluation hook, and the delivery sweep the worker's maintenance
+// loop ticks. Detection is always immediate (a match row the moment an entity
+// enters the set); delivery — webhook now, daily digest, or record-only — is
+// just a consumer of those rows. SQL lives in db.js like everything else.
+import crypto from "node:crypto";
+import {
+  boardAlerts,
+  entityForAlerts,
+  getItemEntity,
+  addAlertMatch,
+  alertsWithPendingMatches,
+  dueDailyAlerts,
+  setAlertNextDelivery,
+  createAlertFiring,
+  pendingWebhookFirings,
+  stampFiringWebhook,
+  firingMatches,
+} from "./db.js";
+
+// The settle window: a bulk ingest tags its items over minutes, and there is
+// no run id to hook — so "the job ended" is read as "no new match for a
+// while", capped so a steady trickle still delivers. What turns a 500-file
+// drop into one notification instead of 500.
+const SETTLE_MS = Number(process.env.ALERT_SETTLE_MS) || 60000;
+const MAX_WAIT_MS = Number(process.env.ALERT_MAX_WAIT_MS) || 600000;
+const WEBHOOK_TIMEOUT_MS = Number(process.env.ALERT_WEBHOOK_TIMEOUT_MS) || 10000;
+const WEBHOOK_MAX_ATTEMPTS = 3; // one attempt per sweep tick, then 'failed' with the error kept
+const PAYLOAD_ENTITY_CAP = 20;  // entity_count carries the real total
+
+// The matchesExcept mirror (filters.js:17): OR within a facet's values, AND
+// across facets, membership tested against "facet/value" tag strings. An
+// empty condition matches nothing (the API refuses to store one anyway).
+export function matchesCondition(tagSet, condition) {
+  const keys = Object.keys(condition || {});
+  if (!keys.length) return false;
+  for (const key of keys) {
+    const values = condition[key];
+    if (!Array.isArray(values) || !values.length) return false;
+    if (!values.some((v) => tagSet.has(`${key}/${v}`))) return false;
+  }
+  return true;
+}
+
+// The detection hook, called wherever an instance's tags land (worker
+// processOne, the manual PATCH route). Re-reads the item's entity — an
+// instance can be re-parented between claim and landing, and a stale
+// entity_id would credit the wrong card. Evaluates the ENTITY's union tag
+// set, not the instance's: entity-level tags are the union across instances
+// (the listItems stance), so a condition can be satisfied only across
+// instances and a single instance's tags would under-match. Never throws —
+// the ledger never breaks the job.
+export async function evaluateItemAlerts(db, itemId) {
+  try {
+    const item = await getItemEntity(db, itemId);
+    if (!item || item.entity_id == null) return;
+    const alerts = await boardAlerts(db, item.board_id);
+    if (!alerts.length) return;
+    const ent = await entityForAlerts(db, item.entity_id);
+    if (!ent) return;
+    for (const a of alerts) {
+      if (!matchesCondition(ent.tagSet, a.condition)) continue;
+      if (await addAlertMatch(db, a.id, item.entity_id, itemId, ent.label)) {
+        console.log(`alert #${a.id} matched entity #${item.entity_id}${ent.label ? ` (${ent.label})` : ""}`);
+      }
+    }
+  } catch (err) {
+    console.warn(`alert evaluation failed for item #${itemId}: ${err.message}`);
+  }
+}
+
+// Next "daily at HH:MM" stamp after `from` — the nextIngestRunAt daily case
+// (server-local time, so TZ moves delivery too).
+export function nextDailyAt(atMin, from = Date.now()) {
+  const d = new Date(from);
+  d.setHours(Math.floor(atMin / 60), atMin % 60, 0, 0);
+  if (d.getTime() <= from) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+// The condition as a shareable ?f= value — the encodeSelected mirror
+// (filters.js:231), so webhook links land on the same filtered view the
+// client would build itself.
+export function encodeConditionF(condition) {
+  return Object.keys(condition || {}).sort().map((key) =>
+    encodeURIComponent(key) + ":" + [...condition[key]].sort().map(encodeURIComponent).join(",")
+  ).join(";");
+}
+
+const appUrl = () => String(process.env.APP_URL || "").replace(/\/+$/, "");
+
+// The webhook body. `target` is a pendingWebhookFirings row (alert fields
+// flattened in); entities beyond the cap are counted, not listed — the cap is
+// stated by entity_count, never silent.
+export function buildFiringPayload(target, entities, { test = false } = {}) {
+  const base = appUrl();
+  const payload = {
+    ...(test ? { test: true } : {}),
+    alert: { id: target.alert_id, name: target.name },
+    board: target.board_id,
+    fired_at: target.fired_at,
+    entity_count: target.entity_count,
+    entities: entities.slice(0, PAYLOAD_ENTITY_CAP).map((e) => ({
+      id: e.entity_id,
+      label: e.label,
+      ...(base ? { url: `${base}/?board=${encodeURIComponent(target.board_id)}&item=${e.entity_id}` } : {}),
+    })),
+  };
+  if (base) {
+    payload.links = {
+      ...(target.id != null ? { event: `${base}/?board=${encodeURIComponent(target.board_id)}&event=${target.id}` } : {}),
+      filter: `${base}/?board=${encodeURIComponent(target.board_id)}&f=${encodeURIComponent(encodeConditionF(target.condition))}`,
+    };
+  }
+  return payload;
+}
+
+// One POST, one verdict — never throws. The signature lets a receiver verify
+// the sender without the URL itself being the only secret.
+export async function sendAlertWebhook(target, entities, opts = {}) {
+  const body = JSON.stringify(buildFiringPayload(target, entities, opts));
+  const headers = { "Content-Type": "application/json", "User-Agent": "001az-alerts" };
+  if (target.webhook_secret) {
+    headers["X-Alert-Signature"] =
+      "sha256=" + crypto.createHmac("sha256", target.webhook_secret).update(body).digest("hex");
+  }
+  try {
+    const r = await fetch(target.webhook_url, {
+      method: "POST",
+      headers,
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+    });
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// The delivery sweep, ticked by the worker's maintenance loop. Three passes:
+// settle-window grouping (immediate + record — record groups identically so
+// history and ?event= links stay uniform, it just never sends), stamp-driven
+// daily grouping, then webhook send/retry for whatever is owed one.
+export async function deliverDueAlerts(db, now = Date.now()) {
+  for (const a of await alertsWithPendingMatches(db)) {
+    if (a.newest > now - SETTLE_MS && a.oldest > now - MAX_WAIT_MS) continue;
+    const withWebhook = a.delivery !== "record" && !!a.webhook_url;
+    const firingId = await createAlertFiring(db, a.id, withWebhook);
+    if (firingId != null) console.log(`alert #${a.id} fired (firing #${firingId}, ${a.pending} entities)`);
+  }
+  for (const a of await dueDailyAlerts(db, now)) {
+    if (a.pending > 0) {
+      const firingId = await createAlertFiring(db, a.id, !!a.webhook_url);
+      if (firingId != null) console.log(`alert #${a.id} fired daily (firing #${firingId}, ${a.pending} entities)`);
+    }
+    // Re-arm even when nothing fired — an overdue stamp left in the past
+    // would deliver the moment a match landed, at whatever time that is.
+    await setAlertNextDelivery(db, a.id, nextDailyAt(a.daily_at_min, now));
+  }
+  for (const f of await pendingWebhookFirings(db)) {
+    const { ok, error } = await sendAlertWebhook(f, await firingMatches(db, f.id));
+    if (ok) {
+      await stampFiringWebhook(db, f.id, "ok", null);
+    } else {
+      const final = f.attempts + 1 >= WEBHOOK_MAX_ATTEMPTS;
+      await stampFiringWebhook(db, f.id, final ? "failed" : "pending", error);
+      console.warn(`alert webhook ${final ? "failed" : "retrying"} (firing #${f.id}, attempt ${f.attempts + 1}): ${error}`);
+    }
+  }
+}

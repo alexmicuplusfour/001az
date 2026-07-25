@@ -7,7 +7,8 @@ import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
 import { initFilterConfigsUI } from './filterconfigs.js';
 import { initUpload } from './upload.js';
-import { initLightbox } from './lightbox.js';
+import { initLightbox, openLightbox } from './lightbox.js';
+import { openAlertEvent } from './alert-event.js';
 
 function render() {
   const key = filterKey();
@@ -51,7 +52,7 @@ async function main() {
     }
   }
 
-  const [boardData, itemsData, meData, cratesData, boardsData, filterConfigsData] = await Promise.all([
+  const [boardData, itemsData, meData, cratesData, boardsData, filterConfigsData, alertsData] = await Promise.all([
     state.boardId
       ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
       : Promise.resolve(null),
@@ -65,6 +66,9 @@ async function main() {
     fetch("/api/boards", { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => []),
     state.boardId
       ? fetch(`/api/filter-configs?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
+      : Promise.resolve([]),
+    state.boardId
+      ? fetch(`/api/alerts?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
       : Promise.resolve([]),
   ]);
 
@@ -96,6 +100,7 @@ async function main() {
   if (typeof firstPage.now === 'number') state.itemsSince = firstPage.now;
   state.crates = Array.isArray(cratesData) ? cratesData : [];
   state.filterConfigs = Array.isArray(filterConfigsData) ? filterConfigsData : [];
+  state.alerts = Array.isArray(alertsData) ? alertsData : [];
   initFilterConfigsUI();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   render();
@@ -103,6 +108,31 @@ async function main() {
   // Rest of the board streams in behind the first paint.
   drainItems(firstPage.nextCursor);
 
+  // Alert deep links: ?event= swings the grid into one firing's entities
+  // (openAlertEvent renders when the fetch lands); ?item= opens the lightbox
+  // on an entity — which may still be draining in, so keep looking as pages
+  // append until it shows up (or the board is done streaming without it).
+  const eventId = Number(params.get("event"));
+  if (eventId) openAlertEvent(eventId);
+  const itemId = Number(params.get("item"));
+  if (itemId) {
+    const tryOpen = () => {
+      const img = state.items.find((i) => i.id === itemId);
+      if (!img) return false;
+      openLightbox(img);
+      // Consumed — strip the param so browsing on (and a later reload)
+      // doesn't keep re-opening the same lightbox.
+      const url = new URL(location.href);
+      url.searchParams.delete("item");
+      history.replaceState(null, "", url.pathname + url.search);
+      return true;
+    };
+    if (!tryOpen()) {
+      const onRender = () => { if (tryOpen()) document.removeEventListener('app:render', onRender); };
+      document.addEventListener('app:render', onRender);
+      setTimeout(() => document.removeEventListener('app:render', onRender), 60000);
+    }
+  }
 }
 
 main();

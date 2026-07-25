@@ -51,6 +51,7 @@ import {
   withPluginHealth,
 } from "./db.js";
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
+import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, transcribeAudio, PROVIDERS } from "./providers.js";
 import { pluginInstalled, pluginState } from "./plugins.js";
@@ -1335,6 +1336,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       if (landed) {
         await legLog(row, "tag", t0, "ok", null, { tags: tags.length, model, ...(undecided ? { undecided: true } : {}) });
         console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
+        await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
       } else {
         await legLog(row, "tag", t0, "discarded", null, { model });
         console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
@@ -1620,6 +1622,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
   let embedWake = () => {};
   let refreshWake = () => {};
   let transcribeWake = () => {};
+  let alertsWake = () => {};
 
   // Fill one lane that has room with a single board-fair BATCH of its stage, sized to
   // the free slots — so boards interleave (a small board's items claim ahead of a big
@@ -1721,6 +1724,22 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
       await new Promise((r) => {
         const t = setTimeout(r, more ? 200 : POLL_MS);
         refreshWake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
+  // Alert delivery on its own loop (the embedLoop reasoning): a webhook send
+  // is outbound I/O with a 10s timeout, and a hung endpoint retried across
+  // several firings would otherwise sit inside the maintenance tick, delaying
+  // recovery and ingestion. Nothing here creates claimable work — no wake().
+  const alertsLoop = (async () => {
+    while (running) {
+      try { await deliverDueAlerts(db); }
+      catch (e) { console.error("worker alerts error:", e.message); }
+      if (!running) break;
+      await new Promise((r) => {
+        const t = setTimeout(r, POLL_MS);
+        alertsWake = () => { clearTimeout(t); r(); };
       });
     }
   })();
@@ -1830,11 +1849,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
     embedWake();
     refreshWake();
     transcribeWake();
+    alertsWake();
     // Drain: let the loops finish their current pass and stop claiming, THEN await the
     // in-flight pipelines (captured after the loops settle, so a final fill's launches
     // are included). server.js caps the total wait.
     return (async () => {
-      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, transcribeLoop]);
+      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, transcribeLoop, alertsLoop]);
       await Promise.all([...pipelines]);
     })();
   };

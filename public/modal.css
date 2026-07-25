@@ -520,3 +520,44 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-preview-count:hover { text-decoration: underline; }
 .im-status { font-size: 12px; color: #6b6b72; margin: 12px 0 0; }
 .im-status.error { color: #b4232a; }
+
+/* ── alert editor + history (alerts-modal.js) ── */
+#alert-modal .modal-dialog { max-width: 480px; }
+.al-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid #d6d9de;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+}
+.al-input:focus { outline: none; border-color: #9aa0aa; }
+.al-cond { display: flex; flex-direction: column; gap: 8px; }
+.al-cond-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.al-cond-key { font-size: 12px; color: #6b6b72; min-width: 64px; }
+.al-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: #f0f1f3;
+  border: 1px solid #e0e2e6;
+  border-radius: 12px;
+  padding: 2px 5px 2px 9px;
+  font-size: 12.5px;
+}
+.al-chip button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #8a8a92;
+  padding: 0 3px;
+  font-size: 14px;
+  line-height: 1;
+}
+.al-chip button:hover { color: #b4232a; }
+/* history rows ride the .job-row skeleton; unseen ones read heavier */
+.al-firing { cursor: pointer; }
+.al-firing:hover { background: #f6f7f8; }
+.al-firing.al-new .job-label { font-weight: 600; }

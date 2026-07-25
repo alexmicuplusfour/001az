@@ -11,7 +11,7 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.boardId, state.searchResults ? state.searchQuery : "", [...state.selectedUploaderIds].sort()]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.alertEvent?.id ?? null, state.boardId, state.searchResults ? state.searchQuery : "", [...state.selectedUploaderIds].sort()]);
 }
 
 function matchesExcept(img, exceptKey) {
@@ -57,6 +57,7 @@ export function taggedFiltered() {
       (!state.showUntagged || isUntagged(img)) &&
       (!state.showFavorites || img.favoritedByMe) &&
       (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId)) &&
+      (state.alertEvent == null || state.alertEvent.ids.has(img.id)) &&
       (state.selectedUploaderIds.size === 0 || (img.uploadedBy && state.selectedUploaderIds.has(img.uploadedBy.id))) &&
       matchesExcept(img, null)
   );

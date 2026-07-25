@@ -151,6 +151,21 @@ async function refreshTokens() {
   } catch { /* leave the last known total */ }
 }
 
+// Alert firings happen server-side (the worker sweep), so unseen counts only
+// move while arrivals do — exactly when we're already polling. Piggyback the
+// tick, throttled: the counts drive an ambient dot, not a live feed. Skipped
+// entirely for users with no alerts on the board.
+let alertsFetchAt = 0;
+async function refreshAlerts() {
+  if (!state.boardId || !state.alerts.length) return;
+  if (Date.now() - alertsFetchAt < 30000) return;
+  alertsFetchAt = Date.now();
+  try {
+    const r = await fetch(`/api/alerts?board=${state.boardId}`, { cache: "no-store" });
+    if (r.ok) state.alerts = await r.json();
+  } catch { /* keep the last known counts */ }
+}
+
 // A live board (connector fields or a live chart face) changes server-side on
 // its own cadence: values refresh, and chart faces regenerate under NEW
 // filenames — the old webp is deleted, since /gallery caches immutably. A tab
@@ -209,6 +224,7 @@ async function pollTick() {
     // than feed reconcile an empty presentIds set — that reads as "everything
     // merged away" and would wrongly drop in-flight items.
     await refreshTokens();
+    await refreshAlerts();
     document.dispatchEvent(new Event('app:render'));
   } catch {
     /* keep polling */
