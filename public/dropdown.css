@@ -136,12 +136,14 @@
   align-items: center;
 }
 
-/* leading row icon (e.g. the bell on alert rows) */
+/* leading row icon (e.g. the bell on alert rows) — decorative: clicks pass
+   through to the row (ddRow reserves leading clicks for real controls) */
 .dd-icon {
   flex-shrink: 0;
   display: inline-flex;
   line-height: 0;
   color: #8a90a0;
+  pointer-events: none;
 }
 .dd-icon svg {
   width: 13px;
