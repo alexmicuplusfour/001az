@@ -1,7 +1,9 @@
 // Self-routing login page: /api/me decides which face it shows. Logged out →
-// sign-in form; logged in without a password (fresh invite redemption) →
-// set-password form; fully logged in → bounce to the app. index.html's app.js
-// redirects here for the first two states, so the pair can't loop.
+// sign-in form (or, when the instance has no passworded accounts at all, the
+// first-run setup form: email + password creates the admin account); logged
+// in without a password (fresh invite redemption) → set-password form; fully
+// logged in → bounce to the app. index.html's app.js redirects here for the
+// first two states, so the pair can't loop.
 import { api } from "./api.js";
 
 const params = new URLSearchParams(location.search);
@@ -75,25 +77,50 @@ if (me && !me.needs_password && !params.has("change")) {
     });
   });
 } else {
-  title.textContent = "Sign in";
-  loginForm.hidden = false;
-  document.getElementById("login-email").focus(); // autofocus doesn't fire on unhide
-  if (params.get("error") === "invalid") {
-    showError("That login link has expired or was already used — sign in with your password, or ask an admin for a new link.");
-  }
-  loginForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    submit(loginForm, async () => {
-      const email = document.getElementById("login-email").value;
-      const password = document.getElementById("login-password").value;
-      const r = await fetch("/api/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+  // Logged out. A fresh instance (no passworded accounts anywhere) shows
+  // first-run setup instead of a sign-in nobody could pass.
+  const s = await fetch("/api/setup", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
+  if (s?.setup) {
+    title.textContent = "First-run setup";
+    sub.textContent = "This instance has no accounts yet — create the admin account.";
+    sub.hidden = false;
+    const emailEl = document.getElementById("setup-email");
+    document.getElementById("setup-email-label").hidden = false;
+    emailEl.required = true;
+    document.getElementById("set-submit").textContent = "Create admin account";
+    setForm.hidden = false;
+    emailEl.focus(); // autofocus doesn't fire on unhide
+    setForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const password = document.getElementById("set-password").value;
+      const confirm = document.getElementById("set-confirm").value;
+      if (password !== confirm) return showError("Passwords don't match.");
+      submit(setForm, async () => {
+        await api("POST", "/api/setup", { email: emailEl.value.trim(), password });
+        location.replace("/");
       });
-      if (r.ok) return location.replace(nextTarget());
-      if (r.status === 429) throw new Error("Too many attempts — try again in a few minutes.");
-      throw new Error("Invalid email or password.");
     });
-  });
+  } else {
+    title.textContent = "Sign in";
+    loginForm.hidden = false;
+    document.getElementById("login-email").focus(); // autofocus doesn't fire on unhide
+    if (params.get("error") === "invalid") {
+      showError("That login link has expired or was already used — sign in with your password, or ask an admin for a new link.");
+    }
+    loginForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      submit(loginForm, async () => {
+        const email = document.getElementById("login-email").value;
+        const password = document.getElementById("login-password").value;
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        });
+        if (r.ok) return location.replace(nextTarget());
+        if (r.status === 429) throw new Error("Too many attempts — try again in a few minutes.");
+        throw new Error("Invalid email or password.");
+      });
+    });
+  }
 }

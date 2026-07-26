@@ -444,6 +444,14 @@ export async function setPassword(db, userId, passwordHash) {
   await db.query("UPDATE users SET password_hash=$1 WHERE id=$2", [passwordHash, userId]);
 }
 
+// True once any account can sign in with a password. The negation is the
+// "nobody can log in" state — a fresh instance, or one restored from an
+// archive with no passworded accounts — that unlocks first-run setup.
+export async function anyPasswordSet(db) {
+  const { rows } = await db.query("SELECT 1 FROM users WHERE password_hash IS NOT NULL LIMIT 1");
+  return rows.length > 0;
+}
+
 export async function setUserName(db, userId, name) {
   await db.query("UPDATE users SET name=$1 WHERE id=$2", [name, userId]);
 }

@@ -24,6 +24,7 @@ import {
   getUserById,
   getUserByEmail,
   setPassword,
+  anyPasswordSet,
   setUserName,
   mintInvite,
   consumeInvite,
@@ -180,6 +181,19 @@ const db = openDb(DATABASE_URL);
 await initDb(db);
 await loadPlugins(db); // register dynamically-installed plugins before routes serve
 await seedAdmin(db, ADMIN_EMAIL);
+
+// --- first-run setup -------------------------------------------------------
+// When NO account has a password — a fresh install, or a restore of an
+// archive with no passworded accounts — nobody can sign in, and the old
+// answer (docker exec + mintlink.js) is the wrong ceremony for that moment.
+// Instead the login page offers first-run setup: enter an email and password,
+// and that account IS the admin — no env preconfiguration (ADMIN_EMAIL stays
+// as optional automation). Single-tenant and self-hosted: whoever reaches a
+// fresh instance first owns it, the same story as any freshly installed web
+// app — the door exists only while zero passwords exist, and closes for good.
+if (!(await anyPasswordSet(db))) {
+  console.log("first-run setup: no account has a password yet — open the app to create the admin account");
+}
 
 // Source handlers (server/sources/): store originals + faces (thumbnails)
 // and clean them up on delete. The upload route itself is core (ingest.js).
@@ -389,6 +403,41 @@ app.get("/auth/:token", authLimiter, wrap(async (req, res) => {
 app.post("/api/logout", wrap(async (req, res) => {
   await deleteSession(db, req.sid);
   clearSessionCookie(res);
+  res.json({ ok: true });
+}));
+
+// --- first-run setup (see the boot log block) ---
+// Available exactly while NO account has a password. Re-checked against the
+// DB on every call: the moment any password exists (someone onboarded via
+// invite before the fresh instance was claimed), the door is closed for good.
+const setupAvailable = async () => !(await anyPasswordSet(db));
+
+app.get("/api/setup", wrap(async (_req, res) => {
+  res.json({ setup: await setupAvailable() });
+}));
+
+app.post("/api/setup", authLimiter, wrap(async (req, res) => {
+  if (!(await setupAvailable())) return res.status(403).json({ error: "setup is not available" });
+  const email = (typeof req.body?.email === "string" ? req.body.email : "").trim();
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "invalid email" });
+  if (password.length < MIN_PASSWORD_LEN)
+    return res.status(400).json({ error: `password must be at least ${MIN_PASSWORD_LEN} characters` });
+  // Creates the account, or promotes it if the email already exists (a
+  // restored instance's passwordless users, or the ADMIN_EMAIL seed).
+  await seedAdmin(db, email);
+  const user = await getUserByEmail(db, email);
+  await setPassword(db, user.id, await hashPassword(password));
+  if (req.sid) await deleteSession(db, req.sid); // rotate: never keep a pre-login session
+  const sid = await createSession(db, user.id);
+  await touchLogin(db, user.id);
+  // The claim is a first password set — like /api/account/password it must
+  // end every other way into this account: sessions someone opened off a
+  // leaked invite link, and any unredeemed link itself.
+  await deleteOtherSessions(db, user.id, sid);
+  await deleteUnredeemedInvites(db, user.id);
+  setSessionCookie(res, sid);
+  console.log(`first-run setup complete: ${user.email} (#${user.id}) claimed the admin account from ${req.ip}`);
   res.json({ ok: true });
 }));
 

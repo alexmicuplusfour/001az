@@ -64,7 +64,9 @@ a live connector.
 - **Invite-only auth** — password sign-in (scrypt-hashed, no deps) with
   single-use 30-day invite links as the onboarding and password-reset path:
   an admin mints a link, it logs the member in once to set their password.
-  Sessions are HttpOnly cookies. No email infrastructure needed.
+  A fresh instance is claimed on its own login page: the first visit creates
+  the admin account (email + password). Sessions are HttpOnly cookies. No
+  email infrastructure needed.
 - **Admin panel** — user management, board management, AI provider/model/key
   config, connector config, backups, and live server logs over SSE.
 - **Backup & restore** — one-click full backup from the admin panel: a single
@@ -130,18 +132,21 @@ directly against the compose Postgres:
 ```sh
 npm install
 docker compose up -d db          # Postgres on 127.0.0.1:5433
-ADMIN_EMAIL=you@example.com COOKIE_SECURE=0 BASE_URL=http://127.0.0.1:3001 node server/server.js
+COOKIE_SECURE=0 BASE_URL=http://127.0.0.1:3001 node server/server.js
 ```
 
-Then mint yourself a login link:
+Then open http://127.0.0.1:3001 — a fresh instance shows the first-run setup
+screen: enter an email and password and that's the admin account. (Whoever
+visits a fresh instance first claims it, so create yours before exposing it
+publicly.) Onboarding more members and resetting a lost password go through
+minted single-use links:
 
 ```sh
-BASE_URL=http://127.0.0.1:3001 node server/mintlink.js you@example.com
+BASE_URL=http://127.0.0.1:3001 node server/mintlink.js them@example.com
 ```
 
-Open http://127.0.0.1:3001 and sign in with the printed link. To enable AI
-tagging, set a provider key (`ANTHROPIC_API_KEY`, etc.) or configure one in the
-admin panel.
+To enable AI tagging, set a provider key (`ANTHROPIC_API_KEY`, etc.) or
+configure one in the admin panel.
 
 ### Tests
 
@@ -159,7 +164,7 @@ service on every push and PR (`.github/workflows/ci.yml`).
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `ADMIN_EMAIL` | — | seeded as admin on startup |
+| `ADMIN_EMAIL` | — | optional: seeded as an admin account on startup (first-run setup creates one interactively either way) |
 | `ANTHROPIC_API_KEY` | — | enables the tagging worker (admin-panel keys, for any provider, override) |
 | `MODEL` | per board | tagging model; normally set per board in the admin panel |
 | `DATABASE_URL` | `postgres://gallery:gallery@127.0.0.1:5433/gallery` | Postgres connection string |
@@ -212,7 +217,9 @@ SSH (no registry), and restarts the stack.
   **Restore is wipe-and-replace**: it replaces the entire instance with the
   archive (typed confirmation required), signs everyone out, and restarts the
   app; restoring an archive from another instance means signing back in with a
-  minted link (`server/mintlink.js`). Before the wipe, every DB member of the
+  minted link (`server/mintlink.js`) — or, if the archive has no passworded
+  accounts at all, through the first-run setup screen the reboot brings back.
+  Before the wipe, every DB member of the
   archive is verified end to end (gunzip + parse + row counts) and a DB-only
   safety dump of the current state is written next to the archives
   (`prerestore-…`, last two kept) — a corrupt archive refuses with the

@@ -61,6 +61,11 @@
         <button type="submit">Sign in</button>
       </form>
       <form id="set-form" hidden>
+        <label id="setup-email-label" hidden>Email
+          <!-- required is set in JS when shown: a hidden required input would
+               block the other set-form modes from submitting -->
+          <input id="setup-email" type="email" autocomplete="username" />
+        </label>
         <label id="set-current-label" hidden>Current password
           <input id="set-current" type="password" autocomplete="current-password" />
         </label>
