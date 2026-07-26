@@ -32,6 +32,8 @@ export async function startServer() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gallery-test-"));
   const galleryDir = path.join(tmp, "gallery");
   const thumbsDir = path.join(tmp, "thumbnails");
+  const backupsDir = path.join(tmp, "backups");
+  const pluginsDir = path.join(tmp, "plugins");
 
   // The app reads all of these at import; set them before importing.
   process.env.DATABASE_URL = dbUrl;
@@ -39,6 +41,8 @@ export async function startServer() {
   process.env.COOKIE_SECURE = "0";
   process.env.GALLERY_DIR = galleryDir;
   process.env.THUMBS_DIR = thumbsDir;
+  process.env.BACKUPS_DIR = backupsDir;
+  process.env.PLUGINS_DIR = pluginsDir;
   process.env.STATIC_DIR = tmp; // no real frontend needed for API tests
   process.env.CONNECTOR_RPM = "1000000"; // don't rate-limit stubbed provider calls in tests
   process.env.CONNECTOR_BURST = "1000000";
@@ -74,7 +78,7 @@ export async function startServer() {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
-  return { base, db, galleryDir, thumbsDir, close };
+  return { base, db, galleryDir, thumbsDir, backupsDir, pluginsDir, close };
 }
 
 // --- seeding (operates on the app's own pool) ---

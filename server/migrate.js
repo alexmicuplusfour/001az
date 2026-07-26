@@ -27,11 +27,29 @@ const ADOPT_THROUGH = "0008_stamp_field_at";
 
 const migrationId = (file) => file.replace(/\.(sql|js)$/, "");
 
-export async function runMigrations(db) {
-  const files = fs
+// List the ledger's migration ids in apply order (used by backup manifests to
+// stamp and validate the schema version an archive was cut at).
+export function migrationIds() {
+  return fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql") || f.endsWith(".js"))
+    .sort()
+    .map(migrationId);
+}
+
+// `upTo`: stop after that migration id — restore rebuilds the schema exactly as
+// the archive knew it, loads the data, then a full run brings it to the present.
+export async function runMigrations(db, { upTo = null } = {}) {
+  let files = fs
     .readdirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql") || f.endsWith(".js"))
     .sort();
+  if (upTo) {
+    if (!files.some((f) => migrationId(f) === upTo)) {
+      throw new Error(`unknown migration "${upTo}" — the archive is from a newer app version`);
+    }
+    files = files.filter((f) => migrationId(f) <= upTo); // zero-padded ids compare lexically
+  }
 
   const client = await db.connect();
   try {

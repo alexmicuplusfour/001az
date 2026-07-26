@@ -118,7 +118,7 @@ import {
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun } from "./worker.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
-import { loadAll as loadPlugins, installFromUrl, uninstall } from "./plugin-loader.js";
+import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
 import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./password.js";
 import { createSources } from "./sources/index.js";
@@ -128,6 +128,7 @@ import { liveFields, faceCadence } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
+import { mountBackups, restoreGate } from "./backup-routes.js";
 import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
@@ -143,6 +144,7 @@ const DATABASE_URL =
 const STATIC_DIR = process.env.STATIC_DIR || path.join(ROOT, "public"); // frontend assets; the app serves them in every env (Caddy just proxies)
 const GALLERY_DIR = process.env.GALLERY_DIR || path.join(ROOT, "gallery");
 const THUMBS_DIR = process.env.THUMBS_DIR || path.join(ROOT, "thumbnails");
+const BACKUPS_DIR = process.env.BACKUPS_DIR || path.join(ROOT, "backups");
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 
@@ -212,6 +214,13 @@ app.use((_req, res, next) => {
   res.setHeader("Referrer-Policy", "same-origin");
   next();
 });
+
+// Live handles the backup routes need but that only exist later (the worker
+// starts in the isMain block below); mutated there, read by reference.
+const runtime = { stopWorker: null, restartWorker: null, exitAfter: false, restore: { active: false, sid: null } };
+// Ahead of attachUser: during a restore the session tables are mid-rebuild,
+// so this must answer without touching the DB.
+app.use(restoreGate(runtime));
 
 app.use(express.json());
 app.use(attachUser(db));
@@ -2297,6 +2306,13 @@ app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => 
 // holding a URL; within a session the 64-bit random filenames are the
 // per-board barrier — they only surface through the board-ACL'd /api/items.
 mountIngest(app, { db, sources });
+const backups = mountBackups(app, {
+  db,
+  backupsDir: BACKUPS_DIR,
+  dirs: { galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR, pluginsDir: pluginsDir() },
+  runtime,
+  adminEmail: ADMIN_EMAIL,
+});
 app.use("/gallery", requireAuth, express.static(GALLERY_DIR, {
   maxAge: "7d",
   immutable: true,
@@ -2334,7 +2350,17 @@ if (isMain) {
   const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   });
-  const stopWorker = startWorker({ db, thumbsDir: THUMBS_DIR, galleryDir: GALLERY_DIR, sources });
+  const launchWorker = () => startWorker({
+    db, thumbsDir: THUMBS_DIR, galleryDir: GALLERY_DIR, sources,
+    autoBackup: backups.autoBackupSweep, // daily DB dump into BACKUPS_DIR (see backup.js)
+  });
+  let stopWorker = launchWorker();
+  runtime.stopWorker = () => stopWorker();
+  // A restore quiesces the worker before touching the schema. Success exits the
+  // process (exitAfter) and the supervisor reboots everything; a REFUSED or
+  // failed restore leaves this process serving, so the worker must come back.
+  runtime.restartWorker = () => { stopWorker = launchWorker(); };
+  runtime.exitAfter = true;
 
   // Graceful shutdown. In the container node is PID 1, which ignores signals
   // it has no handler for — without this, every `docker stop` waits out the

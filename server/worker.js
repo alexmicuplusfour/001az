@@ -820,7 +820,7 @@ export async function documentTextFor(galleryDir, file) {
   return "";
 }
 
-export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
+export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBackup = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
@@ -1691,6 +1691,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null }) {
         await retagDue();
         await ingestDue();
         await pruneSnapshots();
+        // Scheduled DB-only backup (server/backup.js) — it no-ops unless due
+        // and skips itself while any backup/restore job is running.
+        if (autoBackup) await autoBackup();
       } catch (e) { console.error("worker maintain error:", e.message); }
       if (!running) break;
       wake();

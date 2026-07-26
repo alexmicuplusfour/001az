@@ -66,7 +66,15 @@ a live connector.
   an admin mints a link, it logs the member in once to set their password.
   Sessions are HttpOnly cookies. No email infrastructure needed.
 - **Admin panel** — user management, board management, AI provider/model/key
-  config, connector config, and live server logs over SSE.
+  config, connector config, backups, and live server logs over SSE.
+- **Backup & restore** — one-click full backup from the admin panel: a single
+  portable `.tar` holding a consistent DB snapshot (REPEATABLE READ, taken
+  while the app keeps running) plus originals, thumbnails, and installed
+  plugins. Download it, re-upload it, and restore it in place — including onto
+  a fresh instance or a *newer* app version (the archive records its schema
+  version; restore rebuilds at that version, loads, then migrates forward).
+  A nightly DB-only backup into the data volume is on by default, so any
+  volume-level backup automatically contains a usable dump.
 
 ## Architecture
 
@@ -105,6 +113,7 @@ Caddy ── TLS + reverse-proxy ──► Node/Express (server/server.js)
 | `server/ingestion/` | automatic-ingestion adapters (folder watching, connector feeds) + shared filter engine |
 | `server/sources/` | per-format file handling (image/PDF/docx/text) |
 | `server/auth.js` | session-cookie middleware |
+| `server/backup.js` | backup/restore core (snapshot dump, archive, wipe-and-replace restore) + `backup-routes.js` (admin API) + `tarfile.js` (dependency-free tar) |
 | `server/mintlink.js` | CLI: print a single-use login link for an email (onboarding / password reset) |
 | `server/migrations/` | versioned schema migrations |
 | `test/` | `node:test` suite |
@@ -158,6 +167,7 @@ service on every push and PR (`.github/workflows/ci.yml`).
 | `COOKIE_SECURE` | `1` | set `0` for plain-http local dev |
 | `PORT` / `HOST` | `3001` / `127.0.0.1` | listen address |
 | `STATIC_DIR` | `./public` | frontend assets directory |
+| `BACKUPS_DIR` | `./backups` (compose: `/data/backups`) | where backup archives are written and read |
 | `INGEST_ROOT` | — (compose: `/data/ingest`) | root for watched ingestion folders; unset disables folder ingestion |
 
 Tuning knobs (`TAG_CONCURRENCY`, `POLL_MS`, `MAX_ATTEMPTS`, `STUCK_MS`,
@@ -193,8 +203,18 @@ SSH (no registry), and restarts the stack.
   to the client). Fine for a single-tenant self-hosted box; if that's not your
   threat model, keep the DB and its backups access-controlled. Envelope
   encryption is a possible future step.
-- **Backups**: uploads and database live in the `appdata` and `pgdata` volumes.
-  Back them up together — e.g. `docker compose exec -T db pg_dump -U gallery
-  gallery | gzip > db.sql.gz` plus a tar of the uploads volume — on whatever
-  schedule matches how much you'd hate to re-tag. Restore = load the dump into a
-  fresh db and restore the uploads volume.
+- **Backups**: the admin panel's Backups tab creates, downloads, uploads, and
+  restores archives (see the feature bullet above). A nightly DB-only archive
+  into `BACKUPS_DIR` is on by default (time and retention configurable there),
+  which means the `appdata` volume is self-contained: point restic/borg/rclone
+  at that one volume, off-site, and you have both the files and a current DB
+  dump — never file-copy the live `pgdata` volume, it is not a usable backup.
+  **Restore is wipe-and-replace**: it replaces the entire instance with the
+  archive (typed confirmation required), signs everyone out, and restarts the
+  app; restoring an archive from another instance means signing back in with a
+  minted link (`server/mintlink.js`). Archives from an older app version
+  restore fine (migrations run forward after load); archives from a newer
+  version are refused before anything is touched. **Archives contain your AI
+  keys and source credentials** — treat a downloaded backup like the database
+  itself, and test a restore once (on a scratch instance) before you need it.
+  The classic `pg_dump` route still works too, of course.
