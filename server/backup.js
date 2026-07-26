@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import crypto from "node:crypto";
-import readline from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -345,19 +345,99 @@ function validateManifest(manifest) {
     throw new Error(`archive schema "${manifest.migrationId}" is unknown — it was made by a newer app version; upgrade first, then restore`);
   }
   if (!Array.isArray(manifest.tables)) throw new Error("archive manifest has no table list");
+  const seenTables = new Set();
   for (const t of manifest.tables) {
-    if (!NAME_RE.test(t.name) || !Number.isInteger(t.rows) || !Array.isArray(t.columns)) {
+    if (!NAME_RE.test(t.name) || !Number.isInteger(t.rows) || t.rows < 0 || !Array.isArray(t.columns)) {
       throw new Error(`archive manifest is malformed (table "${t.name}")`);
     }
+    // A duplicate table would load the same dump twice (a unique violation
+    // deep inside the load transaction, AFTER the wipe); a duplicate column
+    // would mis-shape the INSERT. Both are one-line refusals here.
+    if (seenTables.has(t.name)) throw new Error(`archive manifest lists table "${t.name}" twice`);
+    seenTables.add(t.name);
     if (t.name === "schema_migrations") {
       throw new Error("archive manifest may not carry schema_migrations — the migration ledger is rebuilt, not restored");
     }
+    const seenCols = new Set();
     for (const c of t.columns) {
       if (!NAME_RE.test(c.name) || typeof c.type !== "string" || !TYPE_RE.test(c.type)) {
         throw new Error(`archive manifest is malformed (column "${t.name}.${c.name}")`);
       }
+      if (seenCols.has(c.name)) throw new Error(`archive manifest lists column "${t.name}.${c.name}" twice`);
+      seenCols.add(c.name);
     }
   }
+}
+
+// One gunzipped JSONL line at a time, length-bounded. readline would happily
+// assemble a multi-GB "line" from a corrupt member as one giant string before
+// anyone could refuse it — gzip expands ~1000:1, so a few MB of archive can be
+// an OOM. The bound applies both to a line completed inside the buffer and to
+// a partial line still accumulating across chunks.
+function gzLines(spoolPath, maxLine = Number(process.env.BACKUP_MAX_LINE_BYTES) || 64 * 1024 * 1024) {
+  return (async function* () {
+    const src = fs.createReadStream(spoolPath);
+    const gz = src.pipe(zlib.createGunzip());
+    try {
+      const dec = new StringDecoder("utf8");
+      let buf = "";
+      for await (const chunk of gz) {
+        buf += dec.write(chunk);
+        let start = 0;
+        for (let i; (i = buf.indexOf("\n", start)) >= 0; start = i + 1) {
+          if (i - start > maxLine) throw new Error(`a dump line exceeds ${maxLine} bytes`);
+          yield buf.slice(start, i);
+        }
+        if (start) buf = buf.slice(start);
+        if (buf.length > maxLine) throw new Error(`a dump line exceeds ${maxLine} bytes`);
+      }
+      buf += dec.end();
+      if (buf) yield buf;
+    } finally {
+      // An early exit (verify's bail, a thrown bound) must not strand the fd —
+      // the staging dir gets removed right after, open handles and all.
+      src.destroy();
+      gz.destroy();
+    }
+  })();
+}
+
+// A dump row must be exactly what dumpTable emits: an array of ::text values,
+// one per column, each a string or SQL NULL. Anything else — a width mismatch,
+// or nested values a hand-edited archive could smuggle into node-pg's
+// parameter serialization — refuses here.
+function checkRow(line, table, columns) {
+  let row;
+  try {
+    row = JSON.parse(line);
+  } catch {
+    throw new Error(`archive data for "${table}" is not valid JSONL`);
+  }
+  if (!Array.isArray(row) || row.length !== columns.length) {
+    throw new Error(`archive data for "${table}" does not match its manifest`);
+  }
+  for (const v of row) {
+    if (v !== null && typeof v !== "string") {
+      throw new Error(`archive data for "${table}" holds a non-text value`);
+    }
+  }
+  return row;
+}
+
+// Full pre-flight read of one dump member — gunzip, parse, count — so gzip
+// bit-rot or tampering refuses while the instance is still intact. The one
+// place a bad member must never surface first is after DROP SCHEMA; an extra
+// pass over the compressed dumps is the price (BACKUP-REVIEW #5).
+async function verifyDump(spoolPath, { name, rows, columns }, j) {
+  let n = 0;
+  for await (const line of gzLines(spoolPath)) {
+    if (!line) continue;
+    checkRow(line, name, columns);
+    if (++n > rows) break; // already a lie — no need to read the rest
+    if (n % 5000 === 0) phase(j, "verify", `${name} (${n}/${rows} rows)`);
+  }
+  if (n > rows) throw new Error(`"${name}": dump holds more rows than the manifest's ${rows}`);
+  if (n < rows) throw new Error(`"${name}": dump holds ${n} rows, manifest says ${rows}`);
 }
 
 // `columns` is the manifest's column list re-typed from the REBUILT schema
@@ -387,17 +467,12 @@ async function loadTable(client, { name, rows, columns }, spoolPath, j) {
     phase(j, "load", `${name} (${loaded}/${rows} rows)`);
   };
 
-  const lines = readline.createInterface({
-    input: fs.createReadStream(spoolPath).pipe(zlib.createGunzip()),
-    crlfDelay: Infinity,
-  });
-  for await (const line of lines) {
+  for await (const line of gzLines(spoolPath)) {
     if (!line) continue;
-    const row = JSON.parse(line);
-    if (!Array.isArray(row) || row.length !== columns.length) {
-      throw new Error(`archive data for "${name}" does not match its manifest`);
-    }
-    batch.push(row);
+    batch.push(checkRow(line, name, columns));
+    // verifyDump already refused an honest surplus; this bounds a member that
+    // changed after verification to one extra batch instead of a full load.
+    if (loaded + batch.length > rows) throw new Error(`"${name}": dump holds more rows than the manifest's ${rows}`);
     batchChars += line.length;
     if (batch.length >= batchRows || batchChars > 4 * 1024 * 1024) await flush();
   }
@@ -429,11 +504,15 @@ async function swapDir(stagingDir, liveDir) {
   if (hadOld) fs.promises.rm(old, { recursive: true, force: true }).catch(() => {});
 }
 
-// Wipe-and-replace restore. The archive is fully extracted and validated
-// BEFORE the database is touched, so a bad file refuses cleanly; once the
-// schema drop begins, a failure leaves an empty (consistent) instance and the
-// caller's job state carries the error. File trees swap only after the DB
-// load committed.
+// Wipe-and-replace restore. Everything that can be checked is checked BEFORE
+// the database is touched — extraction, manifest shape, and a full gunzip +
+// parse + count pass over every db member — then a db-only safety dump of the
+// current state lands in the backups dir. Only then does the wipe start; a
+// failure past that point migrates the (empty) schema forward to the present
+// so the instance comes back consistent, with the safety dump one restore
+// away and the error in the caller's job state. File trees swap only after
+// the DB load committed. Sessions are never restored — a backup's cookies
+// must not come back to life.
 export async function restoreBackup({ db, archivePath, dirs, adminEmail = "", j = null }) {
   const staging = path.join(path.dirname(archivePath), ".restore-" + crypto.randomBytes(6).toString("hex"));
   const sub = (s) => path.join(staging, s);
@@ -482,15 +561,60 @@ export async function restoreBackup({ db, archivePath, dirs, adminEmail = "", j 
       }
     }
 
+    // --- verify every db member end to end, still BEFORE the wipe ---
+    // Gunzip + parse + count each dump now: gzip bit-rot or a tampered member
+    // refuses cleanly here, while the instance is intact, instead of surfacing
+    // for the first time after DROP SCHEMA (BACKUP-REVIEW #5).
+    phase(j, "verify");
+    for (const t of manifest.tables) {
+      if (t.rows === 0) continue;
+      await verifyDump(path.join(sub("db"), t.name + ".jsonl.gz"), t, j);
+    }
+
+    // --- safety net: dump what the wipe is about to take (BACKUP-REVIEW #5) ---
+    // If the restore still fails past the drop, the pre-restore state is one
+    // restore away instead of gone. Best-effort: an instance being restored
+    // BECAUSE its data is broken must not become un-restorable over a failed
+    // dump — a refused safety backup is a warning, not a wall.
+    const backupsDir = path.dirname(archivePath);
+    phase(j, "safety");
+    let safety = null;
+    try {
+      ({ name: safety } = await createBackup({ db, kind: "db", backupsDir, prefix: "prerestore", j }));
+    } catch (err) {
+      warnings.push(`pre-restore safety backup failed: ${err.message}`);
+      console.warn(`restore: pre-restore safety backup failed: ${err.message}`);
+    }
+
+    let dropped = false;
+    try {
     // --- rebuild the schema at the archive's version ---
     phase(j, "schema", manifest.migrationId);
     const client = await db.connect();
     try {
-      await client.query("DROP SCHEMA public CASCADE");
-      await client.query("CREATE SCHEMA public");
+      // One transaction under a lock timeout: the gate stops new requests,
+      // not in-flight ones, and a straggler's open transaction would park
+      // DROP SCHEMA forever with the whole instance 503ing behind the gate.
+      // Timing out rolls back — a clean refusal, nothing touched — and
+      // SET LOCAL dies with the transaction, so the pooled client returns
+      // unpoisoned.
+      const lockMs = Math.max(1, Number(process.env.BACKUP_LOCK_TIMEOUT_MS) || 15000);
+      try {
+        await client.query("BEGIN");
+        await client.query(`SET LOCAL lock_timeout = '${lockMs}ms'`);
+        await client.query("DROP SCHEMA public CASCADE");
+        await client.query("CREATE SCHEMA public");
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err.code === "55P03" // lock_not_available
+          ? new Error("another connection is holding a table lock — try again in a moment")
+          : err;
+      }
     } finally {
       client.release();
     }
+    dropped = true;
     await runMigrations(db, { upTo: manifest.migrationId });
 
     // --- load, one transaction: fail = empty-but-consistent, never half ---
@@ -502,6 +626,14 @@ export async function restoreBackup({ db, archivePath, dirs, adminEmail = "", j 
       // the SQL), and a column the schema doesn't know refuses loudly here
       // instead of half-way into the load.
       const live = await tableColumns(loader);
+      // The reverse of the existence checks below: a manifest that OMITS a
+      // table the rebuilt schema has would restore it silently empty — data
+      // loss dressed as success (BACKUP-REVIEW #20).
+      const listed = new Set(manifest.tables.map((t) => t.name));
+      const missing = [...live.keys()].filter((n) => !listed.has(n));
+      if (missing.length) {
+        throw new Error(`archive manifest omits table(s) ${missing.join(", ")} — refusing a partial restore`);
+      }
       const tables = manifest.tables.map((t) => {
         const liveCols = new Map((live.get(t.name) || []).map((c) => [c.name, c]));
         if (!liveCols.size) throw new Error(`archive table "${t.name}" does not exist at schema ${manifest.migrationId}`);
@@ -517,6 +649,12 @@ export async function restoreBackup({ db, archivePath, dirs, adminEmail = "", j 
       await loader.query("BEGIN");
       for (const t of tables) {
         if (t.rows === 0) continue;
+        // Sessions are point-in-time bearer grants, not data: loading them
+        // would re-arm every cookie minted before the backup — including ones
+        // revoked since (stolen-device logout-all, then a restore from before
+        // = the thief is back in). The restore dialog has always promised
+        // "everyone is signed out"; leaving the table empty keeps it.
+        if (t.name === "sessions") continue;
         await loadTable(loader, t, path.join(sub("db"), t.name + ".jsonl.gz"), j);
       }
       // Every owned sequence, not just identity columns — the rebuilt schema's
@@ -563,7 +701,36 @@ export async function restoreBackup({ db, archivePath, dirs, adminEmail = "", j 
       const dir = path.join(dirs.pluginsDir, base);
       if (dir !== e.dir) await db.query("UPDATE external_plugins SET dir=$1 WHERE id=$2", [dir, e.id]);
     }
-    return { warnings, manifest: { kind: manifest.kind, createdAt: manifest.createdAt, migrationId: manifest.migrationId } };
+    } catch (err) {
+      // Past the drop the old data is gone; what must not ALSO happen is an
+      // old-schema DB serving under new code — every request 500s until a
+      // human reboots (BACKUP-REVIEW #5). Migrate forward to the present so
+      // the instance comes back empty but consistent, admin login reseeded,
+      // with the error in the job state and the safety dump on disk.
+      if (dropped) {
+        try {
+          await db.query("CREATE SCHEMA IF NOT EXISTS public"); // belt-and-braces; the drop txn is atomic
+          await initDb(db);
+          if (adminEmail) await seedAdmin(db, adminEmail);
+          if (safety) err.message += ` — the instance was reset empty; restore ${safety} to return to the pre-restore state`;
+        } catch (healErr) {
+          err.message += ` (migrating forward failed too: ${healErr.message} — restart the app to recover)`;
+        }
+      }
+      throw err;
+    }
+
+    // Keep the last few safety dumps, pruned only after the restore they
+    // insured succeeded. Manual and auto archives have their own lifecycles.
+    for (const n of (await fs.promises.readdir(backupsDir))
+      .filter((n) => /^prerestore-.*-db\.tar$/.test(n))
+      .sort()
+      .reverse()
+      .slice(2)) {
+      await fs.promises.unlink(path.join(backupsDir, n)).catch(() => {});
+    }
+
+    return { warnings, safety, manifest: { kind: manifest.kind, createdAt: manifest.createdAt, migrationId: manifest.migrationId } };
   } finally {
     await fs.promises.rm(staging, { recursive: true, force: true }).catch(() => {});
   }
@@ -575,12 +742,44 @@ export async function restoreBackup({ db, archivePath, dirs, adminEmail = "", j 
 // for free. Full backups stay manual: duplicating the gallery onto the same
 // disk every night would double the volume for no extra safety.
 
+// Debris from interrupted runs: dump spools, restore staging, partial
+// archives, abandoned multer temps (32-hex, extensionless). Shared with the
+// boot sweep in backup-routes.js.
+export const isDebrisName = (n) =>
+  /^\.(spool|restore)-/.test(n) || n.endsWith(".partial") || /^[0-9a-f]{32}$/.test(n);
+
+export async function sweepDebris(backupsDir, minAgeMs = 0) {
+  let names;
+  try {
+    names = await fs.promises.readdir(backupsDir);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!isDebrisName(n)) continue;
+    const p = path.join(backupsDir, n);
+    try {
+      if (minAgeMs && Date.now() - (await fs.promises.stat(p)).mtimeMs < minAgeMs) continue;
+      await fs.promises.rm(p, { recursive: true, force: true });
+      console.log(`backups: cleaned up leftover ${n}`);
+    } catch { /* raced its owner or already gone */ }
+  }
+}
+
 let lastSweepCheck = 0;
+let lastDebrisSweep = 0;
 export async function autoBackupSweep({ db, backupsDir }) {
   // The maintenance loop ticks every few seconds; a due-check per minute is plenty.
   if (Date.now() - lastSweepCheck < 60000) return;
   lastSweepCheck = Date.now();
   if (job.current && !job.current.done) return;
+  // Boot sweeps debris synchronously; a long-lived process re-sweeps daily for
+  // what accumulates between reboots — aborted uploads' multer temps, mostly.
+  // The age floor keeps anything plausibly still in flight.
+  if (Date.now() - lastDebrisSweep > 24 * 3600 * 1000) {
+    lastDebrisSweep = Date.now();
+    await sweepDebris(backupsDir, 24 * 3600 * 1000);
+  }
   if (((await getSetting(db, "backup_auto")) ?? "1") !== "1") return;
   const at = (await getSetting(db, "backup_auto_at")) || "03:30";
   const keep = Math.max(1, Number(await getSetting(db, "backup_auto_keep")) || 7);

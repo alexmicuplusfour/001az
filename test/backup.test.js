@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import crypto from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import { startServer, adminSession, seedUser, seedBoard, seedItem, req } from "./helpers.js";
@@ -71,6 +72,19 @@ test("tar: unconsumed bodies are drained, truncated archives throw", async () =>
   }
 });
 
+test("tar: a corrupt numeric header field is refused by name, not misparsed", async () => {
+  const chunks = [];
+  const out = new Writable({ write(c, _e, cb) { chunks.push(c); cb(); } });
+  const tw = new TarWriter(out);
+  await tw.file("a", 4, Buffer.from("aaaa"));
+  await tw.end();
+  const buf = Buffer.concat(chunks);
+  buf.write("zz", 124, "ascii"); // the size field — used to flow onward as NaN
+  await assert.rejects(async () => {
+    for await (const entry of readTar(Readable.from([buf]))) void entry;
+  }, /corrupt numeric field/);
+});
+
 // The job mutex: one backup/restore at a time. This imports a private copy of
 // backup.js (the server under test imports its own via the cache-busted
 // server.js), so poking it can't disturb the live routes.
@@ -130,6 +144,45 @@ async function waitJob(sid, timeoutMs = 60000) {
     if (Date.now() > deadline) throw new Error("job did not finish in time");
     await new Promise((res) => setTimeout(res, 100));
   }
+}
+
+// A restore that reaches the wipe kills every session (that's asserted below),
+// so its poll can't rely on the admin's cookie surviving. Poll until either
+// the job reports done with the cookie alive (a pre-drop refusal) or the
+// cookie dies (the load committed, or the heal reseeded an empty instance);
+// then re-mint a session and read the job's final state through fresh eyes.
+async function finishRestore(timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const r = await req(base, "GET", "/api/admin/backups/status", { sid: admin.sid });
+    if (r.status === 403) break;
+    if (r.status === 200 && r.json.job?.done && !r.json.restoring) break;
+    if (Date.now() > deadline) throw new Error("restore did not finish in time");
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  admin = await adminSession(db); // works either way — restored users or the heal's reseed
+  const r = await req(base, "GET", "/api/admin/backups/status", { sid: admin.sid });
+  assert.equal(r.status, 200);
+  return r.json.job;
+}
+
+// Repack helpers: read an archive into memory, write a (mutated) one back.
+// Test archives are small; whole-buffer entries keep mutations trivial.
+async function readEntries(tarPath) {
+  const entries = [];
+  for await (const e of readTar(fs.createReadStream(tarPath))) {
+    if (e.type !== "file") continue;
+    const chunks = [];
+    for await (const c of e.body) chunks.push(c);
+    entries.push({ name: e.name, data: Buffer.concat(chunks) });
+  }
+  return entries;
+}
+
+async function writeTar(tarPath, entries) {
+  const tw = new TarWriter(fs.createWriteStream(tarPath));
+  for (const e of entries) await tw.file(e.name, e.data.length, e.data);
+  await tw.end();
 }
 
 test("backup routes are admin-only", async () => {
@@ -298,11 +351,12 @@ test("restore replays the archive exactly: rows, files, secrets, sequences", asy
   fs.rmSync(path.join(galleryDir, itemB.filename)); // "lost" original
   fs.writeFileSync(path.join(galleryDir, "stray.bin"), "not in the backup");
 
+  const oldSid = admin.sid;
   const r = await req(base, "POST", `/api/admin/backups/${archiveName}/restore`, {
     sid: admin.sid, body: { confirm: "RESTORE" },
   });
   assert.equal(r.status, 202);
-  const job = await waitJob(admin.sid);
+  const job = await finishRestore();
   assert.equal(job.error, null);
 
   // Rows: back to the snapshot — the extra item is gone, the originals are back.
@@ -332,10 +386,16 @@ test("restore replays the archive exactly: rows, files, secrets, sequences", asy
   const { rows: [ext] } = await db.query("SELECT dir FROM external_plugins WHERE id='ai:vendor.widget'");
   assert.equal(ext.dir, path.join(pluginsDir, "vendor_widget"));
 
-  // Sessions were in the snapshot: the admin who clicked restore is still in.
-  const me = await req(base, "GET", "/api/me", { sid: admin.sid });
-  assert.equal(me.status, 200);
-  assert.equal(me.json.email, admin.email);
+  // Sessions do NOT come back: every cookie minted before the backup —
+  // including any revoked since — stays dead after a restore. (finishRestore
+  // already re-minted a fresh one for the rest of the suite.)
+  assert.equal((await req(base, "GET", "/api/admin/backups", { sid: oldSid })).status, 403);
+
+  // The pre-wipe safety net: a db dump of the replaced state was written first
+  // and is reachable like any other archive.
+  assert.match(job.result.safety, /^prerestore-.*-db\.tar$/);
+  const list = (await req(base, "GET", "/api/admin/backups", { sid: admin.sid })).json.backups;
+  assert.ok(list.some((b) => b.name === job.result.safety));
 
   // Sequences continue past the restored ids instead of colliding.
   const { rows: [{ max }] } = await db.query("SELECT MAX(id)::int AS max FROM entities");
@@ -371,7 +431,7 @@ test("a database-only backup restores rows but leaves the file trees alone", asy
     sid: admin.sid, body: { confirm: "RESTORE" },
   });
   assert.equal(rr.status, 202);
-  job = await waitJob(admin.sid);
+  job = await finishRestore();
   assert.equal(job.error, null);
 
   // Rows rolled back to the snapshot; the disk was not touched.
@@ -380,6 +440,182 @@ test("a database-only backup restores rows but leaves the file trees alone", asy
   assert.equal((await db.query("SELECT 1 FROM entities WHERE id=$1", [drift.id])).rows.length, 0);
   assert.equal(fs.readFileSync(path.join(galleryDir, "kept-on-db-restore.bin"), "utf8"), "files untouched");
   assert.ok(fs.existsSync(path.join(galleryDir, itemA.filename)));
+});
+
+// BACKUP-REVIEW #5/#6: the verify pass gunzips and parses every db member
+// BEFORE the wipe, so gzip bit-rot in a stored archive surfaces while the
+// instance is still intact — not for the first time after DROP SCHEMA.
+test("a corrupt db member refuses the restore before anything is wiped", async () => {
+  const r = await req(base, "POST", "/api/admin/backups", { sid: admin.sid, body: { kind: "db" } });
+  assert.equal(r.status, 202);
+  const made = await waitJob(admin.sid);
+  assert.equal(made.error, null);
+
+  const entries = await readEntries(path.join(backupsDir, made.result.name));
+  const victim = entries.find((e) => e.name === "db/items.jsonl.gz");
+  for (let i = victim.data.length - 8; i < victim.data.length - 4; i++) victim.data[i] ^= 0xff; // gzip CRC32
+  await writeTar(path.join(backupsDir, "crafted-corrupt.tar"), entries);
+
+  const oldSid = admin.sid;
+  const before = (await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n;
+  assert.equal((await req(base, "POST", "/api/admin/backups/crafted-corrupt.tar/restore", {
+    sid: admin.sid, body: { confirm: "RESTORE" },
+  })).status, 202);
+  const job = await finishRestore();
+  assert.ok(job.error, "a corrupt member must fail the restore");
+  assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n, before,
+    "the refusal must leave the data untouched");
+  // Pre-drop refusal: nothing was wiped, so pre-restore sessions still work.
+  assert.equal((await req(base, "GET", "/api/admin/backups", { sid: oldSid })).status, 200);
+});
+
+// BACKUP-REVIEW #18: gzip expands ~1000:1, so a member holding one enormous
+// line is the OOM-after-the-wipe vector — the reader bounds line length and
+// refuses pre-drop. The env knob exists for exactly this test.
+test("an oversized dump line refuses the restore before anything is wiped", async () => {
+  process.env.BACKUP_MAX_LINE_BYTES = "4096";
+  try {
+    const manifest = Buffer.from(JSON.stringify({
+      app: "001az", version: "1.0.0", kind: "db", createdAt: new Date().toISOString(),
+      migrationId: migrationIds().at(-1),
+      tables: [{ name: "items", rows: 1, columns: [{ name: "id", type: "bigint", identity: true, sequence: true }] }],
+      files: { count: 0, bytes: 0 },
+    }));
+    await writeTar(path.join(backupsDir, "crafted-longline.tar"), [
+      { name: "manifest.json", data: manifest },
+      { name: "db/items.jsonl.gz", data: zlib.gzipSync(JSON.stringify(["x".repeat(10000)]) + "\n") },
+    ]);
+    const before = (await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n;
+    assert.equal((await req(base, "POST", "/api/admin/backups/crafted-longline.tar/restore", {
+      sid: admin.sid, body: { confirm: "RESTORE" },
+    })).status, 202);
+    const job = await finishRestore();
+    assert.match(job.error, /exceeds/);
+    assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n, before);
+  } finally {
+    delete process.env.BACKUP_MAX_LINE_BYTES;
+  }
+});
+
+// BACKUP-REVIEW #19: manifest lies that used to surface only after the drop —
+// duplicate tables double-loading into a unique violation, negative row
+// counts, non-text cells riding node-pg's parameter serialization — now
+// refuse up front, with the instance untouched.
+test("manifest shape lies are refused before anything is wiped", async () => {
+  const mk = (tables) => Buffer.from(JSON.stringify({
+    app: "001az", version: "1.0.0", kind: "db", createdAt: new Date().toISOString(),
+    migrationId: migrationIds().at(-1), tables, files: { count: 0, bytes: 0 },
+  }));
+  const cases = [
+    ["crafted-dup-table.tar",
+      [{ name: "items", rows: 0, columns: [] }, { name: "items", rows: 0, columns: [] }],
+      [], /lists table "items" twice/],
+    ["crafted-dup-column.tar",
+      [{ name: "items", rows: 0, columns: [{ name: "id", type: "bigint" }, { name: "id", type: "bigint" }] }],
+      [], /lists column "items\.id" twice/],
+    ["crafted-neg-rows.tar",
+      [{ name: "items", rows: -1, columns: [] }],
+      [], /malformed/],
+    ["crafted-object-cell.tar",
+      [{ name: "items", rows: 1, columns: [{ name: "id", type: "bigint" }] }],
+      [{ name: "db/items.jsonl.gz", data: zlib.gzipSync('[{"evil":1}]\n') }],
+      /non-text value/],
+  ];
+  const before = (await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n;
+  for (const [tarName, tables, extra, errRe] of cases) {
+    await writeTar(path.join(backupsDir, tarName), [{ name: "manifest.json", data: mk(tables) }, ...extra]);
+    assert.equal((await req(base, "POST", `/api/admin/backups/${tarName}/restore`, {
+      sid: admin.sid, body: { confirm: "RESTORE" },
+    })).status, 202, tarName);
+    const job = await finishRestore();
+    assert.match(job.error ?? "", errRe, tarName);
+  }
+  assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n, before);
+});
+
+// BACKUP-REVIEW #20 + #5: a manifest missing a table refuses — no silently
+// empty tables. The check necessarily sits past the drop, which makes this
+// the post-drop failure drill: the instance must heal forward to the CURRENT
+// schema (empty, consistent, admin reseeded) instead of serving an old-schema
+// DB under new code — and the pre-wipe safety dump must win everything back.
+test("an omitted table refuses; the instance heals; the safety dump recovers it", async () => {
+  const r = await req(base, "POST", "/api/admin/backups", { sid: admin.sid, body: { kind: "db" } });
+  assert.equal(r.status, 202);
+  const made = await waitJob(admin.sid);
+  assert.equal(made.error, null);
+
+  const entries = (await readEntries(path.join(backupsDir, made.result.name)))
+    .filter((e) => e.name !== "db/ai_keys.jsonl.gz");
+  const mEntry = entries.find((e) => e.name === "manifest.json");
+  const manifest = JSON.parse(mEntry.data.toString());
+  manifest.tables = manifest.tables.filter((t) => t.name !== "ai_keys");
+  mEntry.data = Buffer.from(JSON.stringify(manifest));
+  await writeTar(path.join(backupsDir, "crafted-partial.tar"), entries);
+
+  const before = {
+    items: (await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n,
+    keys: (await db.query("SELECT COUNT(*)::int AS n FROM ai_keys")).rows[0].n,
+  };
+  assert.ok(before.keys > 0, "the seeded ai key must exist for the omission to matter");
+
+  assert.equal((await req(base, "POST", "/api/admin/backups/crafted-partial.tar/restore", {
+    sid: admin.sid, body: { confirm: "RESTORE" },
+  })).status, 202);
+  // finishRestore re-minting an admin session IS half the heal proof: the
+  // users table exists again (current schema) with the admin reseeded.
+  const job = await finishRestore();
+  assert.match(job.error, /omits/);
+  assert.match(job.error, /ai_keys/);
+  assert.match(job.error, /reset empty/);
+  const { rows: [{ id }] } = await db.query("SELECT MAX(id) AS id FROM schema_migrations");
+  assert.equal(id, migrationIds().at(-1), "the heal must migrate to the present, not strand the archive's schema");
+  assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n, 0);
+
+  // The safety dump the failed restore took first wins it all back.
+  const safety = (await req(base, "GET", "/api/admin/backups", { sid: admin.sid })).json.backups
+    .filter((b) => /^prerestore-/.test(b.name))
+    .sort((a, b) => b.mtime - a.mtime)[0];
+  assert.ok(safety, "the failed restore must have left a prerestore safety dump");
+  assert.equal((await req(base, "POST", `/api/admin/backups/${safety.name}/restore`, {
+    sid: admin.sid, body: { confirm: "RESTORE" },
+  })).status, 202);
+  const job2 = await finishRestore();
+  assert.equal(job2.error, null);
+  assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n, before.items);
+  assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM ai_keys")).rows[0].n, before.keys);
+  assert.equal((await db.query("SELECT api_key FROM ai_keys LIMIT 1")).rows[0].api_key, "sk-ant-secret-roundtrip");
+});
+
+// BACKUP-REVIEW #23: the restore gate stops new requests but not in-flight
+// ones — a straggler's open transaction would park DROP SCHEMA forever with
+// the whole instance 503ing behind the gate. The lock timeout turns that hang
+// into a clean pre-drop refusal.
+test("a held table lock refuses the restore instead of hanging the instance", async () => {
+  const r = await req(base, "POST", "/api/admin/backups", { sid: admin.sid, body: { kind: "db" } });
+  assert.equal(r.status, 202);
+  const made = await waitJob(admin.sid);
+  assert.equal(made.error, null);
+
+  process.env.BACKUP_LOCK_TIMEOUT_MS = "400";
+  const holder = await db.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT 1 FROM items LIMIT 1"); // ACCESS SHARE, held open: blocks the drop, not the safety dump
+    const oldSid = admin.sid;
+    const before = (await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n;
+    assert.equal((await req(base, "POST", `/api/admin/backups/${made.result.name}/restore`, {
+      sid: admin.sid, body: { confirm: "RESTORE" },
+    })).status, 202);
+    const job = await finishRestore();
+    assert.match(job.error, /holding a table lock/);
+    assert.equal((await db.query("SELECT COUNT(*)::int AS n FROM items")).rows[0].n, before);
+    assert.equal((await req(base, "GET", "/api/admin/backups", { sid: oldSid })).status, 200,
+      "a lock refusal must roll back before the wipe — sessions intact");
+  } finally {
+    await holder.query("ROLLBACK").catch(() => {});
+    holder.release();
+    delete process.env.BACKUP_LOCK_TIMEOUT_MS;
+  }
 });
 
 test("an archive from a newer app version is refused before anything is touched", async () => {
@@ -444,8 +680,15 @@ test("uploaded archives get names the archive routes can actually see", async ()
   assert.equal(emoji.json.name, "uploaded-backup.tar");
   assert.ok((await listedNames()).includes(emoji.json.name));
 
-  // Both are reachable through the API (delete = the reachability proof).
-  for (const n of [upper.json.name, emoji.json.name]) {
+  // The same original name again must mint a DISTINCT name, not silently
+  // clobber the first (the claim is an atomic link(), not exists-then-rename).
+  const again = await upload("My Backup.TAR");
+  assert.equal(again.status, 200);
+  assert.notEqual(again.json.name, upper.json.name);
+  assert.ok((await listedNames()).includes(again.json.name));
+
+  // All are reachable through the API (delete = the reachability proof).
+  for (const n of [upper.json.name, emoji.json.name, again.json.name]) {
     assert.equal((await req(base, "DELETE", `/api/admin/backups/${n}`, { sid: admin.sid })).status, 200, `DELETE ${n}`);
   }
 
@@ -464,36 +707,30 @@ test("archive names that don't parse are rejected everywhere", async () => {
   }
 });
 
-// LAST: this restore succeeds with an empty table list, wiping the test data —
-// which is exactly what proves hostile paths were dropped rather than written.
+// LAST: the first test's full archive, repacked with hostile paths bolted on.
+// The restore must land the legitimate entries — wipe-and-replace succeeding
+// with the archive's truth — while the traversals are reported and dropped.
+// (An empty table list no longer works as the carrier: a manifest that omits
+// live tables is itself refused now.)
 test("hostile entry paths in an uploaded archive never escape staging", async () => {
-  const tarPath = path.join(backupsDir, "crafted-hostile.tar");
-  const manifest = Buffer.from(JSON.stringify({
-    app: "001az", version: "1.0.0", kind: "full", createdAt: new Date().toISOString(),
-    migrationId: migrationIds().at(-1), tables: [], files: { count: 2, bytes: 8 },
-  }));
-  const tw = new TarWriter(fs.createWriteStream(tarPath));
-  await tw.file("manifest.json", manifest.length, manifest);
-  await tw.file("gallery/../../evil.txt", 4, Buffer.from("evil"));
-  await tw.file("plugins/nested/../../../evil2.txt", 4, Buffer.from("evil"));
-  await tw.file("gallery/ok.png", 2, Buffer.from("ok"));
-  await tw.end();
+  const entries = await readEntries(path.join(backupsDir, archiveName));
+  entries.push({ name: "gallery/../../evil.txt", data: Buffer.from("evil") });
+  entries.push({ name: "plugins/nested/../../../evil2.txt", data: Buffer.from("evil") });
+  entries.push({ name: "gallery/ok.png", data: Buffer.from("ok") });
+  await writeTar(path.join(backupsDir, "crafted-hostile.tar"), entries);
 
   const r = await req(base, "POST", "/api/admin/backups/crafted-hostile.tar/restore", {
     sid: admin.sid, body: { confirm: "RESTORE" },
   });
   assert.equal(r.status, 202);
-  // The admin's session dies with the wipe (empty tables), so the status poll
-  // flips 403 once the gate drops; poll the file system outcome instead.
-  const deadline = Date.now() + 60000;
-  for (;;) {
-    const done = fs.existsSync(path.join(galleryDir, "ok.png"));
-    if (done) break;
-    if (Date.now() > deadline) throw new Error("restore did not finish");
-    await new Promise((res) => setTimeout(res, 100));
-  }
-  // The legitimate entry landed; the traversals didn't — not in the parents of
-  // the staging dir, the backups dir, or anywhere else we can name.
+  const job = await finishRestore();
+  assert.equal(job.error, null);
+  assert.ok(job.result.warnings.some((w) => w.includes("evil")),
+    "traversal entries must be reported, not silently written");
+
+  // The legitimate entries landed; the traversals didn't — not in the parents
+  // of the staging dir, the backups dir, or anywhere else we can name.
+  assert.equal(fs.readFileSync(path.join(galleryDir, "ok.png"), "utf8"), "ok");
   for (const p of [
     path.join(backupsDir, "..", "evil.txt"),
     path.join(backupsDir, "evil.txt"),
@@ -505,5 +742,5 @@ test("hostile entry paths in an uploaded archive never escape staging", async ()
     assert.ok(!fs.existsSync(p), `traversal escaped to ${p}`);
   }
   const { rows: [{ n }] } = await db.query("SELECT COUNT(*)::int AS n FROM items");
-  assert.equal(n, 0, "the empty archive's truth replaced the instance");
+  assert.equal(n, 2, "the archive's truth replaced the instance");
 });

@@ -212,9 +212,17 @@ SSH (no registry), and restarts the stack.
   **Restore is wipe-and-replace**: it replaces the entire instance with the
   archive (typed confirmation required), signs everyone out, and restarts the
   app; restoring an archive from another instance means signing back in with a
-  minted link (`server/mintlink.js`). Archives from an older app version
-  restore fine (migrations run forward after load); archives from a newer
-  version are refused before anything is touched. **Archives contain your AI
-  keys and source credentials** — treat a downloaded backup like the database
-  itself, and test a restore once (on a scratch instance) before you need it.
-  The classic `pg_dump` route still works too, of course.
+  minted link (`server/mintlink.js`). Before the wipe, every DB member of the
+  archive is verified end to end (gunzip + parse + row counts) and a DB-only
+  safety dump of the current state is written next to the archives
+  (`prerestore-…`, last two kept) — a corrupt archive refuses with the
+  instance untouched, and even a failure mid-restore leaves the safety dump
+  one restore away. Sessions are never restored: cookies minted before a
+  backup (including ones revoked since) stay dead. Archives from an older app
+  version restore fine (migrations run forward after load); archives from a
+  newer version are refused before anything is touched. **Archives contain
+  your AI keys and source credentials, and full archives contain plugin code
+  that runs after the reboot** — treat a downloaded backup like the database
+  itself, restore only archives you trust, and test a restore once (on a
+  scratch instance) before you need it. The classic `pg_dump` route still
+  works too, of course.

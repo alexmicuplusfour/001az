@@ -36,7 +36,12 @@ function readNum(buf, off, len) {
     return Number(v);
   }
   const s = buf.toString("ascii", off, off + len).replace(/\0.*$/, "").trim();
-  return s ? parseInt(s, 8) : 0;
+  if (!s) return 0;
+  const v = parseInt(s, 8);
+  // Garbage here used to flow onward as NaN and die later as a bare
+  // Buffer.alloc RangeError; name the real problem instead.
+  if (!Number.isFinite(v)) throw new Error("tar: corrupt numeric field in header");
+  return v;
 }
 
 // --- header -----------------------------------------------------------------

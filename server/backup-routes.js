@@ -11,6 +11,7 @@ import {
   createBackup,
   restoreBackup,
   autoBackupSweep,
+  isDebrisName,
   startJob,
   publicJob,
   job,
@@ -50,11 +51,12 @@ export function restoreGate(runtime) {
 export function mountBackups(app, { db, backupsDir, dirs, runtime, adminEmail }) {
   fs.mkdirSync(backupsDir, { recursive: true });
 
-  // Sweep debris from interrupted runs: dump spools, restore staging, partial
-  // archives, and abandoned multer temp files (32-hex, extensionless). Boot
-  // time only, so none of it can belong to work in flight.
+  // Sweep debris from interrupted runs (spools, staging, partials, multer
+  // temps — see isDebrisName). Boot time, so none of it can belong to work in
+  // flight; autoBackupSweep re-runs this daily with an age floor for what
+  // accumulates between reboots.
   for (const n of fs.readdirSync(backupsDir)) {
-    if (/^\.(spool|restore)-/.test(n) || n.endsWith(".partial") || /^[0-9a-f]{32}$/.test(n)) {
+    if (isDebrisName(n)) {
       fs.rmSync(path.join(backupsDir, n), { recursive: true, force: true });
       console.log(`backups: cleaned up leftover ${n}`);
     }
@@ -160,16 +162,32 @@ export function mountBackups(app, { db, backupsDir, dirs, runtime, adminEmail })
       .replace(/\.+$/, "")
       .slice(-80) || "backup";
     let name = `uploaded-${stem}.tar`;
-    if (fs.existsSync(path.join(backupsDir, name))) {
-      name = `uploaded-${Date.now()}-${stem}.tar`;
-    }
     if (!validName(name)) {
       // Unreachable by construction; kept so a future sanitizer change fails
       // loudly here instead of minting an orphan.
       await fs.promises.unlink(req.file.path).catch(() => {});
       return res.status(400).json({ error: "could not derive a safe archive name" });
     }
-    await fs.promises.rename(req.file.path, path.join(backupsDir, name));
+    // Claim the name exclusively: link() refuses EEXIST atomically, where an
+    // exists-then-rename check would let two same-named uploads race and the
+    // loser silently clobber the winner. Same dir as the multer temp, so
+    // always the same filesystem.
+    try {
+      await fs.promises.link(req.file.path, path.join(backupsDir, name));
+    } catch (err) {
+      if (err.code === "EEXIST") {
+        name = `uploaded-${Date.now()}-${stem}.tar`;
+        await fs.promises.link(req.file.path, path.join(backupsDir, name));
+      } else if (err.code === "EPERM" || err.code === "ENOTSUP" || err.code === "ENOSYS") {
+        // Filesystem without hardlinks (exotic NAS mounts) — fall back to the
+        // rename with its tiny same-name race rather than refuse uploads.
+        await fs.promises.rename(req.file.path, path.join(backupsDir, name));
+        return res.json({ name });
+      } else {
+        throw err;
+      }
+    }
+    await fs.promises.unlink(req.file.path).catch(() => {});
     res.json({ name });
   }));
 
@@ -214,6 +232,8 @@ export function mountBackups(app, { db, backupsDir, dirs, runtime, adminEmail })
       // The worker was quiesced above but this process lives on (refused
       // archive, failed validation) — bring the worker back or tagging,
       // ingestion, and alerts would stay silently dead until a reboot.
+      // (If the 30 s drain race was lost, the old loop may still be finishing
+      // a leg; it exits at its next `running` check while this one takes over.)
       runtime.restartWorker?.();
       console.error(`restore failed: ${err.message}`);
     }

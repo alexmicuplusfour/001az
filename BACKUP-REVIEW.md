@@ -60,7 +60,7 @@ deserves the pre-validation pass.
 
 ## Restore failure path (biggest design gap)
 
-- [ ] **5. A post-drop restore failure leaves an empty instance running on an
+- [x] **5. A post-drop restore failure leaves an empty instance running on an
   old schema, with no error shown to anyone.** Load failures roll back the
   load transaction, but the drop + rebuild-at-`upTo` stands. On that path
   `initDb` never runs and `restartWorker` brings the worker back — so the live
@@ -71,21 +71,22 @@ deserves the pre-validation pass.
   wiped, the status poll goes 403, the overlay says "server restarting", and
   they land on a login page for an empty instance; the error exists only in
   server logs (test file notes this blind spot). **Fixes, cheapest first:**
-  - Pre-validate the extracted db members before touching the DB (streaming
-    gunzip + `JSON.parse` + row-count check against the manifest — the data is
-    already fully extracted in staging). Converts nearly every post-drop
-    failure into a clean refusal.
-  - On post-drop failure, still run the remaining migrations forward (or exit
-    like the success path so boot's `initDb` heals it), instead of leaving
-    old-schema + new-code serving.
-  - Consider an automatic db-only safety backup before the wipe — the
-    machinery already exists.
+  - [x] Pre-validate the extracted db members before touching the DB — the
+    `verify` phase gunzips, parses, and counts every dump pre-drop.
+  - [x] On post-drop failure, migrate forward (`initDb` + `seedAdmin`) so the
+    instance comes back empty-but-consistent with the error in the job state.
+  - [x] Automatic db-only safety backup before the wipe (`prerestore-*`, last
+    two kept, pruned only after a successful restore; a failed safety dump
+    warns and continues — a broken instance must stay restorable).
 
 - [ ] **6. No integrity story.** The manifest records sizes and counts but no
   digests, and `readTar` doesn't verify header checksums. A flipped bit in a
   stored archive either fails at the worst moment (see #5) or restores a
   silently corrupt gallery file. **Fix:** per-member sha256 in the manifest —
-  even just for the db members — is cheap insurance.
+  even just for the db members — is cheap insurance. *Progress: the verify
+  pass now catches any corrupt DB member pre-drop (gzip CRC + full parse), so
+  what remains open is file members (gallery/thumbnails/plugins) and header
+  checksums.*
 
 ## Operational loose ends
 
@@ -134,9 +135,11 @@ deserves the pre-validation pass.
 - [ ] **13.** Same-second backups silently overwrite: `stamp()` has 1-second
   resolution and the final `rename` clobbers an existing archive of the same
   name.
-- [ ] **14.** `loadTable` only compares row counts at EOF — a corrupt file
+- [x] **14.** `loadTable` only compares row counts at EOF — a corrupt file
   claiming 10 rows but containing millions inserts them all (inside the txn)
   before failing; aborting as soon as `loaded > rows` bounds the damage.
+  (Fixed twice over: the verify pass refuses a surplus pre-drop, and the load
+  loop aborts within one batch as defense in depth.)
 - [ ] **15.** `readTar` ignores PAX `size` records (only `path`), so a
   hand-repacked pax archive with a >8 GB member would desync the stream
   mid-parse; throwing on unknown PAX size records would fail loudly instead.
@@ -147,6 +150,83 @@ deserves the pre-validation pass.
 - [ ] **17.** `setval(seq, GREATEST(max, 1))` on an empty table makes the
   first post-restore id 2 — harmless, just untidy.
 
+## Round two (hardening deep dive, 2026-07-26, post-4dbc6b9)
+
+- [x] **18. One oversized JSONL line OOMs the restore after the wipe.**
+  `loadTable` reads through `readline` with no line-length bound
+  (server/backup.js ~390-394); gzip expands ~1000:1, so a corrupt or crafted
+  db member holding a single multi-GB line materializes the whole line as one
+  V8 string before `JSON.parse` ever sees it — OOM / string-length throw
+  mid-load, i.e. the #5 disaster path, reachable from a few MB of archive.
+  Note the planned #5 pre-validation pass inherits the exact same hazard
+  unless it bounds lines too. **Fix:** a tiny transform ahead of readline that
+  aborts when bytes-since-last-newline pass a generous cap (say 64 MB).
+
+- [x] **19. Cheap manifest refusals that currently fail post-drop.**
+  `validateManifest` accepts: duplicate table entries (same file loads twice →
+  unique violation inside the load txn), duplicate column names within a
+  table, and negative `rows` (`Number.isInteger(-1)` passes; `rows: -1` skips
+  the existsSync guard but not `loadTable`, which then ENOENTs — all after the
+  drop). `loadTable` also trusts JSON cell values — a nested array/object
+  rides through node-pg's serialization quirks instead of being refused.
+  **Fix:** reject dup tables/columns and `rows < 0` in `validateManifest`;
+  in `loadTable`, require every cell to be `string | null`.
+
+- [x] **20. A manifest that omits tables restores them as silently empty.**
+  The load checks every manifest table exists in the rebuilt schema
+  (server/backup.js ~505-514) but never the reverse; a truncated table list
+  (tampering, or a future dump bug) is silent data loss dressed as success.
+  **Fix:** after the `upTo` rebuild, diff live table set vs manifest and
+  refuse on any live table the manifest doesn't carry.
+
+- [ ] **21. Every archive carries plaintext credentials; a full archive is
+  also executable code.** *Progress: the restore dialog now warns that archive
+  plugins run as the app (full archives) and README documents both hazards;
+  passphrase encryption of archives remains open, tracked with the envelope
+  encryption note in README's security section.* `ai_keys.api_key`, `source_connections` credentials,
+  and alert `webhook_secret` are plaintext rows, so every archive — including
+  the nightly auto-dump, on by default — is a complete secret-exfil artifact
+  in /data/backups; download doubly so. The UI warning is good; consider
+  optional passphrase encryption (even db members only). Separately: a full
+  archive's `plugins/` tree plus its `external_plugins` rows is code the app
+  loads on the post-restore boot — restoring an untrusted archive is arbitrary
+  code execution by design. Say that in the restore confirm dialog, not just
+  here.
+
+- [x] **22. Restore resurrects every session and unspent invite in the
+  archive.** *(Fixed for sessions: the load skips the table, so every
+  pre-backup cookie stays dead. Invites are left restored deliberately — an
+  invite spent after the backup resurrects alongside a user table that no
+  longer holds the account it created, which is self-consistent, and pending
+  invites expire on their own 30-day clock.)* Sessions are hashed at rest, but a restored `sessions` row
+  re-arms any cookie minted before the backup — including sessions revoked
+  since (logout-all after a stolen device, then restore from before = the
+  thief is logged back in; same story for old invite/reset URLs). Everyone
+  re-authenticates after a restore anyway. **Fix:** `TRUNCATE sessions` (and
+  arguably expire pending invites) after the load, before COMMIT.
+
+- [x] **23. `DROP SCHEMA` waits on locks forever — a straggler request turns
+  restore into an indefinite 503.** The gate blocks new requests, not
+  in-flight ones, and the worker drain races a 30 s timeout
+  (server/backup-routes.js ~193-196) — anything still holding a table lock
+  blocks `DROP SCHEMA public CASCADE` (server/backup.js ~489) with the whole
+  instance gated. **Fix:** `SET lock_timeout = '15s'` on the drop client
+  (retry once); converts a hang into a clean pre-drop refusal. Related: the
+  failure path's `restartWorker` can launch a second worker while a
+  timed-out drain is still mid-leg — benign today (the old loop exits at its
+  next `running` check) but worth a comment.
+
+- [x] **24. Nits.** Two concurrent uploads of the same filename both pass the
+  `existsSync` check and the second rename silently clobbers the first;
+  aborted uploads leave multer temps until the next boot (sweep is boot-only);
+  auto-backup failures reach only the console — the app has an alerts/webhook
+  subsystem that could carry them; `readNum` on garbage octal yields NaN and
+  dies as a bare `Buffer.alloc` RangeError instead of "corrupt archive".
+  (Fixed: atomic `link()` claim on upload, daily debris sweep with a 24 h age
+  floor, named tar error. Accepted: auto-backup failure alerting stays
+  console + the admin tab's job state — the alerts subsystem is per-board and
+  user-configured, not a system channel.)
+
 ## Test gaps
 
 - [x] The upload endpoint has no coverage at all (bug #2 lives there) — now
@@ -154,7 +234,9 @@ deserves the pre-validation pass.
   minted names, refusal cleanup.
 - [ ] `autoBackupSweep`: due-time math, retention pruning, claim-slot-first
   behavior — untested.
-- [ ] The post-drop failure path (#5) — untested.
+- [x] The post-drop failure path (#5) — untested. (Now the heal drill: the
+  omitted-table test drives a post-drop refusal, asserts the forward heal,
+  and restores the prerestore safety dump to win the state back.)
 - [x] A db-archive restore onto a genuinely fresh instance (#1) — covered via
   the seeded source connection + post-restore insert in the replay test (the
   rebuilt schema's sequences start at 1 either way, so same-instance restore

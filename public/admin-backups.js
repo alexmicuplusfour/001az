@@ -183,8 +183,11 @@ async function startRestore(b) {
   const typed = prompt(
     `Restore "${b.name}"?\n\nThis REPLACES the entire instance — every board, item, member, ` +
     `setting${b.kind === "full" ? ", and all files on disk" : ""} — with the archive's contents, ` +
-    `then restarts the server. Everyone (including you) is signed out; if the archive is from ` +
-    `another instance, sign back in with a minted login link (server/mintlink.js).\n\n` +
+    `then restarts the server.${b.kind !== "db"
+      ? " Plugins inside the archive run as part of the app after the reboot — only restore archives you trust."
+      : ""} Everyone (including you) is signed out; sign back in with your password, or with a ` +
+    `minted login link (server/mintlink.js) if the archive is from another instance.\n\n` +
+    `A database-only safety backup of the current state is taken first (prerestore-…).\n\n` +
     `Type RESTORE to continue.`
   );
   if (typed === null) return;
