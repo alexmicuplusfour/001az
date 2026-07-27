@@ -485,9 +485,9 @@ function taggerSection(p, ctx, reload) {
   const modelSel = document.createElement("select");
   modelSel.style.cssText = "width:100%;";
   fillModelSelect(modelSel, p.ai, isDefault ? ctx.slots.tagger.model : null);
-  // Live options follow the selected connection ("env" has no row to ask —
-  // the curated list stands).
-  const syncLive = () => attachLiveModels(modelSel, Number(keySel.value) || null);
+  // Live options follow the selected connection. "env" has no ai_keys row,
+  // but the server holds that key — the route's env branch lists with it.
+  const syncLive = () => attachLiveModels(modelSel, keySel.value === "env" ? "env" : Number(keySel.value) || null);
   keySel.addEventListener("change", syncLive);
   syncLive();
   sec.appendChild(labeled("Model", modelSel));

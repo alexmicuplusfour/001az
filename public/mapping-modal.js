@@ -699,8 +699,10 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       extractModelSel.hidden = !key;
       if (key) {
         fillModelSelect(extractModelSel, aiCatalog[key.provider], key.id === extractKeyId ? extractModel : null);
-        attachLiveModels(extractModelSel, key.id);
       }
+      // Unconditional (null on the Board-default row) — see the invariant in
+      // attachLiveModels: a stale in-flight response must not refill this.
+      attachLiveModels(extractModelSel, key ? key.id : null);
     };
     Promise.all([
       fetch("/api/admin/ai-keys").then((r) => r.json()),

@@ -249,10 +249,12 @@ export function fillModelSelect(sel, entry, current) {
 // this is a quiet upgrade when it lands: the current selection is preserved
 // (fillModelSelect keeps it even if the live list no longer carries it). The
 // response applies whether live or fallback, so switching connections always
-// resets the options to the NEW connection's best-known list. _modelKey
-// updates unconditionally, including for null (the "env"/"App default"
-// rows), so a slow response for a previously-selected connection never
-// overwrites the current one. The first fetch per select+connection sends
+// resets the options to the NEW connection's best-known list. keyId is an
+// ai_keys row id or the literal "env" (the ANTHROPIC_API_KEY-backed row —
+// the route lists it with the server's own key). _modelKey updates
+// unconditionally, including for null (the App/Board-default rows), so a
+// slow response for a previously-selected connection never overwrites the
+// current one. The first fetch per select+connection sends
 // refresh=1 — opening a picker is the "I just `ollama pull`ed, show me"
 // moment — and revisits within the same picker ride the server's cache.
 export function attachLiveModels(sel, keyId, kind) {
@@ -478,8 +480,11 @@ export async function openBoardModal(boardId, opts = {}) {
       if (key) {
         const current = board && board.ai_key_id === key.id ? board.ai_model : null;
         fillModelSelect(aiModelSel, aiCatalog[key.provider], current);
-        attachLiveModels(aiModelSel, key.id);
       }
+      // Unconditional (null on the App-default row) so a slow response for a
+      // previously-selected connection can't refill the now-hidden select —
+      // the invariant attachLiveModels documents.
+      attachLiveModels(aiModelSel, key ? key.id : null);
     };
     Promise.all([api("GET", "/api/admin/ai-keys"), loadProviders()]).then(([keys, catalog]) => {
       aiKeys = keys;

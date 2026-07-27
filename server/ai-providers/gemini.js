@@ -17,7 +17,9 @@ export default (wires) => ({
   ],
   research: false, // the compat layer exposes no grounding
   // Live-list carving (the compat /models dump has no capability metadata):
-  // tagging keeps gemini-* chat models (embedding/imagen/veo/tts drop out);
+  // tagging keeps gemini-* chat models (embedding/imagen/veo/tts drop out;
+  // gemma-* too, deliberately — tool-calling is spotty there and the wire
+  // hard-requires the tool call);
   // stripListPrefix normalizes the "models/gemini-…" ids the compat layer
   // lists to the bare ids its chat endpoint takes.
   modelFilter: "^gemini-(?!.*(embedding|image|tts|audio|live))",

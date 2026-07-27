@@ -11,15 +11,21 @@ import http from "node:http";
 import { startServer, adminSession, req } from "./helpers.js";
 import { PROVIDERS, listProviderModels, registerProvider, unregisterProvider, WIRES } from "../server/providers.js";
 import { compatWire } from "../server/ai-providers/wires/compat.js";
+import { anthropicWire } from "../server/ai-providers/wires/anthropic.js";
 
 // A tiny stand-in for a compat server: counts hits, serves a fixed /models
 // list (or an error), like the keyless-providers live-socket tests.
-function fakeBox(models, { status = 200 } = {}) {
+function fakeBox(models, { status = 200, delay = 0 } = {}) {
+  // status is read per request off box.status, so a test can flip a box from
+  // erroring to healthy (the failure-isn't-cached test) without a second box.
   const box = http.createServer((rq, rs) => {
     box.hits.push(rq.url);
-    rs.writeHead(status, { "Content-Type": "application/json" });
-    rs.end(JSON.stringify(status === 200 ? { data: models.map((id) => ({ id })) } : { error: { message: "boom" } }));
+    setTimeout(() => {
+      rs.writeHead(box.status, { "Content-Type": "application/json" });
+      rs.end(JSON.stringify(box.status === 200 ? { data: models.map((id) => ({ id })) } : { error: { message: "boom" } }));
+    }, delay);
   });
+  box.status = status;
   box.hits = [];
   return new Promise((resolve) => box.listen(0, "127.0.0.1", () => resolve(box)));
 }
@@ -58,6 +64,37 @@ test("compat listModels: a provider with no models endpoint (listModels: false) 
 test("every wire family serves the same listModels contract", () => {
   assert.equal(typeof WIRES.compat.listModels, "function");
   assert.equal(typeof WIRES.anthropic.listModels, "function");
+});
+
+// A stand-in for Anthropic's models.list: serves page N by hit count, so the
+// cursor mechanics stay the SDK's business — has_more: false ends the walk.
+function fakeAnthropicBox(pages) {
+  const box = http.createServer((rq, rs) => {
+    box.hits.push(rq.url);
+    rs.writeHead(200, { "Content-Type": "application/json" });
+    rs.end(JSON.stringify(pages[Math.min(box.hits.length - 1, pages.length - 1)]));
+  });
+  box.hits = [];
+  return new Promise((resolve) => box.listen(0, "127.0.0.1", () => resolve(box)));
+}
+const rootOf = (box) => `http://127.0.0.1:${box.address().port}`;
+
+test("anthropic listModels: walks the SDK's pagination, display_name rides as the note", async () => {
+  const box = await fakeAnthropicBox([
+    { data: [{ id: "c-1", display_name: "C One", type: "model" }, { id: "c-2", display_name: "C Two", type: "model" }], has_more: true, first_id: "c-1", last_id: "c-2" },
+    { data: [{ id: "c-3", display_name: "C Three", type: "model" }], has_more: false, first_id: "c-3", last_id: "c-3" },
+  ]);
+  try {
+    const out = await anthropicWire.listModels({}, { apiKey: "sk-ant-wiretest", base: rootOf(box) });
+    assert.deepEqual(out, [
+      { id: "c-1", note: "C One" },
+      { id: "c-2", note: "C Two" },
+      { id: "c-3", note: "C Three" },
+    ], "both pages walked, ids in listing order (the engine sorts)");
+    assert.equal(box.hits.length, 2, "has_more page fetched");
+  } finally {
+    box.close();
+  }
 });
 
 // --- the engine merge ---
@@ -135,6 +172,24 @@ test("capability kinds: a declared filter carves the live list; a capability cat
   } finally {
     box.close();
     unregisterProvider("kinds");
+  }
+});
+
+test("a filter that doesn't compile degrades to the curated fallback — a plugin typo never errors the picker", async () => {
+  const box = await fakeBox(["chat-1", "chat-2"]);
+  registerProvider("badfilter", {
+    label: "Bad Filter", keyless: true, needsBase: true, rpm: 10, burst: 2,
+    wire: WIRES.compat, compat: COMPAT, base: baseOf(box), research: false,
+    defaultModel: "chat-1", models: [{ id: "chat-1", note: "curated" }],
+    modelFilter: "([", // typo'd regex — must degrade, not throw through the route
+  });
+  try {
+    const r = await listProviderModels({ provider: "badfilter", apiKey: null });
+    assert.equal(r.source, "fallback");
+    assert.deepEqual(r.models, [{ id: "chat-1", note: "curated", recommended: true }]);
+  } finally {
+    box.close();
+    unregisterProvider("badfilter");
   }
 });
 
@@ -237,6 +292,94 @@ test("?kind=embed|transcribe: capability catalogs carve the SAME cached raw list
   // No transcribes catalog on this provider → empty fallback, still 200.
   r = await req(srv.base, "GET", `/api/admin/ai-keys/${add.json.id}/models?kind=transcribe`, { sid: admin.sid });
   assert.deepEqual(r.json, { source: "fallback", models: [] });
+});
+
+test("concurrent refreshers ride ONE upstream fetch — the modal's per-kind pickers open together without stampeding the box", async () => {
+  // A slow box keeps the first fetch in flight while the other kinds arrive —
+  // the real shape of a modal open, where every section sends refresh=1 in
+  // the same tick. Refresh must bust settled entries only.
+  const slow = await fakeBox(["rec-1", "pulled:latest", "nomic-embed-text"], { delay: 150 });
+  try {
+    const add = await req(srv.base, "POST", "/api/admin/ai-keys", {
+      sid: admin.sid, body: { name: "Slow box", provider: "modelbox", base_url: baseOf(slow) },
+    });
+    assert.equal(add.status, 200);
+    const id = add.json.id;
+    const [tag, em, tr] = await Promise.all([
+      req(srv.base, "GET", `/api/admin/ai-keys/${id}/models?refresh=1`, { sid: admin.sid }),
+      req(srv.base, "GET", `/api/admin/ai-keys/${id}/models?kind=embed&refresh=1`, { sid: admin.sid }),
+      req(srv.base, "GET", `/api/admin/ai-keys/${id}/models?kind=transcribe&refresh=1`, { sid: admin.sid }),
+    ]);
+    assert.equal(slow.hits.length, 1, "three refreshers coalesced onto one in-flight upstream ask");
+    assert.equal(tag.json.source, "live");
+    assert.deepEqual(em.json.models.map((m) => m.id), ["nomic-embed-text"], "embed kind carved from the shared fetch");
+    assert.deepEqual(tr.json, { source: "fallback", models: [] }, "no transcribes catalog on this provider");
+    // A refresh AFTER settle still refetches — riding is for in-flight only.
+    await req(srv.base, "GET", `/api/admin/ai-keys/${id}/models?refresh=1`, { sid: admin.sid });
+    assert.equal(slow.hits.length, 2);
+  } finally {
+    slow.close();
+  }
+});
+
+test("a failed fetch is never cached — the picker re-probes and heals the moment the box is back, no refresh or TTL wait", async () => {
+  const flaky = await fakeBox(["rec-1", "pulled:latest"], { status: 500 });
+  try {
+    const add = await req(srv.base, "POST", "/api/admin/ai-keys", {
+      sid: admin.sid, body: { name: "Flaky box", provider: "modelbox", base_url: baseOf(flaky) },
+    });
+    assert.equal(add.status, 200);
+    const id = add.json.id;
+    let r = await req(srv.base, "GET", `/api/admin/ai-keys/${id}/models`, { sid: admin.sid });
+    assert.equal(r.json.source, "fallback");
+    assert.equal(flaky.hits.length, 1);
+    // The null did NOT enter the cache — a plain revisit re-probes.
+    r = await req(srv.base, "GET", `/api/admin/ai-keys/${id}/models`, { sid: admin.sid });
+    assert.equal(r.json.source, "fallback");
+    assert.equal(flaky.hits.length, 2, "failure served fallback but wasn't cached");
+    // Box recovers → the very next plain ask goes live; success caches again.
+    flaky.status = 200;
+    r = await req(srv.base, "GET", `/api/admin/ai-keys/${id}/models`, { sid: admin.sid });
+    assert.equal(r.json.source, "live");
+    assert.equal(flaky.hits.length, 3);
+    r = await req(srv.base, "GET", `/api/admin/ai-keys/${id}/models`, { sid: admin.sid });
+    assert.equal(r.json.source, "live");
+    assert.equal(flaky.hits.length, 3, "the healthy answer is cached as before");
+  } finally {
+    flaky.close();
+  }
+});
+
+test("GET /api/admin/ai-keys/env/models: the ANTHROPIC_API_KEY-backed row lists too; ?refresh=0 does not bust", async () => {
+  const saveKey = process.env.ANTHROPIC_API_KEY, saveBase = process.env.ANTHROPIC_BASE_URL;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const gone = await req(srv.base, "GET", "/api/admin/ai-keys/env/models", { sid: admin.sid });
+    assert.equal(gone.status, 404, "no env key configured → no env row to ask");
+
+    const abox = await fakeAnthropicBox([
+      { data: [{ id: "claude-x-1", display_name: "Claude X" }], has_more: false, first_id: "claude-x-1", last_id: "claude-x-1" },
+    ]);
+    try {
+      process.env.ANTHROPIC_API_KEY = "sk-ant-envtest";
+      // The built-in anthropic descriptor declares no base, so the SDK reads
+      // ANTHROPIC_BASE_URL — pointing the env row at the fake box.
+      process.env.ANTHROPIC_BASE_URL = rootOf(abox);
+      let r = await req(srv.base, "GET", "/api/admin/ai-keys/env/models?refresh=1", { sid: admin.sid });
+      assert.equal(r.status, 200);
+      assert.equal(r.json.source, "live");
+      assert.deepEqual(r.json.models, [{ id: "claude-x-1", note: "Claude X" }]);
+      const hits = abox.hits.length;
+      r = await req(srv.base, "GET", "/api/admin/ai-keys/env/models?refresh=0", { sid: admin.sid });
+      assert.equal(r.json.source, "live");
+      assert.equal(abox.hits.length, hits, "refresh=0 rode the cache — only refresh=1 busts");
+    } finally {
+      abox.close();
+    }
+  } finally {
+    if (saveKey == null) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = saveKey;
+    if (saveBase == null) delete process.env.ANTHROPIC_BASE_URL; else process.env.ANTHROPIC_BASE_URL = saveBase;
+  }
 });
 
 test("GET /api/admin/ai-keys/:id/models: an unreachable box serves the curated fallback as 200, never an error", async () => {

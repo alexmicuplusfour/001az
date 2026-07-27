@@ -135,5 +135,8 @@ keeps its UX; discovery happens behind it.)
   no per-model GET, yet lists fine.)
 - **Keyless-networked (Ollama, LM Studio)**: listing hits the user's own box;
   the 30 s interactive timeout and per-connection base already handle it.
-- **Huge lists (OpenRouter)**: `modelFilter` plus datalist's native typeahead
-  keep it usable; if still noisy, cap the display and rely on typeahead.
+- **Huge lists (OpenRouter)**: ~~`modelFilter` plus datalist's native
+  typeahead keep it usable~~ (Superseded with the datalist: the picker is a
+  plain `<select>`, so OpenRouter's ~400 ids land in it unfiltered — many of
+  them non-tool-calling. Accepted for now; a `modelFilter` on the descriptor
+  is the ready lever when it grates.)

@@ -1575,12 +1575,24 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
 // box serves the descriptor's curated fallback rather than a 4xx (failure
 // semantics live in the engine; Test diagnoses).
 app.get("/api/admin/ai-keys/:id/models", requireAdmin, wrap(async (req, res) => {
+  const kind = MODEL_KINDS.includes(req.query.kind) ? req.query.kind : "tagging";
+  const refresh = req.query.refresh === "1"; // strict: ?refresh=0 must not bust
+  // "env" is the ANTHROPIC_API_KEY-backed default-tagger option — no ai_keys
+  // row, but the server holds the key, so it lists like any connection.
+  // Reserved cache id 0 (row ids start at 1); the env key changes only with a
+  // restart, so the TTL is the only staleness possible and no mutation path
+  // needs to invalidate it.
+  if (req.params.id === "env") {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(404).json({ error: "not found" });
+    return res.json(await cachedProviderModels(0, {
+      provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY, kind,
+    }, { refresh }));
+  }
   const key = await getAiKey(db, Number(req.params.id));
   if (!key) return res.status(404).json({ error: "not found" });
-  const kind = MODEL_KINDS.includes(req.query.kind) ? req.query.kind : "tagging";
   res.json(await cachedProviderModels(req.params.id, {
     provider: key.provider, apiKey: key.api_key, base: key.base_url || undefined, kind,
-  }, { refresh: !!req.query.refresh }));
+  }, { refresh }));
 }));
 
 // Provider catalog (labels, model lists + notes, defaults, capabilities). The

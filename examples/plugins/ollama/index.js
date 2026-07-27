@@ -35,6 +35,10 @@ export default function (ctx) {
       { id: "llama3.1:8b", note: "solid tool calling · ~8 GB" },
       { id: "qwen2.5:14b", note: "stronger tagging · ~9 GB" },
     ],
+    // The tagger picker excludes what the embeds filter below claims (the
+    // wire hard-fails on a model that can't tool-call, and an embedder never
+    // can) — keep the two patterns mirror images when editing either.
+    modelFilter: "^(?!.*(embed|bge))",
     research: false,
     keyless: true,
     needsBase: true,

@@ -79,6 +79,8 @@ services:
       AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
       AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
       AI_TRANSCRIBE_TIMEOUT_MS: ${AI_TRANSCRIBE_TIMEOUT_MS:-}
+      # model-picker discovery cache (server/providers.js) — 0 turns it off
+      AI_MODELS_TTL_MS: ${AI_MODELS_TTL_MS:-}
       EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
       # transcription is an async job (submit + poll) — these bound one HTTP
       # exchange and the no-progress stall window, NEVER the job's duration

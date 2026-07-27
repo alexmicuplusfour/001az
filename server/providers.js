@@ -187,7 +187,18 @@ function assembleModels(desc, kind, live) {
     models: (cat.models || []).map((m) => ({ ...m, recommended: true })),
   });
   if (!live?.length || (!cat.filter && !cat.always)) return fallback();
-  const list = cat.filter ? live.filter((m) => new RegExp(cat.filter).test(m.id)) : live;
+  // A filter that doesn't compile (a plugin author's typo) degrades exactly
+  // like one that matches nothing — warned so the author can find it, since
+  // the route's fallback-not-error contract otherwise swallows the evidence.
+  let filter = null;
+  if (cat.filter) {
+    try { filter = new RegExp(cat.filter); }
+    catch (err) {
+      console.warn(`${desc.label}: bad ${kind} model filter ${JSON.stringify(cat.filter)} — serving the curated list (${err.message})`);
+      return fallback();
+    }
+  }
+  const list = filter ? live.filter((m) => filter.test(m.id)) : live;
   if (!list.length) return fallback();
   const rest = new Map(list.map((m) => [m.id, m]));
   const models = [];
@@ -216,7 +227,8 @@ export async function listProviderModels({ provider, apiKey, base, kind = "taggi
 // the admin PATCH/DELETE routes AND plugin uninstall, which deletes rows via
 // deleteAiKey directly — invalidates through the one exported function, the
 // same owner-module pattern as ingestion's invalidateSourceCache. The cache
-// holds the RAW live list, not assembled payloads: all three catalog kinds
+// holds the RAW live list (as a settling promise — see the coalescing note in
+// cachedProviderModels), not assembled payloads: all three catalog kinds
 // share one upstream fetch, and assembly is cheap per request.
 // TTL read per call: 0 = off (tests use this); empty string counts as unset →
 // the 10-min default (Number("") is 0, which would silently disable caching).
@@ -231,15 +243,31 @@ export function invalidateModelListCache(keyId) {
 export async function cachedProviderModels(keyId, { provider, apiKey, base, kind = "tagging" }, { refresh = false } = {}) {
   const desc = PROVIDERS[provider];
   const id = Number(keyId);
-  const hit = modelListCache.get(id);
-  let live;
-  if (!refresh && hit && Date.now() - hit.at < modelListTtl()) {
-    live = hit.live;
-  } else {
-    live = await fetchLiveModels(desc, { apiKey, base });
-    modelListCache.set(id, { at: Date.now(), live });
+  let entry = modelListCache.get(id);
+  // An in-flight fetch is fresh by definition, so later arrivals ride it —
+  // refreshers included: the plugin modal builds its per-kind sections in one
+  // pass and every select's first visit sends refresh=1, so without
+  // coalescing each section would bust the raw list the previous section's
+  // still-pending fetch was about to fill (three racing upstream asks per
+  // modal open). Refresh only busts SETTLED entries; TTL runs from settle.
+  const usable = entry && (entry.pending || (!refresh && Date.now() - entry.at < modelListTtl()));
+  if (!usable) {
+    const e = { pending: true, at: Date.now() };
+    e.live = fetchLiveModels(desc, { apiKey, base }).then((v) => {
+      e.pending = false;
+      e.at = Date.now();
+      // A failure isn't a fact worth remembering: a cached null would pin the
+      // fallback for the whole TTL after the box recovers. Drop the entry so
+      // the next ask re-probes (a dead box refuses in milliseconds, asks are
+      // interactive-only, and concurrent ones coalesce above) — riders on
+      // this fetch still get the null. Guarded: never evict a newer entry.
+      if (v == null && modelListCache.get(id) === e) modelListCache.delete(id);
+      return v;
+    });
+    modelListCache.set(id, e);
+    entry = e;
   }
-  return assembleModels(desc, kind, live);
+  return assembleModels(desc, kind, await entry.live);
 }
 
 // Public catalog for the admin UI — labels, model lists (with notes), defaults,

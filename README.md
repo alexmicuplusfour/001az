@@ -181,8 +181,9 @@ service on every push and PR (`.github/workflows/ci.yml`).
 Tuning knobs (`TAG_CONCURRENCY`, `POLL_MS`, `MAX_ATTEMPTS`, `STUCK_MS`,
 `EMBED_BATCH`, `REFRESH_BATCH`, `INGEST_CONTINUOUS_MS`, `INGEST_SETTLE_MS`,
 `INGEST_RUN_CAP`, `ALERT_SETTLE_MS`, `ALERT_MAX_WAIT_MS`,
-`ALERT_WEBHOOK_TIMEOUT_MS`, connector rate limits) have sensible defaults; see
-the top of `server/server.js`, `server/worker.js`, and `server/alerts.js`.
+`ALERT_WEBHOOK_TIMEOUT_MS`, `AI_MODELS_TTL_MS`, connector rate limits) have
+sensible defaults; see the top of `server/server.js`, `server/worker.js`,
+`server/alerts.js`, and `server/providers.js`.
 
 ## Deployment
 

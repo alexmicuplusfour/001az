@@ -21,6 +21,9 @@ export default (wires) => ({
   // Live-list carving (OpenAI's /models is bare ids, no capability metadata):
   // tagging keeps the chat families (gpt-*/o3/chatgpt-*) minus the non-chat
   // suffixes that share the gpt- prefix (transcribe/tts/audio/realtime/image…).
+  // Responses-API-only ids (o1-pro, *-deep-research) and instruct-era ids
+  // still pass — a name pattern can't see which API serves a model; a wrong
+  // pick fails at call time with the provider's own readable error.
   modelFilter: "^(?!.*(embedding|tts|transcribe|realtime|audio|moderation|image|dall-e))(gpt-|o\\d|chatgpt-)",
   compat: { maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
   embeds: {
