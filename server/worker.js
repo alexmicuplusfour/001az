@@ -90,7 +90,9 @@ export async function resolveDefaultAi(db) {
     const key = await getAiKey(db, defId);
     if (key && (await aiPluginInstalled(db, key.provider))) {
       const model = (await getSetting(db, "model")) || PROVIDERS[key.provider].defaultModel;
-      return { provider: key.provider, apiKey: key.api_key, model };
+      // `base`: the connection's own server URL (self-hosted providers) — rides
+      // every resolved-ai object so the wire can point at the right box.
+      return { provider: key.provider, apiKey: key.api_key, model, base: key.base_url || undefined };
     }
   }
   if (process.env.ANTHROPIC_API_KEY && (await aiPluginInstalled(db, "anthropic"))) {
@@ -127,6 +129,7 @@ export async function resolveEmbedder(db) {
     provider: key.provider,
     apiKey: key.api_key,
     model: (await getSetting(db, "embed_model")) || PROVIDERS[key.provider].embeds.default,
+    base: key.base_url || undefined,
   };
 }
 
@@ -164,6 +167,7 @@ export async function resolveBoardAi(db, boardEntry) {
         provider: key.provider,
         apiKey: key.api_key,
         model: boardEntry.aiModel || PROVIDERS[key.provider].defaultModel,
+        base: key.base_url || undefined,
       };
     }
     if (key) console.log(`board AI provider ${key.provider} is not installed — falling back to the default tagger`);
@@ -419,6 +423,7 @@ export async function embedBatch(db, embedder, rows) {
       embedTexts({
         provider: embedder.provider,
         apiKey: embedder.apiKey,
+        base: embedder.base,
         model: embedder.model,
         rpm, burst,
         texts: rs.map((r) => embedTextFor(r.tags, r.tag_reasoning, r.payload)),
@@ -774,7 +779,7 @@ export async function resolveTranscriber(db, board = null) {
         // the Plugins page — otherwise a paid provider transcribes invisibly.
         transcribe: async (buf, filename) =>
           (await withPluginHealth(db, `ai:${provider}`, () =>
-            transcribeAudio({ provider, apiKey: key?.api_key ?? null, model, rpm, burst, audio: buf, filename }))).text,
+            transcribeAudio({ provider, apiKey: key?.api_key ?? null, base: key?.base_url || undefined, model, rpm, burst, audio: buf, filename }))).text,
       };
     }
   }
@@ -990,6 +995,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const { input, usage } = await trackedTagger(db, {
       provider: ai.provider,
       apiKey: ai.apiKey,
+      base: ai.base,
       model: ai.model,
       systemText,
       schema,
@@ -1423,6 +1429,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const { input, usage } = await trackedTagger(db, {
       provider: ai.provider,
       apiKey: ai.apiKey,
+      base: ai.base,
       model: ai.model,
       systemText,
       schema,

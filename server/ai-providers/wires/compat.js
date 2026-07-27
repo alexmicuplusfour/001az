@@ -70,13 +70,19 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
   };
 }
 
+// The endpoint root for one call: the connection's own server URL when it
+// carries one (self-hosted providers — `needsBase` descriptors), else the
+// descriptor default. Rides the per-call opts like apiKey does, NOT ctx/desc:
+// two connections of one provider can point at two boxes.
+const baseOf = (desc, base) => base || desc.base;
+
 export const compatWire = {
-  async tag(desc, { apiKey, model, systemText, schema, parts, tool = DEFAULT_TOOL }) {
+  async tag(desc, { apiKey, model, systemText, schema, parts, base, tool = DEFAULT_TOOL }) {
     // Document blocks are Anthropic-only: the chat-completions path has no PDF
     // input. Fail loud with the fix, rather than degrading silently.
     if (parts.some((p) => p.kind === "document"))
       throw new Error(`${desc.label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
-    const r = await fetch(`${desc.base}/chat/completions`, {
+    const r = await fetch(`${baseOf(desc, base)}/chat/completions`, {
       method: "POST",
       headers: compatHeaders(apiKey),
       body: JSON.stringify(compatRequest({ compat: desc.compat, model, systemText, schema, parts, tool })),
@@ -99,13 +105,13 @@ export const compatWire = {
     };
   },
 
-  async testKey(desc, { apiKey, model }) {
+  async testKey(desc, { apiKey, model, base }) {
     const id = model || desc.defaultModel;
     // "completion": a one-token chat call (for providers with no models
     // endpoint — GLM). "models": a cheap GET on the model id. Both validate the
     // key and surface the provider's own error message.
     if (desc.compat.keyTest === "completion") {
-      const r = await fetch(`${desc.base}/chat/completions`, {
+      const r = await fetch(`${baseOf(desc, base)}/chat/completions`, {
         method: "POST",
         headers: compatHeaders(apiKey),
         body: JSON.stringify({
@@ -119,14 +125,14 @@ export const compatWire = {
       if (!r.ok) throw await compatError(r, desc.label);
       return;
     }
-    const r = await fetch(`${desc.base}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
+    const r = await fetch(`${baseOf(desc, base)}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
     if (!r.ok) throw await compatError(r, desc.label);
   },
 
   // Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
   // every vector L2-normalized, so similarity is a plain dot product.
-  async embed(desc, { apiKey, model, texts }) {
-    const r = await fetch(`${desc.base}/embeddings`, {
+  async embed(desc, { apiKey, model, texts, base }) {
+    const r = await fetch(`${baseOf(desc, base)}/embeddings`, {
       method: "POST",
       headers: compatHeaders(apiKey),
       body: JSON.stringify({ model, input: texts }),
@@ -152,14 +158,14 @@ export const compatWire = {
   // endpoint opts in by setting `transcribes` on its descriptor — the generic
   // path never names a provider. Returns { text, usage }; usage is per-audio
   // (not tokens), left zero — transcription billing isn't tracked yet.
-  async transcribe(desc, { apiKey, model, audio, filename }) {
+  async transcribe(desc, { apiKey, model, audio, filename, base }) {
     const form = new FormData();
     form.append("model", model || desc.transcribes.default);
     // The multipart filename's EXTENSION is load-bearing: OpenAI validates the
     // audio format from it, and rejects an extensionless name. Callers pass the
     // stored <hex>.<ext> name; the fallback is only for a bare reachability probe.
     form.append("file", new Blob([audio]), filename || "audio.wav");
-    const r = await fetch(`${desc.base}/audio/transcriptions`, {
+    const r = await fetch(`${baseOf(desc, base)}/audio/transcriptions`, {
       method: "POST",
       // NOT compatHeaders — FormData sets its own multipart Content-Type + boundary.
       headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },

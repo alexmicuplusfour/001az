@@ -699,7 +699,7 @@ export async function deleteFilterConfig(db, userId, id) {
 
 export async function listAiKeys(db) {
   const { rows } = await db.query(
-    `SELECT k.id, k.name, k.provider, k.api_key, k.created_at,
+    `SELECT k.id, k.name, k.provider, k.api_key, k.base_url, k.created_at,
       (SELECT COUNT(*) FROM boards b WHERE b.ai_key_id = k.id OR b.extract_key_id = k.id) AS boards_using
      FROM ai_keys k ORDER BY k.created_at ASC`
   );
@@ -707,14 +707,14 @@ export async function listAiKeys(db) {
 }
 
 export async function getAiKey(db, id) {
-  const { rows } = await db.query("SELECT id, name, provider, api_key FROM ai_keys WHERE id=$1", [id]);
+  const { rows } = await db.query("SELECT id, name, provider, api_key, base_url FROM ai_keys WHERE id=$1", [id]);
   return rows[0] || null;
 }
 
-export async function createAiKey(db, name, provider, apiKey) {
+export async function createAiKey(db, name, provider, apiKey, baseUrl = null) {
   const { rows } = await db.query(
-    "INSERT INTO ai_keys (name, provider, api_key, created_at) VALUES ($1, $2, $3, $4) RETURNING id",
-    [name, provider, apiKey, Date.now()]
+    "INSERT INTO ai_keys (name, provider, api_key, base_url, created_at) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    [name, provider, apiKey, baseUrl, Date.now()]
   );
   return rows[0].id;
 }

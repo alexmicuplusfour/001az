@@ -1475,6 +1475,7 @@ app.get("/api/admin/ai-keys", requireAdmin, wrap(async (_req, res) => {
       name: k.name,
       provider: k.provider,
       hint: k.api_key ? "…" + String(k.api_key).slice(-4) : "no key", // raw keys never leave the server; null = keyless connection
+      base_url: k.base_url || null, // a URL, not a secret — the connection's identity for self-hosted providers
       boards_using: k.boards_using,
       created_at: k.created_at,
     }))
@@ -1494,7 +1495,15 @@ app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
   if (PROVIDERS[provider].onDevice)
     return res.status(400).json({ error: `${PROVIDERS[provider].label} runs on-device — it has no connections to register` });
   if (!apiKey && !PROVIDERS[provider].keyless) return res.status(400).json({ error: "key required" });
-  const id = await createAiKey(db, name, provider, apiKey || null);
+  // Per-connection server URL — only for providers that declare `needsBase`
+  // (self-hosted); blank falls back to the descriptor's default base.
+  let baseUrl = null;
+  if (PROVIDERS[provider].needsBase && req.body?.base_url) {
+    baseUrl = String(req.body.base_url).trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(baseUrl))
+      return res.status(400).json({ error: "server URL must start with http:// or https://" });
+  }
+  const id = await createAiKey(db, name, provider, apiKey || null, baseUrl);
   console.log(`ai-key added: "${name}" (${provider})`);
   res.json({ id, name, provider });
 }));
@@ -1514,7 +1523,7 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
   const model = req.body && req.body.model ? String(req.body.model) : null;
   try {
     await withPluginHealth(db, `ai:${key.provider}`, () =>
-      testKey({ provider: key.provider, apiKey: key.api_key, model }));
+      testKey({ provider: key.provider, apiKey: key.api_key, base: key.base_url || undefined, model }));
     res.json({ ok: true, provider: key.provider });
   } catch (err) {
     res.status(400).json({ error: err.message });

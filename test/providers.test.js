@@ -77,11 +77,14 @@ test("providerCatalog exposes the UI-facing shape and leaks no internals", () =>
   assert.equal(glm.embeds, null); // no embeddings
   const openai = cat.find((p) => p.name === "openai");
   assert.equal(openai.embeds.default, "text-embedding-3-small");
-  // no wire functions / compat internals cross the boundary
+  // no wire functions / compat internals cross the boundary. `base` crosses
+  // ONLY as a needsBase provider's suggested default (the connection form's
+  // placeholder); every built-in is fixed-endpoint, so it stays null here.
   for (const p of cat) {
     assert.equal(p.wire, undefined);
     assert.equal(p.compat, undefined);
-    assert.equal(p.base, undefined);
+    assert.equal(p.needsBase, false);
+    assert.equal(p.base, null);
   }
 });
 

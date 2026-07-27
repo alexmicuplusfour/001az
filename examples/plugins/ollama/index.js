@@ -9,10 +9,14 @@
 // sent as a Bearer header. NOT `onDevice`: it's a real server on your network,
 // so the rate-limit contract and per-call pacing apply.
 //
-// The base URL and model list are yours to edit — Ollama's catalog is whatever
-// you've `ollama pull`ed, which the app can't know. OLLAMA_BASE_URL overrides
-// the base without editing the file (the app runs in Docker, so "localhost"
-// would be the app container itself — use host.docker.internal or a LAN IP).
+// `needsBase: true` — each connection carries its own server URL, set in the
+// admin UI when you add it (two connections = two Ollama boxes). The `base`
+// below is only the suggested default; OLLAMA_BASE_URL overrides that default
+// without editing the file. The app runs in Docker, so "localhost" would be
+// the app container itself — use host.docker.internal or a LAN IP.
+//
+// The model list is yours to edit — Ollama's catalog is whatever you've
+// `ollama pull`ed, which the app can't know.
 const base = process.env.OLLAMA_BASE_URL || "http://host.docker.internal:11434/v1";
 
 export default function (ctx) {
@@ -29,6 +33,7 @@ export default function (ctx) {
     ],
     research: false,
     keyless: true,
+    needsBase: true,
     // Pace to what your box can serve, not an account tier — this mostly guards
     // the GPU against a big backlog sweep. Adjustable on the plugin card.
     rpm: 120, burst: 5,

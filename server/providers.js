@@ -170,6 +170,11 @@ export function providerCatalog() {
       research: p.research,
       keyless: !!p.keyless,
       onDevice: !!p.onDevice,
+      // needsBase: connections carry the server URL (self-hosted providers —
+      // the descriptor base is only the suggested default, shown as the form's
+      // placeholder). Fixed-endpoint providers never store one.
+      needsBase: !!p.needsBase,
+      base: p.needsBase ? p.base || null : null,
       embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
       transcribes: p.transcribes ? { default: p.transcribes.default, models: p.transcribes.models } : null,
     };

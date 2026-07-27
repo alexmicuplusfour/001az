@@ -12,6 +12,7 @@
 // and the wire (header omitted exactly when there is no key).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { startServer, adminSession, req } from "./helpers.js";
 import { loadDir, uninstall } from "../server/plugin-loader.js";
@@ -153,6 +154,42 @@ test("resolution: a keyless connection backs the embedder slot; on-device stays 
   em = await resolveEmbedder(db);
   assert.equal(em.provider, "local");
   assert.equal(em.apiKey, null);
+});
+
+test("a connection's server URL overrides the descriptor base — proven on a live socket", async () => {
+  // A tiny stand-in for an Ollama box: records what arrives, answers the
+  // compat models probe. This exercises the WHOLE chain — row → route →
+  // testKey dispatch → compat wire — not just the parsing.
+  const hits = [];
+  const box = http.createServer((rq, rs) => {
+    hits.push({ url: rq.url, auth: rq.headers.authorization || null });
+    rs.writeHead(200, { "Content-Type": "application/json" });
+    rs.end(JSON.stringify({ id: "acme-llm" }));
+  });
+  await new Promise((r) => box.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${box.address().port}/v1`;
+  try {
+    const add = await req(srv.base, "POST", "/api/admin/ai-keys", {
+      sid: admin.sid,
+      body: { name: "Boxed", provider: "acme.selfhosted", base_url: base + "/" }, // trailing slash normalizes away
+    });
+    assert.equal(add.status, 200);
+    const listed = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json.find((k) => k.name === "Boxed");
+    assert.equal(listed.base_url, base);
+
+    const t = await req(srv.base, "POST", `/api/admin/ai-keys/${add.json.id}/test`, { sid: admin.sid });
+    assert.equal(t.status, 200, JSON.stringify(t.json));
+    assert.equal(hits.length, 1, "the call hit the CONNECTION's server, not the descriptor default");
+    assert.equal(hits[0].url, "/v1/models/acme-llm");
+    assert.equal(hits[0].auth, null, "keyless → no Authorization header on the wire");
+
+    // The resolved-ai object carries the base wherever a board points at the row.
+    const board = await resolveBoardAi(db, { aiKeyId: Number(add.json.id), aiModel: null });
+    assert.equal(board.base, base);
+    assert.equal(board.apiKey, null);
+  } finally {
+    box.close();
+  }
 });
 
 test("deleteAiKey: the transcribe slot pointers clear with their key, like embed's do", async () => {

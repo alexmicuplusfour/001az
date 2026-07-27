@@ -6,9 +6,10 @@ real server — connections register without a secret, pacing still applies.
 
 ## Install
 
-1. Edit `index.js` if needed: the `base` URL (or set `OLLAMA_BASE_URL` on the app container)
-   and the model lists — list what you've actually `ollama pull`ed. Tagging requires a
-   tool-calling-capable model (llama3.1+, qwen2.5/3, mistral-nemo…).
+1. Edit the model lists in `index.js` if yours differ — list what you've actually
+   `ollama pull`ed. Tagging requires a tool-calling-capable model (llama3.1+,
+   qwen2.5/3, mistral-nemo…). The server URL is NOT set here — you enter it per
+   connection in the admin UI (step 3).
 2. Admin → Plugins → **Add plugin** → paste any of:
    - the GitHub folder URL of this directory —
      `https://github.com/<owner>/<repo>/tree/main/examples/plugins/ollama`
@@ -18,11 +19,13 @@ real server — connections register without a secret, pacing still applies.
      `examples/plugins/ollama`, so that exact string works);
    - a `file:` URL. Local paths install with no network fetch.
 
-   Note: a path edit (step 1) needs the *installed copy* to carry it — installing from
-   GitHub installs the committed version, so prefer `OLLAMA_BASE_URL` for the base and
-   install from a local copy if you changed the model list.
-3. Open the Ollama card → **Add connection** (a name, no key — unless a reverse proxy in
-   front of your server wants a token) → **test** proves the server is reachable.
+   Note: a model-list edit (step 1) needs the *installed copy* to carry it — installing
+   from GitHub installs the committed version, so install from a local copy if you
+   changed it.
+3. Open the Ollama card → **Add connection**: a name, your server's URL (e.g.
+   `http://host.docker.internal:11434/v1` or `http://192.168.1.20:11434/v1` — include
+   the `/v1`), and no token unless a reverse proxy in front of your server wants one.
+   **test** proves the server is reachable. Two connections can point at two boxes.
 4. Make it the default tagger and/or embedder on the same card, or pick the connection
    per-board in the board's AI settings.
 

@@ -296,17 +296,22 @@ function keysSection(p, ctx, reload) {
     `Named ${noun}s for this provider. Boards can pick any of them; one can be the app default below.`
   );
 
+  // Self-hosted providers (needsBase): a connection IS a server, so show where
+  // each row points — its own URL, or the plugin's default base.
+  const needsBase = p.ai.needsBase;
   if (mine.length) {
     const table = document.createElement("table");
-    table.innerHTML = `<thead><tr><th>Name</th><th>Key</th><th></th></tr></thead>`;
+    table.innerHTML = `<thead><tr><th>Name</th>${needsBase ? "<th>Server</th>" : ""}<th>Key</th><th></th></tr></thead>`;
     const tbody = document.createElement("tbody");
     for (const k of mine) {
       const isDefault = ctx.slots.tagger.keyId === k.id;
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${k.name} ${isDefault ? '<span class="badge">default</span>' : ""}</td>
+        ${needsBase ? `<td style="${MONO_CSS}color:#9aa0aa"></td>` : ""}
         <td style="${MONO_CSS}color:#9aa0aa">${k.hint}</td>
         <td><div class="row-actions"></div></td>`;
+      if (needsBase) tr.children[1].textContent = k.base_url || `${p.ai.base || "?"} (default)`;
       const act = tr.querySelector(".row-actions");
 
       const testBtn = document.createElement("button");
@@ -351,9 +356,20 @@ function keysSection(p, ctx, reload) {
   const addForm = document.createElement("form");
   addForm.style.cssText = "margin:0;";
   const nameIn = document.createElement("input");
-  nameIn.placeholder = "Name (e.g. Personal)";
+  nameIn.placeholder = keyless ? "Name (e.g. Homelab)" : "Name (e.g. Personal)";
   nameIn.required = true;
   nameIn.autocomplete = "off";
+  // Self-hosted: the server URL is the connection's identity. Blank keeps the
+  // plugin's default base (shown as the placeholder).
+  let baseIn = null;
+  if (needsBase) {
+    baseIn = document.createElement("input");
+    baseIn.type = "text";
+    baseIn.placeholder = p.ai.base || "http://host:port/v1";
+    baseIn.autocomplete = "off";
+    baseIn.spellcheck = false;
+    baseIn.style.cssText = MONO_CSS;
+  }
   const keyIn = document.createElement("input");
   keyIn.type = "password";
   // Keyless: the token is optional (e.g. a reverse proxy in front of the box).
@@ -366,12 +382,17 @@ function keysSection(p, ctx, reload) {
   const addBtn = document.createElement("button");
   addBtn.type = "submit";
   addBtn.textContent = `Add ${noun}`;
-  addForm.append(nameIn, keyIn, addBtn);
+  addForm.append(nameIn, ...(baseIn ? [baseIn] : []), keyIn, addBtn);
   addForm.onsubmit = async (e) => {
     e.preventDefault();
     addBtn.disabled = true;
     try {
-      await api("POST", "/api/admin/ai-keys", { name: nameIn.value.trim(), provider: p.name, key: keyIn.value.trim() });
+      await api("POST", "/api/admin/ai-keys", {
+        name: nameIn.value.trim(),
+        provider: p.name,
+        key: keyIn.value.trim(),
+        ...(baseIn?.value.trim() ? { base_url: baseIn.value.trim() } : {}),
+      });
       toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" added`);
       reload();
     } catch (err) {

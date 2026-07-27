@@ -53,7 +53,11 @@ function aiDefs() {
     ],
     // the modal's pickers (models + notes, embed/transcribe catalogs) — same data
     // the board modal reads from /api/admin/ai-providers
-    ai: { defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, keyless: p.keyless, onDevice: p.onDevice },
+    ai: {
+      defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes,
+      keyless: p.keyless, onDevice: p.onDevice,
+      needsBase: !!p.needsBase, base: p.needsBase ? p.base || null : null,
+    },
   }));
 }
 

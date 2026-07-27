@@ -12,6 +12,7 @@ export default function (ctx) {
     models: [{ id: "acme-llm", label: "Acme LLM" }],
     research: false,
     keyless: true,
+    needsBase: true, // connections carry the server URL; `base` above is only the default
     rpm: 60, burst: 10, // networked → the rate-limit contract applies, keyless or not
     compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "models" },
     embeds: { default: "acme-embedder", models: [{ id: "acme-embedder", note: "test" }] },
