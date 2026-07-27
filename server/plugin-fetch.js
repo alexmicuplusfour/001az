@@ -1,10 +1,12 @@
 // Plugin source resolution + fetch (phase 2, slice 2). Turns an install URL into
 // code on disk in a staging dir; the loader (server/plugin-loader.js) then
 // validates, npm-installs, and registers it. Three source kinds:
-//   github:owner/repo[@ref]  |  https://github.com/owner/repo[/tree/ref]
+//   github:owner/repo[/sub/dir][@ref]  |  https://github.com/owner/repo[/tree/ref[/sub/dir]]
+//     — a subdir installs a plugin that lives INSIDE a repo (monorepo /
+//       examples layout), so an app repo can ship installable examples
 //   npm:name[@version]       |  a bare (scoped) package name
-//   file:/abs/path or a local path  — a dir copy (dev / air-gapped / vendored;
-//                                     also the hermetic test vector — no network)
+//   file:/abs/path or a local path — absolute or relative to the server's cwd
+//     (dev / air-gapped / vendored; also the hermetic test vector — no network)
 //   (a direct https .tgz URL is accepted too — download + extract)
 //
 // Network is confined here. The loader stays offline-testable: a file: source
@@ -24,11 +26,22 @@ const UA = "001az-plugin-installer";
 
 // --- resolve a URL/spec to a source descriptor (pure, no IO) ---
 
-function githubSource(owner, repo, ref) {
+// A repo-relative plugin dir ("examples/plugins/ollama"). Slashes trimmed; any
+// empty/dot segment is refused — the subdir is joined onto an extract dir and
+// must never climb out of it.
+function cleanSubdir(subdir) {
+  const d = String(subdir || "").replace(/^\/+|\/+$/g, "");
+  if (!d) return null;
+  if (d.split("/").some((p) => !p || p === "." || p === ".."))
+    throw new Error(`invalid plugin subdirectory "${subdir}"`);
+  return d;
+}
+
+function githubSource(owner, repo, ref, subdir) {
   // The API tarball endpoint defaults to the repo's default branch when ref is
   // empty, and redirects to codeload (fetch follows redirects).
   return {
-    kind: "github", owner, repo, ref: ref || null,
+    kind: "github", owner, repo, ref: ref || null, subdir: cleanSubdir(subdir),
     tarballUrl: `https://api.github.com/repos/${owner}/${repo}/tarball/${ref || ""}`,
     resolvedRef: ref || "default",
   };
@@ -48,10 +61,10 @@ export function resolveSource(url) {
   if (s.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith("./") || s.startsWith("../"))
     return { kind: "file", dir: path.resolve(s), resolvedRef: "local" };
 
-  let m = s.match(/^github:([^/]+)\/([^@/]+)(?:@(.+))?$/);
-  if (m) return githubSource(m[1], m[2], m[3]);
-  m = s.match(/^https?:\/\/github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:\/tree\/([^/#?]+))?\/?$/);
-  if (m) return githubSource(m[1], m[2], m[3]);
+  let m = s.match(/^github:([^/@]+)\/([^/@]+)((?:\/[^@]*)*)(?:@(.+))?$/);
+  if (m) return githubSource(m[1], m[2], m[4], m[3]);
+  m = s.match(/^https?:\/\/github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:\/tree\/([^/#?]+)((?:\/[^#?]*)?))?\/?$/);
+  if (m) return githubSource(m[1], m[2], m[3], m[4]);
 
   if (s.startsWith("npm:")) return npmSource(s.slice(4));
   if (!s.includes("://") && /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(@.+)?$/i.test(s))
@@ -59,12 +72,18 @@ export function resolveSource(url) {
 
   if (/^https?:\/\/.+\.(tgz|tar\.gz)(\?.*)?$/i.test(s)) return { kind: "tarball", tarballUrl: s, resolvedRef: "url" };
 
-  throw new Error(`unrecognized plugin source "${s}" — use github:owner/repo, npm:name, an https tarball URL, or a local path`);
+  // A bare relative path ("examples/plugins/ollama") — resolved against the
+  // server's cwd, like any relative path. Recognized LAST so it can never
+  // shadow the URL forms above; a typo'd URL-ish string errors readably at
+  // fetch time ("local plugin path not found") instead of here.
+  if (!s.includes("://") && /[\\/]/.test(s)) return { kind: "file", dir: path.resolve(s), resolvedRef: "local" };
+
+  throw new Error(`unrecognized plugin source "${s}" — use github:owner/repo[/sub/dir], npm:name, an https tarball URL, or a local path`);
 }
 
 // --- fetch the resolved source into an (existing, empty) staging dir ---
 
-async function downloadTarball(tarballUrl, stagingDir, headers = {}) {
+async function downloadTarball(tarballUrl, stagingDir, headers = {}, subdir = null) {
   const res = await fetch(tarballUrl, { headers: { "User-Agent": UA, ...headers }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "follow" });
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${tarballUrl}`);
   // Reject on the declared size first, then cap while streaming — an unbounded or
@@ -82,9 +101,24 @@ async function downloadTarball(tarballUrl, stagingDir, headers = {}) {
   const tgz = path.join(stagingDir, "__plugin.tgz");
   fs.writeFileSync(tgz, Buffer.concat(chunks));
   // Both GitHub and npm tarballs wrap everything in one top-level dir → strip it.
-  // Run with cwd = stagingDir and a RELATIVE archive name so a Windows drive-letter
-  // path (C:\…) is never passed to tar — GNU tar reads the ':' as a host:path spec.
-  await run("tar", ["-xzf", "__plugin.tgz", "--strip-components=1"], { cwd: stagingDir });
+  // Run with cwd inside staging and a RELATIVE archive name so a Windows
+  // drive-letter path (C:\…) is never passed to tar — GNU tar reads the ':' as
+  // a host:path spec.
+  if (subdir) {
+    // The tarball holds the whole repo; the plugin lives in a subdir (monorepo /
+    // examples layout). Unpack aside, lift the subdir into the staging root, and
+    // the rest of the install path sees a plain plugin dir like any other.
+    const unpack = path.join(stagingDir, ".unpack");
+    fs.mkdirSync(unpack);
+    await run("tar", ["-xzf", "../__plugin.tgz", "--strip-components=1"], { cwd: unpack });
+    const src = path.join(unpack, subdir);
+    if (!fs.existsSync(path.join(src, "manifest.json")))
+      throw new Error(`no manifest.json under "${subdir}" in the repo — is that the plugin's directory?`);
+    fs.cpSync(src, stagingDir, { recursive: true });
+    fs.rmSync(unpack, { recursive: true, force: true });
+  } else {
+    await run("tar", ["-xzf", "__plugin.tgz", "--strip-components=1"], { cwd: stagingDir });
+  }
   fs.rmSync(tgz, { force: true });
 }
 
@@ -109,7 +143,7 @@ export async function fetchModule(source, stagingDir) {
       return { resolvedRef: "local" };
     }
     case "github":
-      await downloadTarball(source.tarballUrl, stagingDir, { Accept: "application/vnd.github+json" });
+      await downloadTarball(source.tarballUrl, stagingDir, { Accept: "application/vnd.github+json" }, source.subdir);
       return { resolvedRef: source.resolvedRef };
     case "tarball":
       await downloadTarball(source.tarballUrl, stagingDir);

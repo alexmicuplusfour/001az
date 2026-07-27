@@ -96,14 +96,14 @@ function installFromUrlZone(ctx, close) {
 
   const label = document.createElement("p");
   label.className = "sub";
-  label.textContent = "Install a community plugin from a GitHub repo, npm package, or tarball URL.";
+  label.textContent = "Install a community plugin from a GitHub repo (or a folder inside one), an npm package, a tarball URL, or a directory path on the server.";
   zone.appendChild(label);
 
   const row = document.createElement("div");
   row.className = "pa-install-row";
   const input = document.createElement("input");
   input.type = "text";
-  input.placeholder = "github:owner/repo · npm:name · https://…/plugin.tgz";
+  input.placeholder = "github:owner/repo · https://github.com/…/tree/main/dir · npm:name · /path/on/server";
   input.autocomplete = "off";
   input.spellcheck = false;
   const btn = document.createElement("button");

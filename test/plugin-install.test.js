@@ -29,8 +29,17 @@ test("resolveSource: github / npm / tarball / local / errors", () => {
   assert.equal(s.kind, "github"); assert.equal(s.owner, "acme"); assert.equal(s.repo, "gecko");
   assert.match(s.tarballUrl, /\/repos\/acme\/gecko\/tarball\//);
   assert.equal(resolveSource("github:acme/gecko@v1.2").ref, "v1.2");
+  assert.equal(resolveSource("github:acme/gecko@v1.2").subdir, null);
   assert.equal(resolveSource("https://github.com/acme/gecko").kind, "github");
   assert.equal(resolveSource("https://github.com/acme/gecko/tree/dev").ref, "dev");
+  assert.equal(resolveSource("https://github.com/acme/gecko/tree/dev").subdir, null);
+
+  // A plugin living INSIDE a repo (monorepo / examples layout) — both forms.
+  s = resolveSource("github:acme/gecko/examples/plugins/ollama@v2");
+  assert.equal(s.subdir, "examples/plugins/ollama"); assert.equal(s.ref, "v2");
+  s = resolveSource("https://github.com/acme/gecko/tree/main/examples/plugins/ollama");
+  assert.equal(s.subdir, "examples/plugins/ollama"); assert.equal(s.ref, "main");
+  assert.throws(() => resolveSource("github:acme/gecko/../evil"), /subdirectory/);
 
   assert.deepEqual(
     (({ kind, name, version }) => ({ kind, name, version }))(resolveSource("npm:left-pad")),
@@ -43,6 +52,10 @@ test("resolveSource: github / npm / tarball / local / errors", () => {
   assert.equal(resolveSource("https://ex.com/p.tgz").kind, "tarball");
   assert.equal(resolveSource("/abs/local/path").kind, "file");
   assert.equal(resolveSource("C:\\Users\\x\\plugin").kind, "file");
+  // A bare relative path resolves against the server's cwd (last-resort form —
+  // URL-ish strings above always win the parse).
+  assert.equal(resolveSource("examples/plugins/ollama").kind, "file");
+  assert.ok(path.isAbsolute(resolveSource("examples/plugins/ollama").dir));
 
   assert.throws(() => resolveSource(""), /required/);
   assert.throws(() => resolveSource("http://example.com/not-a-tarball"), /unrecognized/);
