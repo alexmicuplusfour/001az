@@ -155,6 +155,93 @@ export function testKey({ provider, ...rest }) {
   return desc.wire.testKey(desc, rest);
 }
 
+// The models a connection can use RIGHT NOW: the provider's own listing
+// endpoint (wire.listModels, asked with the connection's key/server), carved
+// per CATALOG KIND and merged under the descriptor's curated picks. One raw
+// fetch serves all three kinds — /models mixes chat, embedding, and audio ids
+// and the listing endpoints carry NO capability metadata (OpenAI's is bare
+// ids), so name-pattern filters carried as descriptor data are how a catalog
+// claims its slice: `modelFilter` (tagging), `embeds.filter`,
+// `transcribes.filter`, each a regex source tested against the id. Tagging
+// without a filter shows everything (a provider may be all-chat); a
+// capability catalog without a filter stays on its curated list — an
+// unfiltered dump into the embedder picker would be worse than hardcoding.
+// The descriptor lists are the recommended set + offline fallback, NOT the
+// catalog — a wire without listing, a fetch failure, or a filter that
+// matches nothing serves them alone (source: "fallback"); never a throw,
+// never an empty picker (the Test button is the key diagnostic). When the
+// live list applies it owns existence: a retired curated id drops out,
+// everything else sorts in below the recommendations; descriptor notes win
+// the labels for ids both sides know.
+const KIND_CATALOG = {
+  tagging: (desc) => ({ models: desc?.models, filter: desc?.modelFilter, always: true }),
+  embed: (desc) => desc?.embeds,
+  transcribe: (desc) => desc?.transcribes,
+};
+export const MODEL_KINDS = Object.keys(KIND_CATALOG);
+function assembleModels(desc, kind, live) {
+  const cat = KIND_CATALOG[kind](desc);
+  if (!cat) return { source: "fallback", models: [] }; // provider lacks the capability
+  const fallback = () => ({
+    source: "fallback",
+    models: (cat.models || []).map((m) => ({ ...m, recommended: true })),
+  });
+  if (!live?.length || (!cat.filter && !cat.always)) return fallback();
+  const list = cat.filter ? live.filter((m) => new RegExp(cat.filter).test(m.id)) : live;
+  if (!list.length) return fallback();
+  const rest = new Map(list.map((m) => [m.id, m]));
+  const models = [];
+  // cat.models is optional (an embed-only plugin omits the tagging list) —
+  // the plugin contract never required it, so the merge can't either.
+  for (const m of cat.models || []) if (rest.delete(m.id)) models.push({ ...m, recommended: true });
+  models.push(...[...rest.values()].sort((a, b) => a.id.localeCompare(b.id)));
+  return { source: "live", models };
+}
+// The raw wire ask, failure-swallowing: null = "nothing live" (no listing
+// support, unreachable, bad key) and every kind falls back. Interactive like
+// testKey — not paced.
+async function fetchLiveModels(desc, opts) {
+  if (!desc?.wire?.listModels) return null;
+  try { return (await desc.wire.listModels(desc, opts)) || null; }
+  catch { return null; }
+}
+export async function listProviderModels({ provider, apiKey, base, kind = "tagging" }) {
+  const desc = PROVIDERS[provider];
+  return assembleModels(desc, kind, await fetchLiveModels(desc, { apiKey, base }));
+}
+
+// --- the per-connection model-list cache ---
+// Keyed by ai_keys row id (the connection's key/server decide the answer), so
+// it lives HERE with the lister, not inline in a route: every mutation path —
+// the admin PATCH/DELETE routes AND plugin uninstall, which deletes rows via
+// deleteAiKey directly — invalidates through the one exported function, the
+// same owner-module pattern as ingestion's invalidateSourceCache. The cache
+// holds the RAW live list, not assembled payloads: all three catalog kinds
+// share one upstream fetch, and assembly is cheap per request.
+// TTL read per call: 0 = off (tests use this); empty string counts as unset →
+// the 10-min default (Number("") is 0, which would silently disable caching).
+const modelListCache = new Map(); // ai_keys row id -> { at, live }
+const modelListTtl = () => {
+  const v = process.env.AI_MODELS_TTL_MS;
+  return v == null || v === "" ? 600000 : Number(v);
+};
+export function invalidateModelListCache(keyId) {
+  modelListCache.delete(Number(keyId));
+}
+export async function cachedProviderModels(keyId, { provider, apiKey, base, kind = "tagging" }, { refresh = false } = {}) {
+  const desc = PROVIDERS[provider];
+  const id = Number(keyId);
+  const hit = modelListCache.get(id);
+  let live;
+  if (!refresh && hit && Date.now() - hit.at < modelListTtl()) {
+    live = hit.live;
+  } else {
+    live = await fetchLiveModels(desc, { apiKey, base });
+    modelListCache.set(id, { at: Date.now(), live });
+  }
+  return assembleModels(desc, kind, live);
+}
+
 // Public catalog for the admin UI — labels, model lists (with notes), defaults,
 // and capability flags. No secrets, safe to serve. The client renders its
 // provider/model pickers from this so the catalog isn't mirrored in two places.

@@ -220,8 +220,9 @@ export const loadProviders = () => (_catalog ??= api("GET", "/api/admin/ai-provi
 export const byName = (list) => Object.fromEntries(list.map((p) => [p.name, p]));
 
 // (Re)populate a <select> from a provider's catalog entry ({ models,
-// defaultModel }); keeps an unknown current model as an extra option instead of
-// silently dropping it.
+// defaultModel }); keeps an unknown current model as an extra option instead
+// of silently dropping it (a saved id the provider has since retired still
+// shows — it just fails at call time with the provider's own error).
 export function fillModelSelect(sel, entry, current) {
   sel.replaceChildren();
   const models = entry?.models || [];
@@ -229,7 +230,7 @@ export function fillModelSelect(sel, entry, current) {
   for (const m of models) {
     const opt = document.createElement("option");
     opt.value = m.id;
-    opt.textContent = `${m.id} — ${m.note}`;
+    opt.textContent = m.note ? `${m.id} — ${m.note}` : m.id;
     if (m.id === selected) opt.selected = true;
     sel.appendChild(opt);
   }
@@ -240,6 +241,30 @@ export function fillModelSelect(sel, entry, current) {
     opt.selected = true;
     sel.insertBefore(opt, sel.firstChild);
   }
+}
+
+// Swap the select's options for the connection's model list (GET
+// /api/admin/ai-keys/:id/models — the server asks the provider itself and
+// caches). The curated catalog entry already rendered instant options, so
+// this is a quiet upgrade when it lands: the current selection is preserved
+// (fillModelSelect keeps it even if the live list no longer carries it). The
+// response applies whether live or fallback, so switching connections always
+// resets the options to the NEW connection's best-known list. _modelKey
+// updates unconditionally, including for null (the "env"/"App default"
+// rows), so a slow response for a previously-selected connection never
+// overwrites the current one. The first fetch per select+connection sends
+// refresh=1 — opening a picker is the "I just `ollama pull`ed, show me"
+// moment — and revisits within the same picker ride the server's cache.
+export function attachLiveModels(sel, keyId, kind) {
+  sel._modelKey = keyId || null;
+  if (!keyId) return;
+  const fetched = (sel._modelFetched ??= new Set());
+  const refresh = !fetched.has(`${keyId}:${kind || ""}`);
+  fetched.add(`${keyId}:${kind || ""}`);
+  const q = [kind && `kind=${kind}`, refresh && "refresh=1"].filter(Boolean).join("&");
+  api("GET", `/api/admin/ai-keys/${keyId}/models${q ? `?${q}` : ""}`).then((r) => {
+    if (sel._modelKey === keyId && r?.models?.length) fillModelSelect(sel, { models: r.models }, sel.value);
+  }).catch(() => {});
 }
 
 // Starter facets prefilled into a new board's facet editor — just a suggestion;
@@ -453,6 +478,7 @@ export async function openBoardModal(boardId, opts = {}) {
       if (key) {
         const current = board && board.ai_key_id === key.id ? board.ai_model : null;
         fillModelSelect(aiModelSel, aiCatalog[key.provider], current);
+        attachLiveModels(aiModelSel, key.id);
       }
     };
     Promise.all([api("GET", "/api/admin/ai-keys"), loadProviders()]).then(([keys, catalog]) => {

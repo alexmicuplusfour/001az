@@ -119,7 +119,7 @@ import {
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun } from "./worker.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
-import { testKey, embedTexts, providerCatalog, PROVIDERS } from "./providers.js";
+import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, MODEL_KINDS, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
 import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./password.js";
@@ -1537,12 +1537,14 @@ app.patch("/api/admin/ai-keys/:id", requireAdmin, wrap(async (req, res) => {
     patch.baseUrl = baseUrl || null; // blank = back to the descriptor default
   }
   await updateAiKey(db, Number(req.params.id), patch);
+  invalidateModelListCache(req.params.id); // rotated key / repointed server = a different catalog
   console.log(`ai-key #${req.params.id} updated by admin`);
   res.json({ ok: true });
 }));
 
 app.delete("/api/admin/ai-keys/:id", requireAdmin, wrap(async (req, res) => {
   if (!(await deleteAiKey(db, Number(req.params.id)))) return res.status(404).json({ error: "not found" });
+  invalidateModelListCache(req.params.id);
   // Boards that used the key fell back to default (FK SET NULL) — their
   // cached entries still carry the old key id.
   invalidateAllBoardCaches();
@@ -1561,6 +1563,24 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+}));
+
+// Live model catalog for one connection — asks the provider itself
+// (wire.listModels) with the row's own key/server, so retired models drop out
+// and new ones appear with no app update. ?kind=embed|transcribe carves the
+// capability catalogs (descriptor filters — one upstream fetch serves all
+// kinds). Cached per connection (the cache + its invalidation live in
+// providers.js beside the lister); ?refresh=1 busts — the client sends it
+// once per picker for "I just `ollama pull`ed". A bad key or an unreachable
+// box serves the descriptor's curated fallback rather than a 4xx (failure
+// semantics live in the engine; Test diagnoses).
+app.get("/api/admin/ai-keys/:id/models", requireAdmin, wrap(async (req, res) => {
+  const key = await getAiKey(db, Number(req.params.id));
+  if (!key) return res.status(404).json({ error: "not found" });
+  const kind = MODEL_KINDS.includes(req.query.kind) ? req.query.kind : "tagging";
+  res.json(await cachedProviderModels(req.params.id, {
+    provider: key.provider, apiKey: key.api_key, base: key.base_url || undefined, kind,
+  }, { refresh: !!req.query.refresh }));
 }));
 
 // Provider catalog (labels, model lists + notes, defaults, capabilities). The

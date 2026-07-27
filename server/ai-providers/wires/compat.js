@@ -129,6 +129,30 @@ export const compatWire = {
     if (!r.ok) throw await compatError(r, desc.label);
   },
 
+  // List the models this connection can use right now — GET {base}/models, the
+  // listing form of the keyTest probe. Returns [{ id }] (the compat schema
+  // carries nothing else useful; OpenAI's is bare ids). A provider with no
+  // models endpoint at all (GLM) says so in its quirk block and returns null —
+  // the engine serves the descriptor's curated fallback instead. Distinct from
+  // keyTest: "completion" ≠ no listing (OpenRouter lists fine, it just has no
+  // per-model GET). stripListPrefix: Gemini's compat layer lists ids as
+  // "models/gemini-…" while its chat endpoint (and our curated lists) use the
+  // bare id — the quirk normalizes so the merge and filters see one spelling.
+  async listModels(desc, { apiKey, base }) {
+    if (desc.compat.listModels === false) return null;
+    const r = await fetch(`${baseOf(desc, base)}/models`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
+    if (!r.ok) throw await compatError(r, desc.label);
+    const data = await r.json();
+    const rows = Array.isArray(data.data) ? data.data : [];
+    const strip = desc.compat.stripListPrefix;
+    return rows
+      .map((m) => {
+        const id = String(m.id || "");
+        return { id: strip && id.startsWith(strip) ? id.slice(strip.length) : id };
+      })
+      .filter((m) => m.id);
+  },
+
   // Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
   // every vector L2-normalized, so similarity is a plain dot product.
   async embed(desc, { apiKey, model, texts, base }) {

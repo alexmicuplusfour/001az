@@ -18,6 +18,10 @@ export default (wires) => ({
     { id: "gpt-5.1", note: "sharpest, most expensive" },
   ],
   research: false, // web search lives on the Responses API, not chat completions
+  // Live-list carving (OpenAI's /models is bare ids, no capability metadata):
+  // tagging keeps the chat families (gpt-*/o3/chatgpt-*) minus the non-chat
+  // suffixes that share the gpt- prefix (transcribe/tts/audio/realtime/image…).
+  modelFilter: "^(?!.*(embedding|tts|transcribe|realtime|audio|moderation|image|dall-e))(gpt-|o\\d|chatgpt-)",
   compat: { maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
   embeds: {
     default: "text-embedding-3-small",
@@ -25,6 +29,7 @@ export default (wires) => ({
       { id: "text-embedding-3-small", note: "cheapest, plenty here" },
       { id: "text-embedding-3-large", note: "sharper, ~6× cost" },
     ],
+    filter: "^text-embedding-",
   },
   // OpenAI's /audio/transcriptions endpoint (shared compat wire's transcribe). A
   // provider advertises this only if its backend serves that endpoint — the
@@ -36,5 +41,6 @@ export default (wires) => ({
       { id: "gpt-4o-transcribe", note: "balanced" },
       { id: "whisper-1", note: "the classic Whisper" },
     ],
+    filter: "transcribe|^whisper-",
   },
 });

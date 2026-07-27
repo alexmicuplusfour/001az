@@ -15,8 +15,10 @@
 // without editing the file. The app runs in Docker, so "localhost" would be
 // the app container itself — use host.docker.internal or a LAN IP.
 //
-// The model list is yours to edit — Ollama's catalog is whatever you've
-// `ollama pull`ed, which the app can't know.
+// The model picker lists what your server has actually `ollama pull`ed — the
+// app asks /v1/models per connection (the shared compat wire's listModels).
+// The `models` below are only the offline fallback + suggested starting
+// points; no need to edit this file when you pull something new.
 const base = process.env.OLLAMA_BASE_URL || "http://host.docker.internal:11434/v1";
 
 export default function (ctx) {
@@ -26,6 +28,8 @@ export default function (ctx) {
     base,
     // Tagging needs a tool-calling-capable model (the wire hard-fails without a
     // tool call in the response) — llama3.1+, qwen2.5/3, mistral-nemo, etc.
+    // These two are recommendations pinned atop the live list, and the fallback
+    // when the server can't be reached; any pulled model can be typed/picked.
     defaultModel: "llama3.1:8b",
     models: [
       { id: "llama3.1:8b", note: "solid tool calling · ~8 GB" },
@@ -41,9 +45,13 @@ export default function (ctx) {
     // versions), so forcing the tool call is safe and helps where supported.
     compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "models" },
     // Embeddings via /v1/embeddings — pull the model first (`ollama pull nomic-embed-text`).
+    // The filter carves embedding models out of the live /v1/models dump by
+    // name (Ollama reports no capabilities there): nomic-embed-text,
+    // mxbai-embed-large, snowflake-arctic-embed, bge-m3, …
     embeds: {
       default: "nomic-embed-text",
       models: [{ id: "nomic-embed-text", note: "768-dim · runs on your Ollama box" }],
+      filter: "embed|bge",
     },
     wire: ctx.wires.compat,
   };

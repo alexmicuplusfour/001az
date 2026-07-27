@@ -23,6 +23,6 @@ export default (wires) => ({
     { id: "glm-5.2", note: "sharpest, text boards only" },
   ],
   research: false, // has a chat-completions web_search tool — future work
-  compat: { maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion" },
+  compat: { maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion", listModels: false },
   embeds: null,
 });

@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { resolveSource, fetchModule } from "./plugin-fetch.js";
-import { registerProvider, unregisterProvider, WIRES } from "./providers.js";
+import { registerProvider, unregisterProvider, invalidateModelListCache, WIRES } from "./providers.js";
 import {
   getConnector,
   registerConnector, unregisterConnector,
@@ -450,7 +450,10 @@ async function cleanupPluginConfig(db, manifest) {
     // Every key registered for this provider (deleteAiKey also handles board
     // fallback + clearing the default-tagger/embed/transcribe key pointers).
     for (const k of await listAiKeys(db)) {
-      if (k.provider === manifest.id) await deleteAiKey(db, k.id);
+      if (k.provider === manifest.id) {
+        await deleteAiKey(db, k.id);
+        invalidateModelListCache(k.id); // same eviction the admin DELETE route does
+      }
     }
     // NAME-based slot pointers too: an on-device plugin is selected by name,
     // not key row, so no deleteAiKey cascade reaches these — left behind they

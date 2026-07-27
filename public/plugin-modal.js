@@ -9,7 +9,7 @@
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
-import { fillModelSelect, switchRow } from "/board-modal.js";
+import { fillModelSelect, attachLiveModels, switchRow } from "/board-modal.js";
 import { fmtDuration } from "/utils.js";
 
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
@@ -485,6 +485,11 @@ function taggerSection(p, ctx, reload) {
   const modelSel = document.createElement("select");
   modelSel.style.cssText = "width:100%;";
   fillModelSelect(modelSel, p.ai, isDefault ? ctx.slots.tagger.model : null);
+  // Live options follow the selected connection ("env" has no row to ask —
+  // the curated list stands).
+  const syncLive = () => attachLiveModels(modelSel, Number(keySel.value) || null);
+  keySel.addEventListener("change", syncLive);
+  syncLive();
   sec.appendChild(labeled("Model", modelSel));
 
   const actions = document.createElement("div");
@@ -553,6 +558,13 @@ function embedSection(p, ctx, reload) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
     fillModelSelect(modelSel, { models: p.ai.embeds.models, defaultModel: p.ai.embeds.default }, active ? em.model : null);
+    // Live options carved to embedders (descriptor embeds.filter) — on-device
+    // providers have no connection row to ask.
+    if (keySel) {
+      const syncLive = () => attachLiveModels(modelSel, Number(keySel.value) || null, "embed");
+      keySel.addEventListener("change", syncLive);
+      syncLive();
+    }
     sec.appendChild(labeled("Embedding model", modelSel));
   } else {
     const note = document.createElement("p");
@@ -667,6 +679,12 @@ function transcribeSection(p, ctx, reload) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
     fillModelSelect(modelSel, { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default }, active ? tr.model : null);
+    // Live options carved to transcription models (descriptor transcribes.filter).
+    if (keySel) {
+      const syncLive = () => attachLiveModels(modelSel, Number(keySel.value) || null, "transcribe");
+      keySel.addEventListener("change", syncLive);
+      syncLive();
+    }
     sec.appendChild(labeled("Transcription model", modelSel));
   } else {
     // `one` is whisper's live self-report (or a provider's single model); an

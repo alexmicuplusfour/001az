@@ -16,9 +16,15 @@ export default (wires) => ({
     { id: "gemini-2.5-pro", note: "sharpest, most expensive" },
   ],
   research: false, // the compat layer exposes no grounding
-  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
+  // Live-list carving (the compat /models dump has no capability metadata):
+  // tagging keeps gemini-* chat models (embedding/imagen/veo/tts drop out);
+  // stripListPrefix normalizes the "models/gemini-…" ids the compat layer
+  // lists to the bare ids its chat endpoint takes.
+  modelFilter: "^gemini-(?!.*(embedding|image|tts|audio|live))",
+  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models", stripListPrefix: "models/" },
   embeds: {
     default: "gemini-embedding-001",
     models: [{ id: "gemini-embedding-001", note: "Gemini's embedder" }],
+    filter: "embedding", // text-embedding-004, gemini-embedding-001, …
   },
 });

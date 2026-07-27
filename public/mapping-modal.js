@@ -1,7 +1,7 @@
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
-import { loadProviders, byName, fillModelSelect } from './board-modal.js';
+import { loadProviders, byName, fillModelSelect, attachLiveModels } from './board-modal.js';
 import { sectionHeadingEl } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date"];
@@ -699,6 +699,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       extractModelSel.hidden = !key;
       if (key) {
         fillModelSelect(extractModelSel, aiCatalog[key.provider], key.id === extractKeyId ? extractModel : null);
+        attachLiveModels(extractModelSel, key.id);
       }
     };
     Promise.all([

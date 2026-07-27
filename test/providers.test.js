@@ -24,15 +24,19 @@ test("every descriptor is well-formed and self-named", () => {
 
 test("capabilities-as-data: compat quirks match what the wire code reads", () => {
   // openai/gemini force the tool call, accept strict, keep thinking, probe /models
-  for (const name of ["openai", "gemini"]) {
-    assert.deepEqual(PROVIDERS[name].compat, {
-      maxTokensField: name === "openai" ? "max_completion_tokens" : "max_tokens",
-      forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models",
-    }, `${name} compat`);
-  }
-  // GLM is the divergent one — every field flips, plus the completion key-test
+  assert.deepEqual(PROVIDERS.openai.compat, {
+    maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models",
+  });
+  // gemini additionally normalizes its compat layer's "models/…" listing ids
+  assert.deepEqual(PROVIDERS.gemini.compat, {
+    maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models", stripListPrefix: "models/",
+  });
+  // GLM is the divergent one — every field flips, the completion key-test, and
+  // no models endpoint at all (listModels: false → the picker gets the curated
+  // fallback). Distinct from OpenRouter below: keyTest "completion" only means
+  // no per-model GET; OpenRouter lists fine.
   assert.deepEqual(PROVIDERS.glm.compat, {
-    maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion",
+    maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion", listModels: false,
   });
   // OpenRouter fills a new cell: forces the tool call like openai but skips
   // strict (backends vary), max_tokens, completion key-test (no per-model GET)
