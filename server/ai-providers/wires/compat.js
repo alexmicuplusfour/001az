@@ -8,7 +8,14 @@
 // the quirk block it's handed and never touches the registry.
 import { DEFAULT_TOOL } from "./tool.js";
 
-const compatHeaders = (apiKey) => ({ Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" });
+// A keyless connection (a self-hosted Ollama, …) carries no secret — send no
+// Authorization header at all rather than a literal "Bearer null". A keyless
+// provider MAY still get a token (e.g. a reverse proxy in front of the box);
+// when one is stored it's sent like any other. Exported as a test seam.
+export const compatHeaders = (apiKey) => ({
+  ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+  "Content-Type": "application/json",
+});
 // Outbound deadlines — raw fetch has no total bound (undici caps response
 // headers at ~5 min; a trickling body never times out), and a hung call wedges
 // the worker's single-flight tick. The Anthropic wire needs none of this: the
@@ -155,7 +162,7 @@ export const compatWire = {
     const r = await fetch(`${desc.base}/audio/transcriptions`, {
       method: "POST",
       // NOT compatHeaders — FormData sets its own multipart Content-Type + boundary.
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
       body: form,
       signal: transcribeSignal(),
     });

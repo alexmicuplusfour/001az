@@ -104,14 +104,18 @@ export async function resolveDefaultAi(db) {
 }
 
 // The app-global embedder for semantic search: enabled flag + provider choice.
-// 'local' uses the on-server ONNX model (no key); otherwise a stored API key
-// is looked up. Returns { provider, apiKey, model } or null when off/missing.
+// An on-device provider (the local ONNX model) is selected by NAME — it has no
+// key row; otherwise a stored key/connection row is looked up (a keyless
+// connection resolves with apiKey null and the wire sends no auth header).
+// Returns { provider, apiKey, model } or null when off/missing.
 export async function resolveEmbedder(db) {
   if ((await getSetting(db, "embed_enabled")) !== "1") return null;
   const embedProvider = await getSetting(db, "embed_provider");
-  if (embedProvider === "local") {
-    if (!(await aiPluginInstalled(db, "local"))) return null; // core → always true; kept for symmetry
-    return { provider: "local", apiKey: null, model: PROVIDERS.local.embeds.default };
+  if (embedProvider) {
+    const desc = PROVIDERS[embedProvider];
+    if (!desc?.onDevice || !desc.embeds) return null; // a stale name (uninstalled plugin) → off
+    if (!(await aiPluginInstalled(db, embedProvider))) return null; // core → always true; kept for symmetry
+    return { provider: embedProvider, apiKey: null, model: desc.embeds.default };
   }
   // Key-based path (backward compat: embed_provider null + embed_key_id set).
   const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
@@ -755,7 +759,11 @@ export async function resolveTranscriber(db, board = null) {
   if (provider && provider !== "whisper" && PROVIDERS[provider]?.transcribes && (await aiPluginInstalled(db, provider))) {
     const keyId = Number(await getSetting(db, "transcribe_key_id")) || 0;
     const key = keyId ? await getAiKey(db, keyId) : null;
-    if (key) {
+    // A keyed/keyless-networked provider needs its stored key/connection row;
+    // an on-device plugin (own wire.transcribe, no rows — the loader rejects a
+    // transcribes descriptor without one) resolves bare. Whisper itself never
+    // reaches here (name-guarded above): it rides the sidecar, not a wire.
+    if (key || PROVIDERS[provider].onDevice) {
       const model = (await getSetting(db, "transcribe_model")) || PROVIDERS[provider].transcribes.default;
       const { rpm, burst } = await aiRate(db, provider); // per-provider pacing, same bucket as tagging
       return {
@@ -766,7 +774,7 @@ export async function resolveTranscriber(db, board = null) {
         // the Plugins page — otherwise a paid provider transcribes invisibly.
         transcribe: async (buf, filename) =>
           (await withPluginHealth(db, `ai:${provider}`, () =>
-            transcribeAudio({ provider, apiKey: key.api_key, model, rpm, burst, audio: buf, filename }))).text,
+            transcribeAudio({ provider, apiKey: key?.api_key ?? null, model, rpm, burst, audio: buf, filename }))).text,
       };
     }
   }

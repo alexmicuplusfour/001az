@@ -1,0 +1,7 @@
+{
+  "id": "community.ollama",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Ollama",
+  "main": "index.js"
+}

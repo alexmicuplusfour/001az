@@ -10,6 +10,7 @@ export default function (ctx) {
     models: [],
     research: false,
     keyless: true,
+    onDevice: true, // mirrors the built-in local embedder: in-process, no connections, no pacing
     embeds: { default: "acme-embed-1", models: [{ id: "acme-embed-1", note: "test" }] },
   };
 }

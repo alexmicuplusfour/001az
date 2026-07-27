@@ -42,17 +42,18 @@ function aiDefs() {
     core: p.name === "local" || p.name === "whisper",
     defaultInstalled: p.name === "anthropic",
     capabilities: { tag: !!PROVIDERS[p.name].wire?.tag, embed: !!p.embeds, transcribe: !!p.transcribes, research: p.research },
-    // Rate-limit config, mirroring connectors — networked providers only (keyless
-    // local/whisper make no external calls). Defaults are the descriptor's grounded
-    // limits; an admin override for their account tier lands in plugins.config and the
+    // Rate-limit config, mirroring connectors — networked providers only
+    // (on-device local/whisper make no external calls; a keyless-networked
+    // provider still paces). Defaults are the descriptor's grounded limits; an
+    // admin override for their account tier lands in plugins.config and the
     // pacing bucket picks it up (worker aiRate → paceAi).
-    configSchema: PROVIDERS[p.name].keyless ? [] : [
+    configSchema: PROVIDERS[p.name].onDevice ? [] : [
       { key: "rpm", label: "Requests / minute", type: "number", default: PROVIDERS[p.name].rpm, min: 1, help: "token-bucket pace per API key" },
       { key: "burst", label: "Burst", type: "number", default: PROVIDERS[p.name].burst, min: 1, help: "calls allowed before pacing kicks in" },
     ],
     // the modal's pickers (models + notes, embed/transcribe catalogs) — same data
     // the board modal reads from /api/admin/ai-providers
-    ai: { defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, keyless: p.keyless },
+    ai: { defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, keyless: p.keyless, onDevice: p.onDevice },
   }));
 }
 

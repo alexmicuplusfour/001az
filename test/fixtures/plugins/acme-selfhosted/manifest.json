@@ -1,0 +1,7 @@
+{
+  "id": "acme.selfhosted",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Acme Self-Hosted",
+  "main": "index.js"
+}

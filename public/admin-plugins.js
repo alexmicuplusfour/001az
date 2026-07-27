@@ -27,8 +27,9 @@ export function slotProviders(slots, keys) {
     ? keyProvider(slots.tagger.keyId)
     : slots.tagger.envKey ? "anthropic" : null;
   const embedder = !slots.embedder.enabled ? null
-    : slots.embedder.provider === "local" ? "local"
-    : keyProvider(slots.embedder.keyId);
+    // A set provider name = an on-device embedder picked by name (no key row);
+    // otherwise the key row says which provider backs the slot.
+    : slots.embedder.provider || keyProvider(slots.embedder.keyId);
   // Transcription always resolves (the whisper sidecar by default); the server
   // hands us the provider actually in effect.
   const transcriber = slots.transcriber?.active || "whisper";
@@ -58,9 +59,10 @@ export function tagFor(p, defaults) {
 function keyNote(p) {
   if (p.state?.loadError) return null; // errored externals show their reason, not a key note
   if (p.kind === "ai") {
-    if (p.ai.keyless) return null;
+    if (p.ai.onDevice) return null; // in-process — nothing to connect
     const n = p.state.keyCount;
-    return n ? { text: `${n} key${n > 1 ? "s" : ""}` } : { text: "no key yet", warn: true };
+    const noun = p.ai.keyless ? "connection" : "key"; // keyless-networked rows are connections without a secret
+    return n ? { text: `${n} ${noun}${n > 1 ? "s" : ""}` } : { text: `no ${noun} yet`, warn: true };
   }
   if (p.kind === "connector") {
     if (p.state.hasKey) return { text: "key stored" };

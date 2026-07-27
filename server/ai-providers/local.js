@@ -1,9 +1,9 @@
 // Local embedding-only provider: on-device ONNX, no API key, no tagger. The
 // Xenova pipeline lives HERE, behind a real `wire.embed`, so the engine's
 // embedTexts dispatches to it exactly as it does a compat provider — there is no
-// `provider === "local"` branch in providers.js. `keyless` marks it as something
-// that must never appear in the API-key registration form; pacing skips keyless
-// providers (on-device → no external rate limit), so a big batch isn't throttled.
+// `provider === "local"` branch in providers.js. `onDevice` marks it as running
+// in-process (no connections to register, no pacing — a big batch isn't
+// throttled); `keyless` (implied by onDevice) is the auth half: no secret.
 //
 // The pipeline (@huggingface/transformers, ONNX, in-process) is lazy-loaded on
 // first call and the Promise is cached so concurrent callers all await the same
@@ -36,6 +36,7 @@ export default () => ({
   models: [],
   research: false,
   keyless: true,
+  onDevice: true,
   embeds: {
     default: LOCAL_EMBED_MODEL,
     models: [{ id: LOCAL_EMBED_MODEL, note: "runs on-server · no API key" }],

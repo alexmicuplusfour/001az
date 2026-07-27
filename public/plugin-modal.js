@@ -105,7 +105,10 @@ export function openPluginModal(p, ctx) {
     if (p.kind === "connector") {
       built.push(connectorSection(p, ctx, reload));
     } else if (p.kind === "ai") {
-      if (!p.ai.keyless) built.push(keysSection(p, ctx, reload));
+      // On-device providers (local embedder, whisper sidecar) have no accounts
+      // — nothing to register. Keyless-NETWORKED providers still get the
+      // section: their rows are connections without a secret.
+      if (!p.ai.onDevice) built.push(keysSection(p, ctx, reload));
       if (p.capabilities.tag) built.push(taggerSection(p, ctx, reload));
       if (p.capabilities.embed) built.push(embedSection(p, ctx, reload));
       if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, reload));
@@ -246,8 +249,9 @@ function connectorSection(p, ctx, reload) {
 
 // --- ai: per-provider request pacing (rpm/burst) — mirrors the connector config ---
 // Same number-field + Save shape as connectorSection, scoped to the rate-limit
-// fields the ai plugin declares. Keyless providers declare none, so the dispatch
-// above skips this section for them. Empty input = back to the descriptor default.
+// fields the ai plugin declares. On-device providers declare none, so the
+// dispatch above skips this section for them; keyless-networked ones pace like
+// any other. Empty input = back to the descriptor default.
 function pacingSection(p, reload) {
   const sec = section(
     "Rate limit",
@@ -282,7 +286,15 @@ function pacingSection(p, reload) {
 
 function keysSection(p, ctx, reload) {
   const mine = ctx.keys.filter((k) => k.provider === p.name);
-  const sec = section("API keys", "Named keys for this provider. Boards can pick any of them; one can be the app default below.");
+  // A keyless provider (self-hosted — no account secret) registers the same
+  // rows as connections: the row is what boards and the default slots point
+  // at, it just carries no key. Same section, softened language + optional input.
+  const keyless = p.ai.keyless;
+  const noun = keyless ? "connection" : "key";
+  const sec = section(
+    keyless ? "Connections" : "API keys",
+    `Named ${noun}s for this provider. Boards can pick any of them; one can be the app default below.`
+  );
 
   if (mine.length) {
     const table = document.createElement("table");
@@ -303,7 +315,7 @@ function keysSection(p, ctx, reload) {
       testBtn.onclick = busy(testBtn, "testing…", async () => {
         try {
           await api("POST", `/api/admin/ai-keys/${k.id}/test`);
-          toast(`✓ "${k.name}" key works`);
+          toast(`✓ "${k.name}" ${noun} works`);
         } catch (err) { toast.error(`"${k.name}": ${err.message}`); }
       });
 
@@ -313,10 +325,10 @@ function keysSection(p, ctx, reload) {
       delBtn.onclick = async () => {
         const uses = Number(k.boards_using) || 0;
         const extra = uses ? ` ${uses} board(s) use it and will fall back to the default.` : "";
-        if (!confirm(`Remove key "${k.name}"?${extra}${isDefault ? " It is the current default — tagging falls back to the env var (or stops)." : ""}`)) return;
+        if (!confirm(`Remove ${noun} "${k.name}"?${extra}${isDefault ? " It is the current default — tagging falls back to the env var (or stops)." : ""}`)) return;
         try {
           await api("DELETE", `/api/admin/ai-keys/${k.id}`);
-          toast(`Key "${k.name}" removed`);
+          toast(`${keyless ? "Connection" : "Key"} "${k.name}" removed`);
           reload();
         } catch (err) { toast.error(err.message); }
       };
@@ -332,7 +344,7 @@ function keysSection(p, ctx, reload) {
     none.textContent =
       p.name === "anthropic" && ctx.slots.tagger.envKey
         ? "No keys stored — tagging runs on the ANTHROPIC_API_KEY env var."
-        : "No keys yet.";
+        : `No ${noun}s yet.`;
     sec.appendChild(none);
   }
 
@@ -344,22 +356,23 @@ function keysSection(p, ctx, reload) {
   nameIn.autocomplete = "off";
   const keyIn = document.createElement("input");
   keyIn.type = "password";
-  keyIn.placeholder = "sk-…";
+  // Keyless: the token is optional (e.g. a reverse proxy in front of the box).
+  keyIn.placeholder = keyless ? "token (optional)" : "sk-…";
   // "new-password", not "off": Chrome ignores "off" on password fields once a
   // login is saved for the site, and autofills email+password into name+key.
   keyIn.autocomplete = "new-password";
-  keyIn.required = true;
+  keyIn.required = !keyless;
   keyIn.style.cssText = MONO_CSS;
   const addBtn = document.createElement("button");
   addBtn.type = "submit";
-  addBtn.textContent = "Add key";
+  addBtn.textContent = `Add ${noun}`;
   addForm.append(nameIn, keyIn, addBtn);
   addForm.onsubmit = async (e) => {
     e.preventDefault();
     addBtn.disabled = true;
     try {
       await api("POST", "/api/admin/ai-keys", { name: nameIn.value.trim(), provider: p.name, key: keyIn.value.trim() });
-      toast(`Key "${nameIn.value.trim()}" added`);
+      toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" added`);
       reload();
     } catch (err) {
       toast.error(err.message);
@@ -382,7 +395,7 @@ function taggerSection(p, ctx, reload) {
     const none = document.createElement("p");
     none.className = "muted";
     none.style.margin = "0";
-    none.textContent = "Add a key above to make this provider the default tagger.";
+    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to make this provider the default tagger.`;
     sec.appendChild(none);
     return { node: sec, footerActions: null };
   }
@@ -402,7 +415,7 @@ function taggerSection(p, ctx, reload) {
     keySel.appendChild(opt);
   }
   if (isDefault) keySel.value = ctx.slots.tagger.keyId ? String(ctx.slots.tagger.keyId) : "env";
-  sec.appendChild(labeled("Key", keySel));
+  sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
 
   const modelSel = document.createElement("select");
   modelSel.style.cssText = "width:100%;";
@@ -447,17 +460,17 @@ function embedSection(p, ctx, reload) {
   const mine = ctx.keys.filter((k) => k.provider === p.name);
   const sec = section("Semantic search", "Free-text search that ranks a board's items by meaning. One embedder serves the whole app — vectors only compare within a model.");
 
-  if (!p.ai.keyless && !mine.length) {
+  if (!p.ai.onDevice && !mine.length) {
     const none = document.createElement("p");
     none.className = "muted";
     none.style.margin = "0";
-    none.textContent = "Add a key above to embed with this provider.";
+    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to embed with this provider.`;
     sec.appendChild(none);
     return { node: sec, footerActions: null };
   }
 
   let keySel = null;
-  if (!p.ai.keyless) {
+  if (!p.ai.onDevice) {
     keySel = document.createElement("select");
     keySel.style.cssText = "width:100%;";
     for (const k of mine) {
@@ -467,11 +480,11 @@ function embedSection(p, ctx, reload) {
       keySel.appendChild(opt);
     }
     if (active && em.keyId) keySel.value = String(em.keyId);
-    if (mine.length > 1 || !active) sec.appendChild(labeled("Key", keySel));
+    if (mine.length > 1 || !active) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
   }
 
   let modelSel = null;
-  if (p.ai.embeds.models.length > 1 || !p.ai.keyless) {
+  if (p.ai.embeds.models.length > 1 || !p.ai.onDevice) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
     fillModelSelect(modelSel, { models: p.ai.embeds.models, defaultModel: p.ai.embeds.default }, active ? em.model : null);
@@ -509,8 +522,10 @@ function embedSection(p, ctx, reload) {
     if (enabled && em.model && em.model !== model &&
         !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) return;
     try {
-      await api("POST", "/api/admin/ai-config", p.ai.keyless
-        ? { embedProvider: "local", embedEnabled: true }
+      // An on-device embedder is selected by name (no key row); everything else
+      // — keyed or keyless-networked — goes through its connection row.
+      await api("POST", "/api/admin/ai-config", p.ai.onDevice
+        ? { embedProvider: p.name, embedEnabled: true }
         : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
       toast("Semantic search settings saved");
       reload();
@@ -556,18 +571,18 @@ function transcribeSection(p, ctx, reload) {
   const mine = ctx.keys.filter((k) => k.provider === p.name);
   const sec = section("Transcription", "Audio → text so recordings can be tagged. One transcriber serves the whole app; the on-server whisper sidecar is the default.");
 
-  if (!p.ai.keyless && !mine.length) {
+  if (!p.ai.onDevice && !mine.length) {
     const none = document.createElement("p");
     none.className = "muted";
     none.style.margin = "0";
-    none.textContent = "Add a key above to transcribe with this provider.";
+    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to transcribe with this provider.`;
     sec.appendChild(none);
     return { node: sec, footerActions: null };
   }
 
-  // Key picker (non-keyless providers).
+  // Key picker (providers with connection rows — everything but on-device).
   let keySel = null;
-  if (!p.ai.keyless) {
+  if (!p.ai.onDevice) {
     keySel = document.createElement("select");
     keySel.style.cssText = "width:100%;";
     for (const k of mine) {
@@ -577,13 +592,13 @@ function transcribeSection(p, ctx, reload) {
       keySel.appendChild(opt);
     }
     if (active && tr.keyId) keySel.value = String(tr.keyId);
-    if (mine.length > 1 || !active) sec.appendChild(labeled("Key", keySel));
+    if (mine.length > 1 || !active) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
   }
 
   // Model picker — a provider gets a dropdown of its transcribes.models; the
-  // keyless local sidecar shows its single baked model as a note.
+  // on-device sidecar shows its single baked model as a note.
   let modelSel = null;
-  if (!p.ai.keyless && p.ai.transcribes.models.length > 1) {
+  if (!p.ai.onDevice && p.ai.transcribes.models.length > 1) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
     fillModelSelect(modelSel, { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default }, active ? tr.model : null);
@@ -602,14 +617,14 @@ function transcribeSection(p, ctx, reload) {
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
 
-  if (p.ai.keyless) {
-    // The on-device whisper sidecar — nothing to configure (its model is a
-    // deploy knob), so the button just makes it the default, and sits disabled +
-    // secondary while it already is, like the other slots.
+  if (p.ai.onDevice) {
+    // An on-device transcriber (the whisper sidecar, or a plugin with its own
+    // wire) is picked by name — nothing to configure, so the button just makes
+    // it the default, and sits disabled + secondary while it already is.
     const apply = async () => {
       try {
-        await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
-        toast("Transcription set to the on-device Whisper sidecar");
+        await api("POST", "/api/admin/ai-config", { transcribeProvider: p.name });
+        toast(`Transcription set to ${p.label}`);
         reload();
       } catch (err) { toast.error(err.message); }
     };

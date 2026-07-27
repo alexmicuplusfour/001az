@@ -1474,7 +1474,7 @@ app.get("/api/admin/ai-keys", requireAdmin, wrap(async (_req, res) => {
       id: k.id,
       name: k.name,
       provider: k.provider,
-      hint: "…" + String(k.api_key).slice(-4), // raw keys never leave the server
+      hint: k.api_key ? "…" + String(k.api_key).slice(-4) : "no key", // raw keys never leave the server; null = keyless connection
       boards_using: k.boards_using,
       created_at: k.created_at,
     }))
@@ -1487,8 +1487,14 @@ app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
   const apiKey = (req.body && req.body.key ? String(req.body.key) : "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
   if (!(provider in PROVIDERS)) return res.status(400).json({ error: `provider must be one of: ${Object.keys(PROVIDERS).join(", ")}` });
-  if (!apiKey) return res.status(400).json({ error: "key required" });
-  const id = await createAiKey(db, name, provider, apiKey);
+  // The row is the selection handle (boards and the default-tagger slot point
+  // at it), so a keyless provider registers one too — just with no secret in
+  // it (a token is still accepted, e.g. for a reverse proxy in front of the
+  // box). On-device providers have no accounts at all — nothing to register.
+  if (PROVIDERS[provider].onDevice)
+    return res.status(400).json({ error: `${PROVIDERS[provider].label} runs on-device — it has no connections to register` });
+  if (!apiKey && !PROVIDERS[provider].keyless) return res.status(400).json({ error: "key required" });
+  const id = await createAiKey(db, name, provider, apiKey || null);
   console.log(`ai-key added: "${name}" (${provider})`);
   res.json({ id, name, provider });
 }));
@@ -1908,25 +1914,31 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     }
   }
   if (model !== undefined) await setSetting(db, "model", model || null);
-  // Explicit provider selection: 'local' (keyless) or null (key-based).
+  // Explicit provider selection: an on-device embedder is picked by NAME (it
+  // has no key row — 'local' today, any onDevice+embeds provider in general);
+  // null selects the key-based path. Capability-gated, no provider name
+  // special-cased.
   if (embedProvider !== undefined) {
-    if (embedProvider === "local") {
-      await setSetting(db, "embed_provider", "local");
+    if (embedProvider) {
+      const desc = PROVIDERS[embedProvider];
+      if (!desc?.onDevice || !desc.embeds)
+        return res.status(400).json({ error: `"${embedProvider}" is not an on-device embedder — pick one of its keys instead` });
+      await setSetting(db, "embed_provider", embedProvider);
       await setSetting(db, "embed_key_id", null);
       await setSetting(db, "embed_model", null);
     } else {
       await setSetting(db, "embed_provider", null);
     }
   }
-  // Key-based path (skipped when embedProvider === 'local').
-  if (embedKeyId !== undefined && embedProvider !== "local") {
+  // Key-based path (skipped when an on-device provider was just picked).
+  if (embedKeyId !== undefined && !embedProvider) {
     if (embedKeyId === null) {
       await setSetting(db, "embed_key_id", null);
     } else {
       const key = await getAiKey(db, Number(embedKeyId));
       if (!key) return res.status(400).json({ error: "unknown key" });
       if (!PROVIDERS[key.provider]?.embeds) {
-        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds && !PROVIDERS[n].keyless).join(" or ");
+        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds && !PROVIDERS[n].onDevice).join(" or ");
         return res.status(400).json({ error: `embeddings need an ${names} key — ${key.provider} has no embeddings API` });
       }
       await setSetting(db, "embed_key_id", String(key.id));
@@ -1935,13 +1947,14 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
   if (embedModel !== undefined) await setSetting(db, "embed_model", embedModel || null);
   if (embedEnabled !== undefined) {
     if (embedEnabled) {
-      // Validate final state: local is always valid; key-based needs a good key.
+      // Validate final state: an on-device pick is always valid; key-based
+      // needs a stored key whose provider embeds.
       const ep = await getSetting(db, "embed_provider");
-      if (ep !== "local") {
+      if (!(ep && PROVIDERS[ep]?.onDevice && PROVIDERS[ep]?.embeds)) {
         const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
         const key = keyId ? await getAiKey(db, keyId) : null;
         if (!key || !PROVIDERS[key.provider]?.embeds) {
-          return res.status(400).json({ error: "pick Local, OpenAI, or Gemini before enabling semantic search" });
+          return res.status(400).json({ error: "pick an embedding provider (or one of its keys) before enabling semantic search" });
         }
       }
     }
@@ -1951,19 +1964,23 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
   // (the always-on on-device sidecar) or any provider that ADVERTISES
   // `transcribes` with a matching key. Capability-gated, no provider name special-cased.
   if (transcribeProvider !== undefined) {
-    if (!transcribeProvider || transcribeProvider === "whisper") {
-      await setSetting(db, "transcribe_provider", "whisper");
+    if (!transcribeProvider || transcribeProvider === "whisper" || PROVIDERS[transcribeProvider]?.onDevice) {
+      // On-device engines are picked by NAME, no key row — the whisper sidecar,
+      // or an on-device plugin shipping its own transcribe wire.
+      if (transcribeProvider && transcribeProvider !== "whisper" && !PROVIDERS[transcribeProvider]?.transcribes)
+        return res.status(400).json({ error: `${transcribeProvider} advertises no transcription` });
+      await setSetting(db, "transcribe_provider", transcribeProvider || "whisper");
       await setSetting(db, "transcribe_key_id", null);
       await setSetting(db, "transcribe_model", null);
     } else {
       const desc = PROVIDERS[transcribeProvider];
       if (!desc?.transcribes) {
-        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].transcribes && !PROVIDERS[n].keyless).join(" or ");
+        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].transcribes && !PROVIDERS[n].onDevice).join(" or ");
         return res.status(400).json({ error: `transcription needs a ${names || "capable"} key — ${transcribeProvider} advertises none` });
       }
       const key = transcribeKeyId != null ? await getAiKey(db, Number(transcribeKeyId)) : null;
       if (!key || key.provider !== transcribeProvider) {
-        return res.status(400).json({ error: `pick a ${desc.label} key to transcribe with it` });
+        return res.status(400).json({ error: `pick a ${desc.label} ${desc.keyless ? "connection" : "key"} to transcribe with it` });
       }
       // A pinned model must be one the provider advertises — otherwise every
       // transcribe would throw at the wire and the item requeues forever. Unset

@@ -74,9 +74,11 @@ test("the manifest contract: a networked provider must declare a rate limit", ()
     () => registerProvider("noratelimit", { label: "No Limit", wire: { tag: async () => ({}) } }),
     /must declare positive rpm and burst/,
   );
-  // A keyless on-device provider makes no external calls → exempt from the contract.
-  assert.doesNotThrow(() => registerProvider("keylesstest", { label: "Keyless", keyless: true, wire: null }));
-  unregisterProvider("keylesstest");
+  // An on-device provider makes no external calls → exempt from the contract.
+  // (Keyless alone does NOT exempt — a self-hosted server still gets paced;
+  // that half of the contract is pinned in keyless-providers.test.js.)
+  assert.doesNotThrow(() => registerProvider("ondevicetest", { label: "On-Device", onDevice: true, wire: null }));
+  unregisterProvider("ondevicetest");
 });
 
 test("an explicit rpm/burst override (the Plugins-page config) beats the descriptor default", async () => {
@@ -105,8 +107,8 @@ test("an explicit rpm/burst override (the Plugins-page config) beats the descrip
   }
 });
 
-test("aiDefs exposes rpm/burst config for networked providers, not for keyless ones", () => {
+test("aiDefs exposes rpm/burst config for networked providers, not for on-device ones", () => {
   const openai = getPluginDef("ai:openai").configSchema.map((f) => f.key);
   assert.ok(openai.includes("rpm") && openai.includes("burst"), "a networked provider offers rpm/burst config");
-  assert.equal(getPluginDef("ai:local").configSchema.length, 0, "keyless local has no rate-limit config");
+  assert.equal(getPluginDef("ai:local").configSchema.length, 0, "on-device local has no rate-limit config");
 });

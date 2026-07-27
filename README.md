@@ -37,7 +37,10 @@ a live connector.
   generated from the board's facets, so the model cannot emit an invalid tag.
   Multi-provider — **Anthropic Claude, OpenAI, Gemini, GLM, and OpenRouter** —
   selectable per board, plus an optional web-research step. Retries, stuck-job
-  recovery, and a concurrency cap included.
+  recovery, and a concurrency cap included. More providers install as
+  **plugins** from a local path, GitHub, or npm — including keyless self-hosted
+  ones (see [`examples/plugins/ollama`](examples/plugins/ollama) for tagging
+  and embeddings against your own Ollama server).
 - **Entities & instances** — an entity is a thin row (its identity + structured
   fields) sitting above one or more per-file *instances*, each with their own
   fields and tags. Merge re-parents instances, split breaks them out, and both

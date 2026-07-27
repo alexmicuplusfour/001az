@@ -448,9 +448,21 @@ export async function uninstall(db, id) {
 async function cleanupPluginConfig(db, manifest) {
   if (manifest.kind === "ai-provider") {
     // Every key registered for this provider (deleteAiKey also handles board
-    // fallback + clearing the default-tagger pointer).
+    // fallback + clearing the default-tagger/embed/transcribe key pointers).
     for (const k of await listAiKeys(db)) {
       if (k.provider === manifest.id) await deleteAiKey(db, k.id);
+    }
+    // NAME-based slot pointers too: an on-device plugin is selected by name,
+    // not key row, so no deleteAiKey cascade reaches these — left behind they
+    // would silently re-activate the slot on a later reinstall.
+    if ((await getSetting(db, "embed_provider")) === manifest.id) {
+      await setSetting(db, "embed_provider", null);
+      await setSetting(db, "embed_enabled", null);
+    }
+    if ((await getSetting(db, "transcribe_provider")) === manifest.id) {
+      await setSetting(db, "transcribe_provider", null); // → whisper fallback
+      await setSetting(db, "transcribe_key_id", null);
+      await setSetting(db, "transcribe_model", null);
     }
     return;
   }

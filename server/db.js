@@ -733,6 +733,14 @@ export async function deleteAiKey(db, id) {
     await setSetting(db, "embed_key_id", null);
     await setSetting(db, "embed_enabled", null);
   }
+  // Transcription mirrors embed: a deleted key/connection reverts the slot to
+  // the whisper sidecar honestly, instead of leaving a dead pointer the UI
+  // shows as configured while resolveTranscriber silently falls back.
+  if (result.rowCount > 0 && Number(await getSetting(db, "transcribe_key_id")) === id) {
+    await setSetting(db, "transcribe_provider", null);
+    await setSetting(db, "transcribe_key_id", null);
+    await setSetting(db, "transcribe_model", null);
+  }
   return result.rowCount > 0;
 }
 

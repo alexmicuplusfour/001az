@@ -17,6 +17,7 @@ export default () => ({
   models: [],
   research: false,
   keyless: true,
+  onDevice: true,
   embeds: null,
   // Truthy = advertises transcription (capability gates check `!!transcribes`);
   // empty = the model list isn't the app's to declare — the sidecar reports it.

@@ -30,13 +30,14 @@ export { WIRES };
 // plugins add theirs live via registerProvider. Both land in this one map.
 export const PROVIDERS = {};
 
-// A networked (keyed) provider MUST declare its rate limit — pacing is part of the
-// provider contract, not an optional add-on. On-device/keyless providers (local,
-// whisper) make no external calls and are exempt. Enforced here for built-ins and
-// in registerProvider for dynamically-loaded plugins, so no AI provider can enter
-// the registry without a declared rpm/burst.
+// A networked provider MUST declare its rate limit — pacing is part of the
+// provider contract, not an optional add-on. On-device providers (local,
+// whisper) make no external calls and are exempt. Keyless-NETWORKED providers
+// (a self-hosted Ollama, …) are NOT: no secret ≠ no server to melt. Enforced
+// here for built-ins and in registerProvider for dynamically-loaded plugins,
+// so no AI provider can enter the registry without a declared rpm/burst.
 export function requireRateLimit(name, desc) {
-  if (!desc.wire || desc.keyless) return; // on-device / keyless → no external rate limit
+  if (!desc.wire || desc.onDevice) return; // on-device → no external rate limit
   if (!(desc.rpm > 0) || !(desc.burst > 0))
     throw new Error(`AI provider "${name}" must declare positive rpm and burst (rate-limit contract)`);
 }
@@ -48,7 +49,12 @@ export function requireRateLimit(name, desc) {
 // and plugins enter the registry the same way" true in code, not just in prose.
 function install(name, desc) {
   desc.name = name;
-  requireRateLimit(name, desc); // any provider declares its rate limit, or it's rejected
+  // Two orthogonal descriptor flags: `keyless` = connections to this provider
+  // carry no secret (auth); `onDevice` = it runs in-process/on-box and makes no
+  // external calls (network). On-device implies keyless — normalize so the two
+  // can never contradict (an on-device provider with a secret is nonsensical).
+  if (desc.onDevice) desc.keyless = true;
+  requireRateLimit(name, desc); // any networked provider declares its rate limit, or it's rejected
   PROVIDERS[name] = desc;
 }
 
@@ -96,7 +102,9 @@ const aiKeyBucket = (provider, apiKey) =>
 // worker's aiRate helper); precedence is env > admin override > descriptor default.
 async function paceAi(provider, apiKey, rpmOverride, burstOverride) {
   const desc = PROVIDERS[provider];
-  if (desc?.keyless) return; // on-device (local/whisper): no external call, nothing to pace
+  if (desc?.onDevice) return; // on-device (local/whisper): no external call, nothing to pace
+  // Keyless-networked providers pace like any other; their bucket is the
+  // per-provider "nokey" one (aiKeyBucket) since all connections share the box.
   const rpm = Number(process.env.AI_RPM) || rpmOverride || desc?.rpm || DEFAULT_AI_RPM;
   const burst = Number(process.env.AI_BURST) || burstOverride || desc?.burst || DEFAULT_AI_BURST;
   await acquire(aiKeyBucket(provider, apiKey), rpm, burst);
@@ -161,6 +169,7 @@ export function providerCatalog() {
       models: p.models,
       research: p.research,
       keyless: !!p.keyless,
+      onDevice: !!p.onDevice,
       embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
       transcribes: p.transcribes ? { default: p.transcribes.default, models: p.transcribes.models } : null,
     };
