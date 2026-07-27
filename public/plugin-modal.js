@@ -324,6 +324,11 @@ function keysSection(p, ctx, reload) {
         } catch (err) { toast.error(`"${k.name}": ${err.message}`); }
       });
 
+      const editBtn = document.createElement("button");
+      editBtn.className = "ghost";
+      editBtn.textContent = "edit";
+      editBtn.onclick = () => beginEdit(k);
+
       const delBtn = document.createElement("button");
       delBtn.className = "danger";
       delBtn.textContent = "remove";
@@ -337,7 +342,7 @@ function keysSection(p, ctx, reload) {
           reload();
         } catch (err) { toast.error(err.message); }
       };
-      act.append(testBtn, delBtn);
+      act.append(testBtn, editBtn, delBtn);
       tbody.appendChild(tr);
     }
     table.appendChild(tbody);
@@ -382,19 +387,58 @@ function keysSection(p, ctx, reload) {
   const addBtn = document.createElement("button");
   addBtn.type = "submit";
   addBtn.textContent = `Add ${noun}`;
-  addForm.append(nameIn, ...(baseIn ? [baseIn] : []), keyIn, addBtn);
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "ghost";
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.hidden = true;
+  addForm.append(nameIn, ...(baseIn ? [baseIn] : []), keyIn, addBtn, cancelBtn);
+
+  // Edit-in-place reuses the add form (the sourceSection pattern): prefill,
+  // flip the button to Save, PATCH on submit. The row id never changes, so
+  // boards and the default slots ride through a rename / repoint / rotation.
+  let editingId = null;
+  function beginEdit(k) {
+    editingId = k.id;
+    nameIn.value = k.name;
+    if (baseIn) baseIn.value = k.base_url || "";
+    keyIn.value = "";
+    keyIn.required = false;
+    keyIn.placeholder = k.hint === "no key" ? "token (optional)" : "•••• stored — leave blank to keep";
+    addBtn.textContent = "Save changes";
+    cancelBtn.hidden = false;
+    nameIn.focus();
+  }
+  cancelBtn.onclick = () => {
+    editingId = null;
+    addForm.reset();
+    keyIn.required = !keyless;
+    keyIn.placeholder = keyless ? "token (optional)" : "sk-…";
+    addBtn.textContent = `Add ${noun}`;
+    cancelBtn.hidden = true;
+  };
+
   addForm.onsubmit = async (e) => {
     e.preventDefault();
     addBtn.disabled = true;
     try {
-      await api("POST", "/api/admin/ai-keys", {
-        name: nameIn.value.trim(),
-        provider: p.name,
-        key: keyIn.value.trim(),
-        ...(baseIn?.value.trim() ? { base_url: baseIn.value.trim() } : {}),
-      });
-      toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" added`);
-      reload();
+      if (editingId) {
+        await api("PATCH", `/api/admin/ai-keys/${editingId}`, {
+          name: nameIn.value.trim(),
+          ...(keyIn.value.trim() ? { key: keyIn.value.trim() } : {}), // blank = keep the stored one
+          ...(baseIn ? { base_url: baseIn.value.trim() } : {}), // blank = back to the default
+        });
+        toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" saved`);
+      } else {
+        await api("POST", "/api/admin/ai-keys", {
+          name: nameIn.value.trim(),
+          provider: p.name,
+          key: keyIn.value.trim(),
+          ...(baseIn?.value.trim() ? { base_url: baseIn.value.trim() } : {}),
+        });
+        toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" added`);
+      }
+      reload(); // rebuilds the section — form state resets with it
     } catch (err) {
       toast.error(err.message);
       addBtn.disabled = false;

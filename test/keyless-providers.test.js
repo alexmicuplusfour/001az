@@ -20,7 +20,7 @@ import { PROVIDERS, providerCatalog, registerProvider, unregisterProvider } from
 import { compatHeaders } from "../server/ai-providers/wires/compat.js";
 import { getPluginDef } from "../server/plugins.js";
 import { resolveDefaultAi, resolveBoardAi, resolveEmbedder } from "../server/worker.js";
-import { setPluginState, upsertExternalPlugin, createAiKey, deleteAiKey, getSetting, setSetting } from "../server/db.js";
+import { setPluginState, upsertExternalPlugin, createAiKey, deleteAiKey, getAiKey, getSetting, setSetting } from "../server/db.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 
@@ -189,6 +189,57 @@ test("a connection's server URL overrides the descriptor base — proven on a li
     assert.equal(board.apiKey, null);
   } finally {
     box.close();
+  }
+});
+
+test("PATCH /api/admin/ai-keys/:id: edit in place — rename, repoint, rotate — the row id survives", async () => {
+  const boxed = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json.find((k) => k.name === "Boxed");
+
+  // Rename + repoint in one PATCH; trailing slash still normalizes.
+  let r = await req(srv.base, "PATCH", `/api/admin/ai-keys/${boxed.id}`, {
+    sid: admin.sid, body: { name: "Boxed 2", base_url: "http://10.0.0.9:11434/v1/" },
+  });
+  assert.equal(r.status, 200);
+  let row = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json.find((k) => k.id === boxed.id);
+  assert.equal(row.name, "Boxed 2");
+  assert.equal(row.base_url, "http://10.0.0.9:11434/v1");
+
+  // Blank URL = back to the descriptor default (acme.selfhosted ships one).
+  r = await req(srv.base, "PATCH", `/api/admin/ai-keys/${boxed.id}`, { sid: admin.sid, body: { base_url: "" } });
+  assert.equal(r.status, 200);
+  row = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json.find((k) => k.id === boxed.id);
+  assert.equal(row.base_url, null);
+
+  // A malformed URL refuses readably.
+  r = await req(srv.base, "PATCH", `/api/admin/ai-keys/${boxed.id}`, { sid: admin.sid, body: { base_url: "ftp://nope" } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /http/);
+
+  // Secret rotation: non-empty replaces, blank keeps.
+  const kid = Number(await createAiKey(db, "Rotate me", "anthropic", "sk-old-1234"));
+  r = await req(srv.base, "PATCH", `/api/admin/ai-keys/${kid}`, { sid: admin.sid, body: { key: "sk-new-5678" } });
+  assert.equal(r.status, 200);
+  assert.equal((await getAiKey(db, kid)).api_key, "sk-new-5678");
+  r = await req(srv.base, "PATCH", `/api/admin/ai-keys/${kid}`, { sid: admin.sid, body: { name: "Rotated", key: "" } });
+  assert.equal(r.status, 200);
+  assert.equal((await getAiKey(db, kid)).api_key, "sk-new-5678", "blank key = keep the stored one");
+  await deleteAiKey(db, kid);
+});
+
+test("registration guard: a needsBase provider with no default base requires the URL up front", async () => {
+  registerProvider("nodefault", {
+    label: "No Default", keyless: true, needsBase: true, rpm: 1, burst: 1,
+    wire: { tag() {} }, defaultModel: "m", models: [{ id: "m", label: "m" }],
+  });
+  try {
+    let r = await req(srv.base, "POST", "/api/admin/ai-keys", { sid: admin.sid, body: { name: "X", provider: "nodefault" } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /server URL required/);
+    r = await req(srv.base, "POST", "/api/admin/ai-keys", { sid: admin.sid, body: { name: "X", provider: "nodefault", base_url: "http://127.0.0.1:9/v1" } });
+    assert.equal(r.status, 200);
+    await deleteAiKey(db, Number(r.json.id));
+  } finally {
+    unregisterProvider("nodefault");
   }
 });
 

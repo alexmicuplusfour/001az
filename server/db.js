@@ -719,6 +719,21 @@ export async function createAiKey(db, name, provider, apiKey, baseUrl = null) {
   return rows[0].id;
 }
 
+// Partial in-place update of a connection row: rename, repoint (server URL),
+// or rotate the secret. Editing in place — vs remove + re-add — is what keeps
+// every pointer alive (boards, the default-tagger slot, embed/transcribe),
+// which is exactly what you want when rotating a key or fixing a typo'd URL.
+export async function updateAiKey(db, id, { name, apiKey, baseUrl }) {
+  const sets = [], vals = [];
+  if (name !== undefined) { vals.push(name); sets.push(`name=$${vals.length}`); }
+  if (apiKey !== undefined) { vals.push(apiKey); sets.push(`api_key=$${vals.length}`); }
+  if (baseUrl !== undefined) { vals.push(baseUrl); sets.push(`base_url=$${vals.length}`); }
+  if (!sets.length) return true;
+  vals.push(id);
+  const r = await db.query(`UPDATE ai_keys SET ${sets.join(", ")} WHERE id=$${vals.length}`, vals);
+  return r.rowCount > 0;
+}
+
 // Boards referencing the key fall back to the default via ON DELETE SET NULL;
 // their model override goes with it, and if the key *was* the default, clear
 // the settings pointer too.

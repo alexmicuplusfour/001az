@@ -77,6 +77,7 @@ import {
   listAiKeys,
   getAiKey,
   createAiKey,
+  updateAiKey,
   deleteAiKey,
   embeddingStats,
   boardEmbeddings,
@@ -1503,9 +1504,41 @@ app.post("/api/admin/ai-keys", requireAdmin, wrap(async (req, res) => {
     if (!/^https?:\/\//i.test(baseUrl))
       return res.status(400).json({ error: "server URL must start with http:// or https://" });
   }
+  // A needsBase provider that ships no default base has nowhere to fall back
+  // to — a URL-less connection would fail confusingly at call time instead.
+  if (PROVIDERS[provider].needsBase && !baseUrl && !PROVIDERS[provider].base)
+    return res.status(400).json({ error: "server URL required — this provider has no default" });
   const id = await createAiKey(db, name, provider, apiKey || null, baseUrl);
   console.log(`ai-key added: "${name}" (${provider})`);
   res.json({ id, name, provider });
+}));
+
+// Edit a connection in place: rename, repoint (server URL), rotate the secret.
+// Boards and the default slots keep working through the edit — the row id (the
+// selection handle) never changes, and resolution reads the row fresh per call.
+app.patch("/api/admin/ai-keys/:id", requireAdmin, wrap(async (req, res) => {
+  const key = await getAiKey(db, Number(req.params.id));
+  if (!key) return res.status(404).json({ error: "not found" });
+  const patch = {};
+  if (req.body?.name !== undefined) {
+    const name = String(req.body.name).trim().slice(0, 64);
+    if (!name) return res.status(400).json({ error: "name required" });
+    patch.name = name;
+  }
+  // Rotation only — non-empty replaces, blank keeps. A keyed provider can
+  // never be edited into keylessness (remove the row for that).
+  if (req.body?.key) patch.apiKey = String(req.body.key).trim();
+  if (req.body?.base_url !== undefined && PROVIDERS[key.provider]?.needsBase) {
+    const baseUrl = String(req.body.base_url || "").trim().replace(/\/+$/, "");
+    if (baseUrl && !/^https?:\/\//i.test(baseUrl))
+      return res.status(400).json({ error: "server URL must start with http:// or https://" });
+    if (!baseUrl && !PROVIDERS[key.provider].base)
+      return res.status(400).json({ error: "server URL required — this provider has no default" });
+    patch.baseUrl = baseUrl || null; // blank = back to the descriptor default
+  }
+  await updateAiKey(db, Number(req.params.id), patch);
+  console.log(`ai-key #${req.params.id} updated by admin`);
+  res.json({ ok: true });
 }));
 
 app.delete("/api/admin/ai-keys/:id", requireAdmin, wrap(async (req, res) => {
