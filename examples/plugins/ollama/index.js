@@ -47,7 +47,10 @@ export default function (ctx) {
     rpm: 120, burst: 5,
     // Ollama ignores unknown OpenAI fields (tool_choice among them, on older
     // versions), so forcing the tool call is safe and helps where supported.
-    compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "models" },
+    // keyTest "list" probes /v1/models (the index): Test answers "is the box
+    // up", not "is one particular model pulled" — a fresh box with nothing
+    // pulled tests green, and the picker shows what's actually there.
+    compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "list" },
     // Embeddings via /v1/embeddings — pull the model first (`ollama pull nomic-embed-text`).
     // The filter carves embedding models out of the live /v1/models dump by
     // name (Ollama reports no capabilities there): nomic-embed-text,

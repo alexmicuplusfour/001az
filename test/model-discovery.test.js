@@ -61,6 +61,22 @@ test("compat listModels: a provider with no models endpoint (listModels: false) 
   assert.equal(out, null);
 });
 
+test("compat testKey 'list': probes the models index — a healthy box with nothing pulled tests green; the box's own error still surfaces", async () => {
+  const box = await fakeBox([]); // reachable, zero models — the fresh-Ollama shape
+  try {
+    await compatWire.testKey({ label: "Fresh", defaultModel: "llama3.1:8b", compat: { ...COMPAT, keyTest: "list" } }, { apiKey: null, base: baseOf(box) });
+    assert.deepEqual(box.hits, ["/v1/models"], "the index, not /models/{defaultModel}");
+    box.status = 500;
+    await assert.rejects(
+      () => compatWire.testKey({ label: "Fresh", defaultModel: "llama3.1:8b", compat: { ...COMPAT, keyTest: "list" } }, { apiKey: null, base: baseOf(box) }),
+      /boom/,
+      "a down box still fails the test with its own message"
+    );
+  } finally {
+    box.close();
+  }
+});
+
 test("every wire family serves the same listModels contract", () => {
   assert.equal(typeof WIRES.compat.listModels, "function");
   assert.equal(typeof WIRES.anthropic.listModels, "function");
@@ -172,6 +188,34 @@ test("capability kinds: a declared filter carves the live list; a capability cat
   } finally {
     box.close();
     unregisterProvider("kinds");
+  }
+});
+
+test("an EMPTY answer marks the suggestions as absent — a healthy box with nothing pulled can't impersonate an installed setup", async () => {
+  const box = await fakeBox([]);
+  registerProvider("freshbox", {
+    label: "Fresh Box", keyless: true, needsBase: true, rpm: 10, burst: 2,
+    wire: WIRES.compat, compat: COMPAT, base: baseOf(box), research: false,
+    defaultModel: "rec-1",
+    models: [{ id: "rec-1", note: "solid pick" }, { id: "rec-2" }],
+    embeds: { default: "emb-1", models: [{ id: "emb-1", note: "embedder" }], filter: "emb" },
+  });
+  try {
+    const r = await listProviderModels({ provider: "freshbox", apiKey: null });
+    assert.equal(r.source, "fallback");
+    assert.deepEqual(r.models, [
+      { id: "rec-1", note: "solid pick · not listed by this connection", recommended: true },
+      { id: "rec-2", note: "not listed by this connection", recommended: true },
+    ], "the provider ANSWERED (empty) — suggestions still serve, marked");
+    const em = await listProviderModels({ provider: "freshbox", apiKey: null, kind: "embed" });
+    assert.deepEqual(em.models.map((m) => m.note), ["embedder · not listed by this connection"], "filter-to-zero on an answer marks the same way");
+    // Unreachable (null live) stays UNMARKED — no evidence of absence.
+    box.close();
+    const dark = await listProviderModels({ provider: "freshbox", apiKey: null });
+    assert.deepEqual(dark.models.map((m) => m.note), ["solid pick", undefined], "couldn't ask → plain suggestions, no absence claim");
+  } finally {
+    box.close();
+    unregisterProvider("freshbox");
   }
 });
 

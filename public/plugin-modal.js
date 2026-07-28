@@ -38,26 +38,68 @@ const busy = (btn, label, fn) => async () => {
   try { await fn(); } finally { btn.disabled = false; btn.textContent = prev; }
 };
 
-// A slot's primary button, always labelled "Make default {slot}". When this
-// provider isn't the default it's the enabled, primary promote action. When it
-// already IS the default the button goes disabled + secondary — a status marker,
-// not a dead "Save" — and re-enables only once you change the key or model, so
-// you can still repoint the running default. `sels` are the selects to watch;
-// `apply` runs the write.
+// A slot's promote button, always labelled "Make default {slot}" and always
+// ghost — the same weight as the connector's "Make default for {domain}".
+// Enabled when this provider isn't the default; when it already IS, it sits
+// disabled as a status marker and re-enables only once you change the key or
+// model, so you can still repoint the running default. `sels` are the selects
+// to watch; `apply` runs the write.
 function slotButton(label, isDefault, sels, apply) {
   const btn = document.createElement("button");
+  btn.className = "ghost";
   btn.textContent = label;
   const initial = sels.map((s) => s.value);
   const sync = () => {
-    const dirty = sels.some((s, i) => s.value !== initial[i]);
-    const on = !isDefault || dirty;
-    btn.disabled = !on;
-    btn.className = on ? "" : "ghost";
+    btn.disabled = isDefault && !sels.some((s, i) => s.value !== initial[i]);
   };
   sels.forEach((s) => s.addEventListener("change", sync));
   sync();
   btn.onclick = busy(btn, "Saving…", apply);
   return btn;
+}
+
+// Beside an enabled promote button: what you'd be replacing. providerName is
+// a slot's current holder (ctx.defaults.*) — resolved to its display label
+// via ctx.plugins; an empty slot reads "none".
+function currentDefaultNote(ctx, providerName, model) {
+  const span = document.createElement("span");
+  span.className = "muted";
+  span.style.cssText = "font-size:12px;";
+  const label = providerName ? (ctx.plugins?.find((x) => x.name === providerName)?.label || providerName) : "none";
+  span.textContent = `Current default: ${label}${model ? ` · ${model}` : ""}`;
+  return span;
+}
+
+// Live commit for a SETTINGS control — the plugin modals carry no Save
+// buttons; each field commits itself on `change` (blur for typed input,
+// instant for steppers/toggles). Success is QUIET — a toast per blur is
+// noise; `commit` only speaks when it has something to say (a key landed, a
+// value will be clamped). Failure toasts the error and puts the last-saved
+// value back — except `revertOnError: false` (secrets), where wiping the
+// field would mean re-pasting the key just to retry. An unchanged blur is a
+// no-op, which also means an empty secret field can never blur-clear a
+// stored key. Commits are serialized per field, NOT gated by disabling the
+// control — a stepper/Enter `change` fires with focus still in the field,
+// and disabling it would steal that focus and eat clicks mid-commit.
+// Settings only: creation forms (keys, source connections) and the slot
+// promotions stay explicit buttons — those change WHAT something is, not
+// how it's tuned.
+function autosave(el, commit, { revertOnError = true } = {}) {
+  let saved = el.value;
+  let chain = Promise.resolve();
+  el.addEventListener("change", () => {
+    if (el.value === saved) return;
+    chain = chain.then(async () => {
+      if (el.value === saved) return; // a queued change already settled here
+      try {
+        await commit();
+        saved = el.value;
+      } catch (err) {
+        toast.error(err.message);
+        if (revertOnError) el.value = saved;
+      }
+    });
+  });
 }
 
 export function openPluginModal(p, ctx) {
@@ -75,17 +117,17 @@ export function openPluginModal(p, ctx) {
     let state;
     try { state = await ctx.getState(); } catch { return; }
     p = state.plugins.find((x) => x.id === p.id) || p;
-    ctx = { ...ctx, slots: state.slots, keys: state.keys, connections: state.connections, defaults: state.defaults };
+    ctx = { ...ctx, plugins: state.plugins, slots: state.slots, keys: state.keys, connections: state.connections, defaults: state.defaults };
     render();
     ctx.refresh(state); // repaint the cards behind, reusing the state we just fetched
   }
 
-  // Builders return { node, footerActions }. footerActions is the modal-level
-  // commit that belongs in the footer — present only for the single-form modals
-  // (connector: Save+Test; media: Save). AI providers are a container of
-  // independent slots, so each slot keeps its own action in its section and the
-  // footer holds just Close; source connections likewise carry their actions in
-  // their own add/edit form.
+  // Builders return their section node; every action lives inside its
+  // section — autosaving fields, slot buttons, per-row actions, add/edit
+  // forms — so the footer holds just Close, for every plugin kind. There is
+  // deliberately no footer-level commit: one once saved only the rate-limit
+  // section while looking modal-wide, and the reload it triggered discarded
+  // a model choice staged in the section above it.
   function render() {
     body.replaceChildren();
     footer.replaceChildren();
@@ -112,15 +154,13 @@ export function openPluginModal(p, ctx) {
       if (p.capabilities.tag) built.push(taggerSection(p, ctx, reload));
       if (p.capabilities.embed) built.push(embedSection(p, ctx, reload));
       if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, reload));
-      if (p.configSchema.length) built.push(pacingSection(p, reload)); // rpm/burst — networked providers only
+      if (p.configSchema.length) built.push(pacingSection(p)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {
       built.push(sourceSection(p, ctx, reload));
     } else {
-      built.push(mediaSection(p, reload));
+      built.push(mediaSection(p));
     }
-    for (const b of built) body.appendChild(b.node);
-
-    for (const b of built) for (const btn of b.footerActions || []) footer.appendChild(btn);
+    for (const b of built) body.appendChild(b);
 
     const closeBtn = document.createElement("button");
     closeBtn.className = "ghost";
@@ -143,7 +183,9 @@ function connectorSection(p, ctx, reload) {
   );
 
   // One input per schema field; the plugin declares them, we just render.
-  const fields = [];
+  // Every field autosaves itself (the PATCH merges per key) — no Save button.
+  const saveField = (key, v) => api("PATCH", `/api/admin/plugins/${p.id}`, { config: { [key]: v } });
+  let secretInput = null; // Test sends the typed key so it works pre-blur
   for (const f of p.configSchema) {
     if (f.type === "secret") {
       const input = document.createElement("input");
@@ -156,21 +198,36 @@ function connectorSection(p, ctx, reload) {
         ? "•••• stored — leave blank to keep"
         : f.required ? "paste key" : f.help || "optional";
       const row = labeled(f.label, input);
-      let clear = false;
+      // Paste → blur = saved. autosave's unchanged-guard means an empty blur
+      // can never write, so a stored key is cleared ONLY by the explicit
+      // confirmed remove below. reload() after a key write: hasKey flips, and
+      // blur already happened so the rebuild steals no focus. On failure the
+      // typed key stays put (revertOnError: false) — wiping it would mean
+      // re-pasting just to retry.
+      autosave(input, async () => {
+        const v = input.value.trim();
+        if (!v) return;
+        await saveField(f.key, v);
+        toast(`${p.label} ${f.label.toLowerCase()} saved`);
+        reload();
+      }, { revertOnError: false });
       if (p.state.hasKey) {
         const rm = document.createElement("button");
         rm.type = "button";
         rm.className = "danger";
         rm.style.cssText = "margin-top:6px;padding:4px 10px;font-size:12px;";
         rm.textContent = "remove stored key";
-        rm.onclick = () => {
-          clear = !clear;
-          rm.textContent = clear ? "will remove on save" : "remove stored key";
-          input.disabled = clear;
-        };
+        rm.onclick = busy(rm, "Removing…", async () => {
+          if (!confirm(`Remove the stored ${f.label}?`)) return;
+          try {
+            await saveField(f.key, ""); // "" clears the secret store
+            toast(`${p.label} ${f.label.toLowerCase()} removed`);
+            reload();
+          } catch (err) { toast.error(err.message); }
+        });
         row.appendChild(rm);
       }
-      fields.push({ f, value: () => (clear ? "" : input.value.trim() || undefined) });
+      secretInput = input;
       sec.appendChild(row);
     } else if (f.type === "number") {
       const input = document.createElement("input");
@@ -178,18 +235,29 @@ function connectorSection(p, ctx, reload) {
       if (f.min !== undefined) input.min = String(f.min);
       input.value = p.state.config[f.key] ?? "";
       input.style.cssText = "width:100%;box-sizing:border-box;";
-      // empty = back to the plugin's default
-      fields.push({ f, value: () => (input.value === "" ? null : Number(input.value)) });
+      autosave(input, async () => {
+        const v = input.value === "" ? null : Number(input.value); // empty = back to the plugin's default
+        await saveField(f.key, v);
+        p.state.config[f.key] = v;
+      });
       sec.appendChild(labeled(f.label + (f.help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${f.help}</span>` : ""), input));
     } else if (f.type === "toggle") {
-      let on = !!p.state.config[f.key];
-      fields.push({ f, value: () => on });
-      sec.appendChild(switchRow(f.label, f.help || "", on, (v) => { on = v; }));
+      // switchRow owns its visual state; a failed write reloads to restore truth.
+      sec.appendChild(switchRow(f.label, f.help || "", !!p.state.config[f.key], async (v) => {
+        try {
+          await saveField(f.key, v);
+          p.state.config[f.key] = v;
+        } catch (err) { toast.error(err.message); reload(); }
+      }));
     } else {
       const input = document.createElement("input");
       input.value = p.state.config[f.key] ?? "";
       input.style.cssText = "width:100%;box-sizing:border-box;";
-      fields.push({ f, value: () => input.value.trim() || null });
+      autosave(input, async () => {
+        const v = input.value.trim() || null;
+        await saveField(f.key, v);
+        p.state.config[f.key] = v;
+      });
       sec.appendChild(labeled(f.label, input));
     }
   }
@@ -215,49 +283,39 @@ function connectorSection(p, ctx, reload) {
     sec.appendChild(star);
   }
 
-  // Footer actions. Save commits the config; Test pings the provider with the
-  // typed key (or its stored one), so it reflects the form without a Save first.
-  const save = document.createElement("button");
-  save.textContent = "Save";
-  save.onclick = busy(save, "Saving…", async () => {
-    const config = {};
-    for (const { f, value } of fields) {
-      const v = value();
-      if (v !== undefined) config[f.key] = v; // undefined = leave stored secret alone
-    }
-    try {
-      await api("PATCH", `/api/admin/plugins/${p.id}`, { config });
-      toast(`${p.label} saved`);
-      reload();
-    } catch (err) { toast.error(err.message); }
-  });
-
+  // Test lives in the section like every other action (the footer holds just
+  // Close). The typed key rides along when present, so Test works even before
+  // the blur that saves it; otherwise it tests the stored one.
   const test = document.createElement("button");
   test.className = "ghost";
+  test.style.alignSelf = "flex-start";
   test.textContent = "Test";
   test.onclick = busy(test, "Testing…", async () => {
-    const typed = fields.find(({ f }) => f.type === "secret")?.value();
+    const typed = secretInput?.value.trim();
     try {
-      const body = typed !== undefined ? { api_key: typed } : undefined;
+      const body = typed ? { api_key: typed } : undefined;
       const { provider } = await api("POST", `/api/admin/plugins/${p.id}/test`, body);
       toast(`✓ ${provider} reachable`);
     } catch (err) { toast.error(err.message); }
   });
+  sec.appendChild(test);
 
-  return { node: sec, footerActions: [save, test] };
+  return sec;
 }
 
 // --- ai: per-provider request pacing (rpm/burst) — mirrors the connector config ---
-// Same number-field + Save shape as connectorSection, scoped to the rate-limit
+// Same number-field shape as connectorSection, scoped to the rate-limit
 // fields the ai plugin declares. On-device providers declare none, so the
 // dispatch above skips this section for them; keyless-networked ones pace like
-// any other. Empty input = back to the descriptor default.
-function pacingSection(p, reload) {
+// any other. Empty input = back to the descriptor default. No Save button:
+// each field autosaves itself per key (the PATCH merges), and nothing
+// rebuilds the modal — a rebuild here once discarded a model choice staged
+// in the tagger section above.
+function pacingSection(p) {
   const sec = section(
     "Rate limit",
-    "How fast the worker calls this provider's API, per key. Raise it to match your account tier; blank uses the default."
+    "How fast the worker calls this provider's API, per key. Raise it to match your account tier; blank uses the default. Saves as you edit."
   );
-  const fields = [];
   for (const f of p.configSchema) {
     const input = document.createElement("input");
     input.type = "number";
@@ -265,21 +323,14 @@ function pacingSection(p, reload) {
     input.value = p.state.config[f.key] ?? "";
     input.placeholder = `default ${f.default}`;
     input.style.cssText = "width:100%;box-sizing:border-box;";
-    fields.push({ f, value: () => (input.value === "" ? null : Number(input.value)) });
+    autosave(input, async () => {
+      const v = input.value === "" ? null : Number(input.value); // null = clear the override, back to default
+      await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { [f.key]: v } });
+      p.state.config[f.key] = v; // local truth without a rebuild
+    });
     sec.appendChild(labeled(f.label + (f.help ? ` <span style="color:#b6b6bd;font-weight:400;">· ${f.help}</span>` : ""), input));
   }
-  const save = document.createElement("button");
-  save.textContent = "Save";
-  save.onclick = busy(save, "Saving…", async () => {
-    const config = {};
-    for (const { f, value } of fields) config[f.key] = value(); // null = clear the override, back to default
-    try {
-      await api("PATCH", `/api/admin/plugins/${p.id}`, { config });
-      toast(`${p.label} rate limit saved`);
-      reload();
-    } catch (err) { toast.error(err.message); }
-  });
-  return { node: sec, footerActions: [save] };
+  return sec;
 }
 
 // --- ai: this provider's keys (add / test / remove) ---
@@ -445,7 +496,7 @@ function keysSection(p, ctx, reload) {
     }
   };
   sec.appendChild(addForm);
-  return { node: sec, footerActions: null };
+  return sec;
 }
 
 // --- ai: the default-tagger slot ---
@@ -462,7 +513,7 @@ function taggerSection(p, ctx, reload) {
     none.style.margin = "0";
     none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to make this provider the default tagger.`;
     sec.appendChild(none);
-    return { node: sec, footerActions: null };
+    return sec;
   }
 
   const keySel = document.createElement("select");
@@ -505,6 +556,7 @@ function taggerSection(p, ctx, reload) {
     } catch (err) { toast.error(err.message); }
   };
   actions.appendChild(slotButton("Make default tagger", isDefault, [keySel, modelSel], apply));
+  if (!isDefault) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.tagger, ctx.slots.tagger.model));
 
   if (isDefault) {
     const test = document.createElement("button");
@@ -519,7 +571,7 @@ function taggerSection(p, ctx, reload) {
     actions.appendChild(test);
   }
   sec.appendChild(actions);
-  return { node: sec, footerActions: null };
+  return sec;
 }
 
 // --- ai: the embedder slot (semantic search) ---
@@ -536,7 +588,7 @@ function embedSection(p, ctx, reload) {
     none.style.margin = "0";
     none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to embed with this provider.`;
     sec.appendChild(none);
-    return { node: sec, footerActions: null };
+    return sec;
   }
 
   let keySel = null;
@@ -609,6 +661,7 @@ function embedSection(p, ctx, reload) {
     } catch (err) { toast.error(err.message); }
   };
   actions.appendChild(slotButton("Make default embedder", enabled, [keySel, modelSel].filter(Boolean), apply));
+  if (!enabled) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.embedder, ctx.slots.embedder.model));
 
   if (enabled) {
     const test = document.createElement("button");
@@ -633,7 +686,7 @@ function embedSection(p, ctx, reload) {
     actions.append(test, off);
   }
   sec.appendChild(actions);
-  return { node: sec, footerActions: null };
+  return sec;
 }
 
 // Transcription slot — audio → text so recordings can be tagged. Mirrors
@@ -654,7 +707,7 @@ function transcribeSection(p, ctx, reload) {
     none.style.margin = "0";
     none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to transcribe with this provider.`;
     sec.appendChild(none);
-    return { node: sec, footerActions: null };
+    return sec;
   }
 
   // Key picker (providers with connection rows — everything but on-device).
@@ -750,9 +803,10 @@ function transcribeSection(p, ctx, reload) {
       actions.append(test, off);
     }
   }
+  if (!active) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.transcriber, ctx.slots.transcriber.model));
 
   if (actions.children.length) sec.appendChild(actions);
-  return { node: sec, footerActions: null };
+  return sec;
 }
 
 // --- source: saved connections (add / edit / test / remove) ---
@@ -767,7 +821,7 @@ function sourceSection(p, ctx, reload) {
     note.style.margin = "0";
     note.textContent = "Core capability — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
     sec.appendChild(note);
-    return { node: sec, footerActions: null };
+    return sec;
   }
 
   const mine = (ctx.connections || []).filter((c) => c.type === p.name);
@@ -919,12 +973,12 @@ function sourceSection(p, ctx, reload) {
 
   // The add/edit form is rebuilt on demand and carries its own Save/Test/Cancel,
   // so there's nothing for the footer — it holds just Close.
-  return { node: sec, footerActions: null };
+  return sec;
 }
 
 // --- media: accepted extensions + the adjustable per-type upload limit ---
 
-function mediaSection(p, reload) {
+function mediaSection(p) {
   const sec = section("File types", null);
   const list = document.createElement("p");
   list.style.cssText = "margin:0;" + MONO_CSS;
@@ -953,26 +1007,23 @@ function mediaSection(p, reload) {
     input,
   ));
 
-  const save = document.createElement("button");
-  save.textContent = "Save";
-  save.onclick = busy(save, "Saving…", async () => {
+  // Autosaves on change; a bad value throws into the helper's revert path.
+  autosave(input, async () => {
     const raw = input.value.trim();
     let maxBytes = null; // blank → clear the override (back to the manifest default)
     if (raw !== "") {
       const mbVal = Number(raw);
-      if (!Number.isFinite(mbVal) || mbVal < 1) return toast.error("Enter at least 1 MB, or leave blank for the default");
+      if (!Number.isFinite(mbVal) || mbVal < 1) throw new Error("Enter at least 1 MB, or leave blank for the default");
       maxBytes = Math.round(mbVal * MB);
     }
-    try {
-      await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { maxBytes } });
-      // An over-ceiling override stores as-is (it takes effect if the env
-      // ceiling is later raised) but the server clamps it in mediaLimits —
-      // say what actually applies rather than silently saving a bigger number.
-      toast(ceilingMB && maxBytes > p.capabilities.ceilingBytes
-        ? `${p.label} saved — uploads cap at the ${ceilingMB} MB server ceiling (UPLOAD_HARD_CEILING)`
-        : `${p.label} saved`);
-      reload();
-    } catch (err) { toast.error(err.message); }
+    await api("PATCH", `/api/admin/plugins/${p.id}`, { config: { maxBytes } });
+    p.state.config.maxBytes = maxBytes;
+    // Quiet on success — except an over-ceiling override, which stores as-is
+    // (it takes effect if the env ceiling is later raised) but is clamped by
+    // the server in mediaLimits: say what actually applies rather than
+    // silently accepting a bigger number.
+    if (ceilingMB && maxBytes > p.capabilities.ceilingBytes)
+      toast(`Uploads cap at the ${ceilingMB} MB server ceiling (UPLOAD_HARD_CEILING)`);
   });
-  return { node: sec, footerActions: [save] };
+  return sec;
 }

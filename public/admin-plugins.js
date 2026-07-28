@@ -105,7 +105,7 @@ export async function renderPlugins(prefetched) {
   sec.className = "section";
   sec.innerHTML = `<h2>Plugins</h2><p class="sub">Capabilities and connections in one place. Add the services you use; core capabilities are always on. Configure keys and options via the gear.</p>`;
 
-  const ctx = { slots, keys, connections: srcConnections, defaults, refresh: renderPlugins, getState: loadPluginState };
+  const ctx = { plugins, slots, keys, connections: srcConnections, defaults, refresh: renderPlugins, getState: loadPluginState };
 
   // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
   // marking installed ones "Added" — so they stay visible across reopens, not

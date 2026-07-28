@@ -169,7 +169,10 @@ export function testKey({ provider, ...rest }) {
 // The descriptor lists are the recommended set + offline fallback, NOT the
 // catalog — a wire without listing, a fetch failure, or a filter that
 // matches nothing serves them alone (source: "fallback"); never a throw,
-// never an empty picker (the Test button is the key diagnostic). When the
+// never an empty picker (the Test button is the key diagnostic). But an
+// ANSWER is the truth: when the provider listed and the curated ids weren't
+// there, their notes say so — a suggestion must not impersonate an
+// installed model. When the
 // live list applies it owns existence: a retired curated id drops out,
 // everything else sorts in below the recommendations; descriptor notes win
 // the labels for ids both sides know.
@@ -182,11 +185,21 @@ export const MODEL_KINDS = Object.keys(KIND_CATALOG);
 function assembleModels(desc, kind, live) {
   const cat = KIND_CATALOG[kind](desc);
   if (!cat) return { source: "fallback", models: [] }; // provider lacks the capability
-  const fallback = () => ({
+  // `absent`: the provider ANSWERED and these ids weren't in the answer
+  // (fresh Ollama box with nothing pulled, filter matched nothing). Still
+  // suggest them — an empty select reads as broken, and the curated notes are
+  // the "what should I pull" hint — but say so inline, so a suggestion can't
+  // impersonate an installed model. A null live (couldn't ask) stays
+  // unmarked: we don't know they're absent.
+  const fallback = (absent) => ({
     source: "fallback",
-    models: (cat.models || []).map((m) => ({ ...m, recommended: true })),
+    models: (cat.models || []).map((m) => ({
+      ...m,
+      recommended: true,
+      ...(absent ? { note: m.note ? `${m.note} · not listed by this connection` : "not listed by this connection" } : {}),
+    })),
   });
-  if (!live?.length || (!cat.filter && !cat.always)) return fallback();
+  if (!live || (!cat.filter && !cat.always)) return fallback(false);
   // A filter that doesn't compile (a plugin author's typo) degrades exactly
   // like one that matches nothing — warned so the author can find it, since
   // the route's fallback-not-error contract otherwise swallows the evidence.
@@ -195,11 +208,11 @@ function assembleModels(desc, kind, live) {
     try { filter = new RegExp(cat.filter); }
     catch (err) {
       console.warn(`${desc.label}: bad ${kind} model filter ${JSON.stringify(cat.filter)} — serving the curated list (${err.message})`);
-      return fallback();
+      return fallback(false); // broken filter ≠ evidence of absence
     }
   }
   const list = filter ? live.filter((m) => filter.test(m.id)) : live;
-  if (!list.length) return fallback();
+  if (!list.length) return fallback(true);
   const rest = new Map(list.map((m) => [m.id, m]));
   const models = [];
   // cat.models is optional (an embed-only plugin omits the tagging list) —

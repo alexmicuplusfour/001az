@@ -116,6 +116,35 @@ as fixed.
 - [x] **12. `?refresh=0` busts the cache** — *(fixed: `refresh === "1"`
   strict compare; asserted in the env-route test)*
 
+## Found in the field (post-sweep)
+
+- [x] **13. Test on a healthy-but-empty Ollama box says "model not found"** —
+  keyTest "models" probes `/models/{defaultModel}`, conflating "box up" with
+  "curated default pulled"; a fresh box reads as broken. *(fixed: compat wire
+  gained `keyTest: "list"` — probes the models INDEX, proving reachability/
+  auth regardless of what's pulled; the Ollama example now declares it.
+  Installed plugin copies need an update/reinstall to pick it up)*
+
+- [x] **14. An empty live answer impersonated a missing one** — `!live?.length`
+  treated "provider answered: nothing here" like "couldn't ask", so a fresh
+  box showed curated suggestions indistinguishable from installed models
+  (the field report behind #13). *(fixed: null live (couldn't ask) keeps
+  plain suggestions; an ANSWERED-but-absent set serves them with the note
+  suffixed "not listed by this connection" — data-only, flows through the
+  existing note rendering, no client change. Broken-filter fallback stays
+  unmarked: no evidence of absence)*
+
+- [x] **15. The plugin modals' footer "Save" was a trap** — it committed ONLY
+  one section (rate limit / connector config / media limit) while looking
+  modal-wide, then reload() rebuilt every section and silently discarded a
+  staged model choice. *(fixed per plugin-modal-live-save-plan.md: Save
+  buttons removed everywhere — settings fields autosave on change (per-key
+  PATCH merge, error → toast + revert, no focus-stealing rebuild); secrets
+  save on non-empty blur only, cleared only via the explicit confirmed
+  remove; connector Test moved inline; footer holds just Close for every
+  plugin kind. Slot sections and add/edit forms unchanged BY DECISION —
+  slot changes and record creation stay explicit buttons)*
+
 ## Verified sound (no action)
 
 Cache invalidation coverage (PATCH/DELETE routes + plugin uninstall — also

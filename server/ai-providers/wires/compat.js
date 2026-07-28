@@ -128,8 +128,17 @@ export const compatWire = {
   async testKey(desc, { apiKey, model, base }) {
     const id = model || desc.defaultModel;
     // "completion": a one-token chat call (for providers with no models
-    // endpoint — GLM). "models": a cheap GET on the model id. Both validate the
-    // key and surface the provider's own error message.
+    // endpoint — GLM). "models": a cheap GET on the model id. "list": GET the
+    // models INDEX — proves the box is up and talking without requiring any
+    // particular model to exist. The self-hosted shape (Ollama): what's pulled
+    // varies per box and the picker already shows it, so a per-model probe
+    // answering "model not found" on a healthy box reads as breakage. All
+    // three surface the provider's own error message.
+    if (desc.compat.keyTest === "list") {
+      const r = await compatFetch(desc.label, `${baseOf(desc, base)}/models`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
+      if (!r.ok) throw await compatError(r, desc.label);
+      return;
+    }
     if (desc.compat.keyTest === "completion") {
       const r = await compatFetch(desc.label, `${baseOf(desc, base)}/chat/completions`, {
         method: "POST",
