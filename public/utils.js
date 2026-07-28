@@ -48,6 +48,9 @@ export function toItem(d) {
     kind: d.kind || "image",
     label: d.label || null,
     fields: d.fields || {},  // connector-bound entity fields (per-instance fields come from the reasoning fetch)
+    created_at: d.created_at ?? null,
+    updated_at: d.updated_at ?? null,
+    media: d.media || null,  // face file's metadata projection ({ fn: value }) — sort keys
     instances: Array.isArray(d.instances) ? d.instances.map(toInstance) : [],
   };
 }

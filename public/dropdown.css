@@ -208,3 +208,14 @@
   background: rgba(255, 255, 255, 0.08);
   color: #c8ccd4;
 }
+
+/* non-interactive section header inside a menu (e.g. the sort menu's groups) */
+.dd-head {
+  padding: 7px 8px 3px;
+  color: #6a7080;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  user-select: none;
+}

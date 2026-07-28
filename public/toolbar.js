@@ -14,6 +14,7 @@ import { openBoardModal } from './board-modal.js';
 import { openConnectorBrowse } from './connector-browse.js';
 import { appendAlertMenu, appendAlertFooter, alertsUnseen } from './alerts-modal.js';
 import { clearAlertEvent } from './alert-event.js';
+import { sortCatalog, defaultDir, saveSort, restoreSort } from './sort.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -210,8 +211,13 @@ export function renderToolbar(resultCount) {
           state.facets = payload.facets;
           state.aiReasoning = payload.ai_reasoning !== false;
           // `mapping` is present only when the Mapping pane was touched — sync
-          // it so the toolbar's connector chip re-reads mapping.input.
-          if (payload.mapping !== undefined) state.boardMapping = payload.mapping;
+          // it so the toolbar's connector chip re-reads mapping.input, and
+          // re-validate the sort: the edit may have unbound the sorted field
+          // or changed the identity mode out from under it.
+          if (payload.mapping !== undefined) {
+            state.boardMapping = payload.mapping;
+            restoreSort();
+          }
           const b = state.boards.find((x) => x.id === state.boardId);
           if (b) b.name = payload.name;
           document.dispatchEvent(new Event('app:render'));
@@ -437,18 +443,59 @@ export function renderToolbar(resultCount) {
     elToolbarSub.appendChild(toolBtn(`Clear filters (${active})`, "clear", clearAll));
   }
 
-  // Wrap sort buttons so only the group gets margin-left:auto, not each individually.
+  // One sort control: a dropdown over the board's sortable attributes —
+  // sort.js assembles the sections from the identity mode and the catalogs.
+  // Wrapped so only the group gets margin-left:auto.
   const sortWrap = document.createElement("div");
   sortWrap.className = "sort-group";
-  sortWrap.appendChild(toolBtn(
-    "A–Z",
-    "sort-btn" + (state.sortAlpha ? " active" : ""),
-    () => { state.sortAlpha = !state.sortAlpha; document.dispatchEvent(new Event('app:render')); }
-  ));
-  sortWrap.appendChild(toolBtn(
-    `${ICONS.heart} Top`,
-    "sort-btn" + (state.sortByHearts ? " active" : ""),
-    () => { state.sortByHearts = !state.sortByHearts; document.dispatchEvent(new Event('app:render')); }
-  ));
+  const sortBtn = toolBtn(
+    state.sort ? `${state.sort.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : "Newest",
+    "sort-btn" + (state.sort ? " active" : ""),
+    async () => openSortMenu(sortBtn, await sortCatalog())
+  );
+  sortBtn.title = "Sort";
+  sortWrap.appendChild(sortBtn);
   elToolbarSub.appendChild(sortWrap);
+}
+
+// The sort menu: "Newest first" (the null default) on top, then the catalog's
+// sections. Picking an entry sorts by it (its kind's natural direction);
+// re-picking the active one flips direction. Persisted per board (sort.js).
+function openSortMenu(anchorEl, sections) {
+  const commit = (sort, close) => {
+    state.sort = sort;
+    saveSort();
+    close();
+    document.dispatchEvent(new Event('app:render'));
+  };
+  openDropdown(anchorEl, {
+    className: "sort-pop",
+    build: (body, { close }) => {
+      body.appendChild(ddRow({
+        label: "Newest first",
+        active: !state.sort,
+        onClick: () => commit(null, close),
+      }));
+      for (const section of sections) {
+        const head = document.createElement("div");
+        head.className = "dd-head";
+        head.textContent = section.count != null ? `${section.label} · ${section.count}` : section.label;
+        body.appendChild(head);
+        for (const entry of section.entries) {
+          const active = state.sort?.by === entry.by;
+          body.appendChild(ddRow({
+            // the active row shows its direction; ddRow's trailing slot eats
+            // clicks, so the arrow rides in the label text instead
+            label: active ? `${entry.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : entry.label,
+            active,
+            onClick: () => commit({
+              by: entry.by,
+              dir: active ? (state.sort.dir === "asc" ? "desc" : "asc") : defaultDir(entry.kind),
+              label: entry.label,
+            }, close),
+          }));
+        }
+      }
+    },
+  });
 }

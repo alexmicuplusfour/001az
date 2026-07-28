@@ -9,6 +9,7 @@ import { initFilterConfigsUI } from './filterconfigs.js';
 import { initUpload } from './upload.js';
 import { initLightbox, openLightbox } from './lightbox.js';
 import { openAlertEvent } from './alert-event.js';
+import { restoreSort } from './sort.js';
 
 function render() {
   const key = filterKey();
@@ -103,6 +104,8 @@ async function main() {
   state.alerts = Array.isArray(alertsData) ? alertsData : [];
   initFilterConfigsUI();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
+  // The viewer's per-board sort — needs boardMapping (identity mode) in place.
+  restoreSort();
   render();
   ensurePolling();
   // Rest of the board streams in behind the first paint.

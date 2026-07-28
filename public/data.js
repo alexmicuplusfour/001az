@@ -77,6 +77,13 @@ export function reconcile(data, presentIds = null) {
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
+      // created_at backfills items uploaded this session (their upload rows
+      // predate the entity stamp); updated_at moves on every delta.
+      if (d.created_at != null) ex.created_at = d.created_at;
+      if (d.updated_at != null) ex.updated_at = d.updated_at;
+      // A re-extract or face swap can change the media bag; live refreshes
+      // change fields — both ride every delta row, follow them.
+      if (d.media !== undefined) ex.media = d.media;
       // Instances change under merges/splits/removals — take the server list
       // wholesale (the lightbox re-resolves its selection by instance id).
       if (Array.isArray(d.instances)) {

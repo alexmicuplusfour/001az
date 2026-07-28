@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { requireAuth } from "./auth.js";
-import { extractFileFields } from "./media/index.js";
+import { extractFileFields, projectEntry } from "./media/index.js";
 import { mediaLimitLookup } from "./plugins.js";
 import { UPLOAD_HARD_CEILING } from "./upload-limits.js";
 
@@ -149,6 +149,9 @@ export function mountIngest(app, { db, sources }) {
           id: entityId, name: file.name, status, tags: [],
           w: file.w, h: file.h, kind: file.kind, label: file.original_name,
           identity: file.name,
+          // The list payload's sort fields (created_at approximates the entity
+          // stamp; the first delta poll trues it up).
+          created_at: now, updated_at: now, media: projectEntry(file),
           uploadedBy: { id: req.user.id, name: req.user.name || null, email: req.user.email },
           instances: [{
             id: itemId, name: file.name, label: file.original_name,

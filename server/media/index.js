@@ -59,6 +59,18 @@ function ctxFromEntry(entry) {
   };
 }
 
+// Full projection of one stored file entry: universal + every applicable kind
+// module, flat { fn: value }. The list payload's sort bag and extractFileFields
+// both read from here — one place decides what a file's metadata says.
+export function projectEntry(entry) {
+  const ctx = ctxFromEntry(entry);
+  const values = { ...universal.extract(ctx) };
+  for (const m of KIND_MODULES) {
+    if (kindMatches(m.appliesTo, ctx.kind)) Object.assign(values, m.extract(ctx));
+  }
+  return values;
+}
+
 // Project the mapping's file fields onto a file entry. `mappingFields` is a
 // mapping's `fields` array (from:"file" entries are selected here). Returns
 // { key: { v, src:"file", kind } }; a field whose catalog kind doesn't apply to
@@ -67,10 +79,7 @@ export function extractFileFields(entry, mappingFields = []) {
   const requested = (mappingFields || []).filter((f) => f.from === "file");
   if (!requested.length) return {};
   const ctx = ctxFromEntry(entry);
-  const values = { ...universal.extract(ctx) };
-  for (const m of KIND_MODULES) {
-    if (kindMatches(m.appliesTo, ctx.kind)) Object.assign(values, m.extract(ctx));
-  }
+  const values = projectEntry(entry);
   const out = {};
   for (const f of requested) {
     const desc = BY_FN.get(f.fn);

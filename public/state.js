@@ -25,8 +25,10 @@ export const state = {
   showUntagged: false,
   showProcessing: false,   // status pill: actively worked (processing/extracting/facing)
   showUnprocessed: false,  // status pill: queued, not started (pending*)
-  sortByHearts: false,
-  sortAlpha: false,
+  // Active board sort: null = server default (newest first), else { by, dir }.
+  // `by` is namespaced: "name"/"created"/"updated"/"hearts"/"instances"
+  // (universal), "media:<fn>" (file metadata), "field:<key>" (connector-bound).
+  sort: null,
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,

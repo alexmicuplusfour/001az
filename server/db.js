@@ -2,6 +2,7 @@ import pg from "pg";
 import crypto from "node:crypto";
 import { runMigrations } from "./migrate.js";
 import { selectFace } from "./faces/select.js";
+import { projectEntry } from "./media/index.js";
 
 // BIGINT (int8) comes back from pg as a string by default. Everything we store
 // in BIGINT is a ms epoch or a row id — both far below 2^53 — so parse to
@@ -127,7 +128,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
     }
   }
   const { rows: ents } = await db.query(
-    `SELECT e.id, e.identity, e.display_name, e.symbol, e.fields, e.identity_provisional, e.created_at,
+    `SELECT e.id, e.identity, e.display_name, e.symbol, e.fields, e.identity_provisional, e.created_at, e.updated_at,
       e.uploaded_by AS uploader_id, u.name AS uploader_name, u.email AS uploader_email,
       COALESCE(fh.hearts, 0) AS hearts,
       (fme.user_id IS NOT NULL) AS fav
@@ -155,9 +156,14 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
     [partial ? ents.map((e) => e.id) : boardId]
   );
   const byEntity = new Map();
+  // Raw file entries by instance id — kept aside so the face's media bag can be
+  // projected at assembly without shipping metadata for every instance.
+  const entryByInstance = new Map();
   for (const r of insts) {
     if (!byEntity.has(r.entity_id)) byEntity.set(r.entity_id, []);
     byEntity.get(r.entity_id).push(instanceEntry(r));
+    const file = r.payload.files?.[0];
+    if (file) entryByInstance.set(r.id, file);
   }
 
   // The board's face-selection config decides which instance of a derived-
@@ -187,6 +193,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
   const items = ents.map((e) => {
     const instances = byEntity.get(e.id) || [];
     const face = selectFace(instances, faceCfg);
+    const faceEntry = face ? entryByInstance.get(face.id) : null;
     const tags = [];
     const seen = new Set();
     for (const i of instances) for (const t of i.tags) if (!seen.has(t)) { seen.add(t); tags.push(t); }
@@ -216,6 +223,11 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
       label: face?.label || null,
       // Connector-bound entity fields (AI-extracted fields are per instance).
       fields: e.fields || {},
+      created_at: e.created_at,
+      updated_at: e.updated_at,
+      // The face file's full metadata projection — what attribute sorting reads.
+      // Connector entities carry no files → null.
+      media: faceEntry ? projectEntry(faceEntry) : null,
       instances,
     };
   });

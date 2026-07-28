@@ -1,6 +1,7 @@
 import { state } from './state.js';
 import { tag, pill } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
+import { applyBoardSort } from './sort.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -11,7 +12,7 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sortByHearts, state.sortAlpha, state.selectedCrateId, state.alertEvent?.id ?? null, state.boardId, state.searchResults ? state.searchQuery : "", [...state.selectedUploaderIds].sort()]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sort, state.selectedCrateId, state.alertEvent?.id ?? null, state.boardId, state.searchResults ? state.searchQuery : "", [...state.selectedUploaderIds].sort()]);
 }
 
 function matchesExcept(img, exceptKey) {
@@ -61,10 +62,11 @@ export function taggedFiltered() {
       (state.selectedUploaderIds.size === 0 || (img.uploadedBy && state.selectedUploaderIds.has(img.uploadedBy.id))) &&
       matchesExcept(img, null)
   );
-  // Sort precedence: search similarity > hearts > alpha > server order (newest first).
+  // While a search is active its similarity order wins outright — the chosen
+  // board sort resumes when the search clears. Otherwise the attribute sort
+  // (sort.js) over the server order (newest first).
   if (state.searchResults) list.sort((a, b) => state.searchResults.get(b.id) - state.searchResults.get(a.id));
-  if (state.sortAlpha) list.sort((a, b) => (a.displayLabel || "").localeCompare(b.displayLabel || ""));
-  if (state.sortByHearts) list.sort((a, b) => b.hearts - a.hearts);
+  else applyBoardSort(list);
   return list;
 }
 
