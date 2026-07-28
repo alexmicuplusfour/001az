@@ -6,14 +6,16 @@ import { renderMembers } from "/admin-members.js";
 import { renderBoards } from "/admin-boards.js";
 import { renderPlugins } from "/admin-plugins.js";
 import { renderBackups } from "/admin-backups.js";
+import { renderLogs, setLogsActive } from "/admin-logs.js";
 
 // --- Tabs ---
-const TAB_NAMES = ["members", "boards", "plugins", "backups"];
+const TAB_NAMES = ["members", "boards", "plugins", "backups", "logs"];
 const tabBtns = [...document.querySelectorAll(".tab")];
 function selectTab(name) {
   tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
   document.querySelectorAll(".panel").forEach((p) => (p.hidden = p.id !== "panel-" + name));
   history.replaceState(null, "", name === "members" ? location.pathname : "#" + name);
+  setLogsActive(name === "logs"); // the SSE stream follows tab visibility
 }
 tabBtns.forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
 const initialTab = location.hash.slice(1);
@@ -23,3 +25,4 @@ renderMembers().catch(() => (document.getElementById("gate").innerHTML = 'Error 
 renderBoards().catch(() => {});
 renderPlugins().catch(() => {});
 renderBackups().catch(() => {});
+renderLogs().catch(() => {});
