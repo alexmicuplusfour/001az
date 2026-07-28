@@ -76,13 +76,33 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
 // two connections of one provider can point at two boxes.
 const baseOf = (desc, base) => base || desc.base;
 
+// Network-level failures (refused, timeout, DNS) surface from undici as a bare
+// "fetch failed" TypeError with the useful part buried in .cause. Rethrow with
+// the cause code and the target URL visible, so an admin's Test (and the
+// health ledger) says "ECONNREFUSED http://…" instead of shrugging —
+// load-bearing for self-hosted connections, where a wrong IP/port/firewall is
+// the common failure. HTTP-level errors never reach this (compatError).
+async function compatFetch(label, url, opts) {
+  try {
+    return await fetch(url, opts);
+  } catch (e) {
+    const code =
+      e.cause?.code || e.cause?.errors?.[0]?.code ||
+      // "timeout" verbatim — the deadline contract is pinned by tests matching
+      // /timeout|abort/ on a hung-provider failure (embed-sweep).
+      (e.name === "TimeoutError" || e.cause?.name === "TimeoutError" ? "timeout" : null) ||
+      e.cause?.message; // e.g. undici's "bad port" — anything beats the outer "fetch failed"
+    throw new Error(`${label}: ${code || e.message} — ${url}`);
+  }
+}
+
 export const compatWire = {
   async tag(desc, { apiKey, model, systemText, schema, parts, base, tool = DEFAULT_TOOL }) {
     // Document blocks are Anthropic-only: the chat-completions path has no PDF
     // input. Fail loud with the fix, rather than degrading silently.
     if (parts.some((p) => p.kind === "document"))
       throw new Error(`${desc.label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
-    const r = await fetch(`${baseOf(desc, base)}/chat/completions`, {
+    const r = await compatFetch(desc.label, `${baseOf(desc, base)}/chat/completions`, {
       method: "POST",
       headers: compatHeaders(apiKey),
       body: JSON.stringify(compatRequest({ compat: desc.compat, model, systemText, schema, parts, tool })),
@@ -111,7 +131,7 @@ export const compatWire = {
     // endpoint — GLM). "models": a cheap GET on the model id. Both validate the
     // key and surface the provider's own error message.
     if (desc.compat.keyTest === "completion") {
-      const r = await fetch(`${baseOf(desc, base)}/chat/completions`, {
+      const r = await compatFetch(desc.label, `${baseOf(desc, base)}/chat/completions`, {
         method: "POST",
         headers: compatHeaders(apiKey),
         body: JSON.stringify({
@@ -125,7 +145,7 @@ export const compatWire = {
       if (!r.ok) throw await compatError(r, desc.label);
       return;
     }
-    const r = await fetch(`${baseOf(desc, base)}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
+    const r = await compatFetch(desc.label, `${baseOf(desc, base)}/models/${encodeURIComponent(id)}`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
     if (!r.ok) throw await compatError(r, desc.label);
   },
 
@@ -156,7 +176,7 @@ export const compatWire = {
   // Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
   // every vector L2-normalized, so similarity is a plain dot product.
   async embed(desc, { apiKey, model, texts, base }) {
-    const r = await fetch(`${baseOf(desc, base)}/embeddings`, {
+    const r = await compatFetch(desc.label, `${baseOf(desc, base)}/embeddings`, {
       method: "POST",
       headers: compatHeaders(apiKey),
       body: JSON.stringify({ model, input: texts }),
@@ -189,7 +209,7 @@ export const compatWire = {
     // audio format from it, and rejects an extensionless name. Callers pass the
     // stored <hex>.<ext> name; the fallback is only for a bare reachability probe.
     form.append("file", new Blob([audio]), filename || "audio.wav");
-    const r = await fetch(`${baseOf(desc, base)}/audio/transcriptions`, {
+    const r = await compatFetch(desc.label, `${baseOf(desc, base)}/audio/transcriptions`, {
       method: "POST",
       // NOT compatHeaders — FormData sets its own multipart Content-Type + boundary.
       headers: { ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },

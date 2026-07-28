@@ -192,6 +192,25 @@ test("a connection's server URL overrides the descriptor base — proven on a li
   }
 });
 
+test("an unreachable server test names the cause and the target, not just 'fetch failed'", async () => {
+  // A genuinely closed loopback port: bind an ephemeral one, close it, use it.
+  // (The fixture's default port 9 is on the fetch spec's blocked-port list —
+  // that fails as "bad port", not a refusal, so it can't serve here.)
+  const probe = http.createServer();
+  await new Promise((r) => probe.listen(0, "127.0.0.1", r));
+  const port = probe.address().port;
+  await new Promise((r) => probe.close(r));
+
+  const homelab = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json.find((k) => k.name === "Homelab");
+  await req(srv.base, "PATCH", `/api/admin/ai-keys/${homelab.id}`, { sid: admin.sid, body: { base_url: `http://127.0.0.1:${port}/v1` } });
+  const r = await req(srv.base, "POST", `/api/admin/ai-keys/${homelab.id}/test`, { sid: admin.sid });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /ECONNREFUSED|refused/i, `got: ${r.json.error}`);
+  assert.match(r.json.error, new RegExp(`127\\.0\\.0\\.1:${port}`), "the target URL rides the error");
+  // Point Homelab back at the descriptor default for the tests that follow.
+  await req(srv.base, "PATCH", `/api/admin/ai-keys/${homelab.id}`, { sid: admin.sid, body: { base_url: "" } });
+});
+
 test("PATCH /api/admin/ai-keys/:id: edit in place — rename, repoint, rotate — the row id survives", async () => {
   const boxed = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json.find((k) => k.name === "Boxed");
 
