@@ -239,7 +239,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   font-family: monospace;
   font-size: 13px;
   font-weight: 500;
-  color: #5a5a6a;
+  color: var(--text, #111);
 }
 .mm-locked-badge {
   font-size: 11px;
@@ -262,7 +262,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 .mm-row {
   background: #f7f7fa;
-  border: 1px solid #e4e4ea;
   border-radius: 8px;
   padding: 10px 12px;
   display: flex;
@@ -314,11 +313,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .mm-face-prefer-label {
   font-size: 12px;
   color: #8a8a92;
-}
-/* connector field row */
-.mm-row-connector {
-  background: #f0f0f8;
-  border-color: #d8d8e8;
 }
 .mm-connector-badge {
   font-size: 11px;
