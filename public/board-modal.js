@@ -223,7 +223,11 @@ export const byName = (list) => Object.fromEntries(list.map((p) => [p.name, p]))
 // defaultModel }); keeps an unknown current model as an extra option instead
 // of silently dropping it (a saved id the provider has since retired still
 // shows — it just fails at call time with the provider's own error).
-export function fillModelSelect(sel, entry, current) {
+// `absentNote` labels that extra option — passed only by callers who KNOW
+// the list is authoritative (a live listing); a curated render can't claim
+// absence, its list is just the recommendations. Internal to the picker
+// mechanism — modals go through syncModelPicker.
+function fillModelSelect(sel, entry, current, absentNote) {
   sel.replaceChildren();
   const models = entry?.models || [];
   const selected = current || entry?.defaultModel;
@@ -237,7 +241,7 @@ export function fillModelSelect(sel, entry, current) {
   if (selected && !models.find((m) => m.id === selected)) {
     const opt = document.createElement("option");
     opt.value = selected;
-    opt.textContent = selected;
+    opt.textContent = absentNote ? `${selected} — ${absentNote}` : selected;
     opt.selected = true;
     sel.insertBefore(opt, sel.firstChild);
   }
@@ -245,19 +249,21 @@ export function fillModelSelect(sel, entry, current) {
 
 // Swap the select's options for the connection's model list (GET
 // /api/admin/ai-keys/:id/models — the server asks the provider itself and
-// caches). The curated catalog entry already rendered instant options, so
-// this is a quiet upgrade when it lands: the current selection is preserved
-// (fillModelSelect keeps it even if the live list no longer carries it). The
-// response applies whether live or fallback, so switching connections always
-// resets the options to the NEW connection's best-known list. keyId is an
-// ai_keys row id or the literal "env" (the ANTHROPIC_API_KEY-backed row —
-// the route lists it with the server's own key). _modelKey updates
-// unconditionally, including for null (the App/Board-default rows), so a
-// slow response for a previously-selected connection never overwrites the
-// current one. The first fetch per select+connection sends
-// refresh=1 — opening a picker is the "I just `ollama pull`ed, show me"
-// moment — and revisits within the same picker ride the server's cache.
-export function attachLiveModels(sel, keyId, kind) {
+// caches). The curated catalog entry already rendered instant options; when
+// the answer lands it OWNS the options. What survives the swap: a selection
+// that's in the answer, and `current` — the connection's PERSISTED model
+// (kept even when absent, marked, so saved config never silently vanishes).
+// What does NOT survive: the pre-answer render's default guess — preserving
+// a disproved guess is how a never-pulled recommendation ended up selected
+// on a fresh Ollama picker. keyId is an ai_keys row id or the literal "env"
+// (the ANTHROPIC_API_KEY-backed row — the route lists it with the server's
+// own key). _modelKey updates unconditionally, including for null (the
+// App/Board-default rows), so a slow response for a previously-selected
+// connection never overwrites the current one. The first fetch per
+// select+connection sends refresh=1 — opening a picker is the "I just
+// `ollama pull`ed, show me" moment — and revisits within the same picker
+// ride the server's cache.
+function attachLiveModels(sel, keyId, kind, current) {
   sel._modelKey = keyId || null;
   if (!keyId) return;
   const fetched = (sel._modelFetched ??= new Set());
@@ -265,8 +271,28 @@ export function attachLiveModels(sel, keyId, kind) {
   fetched.add(`${keyId}:${kind || ""}`);
   const q = [kind && `kind=${kind}`, refresh && "refresh=1"].filter(Boolean).join("&");
   api("GET", `/api/admin/ai-keys/${keyId}/models${q ? `?${q}` : ""}`).then((r) => {
-    if (sel._modelKey === keyId && r?.models?.length) fillModelSelect(sel, { models: r.models }, sel.value);
+    if (sel._modelKey !== keyId || !r?.models?.length) return;
+    const alive = r.models.some((m) => m.id === sel.value);
+    const keep = alive ? sel.value : (current && sel.value === current ? current : null);
+    // Absence is only claimable off a live answer; a fallback list is just
+    // the recommendations and proves nothing about the saved id.
+    fillModelSelect(sel, { models: r.models }, keep, r.source === "live" ? "not listed by this connection" : null);
   }).catch(() => {});
+}
+
+// THE model picker sync — the one entry point modals use. Callers hand over
+// facts (the provider's catalog entry, the connection, the capability kind,
+// the PERSISTED model for their context) and never touch the mechanics: the
+// instant curated render, the live upgrade when the provider's answer lands,
+// which selection survives it, and how absence is labeled all live behind
+// this call. `entry` may be null (the App/Board-default rows — nothing to
+// render, but the stale-response guard still updates); `keyId` may be an
+// ai_keys row id, "env", or null. Persistence stays context-owned by design:
+// one connection serves many boards/slots, so no provider-level layer can
+// know which saved model matters to THIS picker — the caller says, once.
+export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null } = {}) {
+  if (entry) fillModelSelect(sel, entry, saved);
+  attachLiveModels(sel, keyId, kind, saved);
 }
 
 // Starter facets prefilled into a new board's facet editor — just a suggestion;
@@ -477,14 +503,12 @@ export async function openBoardModal(boardId, opts = {}) {
     const syncAiModelSel = () => {
       const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
       aiModelSel.hidden = !key;
-      if (key) {
-        const current = board && board.ai_key_id === key.id ? board.ai_model : null;
-        fillModelSelect(aiModelSel, aiCatalog[key.provider], current);
-      }
-      // Unconditional (null on the App-default row) so a slow response for a
-      // previously-selected connection can't refill the now-hidden select —
-      // the invariant attachLiveModels documents.
-      attachLiveModels(aiModelSel, key ? key.id : null);
+      // Called with null entry/keyId on the App-default row so a slow
+      // response for a previously-selected connection can't refill the
+      // now-hidden select. `saved` = the board's persisted model.
+      syncModelPicker(aiModelSel, key ? aiCatalog[key.provider] : null, key ? key.id : null, {
+        saved: key && board && board.ai_key_id === key.id ? board.ai_model : null,
+      });
     };
     Promise.all([api("GET", "/api/admin/ai-keys"), loadProviders()]).then(([keys, catalog]) => {
       aiKeys = keys;

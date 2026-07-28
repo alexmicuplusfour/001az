@@ -9,7 +9,7 @@
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
-import { fillModelSelect, attachLiveModels, switchRow } from "/board-modal.js";
+import { syncModelPicker, switchRow } from "/board-modal.js";
 import { fmtDuration } from "/utils.js";
 
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
@@ -535,10 +535,14 @@ function taggerSection(p, ctx, reload) {
 
   const modelSel = document.createElement("select");
   modelSel.style.cssText = "width:100%;";
-  fillModelSelect(modelSel, p.ai, isDefault ? ctx.slots.tagger.model : null);
-  // Live options follow the selected connection. "env" has no ai_keys row,
-  // but the server holds that key — the route's env branch lists with it.
-  const syncLive = () => attachLiveModels(modelSel, keySel.value === "env" ? "env" : Number(keySel.value) || null);
+  // Options follow the selected connection ("env" has no ai_keys row, but
+  // the server holds that key — the route's env branch lists with it). The
+  // slot's persisted model rides as `saved` only when the selected
+  // connection IS the slot's.
+  const slotConn = ctx.slots.tagger.keyId ? String(ctx.slots.tagger.keyId) : "env";
+  const syncLive = () => syncModelPicker(modelSel, p.ai, keySel.value === "env" ? "env" : Number(keySel.value) || null, {
+    saved: isDefault && keySel.value === slotConn ? ctx.slots.tagger.model : null,
+  });
   keySel.addEventListener("change", syncLive);
   syncLive();
   sec.appendChild(labeled("Model", modelSel));
@@ -609,14 +613,17 @@ function embedSection(p, ctx, reload) {
   if (p.ai.embeds.models.length > 1 || !p.ai.onDevice) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
-    fillModelSelect(modelSel, { models: p.ai.embeds.models, defaultModel: p.ai.embeds.default }, active ? em.model : null);
-    // Live options carved to embedders (descriptor embeds.filter) — on-device
-    // providers have no connection row to ask.
-    if (keySel) {
-      const syncLive = () => attachLiveModels(modelSel, Number(keySel.value) || null, "embed");
-      keySel.addEventListener("change", syncLive);
-      syncLive();
-    }
+    // Live options carved to embedders (descriptor embeds.filter) — an
+    // on-device provider has no connection row to ask (null keyId: curated
+    // render only). `saved` = the slot's persisted embed model, when the
+    // selected connection is the slot's.
+    const entry = { models: p.ai.embeds.models, defaultModel: p.ai.embeds.default };
+    const syncLive = () => syncModelPicker(modelSel, entry, keySel ? Number(keySel.value) || null : null, {
+      kind: "embed",
+      saved: active && (keySel ? Number(keySel.value) === em.keyId : true) ? em.model : null,
+    });
+    if (keySel) keySel.addEventListener("change", syncLive);
+    syncLive();
     sec.appendChild(labeled("Embedding model", modelSel));
   } else {
     const note = document.createElement("p");
@@ -731,13 +738,16 @@ function transcribeSection(p, ctx, reload) {
   if (!p.ai.onDevice && p.ai.transcribes.models.length > 1) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
-    fillModelSelect(modelSel, { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default }, active ? tr.model : null);
-    // Live options carved to transcription models (descriptor transcribes.filter).
-    if (keySel) {
-      const syncLive = () => attachLiveModels(modelSel, Number(keySel.value) || null, "transcribe");
-      keySel.addEventListener("change", syncLive);
-      syncLive();
-    }
+    // Live options carved to transcription models (descriptor
+    // transcribes.filter); `saved` = the slot's persisted model, when the
+    // selected connection is the slot's.
+    const entry = { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default };
+    const syncLive = () => syncModelPicker(modelSel, entry, Number(keySel.value) || null, {
+      kind: "transcribe",
+      saved: active && Number(keySel.value) === tr.keyId ? tr.model : null,
+    });
+    keySel.addEventListener("change", syncLive);
+    syncLive();
     sec.appendChild(labeled("Transcription model", modelSel));
   } else {
     // `one` is whisper's live self-report (or a provider's single model); an

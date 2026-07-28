@@ -1,7 +1,7 @@
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
-import { loadProviders, byName, fillModelSelect, attachLiveModels } from './board-modal.js';
+import { loadProviders, byName, syncModelPicker } from './board-modal.js';
 import { sectionHeadingEl } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date"];
@@ -697,12 +697,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     const syncExtractModel = () => {
       const key = aiKeys.find((k) => String(k.id) === extractKeySel.value);
       extractModelSel.hidden = !key;
-      if (key) {
-        fillModelSelect(extractModelSel, aiCatalog[key.provider], key.id === extractKeyId ? extractModel : null);
-      }
-      // Unconditional (null on the Board-default row) — see the invariant in
-      // attachLiveModels: a stale in-flight response must not refill this.
-      attachLiveModels(extractModelSel, key ? key.id : null);
+      // Null entry/keyId on the Board-default row (guards the hidden select
+      // against a stale in-flight response); `saved` = the mapping's
+      // persisted model.
+      syncModelPicker(extractModelSel, key ? aiCatalog[key.provider] : null, key ? key.id : null, {
+        saved: key && key.id === extractKeyId ? extractModel : null,
+      });
     };
     Promise.all([
       fetch("/api/admin/ai-keys").then((r) => r.json()),

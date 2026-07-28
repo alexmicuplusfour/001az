@@ -145,6 +145,24 @@ as fixed.
   plugin kind. Slot sections and add/edit forms unchanged BY DECISION —
   slot changes and record creation stay explicit buttons)*
 
+- [x] **16. A disproved default guess survived the live refill, selected** —
+  the picker's instant render preselects the curated defaultModel as a
+  guess; the live refill preserved "the current selection" without being
+  able to tell a persisted choice from that guess, so a never-pulled
+  recommendation (llama3.1:8b) stayed selected and choosable on a fresh
+  Ollama board picker. *(fixed: the answer owns the options — what survives
+  is a selection present in the answer, or the PERSISTED model threaded
+  through every attachLiveModels call site (board/mapping/tagger/embed/
+  transcribe), which is kept even when absent but labeled "not listed by
+  this connection" via fillModelSelect's new absentNote — claimable only
+  off a live answer, never a fallback. Follow-up: the mechanism consolidated
+  behind ONE exported entry point, syncModelPicker(sel, entry, keyId,
+  {kind, saved}) — fillModelSelect/attachLiveModels went module-internal;
+  the five call sites hand over facts and never touch the two-phase
+  render/upgrade/eviction mechanics. Persistence stays context-owned by
+  design: no provider-level layer can know which saved model matters to a
+  given picker)*
+
 ## Verified sound (no action)
 
 Cache invalidation coverage (PATCH/DELETE routes + plugin uninstall — also
