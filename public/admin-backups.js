@@ -274,7 +274,7 @@ function ensureStyles() {
     .bk-auto label { display: inline-flex; gap: 7px; align-items: center; cursor: pointer; }
     /* the global input rule is flex:1 + min-width:140px — pin these down */
     .bk-auto input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; cursor: pointer; }
-    .bk-auto input[type=time] { flex: none; width: 110px; min-width: 0; }
+    .bk-auto input[type=time] { flex: none; width: 140px; min-width: 0; }
     .bk-auto input[type=number] { flex: none; width: 70px; min-width: 0; }
     .bk-auto .sub-inline { color: #9aa0aa; font-size: 12px; flex-basis: 100%; }
     .bk-banner { margin-top: 14px; padding: 10px 12px; border: 1px solid #ececef; border-radius: 8px;
