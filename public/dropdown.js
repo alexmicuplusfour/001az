@@ -3,7 +3,8 @@
 // One dropdown is open at a time. The component owns the shell (.dropdown),
 // viewport-aware positioning (right- or left-aligned to the anchor, flipped
 // above it when out of room below, clamped to the window edges), content-aware
-// width between min/max, a scrollable body capped at `maxItems` rows, dismissal
+// width between min/max, a scrollable body capped at `maxItems` rows (opened
+// with the active row scrolled into view), dismissal
 // (outside click, Escape, re-click of the anchor), arrow-key navigation, and
 // repositioning on scroll/resize.
 //
@@ -82,6 +83,19 @@ export function openDropdown(anchor, {
     ) - chrome;
     const max = Math.min(cap, Math.max(room, 60));
     if (body.scrollHeight > max) body.style.maxHeight = max + "px";
+  }
+
+  // When the body scrolls, start it with the active row in view rather than
+  // at the top — only nudged as far as needed, and only once at open so a
+  // window-scroll reposition never yanks the user's own scrolling around.
+  function revealActive() {
+    if (body.scrollHeight <= body.clientHeight) return;
+    const row = body.querySelector(".active");
+    if (!row) return;
+    const top = row.offsetTop - body.offsetTop; // offsetParent is the fixed shell
+    const bottom = top + row.offsetHeight;
+    if (top < body.scrollTop) body.scrollTop = top;
+    else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
   }
 
   function reposition() {
@@ -174,6 +188,7 @@ export function openDropdown(anchor, {
   }
 
   reposition();
+  revealActive();
   anchor.classList.add("dd-open");
   anchor.setAttribute("aria-haspopup", "menu");
   anchor.setAttribute("aria-expanded", "true");
