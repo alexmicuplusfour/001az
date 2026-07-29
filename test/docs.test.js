@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, adminSession, seedBoard } from "./helpers.js";
 import { anthropicRequest } from "../server/ai-providers/wires/anthropic.js";
-import { documentTextFor } from "../server/worker.js";
+import { documentTextFor, clipText } from "../server/worker.js";
 import { MANIFESTS, acceptsName } from "../server/sources/index.js";
 import { textSource } from "../server/sources/text.js";
 import { docxSource } from "../server/sources/docx.js";
@@ -174,6 +174,23 @@ test("documentTextFor: a docx/text with no extractable text fails permanent-shap
   // content still flows through untouched
   fs.writeFileSync(path.join(dir, "u.txt"), "hello");
   assert.equal(await documentTextFor(dir, { kind: "text", name: "u.txt", original_name: "u.txt" }), "hello");
+});
+
+// ── clipText: the model is told when its material was cut ────────────────────
+// A silently missing tail reads as ABSENCE (extraction answers "not found"
+// with a confident why sentence); the marker turns it into truncation the
+// model can report, with counts for scale.
+
+test("clipText: under the cap passes through untouched", () => {
+  assert.equal(clipText("short document", 100), "short document");
+  assert.equal(clipText("x".repeat(100), 100), "x".repeat(100)); // exactly at the cap: no marker
+});
+
+test("clipText: over the cap keeps the head and appends the counted marker", () => {
+  const clipped = clipText("a".repeat(150), 100);
+  assert.ok(clipped.startsWith("a".repeat(100)));
+  assert.ok(clipped.endsWith("\n\n[truncated: showing the first 100 of 150 characters]"));
+  assert.ok(!clipped.includes("a".repeat(101)), "nothing past the cap leaks through");
 });
 
 test("source registry: every declared extension maps to exactly one handler", () => {

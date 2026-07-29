@@ -42,6 +42,20 @@ test("research paragraph appears in the system text only when asked", () => {
   assert.deepEqual(buildPrompt(facets, "", true, "items", true).schema, buildPrompt(facets).schema);
 });
 
+test("output budget scales with the schema and is capped; scaling wins over the research floor", () => {
+  const bigSchema = (n) => ({
+    type: "object",
+    properties: Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, { type: "object" }])),
+    required: [],
+  });
+  // 40 facets of reasoning output don't fit the old fixed 2048
+  assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(40), parts }).max_tokens, 1024 + 128 * 40);
+  // runaway schemas hit the ceiling
+  assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(100), parts }).max_tokens, 8192);
+  // research floor applies only while it's the larger number
+  assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(40), parts, research: true }).max_tokens, 1024 + 128 * 40);
+});
+
 // --- ai_research through the board routes ---
 
 let srv, db, base, admin;

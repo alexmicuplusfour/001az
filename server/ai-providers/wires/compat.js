@@ -6,7 +6,7 @@
 // only composes this into WIRES and dispatches through descriptor.wire.
 // compatRequest is exported as the pure request-builder test seam — it reads
 // the quirk block it's handed and never touches the registry.
-import { DEFAULT_TOOL } from "./tool.js";
+import { DEFAULT_TOOL, outputBudget, clippedError } from "./tool.js";
 
 // A keyless connection (a self-hosted Ollama, …) carries no secret — send no
 // Authorization header at all rather than a literal "Bearer null". A keyless
@@ -59,14 +59,27 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
   );
   return {
     model,
-    [compat.maxTokensField]: 2048,
+    // Sized to the schema (a floor when small). Reasoning models (gpt-5
+    // family) burn INVISIBLE thinking tokens from this same budget — a
+    // hardcoded 2048 could come back finish_reason:"length" with nothing
+    // visible on an ordinary board.
+    [compat.maxTokensField]: outputBudget(schema),
     ...(compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
     messages: [
       { role: "system", content: systemText },
       { role: "user", content },
     ],
     tools: [{ type: "function", function: { name: tool.name, description: tool.description, parameters: schema, ...(compat.strictTools ? { strict: true } : {}) } }],
-    tool_choice: compat.forceToolChoice ? { type: "function", function: { name: tool.name } } : "auto",
+    // forceToolChoice is three-valued: true names the function, "required"
+    // demands SOME tool call (equivalent here — the compat path only ever
+    // defines one), false leaves auto (GLM). OpenAI moved to "required" on
+    // 2026-07-29: gpt-5-family models began rejecting the NAMED force as
+    // invalid_prompt ("flagged as potentially violating our usage policy") —
+    // bisected live; auto and required pass, the name-check throw downstream
+    // still guards the auto-ish paths.
+    tool_choice: compat.forceToolChoice === "required" ? "required"
+      : compat.forceToolChoice ? { type: "function", function: { name: tool.name } }
+      : "auto",
   };
 }
 
@@ -110,8 +123,18 @@ export const compatWire = {
     });
     if (!r.ok) throw await compatError(r, desc.label);
     const data = await r.json();
-    const call = data.choices?.[0]?.message?.tool_calls?.[0];
-    if (!call) throw new Error("no tool call in response");
+    const choice = data.choices?.[0];
+    // Output-cap check FIRST: a length-clipped turn otherwise surfaces as
+    // "model did not call X" or a JSON parse error on half-written arguments
+    // — both misdirect, and both retry a deterministic failure.
+    if (choice?.finish_reason === "length") throw clippedError(outputBudget(schema));
+    // Find the call BY NAME, like the Anthropic wire: a provider whose tool
+    // choice can't be forced (GLM is auto-only) may invent another function,
+    // and taking whatever came first would accept tag-shaped args as
+    // extraction input — fields silently empty, logged ok. Same error shape
+    // as the Anthropic wire's missing-call throw.
+    const call = (choice?.message?.tool_calls || []).find((c) => c.function?.name === tool.name);
+    if (!call) throw new Error(`model did not call ${tool.name}`);
     const u = data.usage || {};
     const cached = u.prompt_tokens_details?.cached_tokens || 0;
     return {

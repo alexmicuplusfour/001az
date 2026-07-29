@@ -25,7 +25,12 @@ export default (wires) => ({
   // still pass — a name pattern can't see which API serves a model; a wrong
   // pick fails at call time with the provider's own readable error.
   modelFilter: "^(?!.*(embedding|tts|transcribe|realtime|audio|moderation|image|dall-e))(gpt-|o\\d|chatgpt-)",
-  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models" },
+  // forceToolChoice "required" (not the named force): from 2026-07-29 the
+  // gpt-5 family rejects tool_choice:{function:{name}} as invalid_prompt
+  // ("flagged as potentially violating our usage policy") — live-bisected;
+  // "required" and "auto" pass, and with one tool defined "required" is the
+  // same guarantee.
+  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models" },
   embeds: {
     default: "text-embedding-3-small",
     models: [

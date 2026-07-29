@@ -23,9 +23,11 @@ test("every descriptor is well-formed and self-named", () => {
 });
 
 test("capabilities-as-data: compat quirks match what the wire code reads", () => {
-  // openai/gemini force the tool call, accept strict, keep thinking, probe /models
+  // openai forces via "required" (2026-07-29: the gpt-5 family flags the
+  // NAMED force as invalid_prompt; with one tool the guarantee is the same),
+  // accepts strict, keeps thinking, probes /models
   assert.deepEqual(PROVIDERS.openai.compat, {
-    maxTokensField: "max_completion_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models",
+    maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models",
   });
   // gemini additionally normalizes its compat layer's "models/…" listing ids
   assert.deepEqual(PROVIDERS.gemini.compat, {

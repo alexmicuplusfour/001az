@@ -8,7 +8,7 @@
 // No outbound-deadline plumbing here (unlike the compat wire): the SDK defaults
 // to a 10-min per-try timeout, and research tagging legitimately runs minutes.
 import Anthropic from "@anthropic-ai/sdk";
-import { DEFAULT_TOOL } from "./tool.js";
+import { DEFAULT_TOOL, outputBudget, clippedError } from "./tool.js";
 
 // Per-item bound on web searches; each one bills on top of tokens.
 const MAX_SEARCHES = 5;
@@ -40,8 +40,9 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
   const toolDef = { name: tool.name, description: tool.description, strict: true, input_schema: schema };
   return {
     model,
+    // sized to the schema (a floor when small); research raises the floor —
     // searching + digesting results eats output budget
-    max_tokens: research ? 4096 : 2048,
+    max_tokens: outputBudget(schema, research),
     system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
     tools: research
       ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, toolDef]
@@ -72,6 +73,9 @@ export const anthropicWire = {
       msg = await anthropicClient(apiKey, desc.base).messages.create(request);
       addUsage(msg.usage);
     }
+    // After the pause_turn loop, so a continued-then-clipped turn is caught
+    // too. Without this, a clipped turn reads as "model did not call X".
+    if (msg.stop_reason === "max_tokens") throw clippedError(request.max_tokens);
     const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);
     if (!block) throw new Error(`model did not call ${tool.name}`);
     return { input: block.input, usage };

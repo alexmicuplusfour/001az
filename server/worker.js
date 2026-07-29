@@ -798,6 +798,25 @@ async function jobLogWrite(fn) {
   }
 }
 
+// The per-item material budget for a model turn, in chars (~4 chars/token).
+// The default covers ~50 dense pages or ~2.5 hours of speech — the
+// transcriber's own 2-hour design point fits — while staying inside every
+// built-in provider's context window (GLM's 128k tokens is the tightest) and
+// remaining a cost fuse for scheduled retags, which re-pay the input per item
+// per pass. Env-tunable; anything past it is clipText-marked, never silently
+// dropped.
+const TEXT_DOC_MAX_CHARS = Number(process.env.TEXT_DOC_MAX_CHARS) || 150000;
+
+// Bound one material block for a model turn, saying so when it actually cuts:
+// an unmarked missing tail reads as ABSENCE (extraction answers "not found"
+// with a confident why sentence), a marked one reads as truncation the model
+// can report. The counts give it scale — 1% missing and half missing warrant
+// different confidence. Exported for tests.
+export function clipText(text, max = TEXT_DOC_MAX_CHARS) {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n\n[truncated: showing the first ${max} of ${text.length} characters]`;
+}
+
 export async function documentTextFor(galleryDir, file) {
   if (file.kind === "pdf") {
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
@@ -844,7 +863,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   const AI_INFLIGHT = Math.max(1, Number(process.env.AI_INFLIGHT) || Number(process.env.TAG_CONCURRENCY) || 8);
   const EXTRACT_CONCURRENCY = Math.max(1, Number(process.env.EXTRACT_CONCURRENCY) || 2);
   const FACE_CONCURRENCY = Math.max(1, Number(process.env.FACE_CONCURRENCY) || 2);
-  const TEXT_DOC_MAX_CHARS = 50000; // ~12k tokens; plenty for tagging judgment
 
   // Job-log rows still `running` were orphaned by the previous process (a
   // crash or stop mid-transcription/mid-ingest) — stamp them interrupted so
@@ -861,15 +879,24 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // their signal, and fall back to an Anthropic-only document block when the
   // document genuinely has no text layer (extractor DOWNTIME throws instead —
   // the retry queue waits it out rather than paying per-page billing).
-  async function modelInputFor(payload, entity = null) {
+  async function modelInputFor(payload, entity = null, mode = "tag") {
+    // The closing ask names the tool this leg actually offers: the tag leg
+    // forces record_tags, extraction forces record_fields. On a provider that
+    // can't force the call (GLM's tool_choice is auto-only) the sentence IS
+    // the forcing, so a wrong name here instructs the model to fill in the
+    // wrong form.
+    const ask = (subject, judging = "") => mode === "extract"
+      ? `Extract the requested fields from ${subject} using the record_fields tool${judging}.`
+      : `Tag ${subject} using the record_tags tool${judging}.`;
     const file = payload.files?.[0];
     if (!file) {
       // Instance with no material file (connector tag vehicle): the
       // bound-fields dossier appended by tagOne is the material; anchor it
-      // with the entity's name.
+      // with the entity's name. Extraction appends no dossier, so its ask
+      // can't promise "fields below" — the name is all there is.
       return [{
         kind: "text",
-        text: `The item is an entity named "${entity?.display_name || entity?.identity || payload.identity}". Tag it using the record_tags tool, judging from its extracted fields below.`,
+        text: `The item is an entity named "${entity?.display_name || entity?.identity || payload.identity}". ${ask("it", mode === "extract" ? "" : ", judging from its extracted fields below")}`,
       }];
     }
     if (file.kind === "pdf") {
@@ -884,7 +911,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           kind: "text",
           text: `The item is the following document ("${file.original_name}")` +
             (thumb ? ", shown above as a first-page preview" : "") +
-            `:\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
+            `:\n\n${clipText(text)}\n\n${ask("this document")}`,
         });
         return parts;
       }
@@ -896,14 +923,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
       return [
         { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
-        { kind: "text", text: "Tag this document using the record_tags tool." },
+        { kind: "text", text: ask("this document") },
       ];
     }
     if (file.kind === "text" || file.kind === "docx") {
       const text = await documentTextFor(galleryDir, file);
       return [{
         kind: "text",
-        text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this document using the record_tags tool.`,
+        text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\n${ask("this document")}`,
       }];
     }
     if (file.kind === "audio") {
@@ -922,22 +949,22 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       if (transcript && transcript.trim()) {
         return [{
           kind: "text",
-          text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${transcript.slice(0, TEXT_DOC_MAX_CHARS)}\n\nTag this recording using the record_tags tool.`,
+          text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${clipText(transcript)}\n\n${ask("this recording")}`,
         }];
       }
       // No discernible speech (music/ambient/silence) or a permanent transcribe
       // failure → anchor on the filename, like a textless document.
       return [{
         kind: "text",
-        text: `The item is an audio recording named "${file.original_name}" with no discernible speech. Tag it using the record_tags tool, judging from its name.`,
+        text: `The item is an audio recording named "${file.original_name}" with no discernible speech. ${ask("it", ", judging from its name")}`,
       }];
     }
     const buf = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp"));
     // A generated connector face (e.g. a price chart) gets a chart-aware anchor
     // so the tagger reads the trend, not a generic "image".
     const anchor = file.generated
-      ? `This is a price chart for "${entity?.display_name || entity?.identity || payload.identity}". Tag it using the record_tags tool, judging from the chart and the extracted fields below.`
-      : "Tag this image using the record_tags tool.";
+      ? `This is a price chart for "${entity?.display_name || entity?.identity || payload.identity}". ${ask("it", mode === "extract" ? ", judging from the chart" : ", judging from the chart and the extracted fields below")}`
+      : ask("this image");
     return [
       { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
       { kind: "text", text: anchor },
@@ -968,7 +995,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     if (!text.trim()) return null;
     return [{
       kind: "text",
-      text: `The item is the following document ("${file.original_name}"):\n\n${text.slice(0, TEXT_DOC_MAX_CHARS)}\n\nExtract the requested fields using the record_fields tool.`,
+      text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\nExtract the requested fields using the record_fields tool.`,
     }];
   }
 
@@ -1424,8 +1451,16 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const { systemText, schema } = buildFieldsPrompt(mapping);
     // Try text-only extraction first (works with any provider, avoids image
     // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
-    // files (images, connector entities) where there is no text sidecar.
-    const parts = await modelInputForExtract(row.payload) ?? await modelInputFor(row.payload);
+    // files (images, connector entities) where there is no text sidecar — in
+    // extract mode, so its anchors ask for record_fields, not record_tags.
+    let parts = await modelInputForExtract(row.payload);
+    if (!parts) {
+      // The fallback anchors name the entity (no-file vehicles, chart faces).
+      // Identity resolution below re-reads its own copy after the call, so a
+      // mid-call rename never acts on this snapshot.
+      const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
+      parts = await modelInputFor(row.payload, entity, "extract");
+    }
     const { input, usage } = await trackedTagger(db, {
       provider: ai.provider,
       apiKey: ai.apiKey,

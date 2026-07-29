@@ -469,11 +469,17 @@ async function seedLegItem(boardId, name, status, extraPayload = {}) {
 
 const itemStatus = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0]?.status;
 
-const toolCallResponse = (args) => async () =>
-  new Response(JSON.stringify({
-    choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(args) } }] } }],
+// Echoes the request's OWN tool name — the wire matches the call by name, so
+// a nameless stub would read as "model did not call record_fields". `seen`
+// collects request bodies for prompt-shape assertions.
+const toolCallResponse = (args, seen = null) => async (_url, opts) => {
+  const body = JSON.parse(opts.body);
+  seen?.push(body);
+  return new Response(JSON.stringify({
+    choices: [{ message: { tool_calls: [{ function: { name: body.tools?.[0]?.function?.name, arguments: JSON.stringify(args) } }] } }],
     usage: { prompt_tokens: 10, completion_tokens: 5 },
   }), { status: 200 });
+};
 
 test("face leg: a keyless render-nothing advance writes an ok row", async () => {
   const board = await seedBoard(db, "jobs-face");
@@ -517,12 +523,13 @@ test("extract + tag legs: one ok row each, with fields/identity and tags detail"
   const mapping = { identity: { from: "ai" }, fields: [{ key: "role", from: "ai", kind: "text" }] };
   const board = await createBoard(db, "jobs-legs", FACETS, "", true, keyId, null, {}, false, { mapping });
   const { eid, iid } = await seedLegItem(board, "resume.txt", "pending_extract", { mapping });
+  const seen = [];
   const restore = stubFetch(toolCallResponse({
     identity: { value: "Maya Chen", why: "letterhead" },
     role: { value: "engineer", why: "title line" },
     kind: { values: ["a"], reasoning: "fits a" },
     fit: { verdict: "fits", reasoning: "on-topic" },
-  }));
+  }, seen));
   const stop = runWorker();
   try {
     await until(async () => (await itemStatus(iid)) === "tagged");
@@ -541,6 +548,15 @@ test("extract + tag legs: one ok row each, with fields/identity and tags detail"
   // The derivation really landed — the entity was renamed by the extract leg.
   const { rows: [e] } = await db.query("SELECT identity FROM entities WHERE id=$1", [eid]);
   assert.equal(e.identity, "maya chen");
+  // Each leg's user turn asks for ITS tool. This item is fileless, so the
+  // extract leg rode the modelInputFor fallback — the path that used to say
+  // "record_tags" while offering only record_fields.
+  const userText = (b) => b.messages[1].content.map((p) => p.text || "").join(" ");
+  const extractReq = seen.find((b) => b.tools[0].function.name === "record_fields");
+  const tagReq = seen.find((b) => b.tools[0].function.name === "record_tags");
+  assert.match(userText(extractReq), /record_fields/);
+  assert.doesNotMatch(userText(extractReq), /record_tags/);
+  assert.match(userText(tagReq), /record_tags/);
 });
 
 test("tag leg: a permanent provider error (400) writes a failed row", async () => {
