@@ -6,14 +6,21 @@ export default (wires) => ({
   description: "Google models for tagging + embeddings — bring a key",
   wire: wires.compat,
   base: "https://generativelanguage.googleapis.com/v1beta/openai",
-  // Rate limit: Free tier — 10 RPM for gemini-2.5-flash (Google AI docs, 2026-07).
+  // Rate limit: Free tier — 10 RPM for flash-class models (Google AI docs, 2026-07).
   // Paid Tier 1 is far higher (~1,000+ RPM) — raise per key once billing is on.
   rpm: 10, burst: 5,
-  defaultModel: "gemini-2.5-flash",
+  // Curated set live-verified 2026-07-29: the 2.5 family curated here before
+  // was RETIRED for new users (gemini-2.5-flash 404s "no longer available to
+  // new users" while still APPEARING in /models — listing presence is not
+  // usability, so verify with a chat call when refreshing this list). No
+  // stable pro tier currently exists past 2.5; the preview id is offered
+  // with that caveat in its note, and the live-list merge drops it the day
+  // it retires.
+  defaultModel: "gemini-3.5-flash",
   models: [
-    { id: "gemini-2.5-flash-lite", note: "fast, cheapest" },
-    { id: "gemini-2.5-flash", note: "balanced" },
-    { id: "gemini-2.5-pro", note: "sharpest, most expensive" },
+    { id: "gemini-3.5-flash-lite", note: "fast, cheapest" },
+    { id: "gemini-3.5-flash", note: "balanced" },
+    { id: "gemini-3.1-pro-preview", note: "sharpest, most expensive · preview id" },
   ],
   research: false, // the compat layer exposes no grounding
   // Live-list carving (the compat /models dump has no capability metadata):
@@ -25,8 +32,13 @@ export default (wires) => ({
   modelFilter: "^gemini-(?!.*(embedding|image|tts|audio|live))",
   compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models", stripListPrefix: "models/" },
   embeds: {
+    // 001 stays the default on purpose: flipping it would mark every stored
+    // vector stale and re-embed the whole corpus. Both live-verified 2026-07-29.
     default: "gemini-embedding-001",
-    models: [{ id: "gemini-embedding-001", note: "Gemini's embedder" }],
-    filter: "embedding", // text-embedding-004, gemini-embedding-001, …
+    models: [
+      { id: "gemini-embedding-001", note: "Gemini's embedder" },
+      { id: "gemini-embedding-2", note: "newer; switching re-embeds everything" },
+    ],
+    filter: "embedding", // gemini-embedding-001, gemini-embedding-2, …
   },
 });

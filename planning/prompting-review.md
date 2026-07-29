@@ -240,6 +240,49 @@ cliff.
 
 ### 4. Temperature is never set — tagging at 1.0 everywhere
 
+**PARKED by decision 2026-07-29** (the quirk-gated design below stays on the
+shelf); the incidental Gemini catalog finding is **FIXED** — curated set
+refreshed to the live-verified 3.5 family (default gemini-3.5-flash), embeds
+catalog gains gemini-embedding-2 with 001 kept as default so no corpus
+re-embed is triggered.
+
+**DOWNGRADED after a close look (2026-07-29)** — the original "highest
+leverage" claim did not survive contact with evidence:
+
+- **Measured stability is already excellent.** tag_snapshots: 5,508 items
+  with AI judgments, 20 ever changed, ZERO flip-flops (A→B→A). Denominator
+  caveat: only ~3 same-config retags observed in the job-log window, and the
+  changed items cluster on wardrobe — facet-definition iteration, not noise.
+  No evidence of sampling churn; no evidence against it either.
+- **The churn scenario is hypothetical today**: every board has
+  auto_tag=true (tag-on-upload) with the default 1440-min interval value,
+  but `auto_tag_periodic` is armed on none — scheduled retags have never
+  fired (job_log kind='retag' is empty). The insurance only starts mattering
+  if periodic retag gets turned on.
+- **The provider matrix bites exactly where confidence was highest**
+  (live-probed with stored keys, 2026-07-29): gpt-5.4-mini and gpt-5.1
+  ACCEPT temperature:0 (OpenAI restored it in the 5.1+ line); **o3 rejects
+  it with a hard 400** ("Only the default (1) value is supported") and
+  o-series ids pass the tagging modelFilter, so a blanket temperature
+  permanently fails items for anyone picking an o-model. Gemini accepts it
+  on live models. GLM unprobed (no stored key — its quirks are
+  live-verified by policy, so don't guess). OpenRouter backends vary.
+
+**If implemented** (cheap insurance, no longer urgent): quirk data, not a
+global — `compat.temperature: 0` plus a `compat.noTemperature` model-regex
+guard (openai: `"^o\\d"`); anthropic sets temperature 0 in its own wire
+(all Claude models accept it; the app never enables extended thinking);
+GLM/OpenRouter left unset. Pairs with the reasoning-effort quirk from #3's
+follow-up.
+
+**Incidental REAL finding from the probes:** the Gemini descriptor's
+`defaultModel: "gemini-2.5-flash"` is RETIRED — "no longer available to new
+users" (404). A fresh install or new key using the curated default fails
+every call. The curated Gemini catalog needs a refresh to the 3.5 family
+(this instance's boards dodged it by sitting on 2.5-pro / 3.5-flash).
+
+(Original write-up below.)
+
 Neither `anthropicRequest` nor `compatRequest` sends `temperature`, so every
 provider samples at its default (1.0 for Anthropic and OpenAI). For
 closed-vocabulary classification and field extraction, ~0–0.2 is standard.
