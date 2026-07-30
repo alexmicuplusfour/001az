@@ -52,6 +52,18 @@ export function releaseCard(el) {
   if (el) stageObserver.unobserve(el);
 }
 
+// The grid counterpart of rows.js dropAllRows, called on each rows-mode
+// render (a no-op once empty): release the cached cards from the stage
+// observer — nothing else prunes this cache while the grid isn't rendering —
+// and reset the render key, so a later flip back re-enters at a fresh first
+// batch instead of synchronously rebuilding a scrolled-deep limit's worth of
+// cards under a scroll position that just reset to the top.
+export function dropAllCards() {
+  for (const { el } of cardCache.values()) stageObserver.unobserve(el);
+  cardCache = new Map();
+  lastFilterKey = "";
+}
+
 function cardEl(img) {
   const sig = cardSig(img);
   const hit = cardCache.get(img.id);
@@ -128,6 +140,10 @@ async function doReprocess(id) {
     const img = state.items.find((i) => i.id === id);
     if (img) {
       img.status = "pending";
+      // Reprocess re-queues every instance (the route's contract) — mirror
+      // that on the instances too, so rows-mode tiles show the whole strip
+      // queued now rather than at the first poll.
+      for (const i of img.instances || []) i.status = "pending";
       if (!img.tags.length) img.tagSet = new Set();
     }
     document.dispatchEvent(new Event('app:render'));

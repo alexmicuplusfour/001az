@@ -45,6 +45,13 @@ a live connector.
   fields) sitting above one or more per-file *instances*, each with their own
   fields and tags. Merge re-parents instances, split breaks them out, and both
   rename in place.
+- **Rows view** — a second gallery mode that shows the evidence: entities
+  stack vertically, each row the entity card beside a horizontally scrolling
+  strip of its instance files, with per-file tag editing, retag, re-extract,
+  and remove on the tiles. Filtering flips into it automatically when the
+  result contains a multi-file entity (tiles that don't match on their own
+  dim rather than hide), and clearing the filters returns to the previous
+  mode; the toggle next to Sort persists per board while browsing unfiltered.
 - **Data connectors** — map a board's fields to a live source and they refresh
   on their own. Domains include **crypto** (CoinGecko / CoinMarketCap) and
   **US stocks** (Financial Modeling Prep):

@@ -342,7 +342,7 @@ main#grid {
   flex: 0 0 auto;
 }
 #grid.rows-mode > .card {
-  margin-bottom: 14px; /* progress-lane cards flow standalone in rows mode */
+  margin-bottom: var(--gap); /* progress-lane cards flow standalone in rows mode */
 }
 /* Grid, not flex: the strip's height must equal the CARD's, and percentage
    heights only resolve reliably against a definite grid area (nested flex
@@ -354,8 +354,8 @@ main#grid {
   grid-template-columns: auto minmax(0, 1fr);
   gap: 12px;
   padding: 10px;
-  margin-bottom: 14px; /* matches --gap */
-  border: 1px solid #e4e6ea;
+  margin-bottom: var(--gap);
+  border: 1px solid #e2e2e6; /* the chrome hairline (tool buttons, search box) */
   border-radius: 14px;
 }
 .inst-strip {

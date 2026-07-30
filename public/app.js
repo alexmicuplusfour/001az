@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { toItem } from './utils.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl, activeCount } from './filters.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoardIngest } from './data.js';
-import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
+import { renderGrid, layoutGrid, pokeSentinel, initGrid, dropAllCards } from './grid.js';
 import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
 import { resolveView, restoreView } from './view.js';
 import { initShortcuts } from './shortcuts.js';
@@ -28,13 +28,17 @@ function render() {
   // just duplicate the same items.
   const laneHidden = state.showProcessing || state.showUnprocessed;
   const progress = laneHidden ? [] : inProgress();
-  // The mode joins the render key so each renderer's batch limit resets on a
-  // flip and neither cache ever serves the other's elements.
+  // Each renderer owns a cache and a batch limit; rendering one drops the
+  // other's cache (releasing its cards from the stage observer) and resets
+  // its key, so a flip never strands observed elements and the return trip
+  // re-enters at a fresh first batch. The mode suffix on the key is the
+  // belt to that suspender: the caches can never serve each other.
   elGridRoot.classList.toggle("rows-mode", mode === "rows");
   if (mode === "rows") {
+    dropAllCards();
     renderRows(`${key}|rows`, progress, tagged);
   } else {
-    dropAllRows(); // release row-cached cards from the stage observer
+    dropAllRows();
     renderGrid(`${key}|grid`, progress, tagged);
   }
   syncFiltersToUrl();

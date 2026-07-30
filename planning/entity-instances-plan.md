@@ -178,3 +178,10 @@ with tests before touching the worker.
   instances, per-instance email/phone with provenance; cars board → "Toyota" entity,
   per-photo `car_model` and per-photo color/function tags; lightbox switcher swaps
   fields+tags with the file.
+
+## Follow-up
+
+`instance-rows-plan.md` builds the gallery mode this model deserves: entities
+stacked with horizontal instance strips, the lightbox's per-instance verbs on
+the tiles, and filter sessions that flip the viewer into it when a result
+can stack.

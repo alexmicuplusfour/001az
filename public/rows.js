@@ -329,10 +329,14 @@ function rowEl(img) {
 
 // Release every cached row's card from the stage observer. Called on each
 // grid-mode render (a no-op once empty) so a mode flip doesn't strand
-// observed cards in a cache nothing will prune.
+// observed cards in a cache nothing will prune. The key reset makes the
+// return trip start from a fresh first batch — without it, rows→grid→rows
+// under the same filters re-enters with the old scrolled-deep limit and an
+// empty cache, one giant synchronous rebuild at top-of-page.
 export function dropAllRows() {
   for (const { el } of rowCache.values()) releaseCard(el.querySelector(".card"));
   rowCache = new Map();
+  lastKey = "";
 }
 
 // The rows counterpart of renderGrid — same contract, same caching shape.
