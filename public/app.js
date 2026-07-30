@@ -1,8 +1,10 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
-import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl } from './filters.js';
+import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl, activeCount } from './filters.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoardIngest } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
+import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
+import { resolveView, restoreView } from './view.js';
 import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
 import { initFilterConfigsUI } from './filterconfigs.js';
@@ -11,19 +13,35 @@ import { initLightbox, openLightbox } from './lightbox.js';
 import { openAlertEvent } from './alert-event.js';
 import { restoreSort } from './sort.js';
 
+const elGridRoot = document.getElementById("grid");
+
 function render() {
   const key = filterKey();
   const tagged = taggedFiltered();
+  // Resolve the gallery mode before the toolbar renders — its toggle
+  // highlights the EFFECTIVE mode, including an auto-engaged rows (filters
+  // active + a multi-instance entity in the filtered result).
+  const mode = resolveView(tagged, activeCount() > 0);
   renderToolbar(tagged.length);
   renderFacets();
   // With a status pill on, the grid *is* the queue — a lane on top would
   // just duplicate the same items.
   const laneHidden = state.showProcessing || state.showUnprocessed;
-  renderGrid(key, laneHidden ? [] : inProgress(), tagged);
+  const progress = laneHidden ? [] : inProgress();
+  // The mode joins the render key so each renderer's batch limit resets on a
+  // flip and neither cache ever serves the other's elements.
+  elGridRoot.classList.toggle("rows-mode", mode === "rows");
+  if (mode === "rows") {
+    renderRows(`${key}|rows`, progress, tagged);
+  } else {
+    dropAllRows(); // release row-cached cards from the stage observer
+    renderGrid(`${key}|grid`, progress, tagged);
+  }
   syncFiltersToUrl();
   requestAnimationFrame(() => {
-    layoutGrid();
+    layoutGrid(); // self-gates in rows mode
     pokeSentinel();
+    pokeRowsSentinel();
   });
 }
 
@@ -106,6 +124,7 @@ async function main() {
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   // The viewer's per-board sort — needs boardMapping (identity mode) in place.
   restoreSort();
+  restoreView();
   render();
   ensurePolling();
   // Rest of the board streams in behind the first paint.

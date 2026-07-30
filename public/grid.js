@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { ICONS, actionBtn, hasIdentity } from './utils.js';
+import { ICONS, actionBtn, hasIdentity, instanceTagCounts } from './utils.js';
 import { openDropdown } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, isUntagged } from './filters.js';
@@ -8,6 +8,7 @@ import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
 import { kindFor } from './kinds.js';
+import { effectiveView } from './view.js';
 
 const elGrid = document.getElementById("grid");
 const elGridSentinel = document.getElementById("grid-sentinel");
@@ -39,9 +40,16 @@ const stageObserver = new IntersectionObserver((entries) => {
 // Everything cardFor bakes into the DOM that can change after creation.
 // Bulk selection isn't included: bulk.js updates card elements in place.
 // name + instance count: a merge/split can swap the face file or change the
-// stack badge without touching anything else.
-function cardSig(img) {
+// stack badge without touching anything else. Exported for rows.js, whose
+// row signature embeds it (a row re-renders when its card would).
+export function cardSig(img) {
   return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.name}|${img.instances?.length || 0}|${img.displayLabel}|${img.tags.join(",")}`;
+}
+
+// Drop a card element rows.js (or any cache owner) is done with — the stage
+// observer holds strong refs, so every dropped card must be unobserved.
+export function releaseCard(el) {
+  if (el) stageObserver.unobserve(el);
 }
 
 function cardEl(img) {
@@ -57,6 +65,9 @@ function cardEl(img) {
 }
 
 export function layoutGrid() {
+  // Rows mode is normal document flow — masonry's absolute positions would
+  // corrupt it (resize handlers and rAF callers land here unconditionally).
+  if (effectiveView() === "rows") return;
   const cards = [...elGrid.querySelectorAll(".card")];
   if (!cards.length) { elGrid.style.height = ""; return; }
   const cs = getComputedStyle(elGrid);
@@ -200,10 +211,21 @@ function openTagPop(chip, img) {
     maxItems: 0, // tags wrap freely; only the viewport caps the height
     build: (body) => {
       if (img.tags.length) {
+        // The union across a multi-instance entity is a distribution — each
+        // tag carries how many instances hold it. Single-instance entities
+        // (every raw board) render without counts, exactly as before.
+        const counts = img.instances.length > 1 ? instanceTagCounts(img) : null;
         for (const t of img.tags) {
           const s = document.createElement("span");
           s.className = "tp";
           s.textContent = t;
+          const n = counts?.get(t);
+          if (n) {
+            const c = document.createElement("span");
+            c.className = "tp-n";
+            c.textContent = n;
+            s.appendChild(c);
+          }
           body.appendChild(s);
         }
       } else {
@@ -312,7 +334,9 @@ export function teardownCardHover(card) {
 export function scrollToCard(img) {
   if (!img) return;
   let card = elGrid.querySelector(`[data-id="${img.id}"]`);
-  if (!card) {
+  // The backfill below builds masonry cards — grid-mode machinery. In rows
+  // mode an off-screen row (past the render limit) is just not scrolled to.
+  if (!card && effectiveView() !== "rows") {
     const items = taggedFiltered();
     const targetIdx = items.indexOf(img);
     if (targetIdx < 0) return;
@@ -332,7 +356,12 @@ function faceOverlay(card) {
   return card.querySelector(".face-media") || card;
 }
 
-function cardFor(img) {
+// Exported for rows.js: a row is this exact card (all entity affordances —
+// hearts, crate, tag chip, reprocess, delete, bulk select — ride along) plus
+// an instance strip beside it. rows.js keeps its own element cache; cards
+// created here are masonry-positioned only by layoutGrid, which rows mode
+// never runs, so the same builder serves both layouts.
+export function cardFor(img) {
   const card = document.createElement("div");
   card.className = "card";
   card.dataset.id = img.id;
@@ -389,14 +418,11 @@ function cardFor(img) {
   return card;
 }
 
-// key is passed in from app.js render() so grid.js doesn't need to import filterKey.
-export function renderGrid(key, progressItems, items) {
-  if (key !== lastFilterKey) {
-    lastFilterKey = key;
-    renderLimit = RENDER_BATCH;
-  }
+// The progress lane's cards, budgeted and cached — shared verbatim by both
+// gallery modes (rows.js prepends the same lane above its entity rows), so
+// the cache has one owner and upload placeholders survive a mode flip.
+export function progressLane(progressItems) {
   const children = [];
-
   const nextProgress = new Map();
   const budget = laneBudget();
   for (const p of progressItems.slice(0, budget)) {
@@ -410,6 +436,16 @@ export function renderGrid(key, progressItems, items) {
   }
   progressCache = nextProgress;
   if (progressItems.length > budget) children.push(laneMore(progressItems.length - budget));
+  return children;
+}
+
+// key is passed in from app.js render() so grid.js doesn't need to import filterKey.
+export function renderGrid(key, progressItems, items) {
+  if (key !== lastFilterKey) {
+    lastFilterKey = key;
+    renderLimit = RENDER_BATCH;
+  }
+  const children = progressLane(progressItems);
 
   if (!items.length && !progressItems.length) {
     for (const { el } of cardCache.values()) stageObserver.unobserve(el);
@@ -445,6 +481,9 @@ export function pokeSentinel() {
 }
 
 function appendMoreCards() {
+  // Both modes' sentinel observers watch the same element; each appender
+  // no-ops outside its own mode (rows.js has the rows counterpart).
+  if (effectiveView() === "rows") return;
   const items = taggedFiltered();
   let appended = 0;
   for (const img of items) {

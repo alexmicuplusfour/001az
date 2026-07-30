@@ -7,8 +7,9 @@
 // Pure + deterministic: same instances + same faceCfg → same face, so the board
 // listing re-running on every poll/delta never changes the chosen card.
 //
-// MIRROR: public/lightbox.js carries a byte-identical copy (build-less frontend,
-// no shared import). Change both together — test/faces.test.js asserts parity.
+// MIRROR: public/face-select.js carries a byte-identical copy (build-less
+// frontend, no shared import). Change both together — test/faces.test.js
+// asserts parity.
 
 // The three "prefer" families group the granular file kinds into the face shapes
 // (thumbnail / page-or-peek / waveform) users actually choose between.

@@ -29,6 +29,11 @@ export const state = {
   // `by` is namespaced: "name"/"created"/"updated"/"hearts"/"instances"
   // (universal), "media:<fn>" (file metadata), "field:<key>" (connector-bound).
   sort: null,
+  // Gallery view mode BASE preference: null = default (grid), else the
+  // viewer's pick, persisted per board. While filters are active, a session
+  // overlay in view.js takes precedence (auto-rows on filter, session-scoped
+  // toggles, restored on clear) without ever touching this.
+  view: null,
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,

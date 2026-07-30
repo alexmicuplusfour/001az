@@ -27,6 +27,26 @@ function matchesExcept(img, exceptKey) {
   return true;
 }
 
+// Does ONE instance satisfy the active facet selections on its own? Entity
+// matching above is per-facet-any-instance (over the union tagSet), so an
+// entity can match while no single instance does — short from one photo,
+// emma-roberts from another. Rows mode dims tiles that fail this rather than
+// hiding them; such an entity renders as an all-dim strip ("matches only in
+// aggregate"), never an empty one. Facet pills only: search scores,
+// favorites, crates and status are entity-level concerns with no
+// per-instance counterpart.
+export function instanceMatches(inst) {
+  for (const [key, values] of state.selected) {
+    if (values.size === 0) continue;
+    let ok = false;
+    for (const v of values) {
+      if (inst.tagSet.has(tag(key, v))) { ok = true; break; }
+    }
+    if (!ok) return false;
+  }
+  return true;
+}
+
 // "Done" as far as the grid is concerned — held items (waiting for the
 // board's auto-tagging to come back on) show up like any other untagged item.
 export function isTagged(img) {

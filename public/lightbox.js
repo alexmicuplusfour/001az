@@ -8,23 +8,7 @@ import { fullUrl, thumbUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
 import { sectionHeading } from './modal.js';
 
-// MIRROR of server/faces/select.js — which instance backs an entity's card face,
-// per the board's mapping.face { prefer, pick }. Kept byte-identical to the
-// server so the client re-derives the same face after an instance changes here;
-// change both together (test/faces.test.js asserts parity).
-const FACE_FAMILY = { image: "image", pdf: "document", docx: "document", text: "document", audio: "audio" };
-function selectFace(instances, faceCfg) {
-  if (!instances || !instances.length) return null;
-  const isFile = faceCfg?.from === "file";
-  const prefer = isFile ? faceCfg.prefer || "any" : "any";
-  const pick = isFile ? faceCfg.pick || "first" : "first";
-  let pool = instances;
-  if (prefer !== "any") {
-    const matched = instances.filter((i) => FACE_FAMILY[i.kind] === prefer);
-    if (matched.length) pool = matched; // a preference, not a filter — else keep all
-  }
-  return pick === "latest" ? pool[pool.length - 1] : pool[0];
-}
+import { selectFace } from './face-select.js';
 
 // Format numeric field values readably based on key conventions.
 function formatFieldNumber(key, v) {
@@ -644,6 +628,14 @@ function showLightbox() {
     preloadFull(lightboxIndex + d);
     preloadFull(lightboxIndex - d);
   }
+}
+
+// Open on a specific instance (a rows-mode tile click). showLightbox resets
+// the selection to index 0, so the re-aim happens after.
+export function openLightboxAt(img, instId) {
+  openLightbox(img);
+  const i = (img.instances || []).findIndex((x) => x.id === instId);
+  if (i > 0) showInstance(i);
 }
 
 export function openLightbox(img) {

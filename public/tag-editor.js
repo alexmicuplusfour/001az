@@ -1,12 +1,13 @@
 import { state } from './state.js';
 import { ICONS, refreshEntityTags } from './utils.js';
 import { toast } from './toast.js';
-import { kindFor } from './kinds.js';
+import { kindFor, thumbUrl } from './kinds.js';
 import { mountModal } from './modal.js';
 
-// Tags live on instances. The grid's edit affordance targets the face
+// Tags live on instances. The grid's edit affordance targets the first
 // instance (the common case is a single-instance entity, where that's
-// everything); the lightbox passes the instance the user is looking at.
+// everything); the lightbox and rows-mode tiles pass the instance the user
+// is looking at.
 export function openTagEditor(img, inst = img.instances?.[0]) {
   const overlay = document.createElement("div");
   overlay.className = "te-overlay";
@@ -17,7 +18,13 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
   const header = document.createElement("div");
   header.className = "te-header";
   const thumb = document.createElement("img");
-  const preview = kindFor(img).previewUrl?.(img);
+  // The TARGET instance drives the preview — editing one photo of four must
+  // show that photo, not the entity face (they diverge whenever the face
+  // config isn't first-added). No preview for the target → no thumb; the
+  // entity face here would just be the wrong picture.
+  const preview = inst
+    ? (inst.w && inst.h ? thumbUrl(inst.name) : null)
+    : kindFor(img).previewUrl?.(img);
   if (preview) thumb.src = preview;
   else thumb.hidden = true;
   thumb.className = "te-thumb";

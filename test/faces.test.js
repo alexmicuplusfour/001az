@@ -458,16 +458,17 @@ test("selectFace: prefer + pick over an entity's instances", () => {
 });
 
 test("selectFace: the client mirror is byte-identical to the server", () => {
-  // public/lightbox.js hand-copies FACE_FAMILY + selectFace (build-less frontend,
-  // no shared import). Extract both from source and assert they match, so the
-  // pair can't silently drift — the one documented hazard of the mirror.
+  // public/face-select.js hand-copies FACE_FAMILY + selectFace (build-less
+  // frontend, no shared import). Extract both from source and assert they
+  // match, so the pair can't silently drift — the one documented hazard of
+  // the mirror.
   const pick = (src) => {
     const family = src.match(/const FACE_FAMILY = \{[^}]*\};/)[0];
     const fn = src.match(/function selectFace\(instances, faceCfg\) \{[\s\S]*?\n\}/)[0];
     return `${family}\n${fn}`;
   };
   const server = fs.readFileSync(new URL("../server/faces/select.js", import.meta.url), "utf8");
-  const client = fs.readFileSync(new URL("../public/lightbox.js", import.meta.url), "utf8");
+  const client = fs.readFileSync(new URL("../public/face-select.js", import.meta.url), "utf8");
   assert.equal(pick(client), pick(server));
 });
 

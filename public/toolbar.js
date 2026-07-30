@@ -15,6 +15,7 @@ import { openConnectorBrowse } from './connector-browse.js';
 import { appendAlertMenu, appendAlertFooter, alertsUnseen } from './alerts-modal.js';
 import { clearAlertEvent } from './alert-event.js';
 import { sortCatalog, defaultDir, saveSort, restoreSort } from './sort.js';
+import { effectiveView, toggleView, rowsRelevant } from './view.js';
 
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
@@ -448,6 +449,26 @@ export function renderToolbar(resultCount) {
   // Wrapped so only the group gets margin-left:auto.
   const sortWrap = document.createElement("div");
   sortWrap.className = "sort-group";
+  // Rows-view toggle — a single button, shown only where rows can matter
+  // (rowsRelevant: derived boards, multi-instance data, or rows currently
+  // effective). Grid is the unmarked default; the button highlights when
+  // rows is the EFFECTIVE mode, so a filter-engaged auto flip is visible
+  // where the user's hand already is. The flip itself is session-scoped
+  // while filters are active and persistent otherwise (view.js toggleView).
+  if (rowsRelevant()) {
+    const rowsOn = effectiveView() === "rows";
+    const b = document.createElement("button");
+    b.className = "tool-btn view-btn" + (rowsOn ? " active" : "");
+    b.title = rowsOn ? "Back to grid view" : "Rows view — every instance visible";
+    b.setAttribute("aria-label", "Toggle rows view");
+    b.setAttribute("aria-pressed", String(rowsOn));
+    b.innerHTML = ICONS.viewRows;
+    b.addEventListener("click", () => {
+      toggleView();
+      document.dispatchEvent(new Event('app:render'));
+    });
+    sortWrap.appendChild(b);
+  }
   const sortBtn = toolBtn(
     state.sort ? `${state.sort.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : "Newest",
     "sort-btn" + (state.sort ? " active" : ""),

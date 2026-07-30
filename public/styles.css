@@ -334,6 +334,151 @@ main#grid {
   transition: box-shadow 0.15s, transform 0.15s;
 }
 
+/* ── instance rows mode (planning/instance-rows-plan.md): entities stacked,
+   each row = the untouched entity card + a horizontal instance strip ── */
+#grid.rows-mode .card {
+  position: relative;
+  width: min(300px, 45vw);
+  flex: 0 0 auto;
+}
+#grid.rows-mode > .card {
+  margin-bottom: 14px; /* progress-lane cards flow standalone in rows mode */
+}
+/* Grid, not flex: the strip's height must equal the CARD's, and percentage
+   heights only resolve reliably against a definite grid area (nested flex
+   stretch chains are the classic percentage trap). The card sizes the row;
+   the strip contributes zero intrinsic height and then fills the area, so a
+   tall thumbnail can never inflate the row past its card. */
+.entity-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px;
+  margin-bottom: 14px; /* matches --gap */
+  border: 1px solid #e4e6ea;
+  border-radius: 14px;
+}
+.inst-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  height: 0;          /* no intrinsic contribution to the row's height */
+  min-height: 100%;   /* ...then fill the card-sized grid area */
+  box-sizing: border-box;
+  min-width: 0;
+  padding-bottom: 4px; /* room for the scrollbar */
+}
+.inst-tile {
+  position: relative;
+  height: 0;          /* same trick one level down: strip decides */
+  min-height: 100%;
+  flex: 0 0 auto;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: zoom-in;
+  background: #f2f3f5;
+  line-height: 0;
+}
+.inst-tile img {
+  height: 100%;
+  width: auto;
+  display: block;
+}
+.inst-tile.loading {
+  opacity: 0.55;
+}
+/* dim-don't-hide: tiles that fail the active filter on their own (declared
+   after .loading so a dimmed in-flight tile reads dimmed) */
+.inst-tile.dim {
+  opacity: 0.35;
+}
+.inst-tile.dim:hover {
+  opacity: 1;
+}
+.inst-badge {
+  height: 100%;
+  width: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #7a8089;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.3;
+}
+.inst-face-chip {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 10px;
+  line-height: 1.3;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(20, 22, 26, 0.72);
+  color: #fff;
+}
+/* per-instance verbs — DOM-mounted on hover, exactly the card's pattern
+   (rows.js mountTileChrome/teardownTileHover) */
+.inst-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+}
+.inst-actions .act {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+.inst-actions .act svg {
+  width: 13px;
+  height: 13px;
+}
+.inst-tag-chip {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(18, 18, 22, 0.62);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.inst-tag-chip svg {
+  width: 11px;
+  height: 11px;
+}
+.inst-tag-chip .tc {
+  font-weight: 600;
+}
+body.bulk-mode .inst-actions,
+body.bulk-mode .inst-tag-chip {
+  display: none;
+}
+@media (max-width: 640px) {
+  .entity-row {
+    grid-template-columns: 1fr; /* card above, strip below */
+  }
+  #grid.rows-mode .card {
+    width: 100%;
+  }
+  .inst-strip {
+    /* stacked layout: no card beside the strip to size against */
+    height: auto;
+    min-height: 0;
+  }
+  .inst-tile {
+    height: 140px;
+    min-height: 0;
+  }
+}
+
 /* The skeleton gradient is deliberately static: an animated shimmer forces
    style/paint/raster work every frame for every visible unloaded card, and a
    drain keeps cards in that state for its whole duration. The spinner is the
@@ -874,6 +1019,12 @@ body.bulk-mode .heart {
   color: #7a8089;
   background: transparent;
 }
+/* per-tag instance count on multi-instance entities (union = distribution) */
+.tag-pop .tp-n {
+  margin-left: 5px;
+  font-size: 10px;
+  color: #7a8089;
+}
 .tp-edit {
   display: flex;
   align-items: center;
@@ -1123,6 +1274,17 @@ body.bulk-mode .heart {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+/* rows-view toggle — a single button in the sort group; grid is the
+   unmarked default */
+.tool-btn.view-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 8px;
+}
+.view-btn svg {
+  width: 14px;
+  height: 14px;
 }
 .tool-btn.sort-btn {
   display: inline-flex;

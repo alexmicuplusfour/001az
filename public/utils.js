@@ -67,6 +67,25 @@ export function refreshEntityTags(item) {
   item.undecided = item.instances.length > 0 && item.instances.every((i) => i.undecided);
 }
 
+// How many instances carry each tag. The grid tag pop annotates the entity's
+// union with these when there's more than one instance, so a "pick one" facet
+// holding three values reads as a distribution across photos, not a
+// contradiction (see planning/instance-rows-plan.md).
+export function instanceTagCounts(item) {
+  const counts = new Map();
+  for (const inst of item.instances) {
+    for (const t of inst.tags) counts.set(t, (counts.get(t) || 0) + 1);
+  }
+  return counts;
+}
+
+// Does the board's mapping give the extract leg AI work to do? Mirrors the
+// worker's aiWork gate (extractOne) — the reextract route answers 409 without
+// a stamped mapping, so the per-instance Re-extract button shows only here.
+export const mappingHasAiWork = (mapping) =>
+  mapping?.identity?.from === "ai" ||
+  (Array.isArray(mapping?.fields) && mapping.fields.some((f) => f.from === "ai"));
+
 // An item has a mapped identity when extraction (or a connector) gave it an
 // entity key distinct from its stored filename — mirrors displayLabel priority.
 export const hasIdentity = (item) => !!(item.display_name || item.identity !== item.name);
@@ -74,6 +93,7 @@ export const hasIdentity = (item) => !!(item.display_name || item.identity !== i
 export const tag = (facet, value) => `${facet}/${value}`;
 
 export const ICONS = {
+  viewRows: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/></svg>',
   tag: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2 2 0 0 0 2.8 0l6.6-6.6a2 2 0 0 0 0-2.8z"/><circle cx="7" cy="7" r="1.3" fill="currentColor"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/></svg>',
   redo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>',
