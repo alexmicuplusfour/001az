@@ -167,10 +167,37 @@ const multiEnt = () => toItem({ id: 22, name: "m.webp", status: "tagged", tags: 
 
 test("resolveView: auto-rows needs filters AND a multi-instance entity in the result", () => {
   state.view = null;
-  assert.equal(resolveView([singleEnt(), multiEnt()], true), "rows");
   assert.equal(resolveView([singleEnt()], true), "grid", "raw-board guardrail: no multi-instance entity, no flip");
+  resolveView([], false); // session boundary — each case starts a fresh session
+  assert.equal(resolveView([singleEnt(), multiEnt()], true), "rows");
+  resolveView([], false);
   assert.equal(resolveView([singleEnt(), multiEnt()], false), "grid", "no filters, no flip");
   assert.equal(resolveView([], true), "grid");
+  resolveView([], false);
+});
+
+test("resolveView: rows ratchets for the session — losing the last stack doesn't yank the view", () => {
+  state.view = null;
+  assert.equal(resolveView([multiEnt()], true), "rows");
+  // The result's only stack just lost an instance (a rows-mode delete) —
+  // the very next render must not flip the surface out from under the hand
+  // that clicked.
+  assert.equal(resolveView([singleEnt()], true), "rows");
+  assert.equal(resolveView([], true), "rows");
+  // Clearing the filters ends the session and drops the latch: a fresh
+  // session over a stackless result starts from the guardrail again.
+  assert.equal(resolveView([singleEnt()], false), "grid");
+  assert.equal(resolveView([singleEnt()], true), "grid");
+  resolveView([], false);
+});
+
+test("resolveView: the ratchet still engages late — the stack can stream in behind first paint", () => {
+  state.view = null;
+  // URL-restored filters render before the board finishes draining: the
+  // first paint sees no stacks, a later page delivers one.
+  assert.equal(resolveView([singleEnt()], true), "grid");
+  assert.equal(resolveView([singleEnt(), multiEnt()], true), "rows");
+  resolveView([], false);
 });
 
 test("resolveView: filtering flips to rows even over a pinned base; clearing restores it", () => {

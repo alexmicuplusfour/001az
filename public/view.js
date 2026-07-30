@@ -15,7 +15,7 @@ import { state } from './state.js';
 // mid-filter re-derives the same session from the URL's filters.
 let inSession = false;
 let sessionChoice = null; // an explicit toggle made during the session
-let sessionAuto = "grid"; // the session's auto resolution, refreshed per render
+let sessionAuto = "grid"; // the session's auto resolution; ratchets to rows, re-armed per session
 
 const base = () => (state.view === "rows" ? "rows" : "grid");
 
@@ -33,14 +33,22 @@ export function effectiveView() {
 // increment the Filters count either). Session auto-rows requires a
 // multi-instance entity in the filtered result — the raw-board guardrail: on
 // classic galleries no such entity can exist, so the masonry never flips.
-// When the filtered result can't stack, the session shows the base mode, so
-// a standing rows preference survives filtering a corner with no stacks.
+// Until it does, the session shows the base mode, so a standing rows
+// preference survives filtering a corner with no stacks.
+//
+// The flip is a RATCHET: re-asked each render only until it engages — the
+// board streams in behind first paint, so the stack that justifies rows can
+// arrive seconds after a URL-restored filter — and then held for the
+// session's life. Recomputing it both ways would yank the view back to grid
+// the instant a delete removes the result's last stack, right under the
+// hand that clicked. Clearing the filters drops the latch with the session.
 export function resolveView(items, filtersActive) {
   if (filtersActive !== inSession) {
     inSession = filtersActive;
     sessionChoice = null;
+    sessionAuto = "grid"; // re-arm the ratchet for the new session
   }
-  if (inSession) {
+  if (inSession && sessionAuto !== "rows") {
     sessionAuto = items.some((i) => (i.instances?.length || 0) > 1) ? "rows" : base();
   }
   return effectiveView();

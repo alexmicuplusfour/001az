@@ -46,8 +46,12 @@ name/w/h/kind/label/status/tags (`db.js` `instanceEntry`).
   rows whenever the filtered result contains a multi-instance entity —
   regardless of the stored base. That condition is the raw-board guardrail:
   on classic galleries no multi-instance entity can exist, so the masonry
-  never flips (entity-instances-plan's byte-for-byte promise holds); when a
-  filter's result can't stack, the session shows the base mode instead. A
+  never flips (entity-instances-plan's byte-for-byte promise holds); until a
+  filter's result can stack, the session shows the base mode. The flip
+  ratchets: once rows engages it holds for the session's life — deleting the
+  result's last stack must not yank the view out from under the hand that
+  clicked, and the board streaming in behind first paint can still engage it
+  late. A
   toggle click during the session is **session-scoped**; clearing the
   filters drops the layer and restores the pre-filter base ("return to the
   previous mode"). Favorites/crates/search don't start sessions — they
