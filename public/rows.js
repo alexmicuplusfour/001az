@@ -46,6 +46,16 @@ function rowSig(img) {
 
 // ── per-instance verbs (the lightbox's, relocated to the tile) ──────────────
 
+// Cached rows outlive reconcile: data.js takes the server's instance list
+// wholesale on every delta row, so a sig-equal row keeps its DOM while its
+// closures hold objects the entity no longer contains. Everything below
+// re-resolves by id at fire time — mutating a captured orphan is a write the
+// union recompute and the next render never read (a tag edit would look
+// lost, an optimistic status would never paint). The captured object is the
+// fallback (instance deleted in another tab): the request still fires and
+// the server's 404/409 surfaces as the toast.
+const liveInst = (img, inst) => img.instances.find((x) => x.id === inst.id) || inst;
+
 // The lightbox disables its buttons mid-flight; tile buttons are recreated on
 // every row rebuild, so the latch lives here instead. Without it a double
 // click double-DELETEs — the second 404s and toasts a failure after a
@@ -63,6 +73,7 @@ async function once(key, fn) {
 
 function doRetag(img, inst) {
   return once(`retag:${inst.id}`, async () => {
+    inst = liveInst(img, inst);
     try {
       const r = await fetch(`/api/instances/${inst.id}/retag`, { method: "POST" });
       if (!r.ok) throw new Error();
@@ -79,6 +90,7 @@ function doRetag(img, inst) {
 
 function doReextract(img, inst) {
   return once(`reextract:${inst.id}`, async () => {
+    inst = liveInst(img, inst);
     try {
       const r = await fetch(`/api/instances/${inst.id}/reextract`, { method: "POST" });
       if (!r.ok) {
@@ -129,6 +141,7 @@ function doRemoveInstance(img, inst) {
 // hover pop — tiles are small and their overlay buttons sit millimetres away.
 // pop-open pins the hover chrome while the pop is up (the card's pattern).
 function openInstTagPop(chip, img, inst) {
+  inst = liveInst(img, inst); // freshest tags for the list about to render
   const tile = chip.closest(".inst-tile");
   const ctx = openDropdown(chip, {
     className: "tag-pop",
@@ -158,7 +171,9 @@ function openInstTagPop(chip, img, inst) {
       editBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         close();
-        openTagEditor(img, inst);
+        // Re-resolve at click, not pop-open — the pop can sit open across a
+        // poll tick, and the editor's save mutates what it's handed.
+        openTagEditor(img, liveInst(img, inst));
       });
       const retagBtn = document.createElement("button");
       retagBtn.className = "tp-edit";
@@ -188,6 +203,7 @@ function teardownTileHover(tile) {
 }
 
 function mountTileChrome(tile, img, inst) {
+  inst = liveInst(img, inst); // the chip count reads tags at mount time
   const tagChip = document.createElement("div");
   tagChip.className = "inst-tag-chip";
   tagChip.title = "Tags for this file";

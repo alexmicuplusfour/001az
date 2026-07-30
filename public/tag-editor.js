@@ -104,10 +104,17 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
       });
       if (!r.ok) throw new Error();
       const { tags: saved } = await r.json();
-      inst.tags = saved;
-      inst.tagSet = new Set(saved);
-      inst.status = "tagged";
-      inst.undecided = false;
+      // The modal can outlive a poll tick, and reconcile swaps img.instances
+      // for fresh objects — write the server's answer onto the entity's
+      // CURRENT instance, not the captured one, or refreshEntityTags below
+      // recomputes the union from objects that never saw the edit and the
+      // save looks lost until a reload. Fallback to the captured object
+      // (instance deleted elsewhere) keeps this a no-op on a dead entity.
+      const live = img.instances?.find((x) => x.id === inst.id) || inst;
+      live.tags = saved;
+      live.tagSet = new Set(saved);
+      live.status = "tagged";
+      live.undecided = false;
       refreshEntityTags(img);
       if (img.instances.every((i) => i.status === "tagged" || i.status === "failed")) img.status = "tagged";
       close();
