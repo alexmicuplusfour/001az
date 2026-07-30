@@ -404,9 +404,11 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-table tbody tr:hover { background: #fafafc; }
 /* addable rows act as one big checkbox — click anywhere but the Add button */
 .cb-table tbody tr.cb-selectable { cursor: pointer; }
-.cb-end { text-align: right; }
-.cb-col-sel { width: 28px; text-align: center; }
-.cb-col-add { width: 84px; text-align: right; }
+/* Scoped under .cb-table so alignment also lands on header cells — a bare
+   class loses to the `.cb-table thead th` text-align above. */
+.cb-table .cb-end { text-align: right; }
+.cb-table .cb-col-sel { width: 28px; text-align: center; }
+.cb-table .cb-col-add { width: 84px; text-align: right; }
 
 .cb-primary-name { font-weight: 600; color: #1a1a24; }
 .cb-primary-sym { margin-left: 6px; font-size: 11px; color: #9a9aa6; }

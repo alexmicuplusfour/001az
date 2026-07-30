@@ -35,6 +35,7 @@ export function openSourceBrowse({ boardId, source, start = "", onPick }) {
     for (const h of ["Name", "Size", "Modified"]) {
       const th = document.createElement("th");
       th.textContent = h;
+      if (h === "Size") th.className = "cb-end"; // matches its cells below
       tr.appendChild(th);
     }
     thead.appendChild(tr);

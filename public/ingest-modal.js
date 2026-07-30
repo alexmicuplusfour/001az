@@ -14,7 +14,7 @@ import { state } from './state.js';
 import { fmtDuration } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl } from './modal.js';
-import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent } from './paged-table.js';
+import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { openSourceBrowse } from './source-browse-modal.js';
 import { refreshBoardIngest, ensurePolling } from './data.js';
@@ -613,13 +613,21 @@ export function openIngestModal() {
     const nonName = (desc.filters || []).filter((c) => c.fn !== "name");
     const flagged = nonName.filter((c) => c.preview);
     const cols = flagged.length ? flagged : nonName;
+    // Alignment keys off the same kind the cell formatter uses: `display`
+    // when the descriptor carries one (usd/percent), else the filter kind.
+    const alignEnd = (c) => ALIGN_END.has(c.display || c.kind);
     {
       const tr = document.createElement("tr");
-      for (const h of ["Item", ...cols.map((c) => c.label), ""]) {
+      const itemTh = document.createElement("th");
+      itemTh.textContent = "Item";
+      tr.appendChild(itemTh);
+      for (const c of cols) {
         const th = document.createElement("th");
-        th.textContent = h;
+        th.textContent = c.label;
+        if (alignEnd(c)) th.className = "cb-end";
         tr.appendChild(th);
       }
+      tr.appendChild(document.createElement("th")); // status column
       thead.appendChild(tr);
     }
 
@@ -635,6 +643,7 @@ export function openIngestModal() {
         tr.appendChild(name);
         for (const c of cols) {
           const td = document.createElement("td");
+          if (alignEnd(c)) td.className = "cb-end";
           const v = row.values?.[c.fn];
           // `display` is the adapter's richer column kind (feed descriptors
           // carry usd/percent) — same formatters as the browse modal, so a

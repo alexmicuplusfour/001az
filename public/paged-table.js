@@ -22,6 +22,10 @@ export function fmtPercent(v) {
   if (v == null || !Number.isFinite(v)) return "—";
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 }
+// Numeric kinds sit flush right so magnitudes line up down a column. Shared
+// like the formatters: a kind that right-aligns in one consumer right-aligns
+// in all of them — headers included (.cb-end goes on the th and the td).
+export const ALIGN_END = new Set(["usd", "percent", "number"]);
 export function pagedTableScaffold() {
   const scroll = document.createElement("div");
   scroll.className = "cb-scroll";

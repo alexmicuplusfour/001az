@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
-import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent } from './paged-table.js';
+import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { ensurePolling } from './data.js';
 
 // Browse-and-add ingestion modal for connector boards. Completely connector-
@@ -10,9 +10,8 @@ import { ensurePolling } from './data.js';
 // columns (fetched from /api/connectors), and the board-scoped /connector-list
 // endpoint supplies the rows. Crypto today; stocks / businesses / movies drop in
 // with zero changes here. Replaces the old search flyout.
-// Cell formatting by display kind lives in paged-table.js, shared with the
-// ingest preview so the same value never renders two ways.
-const ALIGN_END = new Set(["usd", "percent", "number"]);
+// Cell formatting and column alignment by display kind live in paged-table.js,
+// shared with the ingest preview so the same value never renders two ways.
 
 export function openConnectorBrowse(connectorName) {
   let descriptor = null; // { label, browse: { columns, sorts, defaultSort, pageSize } }
