@@ -294,8 +294,10 @@ function rowFor(img) {
     for (const inst of img.instances) strip.appendChild(tileFor(img, inst, faceId));
     // A mixed strip (some tiles match the filter, some dimmed) gets flagged
     // to scroll its first match into view once it's in the DOM — the reason
-    // the row surfaced shouldn't be off-screen right. Fresh builds only; a
-    // reused row keeps the scroll position the user left it at.
+    // the row surfaced shouldn't be off-screen right. Fresh and filter-
+    // changed builds only: rowEl strips the flag from same-key rebuilds
+    // (data churn) and hands them their predecessor's scroll position; a
+    // reused row simply keeps its own.
     if (strip.querySelector(".inst-tile.dim") && strip.querySelector(".inst-tile:not(.dim)")) {
       row.dataset.scrollMatch = "1";
     }
@@ -304,10 +306,18 @@ function rowFor(img) {
   return row;
 }
 
-// Offsets need layout, so flagged strips scroll one frame after insertion;
-// the flag clears immediately so later renders never re-yank the strip.
+// Scroll targets need layout (offsets, clamp range), so flagged strips
+// scroll one frame after insertion; flags clear immediately so later renders
+// never re-yank the strip. Two flags, at most one per row: scroll-keep
+// restores a rebuilt strip's inherited position, scroll-match aims a fresh
+// strip at its first filter match.
 function scrollFlaggedStrips() {
   requestAnimationFrame(() => {
+    for (const row of elGrid.querySelectorAll(".entity-row[data-scroll-keep]")) {
+      const strip = row.querySelector(".inst-strip");
+      if (strip) strip.scrollLeft = Number(row.dataset.scrollKeep);
+      delete row.dataset.scrollKeep;
+    }
     for (const row of elGrid.querySelectorAll(".entity-row[data-scroll-match]")) {
       delete row.dataset.scrollMatch;
       const strip = row.querySelector(".inst-strip");
@@ -317,12 +327,30 @@ function scrollFlaggedStrips() {
   });
 }
 
-function rowEl(img) {
+function rowEl(img, keyChanged = false) {
   const sig = rowSig(img);
   const hit = rowCache.get(img.id);
   if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
   if (hit) releaseCard(hit.el.querySelector(".card"));
   const el = rowFor(img);
+  // A same-key rebuild is data churn (status poll, tag save, a heart on the
+  // card), not a new presentation: the strip inherits its predecessor's
+  // scroll position instead of snapping to 0, and never re-yanks to the
+  // first match — the user's hand is mid-strip. Across a key change the
+  // filters moved, so scrollMatch re-aims at the new evidence; a strip that
+  // just appeared (1→2 instances, a merge) has no position to keep and
+  // behaves like a fresh build. The restore rides scroll-keep because a
+  // detached strip clamps scrollLeft writes to 0; reading the old row's
+  // pending scroll-keep first covers chained same-frame rebuilds, whose
+  // strip hasn't been restored yet and still reads 0.
+  if (hit && !keyChanged) {
+    const oldStrip = hit.el.querySelector(".inst-strip");
+    if (oldStrip && el.querySelector(".inst-strip")) {
+      delete el.dataset.scrollMatch;
+      const prev = Number(hit.el.dataset.scrollKeep || 0) || oldStrip.scrollLeft;
+      if (prev) el.dataset.scrollKeep = prev;
+    }
+  }
   rowCache.set(img.id, { el, sig });
   return el;
 }
@@ -341,12 +369,19 @@ export function dropAllRows() {
 
 // The rows counterpart of renderGrid — same contract, same caching shape.
 export function renderRows(key, progressItems, items) {
-  if (key !== lastKey) {
+  const keyChanged = key !== lastKey;
+  if (keyChanged) {
     lastKey = key;
     renderLimit = RENDER_BATCH;
   }
   elGrid.style.height = ""; // masonry's inline height from a prior grid render
   const children = progressLane(progressItems);
+  // The same cleanup at card level: lane elements are shared with grid mode
+  // (progressCache and laneMoreCard survive a flip so spinners don't reset),
+  // and layoutGrid stamps inline masonry width/left/top on every .card it
+  // sees. In rows-mode normal flow those read as relative offsets and
+  // displace the lane; strip them — the return trip re-stamps via layoutGrid.
+  for (const el of children) { el.style.left = el.style.top = el.style.width = ""; }
 
   if (!items.length && !progressItems.length) {
     dropAllRows();
@@ -357,7 +392,7 @@ export function renderRows(key, progressItems, items) {
     return;
   }
 
-  for (const img of items.slice(0, renderLimit)) children.push(rowEl(img));
+  for (const img of items.slice(0, renderLimit)) children.push(rowEl(img, keyChanged));
 
   const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
   for (const [id, { el }] of rowCache) {
