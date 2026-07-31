@@ -109,7 +109,46 @@ function relTime(ms) {
   return `${fmtDuration(d)} ago`;
 }
 
-// One "Fields" section: key/value rows with src badges and why-sentences.
+// Start the instances list with the current file in view rather than at the
+// top — nudged only as far as needed (mirrors the dropdown's revealActive), so
+// clicking through the list doesn't snap the scroll back to the top on each
+// rebuild. offsetParent is the fixed panel shell for both row and list, so the
+// difference is the row's position within the list's own scroll space.
+function revealActiveInstance(list) {
+  if (!list || list.scrollHeight <= list.clientHeight) return;
+  const row = list.querySelector(".lbp-file-active");
+  if (!row) return;
+  const top = row.offsetTop - list.offsetTop;
+  const bottom = top + row.offsetHeight;
+  // Keep a couple of rows of context past the active one so you can click
+  // straight through neighbours without scrolling — capped so it never
+  // overscrolls past either end of the list.
+  const margin = row.offsetHeight * 2;
+  const max = list.scrollHeight - list.clientHeight;
+  if (top < list.scrollTop) list.scrollTop = Math.max(top - margin, 0);
+  else if (bottom > list.scrollTop + list.clientHeight) {
+    list.scrollTop = Math.min(bottom - list.clientHeight + margin, max);
+  }
+}
+
+// One panel cell: the light-gray card that holds a single facet or field — a
+// header line plus an optional why-sentence. Both the facet loop and
+// fieldsSection() build their header into it, so the card treatment (padding,
+// background, radius) lives in one place instead of being duplicated per kind.
+function panelCell(head, why) {
+  const cell = document.createElement("div");
+  cell.className = "lbp-cell";
+  cell.appendChild(head);
+  if (why) {
+    const p = document.createElement("p");
+    p.className = "lbp-why";
+    p.textContent = why;
+    cell.appendChild(p);
+  }
+  return cell;
+}
+
+// One "Fields" section: key/value cells with src badges and why-sentences.
 // Used twice — entity-level (connector-bound data, no re-extract) and
 // instance-level (AI extraction, with the Re-extract button).
 function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
@@ -124,8 +163,6 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
   sec.appendChild(secHead);
   for (const key of fieldKeys) {
     const { v, why, src, kind: fieldKind, at } = fields[key] || {};
-    const row = document.createElement("div");
-    row.className = "lbp-field-row";
     const kv = document.createElement("div");
     kv.className = "lbp-field-kv";
     const k = document.createElement("span");
@@ -166,14 +203,7 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
     }
     val.className = "lbp-field-val";
     kv.append(k, val);
-    row.appendChild(kv);
-    if (why) {
-      const p = document.createElement("p");
-      p.className = "lbp-why";
-      p.textContent = why;
-      row.appendChild(p);
-    }
-    sec.appendChild(row);
+    sec.appendChild(panelCell(kv, why));
   }
   return sec;
 }
@@ -210,6 +240,9 @@ function paintPanel(img, inst, reasoning, fields) {
     filesLabel.className = "lbp-fields-label";
     filesLabel.textContent = `Instances (${instances.length})`;
     filesSec.appendChild(filesLabel);
+    // The rows scroll (capped at ~6.5 rows) while the count label stays put.
+    const fileList = document.createElement("div");
+    fileList.className = "lbp-file-list";
     instances.forEach((f, i) => {
       const row = document.createElement("div");
       row.className = "lbp-file-row" + (i === currentInstIndex ? " lbp-file-active" : "");
@@ -257,8 +290,9 @@ function paintPanel(img, inst, reasoning, fields) {
         } finally { rmBtn.disabled = false; }
       });
       row.append(thumb, fname, rmBtn);
-      filesSec.appendChild(row);
+      fileList.appendChild(row);
     });
+    filesSec.appendChild(fileList);
     meta.appendChild(filesSec);
   }
   elLightboxPanelBody.appendChild(meta);
@@ -416,8 +450,6 @@ function paintPanel(img, inst, reasoning, fields) {
     const text = why[f.key];
     if (!vals.length && !text) continue;
     rows++;
-    const row = document.createElement("div");
-    row.className = "lbp-facet";
     const head = document.createElement("div");
     head.className = "lbp-facet-head";
     const label = document.createElement("span");
@@ -437,14 +469,7 @@ function paintPanel(img, inst, reasoning, fields) {
       none.textContent = "—";
       head.appendChild(none);
     }
-    row.appendChild(head);
-    if (text) {
-      const p = document.createElement("p");
-      p.className = "lbp-why";
-      p.textContent = text;
-      row.appendChild(p);
-    }
-    elLightboxPanelBody.appendChild(row);
+    elLightboxPanelBody.appendChild(panelCell(head, text));
   }
 
   if (!rows && !subject.undecided && subject.status !== "held") {
@@ -460,6 +485,10 @@ function paintPanel(img, inst, reasoning, fields) {
       : "AI reasoning is turned off for this board.";
     elLightboxPanelBody.appendChild(hint);
   }
+
+  // Panel's fully built now, so layout is resolvable — bring the active file
+  // into view (no-op unless the list actually overflows).
+  revealActiveInstance(elLightboxPanelBody.querySelector(".lbp-file-list"));
 }
 
 async function renderPanel() {

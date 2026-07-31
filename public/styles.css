@@ -1813,27 +1813,33 @@ a.tool-btn {
   color: #7a5b12;
   margin-bottom: 14px;
 }
-.lbp-facet {
-  margin-bottom: 14px;
+/* one facet or field: a light-gray card holding a header line + optional why.
+   Shared by .lbp-facet-head (facets) and .lbp-field-kv (fields) so both kinds
+   read as the same card. */
+.lbp-cell {
+  background: #f6f6f9;
+  border-radius: 8px;
+  padding: 9px 11px;
+  margin-bottom: 8px;
 }
 .lbp-facet-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 5px;
-  margin-bottom: 3px;
 }
 .lbp-facet-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #8a8a92;
+  color: var(--text);
   margin-right: 2px;
 }
 .lbp-chip {
   font-size: 11px;
-  background: #f1f1f5;
+  background: #fff;
+  border: 1px solid #ececf2;
   border-radius: 999px;
   padding: 2px 8px;
   white-space: nowrap;
@@ -1846,7 +1852,7 @@ a.tool-btn {
   font-size: 12px;
   line-height: 1.45;
   color: #6b6b72;
-  margin: 0;
+  margin: 4px 0 0;
 }
 .lbp-desc {
   font-size: 13px;
@@ -2100,9 +2106,6 @@ a.tool-btn {
 }
 .lbp-reextract:hover:not(:disabled) { background: #f3f3f8; }
 .lbp-reextract:disabled { opacity: 0.5; cursor: default; }
-.lbp-field-row {
-  margin-bottom: 8px;
-}
 .lbp-field-kv {
   display: flex;
   flex-direction: column;
@@ -2143,12 +2146,19 @@ a.lbp-field-val:hover { text-decoration: underline; }
 .lbp-meta .lbp-files {
   margin: 10px 0 0;
 }
+/* Scrolls the rows past ~6.5 (6 full rows at 38px + a peek of the 7th) while
+   the count label above stays fixed. The negative margin bleeds the rows'
+   hover fill into the body padding; the rows drop their own bleed to match. */
+.lbp-file-list {
+  max-height: 247px;
+  overflow-y: auto;
+  margin: 0 -8px;
+}
 .lbp-file-row {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  margin: 0 -8px;
   border-radius: 6px;
   cursor: pointer;
 }
