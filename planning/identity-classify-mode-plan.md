@@ -238,6 +238,45 @@ Two fixes from an adversarial re-read of Slices 2–3:
 
 Checked and found clean: no other `mapping.identity` consumer needs candidate-awareness (the `from==="ai"` "has AI work" checks in db.js/ingest.js/worker.js are mode-agnostic and correct); `buildFieldsPrompt` isn't board-cached so a candidate edit takes effect immediately; empty-`values` (matches none) correctly falls through to the provisional/unmatched path; backup/restore introspects columns so `candidates` (living in the `mapping` JSONB) needs nothing special.
 
+## Deep-dive review (2026-08-01) — loose ends found post-commit
+
+A cold-read audit of the committed feature (HEAD `81bd1f4`) against this plan. Suite 596/596 green, extract mode behaviour-identical, the `entity_id`→`entity_ids` fan-out complete, backup/restore round-trips `bigint[]` cleanly (every column dumped `::text`, re-typed from the rebuilt catalog — `{1,2}` array literal). The gaps cluster in the rewritten `extractOne`/`resolveIdentity` and in one invariant the restructure silently dropped.
+
+### 1. [HIGH — FIXED 2026-08-01] `resolveIdentity` dropped the 23505 collision recovery
+
+`resolveIdentity` (worker.js:1440-1453) find-or-creates without the unique-violation guard the old code had. Two sites throw an **uncaught** 23505 on a concurrent `entities(board_id, identity)` collision:
+- `createEntity(…)` (1452) — a concurrent create of the same key.
+- `setEntityIdentity(db, rid, key, …)` (1449, the reuse-rename branch) — a concurrent claim between the lookup (1441) and the rename. `setEntityIdentity`'s own doc (db.js:1465-1468) still promises the caller re-parents into the existing entity on 23505 — the caller no longer does.
+
+The old block caught `err.code === "23505"` in both spots and merged into the winner (`git show HEAD^:server/worker.js`). The header comment at **worker.js:1467** still describes that deleted behaviour ("resolves collisions by merging into the existing entity instead").
+
+**Reachable by default.** `EXTRACT_CONCURRENCY` defaults to 2 (worker.js:904) — two same-board extractions at once. A thrown 23505 has no `.status`, so `failOrRequeue` (db.js:2017-2025) treats it as transient → requeue with backoff, counting against `MAX_ATTEMPTS`. **Worse on the headline path:** in classify mode many items funnel to the *same* candidate, so the first concurrent pair to match a brand-new value both try to mint/rename it → one wins, the other throws. It self-heals on retry (the loser then finds the winner via `getEntityByIdentity`), but fires routinely on bulk-classify: spurious `extract error … (requeued)` logs, backoff delay, a burned attempt, and — under sustained width — a possible permanent `failed`. Not data loss; a real robustness + noise regression on exactly the path the feature exists for.
+
+*Fix:* wrap create + reuse-rename in `try/catch`; on 23505 fall back to `getEntityByIdentity(key)` and return the winner's id. Correct the stale comment. Add the (currently missing) recovery test — the suite tests that `setEntityIdentity` *throws* 23505 (derived-identity.test.js:238) but nothing tests that extraction *recovers*.
+
+*Fixed (2026-08-01):* `resolveIdentity` hoisted to a module-level export (worker.js:909); both throwing sites now route a 23505 through a shared `winner()` helper that adopts the racing winner (non-23505 / vanished-winner re-throws to requeue). The reuse-rename collision does `reusable.unshift(rid)` so the un-renamed provisional stays available for a later value in the same multi-match. The `extractOne` header comment is accurate again. Tests: two deterministic recovery guards (a `raceAfterLookup` db shim injects the winner right after the existence lookup, forcing the 23505 down each of the create and rename paths every run) + one realistic 5-way concurrent convergence check; mutation-verified (recovery→`throw` reddens both deterministic tests). Suite 599/599.
+
+### 2. [MED] Ghost empty entities are now reachable — and nothing reaps them
+
+Under the old FK + single-transaction `reparentInstance`, a zero-instance entity was structurally impossible. Two new paths create one, and `listItems` (db.js:210-250) maps **every** entity row to a card — a zero-instance entity renders as a blank ghost card (`instances:[]`, no face → tile), with no cleanup path (`deleteEntityIfEmpty` only runs from `reconcileEntities` and the instance-delete heal; there is no sweep):
+- **Non-atomic membership write** — `setItemEntities` then `reconcileEntities` are two separate awaits (worker.js:1599-1601). The old `reparentInstance` was one `withTx` *specifically* so a crash couldn't strand a ghost. A crash between them now can.
+- **Concurrent instance-delete race** — server.js:2306-2320: two concurrent deletes can both pass the `entityInstanceCount ≤ 1` guard; the `deleteEntityIfEmpty` heal narrows but doesn't close the TOCTOU window. (This is the "reaper … unbuilt" the commit message flags — impact sharpened: a persistent, visible blank card.)
+
+*Fix:* wrap the two writes in `withTx`, and/or add a cheap empty-entity reaper to the maintenance loop.
+
+### 3. [LOW / by-design] `entity_ids[0]`-canonical simplifications
+
+A multi-membership item credits only its first entity in semantic search (db.js:1975 `entity_ids[1] AS entity_id`), job-log attribution, and face rendering. Job-log/face are fine. **Search is the surprising one:** the two-Emmas photo surfaces under only one Emma's card in results, though it's a first-class member of both. Matches the stated convention — worth a doc/UI line, not necessarily a fix.
+
+### 4. [minor / informational]
+
+- **Migration 0025 isn't cleanly re-runnable** — line 11-13 reads `entity_id`, line 20 drops it. The `WHERE entity_ids IS NULL` guard means a replay matches zero rows (no data loss) but would error at plan time on the dropped column. Harmless (the ledger never replays a completed migration), worth a comment only. (An audit pass claimed "replay collapses multi-membership to `[entity_id]`" — **false**, the `WHERE` guard prevents it.)
+- **Server tolerates `candidates: []`** (server.js:1214-1228) — accepted and persisted, then read as extract mode everywhere. The client guards against saving it, but the server doesn't strip it, so a listless field can persist against the plan's "mode = has a non-empty list" tidiness. Cosmetic.
+
+### Verified clean (blast-radius scoping)
+
+Hearts and crates key off `entities.id` (via `favorites.item_id` / `crate_items.item_id` = `e.id`, db.js:145-146 / 199-206) — untouched. Alerts correctly iterate `entity_ids` (alerts.js:71) and dedupe on `(alert, entity)`. The client reads no `.entity_id` off instances (`instanceEntry` never exposed it). `listItems` bucketing (one instance → every wanted entity) and the `since`/delta `unnest` are correct for multi-membership. The `reusable`/`resolved` pool is sound — `resolved.includes(rid)` prevents double-assignment and a still-needed entity is never renamed out from under other instances. `reprocessEntity`'s `current` param is used ($3). Backup/restore is type-agnostic.
+
 ## Build order
 
 Classify mode is **not exposed in the UI until the backend is done** (no user sees a half-built feature).

@@ -892,6 +892,57 @@ export async function documentTextFor(galleryDir, file) {
   return "";
 }
 
+// Resolve one derived identity value to an entity id via find-or-create,
+// preferring to reuse an old entity IN PLACE (from `reusable`) when the key is
+// new — that keeps a provisional/sole entity's id stable so its hearts and crate
+// membership survive a rename (the pre-array "sole instance: rename in place"
+// branch). `resolved` is the ids already claimed this pass, so a reusable entity
+// is never handed out twice. The latest derivation wins the display name —
+// identity can be anything (a name, a code, a date), so no cased heuristics.
+//
+// Concurrency: extraction runs EXTRACT_CONCURRENCY-wide and classify mode funnels
+// many items to the same candidate, so a sibling extraction can claim `key`
+// between our lookup and our write — the unique (board_id, identity) index then
+// throws 23505. We recover by adopting the winner, so a race MERGES into it
+// instead of throwing the leg into a requeue. Module-level (exported) so the
+// collision recovery is unit-testable without driving the model.
+export async function resolveIdentity(db, boardId, key, display, reusable, resolved) {
+  // The entity that won a concurrent create/rename of `key`. A non-23505 error —
+  // or a winner that vanished again before we could read it — re-throws, and the
+  // leg requeues; only the genuine race is swallowed.
+  const winner = async (err) => {
+    if (err.code !== "23505") throw err;
+    const w = await getEntityByIdentity(db, boardId, key);
+    if (!w) throw err;
+    return w.id;
+  };
+  const existing = await getEntityByIdentity(db, boardId, key);
+  if (existing) {
+    // Adopt the entity already holding this key, refreshing its display name.
+    // Can't collide — we write the key the row already carries.
+    await setEntityIdentity(db, existing.id, key, display);
+    return existing.id;
+  }
+  while (reusable.length) {
+    const rid = reusable.shift();
+    if (resolved.includes(rid)) continue;      // already claimed by an existing-key match
+    try {
+      await setEntityIdentity(db, rid, key, display);
+      return rid;
+    } catch (err) {
+      // The rename lost the race: rid keeps its old key and is still a sole
+      // entity, so hand it back for a later value in this pass to reuse.
+      reusable.unshift(rid);
+      return winner(err);
+    }
+  }
+  try {
+    return await createEntity(db, boardId, { identity: key, displayName: display });
+  } catch (err) {
+    return winner(err);
+  }
+}
+
 export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBackup = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
@@ -1429,29 +1480,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   }
 
-  // Resolve one derived identity value to an entity id via find-or-create,
-  // preferring to reuse an old entity IN PLACE (from `reusable`) when the key
-  // is new — that keeps a provisional/sole entity's id stable so its hearts and
-  // crate membership survive a rename (the pre-array "sole instance: rename in
-  // place" branch). `resolved` is the ids already claimed this pass, so a
-  // reusable entity is never handed out twice. The latest derivation wins the
-  // display name — identity can be anything (a name, a code, a date), so no
-  // cased-preference heuristics.
-  async function resolveIdentity(row, key, display, reusable, resolved) {
-    const existing = await getEntityByIdentity(db, row.board_id, key);
-    if (existing) {
-      await setEntityIdentity(db, existing.id, key, display);
-      return existing.id;
-    }
-    while (reusable.length) {
-      const rid = reusable.shift();
-      if (resolved.includes(rid)) continue;      // already claimed by an existing-key match
-      await setEntityIdentity(db, rid, key, display);
-      return rid;
-    }
-    return createEntity(db, row.board_id, { identity: key, displayName: display });
-  }
-
   // Stamp the extract result; false = the fence discarded it (the row was
   // re-routed or deleted mid-flight — the user's routing wins, and their
   // fresh run re-derives; entity-side moves above the stamp self-heal there).
@@ -1593,7 +1621,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         for (const eid of oldIds) if ((await entityInstanceCount(db, eid)) <= 1) reusable.push(eid);
         const resolvedIds = [];
         for (const { key, display } of derived) {
-          const id = await resolveIdentity(row, key, display, reusable, resolvedIds);
+          const id = await resolveIdentity(db, row.board_id, key, display, reusable, resolvedIds);
           if (!resolvedIds.includes(id)) resolvedIds.push(id);
         }
         await setItemEntities(db, row.id, resolvedIds);

@@ -7,7 +7,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, seedItem, req } from "./helpers.js";
-import { buildFieldsPrompt } from "../server/worker.js";
+import { buildFieldsPrompt, resolveIdentity } from "../server/worker.js";
 import {
   createEntity,
   getEntity,
@@ -248,6 +248,75 @@ test("setEntityIdentity: throws 23505 on collision with an existing identity", a
   }
   assert.ok(caught, "expected an error");
   assert.equal(caught.code, "23505");
+});
+
+// ── resolveIdentity: 23505 collision recovery ────────────────────────────────
+// Extraction runs EXTRACT_CONCURRENCY-wide and classify funnels many items to one
+// candidate, so siblings routinely race to first-create/rename the same key; the
+// unique (board_id, identity) throws 23505 for the loser, which must ADOPT the
+// winner rather than throw the leg into a requeue. The window (existence lookup →
+// our write) is too narrow to hit reliably by wall-clock racing, so a db shim
+// slips the winning entity in right after resolveIdentity's first query — the
+// existence lookup — forcing the recovery path deterministically every run.
+
+// resolveIdentity's first query is always its existence lookup; fire `inject`
+// once, right after it returns empty, so our subsequent write hits a live 23505.
+function raceAfterLookup(realDb, inject) {
+  let fired = false;
+  return { query: async (...args) => {
+    const res = await realDb.query(...args);
+    if (!fired) { fired = true; await inject(); }
+    return res;
+  } };
+}
+
+test("resolveIdentity: create loses the race → adopts the winner (23505 recovery)", async () => {
+  const boardId = await seedBoard(db, "resolve-race-create");
+  let winnerId = null;
+  const racing = raceAfterLookup(db, async () => {
+    winnerId = await createEntity(db, boardId, { identity: "emma watson", displayName: "Emma Watson" });
+  });
+  // No reusable entity → the create branch; the sibling grabbed the key first.
+  const id = await resolveIdentity(racing, boardId, "emma watson", "Emma Watson", [], []);
+  assert.equal(id, winnerId, "the racer adopts the winner instead of throwing");
+  const { rows } = await db.query(
+    "SELECT id FROM entities WHERE board_id=$1 AND identity=$2", [boardId, "emma watson"]);
+  assert.equal(rows.length, 1, "exactly one entity holds the key — no duplicate minted");
+});
+
+test("resolveIdentity: rename-in-place loses the race → adopts winner, provisional untouched", async () => {
+  const boardId = await seedBoard(db, "resolve-race-rename");
+  const provisional = await createEntity(db, boardId, { identity: "upload.jpg" });
+  let winnerId = null;
+  const racing = raceAfterLookup(db, async () => {
+    winnerId = await createEntity(db, boardId, { identity: "emma watson", displayName: "Emma Watson" });
+  });
+  const reusable = [provisional];
+  // reusable is non-empty → the rename-in-place branch; the sibling grabbed the
+  // key between our lookup and our rename.
+  const id = await resolveIdentity(racing, boardId, "emma watson", "Emma Watson", reusable, []);
+
+  assert.equal(id, winnerId, "the racer adopts the winner, not its own provisional");
+  const ent = await getEntity(db, provisional);
+  assert.equal(ent.identity, "upload.jpg", "the rename rolled back — the provisional keeps its key");
+  assert.deepEqual(reusable, [provisional], "the un-renamed provisional was handed back for later reuse");
+  const { rows } = await db.query(
+    "SELECT id FROM entities WHERE board_id=$1 AND identity=$2", [boardId, "emma watson"]);
+  assert.equal(rows.length, 1, "exactly one entity holds the key");
+});
+
+test("resolveIdentity: five real concurrent racers converge on one entity (no duplicates)", async () => {
+  const boardId = await seedBoard(db, "resolve-race-live");
+  // The realistic path — genuine wall-clock concurrency, no shim. Whatever
+  // interleaving occurs (path-A adopt or 23505 recovery), they must all agree
+  // and mint exactly one entity.
+  const ids = await Promise.all(
+    Array.from({ length: 5 }, () => resolveIdentity(db, boardId, "priya patel", "Priya Patel", [], []))
+  );
+  assert.equal(new Set(ids).size, 1, "every racer resolved to the same id");
+  const { rows } = await db.query(
+    "SELECT count(*)::int AS n FROM entities WHERE board_id=$1 AND identity=$2", [boardId, "priya patel"]);
+  assert.equal(rows[0].n, 1, "no duplicate entity minted under concurrency");
 });
 
 // ── merge = membership change: the instance keeps its fields and tags ────────
