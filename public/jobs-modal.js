@@ -257,7 +257,13 @@ export function openJobsModal() {
     for (const j of running) liveList.appendChild(runningRow(j));
     const inFlight = state.items.filter((i) => ACTIVE.has(i.status) || QUEUED.has(i.status));
     const active = inFlight.filter((i) => ACTIVE.has(i.status));
-    const queued = inFlight.filter((i) => QUEUED.has(i.status));
+    // state.items is newest-first, but the worker claims oldest-first (FIFO —
+    // see claimFairBatch). So the front of the line is the END of this list:
+    // reverse to oldest-first so the next item to tag sits right under the ones
+    // being tagged, and the sliced-off overflow is the newest (furthest back in
+    // line) rather than the next up — the rows that feed into tagging are the
+    // ones on screen.
+    const queued = inFlight.filter((i) => QUEUED.has(i.status)).reverse();
     for (const img of active) liveList.appendChild(liveItemRow(img));
     for (const img of queued.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(img));
     if (queued.length > QUEUED_SHOWN) note(liveList, `…and ${queued.length - QUEUED_SHOWN} more queued`);
