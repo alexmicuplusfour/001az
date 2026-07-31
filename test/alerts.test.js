@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
-import { startServer, adminSession, seedUser, seedItem, req } from "./helpers.js";
-import { createBoard, createEntity, insertItem, setBoardMembers, reparentInstance } from "../server/db.js";
+import { startServer, adminSession, seedUser, seedItem, req, withLegacyEntityId } from "./helpers.js";
+import { createBoard, createEntity, insertItem, setBoardMembers, setItemEntities, reconcileEntities } from "../server/db.js";
 import {
   matchesCondition,
   nextDailyAt,
@@ -233,7 +233,8 @@ test("a merge re-parent completes the union — evaluating at the move records t
   // the union now satisfies the condition. This is the reparentInstance +
   // evaluateItemAlerts sequence extractOne runs on a merge/split.
   const { rows: [target] } = await db.query("SELECT id, identity, display_name FROM entities WHERE id=$1", [half1.id]);
-  await reparentInstance(db, half2.instanceId, target, target.display_name, half2.id);
+  await setItemEntities(db, half2.instanceId, [target.id]);
+  await reconcileEntities(db, [half2.id, target.id]);
   await evaluateItemAlerts(db, half2.instanceId);
 
   const rows = await matchesOf(alert.id);
@@ -463,7 +464,8 @@ test("a merged-away match delivers a link to the card that now holds the content
   // The extract leg merges E's instance into T; emptied, E is deleted. The
   // match row keeps the recorded entity_id and frozen label.
   const { rows: [target] } = await db.query("SELECT id, identity, display_name FROM entities WHERE id=$1", [t.id]);
-  await reparentInstance(db, e.instanceId, target, target.display_name, e.id);
+  await setItemEntities(db, e.instanceId, [target.id]);
+  await reconcileEntities(db, [e.id, target.id]);
   assert.equal((await db.query("SELECT 1 FROM entities WHERE id=$1", [e.id])).rowCount, 0);
 
   hookState.requests.length = 0;
@@ -805,7 +807,7 @@ test("migration 0024 heals a pre-baseline alert by seeding today's matching set"
   // Simulate an alert born before the fix: strip the baseline the route seeded.
   await db.query("DELETE FROM alert_matches WHERE alert_id=$1", [alert.id]);
   const sql = readFileSync(new URL("../server/migrations/0024_alert_baseline.sql", import.meta.url), "utf8");
-  await db.query(sql);
+  await withLegacyEntityId(db, () => db.query(sql));
 
   // The kind/a+color/blue backlog from earlier tests comes back as baseline —
   // claimed, invisible to the sweep.
@@ -814,7 +816,7 @@ test("migration 0024 heals a pre-baseline alert by seeding today's matching set"
   assert.equal((await matchesOf(alert.id)).length, 0);
 
   // And it absorbs a retag re-landing exactly like a route-seeded baseline.
-  const { rows: [item] } = await db.query("SELECT id FROM items WHERE entity_id=$1 LIMIT 1", [seeded[0].entity_id]);
+  const { rows: [item] } = await db.query("SELECT id FROM items WHERE entity_ids @> ARRAY[$1]::bigint[] LIMIT 1", [seeded[0].entity_id]);
   await req(base, "PATCH", `/api/instances/${item.id}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "color/blue"] } });
   assert.equal((await matchesOf(alert.id)).length, 0);
 });

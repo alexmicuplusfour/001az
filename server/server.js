@@ -117,7 +117,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, MODEL_KINDS, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
@@ -1209,6 +1209,23 @@ function validateMapping(mapping) {
       return `mapping.identity.hint is required when from is "ai"`;
     if (id.hint !== undefined && (typeof id.hint !== "string" || id.hint.length > 500))
       return `mapping.identity.hint must be a string ≤500 chars`;
+    // Classify mode: a declared candidate list constrains the AI's answer to a
+    // closed set (vs open extraction). Config only — never seeds entities.
+    if (id.candidates !== undefined) {
+      if (id.from !== "ai") return `mapping.identity.candidates requires from "ai"`;
+      if (!Array.isArray(id.candidates)) return `mapping.identity.candidates must be an array`;
+      if (id.candidates.length > 200) return `mapping.identity may have at most 200 candidates`;
+      const seenKeys = new Set();
+      for (const c of id.candidates) {
+        if (!c || typeof c !== "object" || typeof c.value !== "string" || !c.value.trim())
+          return `each identity candidate needs a non-empty "value"`;
+        if (c.hint !== undefined && (typeof c.hint !== "string" || c.hint.length > 500))
+          return `identity candidate hint must be a string ≤500 chars`;
+        const k = normaliseIdentity(c.value); // same key the runtime dedups on
+        if (seenKeys.has(k)) return `duplicate identity candidate: "${c.value}"`;
+        seenKeys.add(k);
+      }
+    }
   }
   if (!Array.isArray(mapping.fields)) return "mapping.fields must be an array";
   // The cap is on AI fields only — they generate the extraction schema. Connector
@@ -2287,19 +2304,22 @@ app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async 
 // can't be removed this way — delete the entity instead. No re-queue needed:
 // the remaining instances own their fields and tags already.
 app.delete("/api/instances/:id", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const { rows: [item] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [req.itemId]);
+  const { rows: [item] } = await db.query("SELECT entity_ids FROM items WHERE id=$1", [req.itemId]);
   if (!item) return res.status(404).json({ error: "not found" });
-  if (item.entity_id && (await entityInstanceCount(db, item.entity_id)) <= 1)
-    return res.status(409).json({ error: "cannot remove the only instance — delete the item instead" });
+  // Removing this instance must not ghost any entity it's the sole member of —
+  // that last-instance case goes through entity delete instead.
+  for (const eid of item.entity_ids || [])
+    if ((await entityInstanceCount(db, eid)) <= 1)
+      return res.status(409).json({ error: "cannot remove the only instance — delete the item instead" });
 
   const removed = await deleteInstance(db, req.itemId);
   if (!removed) return res.status(404).json({ error: "not found" });
   // Race heal: two concurrent deletes of the last two instances both pass the
-  // count guard above — if that emptied the entity, drop it rather than leave
-  // a ghost card (the atomic emptiness check makes this a no-op otherwise).
-  if (removed.entity_id) await deleteEntityIfEmpty(db, removed.entity_id);
+  // count guard above — if that emptied an entity, drop it rather than leave a
+  // ghost card (the atomic emptiness check makes this a no-op otherwise).
+  for (const eid of removed.entity_ids || []) await deleteEntityIfEmpty(db, eid);
   sources.cleanup(removed.payload?.files);
-  console.log(`instance #${req.itemId} removed from entity #${removed.entity_id}`);
+  console.log(`instance #${req.itemId} removed from ent[${(removed.entity_ids || []).join(",")}]`);
   res.json({ ok: true });
 }));
 

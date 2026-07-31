@@ -62,15 +62,20 @@ export function matchesCondition(tagSet, condition) {
 export async function evaluateItemAlerts(db, itemId) {
   try {
     const item = await getItemEntity(db, itemId);
-    if (!item || item.entity_id == null) return;
+    if (!item || !item.entity_ids?.length) return;
     const alerts = await boardAlerts(db, item.board_id);
     if (!alerts.length) return;
-    const ent = await entityForAlerts(db, item.entity_id);
-    if (!ent) return;
-    for (const a of alerts) {
-      if (!matchesCondition(ent.tagSet, a.condition)) continue;
-      if (await addAlertMatch(db, a.id, item.entity_id, itemId, ent.label)) {
-        console.log(`alert #${a.id} matched entity #${item.entity_id}${ent.label ? ` (${ent.label})` : ""}`);
+    // An instance can belong to several entities (classify mode) — every one is
+    // a card the tags could credit, so evaluate each. Dedupe on (alert, entity)
+    // is the once-only key, so this can't double-fire.
+    for (const entityId of item.entity_ids) {
+      const ent = await entityForAlerts(db, entityId);
+      if (!ent) continue;
+      for (const a of alerts) {
+        if (!matchesCondition(ent.tagSet, a.condition)) continue;
+        if (await addAlertMatch(db, a.id, entityId, itemId, ent.label)) {
+          console.log(`alert #${a.id} matched entity #${entityId}${ent.label ? ` (${ent.label})` : ""}`);
+        }
       }
     }
   } catch (err) {

@@ -25,8 +25,8 @@ import {
   createEntity,
   setEntityIdentity,
   markEntityProvisional,
-  reparentItem,
-  reparentInstance,
+  setItemEntities,
+  reconcileEntities,
   touchEntity,
   entityInstanceCount,
   dueLiveEntities,
@@ -310,6 +310,13 @@ export function htmlToMarkdown(html) {
     .trim();
 }
 
+// Normalise a derived identity value for consistent collision detection.
+// Underscores and hyphens are treated as word separators so the AI returning
+// "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
+// Module-level + exported so validateMapping's candidate dup-check keys the
+// same way the runtime resolver does (no drift between the two).
+export const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
+
 // Build the extraction prompt + strict schema for a mapping's AI fields.
 // Pure function — no cache needed (extraction runs once per item; mappings
 // vary per item so a board-level cache wouldn't help).
@@ -319,6 +326,11 @@ export function buildFieldsPrompt(mapping) {
   const fields = ((mapping && mapping.fields) || []).filter((f) => f.from === "ai");
   const hasDerivedIdentity = mapping?.identity?.from === "ai";
   const identityHint = hasDerivedIdentity ? (mapping.identity.hint || "").trim() : "";
+  // Classify mode: the identity answer is constrained to a user-declared list
+  // (each { value, hint? }). Absent/empty → open extraction, exactly as before.
+  const candidates = hasDerivedIdentity && Array.isArray(mapping.identity.candidates)
+    ? mapping.identity.candidates : [];
+  const classify = candidates.length > 0;
   const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.hint || f.key}`);
 
   // Identity is just another extraction field to the model: its hint rides in
@@ -327,10 +339,24 @@ export function buildFieldsPrompt(mapping) {
   // uniqueness over the user's format (echoing filenames verbatim), so that
   // consistency guidance survives only as the fallback when no hint was given —
   // there it's the only signal the model has, and merge/split needs same
-  // subject → same value.
+  // subject → same value. In classify mode the allowed options (with their
+  // per-value hints) are listed instead — the schema enum forbids anything off
+  // the list, and the hints are the only place a per-option description can live.
   if (hasDerivedIdentity) {
-    lines.unshift(`- identity (text): ${identityHint ||
-      "a short name for what this item is about — the same subject must always produce the same value"}`);
+    if (classify) {
+      const opts = candidates.map((c) => `    - ${c.value}${c.hint ? `: ${c.hint}` : ""}`).join("\n");
+      // Cardinality is the system's to state, not the user's prose (that's the
+      // whole point of the toggle) — so spell out multi here, and pair it with a
+      // conservatism clause so "select all that apply" doesn't become "select
+      // everything". "Not only the closest single match" specifically counters a
+      // hint phrased as a superlative ("resembles the most").
+      lines.unshift(`- identity: ${identityHint || "which of the options below this item matches"}` +
+        ` — an item can match more than one: select every option that genuinely applies` +
+        ` (one, several, or none), not only the closest single match; pick only options you can clearly justify:\n${opts}`);
+    } else {
+      lines.unshift(`- identity (text): ${identityHint ||
+        "a short name for what this item is about — the same subject must always produce the same value"}`);
+    }
   }
   const systemText =
     `You extract structured fields from items for a private research board.\n\n` +
@@ -344,18 +370,32 @@ export function buildFieldsPrompt(mapping) {
   const properties = {};
   const required = [];
 
-  // Identity key is declared first so the model commits to it before extracting fields.
+  // Identity key is declared first so the model commits to it before extracting
+  // fields. Classify mode mirrors the facet enum-array shape (why + values[]);
+  // the closed enum makes an off-list answer structurally impossible and an
+  // empty array is the legal "matches none". Open mode keeps the scalar value.
   if (hasDerivedIdentity) {
-    properties.identity = {
-      type: "object",
-      description: identityHint || "A short, consistent name for what this item is about.",
-      properties: {
-        why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
-        value: { type: ["string", "null"] },
-      },
-      required: ["why", "value"],
-      additionalProperties: false,
-    };
+    properties.identity = classify
+      ? {
+          type: "object",
+          description: identityHint || "Which of the listed options this item matches.",
+          properties: {
+            why: { type: "string", description: "One short sentence justifying the selection(s), or why none apply." },
+            values: { type: "array", items: { type: "string", enum: candidates.map((c) => c.value) } },
+          },
+          required: ["why", "values"],
+          additionalProperties: false,
+        }
+      : {
+          type: "object",
+          description: identityHint || "A short, consistent name for what this item is about.",
+          properties: {
+            why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
+            value: { type: ["string", "null"] },
+          },
+          required: ["why", "value"],
+          additionalProperties: false,
+        };
     required.push("identity");
   }
 
@@ -455,7 +495,7 @@ export async function embedBatch(db, embedder, rows) {
     // Embed successes are plumbing nobody watches, but a marked-and-skipped
     // item silently vanishes from the search corpus — that gets a job row.
     await jobLogWrite(() => addJobLog(db, {
-      boardId: r.board_id, entityId: r.entity_id ?? null, itemId: r.id,
+      boardId: r.board_id, entityId: r.entity_ids?.[0] ?? null, itemId: r.id,
       target: r.payload?.files?.[0]?.original_name || r.payload?.identity || null,
       kind: "embed", outcome: "failed", error: message,
       detail: { model: embedder.model }, startedAt: t0, endedAt: Date.now(),
@@ -1007,7 +1047,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw noKeyError();
 
-    const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
+    const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
     const parts = await modelInputFor(row.payload, entity);
     // Distilled extraction results ride along as a text part so the tagger
     // sees the structured data without re-reading the raw material. Entity
@@ -1333,7 +1373,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // transcript) are gates, not attempts — the callers skip logging those.
   const legLog = (row, kind, t0, outcome, error = null, detail = {}) =>
     jobLogWrite(() => addJobLog(db, {
-      boardId: row.board_id, entityId: row.entity_id ?? null, itemId: row.id,
+      boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
       // The original filename, not payload.identity — for uploads the
       // identity is the vestigial STORED name (a hex string nobody recognizes).
       target: row.payload?.files?.[0]?.original_name || row.payload?.identity || null,
@@ -1389,24 +1429,27 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   }
 
-  // Normalise a derived identity value for consistent collision detection.
-  // Underscores and hyphens are treated as word separators so the AI returning
-  // "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
-  const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
-
-  // Move an instance under the entity that already holds its derived
-  // identity, keeping the fields and tags it just earned (merge and split are
-  // the same move: re-parent, then drop the old entity if it emptied out —
-  // one transaction in reparentInstance, so a crash between the statements
-  // can't leave a ghost empty entity). The latest derivation wins the display
-  // name — identity can be anything (a name, a code, a date), so no
+  // Resolve one derived identity value to an entity id via find-or-create,
+  // preferring to reuse an old entity IN PLACE (from `reusable`) when the key
+  // is new — that keeps a provisional/sole entity's id stable so its hearts and
+  // crate membership survive a rename (the pre-array "sole instance: rename in
+  // place" branch). `resolved` is the ids already claimed this pass, so a
+  // reusable entity is never handed out twice. The latest derivation wins the
+  // display name — identity can be anything (a name, a code, a date), so no
   // cased-preference heuristics.
-  async function reparentInto(row, target, displayName, oldEntityId) {
-    if (await reparentInstance(db, row.id, target, displayName, oldEntityId)) {
-      console.log(`merge: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}"), empty entity #${oldEntityId} deleted`);
-    } else {
-      console.log(`split: instance #${row.id} re-parented into entity #${target.id} ("${target.identity}")`);
+  async function resolveIdentity(row, key, display, reusable, resolved) {
+    const existing = await getEntityByIdentity(db, row.board_id, key);
+    if (existing) {
+      await setEntityIdentity(db, existing.id, key, display);
+      return existing.id;
     }
+    while (reusable.length) {
+      const rid = reusable.shift();
+      if (resolved.includes(rid)) continue;      // already claimed by an existing-key match
+      await setEntityIdentity(db, rid, key, display);
+      return rid;
+    }
+    return createEntity(db, row.board_id, { identity: key, displayName: display });
   }
 
   // Stamp the extract result; false = the fence discarded it (the row was
@@ -1458,7 +1501,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // The fallback anchors name the entity (no-file vehicles, chart faces).
       // Identity resolution below re-reads its own copy after the call, so a
       // mid-call rename never acts on this snapshot.
-      const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
+      const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
       parts = await modelInputFor(row.payload, entity, "extract");
     }
     const { input, usage } = await trackedTagger(db, {
@@ -1492,91 +1535,75 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       fields[f.key] = { v, why };
     }
 
-    // Derived identity: resolve against the parent entity before advancing.
-    // The instance's fields are written either way — they're its own.
-    // `landed`/`disposition` feed the job-log summary: how the identity
-    // resolved (derived / merged / split / kept) and whether the stamp beat
-    // the fence.
+    // Derived identity: resolve the item's membership SET before advancing.
+    // Extract and classify are the same path — extract yields one derived value,
+    // classify yields zero-or-more from the candidate list; both become the set
+    // of entity ids the item carries (entity_ids[0] canonical). The instance's
+    // fields are written either way — they're its own. `disposition` feeds the
+    // job-log summary; `landed` reports whether the stamp beat the fence.
     let landed = false;
     let disposition = null;
     if (mapping.identity?.from === "ai") {
-      const entity = await getEntity(db, row.entity_id);
-      const rawIdentity = input.identity?.value;
-      if (!entity) {
-        // Orphan instance (shouldn't happen) — extract what we can and move on.
-        landed = await stampExtracted(row, fields);
-        console.warn(`extracted #${row.id} [no parent entity — skipped identity resolution] [${ai.model}]`);
-      } else if (!rawIdentity || typeof rawIdentity !== "string" || !rawIdentity.trim()) {
-        // AI couldn't derive an identity. Only flag provisional on entities
-        // that were never identified (no display_name); established entities
-        // keep their identity — this instance just didn't add evidence.
-        const established = !!entity.display_name;
+      const classify = Array.isArray(mapping.identity.candidates) && mapping.identity.candidates.length > 0;
+      // Classify: an allowed set keyed by normalised value → the candidate's
+      // canonical spelling. The schema enum already forbids off-list answers on
+      // strict providers, but a best-effort provider can still return one, so we
+      // filter here too (mirrors the tagging leg's `allowed.has(t)` guard) — the
+      // bounded set is the whole point. Display is the candidate's spelling, not
+      // the model's echo, so the entity's name matches the list the user declared.
+      const allowedByKey = classify
+        ? new Map(mapping.identity.candidates.map((c) => [normaliseIdentity(c.value), c.value.trim()]))
+        : null;
+      const raw = classify
+        ? (Array.isArray(input.identity?.values) ? input.identity.values : [])
+        : (input.identity?.value != null ? [input.identity.value] : []);
+      // Normalise + dedupe, preserving order (first stays canonical). In OPEN
+      // mode the display name is the model's output verbatim — identity can be
+      // anything ("INV-2026-04", "BTC-USD", a name, a date), so no cleanup
+      // heuristic mangles someone's format; fuzzy matching lives only in the key.
+      const seen = new Set();
+      const derived = [];
+      for (const v of raw) {
+        if (typeof v !== "string" || !v.trim()) continue;
+        const key = normaliseIdentity(v);
+        if (classify && !allowedByKey.has(key)) continue; // drop off-list answers
+        if (seen.has(key)) continue;
+        seen.add(key);
+        derived.push({ key, display: classify ? allowedByKey.get(key) : v.trim() });
+      }
+
+      const oldIds = row.entity_ids || [];
+      if (derived.length === 0) {
+        // AI derived nothing / matched no candidate. Keep the current membership;
+        // flag provisional only on entities never identified (no display_name) —
+        // an established entity keeps its identity, this instance just didn't add
+        // evidence.
         disposition = "kept";
-        if (!established) await markEntityProvisional(db, entity.id);
-        if ((landed = await stampExtracted(row, fields)))
-          console.log(`extracted #${row.id} [no identity derived${established ? " — keeping entity identity" : " — provisional"}] [${ai.model}]`);
-      } else {
-        // The display name is the model's output verbatim — identity can be
-        // anything ("INV-2026-04", "BTC-USD", a name, a date), so any cleanup
-        // heuristic mangles someone's format. Fuzzy matching lives only in the
-        // invisible collision key (normaliseIdentity).
-        const newDisplayName = rawIdentity.trim();
-        const derived = normaliseIdentity(rawIdentity);
-        if (entity.identity === derived) {
-          // Same key — refresh the display name to this derivation and make
-          // sure the provisional flag is gone.
-          await setEntityIdentity(db, entity.id, derived, newDisplayName);
-          disposition = "derived";
-          if ((landed = await stampExtracted(row, fields)))
-            console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
-        } else {
-          const other = await getEntityByIdentity(db, row.board_id, derived);
-          if (other) {
-            // Another entity already holds this identity — merge (or split
-            // away from a multi-instance entity): re-parent this instance.
-            await reparentInto(row, other, newDisplayName, entity.id);
-            disposition = "merged";
-            landed = await stampExtracted(row, fields);
-          } else if ((await entityInstanceCount(db, entity.id)) <= 1) {
-            // Sole instance and nobody holds the derived key: establish a
-            // provisional entity, or rename an established one whose identity
-            // changed on re-extract — in place either way, so hearts and
-            // crate membership survive.
-            try {
-              await setEntityIdentity(db, entity.id, derived, newDisplayName);
-              disposition = "derived";
-              if ((landed = await stampExtracted(row, fields)))
-                console.log(`extracted #${row.id} identity="${derived}" [${ai.model}]`);
-            } catch (err) {
-              if (err.code !== "23505") throw err;
-              // Race: the identity appeared since the lookup — merge instead.
-              const winner = await getEntityByIdentity(db, row.board_id, derived);
-              if (!winner) throw err;
-              await reparentInto(row, winner, newDisplayName, entity.id);
-              disposition = "merged";
-              landed = await stampExtracted(row, fields);
-            }
-          } else {
-            // Split: this instance belongs to someone new; the rest of the
-            // entity stays as it is.
-            let targetId;
-            try {
-              targetId = await createEntity(db, row.board_id, { identity: derived, displayName: newDisplayName });
-            } catch (err) {
-              if (err.code !== "23505") throw err;
-              const winner = await getEntityByIdentity(db, row.board_id, derived);
-              if (!winner) throw err;
-              targetId = winner.id;
-            }
-            await reparentItem(db, row.id, targetId);
-            // The old entity keeps its other instances here — stamp it so
-            // delta polls see its aggregate change (mirrors reparentInstance).
-            await touchEntity(db, entity.id);
-            disposition = "split";
-            if ((landed = await stampExtracted(row, fields)))
-              console.log(`split: instance #${row.id} detached from entity #${entity.id} into #${targetId} ("${derived}")`);
-          }
+        for (const eid of oldIds) {
+          const e = await getEntity(db, eid);
+          if (e && !e.display_name) await markEntityProvisional(db, eid);
         }
+        if ((landed = await stampExtracted(row, fields)))
+          console.log(`extracted #${row.id} [no identity derived] [${ai.model}]`);
+      } else {
+        // Old entities this instance is the SOLE member of are safe to rename in
+        // place (hearts/crate survive the identity change) — resolveIdentity
+        // draws from this pool before minting a new entity.
+        const reusable = [];
+        for (const eid of oldIds) if ((await entityInstanceCount(db, eid)) <= 1) reusable.push(eid);
+        const resolvedIds = [];
+        for (const { key, display } of derived) {
+          const id = await resolveIdentity(row, key, display, reusable, resolvedIds);
+          if (!resolvedIds.includes(id)) resolvedIds.push(id);
+        }
+        await setItemEntities(db, row.id, resolvedIds);
+        // Drop the entities this instance abandoned if they emptied out (merge),
+        // stamp the survivors so delta polls see the aggregate change (split).
+        await reconcileEntities(db, [...oldIds, ...resolvedIds]);
+        const same = oldIds.length === resolvedIds.length && oldIds.every((x) => resolvedIds.includes(x));
+        disposition = same ? "derived" : "moved";
+        if ((landed = await stampExtracted(row, fields)))
+          console.log(`extracted #${row.id} identity=[${derived.map((d) => d.key).join(", ")}]${same ? "" : " (membership changed)"} [${ai.model}]`);
       }
     } else {
       const label = row.payload?.identity || `item ${row.id}`;
@@ -1584,13 +1611,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
     }
 
-    // A merge/split re-parent grows the TARGET entity's union with the tags
-    // the instance keeps through the move — the across-instances case the
-    // matcher exists for. The tag leg that follows usually re-evaluates the
-    // final entity anyway, but that leans on the leg landing (a failed or
-    // fence-discarded tag run would strand the grown union unexamined), so
-    // the move itself is the event. Dedupe makes the double evaluation free.
-    if (disposition === "merged" || disposition === "split") {
+    // A membership change re-homes the instance's tags into a different entity's
+    // union — the across-instances case the matcher exists for. The tag leg that
+    // follows usually re-evaluates the final entity anyway, but that leans on the
+    // leg landing (a failed or fence-discarded tag run would strand the grown
+    // union unexamined), so the move itself is the event. Dedupe makes the
+    // double evaluation free.
+    if (disposition === "moved") {
       await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
     }
 
@@ -1619,11 +1646,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // tagger sees it. A missing/ungenerable face leaves the tile; either way we
   // advance to the tag leg.
   async function processFaceOne(row) {
-    const label = row.payload?.identity || `entity ${row.entity_id}`;
+    const label = row.payload?.identity || `entity ${row.entity_ids?.[0]}`;
     const t0 = Date.now();
     try {
       const now = Date.now();
-      const entity = row.entity_id ? await getEntity(db, row.entity_id) : null;
+      const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
       const board = await getBoard(db, row.board_id);
       let rendered = false;
       let renderError = null;
@@ -1632,7 +1659,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // A face render failure isn't fatal — proceed to tag with the tile; the
         // sweep's self-heal retries the first render later.
         try { face = await generateFace(db, { galleryDir, thumbsDir }, entity, { id: row.id, payload: row.payload }, board, now); }
-        catch (e) { renderError = e.message; console.warn(`face render failed for #${row.entity_id} ${label}: ${e.message} (tile)`); }
+        catch (e) { renderError = e.message; console.warn(`face render failed for #${row.entity_ids?.[0]} ${label}: ${e.message} (tile)`); }
         rendered = !!face;
         await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : entity.face_at, board.mapping, now));
       }
@@ -1832,7 +1859,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
             // exists — this sweep has no items.status leg. Each attempt is its
             // own row (a transient retry after the backoff opens a fresh one).
             const jobId = await jobLogWrite(() => addJobLog(db, {
-              boardId: row.board_id, entityId: row.entity_id, itemId: row.id,
+              boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
               target: file?.original_name || file?.name || null, kind: "transcribe",
             }));
             const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));

@@ -14,8 +14,8 @@ import {
   getEntityByIdentity,
   setEntityIdentity,
   markEntityProvisional,
-  reparentItem,
-  reparentInstance,
+  setItemEntities,
+  reconcileEntities,
   entityInstanceCount,
   deleteEntityIfEmpty,
   deleteEntity,
@@ -71,6 +71,81 @@ test("buildFieldsPrompt: identity key absent when mapping.identity.from = 'raw'"
 test("buildFieldsPrompt: identity key absent when identity slot omitted", () => {
   const { schema } = buildFieldsPrompt({ fields: [{ key: "x", kind: "text", from: "ai" }] });
   assert.equal(schema.properties.identity, undefined);
+});
+
+// ─── classify mode (Slice 2): candidate list constrains the identity answer ──
+
+test("buildFieldsPrompt: candidates turn identity into a closed multi-select enum", () => {
+  const mapping = {
+    identity: {
+      from: "ai",
+      hint: "which Emma this resembles",
+      candidates: [
+        { value: "Emma Watson", hint: "British actress" },
+        { value: "Emma Roberts" },
+        { value: "Emma Stone" },
+      ],
+    },
+    fields: [],
+  };
+  const { schema, systemText } = buildFieldsPrompt(mapping);
+  const id = schema.properties.identity;
+  // why + values[] (not the scalar `value`), values constrained to the enum.
+  assert.deepEqual(id.required, ["why", "values"]);
+  assert.equal(id.properties.value, undefined);
+  assert.equal(id.properties.values.type, "array");
+  assert.deepEqual(id.properties.values.items.enum, ["Emma Watson", "Emma Roberts", "Emma Stone"]);
+  assert.equal(schema.required[0], "identity");
+  // The per-candidate hints ride in the prompt (the enum can't carry them).
+  assert.match(systemText, /- Emma Watson: British actress/);
+  // Cardinality is stated by the system, not left to the user's prose: multi +
+  // conservatism, and an explicit counter to a "closest single match" reading.
+  assert.match(systemText, /an item can match more than one/);
+  assert.match(systemText, /not only the closest single match/);
+});
+
+test("buildFieldsPrompt: empty candidates array stays open extraction (scalar value)", () => {
+  const { schema } = buildFieldsPrompt({ identity: { from: "ai", hint: "the name", candidates: [] }, fields: [] });
+  assert.deepEqual(schema.properties.identity.properties.value.type, ["string", "null"]);
+  assert.equal(schema.properties.identity.properties.values, undefined);
+});
+
+test("mapping PATCH: identity candidates validate, dedup by normalised key, and reject bad shapes", async () => {
+  const { json: board } = await createBoardReq("id-candidates");
+  // Valid: from:ai + hint + candidates.
+  assert.equal((await patchBoard(board.id, {
+    mapping: { identity: { from: "ai", hint: "which person", candidates: [
+      { value: "Emma Watson", hint: "British" }, { value: "Emma Roberts" },
+    ] }, fields: [] },
+  })).status, 200);
+
+  // Duplicate by normalised key ("Emma  Watson" → "emma watson") is rejected.
+  const dup = await patchBoard(board.id, {
+    mapping: { identity: { from: "ai", hint: "x", candidates: [
+      { value: "Emma Watson" }, { value: "emma  watson" },
+    ] }, fields: [] },
+  });
+  assert.equal(dup.status, 400);
+  assert.match(dup.json.error, /duplicate identity candidate/);
+
+  // A candidate without a value is rejected.
+  assert.equal((await patchBoard(board.id, {
+    mapping: { identity: { from: "ai", hint: "x", candidates: [{ hint: "no value" }] }, fields: [] },
+  })).status, 400);
+
+  // candidates require from:"ai".
+  assert.equal((await patchBoard(board.id, {
+    mapping: { identity: { from: "raw", candidates: [{ value: "x" }] }, fields: [] },
+  })).status, 400);
+});
+
+test("mapping PATCH: candidates persist on the board for extraction to read", async () => {
+  const { json: board } = await createBoardReq("id-candidates-persist");
+  await patchBoard(board.id, {
+    mapping: { identity: { from: "ai", hint: "which person", candidates: [{ value: "Ada Lovelace" }] }, fields: [] },
+  });
+  const { rows: [b] } = await db.query("SELECT mapping FROM boards WHERE id=$1", [board.id]);
+  assert.deepEqual(b.mapping.identity.candidates, [{ value: "Ada Lovelace" }]);
 });
 
 // ─── integration ─────────────────────────────────────────────────────────────
@@ -175,9 +250,9 @@ test("setEntityIdentity: throws 23505 on collision with an existing identity", a
   assert.equal(caught.code, "23505");
 });
 
-// ── merge = re-parent: the instance keeps its fields and tags ────────────────
+// ── merge = membership change: the instance keeps its fields and tags ────────
 
-test("re-parent moves an instance (data intact) and the emptied entity is deleted", async () => {
+test("setItemEntities moves an instance (data intact); the emptied entity is deleted", async () => {
   const boardId = await seedBoard(db, "reparent");
   const winner = await createEntity(db, boardId, { identity: "jordan okafor", displayName: "Jordan Okafor" });
   await seedInstance(boardId, winner, { name: "a.pdf", original_name: "resume_v1.pdf", kind: "pdf" });
@@ -186,18 +261,41 @@ test("re-parent moves an instance (data intact) and the emptied entity is delete
   const instId = await seedInstance(boardId, provisional, { name: "b.pdf", original_name: "resume_v2.pdf", kind: "pdf" });
   await db.query("UPDATE items SET tags='[\"kind/b\"]'::jsonb, payload = jsonb_set(payload,'{fields}','{\"email\":{\"v\":\"j@x.com\",\"why\":\"header\"}}'::jsonb) WHERE id=$1", [instId]);
 
-  await reparentItem(db, instId, winner);
+  await setItemEntities(db, instId, [winner]);
   assert.equal(await deleteEntityIfEmpty(db, provisional), true);
   assert.equal(await entityInstanceCount(db, winner), 2);
 
   // The moved instance kept everything it had earned.
-  const { rows: [row] } = await db.query("SELECT tags, payload, entity_id FROM items WHERE id=$1", [instId]);
-  assert.equal(row.entity_id, winner);
+  const { rows: [row] } = await db.query("SELECT tags, payload, entity_ids FROM items WHERE id=$1", [instId]);
+  assert.deepEqual(row.entity_ids, [winner]);
   assert.deepEqual(row.tags, ["kind/b"]);
   assert.equal(row.payload.fields.email.v, "j@x.com");
 
   // Not-empty entities survive deleteEntityIfEmpty.
   assert.equal(await deleteEntityIfEmpty(db, winner), false);
+});
+
+test("setItemEntities can place one instance under several entities (classify multi-membership)", async () => {
+  const boardId = await seedBoard(db, "multi-member");
+  const watson = await createEntity(db, boardId, { identity: "emma watson", displayName: "Emma Watson" });
+  const roberts = await createEntity(db, boardId, { identity: "emma roberts", displayName: "Emma Roberts" });
+  const provisional = await createEntity(db, boardId, { identity: "photo.jpg" });
+  const instId = await seedInstance(boardId, provisional, { name: "photo.jpg", kind: "image", w: 4, h: 3 });
+
+  // The one photo resolves to both known people.
+  await setItemEntities(db, instId, [watson, roberts]);
+  await reconcileEntities(db, [provisional, watson, roberts]);
+
+  assert.equal(await getEntity(db, provisional), null, "the emptied provisional entity is gone");
+  assert.equal(await entityInstanceCount(db, watson), 1);
+  assert.equal(await entityInstanceCount(db, roberts), 1);
+
+  // The gallery lists the same instance under BOTH entities.
+  const list = await req(base, "GET", `/api/items?board=${boardId}`, { sid: admin.sid });
+  const w = list.json.find((e) => e.id === watson);
+  const r = list.json.find((e) => e.id === roberts);
+  assert.deepEqual(w.instances.map((i) => i.id), [instId]);
+  assert.deepEqual(r.instances.map((i) => i.id), [instId]);
 });
 
 test("the merged entity lists both instances with per-instance tags", async () => {
@@ -229,7 +327,7 @@ test("instance remove route: removes one instance, entity and siblings stay", as
   assert.equal(r.status, 200);
 
   assert.equal(await entityInstanceCount(db, eid), 1);
-  const { rows } = await db.query("SELECT id FROM items WHERE entity_id=$1", [eid]);
+  const { rows } = await db.query("SELECT id FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
   assert.equal(rows[0].id, keep);
 });
 
@@ -250,94 +348,62 @@ test("entity delete removes all instances and reports their files", async () => 
 
   const result = await deleteEntity(db, eid);
   assert.deepEqual(result.files.map((f) => f.name).sort(), ["f1.png", "f2.png"]);
-  const { rows } = await db.query("SELECT 1 FROM items WHERE entity_id=$1", [eid]);
+  const { rows } = await db.query("SELECT 1 FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
   assert.equal(rows.length, 0);
 
   assert.equal(await deleteEntity(db, eid), null, "already gone → null");
 });
 
-// ── reparentInstance: the transactional merge/split move ─────────────────────
+test("entity delete keeps an instance shared with another entity (orphan-only cleanup)", async () => {
+  const boardId = await seedBoard(db, "entity-delete-shared");
+  const doomed = await createEntity(db, boardId, { identity: "doomed", displayName: "Doomed" });
+  const keeper = await createEntity(db, boardId, { identity: "keeper", displayName: "Keeper" });
+  const soleId = await seedInstance(boardId, doomed, { name: "sole.png", kind: "image" });
+  const sharedId = await seedInstance(boardId, doomed, { name: "shared.png", kind: "image" });
+  await setItemEntities(db, sharedId, [doomed, keeper]); // shared belongs to both
 
-test("reparentInstance: merge empties the old entity, deletes it, and wins the display name", async () => {
-  const boardId = await seedBoard(db, "reparent-tx-merge");
-  const winner = await createEntity(db, boardId, { identity: "amara diallo", displayName: "amara diallo" });
+  const result = await deleteEntity(db, doomed);
+  // Only the sole-member instance is orphaned and reported for cleanup.
+  assert.deepEqual(result.files.map((f) => f.name), ["sole.png"]);
+  const { rows: gone } = await db.query("SELECT 1 FROM items WHERE id=$1", [soleId]);
+  assert.equal(gone.length, 0, "the orphaned instance is deleted");
+  // The shared instance survives, now solely under keeper.
+  const { rows: [row] } = await db.query("SELECT entity_ids FROM items WHERE id=$1", [sharedId]);
+  assert.deepEqual(row.entity_ids, [keeper]);
+  assert.equal(await entityInstanceCount(db, keeper), 1);
+});
+
+// ── membership reconcile: merge empties, split survives ──────────────────────
+// (The old transactional reparentInstance and its FK-cascade lock test are gone
+// with the FK: an item now carries entity_ids, so merge/split are just "the
+// array changed" followed by reconcileEntities tidying emptied entities.)
+
+test("reconcileEntities: merge deletes the entity this instance emptied", async () => {
+  const boardId = await seedBoard(db, "reconcile-merge");
+  const winner = await createEntity(db, boardId, { identity: "amara diallo", displayName: "Amara Diallo" });
   await seedInstance(boardId, winner, { name: "w.pdf", kind: "pdf" });
   const provisional = await createEntity(db, boardId, { identity: "upload9.pdf" });
   const instId = await seedInstance(boardId, provisional, { name: "n.pdf", kind: "pdf" });
 
-  const merged = await reparentInstance(db, instId, await getEntity(db, winner), "Amara Diallo", provisional);
-  assert.equal(merged, true, "old entity emptied → merge");
-  assert.equal(await getEntity(db, provisional), null);
-  assert.equal((await getEntity(db, winner)).display_name, "Amara Diallo", "latest derivation wins");
-  const { rows: [row] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [instId]);
-  assert.equal(row.entity_id, winner);
+  await setItemEntities(db, instId, [winner]);              // instance leaves provisional for winner
+  await reconcileEntities(db, [provisional, winner]);
+  assert.equal(await getEntity(db, provisional), null, "emptied provisional deleted");
+  assert.ok(await getEntity(db, winner), "winner survives");
+  assert.equal(await entityInstanceCount(db, winner), 2);
 });
 
-test("reparentInstance: split leaves the old entity standing and reports false", async () => {
-  const boardId = await seedBoard(db, "reparent-tx-split");
+test("reconcileEntities: split leaves the old entity standing", async () => {
+  const boardId = await seedBoard(db, "reconcile-split");
   const old = await createEntity(db, boardId, { identity: "pile", displayName: "Pile" });
   await seedInstance(boardId, old, { name: "s1.png", kind: "image" });
   const instId = await seedInstance(boardId, old, { name: "s2.png", kind: "image" });
   const target = await createEntity(db, boardId, { identity: "solo", displayName: "Solo" });
 
-  const merged = await reparentInstance(db, instId, await getEntity(db, target), "Solo", old);
-  assert.equal(merged, false, "old entity kept an instance → split");
-  assert.ok(await getEntity(db, old));
+  await setItemEntities(db, instId, [target]);             // one instance detaches to target
+  await reconcileEntities(db, [old, target]);
+  assert.ok(await getEntity(db, old), "old kept its other instance → survives");
+  assert.equal(await entityInstanceCount(db, old), 1);
   assert.equal(await entityInstanceCount(db, target), 1);
-});
-
-test("reparentInstance: rolls back whole when the re-parent fails", async () => {
-  const boardId = await seedBoard(db, "reparent-tx-rollback");
-  const old = await createEntity(db, boardId, { identity: "keeper", displayName: "Keeper" });
-  const instId = await seedInstance(boardId, old, { name: "k.png", kind: "image" });
-
-  await assert.rejects(
-    reparentInstance(db, instId, { id: 999999999, identity: "ghost", display_name: "Ghost" }, "Ghost", old),
-    (e) => e.code === "23503"
-  );
-  const { rows: [row] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [instId]);
-  assert.equal(row.entity_id, old, "instance untouched after rollback");
-  assert.ok(await getEntity(db, old), "old entity untouched after rollback");
-});
-
-// ── deleteEntity's lock-first vs a concurrent merge-in ───────────────────────
-
-test("deleteEntity's row lock blocks a concurrent merge-in, which fails cleanly after the delete", async () => {
-  const boardId = await seedBoard(db, "delete-lock");
-  const target = await createEntity(db, boardId, { identity: "locked", displayName: "Locked" });
-  await seedInstance(boardId, target, { name: "lk.png", kind: "image" });
-  const other = await createEntity(db, boardId, { identity: "mover", displayName: "Mover" });
-  const instId = await seedInstance(boardId, other, { name: "mv.png", kind: "image" });
-
-  // Hold the same lock deleteEntity takes first; the merge-in's FOR KEY SHARE
-  // must queue behind it and then fail its FK check — the retry-heal path —
-  // instead of slipping in and being eaten by the cascade.
-  const client = await db.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("SELECT 1 FROM entities WHERE id=$1 FOR UPDATE", [target]);
-
-    // Rejection captured as a value so the FK error can't surface as an
-    // unhandled rejection while we're still awaiting the COMMIT.
-    let settled = false;
-    const move = reparentItem(db, instId, target).then(
-      () => { settled = true; return null; },
-      (e) => { settled = true; return e; }
-    );
-    await new Promise((r) => setTimeout(r, 150));
-    assert.equal(settled, false, "reparent must block behind the FOR UPDATE lock");
-
-    await client.query("DELETE FROM entities WHERE id=$1", [target]);
-    await client.query("COMMIT");
-    const err = await move;
-    assert.equal(err?.code, "23503", "clean FK failure, not a cascade-eaten row");
-  } finally {
-    await client.query("ROLLBACK").catch(() => {});
-    client.release();
-  }
-
-  const { rows: [row] } = await db.query("SELECT entity_id FROM items WHERE id=$1", [instId]);
-  assert.equal(row.entity_id, other, "the instance survived on its old entity");
 });
 
 // ── per-instance reasoning ───────────────────────────────────────────────────
@@ -367,7 +433,7 @@ test("reprocess re-queues every instance of the entity", async () => {
 
   const r = await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid });
   assert.equal(r.status, 200);
-  const { rows } = await db.query("SELECT status FROM items WHERE entity_id=$1", [eid]);
+  const { rows } = await db.query("SELECT status FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
   assert.deepEqual(rows.map((x) => x.status), ["pending", "pending"]);
   assert.ok(await reprocessEntity(db, eid));
 });
@@ -381,7 +447,7 @@ test("reprocess restarts mapped instances at the extract leg, plain ones at tagg
   await seedInstance(boardId, eid, { name: "m2.png", kind: "image" });
 
   await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid });
-  const { rows } = await db.query("SELECT payload->'files'->0->>'name' AS name, status FROM items WHERE entity_id=$1 ORDER BY id", [eid]);
+  const { rows } = await db.query("SELECT payload->'files'->0->>'name' AS name, status FROM items WHERE entity_ids @> ARRAY[$1]::bigint[] ORDER BY id", [eid]);
   assert.deepEqual(rows, [
     { name: "m1.png", status: "pending_extract" },
     { name: "m2.png", status: "pending" },

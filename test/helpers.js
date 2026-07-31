@@ -81,6 +81,27 @@ export async function startServer() {
   return { base, db, galleryDir, thumbsDir, backupsDir, pluginsDir, close };
 }
 
+// Historical migrations (0005 hoist, 0007 re-key, 0024 alert baseline) predate
+// the entity_ids restructure (migration 0025) and join items through the old
+// scalar `entity_id` column, which 0025 drops. To replay one against the HEAD
+// schema, resurrect that column from entity_ids[0] for the duration of the call,
+// then fold changes back into entity_ids and drop it again. Assumes the rows in
+// play are single-membership (true for the historical data these migrations
+// touch) — the fold-back collapses to entity_ids[0], so don't wrap work that
+// created multi-membership rows.
+export async function withLegacyEntityId(db, fn) {
+  await db.query("ALTER TABLE items ADD COLUMN IF NOT EXISTS entity_id BIGINT");
+  await db.query("UPDATE items SET entity_id = entity_ids[1]");
+  try {
+    return await fn();
+  } finally {
+    await db.query(
+      "UPDATE items SET entity_ids = CASE WHEN entity_id IS NULL THEN '{}'::bigint[] ELSE ARRAY[entity_id] END"
+    );
+    await db.query("ALTER TABLE items DROP COLUMN IF EXISTS entity_id");
+  }
+}
+
 // --- seeding (operates on the app's own pool) ---
 
 const FACETS = [{ key: "kind", label: "Kind", single: true, values: ["a", "b"] }];

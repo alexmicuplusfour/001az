@@ -4,7 +4,7 @@
 // lowercase symbol, provenance is the provider name.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedUser, req, installConnectors } from "./helpers.js";
+import { startServer, adminSession, seedUser, req, installConnectors, withLegacyEntityId } from "./helpers.js";
 import { createEntity, setSetting, getSetting } from "../server/db.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
@@ -502,21 +502,21 @@ test("migration: coingecko boards + entities re-key to crypto/symbol", async () 
   await db.query("UPDATE boards SET mapping=$1 WHERE id=$2", [JSON.stringify(cgMapping), board.id]);
   const eid = await createEntity(db, board.id, { identity: "litecoin", symbol: "LTC", displayName: "Litecoin" });
   await db.query(
-    "INSERT INTO items (board_id, entity_id, payload, status, created_at, updated_at) VALUES ($1,$2,$3,'tagged',$4,$4)",
+    "INSERT INTO items (board_id, entity_ids, payload, status, created_at, updated_at) VALUES ($1,ARRAY[$2]::bigint[],$3,'tagged',$4,$4)",
     [board.id, eid, JSON.stringify({ identity: "litecoin", files: [], fields: {}, mapping: cgMapping }), Date.now()]
   );
 
-  await coingeckoToCrypto(db); // re-applies the crypto migration over the seeded rows
+  await withLegacyEntityId(db, () => coingeckoToCrypto(db)); // re-applies the crypto migration over the seeded rows
 
   const { rows: [b] } = await db.query("SELECT mapping FROM boards WHERE id=$1", [board.id]);
   assert.equal(b.mapping.input.connector, "crypto"); // board mapping renamed
   const { rows: [e] } = await db.query("SELECT identity FROM entities WHERE id=$1", [eid]);
   assert.equal(e.identity, "ltc"); // identity re-keyed to the lowercase symbol
-  const { rows: [i] } = await db.query("SELECT payload FROM items WHERE entity_id=$1", [eid]);
+  const { rows: [i] } = await db.query("SELECT payload FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
   assert.deepEqual(i.payload.source, { provider: "coingecko", id: "litecoin" }); // handle captured
 
   // Idempotent: a second pass changes nothing.
-  await coingeckoToCrypto(db);
+  await withLegacyEntityId(db, () => coingeckoToCrypto(db));
   const { rows: [e2] } = await db.query("SELECT identity FROM entities WHERE id=$1", [eid]);
   assert.equal(e2.identity, "ltc");
 });

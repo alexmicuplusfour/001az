@@ -10,6 +10,14 @@ import { projectEntry } from "./media/index.js";
 // comparison silently breaks.
 pg.types.setTypeParser(20, Number);
 
+// BIGINT[] (int8 array, OID 1016 — e.g. items.entity_ids): the scalar parser
+// above doesn't reach array elements, so they'd arrive as strings and break
+// numeric compares against row ids. Wrap the default array parser to Number
+// each element (all row ids, far below 2^53); NULLs and the empty array pass
+// through untouched.
+const parseBigintArray = pg.types.getTypeParser(1016);
+pg.types.setTypeParser(1016, (val) => parseBigintArray(val).map((v) => (v == null ? v : Number(v))));
+
 // Session ids and invite tokens are bearer credentials: the raw value goes to
 // the client (cookie / login URL) but only its SHA-256 is stored, so a DB read
 // can't be replayed as a login. Raw tokens are 48 hex chars, digests 64 — the
@@ -116,7 +124,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
   let tail = "";
   if (since != null) {
     params.push(since);
-    where.push(`(e.updated_at > $3 OR e.id IN (SELECT entity_id FROM items WHERE board_id = $2 AND updated_at > $3))`);
+    where.push(`(e.updated_at > $3 OR e.id IN (SELECT unnest(entity_ids) FROM items WHERE board_id = $2 AND updated_at > $3))`);
   } else {
     if (after != null) {
       params.push(after.createdAt, after.id);
@@ -147,10 +155,10 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
   const partial = limit != null || after != null || since != null;
   const { rows: insts } = await db.query(
     partial
-      ? `SELECT id, entity_id, status, tags, undecided, payload FROM items
-         WHERE entity_id = ANY($1::bigint[])
+      ? `SELECT id, entity_ids, status, tags, undecided, payload FROM items
+         WHERE entity_ids && $1::bigint[]
          ORDER BY created_at ASC, id ASC`
-      : `SELECT id, entity_id, status, tags, undecided, payload FROM items
+      : `SELECT id, entity_ids, status, tags, undecided, payload FROM items
          WHERE ($1::text IS NULL OR board_id = $1)
          ORDER BY created_at ASC, id ASC`,
     [partial ? ents.map((e) => e.id) : boardId]
@@ -159,9 +167,18 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
   // Raw file entries by instance id — kept aside so the face's media bag can be
   // projected at assembly without shipping metadata for every instance.
   const entryByInstance = new Map();
+  // An instance can belong to several entities (classify mode). Push it into
+  // every one of its entities that this page/delta covers; a partial page only
+  // wants the buckets it asked for (the && query can return an instance shared
+  // with an off-page entity).
+  const wanted = partial ? new Set(ents.map((e) => e.id)) : null;
   for (const r of insts) {
-    if (!byEntity.has(r.entity_id)) byEntity.set(r.entity_id, []);
-    byEntity.get(r.entity_id).push(instanceEntry(r));
+    const entry = instanceEntry(r);
+    for (const eid of r.entity_ids || []) {
+      if (wanted && !wanted.has(eid)) continue;
+      if (!byEntity.has(eid)) byEntity.set(eid, []);
+      byEntity.get(eid).push(entry);
+    }
     const file = r.payload.files?.[0];
     if (file) entryByInstance.set(r.id, file);
   }
@@ -252,9 +269,9 @@ export async function listEntityIds(db, boardId) {
 // to an entity (createEntity first, then insert the instance under it).
 export async function insertItem(db, boardId, payload, status = "pending", entityId = null) {
   const { rows } = await db.query(
-    `INSERT INTO items (payload, status, board_id, entity_id, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
-    [JSON.stringify(payload || {}), status, boardId, entityId, Date.now()]
+    `INSERT INTO items (payload, status, board_id, entity_ids, created_at, updated_at)
+     VALUES ($1, $2, $3, $4::bigint[], $5, $5) RETURNING id`,
+    [JSON.stringify(payload || {}), status, boardId, entityId == null ? [] : [entityId], Date.now()]
   );
   return rows[0].id;
 }
@@ -1472,43 +1489,38 @@ export async function touchEntity(db, id) {
   await db.query("UPDATE entities SET updated_at=$1 WHERE id=$2", [Date.now(), id]);
 }
 
-// Move an instance under another entity (the merge/split mechanism — the
-// instance keeps its file, fields and tags).
-export async function reparentItem(db, itemId, entityId) {
-  await db.query("UPDATE items SET entity_id=$1, updated_at=$2 WHERE id=$3", [entityId, Date.now(), itemId]);
+// Set an instance's entity membership — the ordered set of entities it belongs
+// to (entity_ids[0] is canonical for logging/faces/search). Replaces the old
+// single-parent reparentItem: merge and split are no longer special moves, just
+// "the array changed". Length 1 is the extract-mode norm; length N is classify.
+export async function setItemEntities(db, itemId, entityIds) {
+  await db.query("UPDATE items SET entity_ids=$1::bigint[], updated_at=$2 WHERE id=$3", [entityIds, Date.now(), itemId]);
 }
 
 export async function entityInstanceCount(db, entityId) {
-  const { rows } = await db.query("SELECT COUNT(*) AS c FROM items WHERE entity_id=$1", [entityId]);
+  const { rows } = await db.query("SELECT COUNT(*) AS c FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [entityId]);
   return Number(rows[0].c);
 }
 
-// Drop an entity that lost its last instance (post merge/split re-parent).
+// Drop an entity that lost its last instance (post membership change).
 // Returns true when it was actually deleted.
 export async function deleteEntityIfEmpty(db, entityId) {
   const result = await db.query(
-    "DELETE FROM entities WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM items WHERE entity_id=$1)",
+    "DELETE FROM entities WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM items WHERE entity_ids @> ARRAY[$1]::bigint[])",
     [entityId]
   );
   return result.rowCount > 0;
 }
 
-// Move an instance under another entity and drop the old entity if it emptied
-// out — one transaction, so a crash between the statements can't leave a ghost
-// empty entity behind, and the emptiness check observes the re-parent it
-// follows. The latest derivation wins the target's display name. Returns true
-// when the old entity was deleted (merge emptied it) — false means it kept
-// instances (split).
-export async function reparentInstance(db, itemId, target, displayName, oldEntityId) {
-  return withTx(db, async (client) => {
-    await reparentItem(client, itemId, target.id);
-    if (displayName !== target.display_name) await setEntityIdentity(client, target.id, target.identity, displayName);
-    const deleted = await deleteEntityIfEmpty(client, oldEntityId);
-    // Split: the old entity survives minus an instance — stamp it so delta
-    // polls pick up its new aggregate status/tags/face.
-    if (!deleted) await touchEntity(client, oldEntityId);
-    return deleted;
-  });
+// After a membership change, tidy every entity that gained or lost the instance:
+// delete the ones that emptied out, stamp the survivors so delta polls repaint
+// their aggregate status/tags/face. Idempotent — safe to pass the union of the
+// old and new membership sets (with dupes).
+export async function reconcileEntities(db, entityIds) {
+  for (const id of new Set(entityIds)) {
+    if (id == null) continue;
+    if (!(await deleteEntityIfEmpty(db, id))) await touchEntity(db, id);
+  }
 }
 
 // Delete an entity and (via FK cascade) all its instances. Returns the
@@ -1523,23 +1535,38 @@ export async function deleteEntity(db, id) {
   return withTx(db, async (client) => {
     const locked = await client.query("SELECT 1 FROM entities WHERE id=$1 FOR UPDATE", [id]);
     if (!locked.rows.length) return null;
-    const { rows: insts } = await client.query("SELECT payload FROM items WHERE entity_id=$1", [id]);
+    // Instances this entity is the SOLE home of are orphaned by the delete —
+    // remove them and hand back their files for store cleanup. Instances shared
+    // with another entity survive; just drop this id from their arrays. (There's
+    // no FK cascade to lean on anymore — an item can belong to several entities,
+    // so the delete must not take shared instances with it.)
+    const { rows: orphans } = await client.query(
+      "SELECT id, payload FROM items WHERE entity_ids @> ARRAY[$1]::bigint[] AND cardinality(entity_ids) = 1",
+      [id]
+    );
+    if (orphans.length)
+      await client.query("DELETE FROM items WHERE id = ANY($1::bigint[])", [orphans.map((o) => o.id)]);
+    await client.query(
+      "UPDATE items SET entity_ids = array_remove(entity_ids, $1), updated_at=$2 WHERE entity_ids @> ARRAY[$1]::bigint[]",
+      [id, Date.now()]
+    );
     const { rows } = await client.query("DELETE FROM entities WHERE id=$1 RETURNING board_id", [id]);
     if (!rows.length) return null;
-    return { board_id: rows[0].board_id, files: insts.flatMap((r) => r.payload?.files || []) };
+    return { board_id: rows[0].board_id, files: orphans.flatMap((r) => r.payload?.files || []) };
   });
 }
 
-// Delete one instance row. Returns { payload, entity_id, board_id } for file
-// cleanup and last-instance checks, or null when it doesn't exist. The parent
-// entity's stamp bumps in the same statement — its aggregate status/tags/face
-// just changed — so delta polls see it (a no-op when the delete empties the
-// entity: the row goes away right after and the ids list covers that).
+// Delete one instance row. Returns { payload, entity_ids, board_id } for file
+// cleanup and last-instance checks, or null when it doesn't exist. Every entity
+// the instance belonged to is stamped in the same statement — each one's
+// aggregate status/tags/face just changed — so delta polls see them (a no-op
+// for an entity the delete empties: the row goes away right after and the ids
+// list covers that).
 export async function deleteInstance(db, id) {
   const { rows } = await db.query(
-    `WITH del AS (DELETE FROM items WHERE id=$1 RETURNING payload, entity_id, board_id),
-          touch AS (UPDATE entities SET updated_at=$2 WHERE id = (SELECT entity_id FROM del))
-     SELECT payload, entity_id, board_id FROM del`,
+    `WITH del AS (DELETE FROM items WHERE id=$1 RETURNING payload, entity_ids, board_id),
+          touch AS (UPDATE entities SET updated_at=$2 WHERE id IN (SELECT unnest(entity_ids) FROM del))
+     SELECT payload, entity_ids, board_id FROM del`,
     [id, Date.now()]
   );
   return rows[0] || null;
@@ -1557,7 +1584,7 @@ export async function dueLiveEntities(db, now, limit = 20) {
             i.id AS i_id, i.payload AS i_payload,
             b.id AS b_id, b.mapping AS b_mapping, b.retag_on_refresh, b.auto_tag
      FROM entities e
-     JOIN items i ON i.entity_id = e.id AND i.payload ? 'source'
+     JOIN items i ON i.entity_ids @> ARRAY[e.id]::bigint[] AND i.payload ? 'source'
      JOIN boards b ON b.id = e.board_id
      WHERE e.refresh_at IS NOT NULL AND e.refresh_at <= $1
      ORDER BY e.refresh_at ASC
@@ -1858,7 +1885,7 @@ export async function reprocessEntity(db, entityId) {
            ELSE 'pending' END,
          tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE,
          attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE entity_id=$2`,
+     WHERE entity_ids @> ARRAY[$2]::bigint[]`,
     [Date.now(), entityId, current]
   );
   return result.rowCount > 0;
@@ -1909,7 +1936,7 @@ export async function setItemEmbedError(db, id, message) {
 // (embed_error) are skipped until they get fresh text.
 export async function itemsNeedingEmbedding(db, model, limit) {
   const { rows } = await db.query(
-    `SELECT id, board_id, entity_id, tags, tag_reasoning, payload FROM items
+    `SELECT id, board_id, entity_ids, tags, tag_reasoning, payload FROM items
      WHERE embed_error IS NULL
        AND (embedding IS NULL OR embedding_model IS DISTINCT FROM $1)
        AND (status='tagged'
@@ -1929,7 +1956,7 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 // skipped so one repeatedly-failing clip doesn't head-of-line-block the lane.
 export async function oneAudioNeedingTranscription(db, excludeIds = []) {
   const { rows } = await db.query(
-    `SELECT id, board_id, entity_id, payload FROM items
+    `SELECT id, board_id, entity_ids, payload FROM items
      WHERE payload->'files'->0->>'kind'='audio'
        AND NOT (payload ? 'transcript')
        AND NOT (payload ? 'transcript_error')
@@ -1945,7 +1972,7 @@ export async function oneAudioNeedingTranscription(db, excludeIds = []) {
 // entity_id rides along so search results can speak in card (entity) ids.
 export async function boardEmbeddings(db, boardId, model) {
   const { rows } = await db.query(
-    "SELECT id, entity_id, embedding FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
+    "SELECT id, entity_ids[1] AS entity_id, embedding FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
     [boardId, model]
   );
   return rows;
@@ -2193,19 +2220,19 @@ export async function entityForAlerts(db, entityId) {
   const { rows: [ent] } = await db.query(
     `SELECT e.display_name, e.identity,
        (SELECT i.payload->'files'->0->>'original_name' FROM items i
-         WHERE i.entity_id = e.id ORDER BY i.created_at ASC, i.id ASC LIMIT 1) AS first_file
+         WHERE i.entity_ids @> ARRAY[e.id]::bigint[] ORDER BY i.created_at ASC, i.id ASC LIMIT 1) AS first_file
      FROM entities e WHERE e.id=$1`,
     [entityId]
   );
   if (!ent) return null;
-  const { rows: insts } = await db.query("SELECT tags FROM items WHERE entity_id=$1", [entityId]);
+  const { rows: insts } = await db.query("SELECT tags FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [entityId]);
   const tagSet = new Set();
   for (const r of insts) for (const t of r.tags || []) tagSet.add(t);
   return { tagSet, label: ent.display_name || ent.first_file || ent.identity || null };
 }
 
 export async function getItemEntity(db, id) {
-  const { rows } = await db.query("SELECT board_id, entity_id FROM items WHERE id=$1", [id]);
+  const { rows } = await db.query("SELECT board_id, entity_ids FROM items WHERE id=$1", [id]);
   return rows[0] || null;
 }
 
@@ -2234,7 +2261,7 @@ export const ALERT_BASELINE_FIRING = 0;
 // entityForAlerts union, board-wide in one read.
 export async function boardEntityTagUnions(db, boardId) {
   const { rows } = await db.query(
-    "SELECT entity_id, tags FROM items WHERE board_id=$1 AND entity_id IS NOT NULL",
+    "SELECT unnest(entity_ids) AS entity_id, tags FROM items WHERE board_id=$1 AND cardinality(entity_ids) > 0",
     [boardId]
   );
   const unions = new Map();
@@ -2367,7 +2394,7 @@ export async function stampFiringWebhook(db, id, status, error, retryAt = null) 
 export async function firingMatches(db, firingId) {
   const { rows } = await db.query(
     `SELECT m.entity_id, m.item_id, m.label, m.matched_at,
-       COALESCE(e.id, i.entity_id) AS live_entity_id
+       COALESCE(e.id, i.entity_ids[1]) AS live_entity_id
      FROM alert_matches m
        LEFT JOIN entities e ON e.id = m.entity_id
        LEFT JOIN items i ON i.id = m.item_id

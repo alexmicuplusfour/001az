@@ -12,7 +12,8 @@ import {
   listItems,
   insertItem,
   deleteInstance,
-  reparentInstance,
+  setItemEntities,
+  reconcileEntities,
   setEntityIdentity,
   toggleFavorite,
   createCrate,
@@ -108,8 +109,8 @@ test("losing an instance surfaces the parent: delete and split re-parent", async
   // surfaces via the moved row's own stamp).
   const thirdId = await insertItem(db, boardId, { identity: eA.filename, files: [], fields: {} }, "tagged", eA.id);
   await rewind(boardId);
-  const deleted = await reparentInstance(db, thirdId, { id: eB.id, identity: eB.filename, display_name: null }, null, eA.id);
-  assert.equal(deleted, false, "old entity kept an instance");
+  await setItemEntities(db, thirdId, [eB.id]);      // move the third instance under eB
+  await reconcileEntities(db, [eA.id, eB.id]);       // eA keeps its own instance → survives (split)
   delta = await listItems(db, admin.id, boardId, { since: SINCE });
   assert.deepEqual(ids(delta.items).sort(), [eA.id, eB.id].sort());
 });

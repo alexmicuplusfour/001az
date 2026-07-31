@@ -1,7 +1,7 @@
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
-import { loadProviders, byName, syncModelPicker } from './board-modal.js';
+import { loadProviders, byName, syncModelPicker, switchRow } from './board-modal.js';
 import { sectionHeadingEl } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date"];
@@ -29,6 +29,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   let fields = (mapping?.fields || []).map((f) => ({ ...f }));
   let identityFrom = mapping?.identity?.from || "raw";
   let identityHint = mapping?.identity?.hint || "";
+  // Classify mode (Slice 3): a declared list of allowed answers. Its presence is
+  // the mode; `classifyOn` just drives the reveal so an on-with-empty state is
+  // distinguishable (and blocked at save) from off.
+  let candidates = (mapping?.identity?.candidates || []).map((c) => ({ ...c }));
+  let classifyOn = candidates.length > 0;
   let inputConnector = mapping?.input?.connector || null; // set when a connector template is loaded
   let connectorCatalog = null;   // the active connector's full field set (manifest.fields)
   let fileFieldCatalog = null;   // file-metadata field catalog (server/media) — file boards only
@@ -167,15 +172,90 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     idHint.addEventListener("input", () => { identityHint = idHint.value; });
     idHintWrap.appendChild(idHint);
 
+    // Classify mode: a "Match to a list" toggle that reveals a flat editor of
+    // allowed options (value + optional per-option hint). Off = open extraction,
+    // exactly as before. Reuses the tagging value-editor's fe-* styling so it
+    // reads the same as the Tagging tab. Shown only under AI instruction.
+    const classifyWrap = document.createElement("div");
+    classifyWrap.style.cssText = "margin-top:8px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
+
+    const candidatesBox = document.createElement("div");
+    candidatesBox.className = "fe-root";
+    candidatesBox.style.cssText = "margin-top:6px;display:" + (classifyOn ? "block" : "none") + ";";
+
+    function renderCandidates() {
+      candidatesBox.replaceChildren();
+      candidates.forEach((c, i) => {
+        const rowEl = document.createElement("div");
+        rowEl.className = "fe-val-row";
+        rowEl.style.cssText = "gap:6px;";
+        const valIn = document.createElement("input");
+        valIn.placeholder = "option";
+        valIn.value = c.value || "";
+        valIn.disabled = !isAdmin;
+        valIn.style.cssText = "flex:0 0 38%;";
+        valIn.addEventListener("input", () => { c.value = valIn.value; });
+        const hintIn = document.createElement("input");
+        hintIn.placeholder = "hint (optional) — helps the AI tell options apart";
+        hintIn.value = c.hint || "";
+        hintIn.disabled = !isAdmin;
+        hintIn.style.cssText = "flex:1;";
+        hintIn.addEventListener("input", () => { c.hint = hintIn.value; });
+        rowEl.append(valIn, hintIn);
+        if (isAdmin) {
+          const rm = document.createElement("button");
+          rm.className = "fe-rm";
+          rm.type = "button";
+          rm.textContent = "×";
+          rm.addEventListener("click", () => { candidates.splice(i, 1); markDirty(); renderCandidates(); });
+          rowEl.appendChild(rm);
+        }
+        candidatesBox.appendChild(rowEl);
+      });
+      if (isAdmin) {
+        const add = document.createElement("button");
+        add.className = "fe-add-val";
+        add.type = "button";
+        add.textContent = "+ option";
+        add.addEventListener("click", () => {
+          candidates.push({ value: "", hint: "" });
+          markDirty();
+          renderCandidates();
+          candidatesBox.querySelectorAll(".fe-val-row input").item((candidates.length - 1) * 2)?.focus();
+        });
+        candidatesBox.appendChild(add);
+      }
+    }
+    renderCandidates();
+
+    const classifyToggle = switchRow(
+      "Match to a list",
+      "constrain the answer to options you define — leave off to extract any value",
+      classifyOn,
+      (on) => {
+        classifyOn = on;
+        markDirty();
+        candidatesBox.style.display = on ? "block" : "none";
+        if (on && !candidates.length) { candidates.push({ value: "", hint: "" }); renderCandidates(); }
+      },
+      { small: true }
+    );
+    // Read-only pane: the switch has no disabled state of its own, so freeze it
+    // to match the disabled inputs/selects elsewhere.
+    if (!isAdmin) { classifyToggle.style.pointerEvents = "none"; classifyToggle.style.opacity = "0.6"; }
+    classifyWrap.append(classifyToggle, candidatesBox);
+
     idSrcSel.addEventListener("change", () => {
       identityFrom = idSrcSel.value;
-      idHintWrap.style.display = identityFrom === "ai" ? "block" : "none";
+      const isAi = identityFrom === "ai";
+      idHintWrap.style.display = isAi ? "block" : "none";
+      classifyWrap.style.display = isAi ? "block" : "none";
       // A file board's face controls only make sense under derived identity
       // (several instances per entity), so they track this select — like the hint.
       renderFaceRow();
     });
 
-    identityRow.append(idControls, idHintWrap);
+    identityRow.append(idControls, idHintWrap, classifyWrap);
   }
 
   renderIdentityRow();
@@ -778,6 +858,8 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     inputConnector = t.input?.connector || null;
     identityFrom = t.identity?.from || "raw";
     identityHint = t.identity?.hint || "";
+    candidates = (t.identity?.candidates || []).map((c) => ({ ...c }));
+    classifyOn = candidates.length > 0;
     fields = (t.fields || []).map((f) => ({ ...f }));
     connectorCatalog = connector.fields || [];
     connectorFaces = connector.faces || [];
@@ -816,8 +898,18 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       toast.error("Identity hint is required when using AI instruction");
       return { ok: false };
     }
+    // Classify: keep only options that carry a value; trim hints. An on toggle
+    // with nothing usable is a half-state — block it rather than save a listless
+    // classifier (keeps "mode = has a list" true, mirroring the server).
+    const cleanCandidates = candidates
+      .map((c) => ({ value: (c.value || "").trim(), ...(c.hint && c.hint.trim() ? { hint: c.hint.trim() } : {}) }))
+      .filter((c) => c.value);
+    if (identityFrom === "ai" && classifyOn && !cleanCandidates.length) {
+      toast.error("Add at least one option, or turn off “Match to a list”");
+      return { ok: false };
+    }
     const identitySlot = identityFrom === "ai"
-      ? { from: "ai", hint: identityHint.trim() }
+      ? { from: "ai", hint: identityHint.trim(), ...(classifyOn && cleanCandidates.length ? { candidates: cleanCandidates } : {}) }
       : identityFrom === "connector"
         ? { from: "connector" }
         : { from: "raw" };
