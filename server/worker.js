@@ -49,6 +49,8 @@ import {
   ingestedKeys,
   recordIngest,
   withPluginHealth,
+  withTx,
+  reapEmptyEntities,
 } from "./db.js";
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
@@ -1225,6 +1227,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // it's operational transparency, not the product's data like the snapshots.
   const JOB_LOG_RETENTION_DAYS = Number(process.env.JOB_LOG_RETENTION_DAYS ?? 30);
   let nextPruneAt = 0;
+  // Ghost-entity reap: a zero-instance entity is normally impossible, but the
+  // FK-less entity_ids link can strand one on a crash or a concurrent delete.
+  // Swept hourly; only entities settled empty for REAP_AGE_MS are taken, so an
+  // in-flight upload (entity then instance, two statements) is never caught.
+  const REAP_AGE_MS = Number(process.env.ENTITY_REAP_AFTER_MS) || 1800000; // 30 min
+  let nextReapAt = 0;
   async function pruneSnapshots() {
     if ((!SNAPSHOT_RETENTION_DAYS && !TAG_SNAPSHOT_RETENTION_DAYS && !JOB_LOG_RETENTION_DAYS) || Date.now() < nextPruneAt) return;
     nextPruneAt = Date.now() + 3600000;
@@ -1240,6 +1248,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       const n = await pruneJobLog(db, Date.now() - JOB_LOG_RETENTION_DAYS * 86400000);
       if (n) console.log(`pruned ${n} job log row(s) older than ${JOB_LOG_RETENTION_DAYS}d`);
     }
+  }
+
+  async function reapGhostEntities() {
+    if (Date.now() < nextReapAt) return;
+    nextReapAt = Date.now() + 3600000; // hourly, like the snapshot prune
+    const n = await reapEmptyEntities(db, REAP_AGE_MS);
+    if (n) console.log(`worker: reaped ${n} empty ghost entit${n === 1 ? "y" : "ies"}`);
   }
 
   async function refreshDue() {
@@ -1624,10 +1639,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           const id = await resolveIdentity(db, row.board_id, key, display, reusable, resolvedIds);
           if (!resolvedIds.includes(id)) resolvedIds.push(id);
         }
-        await setItemEntities(db, row.id, resolvedIds);
-        // Drop the entities this instance abandoned if they emptied out (merge),
-        // stamp the survivors so delta polls see the aggregate change (split).
-        await reconcileEntities(db, [...oldIds, ...resolvedIds]);
+        // One transaction so a crash can't strand a ghost: the membership write
+        // and the reconcile that drops whatever it emptied (merge) or stamps the
+        // survivors (split) commit together — the atomicity the single-tx
+        // reparentInstance had, before the array rewrite split it in two.
+        await withTx(db, async (client) => {
+          await setItemEntities(client, row.id, resolvedIds);
+          await reconcileEntities(client, [...oldIds, ...resolvedIds]);
+        });
         const same = oldIds.length === resolvedIds.length && oldIds.every((x) => resolvedIds.includes(x));
         disposition = same ? "derived" : "moved";
         if ((landed = await stampExtracted(row, fields)))
@@ -1796,6 +1815,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         await retagDue();
         await ingestDue();
         await pruneSnapshots();
+        await reapGhostEntities();
         // Scheduled DB-only backup (server/backup.js) — it no-ops unless due
         // and skips itself while any backup/restore job is running.
         if (autoBackup) await autoBackup();

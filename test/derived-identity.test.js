@@ -20,6 +20,8 @@ import {
   deleteEntityIfEmpty,
   deleteEntity,
   reprocessEntity,
+  reapEmptyEntities,
+  withTx,
   insertItem,
 } from "../server/db.js";
 
@@ -473,6 +475,68 @@ test("reconcileEntities: split leaves the old entity standing", async () => {
   assert.ok(await getEntity(db, old), "old kept its other instance → survives");
   assert.equal(await entityInstanceCount(db, old), 1);
   assert.equal(await entityInstanceCount(db, target), 1);
+});
+
+// ── ghost-entity safety: withTx atomicity + the reaper (deep-dive finding #2) ─
+
+test("extract membership write + reconcile roll back together on failure (no ghost)", async () => {
+  const boardId = await seedBoard(db, "ghost-atomic");
+  const winner = await createEntity(db, boardId, { identity: "winner", displayName: "Winner" });
+  await seedInstance(boardId, winner, { name: "w.png", kind: "image" });
+  const provisional = await createEntity(db, boardId, { identity: "prov.png" });
+  const instId = await seedInstance(boardId, provisional, { name: "p.png", kind: "image" });
+
+  // The extractOne pattern — move the instance, reconcile the emptied provisional
+  // — but the transaction fails before commit (stand-in for a crash mid-write).
+  await assert.rejects(
+    withTx(db, async (client) => {
+      await setItemEntities(client, instId, [winner]);
+      await reconcileEntities(client, [provisional, winner]); // would delete the emptied provisional
+      throw new Error("crash before commit");
+    }),
+    /crash before commit/
+  );
+
+  // Nothing moved: the provisional still exists and still owns its instance, so
+  // re-extraction re-runs cleanly instead of stranding an emptied ghost.
+  assert.ok(await getEntity(db, provisional), "the provisional survived the rollback");
+  const { rows: [row] } = await db.query("SELECT entity_ids FROM items WHERE id=$1", [instId]);
+  assert.deepEqual(row.entity_ids, [provisional], "the instance stayed put");
+});
+
+// Backdate an entity's stamp so the reaper's age floor treats it as settled.
+const ageEntity = (id, ms) => db.query("UPDATE entities SET updated_at=$1 WHERE id=$2", [Date.now() - ms, id]);
+
+test("reapEmptyEntities: drops a settled zero-instance ghost", async () => {
+  const boardId = await seedBoard(db, "reap-ghost");
+  const ghost = await createEntity(db, boardId, { identity: "ghost" });
+  await ageEntity(ghost, 3600000); // an hour empty
+  const n = await reapEmptyEntities(db, 1800000); // floor 30 min
+  assert.ok(n >= 1);
+  assert.equal(await getEntity(db, ghost), null, "the settled empty entity is reaped");
+});
+
+test("reapEmptyEntities: spares a freshly-empty entity (in-flight upload window)", async () => {
+  const boardId = await seedBoard(db, "reap-fresh");
+  const fresh = await createEntity(db, boardId, { identity: "fresh" }); // updated_at = now
+  await reapEmptyEntities(db, 1800000);
+  assert.ok(await getEntity(db, fresh), "a just-created empty entity is NOT reaped — its upload may still be inserting the instance");
+});
+
+test("reapEmptyEntities: spares entities that still have an instance, even when aged", async () => {
+  const boardId = await seedBoard(db, "reap-nonempty");
+  const solo = await createEntity(db, boardId, { identity: "solo", displayName: "Solo" });
+  await seedInstance(boardId, solo, { name: "a.png", kind: "image" });
+  const a = await createEntity(db, boardId, { identity: "a", displayName: "A" });
+  const b = await createEntity(db, boardId, { identity: "b", displayName: "B" });
+  const shared = await seedInstance(boardId, a, { name: "s.png", kind: "image" });
+  await setItemEntities(db, shared, [a, b]); // one instance shared by two entities
+  for (const id of [solo, a, b]) await ageEntity(id, 3600000); // aged, but populated
+
+  await reapEmptyEntities(db, 1800000);
+  assert.ok(await getEntity(db, solo), "sole-instance entity survives");
+  assert.ok(await getEntity(db, a), "shared-instance entity a survives");
+  assert.ok(await getEntity(db, b), "shared-instance entity b survives");
 });
 
 // ── per-instance reasoning ───────────────────────────────────────────────────

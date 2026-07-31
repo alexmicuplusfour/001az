@@ -1523,14 +1523,33 @@ export async function reconcileEntities(db, entityIds) {
   }
 }
 
-// Delete an entity and (via FK cascade) all its instances. Returns the
-// instances' file entries so the caller can clean the stores. The row is
-// locked BEFORE the payload read: a concurrent merge-in takes FOR KEY SHARE on
-// this row to reference it, so it either committed first (its files make the
-// cleanup list) or blocks on the lock, fails its FK check once the delete
-// commits, and heals via the extract retry. Without the lock the cascade can
-// eat a freshly re-parented instance whose files were never read — row lost,
-// files orphaned on disk.
+// Reap ghost entities: rows no instance points at any longer, settled empty for
+// at least `olderThanMs`. A zero-instance entity should never persist — reconcile
+// (after a membership change) and deleteEntity clean up inline — but entity_ids
+// carries no FK cascade, so a crash between the membership write and its reconcile,
+// or a concurrent last-two-instance delete, can strand one, and it renders as a
+// blank card with nothing to remove it. The age floor is load-bearing: upload
+// creates the entity and its instance in two statements, so a freshly empty entity
+// is an in-flight upload, not a ghost — only settled ones are reaped. Returns the
+// count deleted.
+export async function reapEmptyEntities(db, olderThanMs) {
+  const { rowCount } = await db.query(
+    `DELETE FROM entities e
+      WHERE e.updated_at < $1
+        AND NOT EXISTS (SELECT 1 FROM items i WHERE i.entity_ids @> ARRAY[e.id]::bigint[])`,
+    [Date.now() - olderThanMs]
+  );
+  return rowCount;
+}
+
+// Delete an entity and the instances it's the SOLE home of; instances shared
+// with another entity survive, just losing this id from their array. Returns the
+// orphaned instances' file entries so the caller can clean the stores. The row is
+// locked FOR UPDATE before the orphan read so two concurrent deletes of the same
+// entity serialize instead of both reading — and double-returning — its files.
+// entity_ids carries no FK cascade anymore, so an extraction resolving to this
+// entity can still append its id right after the scrub (a dangling id / re-emptied
+// entity); the empty-entity reaper (reapEmptyEntities) backstops that.
 export async function deleteEntity(db, id) {
   return withTx(db, async (client) => {
     const locked = await client.query("SELECT 1 FROM entities WHERE id=$1 FOR UPDATE", [id]);
