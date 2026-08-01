@@ -14,5 +14,6 @@ import glm from "./glm.js";
 import openrouter from "./openrouter.js";
 import local from "./local.js";
 import whisper from "./whisper.js";
+import localDetector from "./local-detector.js";
 
-export const BUILTIN_PROVIDERS = { local, whisper, anthropic, openai, gemini, glm, openrouter };
+export const BUILTIN_PROVIDERS = { local, whisper, localDetector, anthropic, openai, gemini, glm, openrouter };

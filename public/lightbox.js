@@ -9,6 +9,7 @@ import { ensurePolling } from './data.js';
 import { sectionHeading } from './modal.js';
 
 import { selectFace } from './face-select.js';
+import { contentRect, detColor } from './det-geometry.js';
 
 // Format numeric field values readably based on key conventions.
 function formatFieldNumber(key, v) {
@@ -70,6 +71,7 @@ let lightboxImg = null;
 let lightboxList = [];
 let lightboxIndex = -1;
 let panelOpen = false;
+let elDetOverlay = null; // object-detection box layer over the lightbox image
 let reasoningReq = 0; // stale-response guard for the reasoning fetch
 let currentInstIndex = 0; // which instance is shown in the main view (multi-instance entities)
 
@@ -131,6 +133,72 @@ function revealActiveInstance(list) {
   }
 }
 
+// ── Object-detection overlay (Slice 3) ──────────────────────────────────────
+// Boxes drawn over the lightbox image for `object` AI-fields, linked by a
+// `key:idx` handle to the hoverable list in the AI-extracted-fields panel cell.
+// Each box is positioned as PERCENTAGES of the overlay, which is itself sized to
+// the displayed image content rect — so a resize only re-sizes the overlay and
+// the boxes follow. `contentRect`/`detColor` live in det-geometry.js (pure,
+// unit-tested).
+function displayedContentRect(img) {
+  return contentRect(img.getBoundingClientRect(), img.naturalWidth, img.naturalHeight);
+}
+function objectFieldsOf(fields) {
+  const out = [];
+  for (const [key, f] of Object.entries(fields || {})) if (Array.isArray(f?.v)) out.push({ key, dets: f.v });
+  return out;
+}
+// Size + place the overlay over the current displayed image; hidden when there's
+// nothing to show or the image isn't ready (repositioned on load/resize/toggle).
+function positionDetOverlay() {
+  if (!elDetOverlay) return;
+  if (!elDetOverlay.childElementCount || elLightboxImg.hidden || !elLightboxImg.naturalWidth) {
+    elDetOverlay.hidden = true;
+    return;
+  }
+  const r = displayedContentRect(elLightboxImg);
+  const host = elLightbox.getBoundingClientRect();
+  elDetOverlay.style.left = (r.x - host.left) + "px";
+  elDetOverlay.style.top = (r.y - host.top) + "px";
+  elDetOverlay.style.width = r.w + "px";
+  elDetOverlay.style.height = r.h + "px";
+  elDetOverlay.hidden = false;
+}
+// Rebuild the boxes for the given fields (percentage-positioned children), then
+// place the overlay. Empty/invalid boxes are skipped; a non-image or fieldless
+// panel clears to nothing.
+function drawDetOverlay(fields) {
+  if (!elDetOverlay) return;
+  elDetOverlay.replaceChildren();
+  for (const { key, dets } of objectFieldsOf(fields)) {
+    const color = detColor(key);
+    dets.forEach((d, idx) => {
+      const box = d?.box;
+      if (!Array.isArray(box) || box.length !== 4 || box.some((n) => typeof n !== "number")) return;
+      const [x0, y0, x1, y1] = box;
+      const el = document.createElement("div");
+      el.className = "lb-det-box";
+      el.dataset.det = `${key}:${idx}`;
+      el.style.cssText = `left:${x0 * 100}%;top:${y0 * 100}%;width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%;border-color:${color};`;
+      const lab = document.createElement("span");
+      lab.className = "lb-det-label";
+      lab.style.background = color;
+      lab.textContent = d.label + (typeof d.score === "number" ? ` ${Math.round(d.score * 100)}%` : "");
+      el.appendChild(lab);
+      elDetOverlay.appendChild(el);
+    });
+  }
+  positionDetOverlay();
+}
+function clearDetOverlay() {
+  if (!elDetOverlay) return;
+  elDetOverlay.replaceChildren();
+  elDetOverlay.hidden = true;
+}
+function highlightDet(detKey, on) {
+  elDetOverlay?.querySelector(`[data-det="${CSS.escape(detKey)}"]`)?.classList.toggle("det-hi", on);
+}
+
 // One panel cell: the light-gray card that holds a single facet or field — a
 // header line plus an optional why-sentence. Both the facet loop and
 // fieldsSection() build their header into it, so the card treatment (padding,
@@ -176,6 +244,13 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
       badge.textContent = src;
       keyMain.appendChild(badge);
     }
+    if (Array.isArray(v)) {
+      // Object-detection field — flag the kind like file fields flag their src.
+      const badge = document.createElement("span");
+      badge.className = "lbp-field-src";
+      badge.textContent = "object";
+      keyMain.appendChild(badge);
+    }
     k.appendChild(keyMain);
     if (at) {
       const t = document.createElement("span");
@@ -188,7 +263,39 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
     }
     let val;
     const vStr = v !== null && v !== undefined ? String(v) : null;
-    if (vStr && /^https?:\/\//.test(vStr)) {
+    if (Array.isArray(v)) {
+      // Object-detection field: one hoverable row per detected object; hovering
+      // highlights its box on the image (linked by the `key:idx` handle).
+      val = document.createElement("div");
+      val.className = "lbp-det-list";
+      if (!v.length) {
+        // The stored why is the empty reason — "No objects detected", or
+        // "no image to detect on" for a non-image item. Surface it instead of a
+        // hardcoded string (the separate why line is dropped below).
+        val.textContent = why || "No objects detected";
+        val.classList.add("lbp-det-empty");
+      } else {
+        v.forEach((d, idx) => {
+          const detKey = `${key}:${idx}`;
+          const row = document.createElement("div");
+          row.className = "lbp-det-row";
+          row.dataset.det = detKey;
+          const sw = document.createElement("span");
+          sw.className = "lbp-det-swatch";
+          sw.style.background = detColor(key);
+          const lab = document.createElement("span");
+          lab.className = "lbp-det-label";
+          lab.textContent = d.label;
+          const sc = document.createElement("span");
+          sc.className = "lbp-det-score";
+          sc.textContent = typeof d.score === "number" ? `${Math.round(d.score * 100)}%` : "";
+          row.append(sw, lab, sc);
+          row.addEventListener("mouseenter", () => highlightDet(detKey, true));
+          row.addEventListener("mouseleave", () => highlightDet(detKey, false));
+          val.appendChild(row);
+        });
+      }
+    } else if (vStr && /^https?:\/\//.test(vStr)) {
       val = document.createElement("a");
       val.href = vStr;
       val.target = "_blank";
@@ -203,7 +310,9 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
     }
     val.className = "lbp-field-val";
     kv.append(k, val);
-    sec.appendChild(panelCell(kv, why));
+    // Object fields carry a synthesized "Detected: …" why that just echoes the
+    // list — drop it; scalar fields keep the model's reasoning sentence.
+    sec.appendChild(panelCell(kv, Array.isArray(v) ? null : why));
   }
   return sec;
 }
@@ -495,8 +604,9 @@ async function renderPanel() {
   if (!panelOpen || !lightboxImg) return;
   const img = lightboxImg;
   const inst = selectedInst();
-  if (!inst) { paintPanel(img, null, {}, {}); return; }
+  if (!inst) { paintPanel(img, null, {}, {}); clearDetOverlay(); return; }
   paintPanel(img, inst, null, null);
+  clearDetOverlay(); // drop the prior instance's boxes while this one's fields load
   const token = ++reasoningReq;
   let reasoning = {};
   let fields = {};
@@ -510,6 +620,7 @@ async function renderPanel() {
   } catch { /* panel just shows tags without reasoning */ }
   if (token !== reasoningReq || lightboxImg !== img || selectedInst() !== inst || !panelOpen) return;
   paintPanel(img, inst, reasoning, fields);
+  drawDetOverlay(fields);
 }
 
 function setPanel(open) {
@@ -518,6 +629,9 @@ function setPanel(open) {
   elLightbox.classList.toggle("panel-open", open);
   elLightboxInfo.classList.toggle("on", open);
   if (open) renderPanel();
+  else clearDetOverlay();
+  // .panel-open shifts the stage padding → the image resizes; track it.
+  requestAnimationFrame(positionDetOverlay);
 }
 
 const isDocItem = (it) => it.kind && it.kind !== "image";
@@ -573,6 +687,7 @@ async function showAudioText(f) {
 // same-origin frame; the frame paints progressively, so no loading spinner.
 // docx can't render in a frame; its formatted-HTML sidecar can.
 function showMedia(f) {
+  clearDetOverlay(); // any prior instance's boxes; redrawn by renderPanel for images
   // Audio: the waveform face (when it rendered) above a native <audio> player;
   // no waveform → just the player (the card badge covered the visual).
   if (f.kind === "audio") {
@@ -610,7 +725,7 @@ function showMedia(f) {
     elLightboxImg.hidden = false;
     elLightboxImg.style.opacity = "0";
     elLightbox.classList.add("loading");
-    elLightboxImg.onload = () => { elLightbox.classList.remove("loading"); elLightboxImg.style.opacity = "1"; };
+    elLightboxImg.onload = () => { elLightbox.classList.remove("loading"); elLightboxImg.style.opacity = "1"; positionDetOverlay(); };
     elLightboxImg.src = fullUrl(f.name);
     if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
       elLightbox.classList.remove("loading");
@@ -704,6 +819,12 @@ export function closeLightbox() {
 }
 
 export function initLightbox() {
+  elDetOverlay = document.createElement("div");
+  elDetOverlay.className = "lb-det-overlay";
+  elDetOverlay.hidden = true;
+  elLightbox.appendChild(elDetOverlay);
+  window.addEventListener("resize", positionDetOverlay);
+
   elLightbox.addEventListener("click", closeLightbox);
 
   elLightboxPrev.addEventListener("click", (e) => { e.stopPropagation(); navLightbox(-1); });

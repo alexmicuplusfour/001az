@@ -18,7 +18,7 @@ const FIELD_TYPES = new Set(["secret", "text", "number", "select", "toggle"]);
 test("defs: one entry per integration, ids unique and namespaced", () => {
   const ids = pluginDefs().map((d) => d.id);
   assert.deepEqual(ids, [
-    "ai:local", "ai:whisper", "ai:anthropic", "ai:openai", "ai:gemini", "ai:glm", "ai:openrouter",
+    "ai:local", "ai:whisper", "ai:localDetector", "ai:anthropic", "ai:openai", "ai:gemini", "ai:glm", "ai:openrouter",
     "crypto:coingecko", "crypto:coinmarketcap", "stocks:financialmodelingprep",
     "media:image", "media:text", "media:pdf", "media:docx", "media:audio",
     "source:folder", "source:ftp", "source:s3",
@@ -35,21 +35,24 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   // the on-device cards name both the capability and the engine behind it
   assert.equal(getPluginDef("ai:local").label, "Local Embedder (Xenova)");
   assert.equal(getPluginDef("ai:whisper").label, "Local Transcriber (Whisper)");
+  assert.equal(getPluginDef("ai:localDetector").label, "Local Object Detector (Transformers.js)");
   // core = the app's own capabilities (always installed, not removable): every
   // media handler, the on-device embedder, and the local-folder source.
   assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
-    ["ai:local", "ai:whisper", "media:image", "media:text", "media:pdf", "media:docx", "media:audio", "source:folder"]);
+    ["ai:local", "ai:whisper", "ai:localDetector", "media:image", "media:text", "media:pdf", "media:docx", "media:audio", "source:folder"]);
   // exactly one connection is pre-added — the flagship AI provider.
   assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
 });
 
 test("defs: capabilities mirror the underlying descriptors", () => {
   const local = getPluginDef("ai:local");
-  assert.deepEqual(local.capabilities, { tag: false, embed: true, transcribe: false, research: false });
+  assert.deepEqual(local.capabilities, { tag: false, embed: true, transcribe: false, detect: false, research: false });
   const whisper = getPluginDef("ai:whisper");
-  assert.deepEqual(whisper.capabilities, { tag: false, embed: false, transcribe: true, research: false });
+  assert.deepEqual(whisper.capabilities, { tag: false, embed: false, transcribe: true, detect: false, research: false });
+  const detector = getPluginDef("ai:localDetector");
+  assert.deepEqual(detector.capabilities, { tag: false, embed: false, transcribe: false, detect: true, research: false });
   const anthropic = getPluginDef("ai:anthropic");
-  assert.deepEqual(anthropic.capabilities, { tag: true, embed: false, transcribe: false, research: true });
+  assert.deepEqual(anthropic.capabilities, { tag: true, embed: false, transcribe: false, detect: false, research: true });
   assert.ok(anthropic.ai.models.some((m) => m.id === anthropic.ai.defaultModel));
 
   const gecko = getPluginDef("crypto:coingecko");

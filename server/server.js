@@ -117,7 +117,8 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, transcriberSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, transcriberSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import sharp from "sharp";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, MODEL_KINDS, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
@@ -1676,6 +1677,15 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
         model: (await getSetting(db, "transcribe_model")) || null,
         active: (await resolveTranscriber(db)).id,
       },
+      // Detection resolves like transcription — the on-device OWLv2 detector by
+      // default; `active` is what actually resolves.
+      detector: {
+        provider: (await getSetting(db, "detect_provider")) || "localDetector",
+        keyId: Number(await getSetting(db, "detect_key_id")) || null,
+        model: (await getSetting(db, "detect_model")) || null,
+        threshold: Number(await getSetting(db, "detect_threshold")) || 0.1,
+        active: (await resolveDetector(db)).id,
+      },
       domains,
     },
   });
@@ -1989,12 +1999,24 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
     model: (await getSetting(db, "transcribe_model")) || null,
     active: transcriber.id, // the engine family actually in effect ("whisper" or a provider)
   };
-  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe });
+  // Object detection: on-device OWLv2 by default, a provider override slots in
+  // later. The provider choice is the only toggle — detection is field-triggered
+  // (a board's object field), not a global sweep, so there's no enabled flag.
+  const detector = await resolveDetector(db);
+  const detect = {
+    provider: (await getSetting(db, "detect_provider")) || "localDetector",
+    keyId: Number(await getSetting(db, "detect_key_id")) || null,
+    model: (await getSetting(db, "detect_model")) || null,
+    threshold: Number(await getSetting(db, "detect_threshold")) || 0.1,
+    active: detector.id,
+  };
+  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe, detect });
 }));
 
 app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
   const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel, embedProvider,
-    transcribeProvider, transcribeKeyId, transcribeModel } = req.body || {};
+    transcribeProvider, transcribeKeyId, transcribeModel,
+    detectProvider, detectKeyId, detectModel, detectThreshold } = req.body || {};
   if (defaultKeyId !== undefined) {
     if (defaultKeyId === null) {
       await setSetting(db, "default_key_id", null);
@@ -2084,7 +2106,38 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
       await setSetting(db, "transcribe_model", transcribeModel || null);
     }
   }
-  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"} transcribe=${transcribeProvider ?? "(unchanged)"}`);
+  // Object detection: `detect_provider` names the engine directly — "localDetector"
+  // (the always-on on-device OWLv2) or any provider that ADVERTISES `detects`
+  // with a matching key. Capability-gated, no provider name special-cased.
+  if (detectProvider !== undefined) {
+    if (!detectProvider || detectProvider === "localDetector" || PROVIDERS[detectProvider]?.onDevice) {
+      if (detectProvider && detectProvider !== "localDetector" && !PROVIDERS[detectProvider]?.detects)
+        return res.status(400).json({ error: `${detectProvider} advertises no object detection` });
+      await setSetting(db, "detect_provider", detectProvider || "localDetector");
+      await setSetting(db, "detect_key_id", null);
+      await setSetting(db, "detect_model", null);
+    } else {
+      const desc = PROVIDERS[detectProvider];
+      if (!desc?.detects) {
+        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].detects && !PROVIDERS[n].onDevice).join(" or ");
+        return res.status(400).json({ error: `object detection needs a ${names || "capable"} key — ${detectProvider} advertises none` });
+      }
+      const key = detectKeyId != null ? await getAiKey(db, Number(detectKeyId)) : null;
+      if (!key || key.provider !== detectProvider) {
+        return res.status(400).json({ error: `pick a ${desc.label} ${desc.keyless ? "connection" : "key"} to detect with it` });
+      }
+      if (detectModel && !desc.detects.models.some((m) => m.id === detectModel)) {
+        return res.status(400).json({ error: `${desc.label} can't detect with model "${detectModel}"` });
+      }
+      await setSetting(db, "detect_provider", detectProvider);
+      await setSetting(db, "detect_key_id", String(key.id));
+      await setSetting(db, "detect_model", detectModel || null);
+    }
+  }
+  // Threshold is a plain scalar knob (OWLv2 scores run low → ~0.1 floor).
+  if (detectThreshold !== undefined)
+    await setSetting(db, "detect_threshold", detectThreshold != null ? String(detectThreshold) : null);
+  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"} transcribe=${transcribeProvider ?? "(unchanged)"} detect=${detectProvider ?? "(unchanged)"}`);
   res.json({ ok: true });
 }));
 
@@ -2128,6 +2181,25 @@ app.post("/api/admin/ai-config/transcribe-test", requireAdmin, wrap(async (_req,
     // the sidecar's express lane answers tiny clips in seconds when healthy.
     await t.transcribe(tinyWav(), "probe.wav", { deadlineMs: 30000 });
     res.json({ ok: true, provider, model: t.model });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+}));
+
+// A tiny solid image — small, valid pixels for a reachability probe. detect-test
+// proves the detector loads + runs end to end (the detection analog of
+// embed-test / transcribe-test); OWLv2 finds nothing in a blank image, so a 200
+// with a count is the signal the engine works. First call on the on-device
+// detector downloads + warms the OWLv2 model, so it can take a few seconds.
+async function tinyImage() {
+  return sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 128, g: 128, b: 128 } } }).png().toBuffer();
+}
+
+app.post("/api/admin/ai-config/detect-test", requireAdmin, wrap(async (_req, res) => {
+  const d = await resolveDetector(db);
+  try {
+    const objects = await d.detect(await tinyImage(), ["object."]);
+    res.json({ ok: true, provider: d.id, model: d.model, count: objects.length });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

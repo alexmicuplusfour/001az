@@ -1727,6 +1727,69 @@ a.tool-btn {
 .lightbox.panel-open .lightbox-controls {
   right: 424px;
 }
+
+/* Object-detection overlay: boxes over the image, linked to the panel list. */
+.lb-det-overlay {
+  position: absolute;
+  pointer-events: none; /* never eat the backdrop click-to-close */
+  z-index: 2;
+}
+.lb-det-box {
+  position: absolute;
+  border: 2px solid #e5484d; /* per-field colour set inline */
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  transition: background 0.1s ease, box-shadow 0.1s ease;
+}
+.lb-det-box.det-hi {
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.4);
+}
+.lb-det-label {
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  transform: translateY(-100%);
+  padding: 3px 5px;
+  border-radius: 3px 3px 3px 0;
+  font-size: 11px;
+  line-height: 1;
+  color: #fff;
+  white-space: nowrap;
+  background: #e5484d; /* matches the box colour, set inline */
+}
+
+/* Object-detection list inside the AI-extracted-fields panel cell. */
+.lbp-det-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.lbp-det-empty {
+  color: #8a8a92;
+}
+.lbp-det-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: default;
+}
+.lbp-det-row:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+.lbp-det-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: none;
+}
+.lbp-det-score {
+  margin-left: auto;
+  color: #8a8a92;
+  font-variant-numeric: tabular-nums;
+}
 .lightbox.panel-open .lightbox-count {
   left: calc((100% - 400px) / 2);
 }

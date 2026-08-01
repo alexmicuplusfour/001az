@@ -8,7 +8,7 @@ import { startServer, adminSession, req } from "./helpers.js";
 import { PROVIDERS, providerCatalog } from "../server/providers.js";
 
 test("every descriptor is well-formed and self-named", () => {
-  assert.deepEqual(Object.keys(PROVIDERS), ["local", "whisper", "anthropic", "openai", "gemini", "glm", "openrouter"]);
+  assert.deepEqual(Object.keys(PROVIDERS), ["local", "whisper", "localDetector", "anthropic", "openai", "gemini", "glm", "openrouter"]);
   for (const name of Object.keys(PROVIDERS)) {
     const d = PROVIDERS[name];
     assert.equal(d.name, name, `${name}: self-reference stamped`);
@@ -115,5 +115,5 @@ test("GET /api/admin/ai-providers: admin-only, returns the catalog + install fla
   // fresh install: the core on-device engines (embedder + whisper transcriber)
   // and the pre-added flagship are installed
   const installed = r.json.filter((p) => p.installed).map((p) => p.name).sort();
-  assert.deepEqual(installed, ["anthropic", "local", "whisper"]);
+  assert.deepEqual(installed, ["anthropic", "local", "localDetector", "whisper"]);
 });

@@ -4,7 +4,7 @@ import { ICONS } from './utils.js';
 import { loadProviders, byName, syncModelPicker, switchRow } from './board-modal.js';
 import { sectionHeadingEl } from './modal.js';
 
-const KINDS = ["text", "number", "url", "date"];
+const KINDS = ["text", "number", "url", "date", "object"];
 // Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
 // and never refreshed). "How often the field updates in the app" — the sweep
 // re-fetches the whole entity but only rewrites fields whose cadence elapsed.
@@ -635,11 +635,19 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     if (isAdmin) controls.appendChild(removeBtn);
 
     const hint = document.createElement("textarea");
-    hint.placeholder = "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")";
     hint.rows = 2;
     hint.value = f.hint || "";
     hint.disabled = !isAdmin;
     hint.addEventListener("input", () => { f.hint = hint.value; });
+    // Object fields feed the detector a list of things to find; scalar fields are
+    // an extraction instruction. The placeholder tracks the kind select.
+    const syncHintPlaceholder = () => {
+      hint.placeholder = kindSel.value === "object"
+        ? "objects to detect — comma-separated noun phrases (e.g. \"logo, badge, zipper\")"
+        : "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")";
+    };
+    kindSel.addEventListener("change", syncHintPlaceholder);
+    syncHintPlaceholder();
 
     row.append(controls, hint);
     return row;

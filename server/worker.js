@@ -55,7 +55,7 @@ import {
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
-import { callTagger, embedTexts, transcribeAudio, PROVIDERS } from "./providers.js";
+import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
 import { pluginInstalled, pluginState } from "./plugins.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
@@ -325,7 +325,10 @@ export const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowe
 export function buildFieldsPrompt(mapping) {
   // Only AI fields are extracted here; file fields (from:"file") are projected
   // deterministically from the stored entry, connector fields come from the source.
-  const fields = ((mapping && mapping.fields) || []).filter((f) => f.from === "ai");
+  // Object-detection fields never reach the model — they're produced by a
+  // separate detector pass in extractOne — so they're excluded from both the
+  // system-text field list and the record_fields schema here.
+  const fields = ((mapping && mapping.fields) || []).filter((f) => f.from === "ai" && f.kind !== "object");
   const hasDerivedIdentity = mapping?.identity?.from === "ai";
   const identityHint = hasDerivedIdentity ? (mapping.identity.hint || "").trim() : "";
   // Classify mode: the identity answer is constrained to a user-declared list
@@ -828,6 +831,48 @@ export async function resolveTranscriber(db, board = null) {
   return whisperTranscriber();
 }
 
+// A board's image→boxes engine. A `detect_provider` setting can point at any
+// provider that ADVERTISES `detects` (with a stored key + installed plugin);
+// everything else — unset, "localDetector", a no-detect provider, a missing key
+// — falls back to the always-on on-device OWLv2 detector. Never fails to
+// resolve. Fully capability-driven — no provider name is hardcoded past the
+// on-device default. `board` is accepted for a future per-board choice (unused
+// today). Threshold is closed over from settings — OWLv2 scores run LOW, so ~0.1
+// is the floor a naive 0.5 would starve. Exported for tests + server.
+export async function resolveDetector(db, board = null) {
+  const provider = (await getSetting(db, "detect_provider")) || "localDetector";
+  const threshold = Number(await getSetting(db, "detect_threshold")) || 0.1;
+  const desc = PROVIDERS[provider];
+  if (provider !== "localDetector" && desc?.detects && (await aiPluginInstalled(db, provider))) {
+    const keyId = Number(await getSetting(db, "detect_key_id")) || 0;
+    const key = keyId ? await getAiKey(db, keyId) : null;
+    // A keyed provider needs its stored key; an on-device detector plugin
+    // (own wire.detect, no rows) resolves bare — same shape as transcription.
+    if (key || desc.onDevice) {
+      const model = (await getSetting(db, "detect_model")) || desc.detects.default;
+      const { rpm, burst } = await aiRate(db, provider);
+      return {
+        id: provider,
+        model,
+        // Runs under the plugin-health ledger like every other provider call so
+        // detection traffic + errors show on the Plugins page.
+        detect: (image, queries) =>
+          withPluginHealth(db, `ai:${provider}`, () =>
+            detectObjects({ provider, apiKey: key?.api_key ?? null, base: key?.base_url || undefined, model, rpm, burst, image, queries, threshold })),
+      };
+    }
+  }
+  // The always-on on-device OWLv2 detector — no key, no pacing, no health ledger
+  // (in-process, like the local embedder). Rides the same dispatcher as a paid
+  // engine; only the provider name + threshold differ.
+  const local = PROVIDERS.localDetector;
+  return {
+    id: "localDetector",
+    model: local.detects.default,
+    detect: (image, queries) => detectObjects({ provider: "localDetector", image, queries, threshold }),
+  };
+}
+
 // The job log observes; it must never break the job it observes. Every ledger
 // write goes through here — a failure is a warn, never a throw into the leg
 // or sweep being recorded. Returns the write's result, or null on failure.
@@ -1108,7 +1153,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // override on key collision.
     const fields = { ...(entity?.fields || {}), ...(row.payload.fields || {}) };
     const fieldLines = Object.entries(fields)
-      .filter(([, { v }]) => v !== null && v !== undefined)
+      // Scalars only — an object-detection field's `v` is an array of boxes,
+      // which distils to noise (`key: [object Object],…`); it has no place in
+      // the tagger's text anyway.
+      .filter(([, { v }]) => v !== null && v !== undefined && typeof v !== "object")
       .map(([key, { v }]) => `${key}: ${v}`);
     if (entity?.display_name) fieldLines.unshift(`entity: ${entity.display_name}`);
     if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
@@ -1525,38 +1573,49 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       return null;
     }
     const board = await getBoard(db, row.board_id);
-    // Extraction uses its own provider override when set; otherwise falls back
-    // to the board's tagging provider. Either way, the input is text-only (via
-    // modelInputForExtract) so extraction works with any provider.
-    const extractAi = board?.extract_key_id
-      ? await resolveBoardAi(db, { aiKeyId: board.extract_key_id, aiModel: board.extract_model })
-      : null;
-    const ai = extractAi || await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
-    if (!ai) throw noKeyError();
+    const aiFields = (mapping.fields || []).filter((f) => f.from === "ai");
+    const objectFields = aiFields.filter((f) => f.kind === "object");
+    // Object fields ride a separate detector pass below, not the LLM — so the
+    // model is only called when there's derived identity or a non-object field
+    // to extract. An object-only board skips the LLM entirely (ai/usage stay
+    // null and the tail guards for it).
+    const needsLLM = mapping?.identity?.from === "ai" || aiFields.some((f) => f.kind !== "object");
 
-    const { systemText, schema } = buildFieldsPrompt(mapping);
-    // Try text-only extraction first (works with any provider, avoids image
-    // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
-    // files (images, connector entities) where there is no text sidecar — in
-    // extract mode, so its anchors ask for record_fields, not record_tags.
-    let parts = await modelInputForExtract(row.payload);
-    if (!parts) {
-      // The fallback anchors name the entity (no-file vehicles, chart faces).
-      // Identity resolution below re-reads its own copy after the call, so a
-      // mid-call rename never acts on this snapshot.
-      const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
-      parts = await modelInputFor(row.payload, entity, "extract");
+    let input = {}, usage = null, ai = null;
+    if (needsLLM) {
+      // Extraction uses its own provider override when set; otherwise falls back
+      // to the board's tagging provider. Either way, the input is text-only (via
+      // modelInputForExtract) so extraction works with any provider.
+      const extractAi = board?.extract_key_id
+        ? await resolveBoardAi(db, { aiKeyId: board.extract_key_id, aiModel: board.extract_model })
+        : null;
+      ai = extractAi || await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
+      if (!ai) throw noKeyError();
+
+      const { systemText, schema } = buildFieldsPrompt(mapping);
+      // Try text-only extraction first (works with any provider, avoids image
+      // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
+      // files (images, connector entities) where there is no text sidecar — in
+      // extract mode, so its anchors ask for record_fields, not record_tags.
+      let parts = await modelInputForExtract(row.payload);
+      if (!parts) {
+        // The fallback anchors name the entity (no-file vehicles, chart faces).
+        // Identity resolution below re-reads its own copy after the call, so a
+        // mid-call rename never acts on this snapshot.
+        const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
+        parts = await modelInputFor(row.payload, entity, "extract");
+      }
+      ({ input, usage } = await trackedTagger(db, {
+        provider: ai.provider,
+        apiKey: ai.apiKey,
+        base: ai.base,
+        model: ai.model,
+        systemText,
+        schema,
+        parts,
+        tool: { name: "record_fields", description: "Record the extracted fields for this item." },
+      }));
     }
-    const { input, usage } = await trackedTagger(db, {
-      provider: ai.provider,
-      apiKey: ai.apiKey,
-      base: ai.base,
-      model: ai.model,
-      systemText,
-      schema,
-      parts,
-      tool: { name: "record_fields", description: "Record the extracted fields for this item." },
-    });
 
     // Seed with the deterministic file fields projected from the stored entry,
     // so the payload.fields write below (markExtracted replaces the map) doesn't
@@ -1564,8 +1623,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // a file-field edit during the pending window still lands; the stamped mapping
     // only governs AI replay. Keys are unique, so AI fields never collide.
     const fields = extractFileFields(row.payload.files?.[0], board?.mapping?.fields || mapping.fields);
-    // Lenient-validate each AI field: wrong type → null (keep the why sentence).
-    for (const f of (mapping.fields || []).filter((f) => f.from === "ai")) {
+    // Lenient-validate each scalar AI field: wrong type → null (keep the why
+    // sentence). Object fields are populated by the detector pass below, not here.
+    for (const f of aiFields) {
+      if (f.kind === "object") continue;
       const entry = input[f.key];
       if (!entry) continue;
       const why = typeof entry.why === "string" ? entry.why.trim() : "";
@@ -1576,6 +1637,28 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         if ((f.kind === "text" || f.kind === "date") && typeof v !== "string") v = null;
       }
       fields[f.key] = { v, why };
+    }
+
+    // Object-detection pass: a separate leg, not an LLM call. Run the resolved
+    // detector on the ORIGINAL image (higher-res than the tag thumbnail) — a
+    // non-image item has nothing to detect (empty, not an error); a detector
+    // failure throws → the extract leg requeues, like extractor downtime. Boxes
+    // arrive canonical (xyxy, 0..1) from the engine.
+    if (objectFields.length) {
+      const file = row.payload.files?.[0];
+      const image = file?.kind === "image"
+        ? await fs.promises.readFile(path.join(galleryDir, file.name))
+        : null;
+      const detector = image ? await resolveDetector(db, board) : null;
+      for (const f of objectFields) {
+        if (!image) { fields[f.key] = { v: [], why: "no image to detect on" }; continue; }
+        // The hint is the query text — comma/newline-split into noun phrases
+        // (OWLv2 takes a candidate list); fall back to the field key.
+        const queries = (f.hint || f.key).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+        const dets = await detector.detect(image, queries.length ? queries : [f.key]);
+        const labels = [...new Set(dets.map((d) => d.label))];
+        fields[f.key] = { v: dets, why: dets.length ? `Detected: ${labels.join(", ")}` : "No objects detected" };
+      }
     }
 
     // Derived identity: resolve the item's membership SET before advancing.
@@ -1655,7 +1738,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     } else {
       const label = row.payload?.identity || `item ${row.id}`;
       if ((landed = await stampExtracted(row, fields)))
-        console.log(`extracted #${row.id} ${label} [${ai.model}] -> [${Object.keys(fields).join(", ")}]`);
+        console.log(`extracted #${row.id} ${label} [${ai?.model ?? "detection"}] -> [${Object.keys(fields).join(", ")}]`);
     }
 
     // A membership change re-homes the instance's tags into a different entity's
@@ -1668,8 +1751,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
     }
 
-    await bumpUsage(db, row.board_id, usage);
-    return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai.model };
+    if (usage) await bumpUsage(db, row.board_id, usage);
+    return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai?.model ?? "detection" };
   }
 
   async function processExtractOne(row) {

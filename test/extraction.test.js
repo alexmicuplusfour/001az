@@ -59,6 +59,26 @@ test("buildFieldsPrompt: empty mapping produces empty-but-valid schema", () => {
   assert.equal(schema.additionalProperties, false);
 });
 
+test("buildFieldsPrompt: object fields are excluded from the schema + system text (detector pass owns them)", () => {
+  const { schema, systemText } = buildFieldsPrompt({
+    fields: [
+      { key: "name",  kind: "text",   from: "ai", hint: "the author's full name" },
+      { key: "logos", kind: "object", from: "ai", hint: "every visible logo" },
+    ],
+  });
+  assert.ok(!("logos" in schema.properties), "object field absent from the record_fields schema");
+  assert.deepEqual(schema.required, ["name"]);
+  assert.ok(schema.properties.name, "scalar field still present");
+  assert.doesNotMatch(systemText, /logos/, "object field not listed in the prompt");
+});
+
+test("buildFieldsPrompt: an object-only mapping yields an empty schema (extractOne skips the LLM)", () => {
+  const { schema, systemText } = buildFieldsPrompt({ fields: [{ key: "logos", kind: "object", from: "ai" }] });
+  assert.deepEqual(schema.properties, {});
+  assert.deepEqual(schema.required, []);
+  assert.doesNotMatch(systemText, /Fields to extract/); // nothing for the model to do
+});
+
 // ─── pure: anthropicRequest tool parameterisation ────────────────────────────
 
 test("anthropicRequest: custom tool name emits in tools[] and tool_choice", () => {

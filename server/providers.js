@@ -148,6 +148,17 @@ export async function transcribeAudio({ provider, rpm, burst, ...rest }) {
   return desc.wire.transcribe(desc, rest);
 }
 
+// Detect objects in an image → [{ label, box, score }] via a provider's wire.
+// Only detects-capable providers qualify — callers gate on
+// PROVIDERS[provider].detects. The on-device `localDetector` rides its own
+// wire.detect like any other (paceAi no-ops for keyless), so there's no
+// provider-name branch here.
+export async function detectObjects({ provider, rpm, burst, ...rest }) {
+  await paceAi(provider, rest.apiKey, rpm, burst);
+  const desc = PROVIDERS[provider];
+  return desc.wire.detect(desc, rest);
+}
+
 // Cheap key/model validation for the admin "Test" buttons. Throws with the
 // provider's error message on failure.
 export function testKey({ provider, ...rest }) {
@@ -180,6 +191,7 @@ const KIND_CATALOG = {
   tagging: (desc) => ({ models: desc?.models, filter: desc?.modelFilter, always: true }),
   embed: (desc) => desc?.embeds,
   transcribe: (desc) => desc?.transcribes,
+  detect: (desc) => desc?.detects,
 };
 export const MODEL_KINDS = Object.keys(KIND_CATALOG);
 function assembleModels(desc, kind, live) {
@@ -305,6 +317,7 @@ export function providerCatalog() {
       base: p.needsBase ? p.base || null : null,
       embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
       transcribes: p.transcribes ? { default: p.transcribes.default, models: p.transcribes.models } : null,
+      detects: p.detects ? { default: p.detects.default, models: p.detects.models } : null,
     };
   });
 }

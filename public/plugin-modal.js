@@ -154,6 +154,7 @@ export function openPluginModal(p, ctx) {
       if (p.capabilities.tag) built.push(taggerSection(p, ctx, reload));
       if (p.capabilities.embed) built.push(embedSection(p, ctx, reload));
       if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, reload));
+      if (p.capabilities.detect) built.push(detectSection(p, ctx, reload));
       if (p.configSchema.length) built.push(pacingSection(p)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {
       built.push(sourceSection(p, ctx, reload));
@@ -814,6 +815,135 @@ function transcribeSection(p, ctx, reload) {
     }
   }
   if (!active) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.transcriber, ctx.slots.transcriber.model));
+
+  if (actions.children.length) sec.appendChild(actions);
+  return sec;
+}
+
+// Object-detection slot — image → boxes from a text prompt. Mirrors
+// transcribeSection: the engine is picked by name, the on-device OWLv2 detector
+// is the always-available default, so there's no enable toggle — the provider
+// choice IS the toggle. A provider advertises this via `detects`; the keyless
+// on-device detector shows its model as a note and offers a Test (which loads +
+// warms the OWLv2 model and runs it on a probe image).
+function detectSection(p, ctx, reload) {
+  const dt = ctx.slots.detector;
+  const active = ctx.defaults.detector === p.name;
+  const mine = ctx.keys.filter((k) => k.provider === p.name);
+  const sec = section("Object detection", "Find objects in images from a text prompt. One detector serves the whole app; the on-device OWLv2 model is the default.");
+
+  if (!p.ai.onDevice && !mine.length) {
+    const none = document.createElement("p");
+    none.className = "muted";
+    none.style.margin = "0";
+    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to detect with this provider.`;
+    sec.appendChild(none);
+    return sec;
+  }
+
+  // Key picker (providers with connection rows — everything but on-device).
+  let keySel = null;
+  if (!p.ai.onDevice) {
+    keySel = document.createElement("select");
+    keySel.style.cssText = "width:100%;";
+    for (const k of mine) {
+      const opt = document.createElement("option");
+      opt.value = String(k.id);
+      opt.textContent = k.name;
+      keySel.appendChild(opt);
+    }
+    if (active && dt.keyId) keySel.value = String(dt.keyId);
+    if (mine.length > 1 || !active) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
+  }
+
+  // Model picker — a provider gets a dropdown of its detects.models; the
+  // on-device detector shows its single model as a note.
+  let modelSel = null;
+  if (!p.ai.onDevice && p.ai.detects.models.length > 1) {
+    modelSel = document.createElement("select");
+    modelSel.style.cssText = "width:100%;";
+    const entry = { models: p.ai.detects.models, defaultModel: p.ai.detects.default };
+    const syncLive = () => syncModelPicker(modelSel, entry, Number(keySel.value) || null, {
+      kind: "detect",
+      saved: active && Number(keySel.value) === dt.keyId ? dt.model : null,
+    });
+    keySel.addEventListener("change", syncLive);
+    syncLive();
+    sec.appendChild(labeled("Detection model", modelSel));
+  } else {
+    const one = p.ai.detects.models[0];
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.style.margin = "0";
+    note.textContent = one ? one.id + " — " + one.note : "on-device model";
+    sec.appendChild(note);
+  }
+
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
+
+  if (p.ai.onDevice) {
+    // Picked by name — nothing to configure, so the button just makes it the
+    // default (disabled + secondary while it already is). Test loads the model.
+    const apply = async () => {
+      try {
+        await api("POST", "/api/admin/ai-config", { detectProvider: p.name });
+        toast(`Object detection set to ${p.label}`);
+        reload();
+      } catch (err) { toast.error(err.message); }
+    };
+    actions.appendChild(slotButton("Make default detector", active, [], apply));
+    if (active) {
+      const test = document.createElement("button");
+      test.className = "ghost";
+      test.textContent = "Test";
+      test.onclick = busy(test, "Loading model…", async () => {
+        try {
+          const { model: m, count } = await api("POST", "/api/admin/ai-config/detect-test");
+          toast(`✓ ${m} ran (${count} found in probe)`);
+        } catch (err) { toast.error(err.message); }
+      });
+      actions.appendChild(test);
+    }
+  } else {
+    const apply = async () => {
+      const model = modelSel?.value || p.ai.detects.default;
+      try {
+        await api("POST", "/api/admin/ai-config", {
+          detectProvider: p.name,
+          detectKeyId: Number(keySel.value),
+          detectModel: model,
+        });
+        toast("Detection settings saved");
+        reload();
+      } catch (err) { toast.error(err.message); }
+    };
+    actions.appendChild(slotButton("Make default detector", active, [keySel, modelSel].filter(Boolean), apply));
+
+    if (active) {
+      const test = document.createElement("button");
+      test.className = "ghost";
+      test.textContent = "Test";
+      test.onclick = busy(test, "Testing…", async () => {
+        try {
+          const { model: m, provider: pr, count } = await api("POST", "/api/admin/ai-config/detect-test");
+          toast(`✓ ${pr}/${m} reachable (${count} found in probe)`);
+        } catch (err) { toast.error(err.message); }
+      });
+      const off = document.createElement("button");
+      off.className = "danger";
+      off.textContent = "Use on-device detector instead";
+      off.onclick = busy(off, "Saving…", async () => {
+        try {
+          await api("POST", "/api/admin/ai-config", { detectProvider: "localDetector" });
+          toast("Detection reverted to the on-device OWLv2 detector");
+          reload();
+        } catch (err) { toast.error(err.message); }
+      });
+      actions.append(test, off);
+    }
+  }
+  if (!active) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.detector, ctx.slots.detector.model));
 
   if (actions.children.length) sec.appendChild(actions);
   return sec;

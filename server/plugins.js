@@ -39,9 +39,9 @@ function aiDefs() {
     // (whisper sidecar) are core capabilities — no account, always installed.
     // Anthropic is the one connection pre-added, since tagging (the product's
     // core value) must work out of the box; it's still removable.
-    core: p.name === "local" || p.name === "whisper",
+    core: p.name === "local" || p.name === "whisper" || p.name === "localDetector",
     defaultInstalled: p.name === "anthropic",
-    capabilities: { tag: !!PROVIDERS[p.name].wire?.tag, embed: !!p.embeds, transcribe: !!p.transcribes, research: p.research },
+    capabilities: { tag: !!PROVIDERS[p.name].wire?.tag, embed: !!p.embeds, transcribe: !!p.transcribes, detect: !!p.detects, research: p.research },
     // Rate-limit config, mirroring connectors — networked providers only
     // (on-device local/whisper make no external calls; a keyless-networked
     // provider still paces). Defaults are the descriptor's grounded limits; an
@@ -54,7 +54,7 @@ function aiDefs() {
     // the modal's pickers (models + notes, embed/transcribe catalogs) — same data
     // the board modal reads from /api/admin/ai-providers
     ai: {
-      defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes,
+      defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, detects: p.detects,
       keyless: p.keyless, onDevice: p.onDevice,
       needsBase: !!p.needsBase, base: p.needsBase ? p.base || null : null,
     },

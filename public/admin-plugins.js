@@ -33,7 +33,10 @@ export function slotProviders(slots, keys) {
   // Transcription always resolves (the whisper sidecar by default); the server
   // hands us the provider actually in effect.
   const transcriber = slots.transcriber?.active || "whisper";
-  return { tagger, embedder, transcriber };
+  // Detection always resolves (the on-device OWLv2 detector by default); the
+  // server hands us the provider actually in effect.
+  const detector = slots.detector?.active || "localDetector";
+  return { tagger, embedder, transcriber, detector };
 }
 
 // The right-aligned tag: category + the role/qualifier that defines the card.
@@ -47,6 +50,7 @@ export function tagFor(p, defaults) {
     if (defaults.tagger === p.name) return "AI · tagger";
     if (defaults.embedder === p.name) return "AI · embedder";
     if (defaults.transcriber === p.name) return "AI · transcriber";
+    if (defaults.detector === p.name) return "AI · detector";
     return "AI";
   }
   if (p.kind === "connector") return `Data · ${p.connector?.domain ?? "external"}`;
@@ -194,6 +198,7 @@ function pluginRow(p, ctx) {
       row.appendChild(badge(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env"));
     if (ctx.defaults.embedder === p.name) row.appendChild(badge("default embedder"));
     if (ctx.defaults.transcriber === p.name) row.appendChild(badge("default transcriber"));
+    if (ctx.defaults.detector === p.name) row.appendChild(badge("default detector"));
   }
   if (p.kind === "connector") {
     const d = ctx.slots.domains[p.connector.domain] || {};
@@ -352,6 +357,7 @@ function removalImpact(p, ctx) {
     const roles = [];
     if (ctx.defaults.tagger === p.name) roles.push("the default tagger");
     if (ctx.defaults.embedder === p.name) roles.push("the default embedder");
+    if (ctx.defaults.detector === p.name) roles.push("the default detector");
     if (roles.length) return `This is ${roles.join(" and ")}.`;
   }
   if (p.kind === "connector") {
