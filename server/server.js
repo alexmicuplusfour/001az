@@ -1190,7 +1190,7 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch, mapping });
 }));
 
-const MAPPING_KINDS = new Set(["text", "number", "url", "date"]);
+const MAPPING_KINDS = new Set(["text", "number", "url", "date", "object"]);
 // Returns an error string when mapping is invalid, null when valid.
 function validateMapping(mapping) {
   // Optional input slot: "files" | { connector: name }

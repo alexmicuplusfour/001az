@@ -52,8 +52,8 @@ async function detectOnce({ image, queries, threshold = 0.1 }) {
 const localDetectorWire = { tag: null, testKey: null, detect: (_desc, rest) => localDetect(rest) };
 
 export default () => ({
-  label: "Local Object Detector (Transformers.js)",
-  description: "On-device open-vocabulary object detection — no API key (transformers.js)",
+  label: "Local Object Detector (OWLv2)",
+  description: "On-device open-vocabulary object detection — no API key",
   wire: localDetectorWire,
   defaultModel: null,
   models: [],

@@ -177,6 +177,15 @@ test("mapping PATCH: bad kind → 400", async () => {
   assert.match(r.json.error, /invalid kind/);
 });
 
+test("mapping PATCH: object kind is accepted (detection field) and round-trips", async () => {
+  const { json: board } = await createBoard("map-object");
+  const mapping = { fields: [{ key: "car", kind: "object", from: "ai", hint: "car" }] };
+  const r = await patchBoard(board.id, { mapping });
+  assert.equal(r.status, 200);
+  const { json: got } = await getPublicBoard(board.id);
+  assert.deepEqual(got.mapping, mapping);
+});
+
 test("mapping PATCH: duplicate key → 400", async () => {
   const { json: board } = await createBoard("map-dupkey");
   const r = await patchBoard(board.id, {

@@ -35,7 +35,7 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   // the on-device cards name both the capability and the engine behind it
   assert.equal(getPluginDef("ai:local").label, "Local Embedder (Xenova)");
   assert.equal(getPluginDef("ai:whisper").label, "Local Transcriber (Whisper)");
-  assert.equal(getPluginDef("ai:localDetector").label, "Local Object Detector (Transformers.js)");
+  assert.equal(getPluginDef("ai:localDetector").label, "Local Object Detector (OWLv2)");
   // core = the app's own capabilities (always installed, not removable): every
   // media handler, the on-device embedder, and the local-folder source.
   assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
