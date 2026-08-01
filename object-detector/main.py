@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import os
+import sys
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -67,11 +68,14 @@ def detect(image_bytes, queries, threshold):
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, data):
         payload = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client (e.g. the healthcheck) closed the connection early — benign
 
     def do_GET(self):
         if self.path == "/health":
@@ -104,7 +108,16 @@ class Handler(BaseHTTPRequestHandler):
         pass  # suppress per-request access logs; the startup line is enough
 
 
+class Server(HTTPServer):
+    def handle_error(self, request, client_address):
+        # An aborted client — the compose healthcheck reads the status line but
+        # not the body, then closes — is routine, not a fault worth a traceback.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", 3004), Handler)
+    server = Server(("0.0.0.0", 3004), Handler)
     print("object-detector listening on :3004", flush=True)
     server.serve_forever()
