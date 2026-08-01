@@ -1683,7 +1683,7 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
         provider: (await getSetting(db, "detect_provider")) || "localDetector",
         keyId: Number(await getSetting(db, "detect_key_id")) || null,
         model: (await getSetting(db, "detect_model")) || null,
-        threshold: Number(await getSetting(db, "detect_threshold")) || 0.1,
+        threshold: Number(await getSetting(db, "detect_threshold")) || 0.3,
         active: (await resolveDetector(db)).id,
       },
       domains,
@@ -2007,7 +2007,7 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
     provider: (await getSetting(db, "detect_provider")) || "localDetector",
     keyId: Number(await getSetting(db, "detect_key_id")) || null,
     model: (await getSetting(db, "detect_model")) || null,
-    threshold: Number(await getSetting(db, "detect_threshold")) || 0.1,
+    threshold: Number(await getSetting(db, "detect_threshold")) || 0.3,
     active: detector.id,
   };
   res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe, detect });

@@ -47,6 +47,25 @@ services:
       retries: 3
       start_period: 120s
 
+  object-detector:
+    build:
+      context: ./object-detector
+      args:
+        # THE one place the detection model is set — baked into the image (see
+        # object-detector/Dockerfile), served from the baked ENV. Changing it is a
+        # rebuild (`docker compose build object-detector`), not an .env-only flip.
+        OBJECT_DETECTOR_MODEL: ${OBJECT_DETECTOR_MODEL:-iSEE-Laboratory/llmdet_tiny}
+    restart: unless-stopped
+    environment:
+      OBJECT_DETECTOR_MODEL: ${OBJECT_DETECTOR_MODEL:-iSEE-Laboratory/llmdet_tiny}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3004/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # the model loads (~25s CPU) before the server binds — give it room
+      start_period: 180s
+
   app:
     build: .
     restart: unless-stopped
@@ -64,6 +83,7 @@ services:
       JOB_LOG_RETENTION_DAYS: ${JOB_LOG_RETENTION_DAYS:-30}
       EXTRACTOR_URL: http://extractor:3002
       TRANSCRIBER_URL: http://transcriber:3003
+      OBJECT_DETECTOR_URL: http://object-detector:3004
       # outbound tuning — code owns the defaults (empty passes through safely);
       # set in .env only when a provider's pace or latency demands it
       CONNECTOR_RPM: ${CONNECTOR_RPM:-}
@@ -86,6 +106,8 @@ services:
       # exchange and the no-progress stall window, NEVER the job's duration
       TRANSCRIBER_HTTP_TIMEOUT_MS: ${TRANSCRIBER_HTTP_TIMEOUT_MS:-}
       TRANSCRIBER_STALL_MS: ${TRANSCRIBER_STALL_MS:-}
+      # object detection is a synchronous /detect exchange to the sidecar
+      OBJECT_DETECTOR_TIMEOUT_MS: ${OBJECT_DETECTOR_TIMEOUT_MS:-}
       # automatic ingestion: watched folders live under this root (bind-mounted
       # below — drop files into ./ingest-root on the host). The tunables are
       # code-owned defaults; set in .env only to deviate.
@@ -106,6 +128,8 @@ services:
       extractor:
         condition: service_started
       transcriber:
+        condition: service_started
+      object-detector:
         condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

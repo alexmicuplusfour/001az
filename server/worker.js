@@ -831,17 +831,56 @@ export async function resolveTranscriber(db, board = null) {
   return whisperTranscriber();
 }
 
+const OBJECT_DETECTOR_URL = process.env.OBJECT_DETECTOR_URL || "http://object-detector:3004";
+// Bounds ONE /detect exchange: a detection is seconds, but a queued image behind
+// others (the sidecar is single-threaded) plus a cold model load can run longer,
+// so keep it generous like the extractor.
+const OBJECT_DETECTOR_TIMEOUT_MS = Number(process.env.OBJECT_DETECTOR_TIMEOUT_MS) || 180000;
+
+// The on-server object-detector sidecar wrapped as an interchangeable engine
+// { id, model, detect } — the peer of whisperTranscriber(). POSTs the ORIGINAL
+// image + noun-phrase queries to /detect and returns canonical
+// [{ label, box(0..1 xyxy), score }]. Unreachable/non-OK throws transient → the
+// extract leg requeues (mirrors the extractor contract), never a silent empty.
+function objectDetectorSidecar(threshold) {
+  return {
+    id: "localDetector",
+    model: PROVIDERS.localDetector.detects.default, // the sidecar's baked default
+    detect: async (image, queries) => {
+      let res;
+      try {
+        res = await fetch(`${OBJECT_DETECTOR_URL}/detect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image_b64: image.toString("base64"), queries, threshold }),
+          signal: AbortSignal.timeout(OBJECT_DETECTOR_TIMEOUT_MS),
+        });
+      } catch (e) {
+        const err = new Error(`object-detector unreachable (${e.message}) — will retry`);
+        err.transient = true;
+        throw err;
+      }
+      if (!res.ok) {
+        const e = new Error(`object-detector failed (HTTP ${res.status})`);
+        e.status = res.status;
+        throw e;
+      }
+      const { objects } = await res.json();
+      return Array.isArray(objects) ? objects : [];
+    },
+  };
+}
+
 // A board's image→boxes engine. A `detect_provider` setting can point at any
-// provider that ADVERTISES `detects` (with a stored key + installed plugin);
-// everything else — unset, "localDetector", a no-detect provider, a missing key
-// — falls back to the always-on on-device OWLv2 detector. Never fails to
-// resolve. Fully capability-driven — no provider name is hardcoded past the
-// on-device default. `board` is accepted for a future per-board choice (unused
-// today). Threshold is closed over from settings — OWLv2 scores run LOW, so ~0.1
-// is the floor a naive 0.5 would starve. Exported for tests + server.
+// provider that ADVERTISES `detects` (a stored key + installed plugin) and routes
+// through wire.detect; everything else — unset, "localDetector", a no-detect
+// provider, a missing key — falls back to the always-on on-server object-detector
+// sidecar (LLMDet). Never fails to resolve. Fully capability-driven; `board` is
+// accepted for a future per-board choice (unused today). Threshold is closed over
+// from settings. Exported for tests + server.
 export async function resolveDetector(db, board = null) {
   const provider = (await getSetting(db, "detect_provider")) || "localDetector";
-  const threshold = Number(await getSetting(db, "detect_threshold")) || 0.1;
+  const threshold = Number(await getSetting(db, "detect_threshold")) || 0.3;
   const desc = PROVIDERS[provider];
   if (provider !== "localDetector" && desc?.detects && (await aiPluginInstalled(db, provider))) {
     const keyId = Number(await getSetting(db, "detect_key_id")) || 0;
@@ -862,15 +901,9 @@ export async function resolveDetector(db, board = null) {
       };
     }
   }
-  // The always-on on-device OWLv2 detector — no key, no pacing, no health ledger
-  // (in-process, like the local embedder). Rides the same dispatcher as a paid
-  // engine; only the provider name + threshold differ.
-  const local = PROVIDERS.localDetector;
-  return {
-    id: "localDetector",
-    model: local.detects.default,
-    detect: (image, queries) => detectObjects({ provider: "localDetector", image, queries, threshold }),
-  };
+  // The always-on on-server object-detector sidecar — no key, resolved directly
+  // (wire: null), like the whisper transcriber.
+  return objectDetectorSidecar(threshold);
 }
 
 // The job log observes; it must never break the job it observes. Every ledger
@@ -1639,25 +1672,45 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       fields[f.key] = { v, why };
     }
 
-    // Object-detection pass: a separate leg, not an LLM call. Run the resolved
-    // detector on the ORIGINAL image (higher-res than the tag thumbnail) — a
-    // non-image item has nothing to detect (empty, not an error); a detector
-    // failure throws → the extract leg requeues, like extractor downtime. Boxes
-    // arrive canonical (xyxy, 0..1) from the engine.
+    // Object-detection pass: a separate leg, not an LLM call. One field = one
+    // object type; its queries are the hint (comma/newline-split synonyms for the
+    // SAME thing), or the de-snaked field key when there's no hint (so a field
+    // `license_plate` detects "license plate"). Every object field's queries run
+    // in ONE OWLv2 pass (it takes a candidate list natively), then each box is
+    // routed back to its field by the matched query. A non-image item has nothing
+    // to detect (empty, not an error); a detector failure throws → the extract leg
+    // requeues, like extractor downtime. Boxes arrive canonical (xyxy, 0..1).
     if (objectFields.length) {
       const file = row.payload.files?.[0];
       const image = file?.kind === "image"
         ? await fs.promises.readFile(path.join(galleryDir, file.name))
         : null;
-      const detector = image ? await resolveDetector(db, board) : null;
-      for (const f of objectFields) {
-        if (!image) { fields[f.key] = { v: [], why: "no image to detect on" }; continue; }
-        // The hint is the query text — comma/newline-split into noun phrases
-        // (OWLv2 takes a candidate list); fall back to the field key.
-        const queries = (f.hint || f.key).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-        const dets = await detector.detect(image, queries.length ? queries : [f.key]);
-        const labels = [...new Set(dets.map((d) => d.label))];
-        fields[f.key] = { v: dets, why: dets.length ? `Detected: ${labels.join(", ")}` : "No objects detected" };
+      if (!image) {
+        for (const f of objectFields) fields[f.key] = { v: [], why: "no image to detect on" };
+      } else {
+        const norm = (s) => s.trim().toLowerCase();
+        const queryToField = new Map(); // normalized query → owning field key (first wins)
+        const queries = []; // original strings passed to the detector (deduped)
+        const seen = new Set();
+        for (const f of objectFields) {
+          const raw = (f.hint || f.key.replace(/_/g, " ")).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+          for (const q of (raw.length ? raw : [f.key.replace(/_/g, " ")])) {
+            const nq = norm(q);
+            if (!queryToField.has(nq)) queryToField.set(nq, f.key);
+            if (!seen.has(nq)) { seen.add(nq); queries.push(q); }
+          }
+          fields[f.key] = { v: [], why: "No objects detected" };
+        }
+        // Demux by the matched query, which OWLv2 echoes as each box's label.
+        const detector = await resolveDetector(db, board);
+        for (const d of await detector.detect(image, queries)) {
+          const key = queryToField.get(norm(d.label));
+          if (key) fields[key].v.push(d);
+        }
+        for (const f of objectFields) {
+          const v = fields[f.key].v;
+          if (v.length) fields[f.key].why = `Detected: ${[...new Set(v.map((d) => d.label))].join(", ")}`;
+        }
       }
     }
 

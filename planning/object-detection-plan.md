@@ -37,6 +37,18 @@ non-image items → empty, not error. 2 new pure tests in
 live extract→boxes path follows the file's convention (manual verify), atop the
 Slice 1 engine smoke test.
 
+**Model settled — one field per object type (refinement 2026-08-01):** an `object`
+field IS one object type; the hint's commas are **synonyms for the same thing**
+(better OWLv2 recall), not a list of different types — so the per-field overlay
+colour is per-type. No hint → the **de-snaked field key** is the query (`license_plate`
+→ "license plate"). All object fields' queries run in **ONE** OWLv2 pass (it takes
+a candidate list natively) and each box is routed back to its field by the matched
+query (OWLv2 echoes the query as the box label; demux is normalized, first-field
+wins on a shared query). Placeholder reworded to teach this. Also fixed post-push:
+the server's `MAPPING_KINDS` validation whitelist didn't include `object` (board
+save was rejected — `5a4a770`), and the detector is now labelled by its model
+("Local Object Detector (OWLv2)", not the runtime).
+
 **Slice 3 shipped:** the lightbox overlay + panel list. Object fields render in
 the existing **AI-extracted fields** section (they already route there — `from:"ai"`,
 no `src`) as a hoverable list — one row per detection (colour swatch · label ·

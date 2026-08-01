@@ -640,10 +640,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     hint.disabled = !isAdmin;
     hint.addEventListener("input", () => { f.hint = hint.value; });
     // Object fields feed the detector a list of things to find; scalar fields are
-    // an extraction instruction. The placeholder tracks the kind select.
+    // an extraction instruction. The placeholder tracks the kind select. One
+    // object field = one object type; commas are synonyms for the SAME thing.
     const syncHintPlaceholder = () => {
       hint.placeholder = kindSel.value === "object"
-        ? "objects to detect — comma-separated noun phrases (e.g. \"logo, badge, zipper\")"
+        ? "the object to detect (defaults to the field name) — e.g. \"car\"; commas = synonyms for the same thing"
         : "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")";
     };
     kindSel.addEventListener("change", syncHintPlaceholder);
