@@ -830,7 +830,7 @@ function detectSection(p, ctx, reload) {
   const dt = ctx.slots.detector;
   const active = ctx.defaults.detector === p.name;
   const mine = ctx.keys.filter((k) => k.provider === p.name);
-  const sec = section("Object detection", "Find objects in images from a text prompt. One detector serves the whole app; the on-device OWLv2 model is the default.");
+  const sec = section("Object detection", "Find objects in images from a text prompt. One detector serves the whole app; the on-device LLMDet model (object-detector sidecar) is the default.");
 
   if (!p.ai.onDevice && !mine.length) {
     const none = document.createElement("p");
@@ -936,7 +936,7 @@ function detectSection(p, ctx, reload) {
       off.onclick = busy(off, "Saving…", async () => {
         try {
           await api("POST", "/api/admin/ai-config", { detectProvider: "localDetector" });
-          toast("Detection reverted to the on-device OWLv2 detector");
+          toast("Detection reverted to the on-device object detector");
           reload();
         } catch (err) { toast.error(err.message); }
       });

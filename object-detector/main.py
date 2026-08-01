@@ -34,14 +34,18 @@ print("object-detector: ready", flush=True)
 def detect(image_bytes, queries, threshold):
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     W, H = img.size
-    # grounding-DINO / mm-grounding-dino: text is a per-image list of noun phrases.
-    inputs = _processor(images=img, text=[queries], return_tensors="pt")
+    # grounding-DINO text format: lowercase phrases, each period-terminated, in ONE
+    # string. The list-of-lists form mis-tokenizes a SINGLE query ("TextEncodeInput
+    # must be Union[...]"); the string form is robust for one phrase or many, and
+    # is what the labels come back matching (lowercased, for the worker's demux).
+    text = " ".join(f"{q.strip().rstrip('.').lower()}." for q in queries)
+    inputs = _processor(images=img, text=text, return_tensors="pt")
     with torch.no_grad():
         outputs = _model(**inputs)
-    # NOTE: this call is version-sensitive — transformers 5.x mangles the boxes;
-    # the image pins transformers>=4.55,<5 (see Dockerfile).
+    # NOTE: version-sensitive — transformers 5.x mangles the boxes; the image pins
+    # transformers>=4.55,<5 (see Dockerfile). input_ids maps boxes → phrases.
     res = _processor.post_process_grounded_object_detection(
-        outputs, threshold=threshold, target_sizes=[(H, W)]
+        outputs, inputs.input_ids, threshold=threshold, text_threshold=0.25, target_sizes=[(H, W)]
     )[0]
     objects = []
     for box, score, label in zip(res["boxes"].tolist(), res["scores"].tolist(), res["text_labels"]):
