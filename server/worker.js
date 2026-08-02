@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import sharp from "sharp";
 import {
   claimFairBatch,
   setEntityFaceAt,
@@ -837,6 +838,24 @@ const OBJECT_DETECTOR_URL = process.env.OBJECT_DETECTOR_URL || "http://object-de
 // so keep it generous like the extractor.
 const OBJECT_DETECTOR_TIMEOUT_MS = Number(process.env.OBJECT_DETECTOR_TIMEOUT_MS) || 180000;
 
+// The detector sidecar's live model, read off its /health and cached briefly —
+// the peer of transcriberSidecarModel(). The model is baked into the image at
+// build (OBJECT_DETECTOR_MODEL), so the app never mirrors it; the admin card
+// reads it from here and thus can't drift when the image is rebuilt with a
+// different model. Null when unreachable — callers show a baked-at-deploy
+// fallback. Failures cache too, so an admin reload doesn't re-time-out per hit.
+let detectorModelCache = { at: 0, model: null };
+export async function detectorSidecarModel() {
+  if (Date.now() - detectorModelCache.at < 60000) return detectorModelCache.model;
+  let model = null;
+  try {
+    const res = await fetch(`${OBJECT_DETECTOR_URL}/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) model = (await res.json()).model || null;
+  } catch { /* down/unreachable — display-only, fall back */ }
+  detectorModelCache = { at: Date.now(), model };
+  return model;
+}
+
 // The on-server object-detector sidecar wrapped as an interchangeable engine
 // { id, model, detect } — the peer of whisperTranscriber(). POSTs the ORIGINAL
 // image + noun-phrase queries to /detect and returns canonical
@@ -861,7 +880,13 @@ function objectDetectorSidecar(threshold) {
         throw err;
       }
       if (!res.ok) {
-        const e = new Error(`object-detector failed (HTTP ${res.status})`);
+        // Carry the sidecar's reason into the message so a parked item's error
+        // says WHY (e.g. "undecodable image: ..."), not a bare status. A 4xx
+        // (422 undecodable input) is permanent → failOrRequeue parks it on the
+        // first attempt; a 5xx stays transient → the extract leg requeues.
+        let detail = "";
+        try { detail = (await res.json())?.error || ""; } catch { /* no/again-unreadable body */ }
+        const e = new Error(`object-detector failed (HTTP ${res.status})${detail ? `: ${detail}` : ""}`);
         e.status = res.status;
         throw e;
       }
@@ -904,6 +929,74 @@ export async function resolveDetector(db, board = null) {
   // The always-on on-server object-detector sidecar — no key, resolved directly
   // (wire: null), like the whisper transcriber.
   return objectDetectorSidecar(threshold);
+}
+
+// One object field = one object type; its queries are the hint's comma/newline-
+// split synonyms for the SAME thing (or the de-snaked field key when there's no
+// hint, so a field `license_plate` detects "license plate"). Every object field's
+// queries run in ONE detector pass — the detector echoes the matched query as
+// each box's label, so `.route()` demuxes boxes back to the owning field by that
+// label. `norm` mirrors the sidecar's own query normalization
+// (q.strip().rstrip('.').lower()): the sidecar feeds period-terminated phrases and
+// echoes labels WITHOUT the period, so a hint typed "car." must normalize to
+// "car" or the label would never match and the box would be silently dropped.
+// Pure + exported so the demux (the fragile part) is unit-testable without a DB.
+export function detectionDemux(objectFields) {
+  const norm = (s) => s.trim().replace(/\.+$/, "").trim().toLowerCase();
+  const deSnake = (key) => key.replace(/_/g, " ");
+  const queryToField = new Map(); // normalized query → owning field key (first wins)
+  const queries = []; // original strings passed to the detector (deduped)
+  const seen = new Set();
+  for (const f of objectFields) {
+    const raw = (f.hint || deSnake(f.key)).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    for (const q of (raw.length ? raw : [deSnake(f.key)])) {
+      const nq = norm(q);
+      if (!queryToField.has(nq)) queryToField.set(nq, f.key);
+      if (!seen.has(nq)) { seen.add(nq); queries.push(q); }
+    }
+  }
+  return {
+    queries,
+    // Boxes → { fieldKey: det[] }. Every field gets an entry (empty if nothing
+    // matched); a box whose label matches no query is dropped (it wasn't asked for).
+    route(detections) {
+      const byField = new Map(objectFields.map((f) => [f.key, []]));
+      for (const d of (detections || [])) {
+        const key = queryToField.get(norm(d.label));
+        if (key) byField.get(key).push(d);
+      }
+      return byField;
+    },
+  };
+}
+
+// The grounding-DINO family resizes to ~this on the long edge internally, so
+// shipping a full-res original only inflates the base64 POST + the sidecar's
+// decode for zero accuracy gain (the sidecar is single-threaded — every wasted
+// megabyte queues behind the next image). 40e6 mirrors the ingest decode cap.
+const DETECT_MAX_EDGE = 1333;
+const DETECT_MAX_INPUT_PIXELS = 40e6;
+
+// Prepare an image for the detector: cap the long edge and re-encode small. The
+// boxes come back normalized 0..1, so a uniform downscale leaves them exact.
+// .rotate() bakes EXIF orientation into the pixels — the sidecar's PIL does NOT
+// auto-orient, so without this a rotated phone photo would detect on unrotated
+// pixels while the browser draws the overlay on the auto-oriented display; baking
+// it keeps the boxes aligned with what the user sees. Best-effort: any sharp
+// failure (undecodable/exotic input) falls back to the original bytes, so this
+// only ever SHRINKS a decodable image and never changes the failure contract —
+// a truly bad image still reaches the sidecar and 422-parks there (see #detect).
+export async function imageForDetection(buf) {
+  try {
+    return await sharp(buf, { pages: 1, limitInputPixels: DETECT_MAX_INPUT_PIXELS })
+      .rotate()
+      .resize({ width: DETECT_MAX_EDGE, height: DETECT_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+      .flatten({ background: "#ffffff" }) // JPEG has no alpha; white beats the default black behind a logo
+      .jpeg({ quality: 90 })
+      .toBuffer();
+  } catch {
+    return buf; // let the sidecar decode (and 422-park) a truly undecodable image
+  }
 }
 
 // The job log observes; it must never break the job it observes. Every ledger
@@ -1676,7 +1769,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // object type; its queries are the hint (comma/newline-split synonyms for the
     // SAME thing), or the de-snaked field key when there's no hint (so a field
     // `license_plate` detects "license plate"). Every object field's queries run
-    // in ONE OWLv2 pass (it takes a candidate list natively), then each box is
+    // in ONE detector pass (LLMDet takes all the queries at once), then each box is
     // routed back to its field by the matched query. A non-image item has nothing
     // to detect (empty, not an error); a detector failure throws → the extract leg
     // requeues, like extractor downtime. Boxes arrive canonical (xyxy, 0..1).
@@ -1688,27 +1781,17 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       if (!image) {
         for (const f of objectFields) fields[f.key] = { v: [], why: "no image to detect on" };
       } else {
-        const norm = (s) => s.trim().toLowerCase();
-        const queryToField = new Map(); // normalized query → owning field key (first wins)
-        const queries = []; // original strings passed to the detector (deduped)
-        const seen = new Set();
-        for (const f of objectFields) {
-          const raw = (f.hint || f.key.replace(/_/g, " ")).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-          for (const q of (raw.length ? raw : [f.key.replace(/_/g, " ")])) {
-            const nq = norm(q);
-            if (!queryToField.has(nq)) queryToField.set(nq, f.key);
-            if (!seen.has(nq)) { seen.add(nq); queries.push(q); }
-          }
-          fields[f.key] = { v: [], why: "No objects detected" };
-        }
-        // Demux by the matched query, which OWLv2 echoes as each box's label.
+        for (const f of objectFields) fields[f.key] = { v: [], why: "No objects detected" };
+        // Build the query set, run ONE detection pass, demux boxes back to fields
+        // by matched label (detectionDemux owns the sidecar-matching normalization).
+        // The image is capped + oriented first (imageForDetection) — same boxes,
+        // far less to ship to the single-threaded sidecar.
+        const demux = detectionDemux(objectFields);
         const detector = await resolveDetector(db, board);
-        for (const d of await detector.detect(image, queries)) {
-          const key = queryToField.get(norm(d.label));
-          if (key) fields[key].v.push(d);
-        }
+        const byField = demux.route(await detector.detect(await imageForDetection(image), demux.queries));
         for (const f of objectFields) {
-          const v = fields[f.key].v;
+          const v = byField.get(f.key) || [];
+          fields[f.key].v = v;
           if (v.length) fields[f.key].why = `Detected: ${[...new Set(v.map((d) => d.label))].join(", ")}`;
         }
       }

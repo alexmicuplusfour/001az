@@ -117,7 +117,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, transcriberSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 import sharp from "sharp";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, MODEL_KINDS, PROVIDERS } from "./providers.js";
@@ -1644,6 +1644,18 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
       transcribes: { default: live, models: live ? [{ id: live, note: "runs on-server · no API key · baked at deploy (WHISPER_MODEL)" }] : [] },
     };
   }
+  // The on-device detector card, same treatment: the model is baked into the
+  // sidecar image (OBJECT_DETECTOR_MODEL), so the card reads what /health reports
+  // and can't drift when the image is rebuilt with a different model. Unreachable
+  // leaves the list empty and the card notes the fallback.
+  const localDetector = plugins.find((p) => p.id === "ai:localDetector");
+  if (localDetector) {
+    const live = await detectorSidecarModel();
+    localDetector.ai = {
+      ...localDetector.ai, // don't mutate: `ai` is shared with the memoized plugin defs
+      detects: { default: live, models: live ? [{ id: live, note: "runs in the object-detector sidecar · no API key · baked at deploy (OBJECT_DETECTOR_MODEL)" }] : [] },
+    };
+  }
   const embedder = await resolveEmbedder(db);
   const domains = {};
   for (const c of listConnectors()) {
@@ -1677,7 +1689,7 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
         model: (await getSetting(db, "transcribe_model")) || null,
         active: (await resolveTranscriber(db)).id,
       },
-      // Detection resolves like transcription — the on-device OWLv2 detector by
+      // Detection resolves like transcription — the on-device LLMDet detector by
       // default; `active` is what actually resolves.
       detector: {
         provider: (await getSetting(db, "detect_provider")) || "localDetector",
@@ -1999,7 +2011,7 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
     model: (await getSetting(db, "transcribe_model")) || null,
     active: transcriber.id, // the engine family actually in effect ("whisper" or a provider)
   };
-  // Object detection: on-device OWLv2 by default, a provider override slots in
+  // Object detection: on-device LLMDet by default, a provider override slots in
   // later. The provider choice is the only toggle — detection is field-triggered
   // (a board's object field), not a global sweep, so there's no enabled flag.
   const detector = await resolveDetector(db);
@@ -2107,7 +2119,7 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
     }
   }
   // Object detection: `detect_provider` names the engine directly — "localDetector"
-  // (the always-on on-device OWLv2) or any provider that ADVERTISES `detects`
+  // (the always-on on-device LLMDet) or any provider that ADVERTISES `detects`
   // with a matching key. Capability-gated, no provider name special-cased.
   if (detectProvider !== undefined) {
     if (!detectProvider || detectProvider === "localDetector" || PROVIDERS[detectProvider]?.onDevice) {
@@ -2134,7 +2146,7 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
       await setSetting(db, "detect_model", detectModel || null);
     }
   }
-  // Threshold is a plain scalar knob (OWLv2 scores run low → ~0.1 floor).
+  // Threshold is a plain scalar knob (LLMDet scores run confident → 0.3 default).
   if (detectThreshold !== undefined)
     await setSetting(db, "detect_threshold", detectThreshold != null ? String(detectThreshold) : null);
   console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"} transcribe=${transcribeProvider ?? "(unchanged)"} detect=${detectProvider ?? "(unchanged)"}`);
@@ -2187,10 +2199,11 @@ app.post("/api/admin/ai-config/transcribe-test", requireAdmin, wrap(async (_req,
 }));
 
 // A tiny solid image — small, valid pixels for a reachability probe. detect-test
-// proves the detector loads + runs end to end (the detection analog of
-// embed-test / transcribe-test); OWLv2 finds nothing in a blank image, so a 200
-// with a count is the signal the engine works. First call on the on-device
-// detector downloads + warms the OWLv2 model, so it can take a few seconds.
+// proves the detector runs end to end (the detection analog of embed-test /
+// transcribe-test); LLMDet finds nothing in a blank image, so a 200 with a count
+// is the signal the engine works. The sidecar bakes + loads its model at startup,
+// so a probe merely confirms it answers — but a queued image ahead of it (the
+// sidecar is single-threaded) can still make this take a few seconds.
 async function tinyImage() {
   return sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 128, g: 128, b: 128 } } }).png().toBuffer();
 }
@@ -2199,7 +2212,11 @@ app.post("/api/admin/ai-config/detect-test", requireAdmin, wrap(async (_req, res
   const d = await resolveDetector(db);
   try {
     const objects = await d.detect(await tinyImage(), ["object."]);
-    res.json({ ok: true, provider: d.id, model: d.model, count: objects.length });
+    // The on-device engine's model is baked in the sidecar — report what /health
+    // says so the toast can't drift from the served model; a paid provider names
+    // its own model on the descriptor.
+    const model = d.id === "localDetector" ? (await detectorSidecarModel()) || d.model : d.model;
+    res.json({ ok: true, provider: d.id, model, count: objects.length });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

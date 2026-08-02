@@ -33,7 +33,7 @@ export function slotProviders(slots, keys) {
   // Transcription always resolves (the whisper sidecar by default); the server
   // hands us the provider actually in effect.
   const transcriber = slots.transcriber?.active || "whisper";
-  // Detection always resolves (the on-device OWLv2 detector by default); the
+  // Detection always resolves (the on-device LLMDet detector by default); the
   // server hands us the provider actually in effect.
   const detector = slots.detector?.active || "localDetector";
   return { tagger, embedder, transcriber, detector };

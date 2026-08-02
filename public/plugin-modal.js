@@ -821,11 +821,11 @@ function transcribeSection(p, ctx, reload) {
 }
 
 // Object-detection slot — image → boxes from a text prompt. Mirrors
-// transcribeSection: the engine is picked by name, the on-device OWLv2 detector
+// transcribeSection: the engine is picked by name, the on-device LLMDet detector
 // is the always-available default, so there's no enable toggle — the provider
 // choice IS the toggle. A provider advertises this via `detects`; the keyless
-// on-device detector shows its model as a note and offers a Test (which loads +
-// warms the OWLv2 model and runs it on a probe image).
+// on-device detector shows its model as a note and offers a Test (which runs the
+// LLMDet sidecar on a probe image).
 function detectSection(p, ctx, reload) {
   const dt = ctx.slots.detector;
   const active = ctx.defaults.detector === p.name;

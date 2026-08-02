@@ -8,7 +8,8 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, req } from "./helpers.js";
-import { resolveDetector } from "../server/worker.js";
+import { resolveDetector, detectionDemux, imageForDetection } from "../server/worker.js";
+import sharp from "sharp";
 import { detectObjects, providerCatalog, PROVIDERS, registerProvider, unregisterProvider } from "../server/providers.js";
 import { setSetting } from "../server/db.js";
 
@@ -50,6 +51,96 @@ test("dispatch: detectObjects routes to a keyed provider's wire.detect (the paid
   } finally {
     unregisterProvider("stubdet");
   }
+});
+
+test("sidecar client: failure taxonomy — unreachable transient, 422 permanent, 5xx transient", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const db = { query: async () => ({ rows: [] }) }; // no settings → the default localDetector sidecar
+  const eng = await resolveDetector(db);
+  const img = Buffer.from("img");
+
+  // sidecar unreachable → transient; the extract leg requeues (no status set)
+  globalThis.fetch = async () => { throw new Error("ECONNREFUSED"); };
+  await assert.rejects(eng.detect(img, ["cat"]),
+    (e) => /object-detector unreachable/.test(e.message) && e.transient === true);
+
+  // undecodable image → 422: permanent-shaped (4xx ≠ 408/429) so failOrRequeue
+  // parks it on attempt one instead of burning the retry budget, and the
+  // sidecar's reason rides through in the message.
+  globalThis.fetch = async () => ({ ok: false, status: 422, json: async () => ({ error: "undecodable image: cannot identify" }) });
+  await assert.rejects(eng.detect(img, ["cat"]),
+    (e) => e.status === 422 && e.transient !== true && /undecodable image/.test(e.message));
+
+  // a genuine inference fault → 500: NOT permanent → the extract leg requeues
+  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: "boom" }) });
+  await assert.rejects(eng.detect(img, ["cat"]),
+    (e) => e.status === 500 && /boom/.test(e.message));
+});
+
+// --- pure: the demux (query build + label routing) ---
+
+test("demux: queries come from the hint's synonyms, else the de-snaked key", () => {
+  const d = detectionDemux([
+    { key: "car", hint: "car, automobile" },
+    { key: "license_plate", hint: "" }, // no hint → de-snaked key
+  ]);
+  assert.deepEqual(d.queries, ["car", "automobile", "license plate"]);
+});
+
+test("demux: a trailing period in a hint still matches the sidecar's period-stripped label", () => {
+  // Regression: the sidecar feeds "car." and echoes label "car"; a hint typed
+  // "car." must normalize to "car" or the box is silently dropped.
+  const d = detectionDemux([{ key: "car", hint: "car." }]);
+  const byField = d.route([{ label: "car", box: [0, 0, 0.5, 0.5], score: 0.9 }]);
+  assert.equal(byField.get("car").length, 1);
+});
+
+test("demux: boxes route to their field by label; an unasked label is dropped", () => {
+  const d = detectionDemux([{ key: "car", hint: "car" }, { key: "wheel", hint: "wheel" }]);
+  const byField = d.route([
+    { label: "car", box: [0, 0, 1, 1], score: 0.8 },
+    { label: "Wheel", box: [0, 0, 1, 1], score: 0.7 }, // case-insensitive
+    { label: "tree", box: [0, 0, 1, 1], score: 0.6 },  // never queried → dropped
+  ]);
+  assert.equal(byField.get("car").length, 1);
+  assert.equal(byField.get("wheel").length, 1);
+  assert.deepEqual([...byField.keys()], ["car", "wheel"]); // no stray "tree" field
+});
+
+test("demux: a query shared by two fields is deduped once, first field wins the label", () => {
+  const d = detectionDemux([{ key: "a", hint: "car" }, { key: "b", hint: "car" }]);
+  assert.deepEqual(d.queries, ["car"]); // sent to the detector once
+  const byField = d.route([{ label: "car", box: [0, 0, 1, 1], score: 0.9 }]);
+  assert.equal(byField.get("a").length, 1);
+  assert.equal(byField.get("b").length, 0);
+});
+
+// --- pure: image prep before the detector ---
+
+test("imageForDetection caps the long edge and shrinks the payload; boxes stay 0..1 so scale is safe", async () => {
+  const big = await sharp({ create: { width: 4000, height: 3000, channels: 3, background: { r: 10, g: 120, b: 200 } } })
+    .png().toBuffer();
+  const out = await imageForDetection(big);
+  const meta = await sharp(out).metadata();
+  assert.ok(Math.max(meta.width, meta.height) <= 1333, "long edge capped");
+  // Aspect preserved to within integer-pixel rounding — a uniform scale keeps 0..1 boxes exact.
+  assert.ok(Math.abs(meta.width / meta.height - 4000 / 3000) < 0.01, "aspect ratio preserved");
+  assert.equal(meta.format, "jpeg");
+  assert.ok(out.length < big.length, "payload shrank");
+});
+
+test("imageForDetection never enlarges a small image", async () => {
+  const small = await sharp({ create: { width: 200, height: 150, channels: 3, background: { r: 0, g: 0, b: 0 } } })
+    .png().toBuffer();
+  const meta = await sharp(await imageForDetection(small)).metadata();
+  assert.equal(meta.width, 200);
+  assert.equal(meta.height, 150);
+});
+
+test("imageForDetection falls back to the original bytes on an undecodable image (sidecar then 422-parks it)", async () => {
+  const junk = Buffer.from("this is not an image");
+  assert.equal(await imageForDetection(junk), junk);
 });
 
 // --- integration: resolution + config validation through the server ---

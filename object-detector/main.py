@@ -24,6 +24,18 @@ from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
 MODEL_ID = os.environ.get("OBJECT_DETECTOR_MODEL", "iSEE-Laboratory/llmdet_tiny")
 DEFAULT_THRESHOLD = float(os.environ.get("OBJECT_DETECTOR_THRESHOLD", "0.3"))
+# A near-full-frame box (≥ this fraction of BOTH dims) is the shape a grounding
+# detector produces when the queried object is ABSENT and the phrase grounds to
+# the whole scene. But a real object CAN legitimately fill the frame (a tightly-
+# cropped logo, a close-up, a scanned document), so geometry alone can't tell the
+# two apart — confidence can: the absent-query artifact is weak, a genuine fill-
+# the-frame detection is confident. So a full-frame box is dropped ONLY when it's
+# ALSO below FULL_FRAME_MIN_SCORE; a confident one is a real object and stays. The
+# default sits just under LLMDet's real-detection range (~0.47+ in the benchmark)
+# so those survive while the barely-over-threshold grounding is culled. Env-
+# overridable like the threshold (a per-model tuning knob, not a rebuild).
+FULL_FRAME_COVERAGE = 0.95
+FULL_FRAME_MIN_SCORE = float(os.environ.get("OBJECT_DETECTOR_FULL_FRAME_MIN_SCORE", "0.45"))
 
 print(f"object-detector: loading {MODEL_ID} ...", flush=True)
 _processor = AutoProcessor.from_pretrained(MODEL_ID, local_files_only=True)
@@ -31,8 +43,7 @@ _model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID, local_fil
 print("object-detector: ready", flush=True)
 
 
-def detect(image_bytes, queries, threshold):
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+def detect(img, queries, threshold):
     W, H = img.size
     # grounding-DINO text format: lowercase phrases, each period-terminated, in ONE
     # string. The list-of-lists form mis-tokenizes a SINGLE query ("TextEncodeInput
@@ -55,11 +66,12 @@ def detect(image_bytes, queries, threshold):
         by0 = min(max(y0 / H, 0.0), 1.0)
         bx1 = min(max(x1 / W, 0.0), 1.0)
         by1 = min(max(y1 / H, 0.0), 1.0)
-        # Grounding detectors emit a near-full-frame box when the queried object
-        # is ABSENT (the phrase grounds to the whole scene). Such a "detection"
-        # carries no localization — a box over the entire image is meaningless —
-        # so drop it. A real object almost never spans >95% of BOTH dimensions.
-        if (bx1 - bx0) >= 0.95 and (by1 - by0) >= 0.95:
+        # Drop a near-full-frame box only when it's ALSO low-confidence — the
+        # absent-query "grounds to the whole scene" artifact (see the constants
+        # above). A confident box that fills the frame is a real object (a
+        # close-up, a tightly-cropped logo) and is kept.
+        if (bx1 - bx0) >= FULL_FRAME_COVERAGE and (by1 - by0) >= FULL_FRAME_COVERAGE \
+                and float(score) < FULL_FRAME_MIN_SCORE:
             continue
         objects.append({
             "label": label,
@@ -94,17 +106,28 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         try:
             req = json.loads(self.rfile.read(length) or b"{}")
-            image = base64.b64decode(req["image_b64"])
             queries = [q for q in (req.get("queries") or []) if isinstance(q, str) and q.strip()]
             threshold = float(req.get("threshold") or DEFAULT_THRESHOLD)
             if not queries:
                 self._json(200, {"objects": []})
                 return
+            # Decode is bad-input territory: unreadable base64, an unsupported or
+            # truncated image. Such a request can never succeed, so return 422
+            # (permanent) — the caller parks it on the first attempt instead of
+            # reading a 500 as transient and burning its whole retry budget on a
+            # file that will never decode. Mirrors the transcriber's bad-input park.
+            try:
+                img = Image.open(io.BytesIO(base64.b64decode(req["image_b64"]))).convert("RGB")
+            except Exception as exc:
+                print(f"detect bad image: {exc}", flush=True)
+                self._json(422, {"error": f"undecodable image: {exc}"})
+                return
             t0 = time.monotonic()
-            objects = detect(image, queries, threshold)
+            objects = detect(img, queries, threshold)
             print(f"detect {len(queries)}q -> {len(objects)} obj in {(time.monotonic()-t0)*1000:.0f}ms", flush=True)
             self._json(200, {"objects": objects})
         except Exception as exc:
+            # A genuine inference/internal fault — transient; the caller requeues.
             print(f"detect FAILED: {exc}", flush=True)
             self._json(500, {"error": str(exc)})
 
