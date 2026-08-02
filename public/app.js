@@ -12,6 +12,7 @@ import { initUpload } from './upload.js';
 import { initLightbox, openLightbox } from './lightbox.js';
 import { openAlertEvent } from './alert-event.js';
 import { restoreSort } from './sort.js';
+import { initHeaderScroll } from './header-scroll.js';
 
 const elGridRoot = document.getElementById("grid");
 
@@ -57,6 +58,7 @@ async function main() {
   initFilters();
   initUpload();
   initLightbox();
+  initHeaderScroll();
 
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
