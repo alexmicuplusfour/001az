@@ -66,6 +66,34 @@ test("absence from the ids list still reads as merged away", () => {
   assert.equal(hasPendingUploadTags(), false, "batch settles: one merged, one tagged");
 });
 
+// The stuck-spinner bug: a merge can delete a card no upload batch is tracking
+// (a re-extract, another tab's upload, ingestion, or a survivor whose batch
+// already settled). The card's spinner never repaints (cardSig keys on status
+// and the poll never lists a deleted entity again), so it ran forever until a
+// reload. The sweep must drop it even with no batch — after a one-tick grace so
+// a not-yet-acknowledged fresh upload isn't yanked out from under a live drop.
+test("in-flight card gone from ids with no batch is swept after a grace tick", () => {
+  state.items = [];
+  reconcile([row(51, "processing")], new Set([51]));   // poll inserts an entity, no batch
+
+  reconcile([], new Set([]));   // #51 vanished (merged) — grace tick, keep it
+  assert.deepEqual(state.items.map((i) => i.id), [51], "one grace tick before the drop");
+
+  reconcile([], new Set([]));   // still gone — a confirmed ghost now
+  assert.deepEqual(state.items.map((i) => i.id), [], "untracked ghost card is swept");
+});
+
+test("a fresh card missing from one stale id snapshot then acknowledged survives", () => {
+  state.items = [];
+  mergeUploadedRows([row(52, "pending")]);   // optimistic upload insert
+
+  // A poll whose id snapshot predates the insert: #52 is momentarily absent.
+  reconcile([], new Set([]));
+  // Next tick acknowledges it. The grace tick means it was never dropped.
+  reconcile([row(52, "processing")], new Set([52]));
+  assert.deepEqual(state.items.map((i) => i.id), [52], "live upload card is not flickered away");
+});
+
 // Live boards regenerate chart faces server-side under new filenames (the old
 // webp is deleted); a tab that stops polling keeps the dead name and 404s in
 // the lightbox. The cadence decision must keep quiet live boards on a slow poll.

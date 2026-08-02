@@ -4,6 +4,11 @@ import { toItem, toInstance } from './utils.js';
 // Batches of uploaded items we're waiting to see fully tagged.
 const pendingBatches = []; // [{ ids: Set<id>, n: number }]
 
+// In-flight card ids that were absent from the server's id list last tick.
+// A ghost card (an entity merged/deleted server-side) is swept only after a
+// SECOND consecutive absence — see the sweep in reconcile() for why.
+let ghostSeen = new Set();
+
 document.addEventListener('app:uploads-pending-tag', (e) => {
   pendingBatches.push(e.detail);
 });
@@ -108,22 +113,51 @@ export function reconcile(data, presentIds = null) {
     }
   }
 
-  // Remove in-flight items that disappeared from the server list — they were
-  // merged into another entity (or deleted externally). Notify so the toast
-  // can update.
+  // An in-flight card that vanished from the server's id list was merged into
+  // another entity (or deleted elsewhere). Two separate jobs here:
+  //
+  //  (a) settle upload batches — drop the vanished id so the "Processing N"
+  //      toast counts down instead of stalling on a row that never reports
+  //      again, and announce the merge to the uploader.
+  //  (b) sweep the ghost CARD out of the grid — its spinner runs forever
+  //      otherwise: the poll never lists a deleted entity again, and cardSig
+  //      keys on status, so nothing repaints it. Crucially this is NOT gated on
+  //      a batch tracking the id (the old bug): a merge from a re-extract,
+  //      another tab's upload, ingestion, or a batch that already settled left a
+  //      spinner only a reload could clear.
   let mergedCount = 0;
+  const trackedGone = new Set();
   for (let i = pendingBatches.length - 1; i >= 0; i--) {
     const { ids } = pendingBatches[i];
     for (const id of [...ids]) {
       if (!freshIds.has(id)) {
         ids.delete(id);
+        trackedGone.add(id);
         mergedCount++;
       }
     }
     if (ids.size === 0) pendingBatches.splice(i, 1);
   }
+
+  // A tracked id (uploaded by us) is dropped on sight — a batch is minted only
+  // once the whole drop finished, by which point its ids have all round-tripped
+  // through the id list, so an absence is a real merge. An UNtracked ghost waits
+  // for a second consecutive absence: a just-uploaded card the server hasn't
+  // acknowledged yet can be momentarily missing from an id snapshot the
+  // optimistic insert raced ahead of, and one grace tick lets that resolve so we
+  // never yank a live upload's card and flicker it back.
+  const absentInFlight = new Set();
+  for (const img of state.items) {
+    if (IN_FLIGHT.has(img.status) && !freshIds.has(img.id)) absentInFlight.add(img.id);
+  }
+  const drop = new Set();
+  for (const id of absentInFlight) if (trackedGone.has(id) || ghostSeen.has(id)) drop.add(id);
+  ghostSeen = absentInFlight;
+  if (drop.size > 0) {
+    state.items = state.items.filter((img) => !drop.has(img.id));
+    document.dispatchEvent(new Event('app:uploads-pending-changed'));
+  }
   if (mergedCount > 0) {
-    state.items = state.items.filter((img) => freshIds.has(img.id) || !IN_FLIGHT.has(img.status));
     document.dispatchEvent(new CustomEvent('app:item-merged', { detail: { count: mergedCount } }));
     document.dispatchEvent(new Event('app:uploads-pending-changed'));
   }
