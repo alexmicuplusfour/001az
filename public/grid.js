@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { ICONS, actionBtn, hasIdentity, instanceTagCounts } from './utils.js';
 import { openDropdown } from './dropdown.js';
 import { toast } from './toast.js';
-import { taggedFiltered, isUntagged } from './filters.js';
+import { taggedFiltered, needsTags } from './filters.js';
 import { ensurePolling, dropPendingUploadId } from './data.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
@@ -388,9 +388,10 @@ export function cardFor(img) {
   // images carry a title strip) must leave this unset — they take the measured lane.
   if (img.w && img.h && img.kind === "image" && !hasIdentity(img)) card.dataset.ratio = img.w / img.h;
   // Anything in the grid without tags needs human attention — AI-undecided,
-  // held (waiting for auto-tagging), failed, or hand-cleared — so the dotted
-  // "needs tags" treatment matches the Untagged filter's definition.
-  if (img.undecided || img.status === "held" || isUntagged(img)) card.classList.add("undecided");
+  // held (waiting for auto-tagging), failed, or hand-cleared — but only on a
+  // board with a taxonomy; a board with no facets can't be tagged at all, so
+  // the dotted "needs tags" treatment there would be a permanent false alarm.
+  if (needsTags(img)) card.classList.add("undecided");
   // The file kind owns the face (the media); grid owns the frame + chrome.
   // (The instance-count chip rides inside the face's title strip — kinds.js.)
   card.appendChild(kindFor(img).face(img, card, scheduleLayout));

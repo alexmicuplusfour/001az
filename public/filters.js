@@ -58,6 +58,22 @@ export function isUntagged(img) {
   return img.tags.length === 0;
 }
 
+// Does this board tag its items at all? No taxonomy means nothing to tag
+// against, so "untagged" isn't a meaningful state here — it's just how every
+// item looks. Manual tagging is gated on the same fact (the grid/rows/lightbox
+// tag-editor footers), so a board with no facets has no path to tags at all.
+export function boardHasTaxonomy() {
+  return state.facets.length > 0;
+}
+
+// The grid's dotted "needs a human" treatment: an item with no usable tags on a
+// board that actually tags. AI-undecided (looked, couldn't decide), held
+// (waiting for auto-tagging to resume), or plain untagged (failed / hand-cleared
+// / never run) all qualify — but only where there's a taxonomy to tag against.
+export function needsTags(img) {
+  return boardHasTaxonomy() && (img.undecided || img.status === "held" || isUntagged(img));
+}
+
 // Status pills OR together (an item has exactly one status), the same way
 // values within a facet do. With none active, the usual isTagged gate keeps
 // in-flight items out of the grid — the progress lane is their home.

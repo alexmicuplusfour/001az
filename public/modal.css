@@ -214,7 +214,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .fe-rm:hover { color: #d33; background: #fdeaea; }
 .fe-add-val { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 2px 0; margin-top: 2px; display: block; }
 .fe-add-val:hover { text-decoration: underline; }
-.fe-add-facet { margin-top: 4px; background: none; border: 1px dashed #ccc; border-radius: 6px; padding: 5px 14px; cursor: pointer; color: #6b6b72; font: inherit; font-size: 13px; }
+.fe-add-facet { display: block; width: 100%; margin-top: 4px; background: none; border: 1px dashed #ccc; border-radius: 6px; padding: 5px 14px; cursor: pointer; color: #6b6b72; font: inherit; font-size: 13px; }
 .fe-add-facet:hover { border-color: #999; color: #111; }
 .fe-toolbar { display: flex; gap: 6px; }
 .fe-clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }

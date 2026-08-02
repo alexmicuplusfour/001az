@@ -191,7 +191,7 @@ export function buildFacetEditor(textarea) {
     addFacet.type = "button";
     addFacet.textContent = "+ facet";
     addFacet.onclick = () => {
-      facets.push({ key: "", label: "", values: [], _new: true });
+      facets.push({ key: "", label: "", values: ["", ""], _new: true });
       render();
       sync();
       root.querySelectorAll(".fe-label").item(facets.length - 1)?.focus();
@@ -201,15 +201,6 @@ export function buildFacetEditor(textarea) {
 
   render();
   sync();
-
-  // Lets the modal prefill the starter facets after build.
-  return {
-    setFacets(next) {
-      facets = Array.isArray(next) ? JSON.parse(JSON.stringify(next)) : [];
-      render();
-      sync();
-    },
-  };
 }
 
 // The provider catalog (labels, model lists + notes, defaults, capabilities) is
@@ -295,26 +286,6 @@ export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null }
   attachLiveModels(sel, keyId, kind, saved);
 }
 
-// Starter facets prefilled into a new board's facet editor — just a suggestion;
-// boards own their facets and edit freely.
-const STARTER_FACETS = [
-  {
-    key: "category", label: "Category", single: true,
-    values: ["tops", "bottoms", "footwear", "accessories", "outerwear"],
-    description: "what kind of item this is",
-  },
-  {
-    key: "season", label: "Season",
-    values: ["summer", "winter", "spring-fall", "year-round"],
-    description: "when you'd wear or use it",
-  },
-  {
-    key: "formality", label: "Formality", single: true,
-    values: ["casual", "workwear", "formal", "athletic"],
-    description: "how dressed-up the item reads",
-  },
-];
-
 // Open the board editor — the ONE board modal, same shape everywhere (admin
 // page, gallery pencil, and both "New board" buttons): a Mapping|Tagging pane
 // toggle over a single Save.
@@ -383,11 +354,9 @@ export async function openBoardModal(boardId, opts = {}) {
   footer.innerHTML = `<button id="board-modal-save">${isNew ? "Create board" : "Save"}</button><button class="ghost" id="board-modal-cancel">Cancel</button>`;
 
   const facetsTextarea = document.getElementById("board-modal-facets");
-  const facetEditor = buildFacetEditor(facetsTextarea);
-
-  // New boards start from the starter facets (the editor is empty at this
-  // point, so nothing user-written is ever overwritten).
-  if (isNew) facetEditor.setFacets(STARTER_FACETS);
+  // New boards open with an empty taxonomy (the "[]" prefilled above) — boards
+  // own their facets, and an empty taxonomy is a valid, non-tagging board.
+  buildFacetEditor(facetsTextarea);
 
   // Mapping pane. Visibility is via `display` (not the `hidden` attribute) so
   // the pane's own flex layout can't override it.
