@@ -54,17 +54,52 @@ async function withRetry(fn, tries = 3) {
 // Outbound deadline for provider HTTP calls. Node's fetch has no total bound —
 // undici caps response headers at ~5 min and a trickling body never times out —
 // and one hung connector call wedges the whole single-flight worker tick.
-// Price/search APIs answer in seconds; 15 s is generous. Env-tunable.
-export const providerSignal = () =>
-  AbortSignal.timeout(Number(process.env.CONNECTOR_TIMEOUT_MS) || 15000);
+// Two budget classes, because one number can't serve both: the default
+// (interactive) covers price/search calls that answer in seconds and must
+// fail fast; "bulk" covers a provider's catalog computations (FMP's
+// company-screener holds a flat ~15 s server-side regardless of size —
+// measured, see planning/connector-scale-plan.md), where the generous
+// ceiling binds only on a true hang. The PROVIDER picks the class per call
+// site — only it knows which of its HTTP calls is a bulk compute; logical
+// entry points don't map 1:1 to requests. The runtime owns the values.
+export const providerBudgetMs = (kind) =>
+  kind === "bulk"
+    ? Number(process.env.CONNECTOR_BULK_TIMEOUT_MS) || 60000
+    : Number(process.env.CONNECTOR_TIMEOUT_MS) || 15000;
+export const providerSignal = (kind) => AbortSignal.timeout(providerBudgetMs(kind));
 
-// Rate-limited + 429-retried provider call. Exported for tests. Env overrides
-// (CONNECTOR_RPM/CONNECTOR_BURST) let the test harness run unthrottled — its
-// provider calls are stubbed, so pacing would only add wall-clock delay.
-export function callProvider(name, provider, fn) {
+// One provider's token acquisition, with the merged rpm/burst (env overrides
+// CONNECTOR_RPM/CONNECTOR_BURST let the test harness run unthrottled — its
+// provider calls are stubbed, so pacing would only add wall-clock delay).
+const paceFor = (name, provider) => {
   const rpm = Number(process.env.CONNECTOR_RPM) || provider.rpm || DEFAULT_RPM;
   const burst = Number(process.env.CONNECTOR_BURST) || provider.burst || DEFAULT_BURST;
-  return acquire(name, rpm, burst).then(() => withRetry(fn));
+  return () => acquire(name, rpm, burst);
+};
+
+// Rate-limited + 429-retried provider call. Exported for tests.
+//
+// Pacing has two modes. Legacy: one token per LOGICAL call, acquired here —
+// blind to what the provider actually does (a cache-served list() pays for
+// zero HTTP; fetchEntity pays one token for a three-request fan-out). A
+// provider that declares `pacesRequests = true` opts into truthful metering:
+// this pre-acquire is skipped and the provider awaits the threaded ctx.pace()
+// before EACH raw request instead — cache hits cost nothing, fan-outs pay
+// full fare, and retried attempts pay per attempt. Dynamic plugin providers
+// without the flag keep legacy behavior untouched.
+//
+// AbortSignal.timeout rejects with a bare DOMException ("The operation was
+// aborted due to timeout") — no provider name, no status. Rewrap it readably
+// for every surface that shows provider errors verbatim (preview toast, job
+// log, plugins health row). Still status-less, so withRetry above never
+// retried it and callers treat it as a plain failure. Providers may pre-wrap
+// with more context (FMP names the endpoint); this is the floor.
+export function callProvider(name, provider, fn) {
+  const pre = provider.pacesRequests ? Promise.resolve() : paceFor(name, provider)();
+  return pre.then(() => withRetry(fn)).catch((e) => {
+    if (e?.name === "TimeoutError") throw new Error(`${name}: request timed out`);
+    throw e;
+  });
 }
 
 // callProvider under the shared plugin health ledger: outcomes (post-retry)
@@ -98,9 +133,15 @@ export async function activeProvider(db, conn) {
   return { name, provider, apiKey: (await providerKey(db, conn, name)) || null };
 }
 
+// The per-call context every provider method receives: the key plus the
+// pacing handle (see callProvider — request-pacing providers await it before
+// each raw fetch). Built fresh per logical call; `pace` closes over the
+// merged rpm/burst so Plugins-page overrides flow everywhere from here.
+const ctxFor = (name, provider, apiKey) => ({ apiKey, pace: paceFor(name, provider) });
+
 export async function search(db, conn, query) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  return tracked(db, conn, name, provider, () => provider.search(query, { apiKey }));
+  return tracked(db, conn, name, provider, () => provider.search(query, ctxFor(name, provider, apiKey)));
 }
 
 // Browse a sorted, paginated page of the domain's catalog for the ingestion
@@ -110,7 +151,7 @@ export async function search(db, conn, query) {
 export async function list(db, conn, opts) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.list) return [];
-  return tracked(db, conn, name, provider, () => provider.list(opts, { apiKey }));
+  return tracked(db, conn, name, provider, () => provider.list(opts, ctxFor(name, provider, apiKey)));
 }
 
 // Assemble the connector entity from the active provider's raw values:
@@ -121,7 +162,7 @@ export async function list(db, conn, opts) {
 //  - source = { provider, id } — the provider handle a future refresh re-fetches from.
 export async function fetchEntity(db, conn, id, now = Date.now()) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, { apiKey }));
+  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, ctxFor(name, provider, apiKey)));
   const symbol = e.symbol || null;
   const identity = (symbol || "").toLowerCase() || e.id;
   const fields = {};
@@ -142,7 +183,7 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
   const provider = { ...raw, rpm: st.config.rpm ?? raw.rpm, burst: st.config.burst ?? raw.burst };
   if (!provider.testConnection) throw new Error("provider has no connection test");
   const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, conn, name);
-  await tracked(db, conn, name, provider, () => provider.testConnection({ apiKey }));
+  await tracked(db, conn, name, provider, () => provider.testConnection(ctxFor(name, provider, apiKey)));
   return { provider: name };
 }
 
@@ -179,10 +220,18 @@ export async function resolveBySymbol(db, conn, symbol) {
 // fields whose cadence has elapsed. Live config comes from `mapping` (the board
 // mapping — the current source of truth an admin edits), NOT the instance's
 // stamped mapping, which is frozen at creation and would ignore later liveness
-// edits. `inst` carries the provider `source`. Whole-object fetch (one API call)
-// even when a single field is due; you can't fetch a field in isolation. `at` is
-// always bumped on a refresh (last-checked, not last-changed) so an unchanged
-// field doesn't read "due" forever. `moved` holds only value changes.
+// edits. `inst` carries the provider `source`. `at` is always bumped on a
+// refresh (last-checked, not last-changed) so an unchanged field doesn't read
+// "due" forever. `moved` holds only value changes.
+//
+// The fetch itself is field-aware when the provider allows: a provider may
+// export fetchFields(id, keys, ctx) → { fields } serving just the requested
+// keys from its cheapest sources (FMP serves price/market_cap/volume/… from
+// its cached screener universe — ZERO marginal HTTP for a whole board's
+// refresh cycle; only change_1d needs a per-symbol quote). The response must
+// cover every due key or the runtime falls back to the whole-object
+// fetchEntity — a partial answer can never strand a field due-forever.
+// Providers without the capability get the whole-object path, unchanged.
 export async function refresh(db, conn, entity, inst, mapping, now = Date.now()) {
   const live = liveFields(mapping);
   const due = live.filter((f) => now - (entity.fields?.[f.key]?.at ?? 0) >= f.every * 60000);
@@ -192,7 +241,17 @@ export async function refresh(db, conn, entity, inst, mapping, now = Date.now())
   const active = await activeProvider(db, conn);
   const id = active.name === src?.provider ? src.id : await resolveBySymbol(db, conn, entity.symbol);
   if (id == null) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
-  const fetched = await fetchEntity(db, conn, id, now);
+
+  const dueKeys = due.map((f) => f.key);
+  let fetched = null;
+  if (active.provider.fetchFields) {
+    const partial = await tracked(db, conn, active.name, active.provider, () =>
+      active.provider.fetchFields(id, dueKeys, ctxFor(active.name, active.provider, active.apiKey)));
+    const fields = {};
+    for (const [k, v] of Object.entries(partial?.fields || {})) fields[k] = { ...v, src: active.name, at: now };
+    if (dueKeys.every((k) => fields[k])) fetched = { fields };
+  }
+  if (!fetched) fetched = await fetchEntity(db, conn, id, now);
 
   const merged = { ...entity.fields };
   const moved = {};
@@ -220,7 +279,7 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
   if (!provider.history) return null; // provider can't supply history → fall back
   const id = name === source?.provider ? source.id : await resolveBySymbol(db, conn, entity.symbol);
   if (id == null) return null;
-  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, { apiKey }));
+  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, ctxFor(name, provider, apiKey)));
   if (!series || !series.length) return null;
   return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
 }

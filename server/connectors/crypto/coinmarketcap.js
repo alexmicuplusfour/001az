@@ -15,12 +15,17 @@ const MAP_TTL = 6 * 60 * 60 * 1000; // the id/symbol map barely changes
 export const label = "CoinMarketCap";
 export const description = "Live crypto prices — needs a key";
 export const needsKey = true;
+// Truthful request pacing (pacesRequests — see runtime.callProvider): each
+// raw request awaits the threaded pace(), so a map-cache-served search pays
+// zero tokens and the query-path list() honestly pays for both requests.
+export const pacesRequests = true;
 export const rpm = 30; // basic plan ~30/min; runtime paces + backs off on 429
 
 // GET + parse, surfacing CMC's structured error (it returns error_message both
 // on non-2xx and inline as status.error_code on a 200).
-async function cmc(path, apiKey) {
+async function cmc(path, apiKey, pace) {
   if (!apiKey) throw new Error("CoinMarketCap needs an API key");
+  await pace?.();
   const r = await fetch(`${BASE}${path}`, {
     headers: { "X-CMC_PRO_API_KEY": apiKey, Accept: "application/json" },
     signal: providerSignal(),
@@ -38,22 +43,22 @@ async function cmc(path, apiKey) {
 
 let mapCache = { at: 0, list: null };
 
-async function coinMap(apiKey) {
+async function coinMap(apiKey, pace) {
   if (mapCache.list && Date.now() - mapCache.at < MAP_TTL) return mapCache.list;
   const body = await cmc(
     `/v1/cryptocurrency/map?listing_status=active&sort=cmc_rank&limit=${MAP_LIMIT}`,
-    apiKey
+    apiKey, pace
   );
   mapCache = { at: Date.now(), list: body.data || [] };
   return mapCache.list;
 }
 
 // Up to 10 matching coins, ranked by match quality then market-cap rank.
-export async function search(query, { apiKey } = {}) {
+export async function search(query, { apiKey, pace } = {}) {
   const q = query.trim().toLowerCase();
   if (!q) return [];
   const scored = [];
-  for (const c of await coinMap(apiKey)) {
+  for (const c of await coinMap(apiKey, pace)) {
     const sym = (c.symbol || "").toLowerCase();
     const name = (c.name || "").toLowerCase();
     let score;
@@ -76,8 +81,8 @@ export async function search(query, { apiKey } = {}) {
 
 // One coin's canonical crypto fields via the v2 quotes endpoint (data keyed
 // by id). Returns { v, kind }; the connector adds identity + `src`.
-export async function fetchEntity(id, { apiKey } = {}) {
-  const body = await cmc(`/v2/cryptocurrency/quotes/latest?id=${encodeURIComponent(id)}&convert=USD`, apiKey);
+export async function fetchEntity(id, { apiKey, pace } = {}) {
+  const body = await cmc(`/v2/cryptocurrency/quotes/latest?id=${encodeURIComponent(id)}&convert=USD`, apiKey, pace);
   const d = body.data?.[id];
   if (!d) throw new Error(`CoinMarketCap: no data for id ${id}`);
   const usd = d.quote?.USD || {};
@@ -118,18 +123,18 @@ function quoteRow(d) {
   };
 }
 
-export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey } = {}) {
+export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey, pace } = {}) {
   const dir = order === "asc" ? "asc" : "desc";
 
   if (query && query.trim()) {
     const q = query.trim().toLowerCase();
-    const ids = (await coinMap(apiKey))
+    const ids = (await coinMap(apiKey, pace))
       .filter((c) => (c.symbol || "").toLowerCase().includes(q) || (c.name || "").toLowerCase().includes(q))
       .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9))
       .slice(0, pageSize)
       .map((c) => c.id);
     if (!ids.length) return [];
-    const body = await cmc(`/v2/cryptocurrency/quotes/latest?id=${ids.join(",")}&convert=USD`, apiKey);
+    const body = await cmc(`/v2/cryptocurrency/quotes/latest?id=${ids.join(",")}&convert=USD`, apiKey, pace);
     return ids.map((id) => body.data?.[id]).filter(Boolean).map(quoteRow);
   }
 
@@ -137,13 +142,13 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
   const start = (page - 1) * pageSize + 1;
   const body = await cmc(
     `/v1/cryptocurrency/listings/latest?start=${start}&limit=${pageSize}&sort=${field}&sort_dir=${dir}&convert=USD`,
-    apiKey
+    apiKey, pace
   );
   return (body.data || []).map(quoteRow);
 }
 
 // Cheap authenticated ping for the admin Test button.
-export async function testConnection({ apiKey } = {}) {
-  await cmc(`/v1/key/info`, apiKey);
+export async function testConnection({ apiKey, pace } = {}) {
+  await cmc(`/v1/key/info`, apiKey, pace);
   return true;
 }

@@ -132,7 +132,7 @@ import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js
 import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
-import { resolveIngestAdapter, validateIngest } from "./ingestion/index.js";
+import { resolveIngestAdapter, validateIngest, ENUM_CAP } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
 import { invalidateSourceCache } from "./ingestion/files.js";
@@ -1003,10 +1003,11 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
       return res.status(400).json({ error: "invalid sample window" });
     sample = { offset, limit };
   }
-  const PREVIEW_CAP = 1000;
+  // The preview window IS the run window (ENUM_CAP, shared with the sweep's
+  // enumerate) — one bound, so the count can never promise what a run won't see.
   let enumerated;
   try {
-    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: PREVIEW_CAP });
+    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: ENUM_CAP() });
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }

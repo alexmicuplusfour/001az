@@ -9,6 +9,10 @@ import * as files from "./files.js";
 import { forBoard as connectorFeed } from "./connector.js";
 import { OPS_BY_KIND } from "./filter-engine.js";
 
+// The shared enumeration bound (window depth for feeds AND the preview route
+// — one number, so a preview count and a real run can never disagree).
+export { ENUM_CAP } from "./connector.js";
+
 // null input.connector = a file board → the shared file adapter (its source
 // backend is picked per-board by ingest.source.type, default folder). Connector
 // boards (crypto/stocks) get a per-board feed adapter built from their manifest's
@@ -86,7 +90,10 @@ export function validateIngest(ingest, descriptor, { hasRoot = false } = {}) {
     if (ingest.sort.order !== undefined && !["asc", "desc"].includes(ingest.sort.order)) return "sort order must be asc or desc";
   }
   if (ingest.limit !== undefined && ingest.limit !== null) {
-    if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > 500) return "limit must be an integer between 1 and 500";
+    // Bound matches the deepest enumeration window a feed can be configured
+    // for (INGEST_FEED_CAP / FMP_UNIVERSE_ROWS top out at 5000) — a "top 1500"
+    // run must be expressible; the drain machinery spreads it across ticks.
+    if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > 5000) return "limit must be an integer between 1 and 5000";
   }
 
   // Trigger.

@@ -111,7 +111,7 @@ test("validateIngest: the folder descriptor's rules, one by one", () => {
   assert.match(validateIngest({ ...good, filters: [{ fn: "name", op: "gte", value: 1 }] }, desc, opts), /not valid for text/);
   assert.match(validateIngest({ ...good, filters: [{ fn: "modified", op: "within_days", value: 0 }] }, desc, opts), /day count/);
   assert.match(validateIngest({ ...good, limit: 0 }, desc, opts), /limit/);
-  assert.match(validateIngest({ ...good, limit: 501 }, desc, opts), /limit/);
+  assert.match(validateIngest({ ...good, limit: 5001 }, desc, opts), /limit/);
   assert.match(validateIngest({ ...good, sort: { by: "nope" } }, desc, opts), /unknown sort/);
   assert.match(validateIngest({ ...good, trigger: { mode: "hourly" } }, desc, opts), /trigger mode/);
   assert.match(validateIngest({ ...good, trigger: { mode: "interval" } }, desc, opts), /trigger\.every/);

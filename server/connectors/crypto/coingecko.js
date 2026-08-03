@@ -14,7 +14,10 @@ export const needsKey = false;
 // Calls/min the runtime paces to (demo key ~30/min; keyless is stricter — the
 // 429/401-under-load backoff covers the residual). A small burst keeps the
 // sweep from spiking over the short-window limit (a rapid spike gets a transient
-// 401 from the demo tier, not just a 429).
+// 401 from the demo tier, not just a 429). Truthful request pacing: each raw
+// fetch awaits ctx.pace() (pacesRequests — see runtime.callProvider), so the
+// query-path list() honestly pays 2 and nothing pays for cache hits.
+export const pacesRequests = true;
 export const rpm = 25;
 export const burst = 3;
 
@@ -36,7 +39,8 @@ function cgFail(r, what) {
 }
 
 // Up to 10 matching coins, normalised to the connector's search-hit shape.
-export async function search(query, { apiKey } = {}) {
+export async function search(query, { apiKey, pace } = {}) {
+  await pace?.();
   const r = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}`, {
     headers: cgHeaders(apiKey),
     signal: providerSignal(),
@@ -54,10 +58,11 @@ export async function search(query, { apiKey } = {}) {
 // One coin's canonical crypto fields. Returns the provider id + symbol +
 // display name and per-field { v, kind }; the connector adds identity and the
 // `src` provenance tag.
-export async function fetchEntity(id, { apiKey } = {}) {
+export async function fetchEntity(id, { apiKey, pace } = {}) {
   const url =
     `${BASE}/coins/${encodeURIComponent(id)}` +
     `?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false`;
+  await pace?.();
   const r = await fetch(url, { headers: cgHeaders(apiKey), signal: providerSignal() });
   if (!r.ok) throw cgFail(r, "fetch");
   const d = await r.json();
@@ -86,8 +91,9 @@ const DEMO_MAX_DAYS = 365;
 const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 };
 export const periods = Object.keys(PERIOD_DAYS);
 
-export async function history(id, period, { apiKey } = {}) {
+export async function history(id, period, { apiKey, pace } = {}) {
   const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
+  await pace?.();
   const r = await fetch(
     `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
     { headers: cgHeaders(apiKey), signal: providerSignal() }
@@ -125,21 +131,24 @@ function marketRow(c) {
   };
 }
 
-export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey } = {}) {
+export async function list({ sort, order, page = 1, pageSize = 50, query } = {}, { apiKey, pace } = {}) {
   const desc = order !== "asc";
   const common = `vs_currency=usd&price_change_percentage=24h`;
 
   if (query && query.trim()) {
+    await pace?.();
     const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
     if (!sr.ok) throw cgFail(sr, "search");
     const ids = ((await sr.json()).coins || []).slice(0, pageSize).map((c) => c.id);
     if (!ids.length) return [];
+    await pace?.();
     const r = await fetch(`${BASE}/coins/markets?${common}&ids=${ids.map(encodeURIComponent).join(",")}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
     if (!r.ok) throw cgFail(r, "list");
     return (await r.json()).map(marketRow);
   }
 
   const orderParam = (SORT_ORDER[sort] || SORT_ORDER.market_cap)(desc);
+  await pace?.();
   const r = await fetch(
     `${BASE}/coins/markets?${common}&order=${orderParam}&per_page=${pageSize}&page=${page}`,
     { headers: cgHeaders(apiKey), signal: providerSignal() }
@@ -150,7 +159,8 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
 
 // Cheap liveness ping for the admin Test button. With a key present this also
 // validates it (an invalid demo key is rejected by the API).
-export async function testConnection({ apiKey } = {}) {
+export async function testConnection({ apiKey, pace } = {}) {
+  await pace?.();
   const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey), signal: providerSignal() });
   if (!r.ok) throw cgFail(r, "unreachable");
   return true;

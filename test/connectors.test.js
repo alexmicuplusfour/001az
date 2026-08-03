@@ -112,6 +112,98 @@ test("runtime: generic domain×provider dispatch over an arbitrary connector", a
   assert.ok(calls.some(([op, l, k]) => op === "test" && l === "Acme" && k === "acme-key"));
 });
 
+// ── runtime: call-class budgets + readable timeouts ──────────────────────────
+
+test("provider budgets: interactive vs bulk, env-tunable per call", () => {
+  assert.equal(runtime.providerBudgetMs(), 15000);
+  assert.equal(runtime.providerBudgetMs("bulk"), 60000);
+  process.env.CONNECTOR_TIMEOUT_MS = "111";
+  process.env.CONNECTOR_BULK_TIMEOUT_MS = "222";
+  try {
+    assert.equal(runtime.providerBudgetMs(), 111);
+    assert.equal(runtime.providerBudgetMs("bulk"), 222);
+  } finally {
+    delete process.env.CONNECTOR_TIMEOUT_MS;
+    delete process.env.CONNECTOR_BULK_TIMEOUT_MS;
+  }
+});
+
+test("callProvider renames a bare TimeoutError after the provider, status-less", async () => {
+  const fast = { rpm: 100000, burst: 100 };
+  await assert.rejects(
+    runtime.callProvider("acme-t", fast, async () => {
+      throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+    }),
+    (e) => {
+      assert.equal(e.message, "acme-t: request timed out"); // never the bare DOMException text
+      assert.equal(e.status, undefined);                    // status-less → withRetry never retries it
+      return true;
+    }
+  );
+  // Non-timeout errors pass through untouched (429 retry behavior is covered
+  // in faces.test.js).
+  await assert.rejects(
+    runtime.callProvider("acme-t", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
+    /boom/
+  );
+});
+
+// ── runtime: field-aware refresh (provider fetchFields capability) ───────────
+
+// A provider serving the due keys from fetchFields spares the whole-object
+// fetch; a partial answer (any due key missing) falls back to fetchEntity so
+// a field can never be stranded due-forever.
+test("refresh: fetchFields serves the due keys; partial coverage falls back whole-object", async () => {
+  const ffCalls = [], feCalls = [];
+  const meter = {
+    label: "Meter",
+    async fetchFields(id, keys, { apiKey }) {
+      ffCalls.push([id, [...keys]]);
+      return { fields: { price: { v: 2, kind: "number" }, volume: { v: 9, kind: "number" } } };
+    },
+    async fetchEntity(id) {
+      feCalls.push(id);
+      return {
+        id, symbol: "GG", display_name: "Gauge",
+        fields: {
+          price: { v: 3, kind: "number" }, volume: { v: 8, kind: "number" },
+          sector: { v: "Widgets", kind: "text" },
+        },
+      };
+    },
+  };
+  const conn = { name: "gauges", providers: { meter }, defaultProvider: "meter", manifest: {} };
+  await installConnectors(db, "gauges:meter");
+
+  const entity = {
+    id: 1, symbol: "GG",
+    fields: {
+      price: { v: 1, kind: "number", at: 0 },
+      volume: { v: 7, kind: "number", at: 0 },
+      sector: { v: "old", kind: "text", at: 0 },
+    },
+  };
+  const inst = { payload: { source: { provider: "meter", id: "gg" } } };
+  const live = (keys) => ({
+    fields: keys.map((key) => ({ key, from: "connector", fn: key, live: true, every: 1 })),
+  });
+  const now = 120000; // both fields due (at=0, every=1min)
+
+  // Full coverage → fetchFields path, no whole-object fetch.
+  const r1 = await runtime.refresh(db, conn, entity, inst, live(["price", "volume"]), now);
+  assert.deepEqual(ffCalls, [["gg", ["price", "volume"]]]);
+  assert.equal(feCalls.length, 0);
+  assert.deepEqual(r1.merged.price, { v: 2, kind: "number", src: "meter", at: now });
+  assert.deepEqual(r1.moved.price, { v: 2, kind: "number", src: "meter", at: now }); // 1 → 2 moved
+  assert.equal(r1.merged.sector.v, "old"); // non-due fields untouched
+  assert.equal(r1.next, now + 60000);
+
+  // sector due too, but fetchFields doesn't produce it → whole-object fallback.
+  const r2 = await runtime.refresh(db, conn, entity, inst, live(["price", "volume", "sector"]), now);
+  assert.equal(feCalls.length, 1);
+  assert.deepEqual(r2.merged.sector, { v: "Widgets", kind: "text", src: "meter", at: now });
+});
+
 // ── validateMapping: connector extensions ────────────────────────────────────
 
 test("mapping PATCH: input { connector: crypto } is valid", async () => {

@@ -17,14 +17,17 @@ import { recordIngest } from "../db.js";
 // formatting); the filter engine only knows text/number/date.
 const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "number", date: "date" };
 
-// The enumeration window: how deep into the catalog a feed can see. Matches
-// the preview route's PREVIEW_CAP; past it `truncated` renders as "N+".
-const ENUM_CAP = 1000;
-// Requested page size. Providers clamp internally (FMP caps at 100) but keep
-// their offset math consistent with their own clamp, so a short-but-nonempty
-// page is normal paging — enumeration stops ONLY on an empty page. Treating
-// a short page as "dry" would silently miss everything past a provider's
-// first clamped page.
+// The enumeration window: how deep into the catalog a feed can see; past it
+// `truncated` renders as "N+". The preview route imports this so the count
+// view and a real run can never disagree on depth. Env-tunable for bigger
+// feeds (pair it with the provider's own universe depth — FMP_UNIVERSE_ROWS
+// for stocks; a window can't see past what the provider materializes).
+export const ENUM_CAP = () => Number(process.env.INGEST_FEED_CAP) || 1000;
+// Requested page size. Providers may clamp internally, but keep their offset
+// math consistent with their own clamp, so a short-but-nonempty page is
+// normal paging — enumeration stops ONLY on an empty page. Treating a short
+// page as "dry" would silently miss everything past a provider's first
+// clamped page. (FMP's clamp is aligned at 250 — a window fill is 4 slices.)
 const ENUM_PAGE = 250;
 const MAX_PAGES = 40; // backstop for a provider that never returns empty
 
@@ -94,7 +97,7 @@ export function feedAdapter(conn) {
       const active = await conn.activeProvider(db);
       if (!active.provider.list)
         throw new Error(`the active ${conn.name} provider can't browse its catalog — switch providers to use feeds`);
-      const cap = Math.min(limit, ENUM_CAP);
+      const cap = Math.min(limit, ENUM_CAP());
       const sortBy = cfg.sort?.by || browse.defaultSort;
       const order = cfg.sort?.order === "asc" ? "asc" : "desc";
 

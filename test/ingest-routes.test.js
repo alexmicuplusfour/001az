@@ -60,7 +60,7 @@ test("PATCH validation: every rejection names its rule", async () => {
     [{ ...GOOD, trigger: { mode: "interval", every: 0 } }, /trigger\.every/],
     [{ ...GOOD, trigger: { mode: "interval", every: 50000 } }, /trigger\.every/],
     [{ ...GOOD, limit: 0 }, /limit/],
-    [{ ...GOOD, limit: 501 }, /limit/],
+    [{ ...GOOD, limit: 5001 }, /limit/],
     [{ ...GOOD, source: { folder: "../escape" } }, /escapes/],
     [{ ...GOOD, source: { recursive: "yes" } }, /recursive/],
     [{ ...GOOD, trigger: { mode: "hourly" } }, /trigger mode/],
