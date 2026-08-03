@@ -1061,6 +1061,15 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
 
 // The content-editable board fields shared by the admin PATCH and the
 // board-manager PATCH: name, context, facets, the reasoning/research toggles,
+// `~` prefixes are reserved for system facets (~objects, ~uploaders — the
+// client's filter router shadows them, and alert conditions/saved configs
+// store them durably), so a user facet may not claim one. The only facet-key
+// constraint enforced server-side; everything else about facets stays free.
+function facetsReservedKeyError(facets) {
+  const clash = facets.find((f) => typeof f?.key === "string" && f.key.startsWith("~"));
+  return clash ? `facet key "${clash.key}" is reserved (~ prefixes belong to system facets)` : null;
+}
+
 // and the auto-tag schedule (with the timer bookkeeping). Returns
 // { update, error, sweep } — error is a string when the body is invalid, sweep
 // is true when auto-tagging transitions off→on (caller queues untagged items).
@@ -1070,6 +1079,8 @@ async function buildBoardContentUpdate(body = {}, prev) {
   if (body.name !== undefined) update.name = String(body.name).trim();
   if (body.facets !== undefined) {
     if (!Array.isArray(body.facets)) return { error: "facets must be an array" };
+    const reserved = facetsReservedKeyError(body.facets);
+    if (reserved) return { error: reserved };
     update.facets = body.facets;
   }
   if (body.context !== undefined) update.context = String(body.context);
@@ -1146,6 +1157,8 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   let facets = [];
   if (req.body && req.body.facets !== undefined) {
     if (!Array.isArray(req.body.facets)) return res.status(400).json({ error: "facets must be an array" });
+    const reserved = facetsReservedKeyError(req.body.facets);
+    if (reserved) return res.status(400).json({ error: reserved });
     facets = req.body.facets;
   }
   const context = req.body && req.body.context ? String(req.body.context) : "";

@@ -103,6 +103,35 @@ test("payload shape and identity", async (t) => {
     assert.equal(ent.name, "one.pdf", "face = first instance's file");
   });
 
+  await t.test("instances distil detected-object keys; the entity lists their union", async () => {
+    const { rows: ents } = await db.query(
+      "SELECT id FROM entities WHERE board_id=$1 AND identity='maya chen'", [board]
+    );
+    // one.pdf saw a car — plus an empty object field and a scalar field, both
+    // of which must NOT distil (the discriminator is a NON-EMPTY array v).
+    const withCar = {
+      car: { v: [{ label: "car", box: [0.1, 0.1, 0.5, 0.5], score: 0.9 }], why: "Detected: car" },
+      cat: { v: [], why: "No objects detected" },
+      title: { v: "hello", why: "a scalar AI field" },
+    };
+    const withCat = { cat: { v: [{ label: "cat", box: [0, 0, 1, 0.5], score: 0.8 }], why: "Detected: cat" } };
+    await db.query(
+      "UPDATE items SET payload = payload || jsonb_build_object('fields', $1::jsonb) WHERE entity_ids @> ARRAY[$2]::bigint[] AND payload->'files'->0->>'name'='one.pdf'",
+      [JSON.stringify(withCar), ents[0].id]
+    );
+    await db.query(
+      "UPDATE items SET payload = payload || jsonb_build_object('fields', $1::jsonb) WHERE entity_ids @> ARRAY[$2]::bigint[] AND payload->'files'->0->>'name'='two.pdf'",
+      [JSON.stringify(withCat), ents[0].id]
+    );
+    const list = await req(base, "GET", `/api/items?board=${board}`, { sid: admin.sid });
+    const ent = list.json.find((i) => i.id === ents[0].id);
+    const byName = new Map(ent.instances.map((i) => [i.name, i]));
+    assert.deepEqual(byName.get("one.pdf").objects, ["car"], "boxed key only — empty v and scalar excluded");
+    assert.deepEqual(byName.get("two.pdf").objects, ["cat"]);
+    assert.equal(byName.get("three.png").objects, undefined, "no detections → key omitted");
+    assert.deepEqual(ent.objects, ["car", "cat"], "entity union, instance order");
+  });
+
   await t.test("identity is unique per board on entities, not globally", async () => {
     const other = await seedBoard(db, "payload-board-2");
     await createEntity(db, board, { identity: "dupe.png" });

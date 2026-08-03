@@ -87,9 +87,23 @@ export function aggregateStatus(instances) {
   return "tagged";
 }
 
+// The field KEYS holding ≥1 stored detection box (a non-empty array `v` is
+// the object-field discriminator, the same one the lightbox overlay reads).
+// Feeds the list payload's distilled summary AND the alert tag-set builders'
+// `~objects` projection — the two server faces of the objects system facet.
+export function objectKeysOf(fields) {
+  return Object.entries(fields || {})
+    .filter(([, f]) => Array.isArray(f?.v) && f.v.length > 0)
+    .map(([k]) => k);
+}
+
 // One instance's slice of the list payload.
 function instanceEntry(r) {
   const file = r.payload.files?.[0];
+  // Detected-object summary: keys only — boxes/scores/whys stay on the lazy
+  // per-instance reasoning fetch. Feeds the client's `~objects` system facet;
+  // omitted when empty so the common no-detection row costs nothing.
+  const objects = objectKeysOf(r.payload.fields);
   return {
     id: r.id,
     name: file?.name || r.payload.identity,
@@ -100,6 +114,7 @@ function instanceEntry(r) {
     status: r.status,
     tags: r.tags,
     undecided: !!r.undecided,
+    ...(objects.length ? { objects } : {}),
   };
 }
 
@@ -214,6 +229,13 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
     const tags = [];
     const seen = new Set();
     for (const i of instances) for (const t of i.tags) if (!seen.has(t)) { seen.add(t); tags.push(t); }
+    // Union of the instances' detected-object keys — the entity-level
+    // membership the `~objects` filter matches on (the tags-union shape:
+    // dedup, instance order preserved). Omitted when empty, like the
+    // per-instance summary.
+    const objects = [];
+    const seenObjects = new Set();
+    for (const i of instances) for (const k of i.objects || []) if (!seenObjects.has(k)) { seenObjects.add(k); objects.push(k); }
     return {
       id: e.id,
       // name = stored filename of the face file, used to construct gallery/
@@ -226,6 +248,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
       identity_provisional: !!e.identity_provisional,
       status: aggregateStatus(instances),
       tags,
+      ...(objects.length ? { objects } : {}),
       undecided: instances.length > 0 && instances.every((i) => i.undecided),
       hearts: e.hearts,
       favoritedByMe: !!e.fav,
@@ -2237,16 +2260,27 @@ export async function boardAlerts(db, boardId) {
 // uploads the identity is the vestigial STORED name nobody recognizes.
 export async function entityForAlerts(db, entityId) {
   const { rows: [ent] } = await db.query(
-    `SELECT e.display_name, e.identity,
+    `SELECT e.display_name, e.identity, e.uploaded_by,
        (SELECT i.payload->'files'->0->>'original_name' FROM items i
          WHERE i.entity_ids @> ARRAY[e.id]::bigint[] ORDER BY i.created_at ASC, i.id ASC LIMIT 1) AS first_file
      FROM entities e WHERE e.id=$1`,
     [entityId]
   );
   if (!ent) return null;
-  const { rows: insts } = await db.query("SELECT tags FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [entityId]);
+  const { rows: insts } = await db.query(
+    "SELECT tags, payload->'fields' AS fields FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]",
+    [entityId]
+  );
   const tagSet = new Set();
-  for (const r of insts) for (const t of r.tags || []) tagSet.add(t);
+  for (const r of insts) {
+    for (const t of r.tags || []) tagSet.add(t);
+    // System facets project in as `~facet/value` strings — matchesCondition
+    // then sees them exactly the way the client's filter engine does, so an
+    // {"~objects": ["car"]} or {"~uploaders": ["5"]} condition needs no
+    // matcher change.
+    for (const k of objectKeysOf(r.fields)) tagSet.add(`~objects/${k}`);
+  }
+  if (ent.uploaded_by != null) tagSet.add(`~uploaders/${ent.uploaded_by}`);
   return { tagSet, label: ent.display_name || ent.first_file || ent.identity || null };
 }
 
@@ -2277,10 +2311,11 @@ export async function addAlertMatch(db, alertId, entityId, itemId, label) {
 export const ALERT_BASELINE_FIRING = 0;
 
 // Every entity's union tag set on a board, for the baseline pass — the
-// entityForAlerts union, board-wide in one read.
+// entityForAlerts union (system-facet projections included, so a baseline
+// records already-matching object/uploader conditions too), board-wide.
 export async function boardEntityTagUnions(db, boardId) {
   const { rows } = await db.query(
-    "SELECT unnest(entity_ids) AS entity_id, tags FROM items WHERE board_id=$1 AND cardinality(entity_ids) > 0",
+    "SELECT unnest(entity_ids) AS entity_id, tags, payload->'fields' AS fields FROM items WHERE board_id=$1 AND cardinality(entity_ids) > 0",
     [boardId]
   );
   const unions = new Map();
@@ -2288,6 +2323,16 @@ export async function boardEntityTagUnions(db, boardId) {
     let set = unions.get(r.entity_id);
     if (!set) unions.set(r.entity_id, (set = new Set()));
     for (const t of r.tags || []) set.add(t);
+    for (const k of objectKeysOf(r.fields)) set.add(`~objects/${k}`);
+  }
+  const { rows: ups } = await db.query(
+    "SELECT id, uploaded_by FROM entities WHERE board_id=$1 AND uploaded_by IS NOT NULL",
+    [boardId]
+  );
+  for (const r of ups) {
+    let set = unions.get(r.id);
+    if (!set) unions.set(r.id, (set = new Set()));
+    set.add(`~uploaders/${r.uploaded_by}`);
   }
   return unions;
 }

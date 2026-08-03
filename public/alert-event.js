@@ -6,9 +6,10 @@ import { state } from './state.js';
 import { toast } from './toast.js';
 import { clearSearch } from './search.js';
 
-// An alert view replaces the current view: pills, status toggles, favorites,
-// uploader picks, crate and search would otherwise silently intersect with
-// the firing's entities and show fewer items than the chip claims.
+// An alert view replaces the current view: pills (facet + system-facet,
+// uploader picks included), status toggles, favorites, crate and search would
+// otherwise silently intersect with the firing's entities and show fewer
+// items than the chip claims.
 export function resetListFilters() {
   clearSearch(); // owns its in-flight invalidation
   state.selected = new Map();
@@ -16,7 +17,6 @@ export function resetListFilters() {
   state.showUntagged = false;
   state.showProcessing = false;
   state.showUnprocessed = false;
-  state.selectedUploaderIds = new Set();
   state.selectedCrateId = null;
 }
 

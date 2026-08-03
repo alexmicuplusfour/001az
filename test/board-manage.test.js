@@ -51,6 +51,19 @@ test("PATCH /api/boards/:id — board-admin allowed, member forbidden, anon unau
   assert.equal(anon.status, 401);
 });
 
+test("facet keys can't claim the ~ system-facet namespace (create + edit)", async () => {
+  const bad = [{ key: "~objects", label: "Sneaky", values: ["x"] }];
+  const patch = await req(base, "PATCH", `/api/boards/${board}`, { sid: admin.sid, body: { facets: bad } });
+  assert.equal(patch.status, 400);
+  assert.match(patch.json.error, /reserved/);
+  const create = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "tilde", facets: bad } });
+  assert.equal(create.status, 400);
+  assert.match(create.json.error, /reserved/);
+  // A normal facet edit still lands.
+  const ok = await req(base, "PATCH", `/api/boards/${board}`, { sid: admin.sid, body: { facets: [{ key: "kind", label: "Kind", values: ["a"] }] } });
+  assert.equal(ok.status, 200);
+});
+
 test("board-manager PATCH is content-only: name applies, ai_key_id is ignored", async () => {
   const keyId = await createAiKey(db, "k", "anthropic", "sk-ant-test");
   // Admin sets the board's tagger key.

@@ -8,6 +8,7 @@ import {
   updateItemPayload,
   markTagged,
   markExtracted,
+  objectKeysOf,
   failOrRequeue,
   recoverStuck,
   bumpUsage,
@@ -1674,7 +1675,18 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // fresh run re-derives; entity-side moves above the stamp self-heal there).
   async function stampExtracted(row, fields) {
     const landed = await markExtracted(db, row.id, fields);
-    if (!landed) console.warn(`stale extract result for #${row.id} discarded (re-routed or deleted mid-flight)`);
+    if (!landed) {
+      console.warn(`stale extract result for #${row.id} discarded (re-routed or deleted mid-flight)`);
+      return landed;
+    }
+    // The THIRD alert landing (beside the two tag landings): object detections
+    // land here, so an `~objects` condition is evaluated the moment boxes
+    // exist. Gated on an actual detection — connector stamps and box-less
+    // extracts skip the read. entityForAlerts projects objects into the
+    // matched set, so a mixed tags+objects condition settles at whichever
+    // landing completes it.
+    if (objectKeysOf(fields).length)
+      await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
     return landed;
   }
 

@@ -63,8 +63,14 @@ async function main() {
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
   state.selected = decodeSelected(params.get("f")); // shareable filtered links
+  // Legacy shareable links: ?u=5,7 predates the ~uploaders system facet.
+  // Fold it into the selection (writes stopped — syncFiltersToUrl drops the
+  // param); an ?f= that already carries ~uploaders wins over the stale ?u=.
   const uParam = params.get("u");
-  state.selectedUploaderIds = new Set(uParam ? uParam.split(",").map(Number).filter(Boolean) : []);
+  if (uParam && !state.selected.has("~uploaders")) {
+    const ids = uParam.split(",").filter(Boolean);
+    if (ids.length) state.selected.set("~uploaders", new Set(ids));
+  }
 
   if (!state.boardId) {
     const accessible = await fetch("/api/boards", { cache: "no-store" })

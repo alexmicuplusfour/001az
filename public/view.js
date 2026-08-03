@@ -28,9 +28,9 @@ export function effectiveView() {
 }
 
 // Called once per render() with the filtered list and whether any filters are
-// active (activeCount() > 0 — facet pills, untagged, status, uploader;
-// favorites/crates/search deliberately don't start sessions: none of them
-// increment the Filters count either). Session auto-rows requires a
+// active (activeCount() > 0 — facet pills, system facets (objects/uploaders),
+// untagged, status; favorites/crates/search deliberately don't start sessions:
+// none of them increment the Filters count either). Session auto-rows requires a
 // multi-instance entity in the filtered result — the raw-board guardrail: on
 // classic galleries no such entity can exist, so the masonry never flips.
 // Until it does, the session shows the base mode, so a standing rows

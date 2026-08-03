@@ -167,6 +167,77 @@ test("the union tag set across instances is what matches, not one instance's tag
   assert.equal(rows[0].entity_id, entityId);
 });
 
+test("~objects conditions: detections are a third landing; baseline records pre-existing matches", async () => {
+  const carFields = { car: { v: [{ label: "car", box: [0.1, 0.1, 0.5, 0.5], score: 0.9 }], why: "Detected: car" } };
+
+  // An entity ALREADY carrying car boxes when the alert is born → baseline,
+  // not a pending match (boardEntityTagUnions projects objects too).
+  const preEntity = await createEntity(db, boardId, { identity: "pre-car" });
+  await insertItem(db, boardId, { identity: "pre-car", files: [], fields: carFields }, "tagged", preEntity);
+  const alert = await makeAlert({ name: "watch cars", condition: { "~objects": ["car"] } });
+  assert.deepEqual((await baselineOf(alert.id)).map((r) => r.entity_id), [preEntity]);
+  assert.equal((await matchesOf(alert.id)).length, 0);
+
+  // A NEW entity's detection lands (what the extract stamp triggers) → a match.
+  const freshEntity = await createEntity(db, boardId, { identity: "fresh-car" });
+  const freshInst = await insertItem(db, boardId, { identity: "fresh-car", files: [], fields: carFields }, "tagged", freshEntity);
+  await evaluateItemAlerts(db, freshInst);
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, freshEntity);
+
+  // An empty-v object field ("No objects detected") is NOT a detection.
+  const noneEntity = await createEntity(db, boardId, { identity: "no-car" });
+  const noneInst = await insertItem(db, boardId,
+    { identity: "no-car", files: [], fields: { car: { v: [], why: "No objects detected" } } }, "tagged", noneEntity);
+  await evaluateItemAlerts(db, noneInst);
+  assert.equal((await matchesOf(alert.id)).length, 1);
+});
+
+test("~uploaders conditions match — the uploader projection rides every landing and the baseline", async () => {
+  const uploader = await seedUser(db, "uploader-alerts@example.com");
+
+  // An entity uploaded by them BEFORE the alert exists → baseline.
+  const preEntity = await createEntity(db, boardId, { identity: "pre-upload", uploadedBy: uploader.id });
+  await insertItem(db, boardId, { identity: "pre-upload", files: [], fields: {} }, "tagged", preEntity);
+  const alert = await makeAlert({ name: "watch uploader", condition: { "~uploaders": [String(uploader.id)] } });
+  assert.deepEqual((await baselineOf(alert.id)).map((r) => r.entity_id), [preEntity]);
+
+  // A NEW upload by them: the first landing (tags here) sees the projection.
+  const freshEntity = await createEntity(db, boardId, { identity: "fresh-upload", uploadedBy: uploader.id });
+  const freshInst = await insertItem(db, boardId, { identity: "fresh-upload", files: [], fields: {} }, "tagged", freshEntity);
+  await evaluateItemAlerts(db, freshInst);
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, freshEntity);
+
+  // Someone else's upload doesn't match.
+  const otherEntity = await createEntity(db, boardId, { identity: "other-upload" });
+  const otherInst = await insertItem(db, boardId, { identity: "other-upload", files: [], fields: {} }, "tagged", otherEntity);
+  await evaluateItemAlerts(db, otherInst);
+  assert.equal((await matchesOf(alert.id)).length, 1);
+});
+
+test("a mixed tags+objects condition settles at whichever landing completes it", async () => {
+  const alert = await makeAlert({ name: "red cars", condition: { color: ["red"], "~objects": ["car"] } });
+  const entityId = await createEntity(db, boardId, { identity: "red-car" });
+  const inst = await insertItem(db, boardId,
+    { identity: "red-car", files: [], fields: { car: { v: [{ label: "car", box: [0, 0, 1, 1], score: 0.8 }], why: "" } } },
+    "tagged", entityId);
+
+  // Extract landing: boxes alone satisfy ~objects but not color — no match yet.
+  await evaluateItemAlerts(db, inst);
+  assert.equal((await matchesOf(alert.id)).length, 0);
+
+  // The tag landing (the real PATCH route) completes the set — and its
+  // evaluation sees the object projection, so the entity matches now.
+  const r = await req(base, "PATCH", `/api/instances/${inst}/tags`, { sid: admin.sid, body: { tags: ["color/red"] } });
+  assert.equal(r.status, 200, r.text);
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, entityId);
+});
+
 test("creating an alert baselines the already-matching set — a retag re-landing stays silent", async () => {
   // This entity is on the board BEFORE the alert exists — the backlog a
   // periodic retag (retagBoard -> markTagged -> evaluateItemAlerts) would

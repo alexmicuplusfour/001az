@@ -10,7 +10,7 @@ import { ICONS, fmtDuration } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl } from './modal.js';
 import { ddRow, ddSep } from './dropdown.js';
-import { selectedAsConfig, applyFilterConfig } from './filters.js';
+import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { switchRow } from './board-modal.js';
 import { openAlertEvent, clearAlertEvent, resetListFilters } from './alert-event.js';
 import { ensurePolling } from './data.js';
@@ -184,13 +184,19 @@ export function openAlertEditor(existing) {
       group.className = "al-cond-group";
       const k = document.createElement("span");
       k.className = "al-cond-key";
-      k.textContent = key;
+      // System facets (~objects, ~uploaders) display by their row label, and
+      // an uploader value resolves to a name the way the filter row shows it —
+      // the stored condition keeps raw keys/ids either way.
+      k.textContent = SYSTEM_FACETS[key] ? SYSTEM_FACETS[key].label.toLowerCase() : key;
       group.appendChild(k);
       for (const v of condition[key]) {
         const chip = document.createElement("span");
         chip.className = "al-chip";
         const txt = document.createElement("span");
-        txt.textContent = v;
+        const uploader = key === "~uploaders"
+          ? state.items.find((img) => String(img.uploadedBy?.id) === v)?.uploadedBy
+          : null;
+        txt.textContent = uploader ? (uploader.name || uploader.email) : v;
         const rm = document.createElement("button");
         rm.type = "button";
         rm.title = "Remove";

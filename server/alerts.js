@@ -51,14 +51,15 @@ export function matchesCondition(tagSet, condition) {
   return true;
 }
 
-// The detection hook, called wherever an instance's tags land (worker
-// processOne, the manual PATCH route). Re-reads the item's entity — an
-// instance can be re-parented between claim and landing, and a stale
-// entity_id would credit the wrong card. Evaluates the ENTITY's union tag
-// set, not the instance's: entity-level tags are the union across instances
-// (the listItems stance), so a condition can be satisfied only across
-// instances and a single instance's tags would under-match. Never throws —
-// the ledger never breaks the job.
+// The detection hook, called wherever condition-relevant data lands: the two
+// tag landings (worker processOne, the manual PATCH route) and the extract
+// stamp (object detections — the `~objects` system facet — land there, not at
+// tagging). Re-reads the item's entity — an instance can be re-parented
+// between claim and landing, and a stale entity_id would credit the wrong
+// card. Evaluates the ENTITY's union set, not the instance's: entity-level
+// membership is the union across instances (the listItems stance), so a
+// condition can be satisfied only across instances and a single instance
+// would under-match. Never throws — the ledger never breaks the job.
 export async function evaluateItemAlerts(db, itemId) {
   try {
     const item = await getItemEntity(db, itemId);

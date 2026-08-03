@@ -12,7 +12,42 @@ export function filterKey() {
     .map(([k, v]) => [k, [...v].sort()])
     .filter(([, v]) => v.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sort, state.selectedCrateId, state.alertEvent?.id ?? null, state.boardId, state.searchResults ? state.searchQuery : "", [...state.selectedUploaderIds].sort()]);
+  return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sort, state.selectedCrateId, state.alertEvent?.id ?? null, state.boardId, state.searchResults ? state.searchQuery : ""]);
+}
+
+// ── System facets ────────────────────────────────────────────────────────────
+// Reserved `~`-prefixed keys in state.selected whose membership comes from a
+// capability's own set instead of tags — detections today (`~objects`: the
+// object field keys with ≥1 box, distilled onto the list payload); uploaders
+// and persons to follow (planning/objects-filter-row-plan.md). Living inside
+// state.selected means saved configs, ?f= URLs, filterKey/activeCount/clearAll
+// and the rows walk-in all work unchanged — MEMBERSHIP is the only seam, routed
+// here. Each entry names an entity-level source and an instance-level one
+// (null = an entity-level dimension: instanceMatches skips it rather than
+// dimming every tile). The `~` prefix can't collide with real facets: mapping
+// field keys match /^[a-z][a-z0-9_]*$/ and the admin facet UI produces
+// word-like keys.
+export const SYSTEM_FACETS = {
+  "~objects": { label: "OBJECTS", entity: (x) => x.objectSet, instance: (x) => x.objectSet },
+  // Uploaders were the original separate-slot filter (selectedUploaderIds +
+  // ?u=); folded here so saved configs stop dropping them and every consumer
+  // shares one model. Values are STRING user ids. Entity-level only.
+  "~uploaders": { label: "UPLOADED BY", entity: (x) => x.uploaderIdSet, instance: null },
+};
+const SYSTEM_FACET_ENTRIES = Object.entries(SYSTEM_FACETS);
+
+// Does the entity carry `value` under facet `key`? Tag strings for regular
+// facets, the system facet's own set otherwise.
+function entityHasValue(img, key, value) {
+  const sys = SYSTEM_FACETS[key];
+  if (sys) { const set = sys.entity(img); return !!set && set.has(value); }
+  return img.tagSet.has(tag(key, value));
+}
+
+function instanceHasValue(inst, key, value) {
+  const sys = SYSTEM_FACETS[key];
+  if (sys) { const set = sys.instance?.(inst); return !!set && set.has(value); }
+  return inst.tagSet.has(tag(key, value));
 }
 
 function matchesExcept(img, exceptKey) {
@@ -20,7 +55,7 @@ function matchesExcept(img, exceptKey) {
     if (key === exceptKey || values.size === 0) continue;
     let ok = false;
     for (const v of values) {
-      if (img.tagSet.has(tag(key, v))) { ok = true; break; }
+      if (entityHasValue(img, key, v)) { ok = true; break; }
     }
     if (!ok) return false;
   }
@@ -32,15 +67,19 @@ function matchesExcept(img, exceptKey) {
 // entity can match while no single instance does — short from one photo,
 // emma-roberts from another. Rows mode dims tiles that fail this rather than
 // hiding them; such an entity renders as an all-dim strip ("matches only in
-// aggregate"), never an empty one. Facet pills only: search scores,
-// favorites, crates and status are entity-level concerns with no
-// per-instance counterpart.
+// aggregate"), never an empty one. Facet pills only — search scores,
+// favorites, crates and status are entity-level concerns with no per-instance
+// counterpart — and likewise a system facet with no instance source is
+// skipped, while one that has one (`~objects`: which photo holds the car)
+// dims like any facet.
 export function instanceMatches(inst) {
   for (const [key, values] of state.selected) {
     if (values.size === 0) continue;
+    const sys = SYSTEM_FACETS[key];
+    if (sys && !sys.instance) continue; // entity-level dimension — every tile passes
     let ok = false;
     for (const v of values) {
-      if (inst.tagSet.has(tag(key, v))) { ok = true; break; }
+      if (instanceHasValue(inst, key, v)) { ok = true; break; }
     }
     if (!ok) return false;
   }
@@ -95,7 +134,6 @@ export function taggedFiltered() {
       (!state.showFavorites || img.favoritedByMe) &&
       (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId)) &&
       (state.alertEvent == null || state.alertEvent.ids.has(img.id)) &&
-      (state.selectedUploaderIds.size === 0 || (img.uploadedBy && state.selectedUploaderIds.has(img.uploadedBy.id))) &&
       matchesExcept(img, null)
   );
   // While a search is active its similarity order wins outright — the chosen
@@ -123,14 +161,23 @@ function computeFacetStats() {
   let activeInContext = 0;
   let totalQueued = 0;
   let queuedInContext = 0;
-  const uploaderTotals = new Map(); // uploaderId -> total count
-  const uploaderCounts = new Map(); // uploaderId -> context count (uploader filter excluded)
+  // The uploader row's universe (uid -> total). Chip CONTEXT counts come from
+  // the shared `counts` map via the `~uploaders` system-facet projection.
+  const uploaderTotals = new Map();
 
   for (const img of state.items) {
     for (const t of img.tags) {
       totals.set(t, (totals.get(t) || 0) + 1);
       const slash = t.indexOf("/");
       if (slash > 0) facetsWithData.add(t.slice(0, slash));
+    }
+    // System-facet memberships project into the same maps as tags
+    // ("~objects/car"), so the chip totals/counts machinery is shared verbatim.
+    for (const [sk, sys] of SYSTEM_FACET_ENTRIES) {
+      for (const v of sys.entity(img) || []) {
+        const t = tag(sk, v);
+        totals.set(t, (totals.get(t) || 0) + 1);
+      }
     }
 
     if (img.uploadedBy) {
@@ -145,20 +192,14 @@ function computeFacetStats() {
     for (const [key, values] of activeSel) {
       let ok = false;
       for (const v of values) {
-        if (img.tagSet.has(tag(key, v))) { ok = true; break; }
+        if (entityHasValue(img, key, v)) { ok = true; break; }
       }
       if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
 
-    const passesUploader = state.selectedUploaderIds.size === 0 || (img.uploadedBy && state.selectedUploaderIds.has(img.uploadedBy.id));
-    const baseContext = fails === 0 && (!state.showFavorites || img.favoritedByMe) && (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId));
-
-    // Uploader pill context: base context but NOT gated on uploader filter (so all uploaders stay visible)
-    if (img.uploadedBy && baseContext) {
-      uploaderCounts.set(img.uploadedBy.id, (uploaderCounts.get(img.uploadedBy.id) || 0) + 1);
-    }
-
-    const inContext = baseContext && passesUploader;
+    // An uploader selection rides `fails` like any facet (the `~uploaders`
+    // system key sits in activeSel), so no separate uploader gate.
+    const inContext = fails === 0 && (!state.showFavorites || img.favoritedByMe) && (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId));
 
     if (isTagged(img) && isUntagged(img)) {
       totalUntagged++;
@@ -179,13 +220,20 @@ function computeFacetStats() {
       if (fails === 1 && t.slice(0, slash) !== failKey) continue;
       counts.set(t, (counts.get(t) || 0) + 1);
     }
+    for (const [sk, sys] of SYSTEM_FACET_ENTRIES) {
+      if (fails === 1 && sk !== failKey) continue;
+      for (const v of sys.entity(img) || []) {
+        const t = tag(sk, v);
+        counts.set(t, (counts.get(t) || 0) + 1);
+      }
+    }
   }
   return {
     totals, counts, facetsWithData,
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
-    uploaderTotals, uploaderCounts,
+    uploaderTotals,
   };
 }
 
@@ -195,7 +243,6 @@ export function activeCount() {
   if (state.showUntagged) n++;
   if (state.showProcessing) n++;
   if (state.showUnprocessed) n++;
-  n += state.selectedUploaderIds.size;
   return n;
 }
 
@@ -213,18 +260,11 @@ export function toggle(facetKey, value) {
   document.dispatchEvent(new Event('app:render'));
 }
 
-export function toggleUploader(uid) {
-  if (state.selectedUploaderIds.has(uid)) state.selectedUploaderIds.delete(uid);
-  else state.selectedUploaderIds.add(uid);
-  document.dispatchEvent(new Event('app:render'));
-}
-
 export function clearAll() {
   state.selected = new Map();
   state.showUntagged = false;
   state.showProcessing = false;
   state.showUnprocessed = false;
-  state.selectedUploaderIds = new Set();
   document.dispatchEvent(new Event('app:render'));
 }
 
@@ -298,9 +338,9 @@ export function syncFiltersToUrl() {
   const f = encodeSelected();
   if (f) url.searchParams.set("f", f);
   else url.searchParams.delete("f");
-  const u = [...state.selectedUploaderIds].sort().join(",");
-  if (u) url.searchParams.set("u", u);
-  else url.searchParams.delete("u");
+  // Uploaders ride ?f= as the ~uploaders facet now; drop the legacy ?u= so an
+  // old link's param migrates away on the first filter change.
+  url.searchParams.delete("u");
   const next = url.pathname + url.search;
   if (next !== location.pathname + location.search) history.replaceState(null, "", next);
 }
@@ -312,13 +352,19 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
-    uploaderTotals, uploaderCounts,
+    uploaderTotals,
   } = stats;
   // The status row: Untagged plus the two queue pills (Processing = actively
   // worked, Unprocessed = waiting in line). Each shows only while it has items
   // or is switched on, so the row disappears entirely on a quiet board.
   const statusPills = [
-    ["Untagged", totalUntagged, untaggedInContext, "showUntagged"],
+    // Untagged only where there's a taxonomy to tag against (the needsTags
+    // discipline) — on a facet-less board every item is "untagged" forever and
+    // the pill just filters to everything. The active-flag escape keeps an
+    // already-on pill clearable if the facets are deleted mid-session.
+    ...(boardHasTaxonomy() || state.showUntagged
+      ? [["Untagged", totalUntagged, untaggedInContext, "showUntagged"]]
+      : []),
     ["Processing", totalActive, activeInContext, "showProcessing"],
     ["Unprocessed", totalQueued, queuedInContext, "showUnprocessed"],
   ].filter(([, total, , flag]) => total > 0 || state[flag]);
@@ -339,27 +385,75 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     row.appendChild(pills);
     container.appendChild(row);
   }
-  // Uploader row — only when there are 2+ distinct uploaders in the board.
-  if (uploaderTotals.size >= 2 || state.selectedUploaderIds.size > 0) {
-    const uploaderItems = [...uploaderTotals.entries()].sort((a, b) => b[1] - a[1]);
-    const row = document.createElement("div");
-    row.className = "facet";
-    const label = document.createElement("div");
-    label.className = "facet-label";
-    label.textContent = "UPLOADED BY";
-    row.appendChild(label);
-    const pills = document.createElement("div");
-    pills.className = "pills";
-    for (const [uid, total] of uploaderItems) {
-      const active = state.selectedUploaderIds.has(uid);
-      const ctxCount = uploaderCounts.get(uid) || 0;
-      if (total === 0 && !active) continue;
-      const uploader = state.items.find((img) => img.uploadedBy?.id === uid)?.uploadedBy;
-      const name = uploader ? (uploader.name || uploader.email) : String(uid);
-      pills.appendChild(pill(name, ctxCount, active, !active && ctxCount === 0, () => toggleUploader(uid)));
+  // The OBJECTS row — the `~objects` system facet, heading the labeled band
+  // (planning/objects-filter-row-plan.md). Chip universe is the mapping's
+  // DECLARED object fields (so a removed field's lingering data can't grow
+  // chips — the state.facets discipline), plus any selected-but-gone key so an
+  // active chip always has a click-off. Chips are the field keys (the user's
+  // declared name for the object type; hint synonyms demux into one field).
+  // Same visibility rule as facet values — data or active, else hidden — and
+  // the row vanishes when no chip is visible.
+  {
+    const sel = state.selected.get("~objects") || new Set();
+    const declared = (state.boardMapping?.fields || [])
+      .filter((f) => f.from === "ai" && f.kind === "object")
+      .map((f) => f.key);
+    const chips = [...new Set([...declared, ...sel])].filter(
+      (key) => (totals.get(tag("~objects", key)) || 0) > 0 || sel.has(key)
+    );
+    if (chips.length) {
+      const row = document.createElement("div");
+      row.className = "facet";
+      const label = document.createElement("div");
+      label.className = "facet-label";
+      label.textContent = SYSTEM_FACETS["~objects"].label;
+      row.appendChild(label);
+      const pills = document.createElement("div");
+      pills.className = "pills";
+      for (const key of chips) {
+        const active = sel.has(key);
+        const ctxCount = counts.get(tag("~objects", key)) || 0;
+        pills.appendChild(
+          pill(key, ctxCount, active, !active && ctxCount === 0, () => toggle("~objects", key))
+        );
+      }
+      row.appendChild(pills);
+      container.appendChild(row);
     }
-    row.appendChild(pills);
-    container.appendChild(row);
+  }
+  // Uploader row — the `~uploaders` system facet (entity-level: never dims
+  // rows tiles). Universe = distinct uploaders in the board (2+ to show, the
+  // original rule) plus any selected-but-gone id, so an active chip always
+  // has a click-off; names resolve from items, falling back to the raw id.
+  {
+    const sel = state.selected.get("~uploaders") || new Set();
+    if (uploaderTotals.size >= 2 || sel.size > 0) {
+      const uploaderItems = [...uploaderTotals.entries()].sort((a, b) => b[1] - a[1]);
+      const row = document.createElement("div");
+      row.className = "facet";
+      const label = document.createElement("div");
+      label.className = "facet-label";
+      label.textContent = SYSTEM_FACETS["~uploaders"].label;
+      row.appendChild(label);
+      const pills = document.createElement("div");
+      pills.className = "pills";
+      const shown = new Set();
+      for (const [uid, total] of uploaderItems) {
+        const key = String(uid);
+        const active = sel.has(key);
+        if (total === 0 && !active) continue;
+        shown.add(key);
+        const ctxCount = counts.get(tag("~uploaders", key)) || 0;
+        const uploader = state.items.find((img) => img.uploadedBy?.id === uid)?.uploadedBy;
+        const name = uploader ? (uploader.name || uploader.email) : key;
+        pills.appendChild(pill(name, ctxCount, active, !active && ctxCount === 0, () => toggle("~uploaders", key)));
+      }
+      for (const key of sel) {
+        if (!shown.has(key)) pills.appendChild(pill(key, 0, true, false, () => toggle("~uploaders", key)));
+      }
+      row.appendChild(pills);
+      container.appendChild(row);
+    }
   }
 
   for (const facet of state.facets) {

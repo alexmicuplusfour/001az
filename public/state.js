@@ -20,7 +20,6 @@ export const state = {
   alerts: [],           // the user's alerts on this board (with unseen counts)
   alertEvent: null,     // ?event= view: { id, name, count, ids: Set<entityId> }
   selectedCrateId: null,
-  selectedUploaderIds: new Set(),
   showFavorites: false,
   showUntagged: false,
   showProcessing: false,   // status pill: actively worked (processing/extracting/facing)

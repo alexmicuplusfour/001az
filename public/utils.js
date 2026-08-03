@@ -17,6 +17,10 @@ export function toInstance(i) {
     status: i.status,
     tags: list,
     tagSet: new Set(list),
+    // Detected-object field keys (the server's distilled summary; absent =
+    // none) — the `~objects` system facet's per-instance membership, what
+    // rows-mode dimming consults.
+    objectSet: new Set(i.objects || []),
     undecided: !!i.undecided,
   };
 }
@@ -38,11 +42,17 @@ export function toItem(d) {
     status: d.status,     // aggregate across instances (server-computed)
     tags: list,           // union across instances — what filtering consumes
     tagSet: new Set(list),
+    // Union of the instances' detected-object keys (server-computed, absent =
+    // none) — the `~objects` system facet's entity-level membership.
+    objectSet: new Set(d.objects || []),
     undecided: !!d.undecided,
     hearts: d.hearts || 0,
     favoritedByMe: !!d.favoritedByMe,
     crateIds: new Set(Array.isArray(d.crateIds) ? d.crateIds : []),
     uploadedBy: d.uploadedBy || null,
+    // String-id membership for the `~uploaders` system facet (selection values
+    // are strings — saved configs and the ?f= encoding assume it).
+    uploaderIdSet: new Set(d.uploadedBy ? [String(d.uploadedBy.id)] : []),
     w: d.w || 0,
     h: d.h || 0,
     kind: d.kind || "image",

@@ -82,6 +82,10 @@ export function reconcile(data, presentIds = null) {
       ex.hearts = d.hearts || 0;
       ex.favoritedByMe = !!d.favoritedByMe;
       ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
+      // Detected-object union — follow unconditionally (absent = none): unlike
+      // tags, fields are only ever REPLACED whole at extraction landing, so
+      // there's no mid-requeue stale window to keep old values through.
+      ex.objectSet = new Set(d.objects || []);
       // created_at backfills items uploaded this session (their upload rows
       // predate the entity stamp); updated_at moves on every delta.
       if (d.created_at != null) ex.created_at = d.created_at;
