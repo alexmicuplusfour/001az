@@ -51,10 +51,12 @@ export function matchesCondition(tagSet, condition) {
   return true;
 }
 
-// The detection hook, called wherever condition-relevant data lands: the two
-// tag landings (worker processOne, the manual PATCH route) and the extract
-// stamp (object detections — the `~objects` system facet — land there, not at
-// tagging). Re-reads the item's entity — an instance can be re-parented
+// The detection hook, called wherever condition-relevant data lands: the tag
+// landings (worker processOne — real or facet-less — and the manual PATCH
+// route), the extract stamp (object detections — the `~objects` system facet —
+// land there, not at tagging), and upload admission (ingest.js admitFile: the
+// `~uploaders` fact is final at birth, and a held-at-birth upload reaches no
+// other landing). Re-reads the item's entity — an instance can be re-parented
 // between claim and landing, and a stale entity_id would credit the wrong
 // card. Evaluates the ENTITY's union set, not the instance's: entity-level
 // membership is the union across instances (the listItems stance), so a

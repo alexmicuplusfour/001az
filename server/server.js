@@ -534,7 +534,8 @@ app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
 }));
 
 // --- alerts (watched facet conditions — per-user like filter configs; the
-// matcher/sweep live in alerts.js, detection hooks at the two tag landings) ---
+// matcher/sweep live in alerts.js, detection hooks wherever condition data
+// lands: the tag landings, the extract stamp, upload admission) ---
 
 const ALERT_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 // :id is a bigint — junk ("abc", 0, 1.5) must read as "not found", not reach

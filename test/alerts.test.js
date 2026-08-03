@@ -218,6 +218,45 @@ test("~uploaders conditions match — the uploader projection rides every landin
   assert.equal((await matchesOf(alert.id)).length, 1);
 });
 
+test("~uploaders alerts fire at the upload door — a held-at-birth upload reaches no other landing", async () => {
+  // The shape with NO later landing: no facets (the tag leg would no-op), no
+  // mapping (no extract leg), auto-tag off — admitted straight to held. Birth
+  // is the only place the uploader fact can ever be seen.
+  const heldBoard = await createBoard(db, "held-at-birth", [], "", true, null, null, { enabled: false });
+  const uploader = await seedUser(db, "door-landing@example.com");
+  await setBoardMembers(db, heldBoard, [uploader.id]);
+  const r = await req(base, "POST", "/api/alerts", {
+    sid: admin.sid,
+    body: { board_id: heldBoard, name: "watch the door", condition: { "~uploaders": [String(uploader.id)] } },
+  });
+  assert.equal(r.status, 200, r.text);
+  const alert = r.json.alert;
+
+  const fd = new FormData();
+  fd.append("files", new File(["hello from the door"], "note.txt", { type: "text/plain" }));
+  const up = await fetch(`${base}/api/upload?board=${heldBoard}`, {
+    method: "POST", headers: { Cookie: `sid=${uploader.sid}` }, body: fd,
+  });
+  assert.equal(up.status, 200);
+  const body = await up.json();
+  assert.equal(body.rejected.length, 0, JSON.stringify(body.rejected));
+  const [u] = body.uploaded;
+  assert.equal(u.status, "held", "precondition: no worker leg will ever run for this item");
+
+  const rows = await matchesOf(alert.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].entity_id, u.id);
+
+  // Someone else through the same door stays silent.
+  const fd2 = new FormData();
+  fd2.append("files", new File(["not them"], "other.txt", { type: "text/plain" }));
+  const up2 = await fetch(`${base}/api/upload?board=${heldBoard}`, {
+    method: "POST", headers: { Cookie: `sid=${admin.sid}` }, body: fd2,
+  });
+  assert.equal(up2.status, 200);
+  assert.equal((await matchesOf(alert.id)).length, 1);
+});
+
 test("a mixed tags+objects condition settles at whichever landing completes it", async () => {
   const alert = await makeAlert({ name: "red cars", condition: { color: ["red"], "~objects": ["car"] } });
   const entityId = await createEntity(db, boardId, { identity: "red-car" });

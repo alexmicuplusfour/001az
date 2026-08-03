@@ -13,7 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, seedUser, req } from "./helpers.js";
 import { createBoard, createEntity, insertItem } from "../server/db.js";
 import { startWorker } from "../server/worker.js";
 
@@ -99,4 +99,33 @@ test("a worker tag landing records the match — the primary detection path, end
   const { rows: [item] } = await db.query("SELECT status, tags FROM items WHERE id=$1", [iid]);
   assert.equal(item.status, "tagged");
   assert.deepEqual(item.tags, ["kind/a", "color/red"]);
+});
+
+test("the facet-less tag landing evaluates too — system-facet conditions don't need tags", async () => {
+  // A board with no facets takes processOne's no-facet branch (complete,
+  // don't fail — getBoardPrompt is null), which is that pipeline's FINAL
+  // landing. Before it evaluated, an ~uploaders condition there could never
+  // fire from the worker.
+  const bare = await createBoard(db, "No-facet board", [], "", true, null, null, { enabled: true });
+  const uploader = await seedUser(db, "no-facet-landing@example.com");
+  const r = await req(base, "POST", "/api/alerts", {
+    sid: admin.sid,
+    body: { board_id: bare, name: "no-facet landing", condition: { "~uploaders": [String(uploader.id)] } },
+  });
+  assert.equal(r.status, 200, r.text);
+  const alert = r.json.alert;
+
+  // Inserted BEHIND the upload door on purpose (no birth landing) — a match
+  // can only come from the worker's facet-less landing.
+  const eid = await createEntity(db, bare, { identity: "bare-entity", uploadedBy: uploader.id });
+  const iid = await insertItem(db, bare, { identity: "bare-entity", files: [], fields: {} }, "pending", eid);
+
+  const match = await until(async () =>
+    (await db.query("SELECT * FROM alert_matches WHERE alert_id=$1", [alert.id])).rows[0]);
+  assert.equal(match.entity_id, eid);
+
+  // And it really took the facet-less branch: completed with zero tags.
+  const { rows: [item] } = await db.query("SELECT status, tags FROM items WHERE id=$1", [iid]);
+  assert.equal(item.status, "tagged");
+  assert.deepEqual(item.tags, []);
 });

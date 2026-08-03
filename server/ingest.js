@@ -7,6 +7,7 @@ import multer from "multer";
 import fs from "node:fs";
 import os from "node:os";
 import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
+import { evaluateItemAlerts } from "./alerts.js";
 import { requireAuth } from "./auth.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
 import { mediaLimitLookup } from "./plugins.js";
@@ -96,6 +97,15 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   // the instance into an existing entity (and delete this shell).
   const entityId = await createEntity(dbc, board.id, { identity: file.name, uploadedBy });
   const itemId = await insertItem(dbc, board.id, payload, status, entityId);
+  // The birth alert landing: the uploader fact (`~uploaders`) is final here,
+  // and for some uploads birth is the only landing there will ever be — an
+  // unmapped auto-tag-off board admits straight to held (no leg runs), and a
+  // facet-less pipeline's later legs evaluate only when boxes land. Gated the
+  // way the extract stamp gates on boxes — evaluate only when a
+  // condition-relevant fact just landed: the folder door admits with no
+  // uploader, and nothing else in a newborn item can match a condition yet.
+  // Later landings re-evaluate freely; dedupe on (alert, entity) absorbs it.
+  if (uploadedBy != null) await evaluateItemAlerts(dbc, itemId); // never throws — the ledger never breaks admission
   return { entityId, itemId, file, status };
 }
 

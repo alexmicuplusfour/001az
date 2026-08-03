@@ -1632,6 +1632,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         if (await markTagged(db, row.id, [], false, {})) {
           await legLog(row, "tag", t0, "ok", null, { tags: 0 });
           console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
+          // Same contract as the real tag landing below. [] tags can't match
+          // anything, but system-facet conditions (~uploaders, ~objects) don't
+          // need tags — and on a facet-less board this is the pipeline's final
+          // landing, so skipping it would strand those conditions unevaluated.
+          await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
         } else {
           await legLog(row, "tag", t0, "discarded");
           console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
@@ -1679,12 +1684,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       console.warn(`stale extract result for #${row.id} discarded (re-routed or deleted mid-flight)`);
       return landed;
     }
-    // The THIRD alert landing (beside the two tag landings): object detections
-    // land here, so an `~objects` condition is evaluated the moment boxes
-    // exist. Gated on an actual detection — connector stamps and box-less
-    // extracts skip the read. entityForAlerts projects objects into the
-    // matched set, so a mixed tags+objects condition settles at whichever
-    // landing completes it.
+    // The extract-stamp alert landing: object detections land here, so an
+    // `~objects` condition is evaluated the moment boxes exist. Gated on an
+    // actual detection — connector stamps and box-less extracts skip the read,
+    // which is sound because nothing ELSE a condition can see lands at
+    // extract: tags land at tagging, the uploader at admission (ingest.js).
+    // entityForAlerts projects objects into the matched set, so a mixed
+    // tags+objects condition settles at whichever landing completes it.
     if (objectKeysOf(fields).length)
       await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
     return landed;

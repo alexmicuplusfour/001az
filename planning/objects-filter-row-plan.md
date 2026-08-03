@@ -227,6 +227,20 @@ now project `~uploaders/<uploaded_by>`), so "alert when X uploads a car"
 composes from two system facets in one condition today; `~persons` later rides
 the same steps.
 
+**Landing coverage (post-review fix).** The three landings missed uploads
+whose pipeline never reaches them: a facet-less board's tag leg completed
+items without evaluating (processOne's no-facet branch — box-less uploads on
+the objects-test board shape were never seen), and an unmapped auto-tag-off
+board admits straight to `held`, running no leg at all — so an
+`~uploaders`-only alert never fired there. Two hooks close it: the no-facet
+tag landing now evaluates like the real one, and upload admission
+([ingest.js](../server/ingest.js) `admitFile`) evaluates at birth, gated on
+`uploadedBy` the way the extract stamp gates on boxes (the folder door admits
+with none; nothing else in a newborn item can match). Birth evaluation on a
+derived-identity board can match a provisional entity that a later merge
+deletes — the ledger's merge-following (`live_entity_id`) and frozen labels
+already cover exactly that.
+
 ### 7. Verify in the app (objects-test board)
 Chips `car`/`cat` appear with counts once extraction lands; clicking filters
 the grid and flips a multi-instance result into rows with non-matching
