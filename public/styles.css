@@ -51,6 +51,11 @@ header {
   display: flex;
   align-items: center;
   gap: 14px;
+  /* Top room inside the clip box so a button's corner alert dot (which overhangs
+     ~6px above the row) isn't shaved by overflow:hidden; the negative margin
+     pulls the row back so the added padding doesn't shift it visually. */
+  margin-top: -10px;
+  padding-top: 10px;
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
@@ -58,14 +63,17 @@ header {
      headroom over the single, non-wrapping row; the spacing/border animate to
      zero alongside it so the card closes seamlessly onto the filters row. */
   overflow: hidden;
-  max-height: 48px;
-  transition: max-height 0.3s ease, opacity 0.2s ease, margin-bottom 0.3s ease,
-    padding-bottom 0.3s ease, border-bottom-color 0.3s ease;
+  max-height: 56px;
+  transition: max-height 0.3s ease, opacity 0.2s ease, margin-top 0.3s ease,
+    padding-top 0.3s ease, margin-bottom 0.3s ease, padding-bottom 0.3s ease,
+    border-bottom-color 0.3s ease;
 }
 
 header.header-collapsed #toolbar {
   max-height: 0;
   opacity: 0;
+  margin-top: 0;
+  padding-top: 0;
   margin-bottom: 0;
   padding-bottom: 0;
   border-bottom-color: transparent;
