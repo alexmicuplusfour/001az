@@ -59,24 +59,40 @@ header {
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  /* Collapses on scroll-down (see header-scroll.js). max-height is generous
-     headroom over the single, non-wrapping row; the spacing/border animate to
-     zero alongside it so the card closes seamlessly onto the filters row. */
+  /* Collapses on scroll-down (see header-scroll.js). --toolbar-h is the row's
+     measured border-box height (set by JS), so the height animates from its
+     true value — the spacing/border collapse to zero alongside it and the card
+     closes seamlessly onto the filters row. The margins net to zero at both
+     ends, so the row's total block size goes exactly H → 0; the header's
+     compensating margin below keeps the page height constant through it. */
+  box-sizing: border-box;
   overflow: hidden;
-  max-height: 56px;
-  transition: max-height 0.3s ease, opacity 0.2s ease, margin-top 0.3s ease,
+  height: var(--toolbar-h, auto);
+  transition: height 0.3s ease, opacity 0.2s ease, margin-top 0.3s ease,
     padding-top 0.3s ease, margin-bottom 0.3s ease, padding-bottom 0.3s ease,
     border-bottom-color 0.3s ease;
 }
 
 header.header-collapsed #toolbar {
-  max-height: 0;
+  height: 0;
   opacity: 0;
   margin-top: 0;
   padding-top: 0;
   margin-bottom: 0;
   padding-bottom: 0;
   border-bottom-color: transparent;
+}
+
+/* Layout-neutral collapse: the document must not change height when the
+   toolbar row folds, or the browser clamps the scroll position at the bottom
+   of short pages — which reads as an upward scroll and re-expands the header
+   in a feedback loop. The margin grows by exactly the row's measured height,
+   on the same curve, so the net flow size of the header stays constant. */
+header {
+  transition: margin-bottom 0.3s ease;
+}
+header.header-collapsed {
+  margin-bottom: var(--toolbar-h, 58px);
 }
 
 #toolbar-sub {
