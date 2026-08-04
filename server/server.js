@@ -59,6 +59,8 @@ import {
   deleteBoard,
   boardExists,
   boardItemStats,
+  boardEntityCounts,
+  boardPreviewFaces,
   boardHasItems,
   boardAiUsage,
   retagBoard,
@@ -754,6 +756,44 @@ app.get("/api/boards", requireAuth, wrap(async (req, res) => {
   const accessible = [];
   for (const b of all) if (await canAccessBoard(db, b.id, req.user)) accessible.push(b);
   res.json(accessible.map((b) => ({ id: b.id, name: b.name })));
+}));
+
+// The boards page (planning/boards-page-plan.md): every accessible board with
+// its card facts — gallery-card count (entities, not item rows), capability
+// flags, and a preview stack of newest thumbnails — one fetch for the whole
+// page. Registered before /:id so the literal path isn't captured as an id.
+// Ingest fields mirror the /:id guard: next-run only rides an enabled config.
+app.get("/api/boards/overview", requireAuth, wrap(async (req, res) => {
+  const all = await listBoards(db);
+  // Both checks go through the shared helpers rather than one batched
+  // board_members read: a second authorization path is exactly the thing that
+  // drifts. They're only fanned out so the per-board lookups overlap instead of
+  // serializing (a global admin short-circuits without querying at all).
+  const access = await Promise.all(all.map((b) => canAccessBoard(db, b.id, req.user)));
+  const boards = all.filter((_, i) => access[i]);
+  const [counts, previews, manage] = await Promise.all([
+    boardEntityCounts(db),
+    boardPreviewFaces(db, boards.map((b) => b.id), 8),
+    Promise.all(boards.map((b) => canManageBoard(db, b.id, req.user))),
+  ]);
+  res.json(boards.map((b, i) => {
+    const ingestOn = !!(b.ingest && b.ingest.enabled !== false);
+    return {
+      id: b.id,
+      name: b.name,
+      count: counts[b.id] || 0,
+      // No has_taxonomy alongside this: unlike the connector name and the
+      // next-run stamp, the count fully implies the flag, and two fields that
+      // can disagree is a bug waiting to happen. The client tests > 0.
+      facet_count: Array.isArray(b.facets) ? b.facets.length : 0,
+      has_mapping: !!b.mapping,
+      mapping_connector: b.mapping?.input?.connector || null,
+      has_ingest: ingestOn,
+      ingest_next_run_at: ingestOn ? b.ingest_next_run_at ?? null : null,
+      manage: manage[i],
+      preview: previews[b.id] || [],
+    };
+  }));
 }));
 
 app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {

@@ -138,7 +138,17 @@ function openBoardPop(anchorEl) {
         }));
       }
     },
-    footer: state.me?.is_admin ? (foot, { close }) => {
+    // The footer is always built now: "All boards" is every member's way to
+    // the boards page (planning/boards-page-plan.md), while CREATING one stays
+    // a global-admin power. A real <a>, so middle-click opens it in a tab.
+    footer: (foot, { close }) => {
+      const all = document.createElement("a");
+      all.className = "tp-edit";
+      all.href = "/boards.html";
+      all.innerHTML = ICONS.grid + "<span>All boards</span>";
+      foot.appendChild(all);
+
+      if (!state.me?.is_admin) return;
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "tp-edit";
@@ -148,7 +158,7 @@ function openBoardPop(anchorEl) {
         openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}`; } });
       });
       foot.appendChild(btn);
-    } : undefined,
+    },
   });
 }
 
@@ -159,8 +169,13 @@ export function renderToolbar(resultCount) {
   elToolbarSub.replaceChildren();
 
   // Row 1: identity + upload + auth
-  const logo = document.createElement("span");
+  // The logo is the conventional "home" — here that's the boards index, and
+  // it's the ONLY route there for a one-board member (the board switcher, and
+  // so its All-boards footer, only renders when there's more than one).
+  const logo = document.createElement("a");
   logo.className = "toolbar-logo";
+  logo.href = "/boards.html";
+  logo.title = "All boards";
   logo.textContent = "001az/";
   elToolbar.appendChild(logo);
 

@@ -1,0 +1,14 @@
+-- The boards page (planning/boards-page-plan.md) asks for the newest few items
+-- of every accessible board on each load. That is a top-N-per-board walk in
+-- (board_id, created_at DESC, id DESC) order — the same shape migration 0014
+-- indexed on `entities` for keyset pagination, one table over.
+--
+-- Without it the planner can only offer idx_items_board plus a sort of every
+-- row on the board, so the query's cost tracks the whole library rather than
+-- the handful of rows it returns (measured: ~19ms over 8k items, and growing
+-- linearly). With it, each board walks its own slice of the index and stops
+-- after n — ~3ms on the same data, flat as the library grows.
+--
+-- Plain CREATE INDEX, like 0014: the migration runner wraps each file in a
+-- transaction, and CONCURRENTLY cannot run inside one.
+CREATE INDEX IF NOT EXISTS idx_items_board_created ON items(board_id, created_at DESC, id DESC);

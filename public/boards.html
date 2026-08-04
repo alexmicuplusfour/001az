@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>001az - boards</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="dropdown.css" />
+    <!-- board-modal.js (the manage pencil / New board) renders into these -->
+    <link rel="stylesheet" href="modal.css" />
+    <link rel="stylesheet" href="toast.css" />
+    <link rel="stylesheet" href="boards.css" />
+  </head>
+  <body>
+    <!-- The gallery's header shell, with only row 1 (#toolbar) — no filter
+         row, no sub-row: this page has nothing to filter. boards.js fills it
+         with the logo and the user menu once /api/me answers. -->
+    <header hidden>
+      <div id="toolbar"></div>
+    </header>
+    <div id="gate" class="gate">Checking access…</div>
+    <main id="boards-grid" hidden></main>
+    <script src="boards.js" type="module"></script>
+  </body>
+</html>

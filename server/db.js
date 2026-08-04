@@ -915,6 +915,80 @@ export async function boardItemStats(db) {
   return Object.fromEntries(rows.map((r) => [r.board_id, { c: r.c, p: r.p, h: r.h }]));
 }
 
+// Gallery-card counts for the boards page: entities per board — what a member
+// sees as cards — NOT items rows (a derived-identity board bundles several
+// instances under one card; boardItemStats answers the admin's inventory
+// question, this answers "how big does the gallery look"). { boardId: n }.
+export async function boardEntityCounts(db) {
+  const { rows } = await db.query(
+    "SELECT board_id, COUNT(*)::int AS c FROM entities GROUP BY board_id"
+  );
+  return Object.fromEntries(rows.map((r) => [r.board_id, r.c]));
+}
+
+// The boards page's preview stacks: newest n file-carrying instances per board,
+// projected straight from payload.files[0] in the thumbnail vocabulary
+// (name/w/h/kind — instanceEntry's face fields). Deliberately NOT the
+// gallery's selectFace pick (that needs all of an entity's instances plus
+// mapping.face); a preview stack is impressionistic, and on raw boards the two
+// coincide anyway. Boards short of n (connector entities carry no files) top
+// up with their newest entities' symbol tiles — the same fallback face the
+// gallery renders for them. Returns { boardId: entries[] } for every requested
+// id, each entry { name, w, h, kind } or { symbol, display_name }.
+// Top-n-per-board is a LATERAL, not a window over the whole table: paired with
+// idx_items_board_created (migration 0028) each board walks its own slice of
+// the index and stops after n, so the cost tracks the number of BOARDS rather
+// than the size of the library. The window form re-read and sorted every row on
+// every board to keep n of them — measured at ~19ms over 8k items and growing
+// linearly, against ~3ms flat here. (The index alone doesn't help the window
+// form: reading `payload` forces a heap visit per row, so nothing terminates
+// early. Both halves of the change are needed.)
+export async function boardPreviewFaces(db, boardIds, n = 8) {
+  const out = Object.fromEntries(boardIds.map((id) => [id, []]));
+  if (!boardIds.length) return out;
+  // created_at/iid ride along only so the outer ORDER BY can be explicit —
+  // nested-loop output order is a plan detail, not a guarantee.
+  const { rows: files } = await db.query(
+    `SELECT b.id AS board_id, t.name, t.w, t.h, t.kind
+     FROM unnest($1::text[]) AS b(id)
+     CROSS JOIN LATERAL (
+       SELECT i.created_at, i.id AS iid,
+         i.payload->'files'->0->>'name'      AS name,
+         (i.payload->'files'->0->>'w')::int  AS w,
+         (i.payload->'files'->0->>'h')::int  AS h,
+         i.payload->'files'->0->>'kind'      AS kind
+       FROM items i
+       WHERE i.board_id = b.id AND i.payload->'files'->0 IS NOT NULL
+       ORDER BY i.created_at DESC, i.id DESC
+       LIMIT $2
+     ) t
+     ORDER BY b.id, t.created_at DESC, t.iid DESC`,
+    [boardIds, n]
+  );
+  for (const r of files) out[r.board_id].push({ name: r.name, w: r.w, h: r.h, kind: r.kind || "image" });
+  const short = boardIds.filter((id) => out[id].length < n);
+  if (short.length) {
+    const { rows: ents } = await db.query(
+      `SELECT b.id AS board_id, t.symbol, t.display_name, t.identity
+       FROM unnest($1::text[]) AS b(id)
+       CROSS JOIN LATERAL (
+         SELECT e.created_at, e.id AS eid, e.symbol, e.display_name, e.identity
+         FROM entities e
+         WHERE e.board_id = b.id AND e.symbol IS NOT NULL
+         ORDER BY e.created_at DESC, e.id DESC
+         LIMIT $2
+       ) t
+       ORDER BY b.id, t.created_at DESC, t.eid DESC`,
+      [short, n]
+    );
+    for (const r of ents) {
+      const bucket = out[r.board_id];
+      if (bucket.length < n) bucket.push({ symbol: r.symbol, display_name: r.display_name || r.identity });
+    }
+  }
+  return out;
+}
+
 // Queue a board's settled items for a fresh tagging pass (held ones included —
 // retag is an explicit "tag now"). Returns the count. Only terminal states are
 // touched: items still in the pipeline (pending_extract/extracting/

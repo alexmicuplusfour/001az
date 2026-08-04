@@ -223,6 +223,7 @@ header.header-collapsed {
   color: var(--text);
   letter-spacing: -0.02em;
   flex-shrink: 0;
+  text-decoration: none; /* it's an <a> to the boards page in the gallery */
 }
 
 .board-name {
@@ -1078,6 +1079,7 @@ body.bulk-mode .heart {
   font-size: 11px;
   cursor: pointer;
   width: 100%;
+  text-decoration: none; /* footer actions can be <a> (board pop's All boards) */
 }
 .tp-edit:hover { background: rgba(255,255,255,0.18); }
 .tp-edit svg { width: 11px; height: 11px; flex-shrink: 0; }
