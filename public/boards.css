@@ -174,6 +174,42 @@ img.bc-thumb {
 .bc-thumb.slot-2 { z-index: 2; transform: translate(-30%, -58%) rotate(8deg); }
 .bc-thumb.slot-3 { z-index: 1; transform: translate(-48%, -30%) rotate(3.5deg); }
 
+/* Hovering the card fans the pile open. Each tile pushes out along its OWN
+   bearing — up, left, right, down — so the pile blooms from its centre instead
+   of sliding one way, and each opens its angle a degree or two further. Small
+   on purpose: 2–6% of a tile, a hint of movement rather than a rearrangement.
+
+   Every offset is a percentage of the TILE and the tile is a percentage of the
+   face, so the whole figure scales with the column and the clearances against
+   .bc-face's overflow clip hold at any card width.
+
+   `:not(:only-child)` is the "nothing to fan" guard: one tile is a photo, not a
+   pile, so it stays put. Writing it as a guard rather than restating the
+   resting transform means there's no second copy of those values to drift —
+   and it keeps holding if a failed thumbnail leaves a stack with one tile.
+
+   The easing is deliberately asymmetric, per the two halves of the gesture:
+   ease-out opening (it springs away and settles), ease-in closing (it drifts,
+   then falls home). */
+.bc-thumb {
+  transition: transform 0.26s ease-in; /* the closing half */
+}
+.bc-wrap:hover .bc-thumb {
+  transition-duration: 0.32s;
+  transition-timing-function: ease-out; /* the opening half */
+}
+.bc-wrap:hover .bc-thumb:not(:only-child).slot-0 { transform: translate(-50%, -55%) rotate(-2.5deg); }
+.bc-wrap:hover .bc-thumb:not(:only-child).slot-1 { transform: translate(-76%, -40%) rotate(-10.5deg); }
+.bc-wrap:hover .bc-thumb:not(:only-child).slot-2 { transform: translate(-24%, -60.5%) rotate(9.5deg); }
+.bc-wrap:hover .bc-thumb:not(:only-child).slot-3 { transform: translate(-46%, -26%) rotate(4.5deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  .bc-wrap,
+  .bc-thumb {
+    transition: none;
+  }
+}
+
 /* Connector entities carry no file — the gallery gives them a symbol tile
    (.connector-face in styles.css ~2366); the stack restates it at tile scale. */
 .bc-thumb.sym {
