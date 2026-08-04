@@ -34,10 +34,11 @@ body {
 }
 
 header {
-  position: sticky;
+  position: fixed;
   top: 12px;
+  left: 12px;
+  right: 12px;
   z-index: 20;
-  margin: 12px 12px 0;
   background: rgba(255, 255, 255, 0.65);
   backdrop-filter: blur(16px) saturate(180%);
   -webkit-backdrop-filter: blur(16px) saturate(180%);
@@ -45,54 +46,66 @@ header {
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: 14px;
   box-shadow: 0 1px 12px rgba(0, 0, 0, 0.04);
+  /* Scroll collapse (header-scroll.js): the top row's track goes to 0fr and the
+     card simply gets shorter. Its own border, radius and shadow come down with
+     it, so nothing is clipped or faked.
+
+     Being out of the document flow is what buys that — #header-space reserves
+     the footprint instead. A card that shrinks in flow drags the whole gallery
+     up with it and, at the bottom of a short board, makes the browser clamp the
+     scroll position, which reads as a scroll-up and reopens the header in a
+     loop. Out of flow there is no page to disturb. */
+  display: grid;
+  grid-template-rows: 1fr auto;
+  transition: grid-template-rows 0.28s ease;
+}
+
+header.header-collapsed {
+  grid-template-rows: 0fr auto;
+}
+
+/* Stands in for the fixed header. JS keeps it level with the card's expanded
+   bottom edge; the height here only covers the gap before that first runs. */
+#header-space {
+  flex: none;
+  height: 120px;
 }
 
 #toolbar {
   display: flex;
   align-items: center;
   gap: 14px;
-  /* Top room inside the clip box so a button's corner alert dot (which overhangs
-     ~6px above the row) isn't shaved by overflow:hidden; the negative margin
-     pulls the row back so the added padding doesn't shift it visually. */
-  margin-top: -10px;
-  padding-top: 10px;
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  /* Collapses on scroll-down (see header-scroll.js). --toolbar-h is the row's
-     measured border-box height (set by JS), so the height animates from its
-     true value — the spacing/border collapse to zero alongside it and the card
-     closes seamlessly onto the filters row. The margins net to zero at both
-     ends, so the row's total block size goes exactly H → 0; the header's
-     compensating margin below keeps the page height constant through it. */
-  box-sizing: border-box;
+  /* The collapsing row. min-height frees it to shrink and its own overflow
+     hides the content on the way down. The top padding is headroom for corner
+     alert dots, which overhang their buttons and would otherwise be shaved by
+     that overflow; the negative margin cancels it so the row still sits exactly
+     where it did. */
+  min-height: 0;
   overflow: hidden;
-  height: var(--toolbar-h, auto);
-  transition: height 0.3s ease, opacity 0.2s ease, margin-top 0.3s ease,
-    padding-top 0.3s ease, margin-bottom 0.3s ease, padding-bottom 0.3s ease,
-    border-bottom-color 0.3s ease;
+  margin-top: -8px;
+  padding-top: 8px;
+  transition: opacity 0.18s ease, margin-block 0.28s ease,
+    padding-block 0.28s ease, border-bottom-width 0.28s ease;
 }
 
+/* Emptying the track collapses the row's CONTENT; a stretched grid item keeps
+   its own padding, border and margin regardless, so those are folded away here
+   too — otherwise the card stops ~21px short of closed. */
 header.header-collapsed #toolbar {
-  height: 0;
   opacity: 0;
-  margin-top: 0;
-  padding-top: 0;
-  margin-bottom: 0;
-  padding-bottom: 0;
-  border-bottom-color: transparent;
+  margin-block: 0;
+  padding-block: 0;
+  border-bottom-width: 0;
 }
 
-/* Layout-neutral collapse: the document must not change height when the
-   toolbar row folds, or the browser clamps the scroll position at the bottom
-   of short pages — which reads as an upward scroll and re-expands the header
-   in a feedback loop. The margin grows by exactly the row's measured height,
-   on the same curve, so the net flow size of the header stays constant. */
-header {
-  transition: margin-bottom 0.3s ease;
-}
-header.header-collapsed {
-  margin-bottom: var(--toolbar-h, 58px);
+@media (prefers-reduced-motion: reduce) {
+  header,
+  #toolbar {
+    transition: none;
+  }
 }
 
 #toolbar-sub {

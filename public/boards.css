@@ -21,6 +21,17 @@
   border-bottom: none;
 }
 
+/* The gallery's header leaves the flow so it can collapse as you scroll, and a
+   spacer element stands in for it. Nothing collapses here and there is no
+   spacer to hold the place, so this page keeps its header in the flow, with the
+   lateral gaps back as margins. */
+header {
+  position: sticky;
+  left: auto;
+  right: auto;
+  margin: 12px 12px 0;
+}
+
 main#boards-grid {
   /* the gallery grid's frame: full-bleed, same side padding, grow-only so the
      page still fills the viewport when there are only a few boards */
