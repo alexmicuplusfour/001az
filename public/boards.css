@@ -120,12 +120,16 @@ main#boards-grid {
   position: relative;
   aspect-ratio: 4 / 3;
   overflow: hidden;
-  background: #f0f1f3;
+  /* The page's own tint at the top dissolving into the body's white at the
+     bottom, so the stack sits in the page rather than in a grey panel and the
+     face has no hard edge where it meets .bc-body. #f7f8fa is the body colour
+     from styles.css, repeated as a literal the way #filters already does —
+     there's no variable for it. */
+  background: linear-gradient(#f7f8fa, #fff);
 }
-.bc-face.empty {
-  background: #fff;
-  border-bottom: 1px solid #f0f0f2;
-}
+/* An empty face keeps the same gradient — only the dashed placeholder marks it
+   out. (It used to be flat white with a hairline underneath to show where the
+   face ended against the white body; the gradient's white foot does that now.) */
 .bc-face.empty::after {
   content: "";
   position: absolute;
