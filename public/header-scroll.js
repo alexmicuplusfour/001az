@@ -9,10 +9,11 @@ const header = document.querySelector("header");
 const space = document.getElementById("header-space");
 
 // Accumulated movement needed to flip state. Reveal is the twitchier direction
-// — an accidental nudge upward shouldn't throw the chrome back in your face —
-// so it asks for a little more travel than the collapse does.
+// — an accidental nudge upward shouldn't throw the chrome back in your face,
+// and on a touchpad or trackpad the tail of a fling wobbles both ways — so it
+// asks for a good deal more travel than the collapse does.
 const COLLAPSE_AFTER = 8;
-const REVEAL_AFTER = 24;
+const REVEAL_AFTER = 40;
 const REVEAL_AT_TOP = 80; // within this many px of the top, always open
 
 let lastY = 0;
@@ -39,9 +40,20 @@ function setCollapsed(next) {
   header.classList.toggle("header-collapsed", next);
 }
 
+// Where the page actually is, ignoring rubber-band. Touch platforms let you
+// drag past either end and then spring back on their own — and that spring is a
+// real upward delta, which is why bouncing at the foot of a board used to pop
+// the header open. Clamping to the legitimate range pins the position at the
+// end for the whole excursion, so the bounce out and the bounce back both
+// contribute nothing to travel.
+function scrollTop() {
+  const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+  return Math.min(Math.max(window.scrollY, 0), max);
+}
+
 function apply() {
   ticking = false;
-  const y = Math.max(0, window.scrollY);
+  const y = scrollTop();
   const dy = y - lastY;
   lastY = y;
 
@@ -65,7 +77,7 @@ function apply() {
 
 export function initHeaderScroll() {
   if (!header || !space) return;
-  lastY = Math.max(0, window.scrollY);
+  lastY = scrollTop();
 
   // Fires once on observe and again on every reflow that resizes the card —
   // content filling in after boot, chips wrapping, the viewport changing.
