@@ -8,7 +8,7 @@ full-bleed grid, the toolbar's row 1) instead of the admin/profile panel
 chrome — see "The page".
 Boards are managed on the admin page and
 switched via a bare name-list dropdown; there is no member-facing surface that
-shows "here are your boards" as a browsable thing. This adds `/boards.html` — a
+shows "here are your boards" as a browsable thing. This adds `/boards` — a
 card grid of the boards the signed-in user can access, each card carrying a
 disordered stack of item thumbnails, the board name, its card count, and
 presence indicators for tagging (taxonomy), custom mapping (AI-extracted
@@ -226,7 +226,7 @@ returning `Map<boardId, entries[]>`). Kind strings ride through verbatim —
 
 `public/boards.html` + `public/boards.js`, served statically like
 admin/profile/login. Boot: fetch `/api/me`; not signed in →
-`location.replace("/login.html?next=/boards.html")`; then fetch the overview
+`location.replace("/login.html?next=/boards")`; then fetch the overview
 and render.
 
 It also honours the gate the OTHER standalone pages skip: a session with
@@ -340,21 +340,24 @@ settings surfaces; this one is a gallery, so it follows the gallery.
 
 1. **Dropdown footer** ([toolbar.js](../public/toolbar.js) `openBoardPop`): the
    footer used to exist only for admins ("New board"). It's now always built —
-   an "All boards" row → `/boards.html` for everyone, then the admin-gated
+   an "All boards" row → `/boards` for everyone, then the admin-gated
    "New board". A real `<a>` (middle-clickable), using the new `ICONS.grid`;
    `.tp-edit` gained `text-decoration: none` for it, the way `.dd-row` already
    carries "rows can be `<a>`". Two stacked footer actions is an existing
    shape — rows.js appends Edit + Retag the same way. Note the dropdown itself
    only renders with `state.boards.length > 1` — acceptable, since a one-board
    member reaches the page via the logo.
-2. **Logo**: the `toolbar-logo` becomes an `<a href="/boards.html">` on the
+2. **Logo**: the `toolbar-logo` becomes an `<a href="/boards">` on the
    gallery page — conventional "home", and the ONLY route there for a
    one-board member. Needs `text-decoration: none` on the class. On the boards
    page itself boards.js builds it as a `<span>`, so it stays inert.
-3. **URL**: `/boards.html` and the clean `/boards` BOTH work with no route at
-   all — the static mount already carries `{ extensions: ["html"] }`
-   ([server.js](../server/server.js) ~2631), so the planned `sendFile` alias
-   is unnecessary. Verified against a running server.
+3. **URL**: every link points at the clean `/boards`. It needs no route at all —
+   the static mount already carries `{ extensions: ["html"] }`
+   ([server.js](../server/server.js) ~2631), so the planned `sendFile` alias is
+   unnecessary; `/boards.html` keeps working as the file's own name. Because
+   the page is reachable by two paths, boards.html references its assets
+   ABSOLUTELY (`/styles.css`, `/boards.js`, …) the way admin.html does —
+   relative paths would resolve against whichever path it was reached by.
 4. **Deliberately NOT changed**: the no-`?board=` landing still redirects to
    the last-used board (app.js ~64–84, `lastBoard` in localStorage). Power
    users land on their board; the boards page is a destination, not a gate.

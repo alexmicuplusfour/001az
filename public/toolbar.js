@@ -144,7 +144,7 @@ function openBoardPop(anchorEl) {
     footer: (foot, { close }) => {
       const all = document.createElement("a");
       all.className = "tp-edit";
-      all.href = "/boards.html";
+      all.href = "/boards";
       all.innerHTML = ICONS.grid + "<span>All boards</span>";
       foot.appendChild(all);
 
@@ -174,7 +174,7 @@ export function renderToolbar(resultCount) {
   // so its All-boards footer, only renders when there's more than one).
   const logo = document.createElement("a");
   logo.className = "toolbar-logo";
-  logo.href = "/boards.html";
+  logo.href = "/boards";
   logo.title = "All boards";
   logo.textContent = "001az/";
   elToolbar.appendChild(logo);

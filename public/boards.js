@@ -14,7 +14,7 @@ import { openDropdown, ddRow, ddSep } from "/dropdown.js";
 import { ICONS, fmtDuration } from "/utils.js";
 import { openBoardModal } from "/board-modal.js";
 
-const LOGIN = "/login.html?next=%2Fboards.html";
+const LOGIN = "/login.html?next=%2Fboards";
 
 const me = await fetch("/api/me", { cache: "no-store" })
   .then((r) => r.json())
