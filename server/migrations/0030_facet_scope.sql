@@ -1,0 +1,22 @@
+-- Facet-addressable tagging (planning/facet-addressable-tagging-plan.md, stage 1).
+-- Which facets a queued tagging pass is allowed to WRITE. NULL = all of them,
+-- which is every existing row and every ordinary pass — so nothing changes
+-- until a scoped retag sets it.
+--
+-- Why: a full retag re-rolls every facet at 18-22% instability (measured
+-- 2026-08-06), so fixing one facet's gloss today means shaking the other eight
+-- for nothing — and every shake is a fresh chance at an alert match that is
+-- recorded once and never retracted. It also makes a gloss edit unmeasurable,
+-- because everything else moved in the same pass.
+--
+-- Nullable with no default on purpose: a pre-0030 archive restores into this
+-- schema with NULL everywhere, which is exactly "unscoped" (backup.js loadTable
+-- INSERTs only the columns the archive's manifest names). A NOT NULL column
+-- would have needed a default to stay restorable; NULL already carries the
+-- meaning, so there is nothing to keep in sync.
+--
+-- The scope lives only between "queued" and "landed": markTagged clears it, and
+-- so does every path that re-queues an item for a FULL pass. claimFairBatch,
+-- failOrRequeue and recoverStuck deliberately leave it alone — a scoped pass
+-- that is claimed, retried or recovered is still scoped.
+ALTER TABLE items ADD COLUMN tag_facets TEXT[];

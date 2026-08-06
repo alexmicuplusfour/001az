@@ -366,8 +366,10 @@ export async function setItemTags(db, id, tags) {
     const a = after.get(key) || new Set();
     if (b.size !== a.size || [...b].some((v) => !a.has(v))) { delete reasoning[key]; delete confidence[key]; }
   }
+  // tag_facets=NULL: a human just settled this item, so any pending scoped pass
+  // is moot. This UPDATE has no status fence, so it CAN land on a scoped row.
   await db.query(
-    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, undecided=FALSE, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5",
+    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, tag_facets=NULL, undecided=FALSE, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5",
     [JSON.stringify(tags), JSON.stringify(reasoning), JSON.stringify(confidence), Date.now(), id]
   );
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
@@ -437,7 +439,7 @@ export async function reextractItem(db, id) {
     `UPDATE items
      SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
                         ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
-         status='pending_extract', attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+         status='pending_extract', tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE id=$2 AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')`,
     [Date.now(), id, current]
   );
@@ -450,7 +452,9 @@ export async function reextractItem(db, id) {
 // to Re-extract since a single instance is what's in focus there.
 export async function retagItem(db, id) {
   const result = await db.query(
-    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE, attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2",
+    // tag_facets=NULL: this is an explicit FULL retag. No status fence here, so
+    // it can land on a row already queued for a scoped pass — that scope dies.
+    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, tag_confidence='{}'::jsonb, tag_facets=NULL, undecided=FALSE, attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2",
     [Date.now(), id]
   );
   return result.rowCount > 0;
@@ -1024,6 +1028,35 @@ export async function retagBoard(db, boardId) {
     [Date.now(), boardId, current]
   );
   return result.rowCount;
+}
+
+// Re-tag a board on SOME of its facets (planning/facet-addressable-tagging-plan.md).
+// The pass still asks the model about every facet; `tag_facets` says which
+// answers are allowed to land, so the others keep what they already have.
+//
+// Only 'tagged' rows, and unlike retagBoard there is no status CASE: a facet
+// retag must never turn into a re-extraction or a re-face. An item that never
+// landed has no other facets to preserve, and a held/failed one needs its whole
+// pass — both are retagBoard's job, not this one.
+export async function retagBoardFacets(db, boardId, facetKeys) {
+  const { rowCount } = await db.query(
+    `UPDATE items SET status='pending', tag_facets=$3::text[],
+       attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+     WHERE board_id=$2 AND status='tagged'`,
+    [Date.now(), boardId, facetKeys]
+  );
+  return rowCount;
+}
+
+// The per-instance counterpart, for the lightbox. Same 'tagged'-only rule.
+export async function retagItemFacets(db, id, facetKeys) {
+  const { rowCount } = await db.query(
+    `UPDATE items SET status='pending', tag_facets=$3::text[],
+       attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+     WHERE id=$2 AND status='tagged'`,
+    [Date.now(), id, facetKeys]
+  );
+  return rowCount > 0;
 }
 
 // --- periodic auto-tagging ---
@@ -2004,7 +2037,8 @@ export async function reprocessEntity(db, entityId) {
                      OR payload->'files'->0->>'generated' = 'true') THEN 'pending_face'
            WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract'
            ELSE 'pending' END,
-         tags='[]'::jsonb, tag_reasoning='{}'::jsonb, undecided=FALSE,
+         tags='[]'::jsonb, tag_reasoning='{}'::jsonb, tag_confidence='{}'::jsonb,
+         tag_facets=NULL, undecided=FALSE,
          attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE entity_ids @> ARRAY[$2]::bigint[]`,
     [Date.now(), entityId, current]
@@ -2023,12 +2057,32 @@ export async function reprocessEntity(db, entityId) {
 // ownership — see the worker-queue audit, hole #7.
 // `confidence` is the per-facet vote agreement (vote mode); {} on a single-pass
 // board means NOT MEASURED, never zero — readers must distinguish those.
-export async function markTagged(db, id, tags, undecided = false, reasoning = {}, confidence = {}) {
+//
+// `scoped` says this pass only spoke for some of the item's facets (0030). Two
+// consequences, and they must move together:
+//   - `undecided` is NOT written. The verdict is a whole-item judgment and a
+//     scoped pass did not make one; an item flagged undecided while eight
+//     facets keep their tags is incoherent.
+//   - the caller must therefore pass the item's EXISTING flag, because
+//     addTagSnapshot dedupes on it. Handing it a verdict that was never stored
+//     makes the comparison test fiction — appending when the flag "changed",
+//     skipping when it "matched".
+export async function markTagged(db, id, tags, undecided = false, reasoning = {}, confidence = {}, scoped = false) {
   // Clearing the vector marks the item for the embedding sweep — the text it
   // was embedded from just changed.
+  // tag_facets=NULL on EVERY landing, scoped or not: the scope is consumed here,
+  // and a stale one would narrow the next pass.
+  const vals = [JSON.stringify(tags), JSON.stringify(reasoning || {}), JSON.stringify(confidence || {}), Date.now()];
+  const sets = [
+    "status='tagged'", "tags=$1", "tag_reasoning=$2", "tag_confidence=$3",
+    "tag_facets=NULL", "error=NULL", "retry_at=NULL",
+    "embedding=NULL", "embedding_model=NULL", "embed_error=NULL", "updated_at=$4",
+  ];
+  if (!scoped) { vals.push(undecided); sets.push(`undecided=$${vals.length}`); }
+  vals.push(id); // last, so the fence's placeholder is always vals.length
   const { rowCount } = await db.query(
-    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, tag_confidence=$4, error=NULL, retry_at=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$5 WHERE id=$6 AND status='processing'",
-    [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), JSON.stringify(confidence || {}), Date.now(), id]
+    `UPDATE items SET ${sets.join(", ")} WHERE id=$${vals.length} AND status='processing'`,
+    vals
   );
   if (rowCount) await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
   return rowCount > 0;
@@ -2298,14 +2352,17 @@ export async function cancelBoardQueue(db, boardId) {
     const now = Date.now();
     const restored = (
       await client.query(
-        `UPDATE items SET status='tagged', attempts=0, error=NULL, updated_at=$1
+        // tag_facets=NULL on both branches: these target status='pending', which
+        // is exactly the window a scoped pass waits in. Pulling an item out of
+        // the queue must not leave a scope armed for the next pass.
+        `UPDATE items SET status='tagged', tag_facets=NULL, attempts=0, error=NULL, updated_at=$1
          WHERE board_id=$2 AND status='pending' AND tags != '[]'::jsonb`,
         [now, boardId]
       )
     ).rowCount;
     const cleared = (
       await client.query(
-        `UPDATE items SET status='tagged', undecided=TRUE, attempts=0, error=NULL, updated_at=$1
+        `UPDATE items SET status='tagged', undecided=TRUE, tag_facets=NULL, attempts=0, error=NULL, updated_at=$1
          WHERE board_id=$2 AND status='pending'`,
         [now, boardId]
       )

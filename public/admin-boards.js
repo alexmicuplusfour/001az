@@ -105,29 +105,47 @@ export async function renderBoards() {
     // pass merges fewer. Single-pass boards keep exactly today's wording.
     const votes = Number(b.ai_votes) || 1;
     const passNote = votes > 1 ? ` — ${votes} agreement passes per item` : "";
+    // Retag, optionally on ONE facet. A facet retag re-rolls only that facet and
+    // leaves every other one alone — which matters because a full pass re-rolls
+    // all of them at 18-22% instability, so fixing one facet's gloss otherwise
+    // shakes the rest for nothing (planning/facet-addressable-tagging-plan.md).
+    const facets = Array.isArray(b.facets) ? b.facets : [];
+    const retagWrap = document.createElement("div");
+    retagWrap.className = "access-wrap";
     const retagBtn = document.createElement("button");
     retagBtn.className = "danger";
-    retagBtn.textContent = "retag ↺";
-    retagBtn.title = "Re-queue all items in this board for AI tagging" + passNote + (nextRun ? ` (${nextRun})` : "");
-    retagBtn.onclick = async () => {
+    retagBtn.textContent = facets.length ? "retag ↺ ▾" : "retag ↺";
+    retagBtn.title = "Re-queue this board for AI tagging" + passNote + (nextRun ? ` (${nextRun})` : "");
+
+    const runRetag = async (facet) => {
+      const scope = facet ? [facet.key] : null;
+      const what = facet ? `on "${facet.label || facet.key}" only` : "on every facet";
+      const keeps = facet ? "\n\nEvery other facet keeps its current tags." : "\n\nExisting tags will be cleared and reprocessed.";
       const cost = votes > 1
-        ? `\n\nThis board runs ${votes} agreement passes per item, so that is up to ~${(b.item_count * votes).toLocaleString()} paid tagging calls.\n`
-        : " ";
-      if (!confirm(`Re-tag all ${b.item_count} item(s) in "${b.name}"?${cost}Existing tags will be cleared and reprocessed.`)) return;
+        ? ` This board runs ${votes} agreement passes per item, so that is up to ~${(b.item_count * votes).toLocaleString()} paid tagging calls.`
+        : "";
+      if (!confirm(`Re-tag all ${b.item_count} item(s) in "${b.name}" ${what}?${keeps}${cost}`)) return;
+      const label = retagBtn.textContent;
       try {
         retagBtn.disabled = true;
         retagBtn.textContent = "queuing…";
-        const { queued } = await api("POST", `/api/admin/boards/${b.id}/retag`);
+        const { queued } = await api("POST", `/api/admin/boards/${b.id}/retag`, scope ? { facets: scope } : undefined);
         retagBtn.textContent = `queued ${queued}`;
-        toast(`Queued ${queued} item(s) for retagging`);
+        toast(`Queued ${queued} item(s) for retagging${facet ? ` on ${facet.label || facet.key}` : ""}`);
         setTimeout(renderBoards, 1500);
       } catch (err) {
         toast.error(err.message);
-        retagBtn.textContent = "retag ↺";
+        retagBtn.textContent = label;
         retagBtn.disabled = false;
       }
     };
-    wrap.appendChild(retagBtn);
+
+    // No facets: nothing to scope to, so the button stays a plain action.
+    retagBtn.onclick = facets.length
+      ? (e) => { e.stopPropagation(); toggleRetagDrop(b, facets, retagWrap, runRetag); }
+      : () => runRetag(null);
+    retagWrap.appendChild(retagBtn);
+    wrap.appendChild(retagWrap);
 
     if (b.held_count > 0) {
       const tagHeldBtn = document.createElement("button");
@@ -207,6 +225,51 @@ export async function renderBoards() {
   sec.appendChild(createSec);
 
   boardsContent.replaceChildren(sec);
+}
+
+// The retag scope picker. Purely local — the board row already carries `facets`
+// (BOARD_COLS selects it and /api/admin/boards spreads the row), so opening this
+// costs no fetch.
+function toggleRetagDrop(board, facets, container, run) {
+  const id = `retag-drop-${board.id}`;
+  const existing = document.getElementById(id);
+  document.querySelectorAll(".retag-drop, .access-drop").forEach((d) => d.remove());
+  if (existing) return; // second click closes
+
+  const drop = document.createElement("div");
+  drop.className = "access-drop retag-drop";
+  drop.id = id;
+
+  const opt = (label, key, onPick) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "retag-opt";
+    b.textContent = label;
+    if (key) {
+      const k = document.createElement("span");
+      k.className = "retag-key";
+      k.textContent = key;
+      b.appendChild(k);
+    }
+    b.onclick = (e) => { e.stopPropagation(); drop.remove(); onPick(); };
+    return b;
+  };
+
+  drop.appendChild(opt("Everything", null, () => run(null)));
+  const sep = document.createElement("div");
+  sep.className = "retag-sep";
+  drop.appendChild(sep);
+  for (const f of facets) {
+    if (!f?.key) continue;
+    drop.appendChild(opt(f.label || f.key, f.key, () => run(f)));
+  }
+
+  container.appendChild(drop);
+  // Same dismiss contract as the access drop: the next click anywhere closes it.
+  setTimeout(() => document.addEventListener("click", function away() {
+    drop.remove();
+    document.removeEventListener("click", away);
+  }, { once: true }), 0);
 }
 
 async function toggleAccessDrop(board, container) {

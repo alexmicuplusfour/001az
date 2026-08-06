@@ -202,7 +202,17 @@ const GLOSS = {
 
 const facetGloss = (f) => (f.description || "").trim() || GLOSS[f.key] || f.label;
 
-export function buildPrompt(facets, context = "", withReasoning = true, subject = "items", withResearch = false) {
+// `scoped` builds a prompt for a PARTIAL pass — some of the board's facets, not
+// all of them (facet-addressable tagging, stage 2). It drops the whole-item
+// description and the fit verdict from both the schema and the prose, because a
+// pass that only speaks for some facets has no business re-deriving either and
+// will not write them.
+//
+// The unscoped strings below are left byte-for-byte alone rather than factored
+// with the scoped ones. Prompt wording is worth ~4 accuracy points here, so
+// "obviously equivalent" refactors of it are not worth the risk — and
+// test/prompt-snapshot.test.js pins them either way.
+export function buildPrompt(facets, context = "", withReasoning = true, subject = "items", withResearch = false, scoped = false) {
   const lines = facets.map((f) => {
     const note = f.single ? " — pick exactly one" : "";
     return `- ${f.key} (${facetGloss(f)}): ${f.values.join(", ")}${note}`;
@@ -214,13 +224,25 @@ export function buildPrompt(facets, context = "", withReasoning = true, subject 
   const researchPara = withResearch
     ? `\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n`
     : "";
-  const selectPara = withReasoning
+  // Four variants, written out rather than composed: the scoped pair drops the
+  // description opener and the "when the fit verdict is undecided…" clause,
+  // both of which name things a scoped schema no longer has. Leaving that
+  // instruction in would tell the model about a verdict it cannot return.
+  const selectPara = scoped
+    ? withReasoning
+      ? `For each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.`
+      : `For each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.`
+    : withReasoning
     ? `Start with a freeform description of the item as a whole — one or two sentences covering what it is and its overall style and mood. Then for each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is "undecided", leave every facet's values empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`
     : `For each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked "pick exactly one" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is "undecided", leave every facet empty, including "pick exactly one" facets). Be accurate and conservative; do not invent values outside the allowed lists.`;
+  // No replacement text when scoped: the model simply sees fewer facets and has
+  // no way to know others exist, so explaining that this is a partial pass would
+  // raise a question it cannot act on.
+  const fitPara = scoped
+    ? ""
+    : `Also decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an item you were able to describe with the facets is a match by definition.\n\n`;
   const systemText = `You tag ${subject} for a private research gallery.${contextBlock}
-Also decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to "match" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to "undecided" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine "undecided" with facet selections: an item you were able to describe with the facets is a match by definition.
-
-${selectPara}
+${fitPara}${selectPara}
 ${researchPara}
 Facets and allowed values:
 ${lines.join("\n")}
@@ -232,7 +254,7 @@ Return your answer only by calling the record_tags tool.`;
   // Declared (and emitted) first: the model describes the whole item before
   // judging facets. Skipped if a facet claims the key, so `required` can't
   // end up with a duplicate entry.
-  if (withReasoning && !facets.some((f) => f.key === "description")) {
+  if (withReasoning && !scoped && !facets.some((f) => f.key === "description")) {
     properties.description = {
       type: "string",
       description: "One or two sentences describing the item as a whole: what it is, its overall style and mood.",
@@ -265,6 +287,13 @@ Return your answer only by calling the record_tags tool.`;
     required.push(f.key);
   }
   // Defined after the facet loop so a facet named "fit" can't clobber it.
+  //
+  // A scoped pass makes no whole-item verdict, so it does not ask for one. Note
+  // the side effect: unscoped, a facet named `fit` is deliberately overwritten
+  // here and never gets asked about at all; scoped, it would keep its own slot.
+  // The retag routes refuse `fit` as a scope key rather than let that facet
+  // behave one way in one mode and another way in the other.
+  if (!scoped) {
   properties.fit = withReasoning
     ? {
         type: "object",
@@ -284,7 +313,8 @@ Return your answer only by calling the record_tags tool.`;
         enum: ["match", "undecided"],
         description: "Whether the item fits the kind of material this board collects.",
       };
-  required.push("fit");
+    required.push("fit");
+  }
   const schema = { type: "object", properties, required, additionalProperties: false };
   return { systemText, schema };
 }
@@ -416,6 +446,68 @@ export function mergeVotes(facets, runs) {
     // Tie -> match: the filledFacets guard in tagOne already arbitrates the real
     // decision, and "match" is the recoverable side of a wrong call.
     fit: { verdict: undecidedVotes > runs.length / 2 ? "undecided" : "match", reasoning: best.fit?.reasoning },
+  };
+}
+
+// ─── facet scope ─────────────────────────────────────────────────────────────
+// A tagging pass can be told which facets it is allowed to WRITE (items.tag_facets,
+// migration 0030). The pass itself is unchanged — it still asks for every facet —
+// so this is purely a landing-side filter. See planning/facet-addressable-tagging-plan.md.
+
+// Group `facet/value` tags by facet key. Same discipline as db.js tagsByFacet,
+// including its `i <= 0` guard: a tag with no separator has no facet and must
+// not be turned into one by a slice(0, -1).
+function groupTags(tags = []) {
+  const m = new Map();
+  for (const t of tags) {
+    const i = t.indexOf("/");
+    if (i <= 0) continue;
+    if (!m.has(t.slice(0, i))) m.set(t.slice(0, i), []);
+    m.get(t.slice(0, i)).push(t.slice(i + 1));
+  }
+  return m;
+}
+
+// Fold a scoped tagging result into what the item already has. `prev` and `next`
+// arrive in the same shape ({ tags, reasoning, confidence }) — the call site
+// adapts the db row's column names, so this never has to know which side is which.
+//
+// `facets` is the board's ORDERED facet list and rebuilding through it is not
+// cosmetic: tagOne emits tags in board-facet order, so sorting the merged array
+// instead would make a scoped landing store a different order than a full one,
+// flipping with whichever path wrote last.
+//
+// `description` and `fit` need no special case — they are reserved keys in
+// tag_reasoning, never facet keys, so they are never in `keep` and ride through
+// on the spread. (A board MAY declare a facet literally named `description`;
+// buildPrompt gives it the facet slot, and scoping to it then replaces it, which
+// is what falling through already does.)
+export function scopeResult(facets, scope, prev, next) {
+  if (!scope?.length) return next; // unscoped is the identity — byte-for-byte
+  const keep = new Set(scope);
+  const prevBy = groupTags(prev.tags);
+  const nextBy = groupTags(next.tags);
+
+  // Walking `facets` also drops a stored tag whose facet is no longer on the
+  // board. That is the right answer — the facet is gone, its tags are orphaned —
+  // but it means a scoped pass quietly garbage-collects them too.
+  const tags = [];
+  for (const f of facets) {
+    for (const v of (keep.has(f.key) ? nextBy : prevBy).get(f.key) || []) tags.push(`${f.key}/${v}`);
+  }
+
+  const pick = (a = {}, b = {}) => {
+    const out = { ...a };
+    for (const k of keep) {
+      delete out[k];
+      if (b[k] !== undefined) out[k] = b[k];
+    }
+    return out;
+  };
+  return {
+    tags,
+    reasoning: pick(prev.reasoning, next.reasoning),
+    confidence: pick(prev.confidence, next.confidence),
   };
 }
 
@@ -555,17 +647,40 @@ export function buildFieldsPrompt(mapping) {
 // Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
 
-async function getBoardPrompt(db, boardId) {
-  if (boardPromptCache.has(boardId)) return boardPromptCache.get(boardId);
+// `scope` = the facet keys a partial pass may write (items.tag_facets). It
+// narrows the PROMPT as well as the write, so a board has one cached entry per
+// distinct scope — hence a nested map. Nesting rather than a compound key is
+// deliberate: it keeps invalidateBoardCache a single delete, so a facet edit
+// cannot leave a scoped variant alive and tagging against the old gloss.
+async function getBoardPrompt(db, boardId, scope = null) {
+  const key = scope?.length ? [...scope].sort().join(",") : "";
+  const byScope = boardPromptCache.get(boardId);
+  if (byScope?.has(key)) return byScope.get(key);
   const board = await getBoard(db, boardId);
   if (!board || !board.facets.length) return null;
-  const { facets, context } = board;
+  const { context } = board;
+
+  // Two facet lists, and they are NOT interchangeable:
+  //   facets    — what this pass asks about and parseRun walks
+  //   allFacets — the board's full ordered list, which scopeResult rebuilds the
+  //               merged tag array through. Hand it `facets` on a scoped pass
+  //               and it emits only the scoped facets, silently deleting every
+  //               other facet's tags.
+  const allFacets = board.facets;
+  const facets = scope?.length ? allFacets.filter((f) => scope.includes(f.key)) : allFacets;
+  if (!facets.length) return null; // the scoped facet left the board — nothing to ask
+
+  // Board-wide on purpose: parseRun only asks allowed.has() for facets it is
+  // already walking, so a wider set is inert while a narrower one would silently
+  // filter valid answers.
   const allowed = new Set();
-  for (const f of facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
+  for (const f of allFacets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const research = board.ai_research === true;
   // Boards mix file kinds now, so the honest per-board subject is "items";
   // the per-item wording ("Tag this image/document…") rides in the user turn.
-  const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, "items", research);
+  const { systemText, schema } = buildPrompt(
+    facets, context, board.ai_reasoning !== false, "items", research, !!scope?.length
+  );
   // Clamped here rather than trusted from the column: the route validates it,
   // but a hand-edited row must not fan out unboundedly.
   //
@@ -574,11 +689,13 @@ async function getBoardPrompt(db, boardId) {
   // so N votes multiply a cost the token estimate never sees. Anyone enabling
   // votes by touching the column directly gets the same protection.
   const votes = research ? 1 : Math.max(1, Math.min(5, Number(board.ai_votes) || 1));
-  const entry = { systemText, schema, allowed, facets, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
-  boardPromptCache.set(boardId, entry);
+  const entry = { systemText, schema, allowed, facets, allFacets, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  if (byScope) byScope.set(key, entry);
+  else boardPromptCache.set(boardId, new Map([[key, entry]]));
   return entry;
 }
 
+// One delete drops every scope variant — see the nesting note above.
 export function invalidateBoardCache(boardId) {
   boardPromptCache.delete(boardId);
 }
@@ -1400,7 +1517,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   }
 
   async function tagOne(row) {
-    const prompt = await getBoardPrompt(db, row.board_id);
+    const prompt = await getBoardPrompt(db, row.board_id, row.tag_facets);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
     const { systemText, schema, allowed, facets, votes } = prompt;
 
@@ -1769,12 +1886,27 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const label = row.payload?.identity || `item ${row.id}`;
     const t0 = Date.now();
     let result;
+    let prompt; // needed again at the landing, which is a separate try block
     try {
       // Facet-less board: nothing to tag. Complete the item instead of failing
       // it — extraction-only boards (mapping, no facets) are a supported shape.
-      if (!(await getBoardPrompt(db, row.board_id))) {
-        if (await markTagged(db, row.id, [], false, {})) {
-          await legLog(row, "tag", t0, "ok", null, { tags: 0 });
+      //
+      // A SCOPED pass here must land unchanged, not empty: the board lost its
+      // facets after the scope was queued, and wiping every tag is the opposite
+      // of what scoping promises. Passing the row's own tags keeps them and
+      // still clears the scope.
+      prompt = await getBoardPrompt(db, row.board_id, row.tag_facets);
+      if (!prompt) {
+        const scoped = !!row.tag_facets?.length;
+        // Unscoped stays exactly as it was: empty tags, verdict cleared, no
+        // reasoning. Only the scoped branch preserves.
+        const landed = scoped
+          ? await markTagged(db, row.id, row.tags || [], row.undecided, row.tag_reasoning || {}, row.tag_confidence || {}, true)
+          : await markTagged(db, row.id, [], false, {});
+        if (landed) {
+          await legLog(row, "tag", t0, "ok", null, scoped
+            ? { tags: (row.tags || []).length, facets: row.tag_facets, skipped: "no facets to ask about" }
+            : { tags: 0 });
           console.log(`tagged #${row.id} ${label} [no facets — nothing to tag]`);
           // Same contract as the real tag landing below. [] tags can't match
           // anything, but system-facet conditions (~uploaders, ~objects) don't
@@ -1801,15 +1933,39 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // failure — their routing wins, the result is dropped, the tokens were
     // spent either way so usage still counts.
     try {
-      const { tags, undecided, reasoning, confidence, usages, votes, model } = result;
-      const landed = await markTagged(db, row.id, tags, undecided, reasoning, confidence);
+      const { undecided, usages, votes, model } = result;
+      // A scoped pass (items.tag_facets) writes only the facets it was queued
+      // for and keeps the rest of the item's answers. `row` is the CLAIM-TIME
+      // state and that is safe without a re-read: markTagged is fenced on
+      // status='processing', and every competing writer — setItemTags,
+      // retagItem, reprocessEntity — moves the row out of it, so either nobody
+      // wrote and this is current, or the fence discards the whole result.
+      const scope = row.tag_facets;
+      // allFacets, NOT prompt.facets: on a scoped pass the latter is just the
+      // scoped subset, and rebuilding through it would drop every other facet's
+      // tags instead of preserving them.
+      const merged = scopeResult(
+        prompt.allFacets, scope,
+        { tags: row.tags || [], reasoning: row.tag_reasoning || {}, confidence: row.tag_confidence || {} },
+        result
+      );
+      const { tags, reasoning, confidence } = merged;
+      // Scoped: `undecided` is not written, so the snapshot must be told the
+      // flag that IS stored or its dedupe compares against a value nobody saved.
+      const landed = await markTagged(db, row.id, tags, scope?.length ? row.undecided : undecided,
+                                      reasoning, confidence, !!scope?.length);
       // One row per PAID call, not per item: ai_board_usage.count is the ledger
       // of provider calls, and every per-call average read off that table
       // (admin dashboard, cost estimates) breaks if N votes record as one.
       for (const u of usages) await bumpUsage(db, row.board_id, u);
       if (landed) {
-        await legLog(row, "tag", t0, "ok", null, { tags: tags.length, model, ...(votes > 1 ? { votes } : {}), ...(undecided ? { undecided: true } : {}) });
-        console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
+        await legLog(row, "tag", t0, "ok", null, {
+          tags: tags.length, model,
+          ...(scope?.length ? { facets: scope } : {}),
+          ...(votes > 1 ? { votes } : {}),
+          ...(!scope?.length && undecided ? { undecided: true } : {}),
+        });
+        console.log(`tagged #${row.id} ${label} [${model}]${scope?.length ? ` (facets: ${scope.join(", ")})` : ""}${!scope?.length && undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
         await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
       } else {
         await legLog(row, "tag", t0, "discarded", null, { model });

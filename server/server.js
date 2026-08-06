@@ -64,6 +64,7 @@ import {
   boardHasItems,
   boardAiUsage,
   retagBoard,
+  retagBoardFacets,
   releaseHeld,
   queueUntagged,
   getBoardMemberIds,
@@ -89,6 +90,7 @@ import {
   updateItemPayloads,
   reextractItem,
   retagItem,
+  retagItemFacets,
   rescheduleEntityRefreshes,
   boardEntityIdentities,
   getBoardTokenTotal,
@@ -1538,13 +1540,32 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Facet scope for a retag: absent = the whole board, exactly as before. A typo
+// silently retagging nothing is the worst outcome here, so unknown keys are a
+// 400 rather than a filter. `fit` is refused because buildPrompt reserves that
+// property for the whole-item verdict — a facet named `fit` never gets asked
+// about, scoped or not (prompt.test.js pins this).
+function readFacetScope(body, board) {
+  if (body?.facets === undefined) return { scope: null };
+  if (!Array.isArray(body.facets) || !body.facets.length) return { error: "facets must be a non-empty array" };
+  const known = new Set((board.facets || []).map((f) => f.key));
+  const keys = [...new Set(body.facets.map(String))];
+  const bad = keys.filter((k) => !known.has(k) || k === "fit");
+  if (bad.length) return { error: `unknown facet(s): ${bad.join(", ")}` };
+  // Scoping to every facet IS an ordinary full pass — normalise so the two
+  // paths cannot drift.
+  return { scope: keys.length === known.size ? null : keys };
+}
+
 app.post("/api/admin/boards/:id/retag", requireAdmin, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
   if (!board) return res.status(404).json({ error: "not found" });
-  const queued = await retagBoard(db, req.params.id);
+  const { scope, error } = readFacetScope(req.body, board);
+  if (error) return res.status(400).json({ error });
+  const queued = scope ? await retagBoardFacets(db, req.params.id, scope) : await retagBoard(db, req.params.id);
   invalidateBoardCache(req.params.id);
-  console.log(`retag queued: ${queued} item(s) in board ${req.params.id}`);
-  res.json({ ok: true, queued });
+  console.log(`retag queued: ${queued} item(s) in board ${req.params.id}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
+  res.json({ ok: true, queued, ...(scope ? { facets: scope } : {}) });
 }));
 
 // "Tag now" for a scheduled board: release held items without waiting for
@@ -2476,9 +2497,22 @@ app.post("/api/instances/:id/reextract", requireAuth, requireItemAccess, wrap(as
 // Re-tag one instance from its existing material and fields — the per-instance,
 // tag-only counterpart to the card-level reprocess. Leaves identity/fields as-is.
 app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  if (!(await retagItem(db, req.itemId))) return res.status(404).json({ error: "not found" });
-  console.log(`retag queued instance #${req.itemId}`);
-  res.json({ ok: true, status: "pending" });
+  const { rows: [item] } = await db.query("SELECT board_id FROM items WHERE id=$1", [req.itemId]);
+  const board = item && (await getBoard(db, item.board_id));
+  if (!board) return res.status(404).json({ error: "not found" });
+  const { scope, error } = readFacetScope(req.body, board);
+  if (error) return res.status(400).json({ error });
+  // A scoped retag needs something to preserve, so it only takes 'tagged' rows —
+  // a 409 rather than a 404 says "this item, wrong state", not "no such item".
+  if (scope) {
+    if (!(await retagItemFacets(db, req.itemId, scope))) {
+      return res.status(409).json({ error: "only a tagged item can be re-tagged on some facets" });
+    }
+  } else if (!(await retagItem(db, req.itemId))) {
+    return res.status(404).json({ error: "not found" });
+  }
+  console.log(`retag queued instance #${req.itemId}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
+  res.json({ ok: true, status: "pending", ...(scope ? { facets: scope } : {}) });
 }));
 
 // Remove one instance from its entity (file included). The last instance

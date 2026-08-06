@@ -1,0 +1,272 @@
+{
+  "reasoning-on": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nAlso decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to \"match\" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to \"undecided\" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine \"undecided\" with facet selections: an item you were able to describe with the facets is a match by definition.\n\nStart with a freeform description of the item as a whole — one or two sentences covering what it is and its overall style and mood. Then for each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is \"undecided\", leave every facet's values empty, including \"pick exactly one\" facets). Be accurate and conservative; do not invent values outside the allowed lists.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "One or two sentences describing the item as a whole: what it is, its overall style and mood."
+        },
+        "shape": {
+          "type": "object",
+          "description": "the outline — pick exactly one value",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "round",
+                  "wide"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        },
+        "motif": {
+          "type": "object",
+          "description": "Motif",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "star",
+                  "leaf"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        },
+        "fit": {
+          "type": "object",
+          "description": "Whether the item fits the kind of material this board collects.",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence explaining the verdict."
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "match",
+                "undecided"
+              ]
+            }
+          },
+          "required": [
+            "reasoning",
+            "verdict"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "description",
+        "shape",
+        "motif",
+        "fit"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "reasoning-on+research": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nAlso decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to \"match\" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to \"undecided\" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine \"undecided\" with facet selections: an item you were able to describe with the facets is a match by definition.\n\nStart with a freeform description of the item as a whole — one or two sentences covering what it is and its overall style and mood. Then for each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies (when the fit verdict is \"undecided\", leave every facet's values empty, including \"pick exactly one\" facets). Be accurate and conservative; do not invent values outside the allowed lists.\n\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "One or two sentences describing the item as a whole: what it is, its overall style and mood."
+        },
+        "shape": {
+          "type": "object",
+          "description": "the outline — pick exactly one value",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "round",
+                  "wide"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        },
+        "motif": {
+          "type": "object",
+          "description": "Motif",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "star",
+                  "leaf"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        },
+        "fit": {
+          "type": "object",
+          "description": "Whether the item fits the kind of material this board collects.",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence explaining the verdict."
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "match",
+                "undecided"
+              ]
+            }
+          },
+          "required": [
+            "reasoning",
+            "verdict"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "description",
+        "shape",
+        "motif",
+        "fit"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "reasoning-off": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nAlso decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to \"match\" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to \"undecided\" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine \"undecided\" with facet selections: an item you were able to describe with the facets is a match by definition.\n\nFor each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is \"undecided\", leave every facet empty, including \"pick exactly one\" facets). Be accurate and conservative; do not invent values outside the allowed lists.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "round",
+              "wide"
+            ]
+          },
+          "description": "the outline — pick exactly one value"
+        },
+        "motif": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "star",
+              "leaf"
+            ]
+          },
+          "description": "Motif"
+        },
+        "fit": {
+          "type": "string",
+          "enum": [
+            "match",
+            "undecided"
+          ],
+          "description": "Whether the item fits the kind of material this board collects."
+        }
+      },
+      "required": [
+        "shape",
+        "motif",
+        "fit"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "reasoning-off+research": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nAlso decide whether the item is the kind of material the facets below can describe at all. If you can honestly justify facet selections from what is visible, the item is a match — set the fit verdict to \"match\" even when it falls outside the board's stated focus; recording that is what the facets themselves are for. Set the fit verdict to \"undecided\" only when the item is a different kind of material altogether and the facets simply do not apply, so that selecting values would be pure guessing; in that case leave every facet's values empty. Never combine \"undecided\" with facet selections: an item you were able to describe with the facets is a match by definition.\n\nFor each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies (when the fit verdict is \"undecided\", leave every facet empty, including \"pick exactly one\" facets). Be accurate and conservative; do not invent values outside the allowed lists.\n\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "round",
+              "wide"
+            ]
+          },
+          "description": "the outline — pick exactly one value"
+        },
+        "motif": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "star",
+              "leaf"
+            ]
+          },
+          "description": "Motif"
+        },
+        "fit": {
+          "type": "string",
+          "enum": [
+            "match",
+            "undecided"
+          ],
+          "description": "Whether the item fits the kind of material this board collects."
+        }
+      },
+      "required": [
+        "shape",
+        "motif",
+        "fit"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
