@@ -352,19 +352,23 @@ function tagsByFacet(tags) {
 // A human made the call, so any AI "undecided" flag is resolved. AI reasoning
 // is dropped for facets whose values changed — it justified a different choice.
 export async function setItemTags(db, id, tags) {
-  const { rows } = await db.query("SELECT tags, tag_reasoning FROM items WHERE id=$1", [id]);
+  const { rows } = await db.query("SELECT tags, tag_reasoning, tag_confidence FROM items WHERE id=$1", [id]);
   const reasoning = { ...(rows[0]?.tag_reasoning || {}) };
+  // Vote agreement is dropped alongside the reasoning for the same reason: it
+  // describes what the AI kept saying, and the user has just overruled it. A
+  // surviving "2 of 3 passes agreed" on a hand-picked value would be a lie.
+  const confidence = { ...(rows[0]?.tag_confidence || {}) };
   const before = tagsByFacet(rows[0]?.tags || []);
   const after = tagsByFacet(tags);
-  for (const key of Object.keys(reasoning)) {
+  for (const key of new Set([...Object.keys(reasoning), ...Object.keys(confidence)])) {
     if (key === "fit") continue;
     const b = before.get(key) || new Set();
     const a = after.get(key) || new Set();
-    if (b.size !== a.size || [...b].some((v) => !a.has(v))) delete reasoning[key];
+    if (b.size !== a.size || [...b].some((v) => !a.has(v))) { delete reasoning[key]; delete confidence[key]; }
   }
   await db.query(
-    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, undecided=FALSE, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$3 WHERE id=$4",
-    [JSON.stringify(tags), JSON.stringify(reasoning), Date.now(), id]
+    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, undecided=FALSE, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5",
+    [JSON.stringify(tags), JSON.stringify(reasoning), JSON.stringify(confidence), Date.now(), id]
   );
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
 }
@@ -396,7 +400,7 @@ async function addTagSnapshot(db, itemId, source, tags, reasoning, undecided) {
 }
 
 export async function getItemReasoning(db, id) {
-  const { rows } = await db.query("SELECT board_id, tag_reasoning, payload FROM items WHERE id=$1", [id]);
+  const { rows } = await db.query("SELECT board_id, tag_reasoning, tag_confidence, payload FROM items WHERE id=$1", [id]);
   return rows[0] || null;
 }
 
@@ -816,7 +820,7 @@ export async function deleteAiKey(db, id) {
 // boards.type still exists in the schema (unread legacy; drop in a later
 // schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
-  "id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model, " +
+  "id, name, facets, context, ai_reasoning, ai_research, ai_votes, ai_key_id, ai_model, " +
   "extract_key_id, extract_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, " +
   "ingest, ingest_next_run_at, ingest_state, created_at";
@@ -824,12 +828,12 @@ const BOARD_COLS =
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false, extras = {}) {
   const id = crypto.randomUUID();
   await db.query(
-    `INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_research, ai_key_id, ai_model,
+    `INSERT INTO boards (id, name, facets, context, ai_reasoning, ai_research, ai_votes, ai_key_id, ai_model,
        auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at,
        mapping, extract_key_id, extract_model, retag_on_refresh, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
     [
-      id, name, JSON.stringify(facets), context, !!aiReasoning, !!aiResearch, aiKeyId, aiModel,
+      id, name, JSON.stringify(facets), context, !!aiReasoning, !!aiResearch, extras.aiVotes ?? 1, aiKeyId, aiModel,
       autoTag.enabled !== false, !!autoTag.periodic, autoTag.everyMin || 1440,
       !!autoTag.skipWeekends, autoTag.nextRunAt ?? null,
       extras.mapping ? JSON.stringify(extras.mapping) : null,
@@ -849,7 +853,7 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiKeyId, aiModel, extractKeyId, extractModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh, ingest, ingestNextRunAt } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiVotes, aiKeyId, aiModel, extractKeyId, extractModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh, ingest, ingestNextRunAt } = {}) {
   const sets = [];
   const vals = [];
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
@@ -857,6 +861,7 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (context !== undefined) { vals.push(String(context)); sets.push(`context=$${vals.length}`); }
   if (aiReasoning !== undefined) { vals.push(!!aiReasoning); sets.push(`ai_reasoning=$${vals.length}`); }
   if (aiResearch !== undefined) { vals.push(!!aiResearch); sets.push(`ai_research=$${vals.length}`); }
+  if (aiVotes !== undefined) { vals.push(Number(aiVotes)); sets.push(`ai_votes=$${vals.length}`); }
   if (aiKeyId !== undefined) { vals.push(aiKeyId); sets.push(`ai_key_id=$${vals.length}`); }
   if (aiModel !== undefined) { vals.push(aiModel); sets.push(`ai_model=$${vals.length}`); }
   if (extractKeyId !== undefined) { vals.push(extractKeyId); sets.push(`extract_key_id=$${vals.length}`); }
@@ -2016,12 +2021,14 @@ export async function reprocessEntity(db, entityId) {
 // Sound single-process because a stale stamp always executes before any
 // re-claim (single-flight tick); across processes a value fence is NOT
 // ownership — see the worker-queue audit, hole #7.
-export async function markTagged(db, id, tags, undecided = false, reasoning = {}) {
+// `confidence` is the per-facet vote agreement (vote mode); {} on a single-pass
+// board means NOT MEASURED, never zero — readers must distinguish those.
+export async function markTagged(db, id, tags, undecided = false, reasoning = {}, confidence = {}) {
   // Clearing the vector marks the item for the embedding sweep — the text it
   // was embedded from just changed.
   const { rowCount } = await db.query(
-    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, error=NULL, retry_at=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5 AND status='processing'",
-    [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), Date.now(), id]
+    "UPDATE items SET status='tagged', tags=$1, undecided=$2, tag_reasoning=$3, tag_confidence=$4, error=NULL, retry_at=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$5 WHERE id=$6 AND status='processing'",
+    [JSON.stringify(tags), undecided, JSON.stringify(reasoning || {}), JSON.stringify(confidence || {}), Date.now(), id]
   );
   if (rowCount) await addTagSnapshot(db, id, "ai", tags, reasoning, undecided);
   return rowCount > 0;

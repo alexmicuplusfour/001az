@@ -915,6 +915,7 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     context: b.context,
     ai_reasoning: b.ai_reasoning !== false,
     ai_research: b.ai_research === true,
+    ai_votes: b.ai_votes || 1,
     auto_tag: b.auto_tag !== false,
     auto_tag_periodic: !!b.auto_tag_periodic,
     auto_tag_every_min: b.auto_tag_every_min || 1440,
@@ -1127,6 +1128,31 @@ async function buildBoardContentUpdate(body = {}, prev) {
   if (body.context !== undefined) update.context = String(body.context);
   if (body.ai_reasoning !== undefined) update.aiReasoning = !!body.ai_reasoning;
   if (body.ai_research !== undefined) update.aiResearch = !!body.ai_research;
+  if (body.ai_votes !== undefined) {
+    const v = Number(body.ai_votes);
+    // Odd only: an even count makes a genuine tie reachable on a single-value
+    // facet, which the merge can only break arbitrarily.
+    if (![1, 3, 5].includes(v)) return { error: "ai_votes must be 1, 3 or 5" };
+    update.aiVotes = v;
+  }
+  // Research bills per web search ON TOP of tokens, so N passes multiply a cost
+  // the token figures never show. Checked against the POST-update pair, so
+  // enabling either one against a standing other is refused and not just the
+  // simultaneous case.
+  //
+  // ONLY when the request actually touches one of the two: a board already
+  // holding the pair (reachable by editing the column directly) must still be
+  // renameable. Validating untouched state would make an unrelated edit fail
+  // for a reason the user can't see in their own request — and tagging is
+  // protected regardless, since getBoardPrompt forces a single pass under
+  // research whatever the column says.
+  if (body.ai_votes !== undefined || body.ai_research !== undefined) {
+    const votesAfter = update.aiVotes ?? prev.ai_votes ?? 1;
+    const researchAfter = update.aiResearch ?? prev.ai_research === true;
+    if (votesAfter > 1 && researchAfter) {
+      return { error: "agreement passes cannot be combined with web research — searches bill per pass" };
+    }
+  }
   if (body.auto_tag !== undefined) update.autoTag = !!body.auto_tag;
   if (body.auto_tag_periodic !== undefined) update.autoTagPeriodic = !!body.auto_tag_periodic;
   if (body.auto_tag_every_min !== undefined) {
@@ -1206,6 +1232,14 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const aiReasoning = !req.body || req.body.ai_reasoning !== false;
   // off by default: research bills per web search, on top of tokens
   const aiResearch = !!(req.body && req.body.ai_research);
+  // Agreement passes — 1 keeps today's single-pass behaviour. Odd only (an even
+  // count makes a real tie reachable), and never alongside research, whose
+  // per-search billing would multiply by the pass count.
+  const aiVotes = req.body && req.body.ai_votes !== undefined ? Number(req.body.ai_votes) : 1;
+  if (![1, 3, 5].includes(aiVotes)) return res.status(400).json({ error: "ai_votes must be 1, 3 or 5" });
+  if (aiVotes > 1 && aiResearch) {
+    return res.status(400).json({ error: "agreement passes cannot be combined with web research — searches bill per pass" });
+  }
   let aiKeyId = null;
   if (req.body && req.body.ai_key_id != null) {
     aiKeyId = Number(req.body.ai_key_id);
@@ -1240,9 +1274,9 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   const extractModel = extractKeyId && req.body.extract_model ? String(req.body.extract_model) : null;
   const retagOnRefresh = !!(req.body && req.body.retag_on_refresh);
   const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, aiResearch,
-    { mapping, extractKeyId, extractModel, retagOnRefresh });
+    { mapping, extractKeyId, extractModel, retagOnRefresh, aiVotes });
   console.log(`created board "${name}" ${id}`);
-  res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch, mapping });
+  res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch, ai_votes: aiVotes, mapping });
 }));
 
 const MAPPING_KINDS = new Set(["text", "number", "url", "date", "object"]);
@@ -2384,6 +2418,9 @@ app.get("/api/instances/:id/reasoning", requireAuth, requireItemAccess, wrap(asy
   const row = await getItemReasoning(db, req.itemId);
   res.json({
     reasoning: row?.tag_reasoning || {},
+    // Per-facet vote agreement, {} on a single-pass board. Empty means NOT
+    // MEASURED — the client must render nothing rather than "0 agreed".
+    confidence: row?.tag_confidence || {},
     fields: row?.payload?.fields || {},
   });
 }));

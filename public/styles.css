@@ -1966,6 +1966,20 @@ a.tool-btn {
   font-size: 12px;
   color: #b0b0b8;
 }
+/* Vote agreement, shown only when the passes disagreed (see paintPanel). Muted
+   and unobtrusive on purpose — it qualifies the tags beside it rather than
+   competing with them. */
+.lbp-agree {
+  font-size: 10px;
+  font-weight: 600;
+  color: #a08a4a;
+  background: #fdf7e6;
+  border: 1px solid #f0e4c0;
+  border-radius: 999px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  cursor: help;
+}
 .lbp-why {
   font-size: 12px;
   line-height: 1.45;

@@ -335,6 +335,7 @@ export async function openBoardModal(boardId, opts = {}) {
         ${sectionHeading("Tagging Settings", null, "margin-bottom:12px;")}
         ${aiKeyBlock}
         <div id="board-modal-reasoning" style="margin:0 0 10px;font-size:13px"></div>
+        <div id="board-modal-votes" style="margin:0 0 10px;font-size:13px"></div>
         <div id="board-modal-research" style="margin:0 0 10px;font-size:13px"></div>
         <div id="board-modal-autotag" style="font-size:13px"></div>
       </div>
@@ -397,10 +398,59 @@ export async function openBoardModal(boardId, opts = {}) {
     switchRow("AI reasoning", "(the tagger describes the item and justifies each facet; shown in the lightbox and powers semantic search)", aiReasoning, (on) => { aiReasoning = on; })
   );
 
+  // Double-checking and web research are mutually exclusive (the server refuses
+  // the pair): searches bill per pass, so N passes multiply a cost the token
+  // figures never show. Each control disables the other rather than letting the
+  // user discover it at save time.
+  //
+  // Shape mirrors Auto tagging below — a switch, with the count indented
+  // underneath and revealed only once it's on. The count is a detail of the
+  // feature, not a second decision to make before turning it on.
   let aiResearch = isNew ? false : board.ai_research === true;
-  document.getElementById("board-modal-research").appendChild(
-    switchRow("Web research", "(the tagger may search the web before judging — works on Anthropic taggers; searches bill on top of tokens)", aiResearch, (on) => { aiResearch = on; })
+  const dc = {
+    on: !isNew && Number(board.ai_votes) > 1,
+    passes: (!isNew && Number(board.ai_votes) > 1) ? Number(board.ai_votes) : 3,
+  };
+
+  const dcSub = document.createElement("div");
+  dcSub.style.cssText = "margin:6px 0 0 30px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;";
+  const dcSel = document.createElement("select");
+  for (const n of [3, 5]) {
+    const opt = document.createElement("option");
+    opt.value = String(n);
+    opt.textContent = `${n} passes`;
+    dcSel.appendChild(opt);
+  }
+  dcSel.value = String(dc.passes);
+  const dcCost = document.createElement("span");
+  dcCost.style.cssText = "font-weight:400;color:#9aa0aa;";
+  dcSub.append(dcSel, dcCost);
+
+  const dcRow = switchRow(
+    "Double-check tags",
+    "(tags each item more than once and keeps only the answers the AI repeats)",
+    dc.on,
+    (on) => { dc.on = on; syncAi(); }
   );
+  const researchRow = switchRow("Web research", "(the tagger may search the web before judging — works on Anthropic taggers; searches bill on top of tokens)", aiResearch, (on) => { aiResearch = on; syncAi(); });
+
+  // A disabled <button class="switch"> ignores .click(), which also kills
+  // switchRow's row-wide click handler — so disabling the button is enough.
+  const swOf = (row) => row.querySelector("button.switch");
+  const syncAi = () => {
+    // hidden loses to the inline display:flex, so toggle display directly
+    dcSub.style.display = dc.on ? "flex" : "none";
+    dcCost.textContent = `— roughly ${dc.passes}× the tagging cost`;
+    swOf(dcRow)?.toggleAttribute("disabled", aiResearch);
+    swOf(researchRow)?.toggleAttribute("disabled", dc.on);
+    dcRow.style.opacity = aiResearch ? "0.5" : "";
+    researchRow.style.opacity = dc.on ? "0.5" : "";
+  };
+  dcSel.onchange = () => { dc.passes = Number(dcSel.value); syncAi(); };
+
+  document.getElementById("board-modal-votes").append(dcRow, dcSub);
+  document.getElementById("board-modal-research").append(researchRow);
+  syncAi();
 
   // Auto tagging: on/off, plus an optional schedule that periodically re-tags
   // the whole board (for object types whose content goes stale).
@@ -526,6 +576,7 @@ export async function openBoardModal(boardId, opts = {}) {
       name, context, facets,
       ai_reasoning: aiReasoning,
       ai_research: aiResearch,
+      ai_votes: dc.on ? dc.passes : 1,
       ...aiOverride,
       auto_tag: at.enabled,
       auto_tag_periodic: at.periodic,

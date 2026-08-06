@@ -292,6 +292,133 @@ Return your answer only by calling the record_tags tool.`;
 // Convert mammoth HTML to extraction-friendly markdown. Preserves headings,
 // bold, and — crucially — hyperlinks (<a href>) as [label](url) so linked
 // labels (portfolio, LinkedIn) carry their URLs into the extraction prompt.
+// ─── vote mode ───────────────────────────────────────────────────────────────
+// Re-running one prompt on one item changes 18-22% of facet answers (measured
+// 2026-08-06). A board with ai_votes > 1 tags each item that many times and
+// keeps what the model repeats. Both helpers are pure so they test without
+// fixtures; the orchestration lives in tagOne.
+
+const sameSet = (a = [], b = []) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+// One tool-call result -> the normalised shape mergeVotes consumes. This is
+// also the ONE place the ai_reasoning:false schema is reconciled with the
+// reasoning-on one: that board emits `fit` as a bare enum string and no
+// description at all, and the merge must never see two shapes.
+export function parseRun(input, facets, allowed) {
+  const picks = {};
+  const reasoning = {};
+  for (const f of facets) {
+    const entry = input[f.key];
+    // Tolerate the pre-reasoning shape (bare array) in case the model drifts.
+    const vals = Array.isArray(entry) ? entry : entry && Array.isArray(entry.values) ? entry.values : [];
+    picks[f.key] = vals.filter((v) => allowed.has(`${f.key}/${v}`)).sort();
+    if (entry && typeof entry.reasoning === "string" && entry.reasoning.trim()) {
+      reasoning[f.key] = entry.reasoning.trim();
+    }
+  }
+  // `fit` normalises exactly like `description` below, and for the same reason:
+  // one shape for the merge, one shape for the store. The trim is not cosmetic —
+  // the schema marks fit.reasoning REQUIRED, so a model with nothing to say
+  // answers with whitespace rather than omitting the key, and a truthy blank
+  // beats the lightbox's fallback copy to the undecided note (lightbox.js) and
+  // renders an empty box. The typeof check covers the strictTools:false
+  // providers, whose schema is advisory. tagOne trusts this and re-checks
+  // nothing.
+  const rawFit = typeof input.fit === "string" ? { verdict: input.fit } : input.fit || {};
+  const fit = { verdict: rawFit.verdict };
+  if (typeof rawFit.reasoning === "string" && rawFit.reasoning.trim()) {
+    fit.reasoning = rawFit.reasoning.trim();
+  }
+  // The typeof check keeps a facet named "description" (whose entry is an
+  // object) from landing here.
+  const description = typeof input.description === "string" && input.description.trim()
+    ? input.description.trim()
+    : undefined;
+  return { picks, reasoning, description, fit };
+}
+
+// Merge N independent taggings of ONE item. `runs` is in call order, so runs[0]
+// is the first (cache-warming) call and wins every tie.
+//
+// Per facet the merge records { of, agreed, votes }:
+//   of      — how many runs actually completed (NOT the configured ai_votes;
+//             a failed vote leaves fewer, and an escalating count would vary)
+//   agreed  — how many of them selected exactly what was kept. One definition
+//             for both facet kinds; agreed === of always means unanimous.
+//   votes   — the full tally, INCLUDING the values that lost.
+//
+// The losing values are the reason this is an object rather than a bare
+// fraction. A facet that fails to converge keeps nothing, so the merged answer
+// records no trace of what the model was torn between — and that tension is
+// exactly what the facet-diagnosis pass needs to read (work item 3). Discarding
+// it would leave "construction is unstable on 18 items" with no way to say what
+// it was unstable BETWEEN.
+export function mergeVotes(facets, runs) {
+  if (runs.length === 1) return { ...runs[0], confidence: {} }; // votes=1 is the identity
+  // STRICT majority, and floor+1 rather than ceil on purpose: ceil(N/2) is a
+  // real majority only for odd N — at N=4 it would let a value supported by
+  // exactly half survive. runs.length is not guaranteed odd (a hand-edited
+  // ai_votes, or a round where some votes failed), so the threshold must not
+  // depend on the route enforcing it.
+  const need = Math.floor(runs.length / 2) + 1;
+  const picks = {};
+  const reasoning = {};
+  const confidence = {};
+
+  for (const f of facets) {
+    // Insertion order is run order, so a tie resolves to the earliest run.
+    const count = new Map();
+    for (const r of runs) for (const v of r.picks[f.key] || []) count.set(v, (count.get(v) || 0) + 1);
+
+    let chosen;
+    if (f.single) {
+      // argmax, NOT a majority threshold: three runs giving three different
+      // answers must still yield one. Leaving it empty would read downstream as
+      // "nothing applies" — a different claim, and one the fit guard acts on.
+      let best = null;
+      let bestN = 0;
+      for (const [v, n] of count) if (n > bestN) { best = v; bestN = n; }
+      chosen = best === null ? [] : [best];
+    } else {
+      chosen = [...count].filter(([, n]) => n >= need).map(([v]) => v).sort();
+    }
+    picks[f.key] = chosen;
+    confidence[f.key] = {
+      of: runs.length,
+      agreed: runs.filter((r) => sameSet(r.picks[f.key] || [], chosen)).length,
+      votes: Object.fromEntries(count),
+    };
+
+    // The justification must belong to the answer that was KEPT — take it from
+    // the earliest run that actually made that selection, and from NOWHERE if
+    // no run made it. There is no runs[0] fallback on purpose: on a multi-value
+    // facet the merge routinely keeps a set no single run proposed (three runs
+    // agree on monoline and each add a different second value -> monoline
+    // alone), and runs[0]'s sentence then argues for the values that were just
+    // dropped. Single-value facets always find a source, so this only ever
+    // withholds a sentence that would have been about something else.
+    const src = runs.find((r) => sameSet(r.picks[f.key] || [], chosen));
+    if (src?.reasoning[f.key]) reasoning[f.key] = src.reasoning[f.key];
+  }
+
+  // description + fit come from ONE run — whichever agreed with the merged
+  // result most often — so the item's prose stays internally coherent instead
+  // of being stitched from runs that contradicted each other.
+  const score = (r) => facets.filter((f) => sameSet(r.picks[f.key] || [], picks[f.key])).length;
+  const best = runs.reduce((a, b) => (score(b) > score(a) ? b : a), runs[0]);
+  const undecidedVotes = runs.filter((r) => r.fit?.verdict === "undecided").length;
+
+  return {
+    picks,
+    reasoning,
+    confidence,
+    description: best.description,
+    // Tie -> match: the filledFacets guard in tagOne already arbitrates the real
+    // decision, and "match" is the recoverable side of a wrong call.
+    fit: { verdict: undecidedVotes > runs.length / 2 ? "undecided" : "match", reasoning: best.fit?.reasoning },
+  };
+}
+
 export function htmlToMarkdown(html) {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -439,7 +566,15 @@ async function getBoardPrompt(db, boardId) {
   // Boards mix file kinds now, so the honest per-board subject is "items";
   // the per-item wording ("Tag this image/document…") rides in the user turn.
   const { systemText, schema } = buildPrompt(facets, context, board.ai_reasoning !== false, "items", research);
-  const entry = { systemText, schema, allowed, facets, research, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  // Clamped here rather than trusted from the column: the route validates it,
+  // but a hand-edited row must not fan out unboundedly.
+  //
+  // Research forces a single pass, and this is the load-bearing guard, not the
+  // route's: web_search bills per search (up to MAX_SEARCHES) ON TOP of tokens,
+  // so N votes multiply a cost the token estimate never sees. Anyone enabling
+  // votes by touching the column directly gets the same protection.
+  const votes = research ? 1 : Math.max(1, Math.min(5, Number(board.ai_votes) || 1));
+  const entry = { systemText, schema, allowed, facets, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   boardPromptCache.set(boardId, entry);
   return entry;
 }
@@ -1267,7 +1402,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   async function tagOne(row) {
     const prompt = await getBoardPrompt(db, row.board_id);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
-    const { systemText, schema, allowed, facets } = prompt;
+    const { systemText, schema, allowed, facets, votes } = prompt;
 
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw noKeyError();
@@ -1287,50 +1422,59 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       .map(([key, { v }]) => `${key}: ${v}`);
     if (entity?.display_name) fieldLines.unshift(`entity: ${entity.display_name}`);
     if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
-    const { input, usage } = await trackedTagger(db, {
-      provider: ai.provider,
-      apiKey: ai.apiKey,
-      base: ai.base,
-      model: ai.model,
-      systemText,
-      schema,
-      parts,
-      research: prompt.research,
-    });
-    const tags = [];
-    const reasoning = {};
-    // Whole-item description rides in tag_reasoning under a reserved key,
-    // like `fit`. The typeof check keeps a facet named "description" (whose
-    // entry is an object) from landing here.
-    if (typeof input.description === "string" && input.description.trim()) {
-      reasoning.description = input.description.trim();
+    // A vote pass is an internal API call, NOT a pipeline event: however many
+    // run here, tagOne returns one result for one item and everything
+    // downstream (markTagged, the snapshot, alerts, the job log) happens once.
+    // The only thing that is genuinely N is the paid call — hence `usages`.
+    const usages = [];
+    const once = async () => {
+      const { input, usage } = await trackedTagger(db, {
+        provider: ai.provider,
+        apiKey: ai.apiKey,
+        base: ai.base,
+        model: ai.model,
+        systemText,
+        schema,
+        parts,
+        research: prompt.research,
+      });
+      usages.push(usage);
+      return parseRun(input, facets, allowed);
+    };
+
+    // Run 1 alone, THEN the rest together. The provider-side prompt cache is
+    // written by a COMPLETED call — firing all N at once makes all N miss and
+    // costs ~7,000 extra fresh tokens per item (measured). One call of latency
+    // buys that back. Later runs are allSettled: a timeout on vote 3 must not
+    // cost the item its attempts, only its precision.
+    const runs = [await once()];
+    if (votes > 1) {
+      for (const r of await Promise.allSettled(Array.from({ length: votes - 1 }, once))) {
+        if (r.status === "fulfilled") runs.push(r.value);
+        else console.warn(`vote run failed for #${row.id}: ${r.reason?.message} — merging ${runs.length} of ${votes}`);
+      }
     }
+
+    const merged = mergeVotes(facets, runs);
+    const tags = [];
     let filledFacets = 0;
     for (const f of facets) {
-      const entry = input[f.key];
-      // Tolerate the pre-reasoning shape (bare array) in case the model drifts.
-      const vals = Array.isArray(entry) ? entry : entry && Array.isArray(entry.values) ? entry.values : [];
-      if (entry && typeof entry.reasoning === "string" && entry.reasoning.trim()) {
-        reasoning[f.key] = entry.reasoning.trim();
-      }
-      const before = tags.length;
-      for (const v of vals) {
-        const t = `${f.key}/${v}`;
-        if (allowed.has(t)) tags.push(t);
-      }
-      if (tags.length > before) filledFacets++;
+      if (merged.picks[f.key].length) filledFacets++;
+      for (const v of merged.picks[f.key]) tags.push(`${f.key}/${v}`);
     }
-    const fit = input.fit;
-    const verdict = typeof fit === "string" ? fit : fit && fit.verdict;
-    if (fit && typeof fit.reasoning === "string" && fit.reasoning.trim()) {
-      reasoning.fit = fit.reasoning.trim();
-    }
+    // Whole-item description rides in tag_reasoning under a reserved key, like `fit`.
+    const reasoning = { ...merged.reasoning };
+    if (merged.description) reasoning.description = merged.description;
+    if (merged.fit.reasoning) reasoning.fit = merged.fit.reasoning;
     // Only honor an undecided verdict when the model also found the facets
     // mostly inapplicable. It keeps folding "off-scope but taggable" into
     // undecided regardless of prompt wording, and an item it could describe
     // with most of the facets is board material by definition.
-    const undecided = verdict === "undecided" && filledFacets < facets.length / 2;
-    return { tags, undecided, reasoning, usage, model: ai.model, provider: ai.provider };
+    const undecided = merged.fit.verdict === "undecided" && filledFacets < facets.length / 2;
+    return {
+      tags, undecided, reasoning, confidence: merged.confidence,
+      usages, votes: runs.length, model: ai.model, provider: ai.provider,
+    };
   }
 
   // Fire due scheduled boards: re-queue everything for a fresh tagging pass
@@ -1657,11 +1801,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // failure — their routing wins, the result is dropped, the tokens were
     // spent either way so usage still counts.
     try {
-      const { tags, undecided, reasoning, usage, model } = result;
-      const landed = await markTagged(db, row.id, tags, undecided, reasoning);
-      await bumpUsage(db, row.board_id, usage);
+      const { tags, undecided, reasoning, confidence, usages, votes, model } = result;
+      const landed = await markTagged(db, row.id, tags, undecided, reasoning, confidence);
+      // One row per PAID call, not per item: ai_board_usage.count is the ledger
+      // of provider calls, and every per-call average read off that table
+      // (admin dashboard, cost estimates) breaks if N votes record as one.
+      for (const u of usages) await bumpUsage(db, row.board_id, u);
       if (landed) {
-        await legLog(row, "tag", t0, "ok", null, { tags: tags.length, model, ...(undecided ? { undecided: true } : {}) });
+        await legLog(row, "tag", t0, "ok", null, { tags: tags.length, model, ...(votes > 1 ? { votes } : {}), ...(undecided ? { undecided: true } : {}) });
         console.log(`tagged #${row.id} ${label} [${model}]${undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
         await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
       } else {

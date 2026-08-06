@@ -322,7 +322,7 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
 // the selected instance's zone (its extracted fields, its tags + reasoning).
 // reasoning/fields are null while the per-instance fetch is in flight — tags
 // render immediately, details fill in when it lands.
-function paintPanel(img, inst, reasoning, fields) {
+function paintPanel(img, inst, reasoning, fields, confidence) {
   // Same-origin link, so the download attribute names the saved file — the
   // instance's original name, not the hashed store name.
   elLightboxDownload.href = fullUrl(inst?.name || img.name);
@@ -533,6 +533,7 @@ function paintPanel(img, inst, reasoning, fields) {
     byFacet.get(k).push(t.slice(i + 1));
   }
   const why = reasoning || {};
+  const conf = confidence || {};
 
   if (subject.status === "held") {
     const note = document.createElement("div");
@@ -557,7 +558,13 @@ function paintPanel(img, inst, reasoning, fields) {
   for (const f of state.facets) {
     const vals = byFacet.get(f.key) || [];
     const text = why[f.key];
-    if (!vals.length && !text) continue;
+    const c = conf[f.key];
+    // The passes disagreed. That earns a row by itself: a facet that converged
+    // on NOTHING keeps no values, and keeps no sentence either (the merge only
+    // carries a justification a run actually made), so without this it would
+    // vanish from the panel at exactly the moment it has the most to say.
+    const split = !!(c && c.of > 1 && c.agreed < c.of);
+    if (!vals.length && !text && !split) continue;
     rows++;
     const head = document.createElement("div");
     head.className = "lbp-facet-head";
@@ -565,6 +572,26 @@ function paintPanel(img, inst, reasoning, fields) {
     label.className = "lbp-facet-label";
     label.textContent = f.label;
     head.appendChild(label);
+    // Agreement badge: only on boards running more than one pass, and only when
+    // the passes actually disagreed. An absent entry means NOT MEASURED (single
+    // pass) — rendering "1 of 1" there would invent a certainty nobody checked.
+    if (split) {
+      // `agreed` counts passes that selected exactly this SET, not this value.
+      // On a multi-value facet a value every pass chose can still sit under an
+      // 0/3 badge, because each pass added a different second value — so the
+      // copy says "set", and the tally beside it carries the per-value truth.
+      const lost = Object.entries(c.votes || {}).filter(([v]) => !vals.includes(v));
+      const tally = lost.map(([v, n]) => `${v} (${n})`).join(", ");
+      const badge = document.createElement("span");
+      badge.className = "lbp-agree";
+      badge.textContent = `${c.agreed}/${c.of}`;
+      badge.title =
+        (vals.length
+          ? `${c.agreed} of ${c.of} passes selected exactly this set`
+          : `no value reached a majority across ${c.of} passes`) +
+        (tally ? ` — ${vals.length ? "also " : ""}proposed: ${tally}` : "");
+      head.appendChild(badge);
+    }
     if (vals.length) {
       for (const v of vals) {
         const chip = document.createElement("span");
@@ -604,22 +631,24 @@ async function renderPanel() {
   if (!panelOpen || !lightboxImg) return;
   const img = lightboxImg;
   const inst = selectedInst();
-  if (!inst) { paintPanel(img, null, {}, {}); clearDetOverlay(); return; }
-  paintPanel(img, inst, null, null);
+  if (!inst) { paintPanel(img, null, {}, {}, {}); clearDetOverlay(); return; }
+  paintPanel(img, inst, null, null, {});
   clearDetOverlay(); // drop the prior instance's boxes while this one's fields load
   const token = ++reasoningReq;
   let reasoning = {};
   let fields = {};
+  let confidence = {};
   try {
     const r = await fetch(`/api/instances/${inst.id}/reasoning`);
     if (r.ok) {
       const data = await r.json();
       reasoning = data.reasoning || {};
       fields = data.fields || {};
+      confidence = data.confidence || {};
     }
   } catch { /* panel just shows tags without reasoning */ }
   if (token !== reasoningReq || lightboxImg !== img || selectedInst() !== inst || !panelOpen) return;
-  paintPanel(img, inst, reasoning, fields);
+  paintPanel(img, inst, reasoning, fields, confidence);
   drawDetOverlay(fields);
 }
 

@@ -1,0 +1,26 @@
+-- Vote mode (planning/tagging-accuracy-plan.md). Tag an item N times with the
+-- IDENTICAL prompt and keep the answer the model repeats.
+--
+-- Why: re-running the same prompt on the same item changes 18-22% of facet
+-- answers (measured 2026-08-06, 2,240 calls on gpt-5.4-mini; 22.4% at the API
+-- default temperature, 18.3% at 0). Per-facet stability ~82% compounds across
+-- a 9-facet board to only ~16% of items reproducing in full. Splitting the call
+-- per facet was measured and rejected — it moves answers no further than that
+-- noise floor while costing 7-9x the input tokens.
+--
+-- ai_votes DEFAULT 1 is exactly today's behaviour, so every existing board is
+-- untouched until someone opts in.
+--
+-- tag_confidence is the other half of the point: the fraction of runs that
+-- agreed with the answer that was kept, per facet. It makes tagger instability
+-- visible in the product for the first time — today nothing in the app can say
+-- which of a user's facets is a coin flip. {} means NOT MEASURED (single-pass),
+-- never "zero confidence"; readers must distinguish those.
+--
+-- Both columns are NOT NULL DEFAULT deliberately and that is load-bearing:
+-- restore INSERTs only the columns an archive's manifest names (backup.js
+-- loadTable), so a pre-0029 archive relies on these defaults to load into a
+-- post-0029 schema. A NOT NULL column without a default here would make every
+-- existing archive unrestorable.
+ALTER TABLE boards ADD COLUMN ai_votes SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE items  ADD COLUMN tag_confidence JSONB NOT NULL DEFAULT '{}'::jsonb;

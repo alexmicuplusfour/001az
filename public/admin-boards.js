@@ -98,12 +98,22 @@ export async function renderBoards() {
     accessWrap.appendChild(accessBtn);
     wrap.appendChild(accessWrap);
 
+    // A voting board bills once per PASS, not once per item, so the item count
+    // stops being the cost. "Up to" is doing real work in both directions: the
+    // retag route only re-queues tagged/failed/held rows (a subset of
+    // item_count, which counts every status), and a vote round that loses a
+    // pass merges fewer. Single-pass boards keep exactly today's wording.
+    const votes = Number(b.ai_votes) || 1;
+    const passNote = votes > 1 ? ` — ${votes} agreement passes per item` : "";
     const retagBtn = document.createElement("button");
     retagBtn.className = "danger";
     retagBtn.textContent = "retag ↺";
-    retagBtn.title = "Re-queue all items in this board for AI tagging" + (nextRun ? ` (${nextRun})` : "");
+    retagBtn.title = "Re-queue all items in this board for AI tagging" + passNote + (nextRun ? ` (${nextRun})` : "");
     retagBtn.onclick = async () => {
-      if (!confirm(`Re-tag all ${b.item_count} item(s) in "${b.name}"? Existing tags will be cleared and reprocessed.`)) return;
+      const cost = votes > 1
+        ? `\n\nThis board runs ${votes} agreement passes per item, so that is up to ~${(b.item_count * votes).toLocaleString()} paid tagging calls.\n`
+        : " ";
+      if (!confirm(`Re-tag all ${b.item_count} item(s) in "${b.name}"?${cost}Existing tags will be cleared and reprocessed.`)) return;
       try {
         retagBtn.disabled = true;
         retagBtn.textContent = "queuing…";
@@ -123,7 +133,10 @@ export async function renderBoards() {
       const tagHeldBtn = document.createElement("button");
       tagHeldBtn.className = "ghost";
       tagHeldBtn.textContent = "tag held ▸";
-      tagHeldBtn.title = `Tag the ${b.held_count} held item(s) now, without turning auto-tagging back on`;
+      // Informational only — this button deliberately has no confirm, so the
+      // pass count rides the title rather than adding friction to it.
+      tagHeldBtn.title = `Tag the ${b.held_count} held item(s) now, without turning auto-tagging back on`
+        + (votes > 1 ? ` — ${votes} passes each, up to ~${(b.held_count * votes).toLocaleString()} paid calls` : "");
       tagHeldBtn.onclick = async () => {
         try {
           tagHeldBtn.disabled = true;
