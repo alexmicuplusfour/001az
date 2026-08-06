@@ -259,7 +259,14 @@ around them.
 
 ## Found on the second pass (while tracing #1's readers)
 
-- [ ] **13. The retag reset paths clear reasoning but keep confidence** —
+- [x] **13. The retag reset paths clear reasoning but keep confidence** —
+  *(fixed alongside stage 1 of facet-addressable tagging, which rewrites the
+  same two statements: `retagItem` and `reprocessEntity` now reset
+  `tag_confidence='{}'::jsonb` beside `tag_reasoning`. Not split into its own
+  commit because the change is on the same lines — separating it would have
+  meant editing them twice. `cancelBoardQueue` needed nothing: its `cleared`
+  branch only ever sees rows those two already reset)*
+
   `setItemTags` was correctly taught to drop confidence alongside reasoning
   (blast radius, "Manual tag edits must drop stale confidence"), but the two
   statements that reset an item back to the tag leg were not:
@@ -303,3 +310,11 @@ around them.
   Windows antivirus/indexer race, not a logic fault, and nothing in the vote
   path touches `backups/`. Worth a retry-on-EPERM in the writer if it recurs;
   no action for this plan.
+
+- **`ingest-sweep.test.js:141` is flaky under full-suite load.** "continuous
+  trigger reschedules itself on the continuous cadence" failed once with
+  `rearmed in the future`, and passed in isolation immediately after (26/26 with
+  backup.test.js). A wall-clock assertion losing to scheduler jitter when ~700
+  tests are competing for the box. Both flakes appeared in the same run and
+  neither reproduced; if either becomes frequent, they want fake timers rather
+  than wider tolerances.
