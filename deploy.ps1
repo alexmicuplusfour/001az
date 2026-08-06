@@ -107,15 +107,18 @@ grep -q '^APP_TAG=' .env && sed -i 's/^APP_TAG=.*/APP_TAG=$tag/' .env || echo 'A
 mkdir -p ingest-root && chmod 777 ingest-root
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --wait app db extractor transcriber object-detector
 docker image prune -f >/dev/null
-# Tags embed yyyyMMdd-HHmmss, so lexical sort -r = newest first. Do NOT trust
-# docker images' own ordering: it sorts by image creation time, and fully
-# cache-hit rebuilds (e.g. the extractor) all share one timestamp, making the
-# order arbitrary — it once put the just-deployed tag in the "old" tail.
-# Cleanup is best-effort; an in-use image must not fail the deploy.
-docker images 001az-app --format '{{.Tag}}' | sort -r | tail -n +4 | xargs -r -I{} docker rmi 001az-app:{} || true
-docker images 001az-extractor --format '{{.Tag}}' | sort -r | tail -n +4 | xargs -r -I{} docker rmi 001az-extractor:{} || true
-docker images 001az-transcriber --format '{{.Tag}}' | sort -r | tail -n +4 | xargs -r -I{} docker rmi 001az-transcriber:{} || true
-docker images 001az-object-detector --format '{{.Tag}}' | sort -r | tail -n +4 | xargs -r -I{} docker rmi 001az-object-detector:{} || true
+# Keep only the current generation of each image; older tags are pruned so a
+# 24G disk can't fill with stale images (each generation is ~7G). This drops
+# one-command rollback — to roll back, re-deploy the previous git sha. Tags
+# embed yyyyMMdd-HHmmss, so lexical sort -r = newest first. Do NOT trust docker
+# images' own ordering: it sorts by image creation time, and fully cache-hit
+# rebuilds (e.g. the extractor) all share one timestamp, making the order
+# arbitrary — it once put the just-deployed tag in the "old" tail. Cleanup is
+# best-effort; an in-use image must not fail the deploy.
+docker images 001az-app --format '{{.Tag}}' | sort -r | tail -n +2 | xargs -r -I{} docker rmi 001az-app:{} || true
+docker images 001az-extractor --format '{{.Tag}}' | sort -r | tail -n +2 | xargs -r -I{} docker rmi 001az-extractor:{} || true
+docker images 001az-transcriber --format '{{.Tag}}' | sort -r | tail -n +2 | xargs -r -I{} docker rmi 001az-transcriber:{} || true
+docker images 001az-object-detector --format '{{.Tag}}' | sort -r | tail -n +2 | xargs -r -I{} docker rmi 001az-object-detector:{} || true
 echo '--- health ---'
 curl -sf http://127.0.0.1:3001/api/health && echo
 "@
