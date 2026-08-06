@@ -319,9 +319,6 @@ Return your answer only by calling the record_tags tool.`;
   return { systemText, schema };
 }
 
-// Convert mammoth HTML to extraction-friendly markdown. Preserves headings,
-// bold, and — crucially — hyperlinks (<a href>) as [label](url) so linked
-// labels (portfolio, LinkedIn) carry their URLs into the extraction prompt.
 // ─── vote mode ───────────────────────────────────────────────────────────────
 // Re-running one prompt on one item changes 18-22% of facet answers (measured
 // 2026-08-06). A board with ai_votes > 1 tags each item that many times and
@@ -511,6 +508,9 @@ export function scopeResult(facets, scope, prev, next) {
   };
 }
 
+// Convert mammoth HTML to extraction-friendly markdown. Preserves headings,
+// bold, and — crucially — hyperlinks (<a href>) as [label](url) so linked
+// labels (portfolio, LinkedIn) carry their URLs into the extraction prompt.
 export function htmlToMarkdown(html) {
   return html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")

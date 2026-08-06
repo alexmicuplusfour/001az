@@ -268,5 +268,201 @@
       ],
       "additionalProperties": false
     }
+  },
+  "scoped+reasoning-on": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nFor each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "shape": {
+          "type": "object",
+          "description": "the outline — pick exactly one value",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "round",
+                  "wide"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        },
+        "motif": {
+          "type": "object",
+          "description": "Motif",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "star",
+                  "leaf"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "shape",
+        "motif"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "scoped+reasoning-on+research": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nFor each facet, first write one short reasoning sentence naming what is visible that drives the choice (or why nothing applies), then select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's values empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.\n\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "shape": {
+          "type": "object",
+          "description": "the outline — pick exactly one value",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "round",
+                  "wide"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        },
+        "motif": {
+          "type": "object",
+          "description": "Motif",
+          "properties": {
+            "reasoning": {
+              "type": "string",
+              "description": "One short sentence: what is visible that justifies the selection, or why nothing applies."
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "star",
+                  "leaf"
+                ]
+              }
+            }
+          },
+          "required": [
+            "reasoning",
+            "values"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "shape",
+        "motif"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "scoped+reasoning-off": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nFor each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "round",
+              "wide"
+            ]
+          },
+          "description": "the outline — pick exactly one value"
+        },
+        "motif": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "star",
+              "leaf"
+            ]
+          },
+          "description": "Motif"
+        }
+      },
+      "required": [
+        "shape",
+        "motif"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "scoped+reasoning-off+research": {
+    "systemText": "You tag widgets for a private research gallery.\nOnly blue things.\n\nFor each facet, select every applicable value. Facets are independent; most allow multiple values. Facets marked \"pick exactly one\" must have exactly one value selected. Choose only tags you can clearly justify from what is visible. Leave a facet's array empty when nothing applies. Be accurate and conservative; do not invent values outside the allowed lists.\n\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n\nFacets and allowed values:\n- shape (the outline): round, wide — pick exactly one\n- motif (Motif): star, leaf\n\nReturn your answer only by calling the record_tags tool.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "round",
+              "wide"
+            ]
+          },
+          "description": "the outline — pick exactly one value"
+        },
+        "motif": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "star",
+              "leaf"
+            ]
+          },
+          "description": "Motif"
+        }
+      },
+      "required": [
+        "shape",
+        "motif"
+      ],
+      "additionalProperties": false
+    }
   }
 }

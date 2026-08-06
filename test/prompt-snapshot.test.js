@@ -1,4 +1,4 @@
-// A golden snapshot of the UNSCOPED tagging prompt.
+// A golden snapshot of the tagging prompt — every variant buildPrompt can emit.
 //
 // Why this exists: every other systemText assertion in the suite is a regex
 // fragment match (`assert.match(systemText, /description of the item as a whole/)`),
@@ -32,18 +32,26 @@ const FACETS = [
   { key: "motif", label: "Motif", values: ["star", "leaf"] },
 ];
 
+// All eight, not just the four unscoped ones. The scoped pair writes out its own
+// selectPara and drops fitPara entirely (worker.js), so pinning only the unscoped
+// prompts leaves the NEWEST prose in the file — the least battle-tested — behind
+// the same fragment-match hole this file exists to close. `scoped` is orthogonal
+// to research: a research board can be re-tagged on one facet like any other.
 const capture = () => {
   const out = {};
-  for (const mode of ["reasoning-on", "reasoning-off"]) {
-    for (const research of [false, true]) {
-      const p = buildPrompt(FACETS, "Only blue things.", mode === "reasoning-on", "widgets", research);
-      out[mode + (research ? "+research" : "")] = { systemText: p.systemText, schema: p.schema };
+  for (const scoped of [false, true]) {
+    for (const mode of ["reasoning-on", "reasoning-off"]) {
+      for (const research of [false, true]) {
+        const p = buildPrompt(FACETS, "Only blue things.", mode === "reasoning-on", "widgets", research, scoped);
+        out[(scoped ? "scoped+" : "") + mode + (research ? "+research" : "")] =
+          { systemText: p.systemText, schema: p.schema };
+      }
     }
   }
   return out;
 };
 
-test("the unscoped tagging prompt has not changed", () => {
+test("the tagging prompt has not changed, scoped or not", () => {
   const actual = capture();
   if (process.env.UPDATE_PROMPT_SNAPSHOT === "1") {
     fs.writeFileSync(SNAP, JSON.stringify(actual, null, 2).replace(/\r\n/g, "\n") + "\n");
