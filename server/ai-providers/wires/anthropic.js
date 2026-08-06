@@ -43,6 +43,12 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
     // sized to the schema (a floor when small); research raises the floor —
     // searching + digesting results eats output budget
     max_tokens: outputBudget(schema, research),
+    // Closed-vocabulary classification wants the mode, not a sample — see the
+    // measurement in compatRequest. Unconditional here: every Claude model
+    // accepts it, and the app never enables extended thinking (which is the one
+    // mode that forbids a non-default temperature). Live-probed 2026-08-06 on
+    // claude-sonnet-4-6.
+    temperature: 0,
     system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
     tools: research
       ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, toolDef]

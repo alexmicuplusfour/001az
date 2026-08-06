@@ -26,12 +26,18 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
   // openai forces via "required" (2026-07-29: the gpt-5 family flags the
   // NAMED force as invalid_prompt; with one tool the guarantee is the same),
   // accepts strict, keeps thinking, probes /models
+  // …and samples tagging at temperature 0, except on the o-series (noTemperature
+  // is a model-id regex; o3 hard-400s on any non-default value and o-ids pass
+  // the tagging modelFilter). Both live-probed 2026-08-06.
   assert.deepEqual(PROVIDERS.openai.compat, {
     maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models",
+    temperature: 0, noTemperature: "^o\\d",
   });
-  // gemini additionally normalizes its compat layer's "models/…" listing ids
+  // gemini additionally normalizes its compat layer's "models/…" listing ids,
+  // and takes temperature 0 with no guard — no Gemini family rejects it
   assert.deepEqual(PROVIDERS.gemini.compat, {
     maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models", stripListPrefix: "models/",
+    temperature: 0,
   });
   // GLM is the divergent one — every field flips, the completion key-test, and
   // no models endpoint at all (listModels: false → the picker gets the curated
@@ -41,7 +47,10 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
     maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion", listModels: false,
   });
   // OpenRouter fills a new cell: forces the tool call like openai but skips
-  // strict (backends vary), max_tokens, completion key-test (no per-model GET)
+  // strict (backends vary), max_tokens, completion key-test (no per-model GET).
+  // Deliberately NO temperature — like GLM above, for the opposite reason: GLM
+  // could not be probed, OpenRouter fronts too many backends (including
+  // openai/o-series) for one passing probe to generalise.
   assert.deepEqual(PROVIDERS.openrouter.compat, {
     maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion",
   });

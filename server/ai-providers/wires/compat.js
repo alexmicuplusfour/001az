@@ -65,6 +65,21 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
     // visible on an ordinary board.
     [compat.maxTokensField]: outputBudget(schema),
     ...(compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
+    // Closed-vocabulary classification wants the mode, not a sample. Measured
+    // 2026-08-06 on gpt-5.4-mini: re-tagging the same item with the same prompt
+    // changed 22.4% of facet answers at the API default (1.0) and 18.3% at 0 —
+    // 4 points of pure churn for nothing. (The remaining 18% is the reasoning
+    // model's own decode variance; temperature does not touch it.)
+    //
+    // Quirk data, not a global: `noTemperature` is a model-id regex for
+    // families that REJECT the parameter. OpenAI's o-series 400s on it
+    // ("Unsupported value: 'temperature' does not support 0 with this model")
+    // and o-ids pass the tagging modelFilter, so a blanket send would
+    // permanently fail every item on a board using one. Live-probed
+    // 2026-08-06: gpt-5.4-mini/gpt-5.1/gemini-3.5-flash accept, o3 rejects.
+    ...(compat.temperature !== undefined &&
+        !(compat.noTemperature && new RegExp(compat.noTemperature).test(model))
+          ? { temperature: compat.temperature } : {}),
     messages: [
       { role: "system", content: systemText },
       { role: "user", content },

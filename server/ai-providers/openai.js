@@ -30,7 +30,11 @@ export default (wires) => ({
   // ("flagged as potentially violating our usage policy") — live-bisected;
   // "required" and "auto" pass, and with one tool defined "required" is the
   // same guarantee.
-  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models" },
+  // temperature 0 for the tagging path (see compatRequest for the measurement);
+  // noTemperature exempts the o-series, which 400s on any non-default value and
+  // whose ids pass the modelFilter above. Both live-probed 2026-08-06:
+  // gpt-5.4-mini and gpt-5.1 accept 0, o3 rejects it.
+  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models", temperature: 0, noTemperature: "^o\\d" },
   embeds: {
     default: "text-embedding-3-small",
     models: [

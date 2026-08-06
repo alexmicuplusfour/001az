@@ -72,6 +72,37 @@ test("GLM quirks: auto tool_choice, no strict, thinking disabled, legacy max_tok
   assert.equal(gem.thinking, undefined);
 });
 
+// Tagging is closed-vocabulary classification — sampling at the API default
+// (1.0) re-judged 22.4% of facet answers on an identical rerun vs 18.3% at 0
+// (measured 2026-08-06, gpt-5.4-mini). The parameter rides the `compat` quirk
+// block, NOT a provider name, and `noTemperature` exempts families that reject
+// it — o-series 400s ("Unsupported value: 'temperature' does not support 0
+// with this model") and o-ids pass OpenAI's tagging modelFilter, so an
+// unguarded send would permanently fail every item on such a board.
+test("temperature: 0 rides the quirk block, and the o-series guard exempts it", () => {
+  for (const [provider, model] of [["openai", "gpt-5.4-mini"], ["openai", "gpt-5.1"], ["gemini", "gemini-3.5-flash"]]) {
+    const r = compatRequest({ provider, model, systemText: "s", schema, parts });
+    assert.equal(r.temperature, 0, `${provider}/${model} should send temperature 0`);
+  }
+  // o-series: the guard must drop the field entirely, not send a different value
+  for (const model of ["o3", "o4-mini"]) {
+    const r = compatRequest({ provider: "openai", model, systemText: "s", schema, parts });
+    assert.equal(r.temperature, undefined, `${model} must not carry a temperature`);
+    assert.ok(!("temperature" in r), `${model} must omit the key, not send undefined`);
+  }
+  // The guard is anchored — a model that merely CONTAINS an o-digit still gets it
+  assert.equal(compatRequest({ provider: "openai", model: "gpt-4o-2024", systemText: "s", schema, parts }).temperature, 0);
+});
+
+test("providers whose temperature support is unverified send none", () => {
+  // GLM was unreachable in the probe pass (insufficient balance) and OpenRouter
+  // fronts hundreds of backends off one descriptor — neither may guess.
+  for (const provider of ["glm", "openrouter"]) {
+    const r = compatRequest({ provider, model: "m", systemText: "s", schema, parts });
+    assert.ok(!("temperature" in r), `${provider} must not send a temperature`);
+  }
+});
+
 test("custom tool name flows into tools[] for every compat provider", () => {
   const tool = { name: "record_fields", description: "Record extracted fields." };
   for (const provider of ["openai", "gemini", "glm", "openrouter"]) {

@@ -30,7 +30,9 @@ export default (wires) => ({
   // stripListPrefix normalizes the "models/gemini-…" ids the compat layer
   // lists to the bare ids its chat endpoint takes.
   modelFilter: "^gemini-(?!.*(embedding|image|tts|audio|live))",
-  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models", stripListPrefix: "models/" },
+  // temperature 0 for tagging (see compatRequest). Live-probed 2026-08-06 on
+  // gemini-3.5-flash; no Gemini family rejects the parameter, so no guard.
+  compat: { maxTokensField: "max_tokens", forceToolChoice: true, strictTools: true, disableThinking: false, keyTest: "models", stripListPrefix: "models/", temperature: 0 },
   embeds: {
     // 001 stays the default on purpose: flipping it would mark every stored
     // vector stale and re-embed the whole corpus. Both live-verified 2026-07-29.

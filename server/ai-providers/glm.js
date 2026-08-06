@@ -23,6 +23,10 @@ export default (wires) => ({
     { id: "glm-5.2", note: "sharpest, text boards only" },
   ],
   research: false, // has a chat-completions web_search tool — future work
+  // No `temperature` knob: the 2026-08-06 probe pass could not reach GLM (the
+  // stored key returns 1113 "insufficient balance" with or without the
+  // parameter), and this provider's quirks are live-verified by policy, never
+  // guessed. Add `temperature: 0` here once a working key confirms it accepts.
   compat: { maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion", listModels: false },
   embeds: null,
 });
