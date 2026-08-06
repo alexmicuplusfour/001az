@@ -15,8 +15,12 @@
 -- would have needed a default to stay restorable; NULL already carries the
 -- meaning, so there is nothing to keep in sync.
 --
--- The scope lives only between "queued" and "landed": markTagged clears it, and
--- so does every path that re-queues an item for a FULL pass. claimFairBatch,
--- failOrRequeue and recoverStuck deliberately leave it alone — a scoped pass
--- that is claimed, retried or recovered is still scoped.
+-- The scope lives only between "queued" and "landed", so a scoped row is only
+-- ever 'pending' or 'processing' — which is what exempts every writer whose
+-- WHERE clause cannot see those. markTagged clears it, and so does every path
+-- that re-queues an item for a FULL pass. claimFairBatch leaves it alone, and so
+-- do failOrRequeue and recoverStuck WHILE THEY RETRY: a scoped pass that is
+-- claimed, retried or recovered is still scoped. Both clear it when the retries
+-- run out, because a 'failed' row IS visible to retagBoard/queueUntagged/
+-- requeueItemForTag and a surviving scope would silently narrow them.
 ALTER TABLE items ADD COLUMN tag_facets TEXT[];

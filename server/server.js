@@ -2502,11 +2502,12 @@ app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async 
   if (!board) return res.status(404).json({ error: "not found" });
   const { scope, error } = readFacetScope(req.body, board);
   if (error) return res.status(400).json({ error });
-  // A scoped retag needs something to preserve, so it only takes 'tagged' rows —
-  // a 409 rather than a 404 says "this item, wrong state", not "no such item".
+  // A scoped retag needs something to preserve AND a verdict it can leave alone,
+  // so it only takes settled, decided rows — a 409 rather than a 404 says "this
+  // item, wrong state", not "no such item".
   if (scope) {
     if (!(await retagItemFacets(db, req.itemId, scope))) {
-      return res.status(409).json({ error: "only a tagged item can be re-tagged on some facets" });
+      return res.status(409).json({ error: "only a tagged, decided item can be re-tagged on some facets" });
     }
   } else if (!(await retagItem(db, req.itemId))) {
     return res.status(404).json({ error: "not found" });

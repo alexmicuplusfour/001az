@@ -10,7 +10,8 @@ import { startServer, adminSession, req } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
   markTagged, setItemTags, retagItem, retagBoard, retagBoardFacets, retagItemFacets,
-  reprocessEntity, cancelBoardQueue,
+  reprocessEntity, cancelBoardQueue, failOrRequeue, recoverStuck,
+  queueUntagged, requeueItemForTag,
 } from "../server/db.js";
 import { scopeResult, startWorker } from "../server/worker.js";
 
@@ -181,10 +182,15 @@ test("a scoped retag rewrites one facet and leaves the other alone", async () =>
 
 test("a scoped pass leaves `undecided` alone and snapshots consistently", async () => {
   const { id } = await seedTagged("two.png", "a", "calm");
-  await db.query("UPDATE items SET undecided=TRUE WHERE id=$1", [id]);
   const snapsBefore = (await rowsOf("SELECT 1 FROM tag_snapshots WHERE item_id=$1", [id])).length;
 
+  // Armed first, flagged second — retagBoardFacets/retagItemFacets refuse an
+  // already-undecided item, so the only way a scoped pass meets the flag is for
+  // it to arrive after the arming. The landing must still not touch it, and must
+  // hand addTagSnapshot the flag that is STORED rather than the pass's own
+  // verdict, or the dedupe compares against a value nobody saved.
   await retagItemFacets(db, id, ["mood"]);
+  await db.query("UPDATE items SET undecided=TRUE WHERE id=$1", [id]);
   await drain(tagger("b", "loud"), id);
 
   const after = await itemOf(id);
@@ -337,13 +343,130 @@ test("markTagged clears the scope it consumed, even when the pass is unscoped", 
 
 test("a retry keeps its scope — failOrRequeue and recoverStuck must not clear it", async () => {
   const { id } = await armed("c7.png");
-  const { failOrRequeue, recoverStuck } = await import("../server/db.js");
   await db.query("UPDATE items SET status='processing' WHERE id=$1", [id]);
   await failOrRequeue(db, id, new Error("boom"), 5);
   assert.deepEqual((await itemOf(id)).tag_facets, ["mood"], "a failed vote keeps its scope");
   await db.query("UPDATE items SET status='processing', updated_at=0 WHERE id=$1", [id]);
   await recoverStuck(db, 1000, 5);
   assert.deepEqual((await itemOf(id)).tag_facets, ["mood"], "and so does a crash-recovered one");
+});
+
+// …but a pass that has run OUT of retries is over, and its scope must go with
+// it. This is the other half of the rule above, and it is what keeps "a scoped
+// row is only ever pending or processing" true — the premise every remaining
+// writer's exemption rests on. A 'failed' row is visible to retagBoard,
+// queueUntagged and requeueItemForTag, none of which filter on the scope.
+
+// Arm a scope and then exhaust the pass: a permanent 4xx fails the row outright.
+async function armedThenFailed(name) {
+  const { board, id } = await armed(name);
+  await db.query("UPDATE items SET status='processing' WHERE id=$1", [id]);
+  const permanent = Object.assign(new Error("bad request"), { status: 400 });
+  assert.equal(await failOrRequeue(db, id, permanent, 3), true, "a permanent error fails the row");
+  assert.equal((await itemOf(id)).status, "failed");
+  return { board, id };
+}
+
+test("a terminally failed pass drops its scope, and so does a recovery ceiling", async () => {
+  const { id } = await armedThenFailed("c8.png");
+  assert.equal((await itemOf(id)).tag_facets, null, "failOrRequeue's terminal branch");
+
+  const { id: id2 } = await armed("c9.png");
+  await db.query("UPDATE items SET status='processing', attempts=99, updated_at=0 WHERE id=$1", [id2]);
+  await recoverStuck(db, 1000, 3);
+  const r = await itemOf(id2);
+  assert.equal(r.status, "failed");
+  assert.equal(r.tag_facets, null, "recoverStuck's ceiling branch");
+});
+
+test("the three writers that CAN see a failed row inherit no scope from it", async () => {
+  // Each is exempt from clearing only because a scoped row never reaches its
+  // status filter. These pin that, rather than the list of exemptions.
+  const { board, id } = await armedThenFailed("c10.png");
+  await retagBoard(db, board);
+  assert.equal((await itemOf(id)).tag_facets, null, "retagBoard");
+
+  const { board: b2, id: id2 } = await armedThenFailed("c11.png");
+  await db.query("UPDATE items SET tags='[]'::jsonb WHERE id=$1", [id2]); // queueUntagged's filter
+  await queueUntagged(db, b2);
+  assert.equal((await itemOf(id2)).tag_facets, null, "queueUntagged");
+
+  const { id: id3 } = await armedThenFailed("c12.png");
+  await requeueItemForTag(db, id3);
+  assert.equal((await itemOf(id3)).tag_facets, null, "requeueItemForTag");
+
+  // Park them: drain() runs a real worker over every board, so a row left
+  // 'pending' here would land in a later test's captured requests.
+  await db.query("UPDATE items SET status='tagged' WHERE id = ANY($1::bigint[])", [[id, id2, id3]]);
+});
+
+test("a FULL retag after a failed scoped pass rewrites every facet", async () => {
+  // The user-visible shape of the bug: the rescue pass would ask about one facet
+  // and leave the other eight on their old answers, silently.
+  const { board, id } = await armedThenFailed("c13.png");
+  await retagBoard(db, board);
+  const sent = [];
+  await drain(capturingTagger("b", "loud", sent), id);
+  const asked = Object.keys(sent.at(-1).tools[0].function.parameters.properties).sort();
+  assert.deepEqual(asked, ["description", "fit", "kind", "mood"], "the whole board was asked about");
+  assert.deepEqual((await itemOf(id)).tags, ["kind/b", "mood/loud"], "and the whole board landed");
+});
+
+// ─── undecided items are a full pass's job, not a scoped one ─────────────────
+// An undecided item IS status='tagged' — the verdict rides its own column — so
+// the status filter alone would sweep in exactly the items scoping cannot help.
+
+const undecidedTagger = async (_url, opts) => {
+  const body = JSON.parse(opts.body);
+  return new Response(JSON.stringify({
+    choices: [{ message: { tool_calls: [{ function: { name: body.tools?.[0]?.function?.name,
+      arguments: JSON.stringify({
+        description: "d",
+        kind: { values: [], reasoning: "nothing applies" },
+        mood: { values: [], reasoning: "nothing applies" },
+        fit: { verdict: "undecided", reasoning: "not this kind of thing" },
+      }) } }] } }],
+    usage: { prompt_tokens: 10, completion_tokens: 5 },
+  }), { status: 200 });
+};
+
+async function seedUndecided(name) {
+  await setPluginState(db, "ai:openai", { installed: true });
+  const keyId = await createAiKey(db, `fs-${name}`, "openai", "sk-test");
+  const board = await createBoard(db, `fs-${name}`, BF, "", true, keyId);
+  const eid = await createEntity(db, board, { identity: name });
+  const id = await insertItem(db, board, { identity: name, files: [], fields: {} }, "pending", eid);
+  await drain(undecidedTagger, id);
+  const r = await itemOf(id);
+  assert.equal(r.undecided, true, "the seed must actually be undecided");
+  assert.deepEqual(r.tags, [], "…with nothing to preserve");
+  return { board, id };
+}
+
+test("a scoped retag skips undecided items — they have nothing to preserve", async () => {
+  const { board, id } = await seedUndecided("u1.png");
+  // Writing one facet's answers to an item still flagged undecided is incoherent
+  // both ways, and the landing would fire alerts (recorded once, never retracted)
+  // off a verdict the model declined to make.
+  assert.equal(await retagBoardFacets(db, board, ["mood"]), 0, "queued nothing");
+  const after = await itemOf(id);
+  assert.equal(after.status, "tagged", "and left the item exactly where it was");
+  assert.equal(after.tag_facets, null);
+
+  // A full retag is still the right tool for them, and still takes them.
+  assert.equal(await retagBoard(db, board) > 0, true);
+  await db.query("UPDATE items SET status='tagged' WHERE id=$1", [id]); // park (see above)
+});
+
+test("the per-instance scoped route refuses an undecided item with a 409", async () => {
+  const admin = await adminSession(db);
+  const { id } = await seedUndecided("u2.png");
+  assert.equal(await retagItemFacets(db, id, ["mood"]), false);
+  const r = await req(srv.base, "POST", `/api/instances/${id}/retag`, { sid: admin.sid, body: { facets: ["mood"] } });
+  assert.equal(r.status, 409);
+  // …but an unscoped retag of the same item is still fine.
+  const full = await req(srv.base, "POST", `/api/instances/${id}/retag`, { sid: admin.sid, body: {} });
+  assert.equal(full.status, 200);
 });
 
 // ─── routes ──────────────────────────────────────────────────────────────────

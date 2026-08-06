@@ -1034,26 +1034,35 @@ export async function retagBoard(db, boardId) {
 // The pass still asks the model about every facet; `tag_facets` says which
 // answers are allowed to land, so the others keep what they already have.
 //
-// Only 'tagged' rows, and unlike retagBoard there is no status CASE: a facet
-// retag must never turn into a re-extraction or a re-face. An item that never
-// landed has no other facets to preserve, and a held/failed one needs its whole
-// pass — both are retagBoard's job, not this one.
+// Only settled, decided rows, and unlike retagBoard there is no status CASE: a
+// facet retag must never turn into a re-extraction or a re-face. An item that
+// never landed has no other facets to preserve, and a held/failed one needs its
+// whole pass — both are retagBoard's job, not this one.
+//
+// `NOT undecided` is not redundant with status='tagged': an undecided item IS
+// 'tagged' (the verdict rides its own column), so the status filter alone would
+// sweep in exactly the items scoping cannot help. They have nothing to preserve,
+// a scoped pass deliberately does not move the verdict, and the landing would
+// leave an item flagged "the model could not place this" carrying a fresh AI tag
+// — and firing alerts off it, which are recorded once and never retracted.
 export async function retagBoardFacets(db, boardId, facetKeys) {
   const { rowCount } = await db.query(
     `UPDATE items SET status='pending', tag_facets=$3::text[],
        attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE board_id=$2 AND status='tagged'`,
+     WHERE board_id=$2 AND status='tagged' AND NOT undecided`,
     [Date.now(), boardId, facetKeys]
   );
   return rowCount;
 }
 
-// The per-instance counterpart, for the lightbox. Same 'tagged'-only rule.
+// The per-instance counterpart, for the lightbox. Same settled-and-decided rule:
+// picking one item by hand does not make a partial verdict any more coherent, and
+// the route turns the miss into a 409 rather than a silent no-op.
 export async function retagItemFacets(db, id, facetKeys) {
   const { rowCount } = await db.query(
     `UPDATE items SET status='pending', tag_facets=$3::text[],
        attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE id=$2 AND status='tagged'`,
+     WHERE id=$2 AND status='tagged' AND NOT undecided`,
     [Date.now(), id, facetKeys]
   );
   return rowCount > 0;
@@ -2209,8 +2218,17 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
   // user re-routed mid-flight (their reprocess/re-extract already reset it and
   // chose its leg). The fence also closes the attempts read-then-write race —
   // every writer that resets attempts also moves the row out of this status.
+  //
+  // A REQUEUE keeps any facet scope (0030) — the retry is the same partial pass.
+  // A FAILURE clears it, and that is load-bearing: it is what keeps "a scoped row
+  // is only ever pending or processing" true. A 'failed' row is visible to
+  // retagBoard, queueUntagged and requeueItemForTag, none of which filter on the
+  // scope, so a surviving one would silently narrow the FULL retag that comes to
+  // rescue the item — and narrow it again on every later pass, since a still-broken
+  // item lands back here. (No-op on the definition legs, which never set a scope.)
   const { rowCount } = await db.query(
-    "UPDATE items SET status=$1, attempts=$2, error=$3, retry_at=$4, updated_at=$5 WHERE id=$6 AND status=$7",
+    `UPDATE items SET status=$1, attempts=$2, error=$3, retry_at=$4, updated_at=$5${failed ? ", tag_facets=NULL" : ""}
+     WHERE id=$6 AND status=$7`,
     [
       failed ? "failed" : requeueStatus,
       attempts,
@@ -2255,6 +2273,10 @@ export async function recoverStuck(db, olderThanMs, maxAttempts = 3, excludeIds 
                     THEN 'interrupted mid-flight repeatedly (crash or shutdown)' ELSE error END,
        retry_at = CASE WHEN attempts + 1 >= $2 THEN NULL
                        ELSE $3::bigint + (CASE LEAST(attempts, 2) WHEN 0 THEN ${b0} WHEN 1 THEN ${b1} ELSE ${b2} END) END,
+       -- Same rule as failOrRequeue: a recovered pass is still scoped, a failed
+       -- one is over. Leaving the scope on a 'failed' row lets the full retag
+       -- that rescues the item inherit it and tag one facet instead of nine.
+       tag_facets = CASE WHEN attempts + 1 >= $2 THEN NULL ELSE tag_facets END,
        updated_at = $3
      WHERE status IN ('processing','extracting','facing') AND updated_at < $1
        AND id <> ALL($4::bigint[])`,

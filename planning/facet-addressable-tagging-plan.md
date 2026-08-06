@@ -525,6 +525,19 @@ Unreachable by their own status filters, and therefore **not** on the list:
 their WHERE clauses rather than a design guarantee, so a test per site is what
 holds the whole set in place.
 
+> **CORRECTED 2026-08-07 — the premise above was false for three of those six.**
+> "A scoped row exists only while `status` is `pending` or `processing`" ignored
+> this plan's own instruction two rows up: `failOrRequeue` and `recoverStuck`
+> must NOT clear the scope, so when their retries run out they park an armed row
+> at `status='failed'` — which `retagBoard`, `queueUntagged` and
+> `requeueItemForTag` can all see. A full retag over such a row was silently
+> narrowed to the stale facet, and (since stage 2) narrowed at the *prompt*, not
+> just the write. Fixed by clearing the scope on terminal failure at both failure
+> sites, which makes the premise true rather than growing this table to ten
+> rows. `releaseHeld`, `markExtracted` and `advanceFaced` are genuinely
+> unreachable and were verified as such. See
+> `facet-scope-loose-ends.md` defect 7.
+
 **Severity, stated accurately:** a missed site narrows exactly **one** pass.
 `markTagged` nulls the scope on landing, so the item self-heals on the next
 retag. It is a real bug and it is silent, but it is not the permanent
@@ -642,6 +655,15 @@ reachable once Stage 2 exists.
   undecided is incoherent. Simplest rule: `retagBoardFacets` targets
   `status='tagged'` and leaves undecided items to a full pass. Revisit if
   someone wants it.
+
+  > **CORRECTED 2026-08-07 — that rule does not do what it says.** An undecided
+  > item **is** `status='tagged'`; the verdict rides its own column. So the
+  > status filter alone swept in exactly the items the answer meant to exclude,
+  > and the landing left them flagged undecided while carrying a fresh AI tag —
+  > and firing alerts off it, which is motivation #2 pointed backwards. The
+  > intent was right; it needs `AND NOT undecided`, now on both
+  > `retagBoardFacets` and `retagItemFacets`. See
+  > `facet-scope-loose-ends.md` defect 8.
 - **Per-facet vote counts** (from `tagging-accuracy-plan.md`) become buildable
   once Stage 2 lands. Worth deciding whether the vote count belongs on the facet
   or stays on the board.

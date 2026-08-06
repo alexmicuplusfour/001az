@@ -3,10 +3,15 @@
 Second post-implementation sweep, 2026-08-07 — a re-read of the landed code
 rather than of the plan. Stage 1 (scope column, `scopeResult`, the seven
 `tag_facets=NULL` sites, `retagBoardFacets`/`retagItemFacets`, routes), stage 2
-(the scoped prompt) and the admin UI are all built as specified, and the live
-probe stands. What follows is what the sweep turned up around them.
+(the scoped prompt) and the admin UI are all built, and the live probe stands.
+What follows is what the sweep turned up around them.
 
 Baseline: 703 tests pass. Two items below are already fixed in this pass.
+
+**Third sweep, 2026-08-07** — this one went after the plan's *premises* rather
+than its checklist, and found two the code inherited without checking. Both are
+fixed below (defects 7 and 8), with the third sweep's own verified-sound list
+folded into the section beneath. 708 tests pass.
 
 ## Verified sound (checked because a break here would be silent)
 
@@ -27,6 +32,23 @@ Baseline: 703 tests pass. Two items below are already fixed in this pass.
 - **A scoped pass with `ai_votes=1` deletes the scoped facet's confidence entry
   rather than keeping the old one.** Correct under the `{}` = NOT MEASURED rule:
   the retained figure would describe an answer that has just been replaced.
+
+Added by the third sweep, all measured rather than read:
+
+- **The backup round-trip really does survive `TEXT[]`.** The second sweep
+  reasoned this from `dumpTable`'s `::text` cast and `loadTable`'s `$n::c.type`;
+  it now has a probe behind it. `{mood,kind}` re-casts exactly, and so does a
+  key set containing a comma, a double quote and braces — `{"a,b","c\"d","{e}"}`
+  — which is the case that would have quietly corrupted an archive, since facet
+  keys are only sanitised in the modal and not server-side.
+- **A facet added or removed between queueing and landing merges correctly**, in
+  both directions. A facet that arrives mid-flight is absent from the prompt and
+  contributes nothing to the merge (rather than landing empty); one that leaves
+  is garbage-collected exactly as a full pass would.
+- **`releaseHeld` and `markExtracted` are genuinely unreachable** for an armed
+  row, not merely unreached. `held` is only entered through `markExtracted`,
+  which is fenced on `status='extracting'`, and every path into that leg
+  (`reExtract`, `reextractItem`, `reprocessEntity`) clears the scope first.
 
 ## Defects
 
@@ -53,6 +75,87 @@ Baseline: 703 tests pass. Two items below are already fixed in this pass.
   landed between them too, leaving three lines about mammoth HTML sitting above
   `sameSet` and `htmlToMarkdown` (`worker.js:514`) undocumented. Comment moved
   back onto its function.
+
+- [x] **7. The scope outlived its pass on `failed` rows, and three "exempt"
+  writers inherited it.** *(fixed, third sweep)*
+
+  The plan's blast radius rests on one sentence — *"A scoped row exists only
+  while `status` is `pending` or `processing`"* — and that sentence is what
+  exempts `retagBoard`, `queueUntagged` and `requeueItemForTag` from the
+  seven-site table. 0030's header asserted it too. It was not true.
+
+  `failOrRequeue`'s terminal branch and `recoverStuck`'s ceiling branch both
+  write `status='failed'` while preserving `tag_facets` — correct on their own
+  terms, since a *retry* of a scoped pass is still scoped, and the second sweep
+  pinned exactly that. But when the retries run out the scope stayed armed on a
+  row all three of those writers can see:
+
+  | site | filter | reached from |
+  | --- | --- | --- |
+  | `retagBoard` (`db.js:1027`) | `('tagged','failed','held')` | the retag button; `retagDue`'s scheduled pass |
+  | `queueUntagged` (`db.js:1110`) | `('held','tagged','failed') AND tags='[]'` | the auto-tag off→on sweep |
+  | `requeueItemForTag` (`db.js:1963`) | `('tagged','failed')` | the connector `retag_on_refresh` cascade |
+
+  Measured before the fix: seed a tagged item, arm `['mood']`, fail it
+  permanently, call `retagBoard`. The model is asked about `mood` alone — stage 2
+  makes this a *prompt* narrowing, not just a write filter — and `kind` keeps its
+  old answer.
+
+  ```
+  -> before: tags = ["kind/a","mood/calm"]
+  -> the model was asked about: ["mood"]
+  -> after:  tags = ["kind/a","mood/loud"]      # kind/b never landed
+  ```
+
+  Usually one pass, since `markTagged` nulls the scope on landing. Not always: if
+  whatever failed the item is still broken, the narrowed pass fails too,
+  `failOrRequeue` re-parks the scope, and **every** later full retag is narrowed.
+  `queueUntagged` is the worst of the three — its filter is `tags='[]'`, so it
+  targets precisely the items with nothing to preserve.
+
+  Fixed at the two failure sites rather than the three consumers: a terminally
+  failed pass is over, so it drops its scope. That restores the invariant instead
+  of growing the table from seven entries to ten, and it keeps the remaining
+  exemptions honest. Tests: the terminal branch of each failure site, a guard
+  running all three consumers over a genuinely-failed row, and the user-visible
+  end-to-end — a full retag after a failed scoped pass asks about all four
+  properties and lands both facets.
+
+  Worth noting *why* the second sweep missed it: `facet-scope.test.js` already
+  asserted the scope survives `failOrRequeue`, which is right, and never then ran
+  a full retag over the resulting row. The test encoded half a rule.
+
+- [x] **8. A scoped retag swept in undecided items.** *(fixed, third sweep)*
+
+  The plan closed this open question with *"`retagBoardFacets` targets
+  `status='tagged'` and leaves undecided items to a full pass."* The
+  implementation did target `status='tagged'` — but an undecided item **is**
+  `status='tagged'`; the verdict rides its own column. The rule never did what it
+  said.
+
+  ```
+  -> seeded: status = tagged  undecided = true  tags = []
+  -> retagBoardFacets queued: 1
+  -> after:  undecided = true  tags = ["mood/loud"]
+  ```
+
+  That is the exact incoherence the plan named, and three things make it more
+  than cosmetic: the item has nothing to preserve, so the whole rationale for
+  scoping is vacuous for it; `filters.js:113` still renders it as needing human
+  attention while it now carries an AI tag; and the landing runs
+  `evaluateItemAlerts`, so an item the model *declined to place* can permanently
+  fire a match — motivation #2 of the plan, pointed the wrong way.
+
+  Fixed with `AND NOT undecided` on both `retagBoardFacets` and
+  `retagItemFacets`; the per-instance route's 409 now reads "only a tagged,
+  decided item". A full retag is still the right tool for these items and still
+  takes them.
+
+  One existing test had to move: it forced `undecided=TRUE` and *then* armed the
+  item, which the queue now refuses. Its subject — a scoped landing must not move
+  the flag, and must hand `addTagSnapshot` the STORED one — is unchanged and
+  still needed, so it now arms first and flips the flag second, which is the only
+  order the state can actually arise in.
 
 ## Behaviour worth a decision (no change made)
 
@@ -88,10 +191,39 @@ Baseline: 703 tests pass. Two items below are already fixed in this pass.
   busy queue.
 
 - **6. `POST /api/instances/:id/retag` accepts `facets` but nothing sends it.**
-  The per-item scoped route is built, fenced (409 on a non-`tagged` row) and
-  tested; `lightbox.js:507` posts with no body, so every UI path through it is a
-  full retag. Either wire a scope picker into the lightbox or record that the
-  route is deliberately API-only — right now it reads as an unfinished half.
+  The per-item scoped route is built, fenced (409 on a non-`tagged`-and-decided
+  row) and tested; `lightbox.js:507` posts with no body, so every UI path through
+  it is a full retag. Either wire a scope picker into the lightbox or record that
+  the route is deliberately API-only — right now it reads as an unfinished half.
+
+Added by the third sweep:
+
+- **9. `cancelBoardQueue` invents an undecided verdict on a tagless row.** Its
+  `cleared` branch (`db.js:2365`) flags any `pending` row with `tags='[]'` as
+  `undecided=TRUE`, which is right for the never-tagged rows it was written for.
+  An item legitimately tagged with nothing — the model judged it a match and
+  selected no values — comes back from a cancel flagged for human review.
+
+  **Pre-existing, and correctly attributed:** `retagBoard` does not reset `tags`
+  either, so the same item has been reachable through the ordinary retag→cancel
+  path since long before this feature. Facet scope only makes it likelier, since
+  `retagBoardFacets` arms *only* already-tagged rows. Left alone deliberately: it
+  belongs to `cancelBoardQueue`, and fixing it here would bundle an unrelated
+  regression risk into a facet-scope commit. The fix, when someone wants it, is
+  to gate the flag on the item never having landed rather than on `tags='[]'`.
+
+- **10. The admin UI diverged from §1.7, for the better — record it as a
+  decision, not as compliance.** The plan asked for a per-facet "retag this
+  facet" control inside `buildFacetEditor`, with two hard requirements it derived
+  from the blast radius: save before retagging, and no button on a new or renamed
+  facet. What shipped is a dropdown on the boards-list row (`toggleRetagDrop`),
+  reading `b.facets` from the list payload — i.e. server state.
+
+  That is the stronger answer: the picker is outside the unsaved modal entirely,
+  so retagging against a gloss the user has edited but not saved is *impossible*
+  rather than *guarded against*, and the rename hazard goes with it. The second
+  sweep recorded the UI as "built as specified", which reads as though §1.7's
+  requirements were met when they are actually moot. Corrected above.
 
 ## Still open from the previous sweep (`vote-mode-loose-ends.md`)
 
