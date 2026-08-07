@@ -6,7 +6,7 @@
 // only composes this into WIRES and dispatches through descriptor.wire.
 // compatRequest is exported as the pure request-builder test seam — it reads
 // the quirk block it's handed and never touches the registry.
-import { DEFAULT_TOOL, outputBudget, clippedError } from "./tool.js";
+import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
 
 // A keyless connection (a self-hosted Ollama, …) carries no secret — send no
 // Authorization header at all rather than a literal "Bearer null". A keyless
@@ -59,11 +59,9 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
   );
   return {
     model,
-    // Sized to the schema (a floor when small). Reasoning models (gpt-5
-    // family) burn INVISIBLE thinking tokens from this same budget — a
-    // hardcoded 2048 could come back finish_reason:"length" with nothing
-    // visible on an ordinary board.
-    [compat.maxTokensField]: outputBudget(schema),
+    // A runaway guard, not a size estimate — see OUTPUT_BUDGET for why sizing
+    // this to the schema measured the wrong half of the spend.
+    [compat.maxTokensField]: OUTPUT_BUDGET,
     ...(compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
     // Closed-vocabulary classification wants the mode, not a sample. Measured
     // 2026-08-06 on gpt-5.4-mini: re-tagging the same item with the same prompt
@@ -139,25 +137,40 @@ export const compatWire = {
     if (!r.ok) throw await compatError(r, desc.label);
     const data = await r.json();
     const choice = data.choices?.[0];
-    // Output-cap check FIRST: a length-clipped turn otherwise surfaces as
-    // "model did not call X" or a JSON parse error on half-written arguments
-    // — both misdirect, and both retry a deterministic failure.
-    if (choice?.finish_reason === "length") throw clippedError(outputBudget(schema));
     // Find the call BY NAME, like the Anthropic wire: a provider whose tool
     // choice can't be forced (GLM is auto-only) may invent another function,
     // and taking whatever came first would accept tag-shaped args as
     // extraction input — fields silently empty, logged ok. Same error shape
     // as the Anthropic wire's missing-call throw.
     const call = (choice?.message?.tool_calls || []).find((c) => c.function?.name === tool.name);
+    // Arguments that parse ARE the answer, whatever the finish reason claims.
+    // Gemini reports finish_reason "length" whenever its hidden thinking
+    // overran the cap — including when it then went on to emit the entire tool
+    // call (measured 2026-08-07: 1,807 thinking + 299 visible against a 2,048
+    // cap, valid JSON, every required key present). Reading the finish reason
+    // before the payload threw that answer away and failed the item
+    // permanently, on a board where 1 item in 6 hit it.
+    let input = null;
+    try { input = call ? JSON.parse(call.function.arguments) : null; } catch { input = null; }
+    // So a clip is fatal only once nothing usable came back: no call at all, or
+    // arguments cut mid-JSON.
+    if (!input && choice?.finish_reason === "length") throw clippedError(OUTPUT_BUDGET);
     if (!call) throw new Error(`model did not call ${tool.name}`);
+    if (!input) throw new Error(`${tool.name} arguments were not valid JSON`);
     const u = data.usage || {};
     const cached = u.prompt_tokens_details?.cached_tokens || 0;
     return {
-      input: JSON.parse(call.function.arguments),
+      input,
       usage: {
         // prompt_tokens includes cached ones; pull those out to match Anthropic
         input: Math.max((u.prompt_tokens || 0) - cached, 0),
-        output: u.completion_tokens || 0,
+        // Thinking bills as output, and Gemini reports it ONLY inside the total
+        // — completion_tokens counts the visible answer alone (measured
+        // 2026-08-07: completion_tokens 299 on a turn whose total ran 1,807
+        // above prompt+completion, a ~6x under-count of what Google charged).
+        // OpenAI already folds reasoning into completion_tokens, where the
+        // total agrees and this max is a no-op.
+        output: Math.max(u.completion_tokens || 0, (u.total_tokens || 0) - (u.prompt_tokens || 0)),
         cacheRead: cached,
       },
     };

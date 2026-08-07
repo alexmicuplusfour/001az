@@ -8,7 +8,7 @@
 // No outbound-deadline plumbing here (unlike the compat wire): the SDK defaults
 // to a 10-min per-try timeout, and research tagging legitimately runs minutes.
 import Anthropic from "@anthropic-ai/sdk";
-import { DEFAULT_TOOL, outputBudget, clippedError } from "./tool.js";
+import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
 
 // Per-item bound on web searches; each one bills on top of tokens.
 const MAX_SEARCHES = 5;
@@ -40,9 +40,10 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
   const toolDef = { name: tool.name, description: tool.description, strict: true, input_schema: schema };
   return {
     model,
-    // sized to the schema (a floor when small); research raises the floor —
-    // searching + digesting results eats output budget
-    max_tokens: outputBudget(schema, research),
+    // A runaway guard, not a size estimate — see OUTPUT_BUDGET. Flat across
+    // research too: searching and digesting results eats output, and the old
+    // research floor was the same guess one rung higher.
+    max_tokens: OUTPUT_BUDGET,
     // Closed-vocabulary classification wants the mode, not a sample — see the
     // measurement in compatRequest. Unconditional here: every Claude model
     // accepts it, and the app never enables extended thinking (which is the one
@@ -79,10 +80,16 @@ export const anthropicWire = {
       msg = await anthropicClient(apiKey, desc.base).messages.create(request);
       addUsage(msg.usage);
     }
-    // After the pause_turn loop, so a continued-then-clipped turn is caught
-    // too. Without this, a clipped turn reads as "model did not call X".
-    if (msg.stop_reason === "max_tokens") throw clippedError(request.max_tokens);
     const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);
+    // Checked after the pause_turn loop, so a continued-then-clipped turn is
+    // caught too — but only when the clip actually cost us the answer. A turn
+    // can stop at max_tokens with the tool call already whole (the compat wire
+    // documents Gemini doing exactly that), and failing that item would discard
+    // a usable result. Completeness is the required keys: a turn cut mid-call
+    // leaves them missing, and parseRun reads a missing facet as "no tags"
+    // rather than as damage.
+    const whole = block && (schema?.required || []).every((k) => k in (block.input || {}));
+    if (!whole && msg.stop_reason === "max_tokens") throw clippedError(request.max_tokens);
     if (!block) throw new Error(`model did not call ${tool.name}`);
     return { input: block.input, usage };
   },

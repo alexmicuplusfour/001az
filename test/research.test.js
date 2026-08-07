@@ -5,8 +5,10 @@
 // and the ai_research round-trip through the board routes.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { startServer, adminSession, req } from "./helpers.js";
 import { anthropicRequest } from "../server/ai-providers/wires/anthropic.js";
+import { OUTPUT_BUDGET } from "../server/ai-providers/wires/tool.js";
 import { buildPrompt } from "../server/worker.js";
 
 const facets = [{ key: "kind", label: "Kind", single: true, values: ["a", "b"] }];
@@ -18,10 +20,10 @@ test("research off: single forced record_tags tool, base output budget", () => {
   assert.equal(r.tools.length, 1);
   assert.equal(r.tools[0].name, "record_tags");
   assert.deepEqual(r.tool_choice, { type: "tool", name: "record_tags" });
-  assert.equal(r.max_tokens, 2048);
+  assert.equal(r.max_tokens, OUTPUT_BUDGET);
 });
 
-test("research on: web_search rides along, tool choice relaxes, budget grows", () => {
+test("research on: web_search rides along, tool choice relaxes", () => {
   const r = anthropicRequest({ model: "m", systemText: "s", schema, parts, research: true });
   assert.equal(r.tools.length, 2);
   assert.equal(r.tools[0].type, "web_search_20250305");
@@ -29,7 +31,9 @@ test("research on: web_search rides along, tool choice relaxes, budget grows", (
   assert.equal(r.tools[1].name, "record_tags");
   // a forced tool call would block the server-side search tool
   assert.deepEqual(r.tool_choice, { type: "auto" });
-  assert.equal(r.max_tokens, 4096);
+  // the cap is a runaway guard now, not a size estimate — research needs no
+  // separate floor because there is nothing left to be a floor under
+  assert.equal(r.max_tokens, OUTPUT_BUDGET);
 });
 
 test("research paragraph appears in the system text only when asked", () => {
@@ -42,18 +46,60 @@ test("research paragraph appears in the system text only when asked", () => {
   assert.deepEqual(buildPrompt(facets, "", true, "items", true).schema, buildPrompt(facets).schema);
 });
 
-test("output budget scales with the schema and is capped; scaling wins over the research floor", () => {
+test("output budget is flat: neither schema size nor research moves it", () => {
   const bigSchema = (n) => ({
     type: "object",
     properties: Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, { type: "object" }])),
     required: [],
   });
-  // 40 facets of reasoning output don't fit the old fixed 2048
-  assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(40), parts }).max_tokens, 1024 + 128 * 40);
-  // runaway schemas hit the ceiling
-  assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(100), parts }).max_tokens, 8192);
-  // research floor applies only while it's the larger number
-  assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(40), parts, research: true }).max_tokens, 1024 + 128 * 40);
+  for (const n of [1, 40, 100]) {
+    assert.equal(anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(n), parts }).max_tokens, OUTPUT_BUDGET);
+    assert.equal(
+      anthropicRequest({ model: "m", systemText: "s", schema: bigSchema(n), parts, research: true }).max_tokens,
+      OUTPUT_BUDGET
+    );
+  }
+});
+
+// A turn that stops at max_tokens can still carry the whole tool call — Gemini
+// does it routinely (see the compat wire), and Claude can too. Failing the item
+// then would discard a usable answer, so the clip throw is conditional on the
+// call NOT surviving. Completeness is the schema's required keys: parseRun
+// reads a missing facet as "no tags", not as damage, so a half-written call has
+// to be caught here.
+test("anthropic wire: max_tokens is fatal only when the tool call didn't survive", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  const { schema: s } = buildPrompt(facets);
+  // A stand-in Messages API, like the model-discovery tests' fake boxes: every
+  // turn stops at max_tokens, and the test varies only how whole the call is.
+  const box = http.createServer((rq, rs) => {
+    rs.writeHead(200, { "Content-Type": "application/json" });
+    rs.end(JSON.stringify({
+      id: "msg_1", type: "message", role: "assistant", model: "m",
+      stop_reason: "max_tokens",
+      content: [{ type: "tool_use", id: "tu_1", name: "record_tags", input: box.input }],
+      usage: { input_tokens: 10, output_tokens: 20 },
+    }));
+  });
+  await new Promise((r) => box.listen(0, "127.0.0.1", r));
+  const desc = { base: `http://127.0.0.1:${box.address().port}` };
+  const opts = { apiKey: "sk-ant-wiretest", model: "m", systemText: "s", schema: s, parts };
+  try {
+    // every required key present → the clip cost us nothing, keep the answer
+    box.input = Object.fromEntries(
+      s.required.map((k) => [k, k === "description" ? "d" : { reasoning: "r", values: [] }])
+    );
+    assert.deepEqual((await anthropicWire.tag(desc, opts)).input, box.input);
+    // a key short → genuinely truncated, fail permanently rather than tag blanks
+    const { description, ...partial } = box.input;
+    box.input = partial;
+    await assert.rejects(
+      anthropicWire.tag(desc, opts),
+      (e) => /token cap/.test(e.message) && e.status === 422
+    );
+  } finally {
+    box.close();
+  }
 });
 
 // --- ai_research through the board routes ---

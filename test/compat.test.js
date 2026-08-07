@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PROVIDERS } from "../server/providers.js";
 import { compatRequest as buildRequest } from "../server/ai-providers/wires/compat.js";
+import { OUTPUT_BUDGET } from "../server/ai-providers/wires/tool.js";
 
 // compatRequest takes the descriptor's `compat` quirk block, not a provider
 // name — the wire never reaches into the registry. These tests still pin the
@@ -38,23 +39,30 @@ test("common shape: image → data URL, forced record_tags, strict schema", () =
 
 test("max-tokens cap: only OpenAI takes the new field name", () => {
   const openai = compatRequest({ provider: "openai", model: "m", systemText: "s", schema, parts });
-  assert.equal(openai.max_completion_tokens, 2048);
+  assert.equal(openai.max_completion_tokens, OUTPUT_BUDGET);
   assert.equal(openai.max_tokens, undefined);
   for (const provider of ["gemini", "glm"]) {
     const r = compatRequest({ provider, model: "m", systemText: "s", schema, parts });
-    assert.equal(r.max_tokens, 2048);
+    assert.equal(r.max_tokens, OUTPUT_BUDGET);
     assert.equal(r.max_completion_tokens, undefined);
   }
 });
 
-test("output budget scales with schema size past the 2048 floor", () => {
-  const bigSchema = {
+// The cap is a runaway guard, not a size estimate. It was sized per-schema
+// until 2026-08-07, when measuring gemini-3.5-flash showed the visible answer
+// (~300 tokens) is the smaller half of the spend and hidden thinking
+// (780-1,920) the larger — so schema size predicts the wrong quantity, and a
+// board of 5 facets clipped as readily as a board of 40.
+test("output budget is flat: schema size does not move it", () => {
+  const bigSchema = (n) => ({
     type: "object",
-    properties: Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`f${i}`, { type: "object" }])),
+    properties: Object.fromEntries(Array.from({ length: n }, (_, i) => [`f${i}`, { type: "object" }])),
     required: [],
-  };
-  const r = compatRequest({ provider: "openai", model: "m", systemText: "s", schema: bigSchema, parts });
-  assert.equal(r.max_completion_tokens, 1024 + 128 * 40);
+  });
+  for (const n of [1, 40, 100]) {
+    const r = compatRequest({ provider: "openai", model: "m", systemText: "s", schema: bigSchema(n), parts });
+    assert.equal(r.max_completion_tokens, OUTPUT_BUDGET, `${n} properties must not resize the cap`);
+  }
 });
 
 test("GLM quirks: auto tool_choice, no strict, thinking disabled, legacy max_tokens", () => {
@@ -66,7 +74,7 @@ test("GLM quirks: auto tool_choice, no strict, thinking disabled, legacy max_tok
   assert.equal(r.tools[0].function.name, "record_tags");
   // thinking defaults ON at Z.ai; off keeps output tokens on the tool call
   assert.deepEqual(r.thinking, { type: "disabled" });
-  assert.equal(r.max_tokens, 2048);
+  assert.equal(r.max_tokens, OUTPUT_BUDGET);
   // non-GLM providers never carry a thinking field
   const gem = compatRequest({ provider: "gemini", model: "m", systemText: "s", schema, parts });
   assert.equal(gem.thinking, undefined);
@@ -159,6 +167,51 @@ test("compat wire: a length-clipped turn throws the cap error, not JSON garbage"
     compatWire.tag(PROVIDERS.openai, tagOpts({ name: "record_tags", description: "d" })),
     (e) => /token cap/.test(e.message) && e.status === 422 // permanent-shaped: fail on attempt one, don't re-pay
   ));
+});
+
+// The other half of that check, and the one that cost real items: Gemini raises
+// finish_reason "length" when its HIDDEN thinking overran the cap, even though
+// it went on to write the whole tool call (measured 2026-08-07 — 1,807 thinking
+// + 299 visible against 2,048, valid JSON, every key present). Reading the
+// finish reason before the payload binned a complete answer and failed the item
+// permanently, ~1 item in 6 on a 5-facet board.
+test("compat wire: a complete tool call survives a length finish_reason", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  const clippedButWhole = async () => new Response(JSON.stringify({
+    choices: [{
+      finish_reason: "length",
+      message: { tool_calls: [{ function: { name: "record_tags", arguments: JSON.stringify({ kind: ["a"] }) } }] },
+    }],
+    usage: { prompt_tokens: 10, completion_tokens: 299 },
+  }), { status: 200 });
+  const result = await withFetch(clippedButWhole, () =>
+    compatWire.tag(PROVIDERS.gemini, tagOpts({ name: "record_tags", description: "d" })));
+  assert.deepEqual(result.input, { kind: ["a"] });
+});
+
+// Thinking bills as output, but Gemini reports it only inside total_tokens —
+// completion_tokens counts the visible answer alone. Billing the recorded
+// number under-counted Google's charge ~6x on the board that surfaced this.
+test("compat wire: hidden thinking tokens are billed as output", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  const withThinking = async () => new Response(JSON.stringify({
+    choices: [{ message: { tool_calls: [{ function: { name: "record_tags", arguments: '{"kind":["a"]}' } }] } }],
+    // 299 visible + 1,807 unreported thinking, the measured shape
+    usage: { prompt_tokens: 4428, completion_tokens: 299, total_tokens: 6534 },
+  }), { status: 200 });
+  const { usage } = await withFetch(withThinking, () =>
+    compatWire.tag(PROVIDERS.gemini, tagOpts({ name: "record_tags", description: "d" })));
+  assert.equal(usage.output, 2106);
+  assert.equal(usage.input, 4428);
+  // OpenAI folds reasoning into completion_tokens already — the total agrees
+  // there, so the same arithmetic must leave it untouched
+  const openaiShaped = async () => new Response(JSON.stringify({
+    choices: [{ message: { tool_calls: [{ function: { name: "record_tags", arguments: '{"kind":["a"]}' } }] } }],
+    usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+  }), { status: 200 });
+  const plain = await withFetch(openaiShaped, () =>
+    compatWire.tag(PROVIDERS.openai, tagOpts({ name: "record_tags", description: "d" })));
+  assert.equal(plain.usage.output, 50);
 });
 
 test("compat wire: the right-name call is found past an invented one", async () => {
