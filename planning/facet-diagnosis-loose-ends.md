@@ -170,7 +170,137 @@ Everything here is from the running app, not from a fixture.
   and the per-facet copy now share the word (`60% consistent · 377 items`;
   *"the tagger contradicted itself on 40% of items"*).
 
+## Second sweep, 2026-08-07 — the baseline, and the state that outranks it
+
+A read of the landed code against the states it is supposed to render rather
+than against the plan, with two of the three findings reproduced against a live
+database before being believed. All three are fixed here. 801 tests pass.
+
+The theme is that both defects destroy the **same thing** — the `stats` that
+`demoteFacetDiagnostics` turns into `previous` — by two different routes, and
+`previous` is the only operand state 5 has. The feature's whole thesis is
+*diagnose → edit → re-tag → find out whether it worked*, and the last step of
+that sentence is the one that quietly stops working.
+
+- [x] **10. A failed attempt destroys the stats a later edit would demote.**
+  *(fixed)*
+
+  The first sweep's defect 1 carried `previous` through a recorded failure,
+  reasoning that an outage between an edit and a re-diagnosis must not destroy
+  the evidence the edit did anything. It did not carry `stats` — and `stats` is
+  the *next* `previous`. `demoteFacetDiagnostics` skips any entry without them
+  (`if (!e?.stats) continue`), so the other order of the same three events:
+
+  ```
+  diagnosed          entry { verdict, stats: { items: 21, unanimous: 4 }, k: K1 }
+  measurements move  a scheduled retag lands six items -> k becomes K2
+  provider blips     attempted() replaces the entry with { k: K2, at, attempts: 1, error }
+  user edits         demote finds no stats, writes nothing, previous never exists
+  ```
+
+  From there the facet can never reach *improved*, no matter how well the edit
+  worked — on precisely the facet the loop had just told the user to fix. The
+  measurements moving first is not exotic: any board with a periodic retag does
+  it on a schedule, and the `previous`-only guard made the failure look handled.
+
+  Fixed by carrying `stats`/`d`/`scoped` through `attempted()` alongside
+  `previous`. The verdict is still dropped, and has to be: it described numbers
+  that have since moved, and keeping it would also make the skip check read a
+  stale finding as a current one and stop asking forever.
+
+- [x] **11. A finding rendered on a sample too small to have produced it.**
+  *(fixed)*
+
+  `diagnosisState` gated *awaiting* on `previous || stale > 0`, and a curated
+  board has neither. `setItemTags` **deletes** a corrected facet's confidence
+  entry rather than re-stamping it, so those items leave the roll-up entirely
+  instead of landing in `stale`. Hand-fix eighteen of twenty-one contested items
+  under a standing finding and the row comes back `items: 3, stale: 0,
+  previous: null` — every disjunct absent, and the stored paragraph the only
+  thing left to render.
+
+  Reproduced end to end rather than argued. What the user saw:
+
+  ```
+  Shape                                        100% consistent · 3 items
+  !  The tagger contradicted itself on 0% of items.
+     round and wide overlap
+     Suggested: "prefer wide when both read true"       [add to description]
+  ```
+
+  A headline computed from what is left, an explanation computed from what is
+  gone, and a suggestion to paste on the strength of it. This is §10's curation
+  bias — *the more diligent the curation, the healthier the facet reads* —
+  arriving as a rendering bug rather than as a sampling one.
+
+  The existing test named this exact scenario in its comment and seeded
+  `stale: 22`, which is what an *edit* leaves behind, not what curation does. It
+  passed on a disjunct the scenario never produces. Both cases are pinned now.
+
+  *Awaiting* now also wins on a stored verdict, and the copy splits three ways:
+  an edit gets "this description changed", nothing measured gets "not measured
+  against the current wording yet", and a shrunken sample gets its own sentence
+  — the middle one would have been a plain lie about items that were measured.
+
+- [x] **12. `.fd-note` meant two things.** *(fixed)* It is the state class for a
+  whole `genuinely-ambiguous-items` block (`.fd-note, .fd-awaiting { background…
+  color… }`) *and* the class on the prompt-shape caveat nested inside an
+  `improved` block. Both rules match both elements: the caveat drew a grey panel
+  and grey text inside the green one, and every ambiguous block rendered a point
+  smaller at 85% opacity. Renamed to `.fd-caveat`. Same family as the first
+  sweep's defect 5 — CSS is not in the suite — but unlike that one this was
+  legible from the stylesheet, since the two rules sit seven lines apart.
+
 ## Behaviour worth a decision (no change made)
+
+- **13. A diagnosis in flight can undo the save that demotes it.** The worker
+  reads `board.facet_diagnostics` once at the top of a pass and writes with an
+  unconditional `facet_diagnostics || jsonb_build_object(...)` merge, and between
+  the two sits a provider call. `demoteFacetDiagnostics` takes `FOR UPDATE`, so
+  the *demotion* is safe; what is not safe is the worker's write landing after
+  it, restoring a finding from a pre-edit read with `previous` absent. The plan
+  priced this at "one paragraph that was about to be demoted anyway" and assumed
+  a microsecond window; it is actually the whole duration of the call, several
+  seconds, once a minute per board. The paragraph itself stays invisible —
+  *awaiting* outranks it, since nothing is measured under the new stamp — so the
+  cost is again the lost baseline, i.e. defect 10 by a third route. The cheap fix
+  is to make `setFacetDiagnostic` conditional on the facet's unscoped stamp still
+  matching what the pass read; not done because it wants a decision about whether
+  that belongs in the setter or in the caller.
+
+- **14. Nothing renders between a re-measurement and the next diagnosis.** Edit,
+  re-tag, and the facet clears the item minimum again with its rate unmoved:
+  the verdict is gone (demoted), *improved* needs the rate to have crossed the
+  threshold, so `diagnosisState` returns `none` — which renders identically to a
+  healthy facet. The settle gate is ten minutes wide and the loop ticks once a
+  minute after that, so the user who just did what they were told looks at a
+  blank facet for at least that long, with no way to tell "we are re-reading
+  this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
+  read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
+
+- **15. Gate 2 can never pass on a board that never goes quiet**, and it is
+  measuring more than it says. `boardTagActivity` reads
+  `max(updated_at) FILTER (WHERE status='tagged')`, but `updated_at` is bumped by
+  writers that are not tagging — `setItemEntities` on every face/entity
+  assignment, entity deletion — so face work on a settled board pushes the
+  window while the tally does not move at all. Combined with the board-level
+  `busy > 0` check, a board that ingests faster than (drain + ten minutes) is
+  silently ineligible forever, and the surface that would say so shows healthy
+  numbers with no findings, which is indistinguishable from a healthy board.
+  Cheap version: read the tagging lane's own stamp rather than `updated_at`.
+
+- **16. The roll-up is a whole-board jsonb expansion, run per board per tick.**
+  `candidates` calls `facetRollup` for every vote board it scans (up to eight a
+  minute), each one a `jsonb_each` over every tagged row, plus `facetSplitValues`
+  per unstable facet. At `logos`'s 2,406 items this is nothing; nobody has looked
+  at what it costs at 100k. Same family as #6 and worth measuring together.
+
+- **17. `state.facetStats` is fetched once per board and never invalidated.**
+  `ensureFacetStats` keys on `state.boardId`, so a save that demotes a finding
+  leaves the toolbar reading the pre-save roll-up — the dot can stay lit for a
+  finding that no longer exists until the user switches boards. A failed fetch is
+  also never retried: `statsFetchedFor` is set *before* the request and the catch
+  does not clear it. One line each, both in `ensureFacetStats`.
 
 - **5. A deleted facet's diagnostic entry lingers forever.** `editedFacets` walks
   the *new* facet list, so a facet that has left the board is never demoted and

@@ -317,11 +317,23 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   if (!ai) return null; // no key is a configuration gap, not a finding
 
   // The one thing an attempt always leaves behind, so a failure is a fact on the
-  // board rather than a line in a log nobody reads. Carries `previous` through
-  // untouched: a baseline must survive a run that went nowhere.
+  // board rather than a line in a log nobody reads.
+  //
+  // Two things ride through it untouched, and both are baselines the user's next
+  // edit needs. `previous` is the obvious one — an outage between an edit and a
+  // successful re-diagnosis must not destroy the evidence the edit did anything.
+  // `stats` is the one the first sweep missed: the entry it replaces is what
+  // demoteFacetDiagnostics moves INTO `previous`, and that function skips any
+  // entry without stats. Drop them here and the sequence "finding stored →
+  // measurements move → provider blips → user edits" leaves nothing to demote,
+  // so the 'improved' state can never fire on the very facet the loop just told
+  // the user to fix. The verdict is deliberately NOT carried: it described
+  // measurements that have since moved, and keeping it would also make the skip
+  // check above read a stale finding as a current one and never ask again.
   const attempted = (fields) => setFacetDiagnostic(db, board.id, facet.key, {
     k: fresh, at: Date.now(), attempts: (prior?.k === fresh ? prior.attempts || 0 : 0) + 1,
     ...(prior?.previous ? { previous: prior.previous } : {}),
+    ...(prior?.stats ? { stats: prior.stats, d: prior.d ?? null, scoped: prior.scoped ?? null } : {}),
     ...fields,
   });
 

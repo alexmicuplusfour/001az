@@ -84,14 +84,25 @@ test("genuinely-ambiguous-items is its own state, not a finding", () => {
 test("a live verdict does NOT outrank awaiting when the sample has fallen away", () => {
   // The ordering, and the only case that actually tests it: an entry carrying a
   // verdict AND a previous, on a facet whose current segment is now too thin.
-  // Reachable without any edit — hand-corrections delete a facet's confidence
-  // entry (setItemTags), so a curated board's sample shrinks under a standing
-  // finding. Rendering the paragraph anyway shows a rate computed from noise.
   const s = diagnosisState(row({
     items: 3, unanimous: 1, stale: 22,
     diagnostic: finding({ previous: { stats: { items: 25, unanimous: 15 }, description: "old", scoped: false } }),
   }), G);
   assert.equal(s.state, "awaiting", "the finding must not win here");
+});
+
+test("…and a curated board is the case that has neither `previous` nor `stale`", () => {
+  // The one above passes on `stale` alone, which is NOT what curation leaves
+  // behind: setItemTags DELETES a corrected facet's confidence entry rather
+  // than re-stamping it, so the removed items vanish from the roll-up entirely
+  // instead of landing in `stale`. Hand-fix eighteen of twenty-one contested
+  // items under a standing finding and the row reads items: 3, stale: 0,
+  // previous: null — every disjunct the ordering used to key on absent, and the
+  // stored paragraph the only thing left. It rendered "the tagger contradicted
+  // itself on 0% of items" above an explanation of the contradiction.
+  const s = diagnosisState(row({ items: 3, unanimous: 3, stale: 0, diagnostic: finding() }), G);
+  assert.equal(s.state, "awaiting", "a finding must never render on a sub-minimum sample");
+  assert.equal(s.previous, null);
 });
 
 test("a demoted entry after an edit is awaiting, with the baseline intact", () => {

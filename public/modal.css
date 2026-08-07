@@ -569,7 +569,12 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .fd-head { display: block; font-weight: 500; margin: 0 0 3px; }
 .fd-why { color: inherit; opacity: .9; }
 .fd-suggestion { margin-top: 5px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.fd-note { font-size: 11px; opacity: .85; margin-top: 3px; }
+/* The prompt-shape caveat inside an `improved` block. NOT .fd-note: that is the
+   state class for the whole `genuinely-ambiguous-items` block two rules up, and
+   sharing the name made each rule apply where it was not meant to — a grey
+   panel inside the green one, and the ambiguous block silently rendered a point
+   smaller than every other state. One class, one meaning. */
+.fd-caveat { font-size: 11px; opacity: .85; margin-top: 3px; }
 .fd-apply { flex: none; background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 0; white-space: nowrap; }
 .fd-apply:hover { text-decoration: underline; }
 

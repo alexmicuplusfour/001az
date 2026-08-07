@@ -40,10 +40,19 @@ export function diagnosisState(row, gates = {}) {
   const items = row?.items || 0;
   const rate = items ? (items - row.unanimous) / items : 0;
 
-  // `stale` without a `previous` is the pre-stamp board: measured, but under a
-  // definition nobody recorded. The copy has to work as a first impression
-  // there, not only as a follow-up to an edit the user just made.
-  if (items < minItems && (previous || (row?.stale || 0) > 0)) {
+  // Below the minimum, ANY of the three things that could be said about this
+  // facet is "we cannot judge it yet" — the stored finding included. The
+  // finding's own numbers came from a sample that is no longer being counted,
+  // and `rate` here is computed from what is left, so letting it through renders
+  // a paragraph explaining an inconsistency above a headline that reports 0%.
+  //
+  // The third disjunct is the one the first pass missed. `previous` covers an
+  // edit and `stale` covers a pre-stamp board, but ordinary curation is neither:
+  // setItemTags DELETES a corrected facet's confidence entry rather than
+  // re-stamping it, so a board whose contested items have been hand-fixed comes
+  // back items: 3, stale: 0, previous: null — with the finding still stored.
+  // That is the sampling bias §10 names, arriving as a rendering bug.
+  if (items < minItems && (previous || (row?.stale || 0) > 0 || entry?.verdict)) {
     return { state: "awaiting", previous, items, rate };
   }
   if (previous?.stats?.items) {
@@ -132,9 +141,16 @@ export function diagnosisBlock(row, gates, onApply) {
   el.appendChild(head);
 
   if (s.state === "awaiting") {
+    // Three ways to be here and they are not one sentence. An edit is the
+    // designed path; nothing measured at all is the pre-stamp board; and a
+    // handful of items is what curation leaves behind, where "not measured yet"
+    // would be a plain lie — those items WERE measured, there are just too few
+    // of them left to say anything.
     head.textContent = s.previous
       ? `This description changed. Re-tag this board on ${row.label} to measure whether it helped.`
-      : `Not measured against the current wording yet. Re-tag this board on ${row.label} to see how stable it is.`;
+      : s.items
+        ? `Only ${s.items} item${s.items === 1 ? "" : "s"} still carry a measurement of the current wording — too few to judge. Re-tag this board on ${row.label}.`
+        : `Not measured against the current wording yet. Re-tag this board on ${row.label} to see how stable it is.`;
     return el;
   }
 
@@ -147,7 +163,8 @@ export function diagnosisBlock(row, gates, onApply) {
     head.textContent = `${pct(1 - was)} consistent before, ${pct(1 - s.rate)} now.`;
     if (s.shapeChanged) {
       const note = document.createElement("div");
-      note.className = "fd-note";
+      // Not "fd-note" — that is the state class of the whole ambiguous block.
+      note.className = "fd-caveat";
       note.textContent = "(re-measured on this facet alone, which is a slightly different prompt — the next comparison will be like-for-like.)";
       el.appendChild(note);
     }

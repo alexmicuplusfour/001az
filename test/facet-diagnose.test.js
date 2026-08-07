@@ -639,3 +639,41 @@ test("a recorded failure keeps the baseline it inherited", async () => {
   assert.equal(e.attempts, 1);
   assert.deepEqual(e.previous.stats, { items: 30, unanimous: 10 }, "the baseline survived the outage");
 });
+
+test("…and it keeps the stats that are the NEXT baseline, not only the last one", async () => {
+  // The other order, and the one the first sweep missed. There is no `previous`
+  // yet — the user has not edited anything. The stats on the live entry are what
+  // demoteFacetDiagnostics moves into `previous` when they finally do, and it
+  // skips any entry that has none. So: diagnose, let the measurements move (a
+  // scheduled retag is enough), fail one call, then take the advice — and
+  // without this the edit demotes nothing, `previous` never exists, and the
+  // "was 60%, now 88%" the whole feature is pointed at can never render on the
+  // one facet the loop just told the user to fix.
+  const b = await board("retry-stats");
+  await seedUnstable(b);
+  await diagnoseDue(db, stubTagger(), null);
+  assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 21, unanimous: 4 });
+
+  // The numbers move, so the next tick is a fresh freshness key and calls again.
+  for (let i = 0; i < 6; i++) {
+    await item(b, { confidence: { shape: conf(FULL.shape, 3, 1, { round: 1, wide: 2 }) }, description: `more ${i}` });
+  }
+  await diagnoseDue(db, {
+    resolveAi: async () => ({ provider: "openai", apiKey: "sk-test", model: "m" }),
+    tagger: async () => { throw new Error("down"); },
+  }, null);
+  const failed = (await diagnosticsOf(b)).shape;
+  assert.equal(failed.attempts, 1);
+  assert.equal(failed.verdict, undefined, "a failure is still not a finding");
+  assert.deepEqual(failed.stats, { items: 21, unanimous: 4 }, "…but the measured baseline is still there");
+
+  // Now the user takes the advice.
+  const admin = await adminSession(db);
+  const edited = BF.map((f) => (f.key === "shape" ? { ...f, description: "the silhouette; prefer wide" } : f));
+  const r = await req(srv.base, "PATCH", `/api/boards/${b}`, { sid: admin.sid, body: { facets: edited } });
+  assert.equal(r.status, 200);
+
+  const after = (await diagnosticsOf(b)).shape;
+  assert.deepEqual(after.previous.stats, { items: 21, unanimous: 4 }, "the edit had something to demote");
+  assert.equal(after.previous.description, "the silhouette");
+});
