@@ -298,6 +298,139 @@ that sentence is the one that quietly stops working.
   The note in `styles.css` now carries both halves of the lesson, since the next
   icon button will meet the second one too.
 
+## Third sweep, 2026-08-07 — the last mile, and a surface that does not know which board it is on
+
+A read of the landed code against the product it is supposed to be rather than
+against either surface on its own. Four defects, none fixed in this pass; the
+first three were reproduced against a live database before being believed.
+
+Every one of them lives in a **seam**, which is why the suite is green on all of
+it. Two surfaces render the same finding and no test crosses between them, so a
+control that exists in one density and is offered only from the other is dead
+without a single red assertion. Two gates decide whether this feature applies to
+a board and only one of them is written down. A hash and a prompt describe the
+same facet and are computed in different files from different fields. Nothing
+here is wrong inside any single unit.
+
+- [ ] **19. The `[replace description]` control is unreachable, so the loop's
+  last step is dead code.**
+
+  `diagnosisBlock` builds `fd-apply` only when `onApply` is passed **and** the
+  block is not compact. Both call sites fail one half, and each fails the other
+  one:
+
+  ```
+  facet editor   diagnosisBlock(row, gates, onApply, { compact: true })
+                 -> returns at the `if (compact)` early exit, before fd-suggestion exists
+  the modal      diagnosisBlock(row, gates, null,    { collapsible: true })
+                 -> builds fd-suggestion and fd-rewrite, then skips `if (onApply)`
+  ```
+
+  Confirmed by driving both through the UI harness: `fd-apply` absent from each,
+  `fd-rewrite` present in the modal. Dead as a consequence — the `onApply`
+  parameter itself, the whole `execCommand("insertText")` callback in
+  `board-modal.js` with its undo-stack reasoning, and `.fd-apply` in `modal.css`.
+
+  e27cbce built this leg (§6 state 1: *"`[replace description]` puts the proposed
+  wording into the textarea"*). 888f770 severed it while moving the content to
+  the modal, and the severing is invisible from either side: the editor test
+  (`no apply control can reach the editor, even if one is offered`) pins its half
+  **deliberately and correctly**, and there is no modal test to notice that
+  nothing picked the control up.
+
+  The sharper version of the defect is not the missing button but **the missing
+  text**. `onEdit` calls `close()` before `openBoardModal`, so the proposed
+  description leaves the screen at the exact moment the textarea arrives on it.
+  A user who followed the feature's own path — dot, modal, expand, *Edit this
+  board's facets* — is now looking at a two-row textarea and a one-line headline,
+  asked to reproduce a three-sentence paragraph they can no longer see. The
+  model's proposal is the product; this is the one step where it is not on
+  screen.
+
+- [ ] **20. The facet editor renders diagnosis states on boards that measure
+  nothing.**
+
+  `canSeeDiagnostics` gates the header button on `boardManage && ai_votes > 1`
+  and the second half is load-bearing, for the reason the plan gives: a
+  single-pass board writes no confidence at all. `buildFacetEditor` renders a
+  block per facet with **no votes gate**, and `/settings` serves `facet_stats`
+  unconditionally. Reproduced on a fresh `ai_votes: 1` board with five items
+  queued:
+
+  ```
+  facet_stats     [{ key: "shape", items: 0, unanimous: 0, d: null,
+                     stale: 0, queued: 5, diagnostic: null }]
+  diagnosisState  { state: "measuring", items: 0, queued: 5 }
+  renders         "Re-tagging this facet — 5 items still queued.
+                   Its figures return as they land."
+  ```
+
+  They do not return. `mergeVotes` short-circuits at `runs.length === 1` and
+  writes `confidence: {}`, so the promise is unkeepable on this board by
+  construction. Second variant, also reproduced: a board carrying findings from
+  when votes were on, switched back to 1, renders *"Not measured against the
+  current wording yet. Re-tag this board on Shape to see how stable it is"* —
+  advice that cannot be satisfied however many times it is taken.
+
+  This is the second sweep's defect 11 in reverse. That one rendered a finding
+  computed from a sample that had gone; this renders a promise about a
+  measurement that will never be taken. Both are `diagnosisState` answering a
+  question it should have declined.
+
+  Reach is wide and ordinary: any board manager opening the editor from the
+  gallery pencil or from the boards page, on any single-pass board with anything
+  in the tag queue — which is most boards, most of the time. `/settings` already
+  returns `ai_votes`, so the fix is one condition threaded to `buildFacetEditor`,
+  and it should be `canSeeDiagnostics`'s own second half rather than a new copy
+  of it.
+
+- [ ] **21. The stamp and the prompt disagree about what a facet's gloss is, in
+  both directions.**
+
+  ```
+  prompt   facetGloss = (f) => (f.description || "").trim() || GLOSS[f.key] || f.label
+  stamp    facetStamp hashes  f.description || ""      — untrimmed, and no label
+  ```
+
+  Two failures, opposite in sign:
+
+  - A facet with **no description and no `GLOSS` entry** is glossed to the tagger
+    by its `label`. Rename it and the prompt changes while `d` does not, so
+    pre- and post-rename measurements pool into one segment and `editedFacets`
+    demotes nothing. That is exactly the bug §2 says cannot arise.
+  - A whitespace-only description edit moves `d` while the prompt is byte
+    identical, stranding every measurement into *awaiting re-measurement* for a
+    change that altered nothing. The modal's `sync()` trims on save so the UI
+    path is safe; a direct PATCH is not, and the guard should not be the caller's.
+
+  Hashing `facetGloss(f)` fixes both and is not available: it lives in
+  `worker.js`, and `facet-diagnosis.js` sits below it in the import graph on
+  purpose. So either the gloss function moves down into this module and
+  `worker.js` imports it (correct, and it is three lines and one `GLOSS` table),
+  or `facetStamp` trims the description and adds `label` to the tuple
+  (cheaper, and still leaves the `GLOSS` fallback unhashed).
+
+  Either way **every stamp moves once**, so the first pass after the fix puts
+  every facet on every board into *awaiting re-measurement*. That is the price
+  and it should be stated in the commit rather than discovered in the UI.
+
+- [ ] **22. One path can still bill without recording an attempt.**
+
+  The first sweep's defect 1 wrapped the **provider call** in `attempted()`. The
+  two writes after it are bare:
+
+  ```js
+  if (usage) await bumpUsage(db, board.id, usage);   // throws -> nothing recorded
+  ...
+  await setFacetDiagnostic(db, board.id, facet.key, entry);   // same
+  ```
+
+  A throw from either leaves the call paid for and the board unchanged, so the
+  freshness key is identical a minute later and the same facet is diagnosed
+  again. Narrower than defect 1 — it needs a database fault, not a provider one —
+  but it is the same standing order, and the whole point of `MAX_ATTEMPTS` was
+  that no path reaches the next tick having spent money and recorded nothing.
+
 ## Behaviour worth a decision (no change made)
 
 - **14. A diagnosis in flight can undo the save that demotes it.** The worker
@@ -382,6 +515,62 @@ that sentence is the one that quietly stops working.
   fixes leave the sample. On these two boards the confidence coverage is so thin
   that the effect would dominate. Worth a query before trusting a first
   instability rate.
+
+Added by the third sweep:
+
+- **23. `MAX_FACETS` takes the first ten qualifying facets, not the worst ten.**
+  `candidates` walks `facetRollup` in board order and breaks at ten, so on a
+  board with more than ten unstable facets the tail is never diagnosed — not
+  "later", never, because the bound is re-applied identically every tick. The
+  bound itself is right (§4: a fleet of newly vote-enabled boards must not fan
+  out into a burst); ordering the candidates by instability before slicing would
+  make it a priority rather than a truncation. No board is near ten today.
+
+- **24. The roll-up is now on an interactive path.** #17 priced `facetRollup` as
+  a worker cost. `GET /api/boards/:id/settings` calls it too, so opening the
+  board editor runs a whole-board `jsonb_each` plus a queue group-by, on a click,
+  synchronously, on every board — including single-pass ones that can never have
+  a row in it (see 20). Measure it with #17 and #6.
+
+- **25. `d` covers the facet and nothing around it.** The board `context` sits in
+  the same system turn as the facet list, and the model and provider decide what
+  the numbers mean at all — none of the three is hashed, so changing any of them
+  re-measures under a different tagger with no stamp moving and nothing demoting.
+  §2 scoped `d` to the facet deliberately and that is defensible; what is missing
+  is anywhere that says so. It is the failure mode the stamp exists to prevent,
+  one level up, and the honest answer may be that a model switch is simply out of
+  scope — but it should be written rather than implied.
+
+- **26. `updateBoard` and `demoteFacetDiagnostics` are two statements.** Both the
+  board-manager PATCH and the admin PUT write the new facets, then demote. A
+  crash between them leaves the new wording beside an undemoted finding. It is
+  benign today only by accident: `items` collapses under the new stamp, so
+  *awaiting* outranks the stale paragraph and the user sees the right thing for
+  the wrong reason. The baseline is lost either way, which is defect 10's family
+  again.
+
+- **27. `MAX_ATTEMPTS` has no backoff.** Three attempts on the 60-second cadence
+  is three calls in three minutes, then silence until the measurements move. The
+  webhook precedent it cites (`WEBHOOK_MAX_ATTEMPTS`) spaces its retries; this
+  does not. Cheap and probably fine — the cap is what mattered — but the
+  precedent is only half-adopted.
+
+- **28. Naming drift the first sweep's rename did not reach.** `KIND_LABELS` in
+  `jobs-modal.js` still badges the run **"Facet review"**, a phrase that now
+  appears nowhere else in the product; everything else says *Tagging
+  consistency*. The row's own label is `j.target`, which for this kind is the
+  facet **key** (`mark_type`), not its label — every other kind resolves to a
+  display name.
+
+- **29. 0031's header documents a field that no longer exists.** It describes the
+  entry shape with `suggestion`, which `PROMPT_VERSION` 2 replaced with
+  `rewrite`. The migration comment is the most durable description of this
+  column's shape and it is now wrong about it.
+
+- **30. `openDiagnosticsModal` swallows a failed fetch.** `catch { return; }` —
+  the button is clicked and nothing happens at all, no toast, no empty modal.
+  Every other fetch in this file's neighbourhood degrades visibly; this one is
+  indistinguishable from a dead button.
 
 ## Still open from the previous sweeps
 
