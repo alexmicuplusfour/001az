@@ -785,6 +785,96 @@ those two rules outright, and it is fixed here. 840 tests pass.
   so every stored `k` mismatches and every eligible facet re-diagnoses once on its
   next settled tick. One call each, at ~1-2k input.
 
+- [x] **42. The arming hook was a no-op on every mapped and connector board.**
+  *(fixed — found by auditing which re-measurement paths reach the hook, and the
+  answer was not the one the audit went looking for)*
+
+  The question was which callers never call `supersedeFacetDiagnostics` — the
+  single-item retags, the refresh cascade. That turned out to be mostly a
+  non-issue (see below). What the audit actually found is that the hook that IS
+  wired does nothing on a whole class of board.
+
+  `retagBoard` does not queue items uniformly. It routes each one by payload:
+
+  ```sql
+  status = CASE
+    WHEN payload->'mapping'->'face'->>'from' = 'connector' AND no files THEN 'pending_face'
+    WHEN payload ? 'extracted_at'                                       THEN 'pending'
+    WHEN payload ? 'mapping'                                            THEN 'pending_extract'
+    ELSE 'pending' END
+  ```
+
+  So on a mapped or connector board a full retag produces **no `'pending'` row at
+  all**. And three diagnosis queries — `queuedAmong`, `boardTagActivity`,
+  `boardQueuedScopes` — each independently wrote `IN ('pending','processing')`.
+
+  Measured, same retag, two boards differing only in payload:
+
+  ```
+  plain (payload has extracted_at)   21 -> pending          hook marked ["shape"]
+                                                            busy 21, queued 21
+  mapped (payload has mapping)       21 -> pending_extract  hook marked []
+                                                            busy  0, queued  0
+  ```
+
+  Three consequences, all silent, all in the same direction:
+
+  - **The hook finds nothing queued and leaves every finding standing.** This is
+    39's failure reached by a different door, and worse: 39 needed a race, this
+    is every retag on those boards, every time.
+  - **The settle gate calls the board quiet mid-sweep.** `busy` is the only thing
+    holding a diagnosis off a moving target while a pass drains.
+  - **The roll-up reports nothing in flight**, so `diagnosisState` falls to
+    *awaiting* and renders *"Not measured against the current wording yet. Re-tag
+    this board on Shape"* — over a board being re-tagged as the user reads it.
+    That is defect 11's sentence, arriving through the data instead of the logic,
+    and the retag route logs `retag queued: 2,406 item(s)` throughout.
+
+  **Fixed as one `TAG_QUEUE` constant** rather than three corrected literals,
+  because three copies is what let one class of board be wrong in three places at
+  once. Deliberately NOT extended to `boardFacetSegments`' scoped-pending clause:
+  that one needs `tag_facets IS NOT NULL`, and a scope is only ever armed by
+  `retagBoardFacets`, which sets `'pending'` flat with no routing CASE. It holds
+  on that invariant, not on this list.
+
+  **The first version of this fix named four states and was wrong the same way.**
+  There are SIX: three legs, each with the state an item waits in and the state
+  the worker claims it into (`IN_FLIGHT_FOR`). `'extracting'` and `'facing'` were
+  missed, which is the identical defect one level down — a board whose queue has
+  just been picked up reads quiet again, and an evidence item being extracted
+  right now reads untouched. `TAG_QUEUE` is now DERIVED from `IN_FLIGHT_FOR`
+  rather than written out, so a fourth leg cannot be added without it following,
+  and both are declared beside `STATUS_PRIORITY` where the pipeline's states are
+  already enumerated.
+
+  Pinned two ways: a **parity** test between the two payload shapes (the routing
+  is `retagBoard`'s business and may grow a leg; what must hold is that diagnosis
+  cannot tell the legs apart), and a **table** over all six states plus `held` and
+  `failed` as the negative case. Driven off the list rather than off hand-picked
+  examples, because picking examples is exactly how the first version came to name
+  a subset and look complete.
+
+  **A risk I named and then found was not one.** I wrote that `busy` being
+  stricter would starve a board with an item wedged in `pending_face`. Items do
+  not wedge: both legs go through `failOrRequeue`, which fails a row out of the
+  queue at `maxAttempts + TRANSIENT_EXTRA` or immediately on a permanent 4xx. What
+  actually happens is a *delay* — a retrying item holds the gate through its
+  backoff, up to 15 minutes on the third try — and that is the gate working, since
+  the sample really is about to move. The one unbounded case is `noCount` errors
+  (a missing key), which requeue without consuming an attempt forever; it is moot
+  here because a board with no key exits `diagnoseFacet` before any call anyway.
+
+  **And the paths the audit set out to find are correctly left alone.**
+  `retagItem`, `retagItemFacets` and `reextractItem` touch one item; the refresh
+  cascade's `requeueItemForTag` touches one per refreshed entity and routes to
+  plain `'pending'`, so the settle gate and the banner already see it. None is
+  hooked, and after 41 none needs to be: the key now hashes what the twelve
+  worked examples SAY, so any of these that reaches the sample the finding was
+  reasoned from moves the key on the next settled tick, and any that does not
+  should leave the finding alone. 38's note — *"one item cannot move a real
+  sample, and the backstop catches it if it does"* — was a promise the backstop
+  could not keep when it was written, and 41 is what made it true.
+
 ## Behaviour worth a decision (no change made)
 
 - **14. A diagnosis in flight can undo the save that demotes it.** *(half closed

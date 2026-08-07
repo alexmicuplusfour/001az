@@ -12,7 +12,7 @@ import { startServer, adminSession, req } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
   updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
-  retagBoard,
+  retagBoard, boardTagActivity,
 } from "../server/db.js";
 import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
 import { startWorker } from "../server/worker.js";
@@ -53,10 +53,12 @@ async function board(name, { facets = BF, votes = 3 } = {}) {
 const conf = (d, of, agreed, votes) => ({ of, agreed, votes, d });
 
 // updated_at = 0 puts the item well outside the settle window; a test that wants
-// to exercise the window passes `at: Date.now()`.
-async function item(boardId, { confidence, status = "tagged", description = "a mark", at = 0 }) {
+// to exercise the window passes `at: Date.now()`. `payload` is what retagBoard
+// routes on — `extracted_at` sends a retag straight to tagging, `mapping` sends
+// it through the extract leg — so a test can pick which queue state it lands in.
+async function item(boardId, { confidence, status = "tagged", description = "a mark", at = 0, payload = {} }) {
   const eid = await createEntity(db, boardId, { identity: `d${++seq}` });
-  const id = await insertItem(db, boardId, { identity: `d${seq}`, files: [], fields: {} }, "pending", eid);
+  const id = await insertItem(db, boardId, { identity: `d${seq}`, files: [], fields: {}, ...payload }, "pending", eid);
   await db.query(
     "UPDATE items SET status=$1, tag_confidence=$2, tag_reasoning=$3, updated_at=$4 WHERE id=$5",
     [status, JSON.stringify(confidence), JSON.stringify({ description }), at, id]
@@ -583,6 +585,92 @@ test("…and MAX_ATTEMPTS still bounds a SUPERSEDED finding", async () => {
   for (let i = 0; i < 8; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) } });
   await diagnoseDue(db, deps, null);
   assert.equal(paid, 4, "a moved rate is a new question and earns a clean slate");
+});
+
+test("a retag is a retag on a MAPPED board too — all four queue states count", async () => {
+  // retagBoard routes items by payload rather than queueing them uniformly: one
+  // carrying a `mapping` it has not been extracted under enters 'pending_extract',
+  // a connector vehicle with no rendered file enters 'pending_face'. So on a
+  // mapped or connector board a full retag produces no 'pending' row at all.
+  //
+  // Three diagnosis queries read `IN ('pending','processing')` and every one was
+  // therefore wrong on that whole class of board, in the same direction and
+  // silently: the arming hook found nothing queued and left every finding
+  // standing, the settle gate called the board quiet mid-sweep, and the roll-up
+  // reported nothing in flight — which is what put "Not measured against the
+  // current wording yet. Re-tag this board" over a board being re-tagged as the
+  // user read it. The route logged "retag queued: 21 item(s)" throughout.
+  //
+  // Asserted as PARITY between the two shapes rather than against fixed numbers:
+  // the routing is retagBoard's business and may grow another leg, and the claim
+  // that matters is that diagnosis cannot tell the legs apart.
+  const shape = async (payload) => {
+    const b = await board(`routed-${Object.keys(payload)[0]}`);
+    for (let i = 0; i < 17; i++) {
+      await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `c${i}`, payload });
+    }
+    for (let i = 0; i < 4; i++) {
+      await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `u${i}`, payload });
+    }
+    await diagnoseDue(db, stubTagger(), null);
+    assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
+
+    await retagBoard(db, b);
+    const statuses = (await db.query("SELECT DISTINCT status FROM items WHERE board_id=$1", [b])).rows.map((r) => r.status);
+    const hit = await supersedeFacetDiagnostics(db, b, null);
+    const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
+    return { statuses, hit, busy: (await boardTagActivity(db, b)).busy, queued: row.queued, current: row.current };
+  };
+
+  const plain = await shape({ extracted_at: 1 });
+  const mapped = await shape({ mapping: { input: {} } });
+
+  assert.deepEqual(plain.statuses, ["pending"], "the plain board queues straight to tagging");
+  assert.deepEqual(mapped.statuses, ["pending_extract"], "the mapped one goes through the extract leg");
+  assert.deepEqual(mapped.hit, plain.hit, "the hook fires the same on both");
+  assert.equal(mapped.hit.length, 1);
+  assert.equal(mapped.busy, plain.busy, "and the settle gate holds the same");
+  assert.ok(mapped.busy > 0);
+  assert.equal(mapped.queued, plain.queued, "and the reader is told the same thing is in flight");
+  assert.ok(mapped.queued > 0, "which is what turns 'go re-tag this' into 'this is re-tagging'");
+  assert.equal(mapped.current, false);
+});
+
+test("…and every one of the six in-flight states counts, claimed ones included", async () => {
+  // Three legs, each with a state the item WAITS in and a state the worker claims
+  // it INTO — six, not the four the first pass at this named. Missing 'extracting'
+  // and 'facing' is the same defect one level down: a board whose queue has just
+  // been picked up reads quiet, and an evidence item being extracted right now
+  // reads untouched.
+  //
+  // Driven off the list rather than off two hand-picked examples, because that is
+  // exactly how the first version came to name a subset and look complete.
+  const STATES = ["pending", "processing", "pending_extract", "extracting", "pending_face", "facing"];
+  for (const status of STATES) {
+    const b = await board(`state-${status}`);
+    await seedUnstable(b);
+    await diagnoseDue(db, stubTagger(), null);
+    const evidence = (await diagnosticsOf(b)).shape.evidence;
+    assert.ok(evidence.length, `${status}: a finding to supersede`);
+
+    await db.query("UPDATE items SET status=$2 WHERE board_id=$1", [b, status]);
+    assert.deepEqual(await supersedeFacetDiagnostics(db, b, null), ["shape"], `${status}: the hook fires`);
+    assert.ok((await boardTagActivity(db, b)).busy > 0, `${status}: the settle gate holds`);
+    const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
+    assert.ok(row.queued > 0, `${status}: the reader is told a pass is running`);
+  }
+
+  // The parked states are the other half of the claim and must NOT count: a held
+  // or failed row is not coming back on its own, so treating it as in flight
+  // would hold the settle gate open for good.
+  for (const status of ["held", "failed"]) {
+    const b = await board(`parked-${status}`);
+    await seedUnstable(b);
+    await diagnoseDue(db, stubTagger(), null);
+    await db.query("UPDATE items SET status=$2 WHERE board_id=$1", [b, status]);
+    assert.deepEqual(await supersedeFacetDiagnostics(db, b, null), [], `${status}: nothing is re-measuring`);
+    assert.equal((await boardTagActivity(db, b)).busy, 0, `${status}: the board is quiet`);
+  }
 });
 
 // ─── the escape hatches ──────────────────────────────────────────────────────

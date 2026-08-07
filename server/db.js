@@ -80,6 +80,36 @@ export async function countItems(db) {
 // whose instances are all done reads tagged. Single-instance entities (every
 // raw board) pass their status through verbatim.
 const STATUS_PRIORITY = ["facing", "pending_face", "extracting", "pending_extract", "processing", "pending", "failed", "held"];
+
+// The three legs an item passes through before it carries tags, each as the
+// state it WAITS in and the state the worker claims it INTO. Lives up here with
+// STATUS_PRIORITY rather than beside its first user, because it is the
+// authoritative list of "the pipeline is doing something to this row" and two
+// other things now derive from it.
+const IN_FLIGHT_FOR = { pending: "processing", pending_extract: "extracting", pending_face: "facing" };
+
+// Every state that means "this item's tags are about to be rewritten" — both
+// halves of all three legs, six in total. DERIVED rather than written out, so a
+// fourth leg cannot be added without this following it.
+//
+// Facet diagnosis had this as `('pending','processing')` in three separate
+// queries, and retagBoard does not queue items uniformly: it routes each one by
+// payload, so an item carrying a `mapping` it has not been extracted under enters
+// 'pending_extract' and a connector vehicle with no rendered file enters
+// 'pending_face'. On a mapped or connector board a full retag therefore produced
+// no 'pending' row at all. Measured, same retag, two boards differing only in
+// payload:
+//
+//   plain (payload has extracted_at)   21 -> pending          hook marked ["shape"]
+//   mapped (payload has mapping)       21 -> pending_extract  hook marked []
+//
+// So supersedeFacetDiagnostics found nothing queued and left every finding
+// standing, boardTagActivity called the board quiet mid-sweep, and the roll-up
+// reported nothing in flight — which put "Not measured against the current
+// wording yet. Re-tag this board" over a board being re-tagged as the user read
+// it. Three surfaces, one missing set of strings, and the first fix for it named
+// four states and still missed the two the worker claims into.
+const TAG_QUEUE = `(${Object.entries(IN_FLIGHT_FOR).flat().map((s) => `'${s}'`).join(",")})`;
 export function aggregateStatus(instances) {
   if (!instances.length) return "tagged";
   if (instances.length === 1) return instances[0].status;
@@ -419,6 +449,15 @@ export async function getItemReasoning(db, id) {
 // picked [], so agreed === of and the facet scores UNANIMOUS. Items the model
 // explicitly declined to place would count as evidence that the taxonomy works.
 
+// The three queries below read TAG_QUEUE (declared with STATUS_PRIORITY, where
+// the reasoning is) rather than naming statuses themselves.
+//
+// It is NOT extended to boardFacetSegments' scoped-pending clause, which is
+// complete as it stands: that clause needs `tag_facets IS NOT NULL`, and a scope
+// is only ever armed by retagBoardFacets, which sets 'pending' flat with no
+// routing CASE. It holds on that invariant rather than on this list, and the
+// invariant is stated where failOrRequeue clears the scope.
+
 // Every (facet, definition-stamp) segment on a board with its unanimity count.
 // One query for the whole board rather than two per facet: the caller has to
 // compare a facet's segments against each other to choose one, so it needs them
@@ -459,7 +498,7 @@ export async function boardQueuedScopes(db, boardId) {
   const { rows } = await db.query(
     `SELECT tag_facets AS facets, count(*)::int AS n
      FROM items
-     WHERE board_id = $1 AND status IN ('pending','processing') AND NOT undecided
+     WHERE board_id = $1 AND status IN ${TAG_QUEUE} AND NOT undecided
      GROUP BY 1`,
     [boardId]
   );
@@ -509,7 +548,7 @@ export async function boardsWithVotes(db) {
 // a per-facet "last landed" stamp that nothing else wants.
 export async function boardTagActivity(db, boardId) {
   const { rows } = await db.query(
-    `SELECT count(*) FILTER (WHERE status IN ('pending','processing'))::int AS busy,
+    `SELECT count(*) FILTER (WHERE status IN ${TAG_QUEUE})::int AS busy,
             max(updated_at) FILTER (WHERE status = 'tagged') AS last_tagged
      FROM items WHERE board_id=$1`,
     [boardId]
@@ -692,11 +731,16 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
 // Of the given item ids, which are currently queued for tagging. A primary-key
 // lookup over at most a dozen ids per facet — the cheap half of the arming
 // check, and the reason it can run inline on a retag.
+//
+// TAG_QUEUE, not 'pending' alone: an item routed through the extract or face leg
+// is every bit as re-measured as one that went straight to tagging, and reading
+// two of the four states made this whole hook a no-op on mapped and connector
+// boards while the route still logged "retag queued: 2,406 item(s)".
 export async function queuedAmong(db, ids) {
   if (!ids?.length) return new Set();
   const { rows } = await db.query(
     `SELECT id::text AS id FROM items
-     WHERE id = ANY($1::bigint[]) AND status IN ('pending','processing')`,
+     WHERE id = ANY($1::bigint[]) AND status IN ${TAG_QUEUE}`,
     [ids]
   );
   return new Set(rows.map((r) => r.id));
@@ -2503,9 +2547,8 @@ export async function embeddingStats(db, model) {
 // Returns true if the item was failed.
 const RETRY_BACKOFF_MS = [60000, 300000, 900000];
 const TRANSIENT_EXTRA = 2;
-// Maps a leg's requeue target back to the in-flight status that leg claims
-// into — the value fence for failOrRequeue below.
-const IN_FLIGHT_FOR = { pending: "processing", pending_extract: "extracting", pending_face: "facing" };
+// IN_FLIGHT_FOR — the leg map this fences on — is declared with STATUS_PRIORITY
+// at the top of the file, because TAG_QUEUE derives from it too.
 
 export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = "pending") {
   const httpStatus = Number(error?.status);
