@@ -325,7 +325,7 @@ const bigFinding = () => row({
   }),
 });
 
-test("the facet editor gets the headline and a pointer, never the content", () => {
+test("the facet editor gets the headline, never the content", () => {
   // The complaint this exists to prevent: a finding rendered at survey size is
   // a panel taller than the facet it belongs to, pushing that facet's own
   // values off screen. The editor is a stack of 28px rows.
@@ -333,9 +333,11 @@ test("the facet editor gets the headline and a pointer, never the content", () =
   const t = textOf(block);
   assert.match(t, /The tagger contradicted itself on 32% of items\./,
     "worded exactly as the modal words it — one finding, one sentence");
-  assert.match(t, /See Tagging consistency/);
   assert.doesNotMatch(t, /geometric-modernist/, "no explanation here");
   assert.doesNotMatch(t, /Suggested description/, "and no proposal here");
+  // ONE sentence on the line. A second one pointing at the modal wrapped into a
+  // column beside the first and broke the row it had to fit in.
+  assert.doesNotMatch(t, /See Tagging consistency/);
 });
 
 test("no apply control can reach the editor, even if one is offered", () => {
@@ -364,8 +366,7 @@ test("the modal folds each finding, and opens to the whole thing", () => {
 });
 
 test("a one-line state says its whole piece in the editor", () => {
-  // `awaiting` and `improved` are one sentence each and complete in themselves —
-  // no pointer, because there is nothing further to go and read.
+  // `awaiting` and `improved` are one sentence each and complete in themselves.
   const block = diagnosisBlock(row({ items: 0, stale: 25 }), G, null, { compact: true });
   const t = textOf(block);
   assert.match(t, /Not measured against the current wording yet/);

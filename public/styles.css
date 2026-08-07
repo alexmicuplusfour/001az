@@ -5,6 +5,11 @@
   --pill-active: #111;
   --text: #111;
   --text-dim: #6b6b72;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* For prose the model wrote, as opposed to the UI's own labels. System faces
+     only — the page already pays for one webfont and a second one would land
+     late, on exactly the paragraphs this is meant to make readable. */
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
 }
 
 * {
@@ -21,7 +26,7 @@ body {
   overflow-anchor: none;
   background: #f7f8fa;
   color: var(--text);
-  font: 14px/1.4 "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font: 14px/1.4 var(--sans);
 }
 
 /* Column layout so the grid can stretch to the bottom of the viewport.
@@ -1931,32 +1936,24 @@ a.tool-btn {
   word-break: break-all;
   text-align: right;
 }
-.lbp-undecided {
-  background: #fff7e6;
-  border: 1px solid #f2e2b8;
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.45;
-  color: #7a5b12;
-  margin-bottom: 14px;
-}
+/* ─── shared panel primitives ───
+   The card / label / chip / notice shells the lightbox panel is built from.
+   Deliberately NOT `lbp-` prefixed: the Tagging consistency modal renders the
+   same facets and must read as the same thing, and a second copy of these four
+   rules in modal.css is exactly how the two surfaces drift apart. Anything
+   genuinely specific to one surface stays with that surface. */
+
 /* one facet or field: a light-gray card holding a header line + optional why.
-   Shared by .lbp-facet-head (facets) and .lbp-field-kv (fields) so both kinds
-   read as the same card. */
-.lbp-cell {
+   Worn by .lbp-facet-head (facets), .lbp-field-kv (fields) and the diagnostics
+   modal's per-facet cards, so all three read as the same card. */
+.panel-cell {
   background: #f6f6f9;
   border-radius: 8px;
   padding: 9px 11px;
   margin-bottom: 8px;
 }
-.lbp-facet-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-}
-.lbp-facet-label {
+/* the facet's name inside that card */
+.panel-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
@@ -1964,13 +1961,36 @@ a.tool-btn {
   color: var(--text);
   margin-right: 2px;
 }
-.lbp-chip {
+/* a value, or any other small fact, sitting on the card */
+.panel-chip {
   font-size: 11px;
   background: #fff;
   border: 1px solid #ececf2;
   border-radius: 999px;
   padding: 2px 8px;
   white-space: nowrap;
+}
+/* Inline notice boxes, one rounded shell in three tones. The tone is the whole
+   message — amber is "this wants your attention", grey is "nothing to say
+   yet", green is "this got better" — so they share every dimension and differ
+   only in colour, and a box that changes state changes one class. */
+.warn-box, .mute-box, .good-box {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.warn-box { background: #fff7e6; border-color: #f2e2b8; color: #7a5b12; }
+.mute-box { background: #f6f6f9; border-color: #e6e6ec; color: #6b6b72; }
+.good-box { background: #f0fdf4; border-color: #d5f0de; color: #14532d; }
+
+.lbp-undecided { margin-bottom: 14px; }
+.lbp-facet-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
 }
 .lbp-none {
   font-size: 12px;
@@ -2418,14 +2438,6 @@ div.lbp-file-thumb {
   letter-spacing: -0.02em;
 }
 
-/* provisional identity warning */
-.lbp-provisional-warn {
-  font-size: 12px;
-  line-height: 1.45;
-  color: #92400e;
-  background: #fef3c7;
-  border: 1px solid #fde68a;
-  border-radius: 6px;
-  padding: 7px 10px;
-  margin-bottom: 12px;
-}
+/* provisional identity warning — a .warn-box; two warnings in one panel wearing
+   two different ambers read as two different kinds of thing, which they are not */
+.lbp-provisional-warn { margin-bottom: 12px; }

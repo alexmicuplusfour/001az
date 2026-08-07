@@ -561,13 +561,21 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* ─── facet diagnosis (planning/facet-diagnosis-plan.md §6) ───
    One block shape, used in two places: inline under the description being
    edited (facet editor) and inside the Diagnostics modal. Indented to the same
-   22px gutter as .fe-desc so it reads as belonging to its facet. */
-/* Square corners, both densities: the 2px state rule runs the block's full
-   height cleanly, where rounding left it detaching at the top and bottom. */
-.fd-block { margin: 0 0 8px 22px; padding: 7px 10px; font-size: 12px; line-height: 1.45; border-left: 2px solid transparent; }
-.fd-finding { background: #fff7ed; border-left-color: #f59e0b; color: #7c4a03; }
-.fd-note, .fd-awaiting { background: #f6f6f9; border-left-color: #d8d8de; color: #6b6b72; }
-.fd-improved { background: #f0fdf4; border-left-color: #22c55e; color: #14532d; }
+   22px gutter as .fe-desc so it reads as belonging to its facet.
+   Everything the block LOOKS like — the rounded shell, the padding, the three
+   tones — comes from .warn-box / .mute-box / .good-box in styles.css, the same
+   shells the lightbox panel's notices wear. The state classes below are hooks
+   for what is specific to a state, not a second palette. */
+.fd-block { margin: 0 0 8px 22px; }
+
+/* ── the headline, in ONE place ──
+   The modal's collapsible head (.fd-head) and the facet editor's one-line
+   summary (.fd-sum) are the same sentence about the same finding, so they are
+   the same type: serif, because everything inside a notice is prose the model
+   wrote about this board rather than a label the UI chose. Only LAYOUT differs
+   between the two densities, and that is what the rules below vary.
+   Nothing further down may re-declare font — see the note on .fd-head.fd-toggle. */
+.fd-head, .fd-sum { font-family: var(--serif); font-size: 13px; font-weight: 500; line-height: 1.45; color: inherit; }
 
 /* ── compact: the same block inline in the facet editor ──
    KEEPS the panel — the tint is what makes a finding findable in a stack of
@@ -575,15 +583,12 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    it runs to ~15 and pushes the facet's own values off screen. The caret is the
    leading mark: it says "there is more here" where a dot only said "look". */
 .fd-block.fd-compact { margin: -2px 0 8px 22px; padding: 5px 9px; }
-.fd-sum { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; font-weight: 600; line-height: 1.5; }
+.fd-sum { display: flex; align-items: baseline; gap: 6px; }
 /* The toolbar button's own glyph, so the line reads as belonging to that
    feature rather than as a generic form warning. Nudged down a hair: the row is
    baseline-aligned for the text, which sits an icon slightly high. */
 .fd-icon { flex: none; display: inline-flex; position: relative; top: 2px; }
 .fd-icon svg { width: 13px; height: 13px; }
-/* The pointer to the surface that holds the content. Normal weight so the
-   finding itself stays the bold thing on the line. */
-.fd-more { font-weight: 400; opacity: .78; }
 
 /* ── collapsible: the modal's per-facet sections ──
    Folded by default. The survey is the list of facets and their numbers; the
@@ -593,28 +598,47 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    specificity it won and quietly un-flexed this — which cost the gap AND the
    caret's rotation, since transforms do not apply to non-replaced inline
    elements. Two symptoms, one missing tenth of specificity. */
-.fd-head.fd-toggle { display: flex; align-items: baseline; gap: 8px; width: 100%; margin: 0; padding: 0; background: none; border: none; font: inherit; font-weight: 500; line-height: 1.45; color: inherit; text-align: left; cursor: pointer; }
+/* Deliberately declares NO font, though it is a <button> and the UA gives
+   buttons one. Author rules beat the UA sheet at any specificity, so the shared
+   `.fd-head, .fd-sum` rule above dresses it — where `font: inherit` here would
+   have pulled the sans body font back in at a specificity that rule cannot
+   beat, and the two densities would have drifted apart again. */
+.fd-head.fd-toggle { display: flex; align-items: baseline; gap: 8px; width: 100%; margin: 0; padding: 0; background: none; border: none; text-align: left; cursor: pointer; }
 /* The glyph points right already, so collapsed is UNROTATED — it points at what
    it will open — and expanding turns it down. */
 /* inline-block is load-bearing, not tidiness: a bare inline span ignores
    `transform` outright, so the caret would sit there unrotated with nothing in
    the console to say why. */
-.fd-caret { flex: none; display: inline-block; font-size: 15px; line-height: 1; opacity: .9; transition: transform .15s; }
+/* Sans, explicitly: the head around it is serif now, and the serif faces draw
+   U+203A about half the size Inter does at the same font-size — the caret went
+   tiny with nothing in the rules to say why. It is a UI mark, not prose, so it
+   belongs to the UI's face regardless of what the sentence beside it is set in. */
+.fd-caret { flex: none; display: inline-block; font-family: var(--sans); font-size: 15px; line-height: 1; opacity: .9; transition: transform .15s; }
 .fd-head.fd-toggle[aria-expanded="true"] .fd-caret { transform: rotate(90deg); }
 .fd-detail { padding: 6px 0 1px; }
-.fd-head { display: block; font-weight: 500; margin: 0 0 3px; }
-.fd-why { color: inherit; opacity: .9; }
+/* Layout only — the type is set once, at the top of this section. */
+.fd-head { display: block; margin: 0 0 3px; }
+/* The explanation under it: the same serif, a step down, because it is the
+   supporting paragraph rather than the finding. */
+.fd-why { font-family: var(--serif); font-size: 12.5px; color: inherit; opacity: .9; }
 /* Stacked, not side by side: the box is the content and the action belongs
    under it, the way a form field's button does. Beside it, the box was squeezed
    into a column while the link floated in the whitespace next to it. */
-.fd-suggestion { margin-top: 7px; }
-.fd-rewrite-cap { font-size: 9.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; opacity: .6; margin-bottom: 3px; }
+.fd-suggestion { margin-top: 9px; }
+/* A heading, not a frame. The proposed wording used to sit in a panel of its
+   own inside the notice, which read as two nested boxes for what is one
+   thought; the label alone does the separating, so it takes the weight the
+   frame used to carry and the notice's own colour. */
+.fd-rewrite-cap { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 4px; }
 /* Unclamped. It was capped and scrollable back when it rendered inside the
    facet editor, where its natural height dwarfed the two-row textarea it was
    proposing to replace. It only lives in the modal now, which has the room —
    and a nested scroller inside a scrolling dialog is a worse way to read a
-   paragraph than simply letting it be as long as it is. */
-.fd-rewrite { padding: 6px 8px; background: rgba(255,255,255,.7); border: 1px solid rgba(0,0,0,.08); font-style: italic; }
+   paragraph than simply letting it be as long as it is.
+   Sans and upright, against the serif above it: this is not more prose about
+   the board, it is the literal text that would go in the description field —
+   set the way that field sets it. */
+.fd-rewrite { font-family: var(--sans); }
 /* The prompt-shape caveat inside an `improved` block. NOT .fd-note: that is the
    state class for the whole `genuinely-ambiguous-items` block two rules up, and
    sharing the name made each rule apply where it was not meant to — a grey
@@ -627,14 +651,24 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* The modal's own survey chrome. Read-only by construction — the only control
    in here is the one that hands the user off to the editor. */
 .fd-intro { font-size: 12px; color: #6b6b72; line-height: 1.5; margin: 0 0 14px; }
-/* Qualifies every figure below it, so it sits above the list rather than in it. */
-.fd-busy { font-size: 12px; line-height: 1.5; margin: 0 0 14px; padding: 7px 10px; background: #f6f6f9; border-left: 2px solid #b9bcc6; color: #5d5d66; }
-.fd-measuring { background: #f6f6f9; border-left-color: #b9bcc6; color: #6b6b72; }
-.fd-card { padding: 10px 0; border-top: 1px solid #eee; }
-.fd-card:first-of-type { border-top: none; }
-.fd-card-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+/* Qualifies every figure below it, so it sits above the list rather than in it.
+   A .mute-box, like every other "nothing to report yet" panel in the app. */
+.fd-busy { line-height: 1.5; margin: 0 0 14px; }
+/* .fd-card is a .panel-cell — the lightbox panel's facet card. Only the two
+   things the modal adds live here. */
+/* No bottom margin: the gap belongs to the block below, because most facets
+   have no block at all and a margin here left their card padded 9px above the
+   name and 15px below it — the row sat visibly high in its own box. */
+.fd-card-head { display: flex; gap: 8px; align-items: center; }
 .fd-stat { font-size: 11px; color: #9aa0aa; margin-left: auto; white-space: nowrap; }
-.fd-card .fd-block { margin-left: 0; }
+/* The consistency figure: a .panel-chip like a facet value, because that is
+   what it is — one fact about this facet — carrying the glyph of the button
+   this modal opened from so the number is attributed. */
+.fd-score { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: #55555e; }
+.fd-score .fd-icon { top: 0; }
+.fd-score .fd-icon svg { width: 12px; height: 12px; }
+/* Flush inside the card, and carrying the gap between itself and the name. */
+.fd-card .fd-block { margin: 6px 0 0; }
 /* One per modal, above the list — not one per finding. */
 .fd-edit { display: block; background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; font-size: 12px; padding: 0; margin: -6px 0 14px; }
 .fd-edit:hover { text-decoration: underline; }

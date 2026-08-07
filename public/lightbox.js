@@ -205,7 +205,7 @@ function highlightDet(detKey, on) {
 // background, radius) lives in one place instead of being duplicated per kind.
 function panelCell(head, why) {
   const cell = document.createElement("div");
-  cell.className = "lbp-cell";
+  cell.className = "panel-cell";
   cell.appendChild(head);
   if (why) {
     const p = document.createElement("p");
@@ -409,7 +409,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   // Provisional identity warning — shown when the AI couldn't derive an identity.
   if (img.identityProvisional) {
     const warn = document.createElement("div");
-    warn.className = "lbp-provisional-warn";
+    warn.className = "warn-box lbp-provisional-warn";
     warn.textContent = "Identity not derived — AI couldn't identify this entity. Re-extract or remove the item.";
     elLightboxPanelBody.appendChild(warn);
   }
@@ -537,12 +537,12 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
 
   if (subject.status === "held") {
     const note = document.createElement("div");
-    note.className = "lbp-undecided";
+    note.className = "warn-box lbp-undecided";
     note.textContent = "Not tagged yet — this board's auto-tagging is off. Tag it by hand, or turn auto-tagging back on.";
     elLightboxPanelBody.appendChild(note);
   } else if (subject.undecided) {
     const note = document.createElement("div");
-    note.className = "lbp-undecided";
+    note.className = "warn-box lbp-undecided";
     note.textContent = why.fit || "The AI couldn't apply this board's facets to this item.";
     elLightboxPanelBody.appendChild(note);
   }
@@ -569,7 +569,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
     const head = document.createElement("div");
     head.className = "lbp-facet-head";
     const label = document.createElement("span");
-    label.className = "lbp-facet-label";
+    label.className = "panel-label";
     label.textContent = f.label;
     head.appendChild(label);
     // Agreement badge: only on boards running more than one pass, and only when
@@ -595,7 +595,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
     if (vals.length) {
       for (const v of vals) {
         const chip = document.createElement("span");
-        chip.className = "lbp-chip";
+        chip.className = "panel-chip";
         chip.textContent = v;
         head.appendChild(chip);
       }

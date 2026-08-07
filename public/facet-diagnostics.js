@@ -144,9 +144,9 @@ export function markDiagnosticsSeen(boardId, facets) {
 // The Tagging consistency modal owns the CONTENT — the explanation and the
 // proposed description — and keeps each finding folded until asked, so the
 // survey stays a survey and you open the one you care about. The facet editor
-// gets the headline and a pointer, nothing more: it is a dense stack of 28px
-// rows, and a finding rendered there at any size worth reading is a panel taller
-// than the facet it belongs to.
+// gets the headline and nothing else: it is a dense stack of 28px rows, and a
+// finding rendered there at any size worth reading is a panel taller than the
+// facet it belongs to.
 //
 // So one surface reports and one explains, and neither pretends to be the other.
 // `onApply` is honoured only in the density that has somewhere to put it.
@@ -155,7 +155,11 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
   if (s.state === "none") return null;
 
   const el = document.createElement("div");
-  el.className = `fd-block fd-${s.state}` + (compact ? " fd-compact" : "");
+  // The tone carries the message, and it is one of the three shared notice
+  // shells (styles.css) rather than a private palette: amber wants attention,
+  // grey has nothing to say yet, green says this got better.
+  const tone = { finding: "warn-box", improved: "good-box" }[s.state] || "mute-box";
+  el.className = `fd-block ${tone} fd-${s.state}` + (compact ? " fd-compact" : "");
 
   const head = document.createElement(collapsible ? "button" : "div");
   head.className = compact ? "fd-sum" : "fd-head";
@@ -175,17 +179,6 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
   const headText = document.createElement("span");
   head.appendChild(headText);
   const setText = (t) => { headText.textContent = t; };
-
-  // The pointer to the surface that holds the content. Plain text rather than a
-  // link on purpose: the reader is inside an unsaved board modal, and a control
-  // that navigated out of it would either lose their edits or stack a second
-  // dialog on top of the one they are typing in.
-  const pointTo = () => {
-    const more = document.createElement("span");
-    more.className = "fd-more";
-    more.textContent = " See Tagging consistency for the detail.";
-    head.appendChild(more);
-  };
 
   if (s.state === "measuring") {
     setText(`Re-tagging this facet — ${s.queued.toLocaleString()} item${s.queued === 1 ? "" : "s"} still queued. Its figures return as they land.`);
@@ -230,10 +223,12 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
       ? `The tagger contradicted itself on ${pct(s.rate)} of items, and the wording may not be the reason.`
       : `The tagger contradicted itself on ${pct(s.rate)} of items.`,
   );
-  if (compact) {
-    pointTo();
-    return el;
-  }
+  // The headline is the whole compact block. It used to carry "See Tagging
+  // consistency for the detail." as well, which was a second sentence competing
+  // for a line already too narrow for the first — it wrapped into a column
+  // beside the finding and broke the row. The glyph in front of the line
+  // already names the surface it came from.
+  if (compact) return el;
 
   const detail = document.createElement("div");
   detail.className = "fd-detail";
@@ -253,8 +248,9 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
   if (s.state === "finding" && s.entry.rewrite) {
     const sug = document.createElement("div");
     sug.className = "fd-suggestion";
-    // A quiet label, because without one the box is an unattributed slab of
-    // italic prose sitting under a paragraph of different italic prose.
+    // A label rather than a box of its own: the explanation and the replacement
+    // wording are one thought, and framing the second half separately made the
+    // notice read as two nested panels. The heading does the separating.
     const cap = document.createElement("div");
     cap.className = "fd-rewrite-cap";
     cap.textContent = "Suggested description";
@@ -329,7 +325,7 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
   if (busyFacets.length) {
     const n = Math.max(...busyFacets.map((f) => f.queued));
     const banner = document.createElement("p");
-    banner.className = "fd-busy";
+    banner.className = "mute-box fd-busy";
     // Names the facets, because that is the whole difference between "your
     // board is mid-pass" and "these three numbers are partial". A scoped retag
     // is the thing this feature tells people to run, so it is the common case.
@@ -357,23 +353,40 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
   }
 
   for (const row of facets) {
+    // The lightbox panel's facet card, worn here too: this modal lists the same
+    // facets, so it uses the same shell (panel-cell / panel-label / panel-chip)
+    // rather than a lookalike of its own.
     const card = document.createElement("div");
-    card.className = "fd-card";
+    card.className = "fd-card panel-cell";
 
     const title = document.createElement("div");
     title.className = "fd-card-head";
-    const name = document.createElement("strong");
+    const name = document.createElement("span");
+    name.className = "panel-label";
     name.textContent = row.label || row.key;
     title.appendChild(name);
 
+    // Size first, then the score — the count is the qualifier and belongs
+    // beside the number it qualifies, not stacked in front of it.
     const stat = document.createElement("span");
     stat.className = "fd-stat";
+    const score = document.createElement("span");
+    score.className = "panel-chip fd-score";
     // Not measured and measured-at-100% are different claims and must not share
     // a rendering: {} means NOT MEASURED, never zero.
-    stat.textContent = row.items
-      ? `${pct(row.unanimous / row.items)} consistent · ${row.items} item${row.items === 1 ? "" : "s"}`
-      : "not measured";
-    title.appendChild(stat);
+    if (row.items) {
+      stat.textContent = `${row.items} item${row.items === 1 ? "" : "s"}`;
+      // The toolbar button's glyph, so the figure reads as this feature's
+      // measurement rather than as a bare percentage of something unnamed.
+      const icon = document.createElement("span");
+      icon.className = "fd-icon";
+      icon.innerHTML = ICONS.doubleCheck;
+      score.appendChild(icon);
+      score.appendChild(document.createTextNode(pct(row.unanimous / row.items)));
+    } else {
+      score.textContent = "not measured";
+    }
+    title.append(stat, score);
     card.appendChild(title);
 
     const block = diagnosisBlock(row, gates, null, { collapsible: true });
