@@ -10,7 +10,7 @@
 // provider, the tagger) has to be injected by the caller rather than imported.
 import crypto from "node:crypto";
 import {
-  boardFacetSegments, facetSplitValues, facetExamples,
+  boardFacetSegments, facetSplitValues, facetExamples, facetExampleKeys,
   boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog, bumpUsage,
 } from "./db.js";
 
@@ -162,7 +162,16 @@ export function pickSegment(facet, rows, queued = 0) {
 // health, and a stored key whose facet has left the board has to not appear at
 // all. Both directions matter, and only one of them is what the data would give
 // you on its own.
-export async function facetRollup(db, board) {
+// `fresh: true` adds `current` — whether each stored finding still describes the
+// evidence that is there now (sampleKey). The reader needs it and the loop does
+// not: the loop computes the key itself for the facets it is about to diagnose,
+// and it runs this once per board per tick, where two more queries per facet
+// would be a standing cost to answer a question it is about to ask anyway.
+//
+// It is off by default for that reason, and the routes turn it on. The cost is
+// bounded by the number of facets that actually carry a finding, which on a
+// healthy board is none.
+export async function facetRollup(db, board, { fresh = false } = {}) {
   const [rows, scopes] = await Promise.all([
     boardFacetSegments(db, board.id),
     boardQueuedScopes(db, board.id),
@@ -177,7 +186,16 @@ export async function facetRollup(db, board) {
   // surfaces read this — the Diagnostics modal and the facet editor — and
   // handing them the halves separately is how one ends up rendering a paragraph
   // beside numbers it was not written about.
-  return (board.facets || []).map((f) => ({ ...pickSegment(f, rows, queuedFor(f.key)), diagnostic: found[f.key] || null }));
+  const out = (board.facets || []).map((f) => ({ ...pickSegment(f, rows, queuedFor(f.key)), diagnostic: found[f.key] || null }));
+  if (!fresh) return out;
+  await Promise.all(out.map(async (r) => {
+    // No stored key means a pre-`k` entry or an attempts-only record; nothing to
+    // compare, and `current` stays undefined so the reader falls back to showing
+    // it rather than hiding something it cannot reason about.
+    if (!r.diagnostic?.k || !r.d) return;
+    r.current = (await sampleKey(db, board.id, r)).k === r.diagnostic.k;
+  }));
+  return out;
 }
 
 // Everything the diagnosis prompt reads about one facet, all of it confined to
@@ -374,29 +392,60 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 // shape — so this only has to catch the case where the numbers moved under an
 // unchanged definition.
 //
-// The counts are EXACT. §4 bucketed the rate to 5 points so that one more tagged
-// item could not invalidate a good paragraph, and that optimisation is what let
-// a whole re-tag pass unnoticed: `construction` went from 2,143 items to 2,276
-// with the rate at 37% on both sides of the run, so the key was identical and
-// the loop skipped — a finding written about a sample that no longer existed,
-// standing indefinitely. Drift and wholesale re-measurement are the same shape
-// through a bucket, and there is no width that separates them.
+// Two halves, and every version that shipped one without the other broke:
 //
-// The re-diagnoses this costs are bounded by the settle gate rather than by the
-// bucket: nothing is diagnosed until the board has been quiet for ten minutes,
-// so the counts have stopped moving by the time this is read. A board that is
-// genuinely being re-tagged is a board whose diagnosis genuinely is out of date.
+//   rate alone, bucketed  a whole re-tag passed unnoticed — 2,143 items to
+//                         2,276 at 37% on both sides is one bucket, so the key
+//                         matched and a finding about a sample that no longer
+//                         existed stood indefinitely
+//   counts, exact         the opposite — 20 new items on 3,000 changed the key
+//                         and bought a re-read of all 3,020, which returns the
+//                         same paragraph because the new items are 0.7% of the
+//                         sample and reach none of the worked examples
 //
-// The reader hides a finding on exactly this condition (diagnosisState's
-// `sameSample`). The two must stay in step: whatever this would re-diagnose,
-// the UI hides — and anything the UI hides, this must re-diagnose, or a facet
-// goes silent with nothing coming to replace it.
-const freshness = (segment, split) => [
-  `v${PROMPT_VERSION}`,
-  segment.d,
-  `${segment.unanimous}/${segment.items}`,
-  split.join(","),
-].join("|");
+// The bucket was never the mistake. Keying on a SUMMARY and nothing else was:
+// with no term for the evidence, a re-measurement that preserved the average
+// was invisible. Adding exact counts made the summary sharper, which is the
+// wrong axis — a count is not evidence either, it just moves more often.
+//
+// So both, each answering the question it can:
+//
+//   EVIDENCE   the split values, and the identity and tallies of the worked
+//              examples. Changes when the items the model reasons from change,
+//              whatever the average does.
+//   RATE       bucketed to 5 points. Changes when the SEVERITY changes, whatever
+//              the individual items do — 81% inconsistent and 40% inconsistent
+//              are different questions even over the same eight examples, and
+//              the second is far likelier to be "these items really are mixed".
+//
+//   +20 items not in the top eight    evidence same, bucket same    skip
+//   133 items re-measured             tallies move                  re-ask
+//   the contested items hand-fixed    they leave the sample         re-ask
+//   21 clean items land, 81% -> 40%   bucket moves                  re-ask
+//
+// Five points is an absolute step on a bounded quantity, which is why it needs
+// no justification of the kind a tolerance on a raw count would: it is "the
+// rate moved enough to read differently", not a guess about how much churn is
+// too much.
+//
+// The reader hides a finding on exactly this condition — `current` on the
+// roll-up row, from this same function. The two must stay in step: whatever
+// this re-diagnoses the UI hides, and whatever the UI hides this re-diagnoses,
+// or a facet goes silent with nothing coming to replace it.
+export async function sampleKey(db, boardId, segment) {
+  const split = (await facetSplitValues(db, boardId, segment.key, segment.d))
+    .slice(0, 5).map((s) => s.value).sort();
+  const rows = await facetExampleKeys(db, boardId, segment.key, segment.d, CONTESTED_SHOWN, UNANIMOUS_SHOWN);
+  const evidence = crypto.createHash("sha1")
+    .update(JSON.stringify(rows.map((r) => [r.id, r.votes])))
+    .digest("hex").slice(0, 12);
+  const bucket = Math.round(((segment.items - segment.unanimous) / segment.items) * 20) * 5;
+  // `d`, the prompt version and the rate stay readable in front of the hash: the
+  // reasons a finding goes stale that a person might have to reason about are
+  // "the wording changed", "we ask a different question now" and "it got better",
+  // and none of them should need a debugger to see.
+  return { k: [`v${PROMPT_VERSION}`, segment.d, bucket, split.join(","), evidence].join("|"), split };
+}
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
 const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
@@ -406,10 +455,8 @@ const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : 
 // module sits below worker.js in the import graph (worker.js reaches in here for
 // facetStamp) and must stay there.
 async function diagnoseFacet(db, deps, board, facet, segment, prior) {
-  const probe = await diagnosisSample(db, board.id, segment, { withExamples: false });
-  if (!probe) return null;
-  const split = probe.split.slice(0, 5).map((s) => s.value).sort();
-  const fresh = freshness(segment, split);
+  if (!segment.d) return null;
+  const { k: fresh, split } = await sampleKey(db, board.id, segment);
   // Nothing has moved since the last attempt on this facet — either it produced
   // a finding, or it has failed enough times that asking again is just spending.
   if (prior?.k === fresh && (prior.verdict || (prior.attempts || 0) >= MAX_ATTEMPTS)) return null;

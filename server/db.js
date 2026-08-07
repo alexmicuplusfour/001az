@@ -606,6 +606,44 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
   return rows;
 }
 
+// The IDENTITY of the worked examples the diagnosis prompt would carry — the
+// same two groups facetExamples returns, same filters, same ordering, without
+// the descriptions. This is what "has the evidence moved" is asked against, so
+// the two must stay byte-identical in their WHERE and ORDER BY or the freshness
+// check would be tracking a different sample from the one the model reads.
+//
+// One round trip for both groups: it runs on the loop's hot path, once per
+// unstable facet per tick, and the point of the exercise is to decide whether
+// to pay for a call — a decision that must not itself become the cost.
+//
+// Votes ride along because they are what the prompt actually SAYS about each
+// item ("the passes chose: monoline x2, gradient x1"). A retag can keep the
+// same eight items and change every tally under them, which is a different
+// question with the same item ids.
+export async function facetExampleKeys(db, boardId, key, stamp, contested, unanimous) {
+  const { rows } = await db.query(
+    `(SELECT i.id::text AS id, e.value->'votes' AS votes
+      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
+      WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+        AND e.key = $2 AND e.value->>'d' = $3
+        AND (e.value->>'agreed')::int < (e.value->>'of')::int
+        AND i.tag_reasoning ? 'description'
+      ORDER BY (e.value->>'agreed')::numeric / (e.value->>'of')::int ASC, i.id
+      LIMIT $4)
+     UNION ALL
+     (SELECT i.id::text AS id, e.value->'votes' AS votes
+      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
+      WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+        AND e.key = $2 AND e.value->>'d' = $3
+        AND (e.value->>'agreed')::int = (e.value->>'of')::int
+        AND i.tag_reasoning ? 'description'
+      ORDER BY i.id
+      LIMIT $5)`,
+    [boardId, key, stamp, contested, unanimous]
+  );
+  return rows;
+}
+
 // The mapping to stamp for AI extraction: the given mapping when it has AI
 // work in it (derived identity or AI fields), else null. Mirrors ingest's
 // hasMapping gate.

@@ -602,6 +602,55 @@ here is wrong inside any single unit.
   this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
   read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
 
+- [x] **35. The freshness key needed two halves, and every version so far shipped
+  one.** *(fixed — found by the user asking "I have thousands of items and a
+  diagnosis, then I add 20 more; does that re-diagnose?")*
+
+  It did, and the re-read was worthless. The sample is read WHOLE, with no
+  recency filter anywhere: the worked examples are the eight most-contested
+  items on the board and the four **oldest** unanimous ones (`ORDER BY i.id`),
+  so twenty arrivals reach neither group, the split values do not move, and the
+  model is asked the same question for money. On a board with steady ingestion
+  the settle gate is the only bound — three minutes' quiet, up to ten facets —
+  so this is defect 1's shape returning through a door defect 32 opened.
+
+  The history, because each fix broke the case the previous one was fixing:
+
+  | key | 2,143 → 2,276 items, 37% both sides | +20 items on 3,000 |
+  |---|---|---|
+  | rate, bucketed to 5 pts | missed — finding stood forever | correctly ignored |
+  | counts, exact (32) | caught | re-read all 3,020 for nothing |
+  | **rate bucket + evidence hash** | caught | correctly ignored |
+
+  **The bucket was never the mistake.** Keying on a *summary* and nothing else
+  was: with no term for the evidence, a re-measurement that preserved the
+  average was invisible. Making the summary sharper (exact counts) was the wrong
+  axis — a count is not evidence either, it just moves more often.
+
+  So both terms, each answering what it can. **Evidence**: the split values plus
+  the identity and vote tallies of the worked examples, hashed — moves when the
+  items the model reasons from change, whatever the average does. **Rate**:
+  bucketed to five points — moves when the severity changes, whatever the
+  individual items do, because 81% inconsistent and 40% inconsistent are
+  different questions over the same eight examples, and the second is far
+  likelier to be *"these items really are mixed"*.
+
+  I proposed a 2% relative tolerance on the item count first. It was a round
+  number picked between the only two figures in front of me, and the user asked
+  where it came from, which was the right question — there was no answer. The
+  five-point rate bucket needs no such defence: it is an absolute step on a
+  bounded quantity, "the rate moved enough to read differently", not a guess
+  about how much churn is too much.
+
+  The reader now takes `current` from the roll-up rather than comparing stats
+  itself. Defect 32 had the client recomputing its own version of "has this
+  moved", which was correct only while the two implementations agreed — and they
+  stop agreeing the moment either is touched, with a facet going silent and
+  nothing coming to replace it as the symptom. One function, `sampleKey`, used
+  by the loop and by the two read routes; `{ fresh: true }` is off by default so
+  the loop's own per-tick roll-up does not pay for an answer it is about to
+  compute anyway.
+
 - [x] **34. `DIAGNOSE_SETTLE_MS` 10 min → 3 min.** *(changed, and the reason the
   plan gave for ten turned out not to be a reason)*
 

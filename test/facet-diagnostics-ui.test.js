@@ -106,15 +106,20 @@ test("a re-measured sample discards the old finding — it does not annotate it"
   // The answer is neither. A superseded finding is not a finding — the loop
   // will replace it within a settled tick, and until then the honest rendering
   // is nothing at all.
-  const s = diagnosisState(row({
-    items: 133, unanimous: 84,                                      // 37% now
-    diagnostic: finding({ stats: { items: 25, unanimous: 15 } }),   // measured on 25
-  }), G);
-  assert.equal(s.state, "none", "a run that has been superseded says nothing");
-  assert.equal(diagnosisBlock(row({
-    items: 133, unanimous: 84,
+  // `current: false` is the SERVER's answer, from the same sampleKey() the loop
+  // gates on. The client deliberately does not recompute it — a second
+  // implementation would drift, and a facet hidden by a check the loop does not
+  // share never gets a replacement.
+  const superseded = () => row({
+    items: 133, unanimous: 84, current: false,
     diagnostic: finding({ stats: { items: 25, unanimous: 15 } }),
-  }), G), null, "and renders no box at all");
+  });
+  assert.equal(diagnosisState(superseded(), G).state, "none", "a run that has been superseded says nothing");
+  assert.equal(diagnosisBlock(superseded(), G), null, "and renders no box at all");
+
+  // …and an entry the server vouched for still shows, on the same numbers.
+  const vouched = row({ items: 133, unanimous: 84, current: true, diagnostic: finding() });
+  assert.equal(diagnosisState(vouched, G).state, "finding");
 });
 
 test("a facet that now reads healthy shows no warning, whatever is stored", () => {

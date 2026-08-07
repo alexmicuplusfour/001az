@@ -259,6 +259,58 @@ test("a second pass over unchanged measurements spends nothing", async () => {
   assert.equal(deps.calls.length, 1, "the paragraph still describes the data");
 });
 
+test("…and neither does a trickle of new items on an established sample", async () => {
+  // The question that found this: "I have thousands of items and a diagnosis,
+  // then I add 20 more — does that re-diagnose?" It did, and the re-read was
+  // worthless. The sample is read WHOLE, with no recency filter anywhere: the
+  // worked examples are the eight most-contested items on the board and the
+  // four oldest unanimous ones, so twenty arrivals reach neither, the split
+  // values do not move, and the model is asked the same question for money.
+  //
+  // Seeded proportionally rather than at the real 3,000 — 100 items with 20
+  // arriving is a HARSHER test than 3,000 with 20, since the same twenty are a
+  // fifth of the sample here instead of 0.7% of it.
+  const b = await board("trickle");
+  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+
+  // Twenty more in the same proportion, so the rate lands in the same bucket.
+  for (let i = 0; i < 8; i++) {
+    await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `new contested ${i}` });
+  }
+  for (let i = 0; i < 12; i++) {
+    await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `new clean ${i}` });
+  }
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1, "same evidence, same severity — nothing to re-ask");
+});
+
+test("…while a re-measurement that leaves the rate alone DOES re-diagnose", async () => {
+  // The other half, and the one a rate-only key could never see: the retag that
+  // started this went 2,143 items to 2,276 with the rate at 37% on both sides,
+  // so a 5-point bucket matched and a finding about a sample that no longer
+  // existed stood indefinitely. Here the numbers do not move at all — same
+  // items, same agreed/of — and only what the passes CHOSE is different, which
+  // is the whole content of the worked examples.
+  const b = await board("remeasured");
+  await seedUnstable(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+
+  const before = (await diagnosticsOf(b)).shape.stats;
+  await db.query(
+    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', $2::jsonb)
+     WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
+    [b, JSON.stringify({ round: 1, wide: 2 })]
+  );
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 2, "the passes are parting differently now");
+  assert.deepEqual((await diagnosticsOf(b)).shape.stats, before, "…on numbers that did not move at all");
+});
+
 test("…but a moved rate re-diagnoses", async () => {
   const b = await board("moved");
   await seedUnstable(b);

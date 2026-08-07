@@ -90,18 +90,18 @@ export function diagnosisState(row, ctx = {}) {
   // superseded finding look freshly computed, and showing it with its own
   // percentage just adds a second number to reconcile.
   //
-  // The sample test is exact and mirrors the loop's freshness key deliberately:
-  // whatever the key would re-diagnose, this hides. Keep them in step or a
-  // facet can go quiet with no replacement coming, which is the one outcome
-  // worse than a stale paragraph.
+  // `row.current` is the SERVER's answer, from the same sampleKey() the loop
+  // gates on — not a comparison made here. That is deliberate: the reader must
+  // hide exactly what the loop re-diagnoses, and a second implementation of
+  // "has the evidence moved" in the browser would drift from the first, leaving
+  // a facet silent with nothing coming to replace it. Undefined means the entry
+  // predates the key, and then showing it beats hiding something we cannot
+  // reason about.
   //
-  // The rate test is the plainer of the two. A facet at 86% consistent against
-  // a 70% threshold is not a problem, whatever a paragraph written when it was
-  // 60% has to say about it.
-  const sameSample = entry?.stats
-    ? entry.stats.items === items && entry.stats.unanimous === (row?.unanimous || 0)
-    : false;
-  const current = sameSample && rate >= minRate;
+  // The rate test is the plainer of the two, and local because it needs
+  // nothing: a facet at 86% consistent against a 70% floor is not a problem,
+  // whatever a paragraph written when it was 60% has to say about it.
+  const current = row?.current !== false && rate >= minRate;
   if (current && entry.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate };
   if (current && entry.verdict !== "no-problem-found" && entry.explanation) {
     return { state: "finding", entry, items, rate };

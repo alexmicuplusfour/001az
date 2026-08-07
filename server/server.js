@@ -930,7 +930,7 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     // edited, which is where the fix gets typed. Same rows as /facet-stats, so
     // the two surfaces cannot disagree about what a facet's state is.
     facet_gates: GATES,
-    facet_stats: await facetRollup(db, b),
+    facet_stats: await facetRollup(db, b, { fresh: true }),
     auto_tag: b.auto_tag !== false,
     auto_tag_periodic: !!b.auto_tag_periodic,
     auto_tag_every_min: b.auto_tag_every_min || 1440,
@@ -970,7 +970,7 @@ app.get("/api/boards/:id/facet-stats", requireAuth, requireBoardManager, wrap(as
     // a symptom (a facet stuck "awaiting re-measurement" while the loop happily
     // re-diagnoses it) that reads as a bug in neither half.
     gates: GATES,
-    facets: await facetRollup(db, req.board),
+    facets: await facetRollup(db, req.board, { fresh: true }),
   });
 }));
 
