@@ -125,6 +125,10 @@ export const ICONS = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   // AI-derived content (the boards page's custom-mapping chip)
   sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/></svg>',
+  // Tagging consistency — a dial reading somewhere short of full. Its own glyph
+  // rather than `sparkle`, which is taken by the boards page's AI-fields chip
+  // and would mean two things one click apart; `activity` is the jobs ledger.
+  gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 16a9 9 0 1 1 17 0"/><path d="m12 15 4.5-4.5"/><circle cx="12" cy="16" r="1.4"/></svg>',
 };
 
 // Corner presence dot for any button — sits centered on the top-right

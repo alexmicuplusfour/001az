@@ -4,6 +4,9 @@ export const state = {
   boardManage: false,   // may the current user edit this board (global or board admin)
   facets: [],
   aiReasoning: true,
+  boardVotes: 1,        // ai_votes: >1 means the board carries per-facet confidence
+  facetStats: null,     // per-facet stability roll-up; null = not fetched yet
+  facetGates: {},       // the thresholds the diagnose loop gates on, served with it
   items: [],
   // Cursor for ?since= delta polls: the server's `now` from the last items
   // response. Null = server predates delta polling, fall back to full fetches.

@@ -13,6 +13,7 @@ import { openIngestModal } from './ingest-modal.js';
 import { openBoardModal } from './board-modal.js';
 import { openConnectorBrowse } from './connector-browse.js';
 import { appendAlertMenu, appendAlertFooter, alertsUnseen } from './alerts-modal.js';
+import { openDiagnosticsModal, diagnosticsUnseen, ensureFacetStats, canSeeDiagnostics } from './facet-diagnostics.js';
 import { clearAlertEvent } from './alert-event.js';
 import { sortCatalog, defaultDir, saveSort, restoreSort } from './sort.js';
 import { effectiveView, toggleView, rowsRelevant } from './view.js';
@@ -76,6 +77,47 @@ function ingestChip() {
     }
   }, 1000);
   return chip;
+}
+
+// The door to facet diagnosis, and its attention signal — a third icon in the
+// board-group, between the edit pencil and the jobs chip.
+//
+// Nobody opens a board modal to find out whether something is wrong, so without
+// a door a finding sits unread until the user is already suspicious — by which
+// point it has told them nothing they didn't know.
+//
+// Both halves of the gate are load-bearing. `boardManage` because the pencil is
+// and this is the same cluster: a facet suggestion is only useful to someone who
+// can edit facets. (jobsChip() is deliberately ungated — the log is
+// transparency, not management — and this is the opposite kind of thing.)
+// `boardVotes > 1` because a single-pass board writes no confidence at all, so
+// the modal would be permanently empty.
+//
+// ALWAYS present when the gate passes, not only when there is a finding. A
+// button that appears only when something is wrong gives a user who took the
+// advice no way back in to check whether it worked; it conflates "there is a
+// finding" with "there is a NEW finding", which is the dot's job and it does it
+// better; and the header reflows as it comes and goes.
+function diagnosticsBtn() {
+  if (!canSeeDiagnostics(state)) return null;
+  // The roll-up is board-manager data on its own endpoint, so it is not in the
+  // gallery's board payload. Fetched once per board and re-rendered on arrival,
+  // the ingest-chip pattern: the button is drawn immediately either way, and
+  // only the dot waits.
+  ensureFacetStats();
+  const b = toolBtn(ICONS.gauge, "board-diag-btn", () => openDiagnosticsModal({
+    onEditFacet: (key) => openBoardModal(state.boardId, {
+      canEditAI: !!state.me?.is_admin,
+      focusFacet: key,
+      onSaved: () => document.dispatchEvent(new Event('app:render')),
+    }),
+  }));
+  b.title = "Tagging consistency";
+  b.setAttribute("aria-label", "Tagging consistency");
+  // The ambient "a finding landed while you were away" signal, exactly the
+  // plus-caret's unseen-alert precedent.
+  if (diagnosticsUnseen(state.boardId, state.facetStats, state.facetGates)) attachBtnDot(b);
+  return b;
 }
 
 // ── jobs chip: ambient "work is happening" signal + the door to the job log ──
@@ -226,6 +268,10 @@ export function renderToolbar(resultCount) {
           state.boardName = payload.name;
           state.facets = payload.facets;
           state.aiReasoning = payload.ai_reasoning !== false;
+          // Both PATCH routes take ai_votes (buildBoardContentUpdate), so a save
+          // can turn vote mode on or off from right here — sync it or anything
+          // gated on confidence data reads the pre-save answer until a reload.
+          state.boardVotes = Number(payload.ai_votes) || 1;
           // `mapping` is present only when the Mapping pane was touched — sync
           // it so the toolbar's connector chip re-reads mapping.input, and
           // re-validate the sort: the edit may have unbound the sorted field
@@ -242,6 +288,8 @@ export function renderToolbar(resultCount) {
       editBtn.title = "Edit board";
       editBtn.setAttribute("aria-label", "Edit board");
       boardGroup.appendChild(editBtn);
+      const diag = diagnosticsBtn();
+      if (diag) boardGroup.appendChild(diag);
       if (templateChip) boardGroup.appendChild(templateChip);
 
       if (state.boardTokens > 0) {

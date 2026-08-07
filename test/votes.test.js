@@ -272,7 +272,11 @@ test("three votes make three calls but exactly one landing", async () => {
 
   const [item] = await rowsOf("SELECT tags, tag_confidence FROM items WHERE id=$1", [iid]);
   assert.deepEqual(item.tags, ["kind/a"], "2 of 3 said a");
-  assert.deepEqual(item.tag_confidence.kind, { of: 3, agreed: 2, votes: { a: 2, b: 1 } });
+  // `d` is the definition stamp a live pass adds (facet-stamp.test.js owns it);
+  // the tally itself is what this test is about.
+  const { d, ...tally } = item.tag_confidence.kind;
+  assert.deepEqual(tally, { of: 3, agreed: 2, votes: { a: 2, b: 1 } });
+  assert.equal(typeof d, "string");
 
   // one landing: one snapshot, one job-log row, one item
   assert.equal((await rowsOf("SELECT 1 FROM tag_snapshots WHERE item_id=$1", [iid])).length, 1);

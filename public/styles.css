@@ -258,15 +258,22 @@ header.header-collapsed #toolbar {
   align-items: center;
   gap: 6px;
 }
-.tool-btn.board-edit-btn {
+/* The pencil and the tagging-stability dial are one cluster and must look it.
+   Note that .tool-btn carries NO generic `svg` sizing — every icon button sizes
+   its own glyph — so a new icon button that skips this renders as an empty box:
+   the SVG collapses to nothing and the button's padding is all that is left. */
+.tool-btn.board-edit-btn,
+.tool-btn.board-diag-btn {
   display: inline-flex;
   align-items: center;
   padding: 4px 7px;
   line-height: 0;
   color: var(--text-dim);
 }
-.tool-btn.board-edit-btn svg { width: 15px; height: 15px; }
-.tool-btn.board-edit-btn:hover { color: var(--text); }
+.tool-btn.board-edit-btn svg,
+.tool-btn.board-diag-btn svg { width: 15px; height: 15px; }
+.tool-btn.board-edit-btn:hover,
+.tool-btn.board-diag-btn:hover { color: var(--text); }
 .board-chevron {
   display: inline-flex;
   margin-left: -1px;

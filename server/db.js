@@ -406,6 +406,178 @@ export async function getItemReasoning(db, id) {
   return rows[0] || null;
 }
 
+// --- the facet confidence roll-up (planning/facet-diagnosis-plan.md §1) ---
+//
+// Three readers over items.tag_confidence, which vote mode writes per item as
+// { of, agreed, votes, d }. The reasoning lives in facet-diagnosis.js; the SQL
+// lives here like everything else.
+//
+// EVERY one of them excludes undecided items, and `status='tagged'` does NOT do
+// that — the verdict rides its own column, so an undecided item IS a tagged one
+// (the same trap as facet-scope-loose-ends #8). It matters more here and in the
+// direction that flatters us: an undecided item has most facets empty, every run
+// picked [], so agreed === of and the facet scores UNANIMOUS. Items the model
+// explicitly declined to place would count as evidence that the taxonomy works.
+
+// Every (facet, definition-stamp) segment on a board with its unanimity count.
+// One query for the whole board rather than two per facet: the caller has to
+// compare a facet's segments against each other to choose one, so it needs them
+// all regardless. A pre-stamp entry groups under d = NULL, which can never equal
+// a computed stamp — "measured under an unknown definition", exactly right.
+export async function boardFacetSegments(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT e.key AS facet,
+            e.value->>'d' AS d,
+            count(*)::int AS items,
+            count(*) FILTER (WHERE (e.value->>'agreed')::int = (e.value->>'of')::int)::int AS unanimous
+     FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
+     WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+     GROUP BY 1, 2`,
+    [boardId]
+  );
+  return rows;
+}
+
+// The values the runs actually PARTED on, counted once per item.
+//
+// NOT a sum of the tally. `votes` counts how many runs picked each value, so
+// summing it across the disagreeing items measures frequency rather than
+// tension: three runs, kept set {monoline}, tally {monoline: 3, gradient: 1}
+// contributes 3 to monoline and 1 to gradient, and monoline tops the list
+// precisely because nobody disputed it. A value is in tension on an item when
+// some runs chose it and some didn't — votes[v] < of. The lower bound is free:
+// a value no run picked is absent from the tally entirely.
+export async function facetSplitValues(db, boardId, key, stamp) {
+  const { rows } = await db.query(
+    `SELECT v.key AS value, count(*)::int AS split_on
+     FROM items i, jsonb_each(i.tag_confidence) AS e(key, value),
+          jsonb_each(e.value->'votes') AS v(key, value)
+     WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+       AND e.key = $2 AND e.value->>'d' = $3
+       AND (e.value->>'agreed')::int < (e.value->>'of')::int
+       AND v.value::text::int < (e.value->>'of')::int
+     GROUP BY 1 ORDER BY 2 DESC, 1`,
+    [boardId, key, stamp]
+  );
+  return rows;
+}
+
+// Boards that could carry confidence data at all. The diagnose loop's cheapest
+// gate, and the only one that is a property of configuration rather than of the
+// measurements — everything else it needs to know it has to count.
+export async function boardsWithVotes(db) {
+  const { rows } = await db.query(
+    `SELECT id, name, context, facets, facet_diagnostics, ai_votes, ai_key_id, ai_model
+     FROM boards WHERE ai_votes > 1 ORDER BY id`
+  );
+  return rows;
+}
+
+// Is the board's tagging lane quiet? A bulk retag lands items over minutes and
+// the tally moves the whole time, so a diagnosis taken mid-sweep burns a call on
+// a moving target and immediately re-stales. Board-level rather than per-facet
+// on purpose: a scoped retag invalidates only its own facet, so this is more
+// conservative than it strictly needs to be, and the extra precision would cost
+// a per-facet "last landed" stamp that nothing else wants.
+export async function boardTagActivity(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT count(*) FILTER (WHERE status IN ('pending','processing'))::int AS busy,
+            max(updated_at) FILTER (WHERE status = 'tagged') AS last_tagged
+     FROM items WHERE board_id=$1`,
+    [boardId]
+  );
+  return { busy: rows[0]?.busy || 0, lastTagged: Number(rows[0]?.last_tagged) || 0 };
+}
+
+// The diagnose loop's own setter, on setIngestState's terms — and a jsonb MERGE
+// rather than a whole-column write, because two facets diagnosed in the same
+// pass must not overwrite each other and the user's save may be demoting a third
+// at the same moment.
+export async function setFacetDiagnostic(db, boardId, key, entry) {
+  await db.query(
+    "UPDATE boards SET facet_diagnostics = facet_diagnostics || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3",
+    [key, JSON.stringify(entry), boardId]
+  );
+}
+
+// Demote the findings for facets whose definition the user just changed.
+// `edits` is [{ key, description }] — the description being the wording being
+// REPLACED, which the next diagnosis quotes back to the model so it can say
+// whether the edit helped rather than re-deriving from scratch.
+//
+// Demote, not drop: the paragraph quotes wording that no longer exists and has
+// to go, but `stats` is the only evidence the user's edit did anything, and it
+// is what "was 60% unanimous, now 88%" is measured against.
+//
+// A second edit before any re-measurement finds no `stats` to move and leaves
+// the older baseline alone. That is deliberately not "overwrite `previous`":
+// overwriting it with a demoted entry's empty stats would destroy the only
+// baseline there is, and nesting would grow a history in a board column.
+//
+// FOR UPDATE rather than a bare read: setFacetDiagnostic is a plain UPDATE from
+// the worker, so the lock is what keeps a diagnosis landing mid-save from being
+// read, dropped and written back.
+export async function demoteFacetDiagnostics(db, boardId, edits) {
+  if (!edits?.length) return 0;
+  return withTx(db, async (client) => {
+    const { rows } = await client.query("SELECT facet_diagnostics FROM boards WHERE id=$1 FOR UPDATE", [boardId]);
+    if (!rows.length) return 0;
+    const map = { ...(rows[0].facet_diagnostics || {}) };
+    let n = 0;
+    for (const { key, description } of edits) {
+      const e = map[key];
+      if (!e?.stats) continue;
+      map[key] = {
+        previous: {
+          stats: e.stats,
+          description: description || "",
+          d: e.d ?? null,
+          scoped: e.scoped ?? null,
+          at: e.at ?? null,
+        },
+      };
+      n++;
+    }
+    if (!n) return 0;
+    await client.query("UPDATE boards SET facet_diagnostics=$1 WHERE id=$2", [JSON.stringify(map), boardId]);
+    return n;
+  });
+}
+
+// Worked examples for the diagnosis prompt: items where this facet was contested
+// (agreed < of, most contested first) or unanimous (agreed = of). The two sets
+// are disjoint by construction and the prompt shows them as labelled groups —
+// shown only failures, a model can never reach the "your taxonomy is fine"
+// verdict, so every board would read as broken.
+//
+// The whole-item `description`, NOT the per-facet sentence (tag_reasoning->>key).
+// That looks like the better source and is systematically absent exactly where
+// it is needed: mergeVotes takes the sentence from the earliest run that
+// selected what was KEPT, and from nowhere when no single run proposed that set
+// — routine on a multi-value facet, and multi-value facets are the unstable
+// ones. Reaching for it would bias the sample toward the items that agreed.
+//
+// Contested items order on the RATIO: `of` is how many runs completed, not the
+// configured ai_votes, so a board carries a mix of 2-, 3- and 5-run items and
+// ordering on `agreed` alone would rank 1-of-2 above 2-of-5.
+export async function facetExamples(db, boardId, key, stamp, { contested, limit }) {
+  const { rows } = await db.query(
+    `SELECT i.tag_reasoning->>'description' AS description,
+            e.value->'votes' AS votes,
+            (e.value->>'agreed')::int AS agreed,
+            (e.value->>'of')::int AS of
+     FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
+     WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+       AND e.key = $2 AND e.value->>'d' = $3
+       AND (e.value->>'agreed')::int ${contested ? "<" : "="} (e.value->>'of')::int
+       AND i.tag_reasoning ? 'description'
+     ORDER BY ${contested ? "(e.value->>'agreed')::numeric / (e.value->>'of')::int ASC," : ""} i.id
+     LIMIT $4`,
+    [boardId, key, stamp, limit]
+  );
+  return rows;
+}
+
 // The mapping to stamp for AI extraction: the given mapping when it has AI
 // work in it (derived identity or AI fields), else null. Mirrors ingest's
 // hasMapping gate.
@@ -827,7 +999,12 @@ const BOARD_COLS =
   "id, name, facets, context, ai_reasoning, ai_research, ai_votes, ai_key_id, ai_model, " +
   "extract_key_id, extract_model, " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, " +
-  "ingest, ingest_next_run_at, ingest_state, created_at";
+  "ingest, ingest_next_run_at, ingest_state, facet_diagnostics, created_at";
+// Hand-written, so a new column is invisible until it is named here — which is
+// how a feature evaporates into "it never writes anything" with a green suite.
+// facet_diagnostics is read by the board modal and the diagnostics surface; the
+// worker's own loop selects it explicitly (boardsWithVotes) and does not rely on
+// this list.
 
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false, extras = {}) {
   const id = crypto.randomUUID();
@@ -880,6 +1057,12 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   if (ingest !== undefined) { vals.push(ingest === null ? null : JSON.stringify(ingest)); sets.push(`ingest=$${vals.length}`); }
   if (ingestNextRunAt !== undefined) { vals.push(ingestNextRunAt); sets.push(`ingest_next_run_at=$${vals.length}`); }
   // ingest_state is deliberately absent: the sweep owns it (setIngestState).
+  // facet_diagnostics likewise (setFacetDiagnostic) — with one exception the
+  // routes handle rather than this function: changing `facets` demotes the
+  // findings for the facets whose definition moved. That needs the OLD facet
+  // list to diff against, which this function does not read and must not start
+  // reading — the modal sends `facets` on every save, so "facets !== undefined"
+  // is not "the taxonomy changed". See demoteFacetDiagnostics.
   if (!sets.length) return false;
   vals.push(id);
   const result = await db.query(`UPDATE boards SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);

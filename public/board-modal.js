@@ -8,6 +8,7 @@ import { toast } from "/toast.js";
 import { createModal, sectionHeading } from "/modal.js";
 import { api } from "/api.js";
 import { buildMappingPane } from "/mapping-modal.js";
+import { diagnosisBlock } from "/facet-diagnostics.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
@@ -45,7 +46,11 @@ export function switchRow(label, hint, checked, onChange, opts = {}) {
   return row;
 }
 
-export function buildFacetEditor(textarea) {
+// `stats` is the roll-up rows keyed by facet, `gates` the thresholds the worker
+// gates on — both from the board payload, both optional so the admin page's
+// new-board path (which has neither) is unaffected.
+export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
+  const statsByKey = new Map((stats || []).map((r) => [r.key, r]));
   textarea.hidden = true;
   let facets = [];
   try { facets = JSON.parse(textarea.value) || []; } catch {}
@@ -142,6 +147,28 @@ export function buildFacetEditor(textarea) {
       descIn.value = f.description || "";
       descIn.oninput = () => { f.description = descIn.value; sync(); };
       facetEl.appendChild(descIn);
+
+      // The facet's finding, rendered under the description it is about —
+      // which is exactly where the fix gets typed. Display only: the per-facet
+      // retag control deliberately lives on the boards-list row instead, where
+      // retagging against a gloss the user has edited but not saved is
+      // impossible rather than merely guarded against.
+      //
+      // Keyed on the STORED facet key, so a facet the user is still naming has
+      // no stats to look up and renders nothing — right, since nothing has
+      // measured it under that name.
+      const row = statsByKey.get(f.key);
+      if (row) {
+        const block = diagnosisBlock(row, gates, (suggestion) => {
+          const base = descIn.value.trim();
+          descIn.value = base ? `${base} ${suggestion}` : suggestion;
+          f.description = descIn.value;
+          sync();
+          descIn.focus();
+          descIn.setSelectionRange(descIn.value.length, descIn.value.length);
+        });
+        if (block) facetEl.appendChild(block);
+      }
 
       const valuesEl = document.createElement("div");
       valuesEl.className = "fe-values";
@@ -301,7 +328,7 @@ export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null }
 //                    edits that's the sent payload, incl. `mapping` when the
 //                    pane was touched).
 export async function openBoardModal(boardId, opts = {}) {
-  const { canEditAI = false, onSaved } = opts;
+  const { canEditAI = false, onSaved, focusFacet = null } = opts;
   let board = null;
   if (boardId) {
     try { board = await api("GET", `/api/boards/${boardId}/settings`); }
@@ -357,7 +384,19 @@ export async function openBoardModal(boardId, opts = {}) {
   const facetsTextarea = document.getElementById("board-modal-facets");
   // New boards open with an empty taxonomy (the "[]" prefilled above) — boards
   // own their facets, and an empty taxonomy is a valid, non-tagging board.
-  buildFacetEditor(facetsTextarea);
+  buildFacetEditor(facetsTextarea, { stats: board?.facet_stats, gates: board?.facet_gates });
+
+  // Arrived from the Diagnostics modal's "Edit this facet": bring that facet's
+  // description into view and put the cursor in it. Without this the user lands
+  // at the top of a nine-facet taxonomy and has to find the one they clicked.
+  if (focusFacet) {
+    const idx = (board?.facets || []).findIndex((f) => f.key === focusFacet);
+    const desc = idx >= 0 ? facetsTextarea.nextElementSibling?.querySelectorAll("textarea.fe-desc")[idx] : null;
+    if (desc) {
+      desc.scrollIntoView({ block: "center" });
+      desc.focus();
+    }
+  }
 
   // Mapping pane. Visibility is via `display` (not the `hidden` attribute) so
   // the pane's own flex layout can't override it.

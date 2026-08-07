@@ -102,6 +102,7 @@ import {
   boardNextRefreshAt,
   setIngestNextRun,
   setIngestState,
+  demoteFacetDiagnostics,
   clearIngestDrain,
   ingestedKeys,
   ingestedAmong,
@@ -124,6 +125,7 @@ import {
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 import sharp from "sharp";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
+import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, MODEL_KINDS, PROVIDERS } from "./providers.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -813,6 +815,12 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     facets: board.facets,
     context: board.context,
     ai_reasoning: board.ai_reasoning !== false,
+    // Vote mode's pass count. The gallery needs it to gate anything that reads
+    // per-facet confidence — a single-pass board has none at all (tag_confidence
+    // {} means NOT MEASURED), so a control that surfaces it would be permanently
+    // empty there. /settings has carried it since 0029; this payload is what the
+    // gallery actually loads.
+    ai_votes: board.ai_votes || 1,
     mapping: board.mapping || null,
     search: embeddingOk,
     manage: canManage,
@@ -918,6 +926,11 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     ai_reasoning: b.ai_reasoning !== false,
     ai_research: b.ai_research === true,
     ai_votes: b.ai_votes || 1,
+    // The facet editor renders each facet's finding under the description being
+    // edited, which is where the fix gets typed. Same rows as /facet-stats, so
+    // the two surfaces cannot disagree about what a facet's state is.
+    facet_gates: GATES,
+    facet_stats: await facetRollup(db, b),
     auto_tag: b.auto_tag !== false,
     auto_tag_periodic: !!b.auto_tag_periodic,
     auto_tag_every_min: b.auto_tag_every_min || 1440,
@@ -939,11 +952,36 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
   });
 }));
 
+// Per-facet tagging consistency: how often the board's own tagger agreed with
+// itself, facet by facet (planning/facet-diagnosis-plan.md §1). Answering "which
+// of my facets is a coin flip" has needed hand-written SQL until now.
+//
+// requireBoardManager, matching the edit pencil rather than the jobs chip: the
+// number is only actionable to someone who can edit the taxonomy it measures.
+// `votes` rides along because 1 means the board measures nothing at all — {} is
+// NOT MEASURED, never zero agreement — and a reader has to tell that from a
+// board that measured and found no problem.
+app.get("/api/boards/:id/facet-stats", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  res.json({
+    votes: req.board.ai_votes || 1,
+    // The thresholds the loop gates on ride out with the numbers they apply to.
+    // The client decides which of the five states a facet is in, and a copy of
+    // these in the browser would drift the first time either is retuned — with
+    // a symptom (a facet stuck "awaiting re-measurement" while the loop happily
+    // re-diagnoses it) that reads as a bug in neither half.
+    gates: GATES,
+    facets: await facetRollup(db, req.board),
+  });
+}));
+
 app.patch("/api/boards/:id", requireAuth, requireBoardManager, wrap(async (req, res) => {
   const prev = req.board;
-  const { update, error, sweep } = await buildBoardContentUpdate(req.body, prev);
+  const { update, error, sweep, demote } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
   if (Object.keys(update).length > 0) await updateBoard(db, prev.id, update);
+  // A redefined facet's finding quotes wording that no longer exists; its stats
+  // are the only baseline for "was 60% unanimous, now 88%". Demote, don't drop.
+  await demoteFacetDiagnostics(db, prev.id, demote);
   // A saved config supersedes any half-drained run of the old one — a stale
   // drain_left would hand the next run the dead config's budget as its limit.
   if (update.ingest !== undefined) await clearIngestDrain(db, prev.id);
@@ -1120,12 +1158,22 @@ function facetsReservedKeyError(facets) {
 async function buildBoardContentUpdate(body = {}, prev) {
   body = body || {};
   const update = {};
+  // Facets whose DEFINITION moved, with the wording being replaced. Returned
+  // beside `update` for the route to act on, exactly as `sweep` is: the write
+  // itself is a second statement against a worker-owned column, not something
+  // updateBoard can fold in.
+  //
+  // DIFFED, never fired on `body.facets !== undefined` — the board modal sends
+  // `facets` on every save, so that test would demote every finding on the board
+  // the first time someone renames it.
+  let demote = [];
   if (body.name !== undefined) update.name = String(body.name).trim();
   if (body.facets !== undefined) {
     if (!Array.isArray(body.facets)) return { error: "facets must be an array" };
     const reserved = facetsReservedKeyError(body.facets);
     if (reserved) return { error: reserved };
     update.facets = body.facets;
+    demote = editedFacets(prev?.facets || [], body.facets);
   }
   if (body.context !== undefined) update.context = String(body.context);
   if (body.ai_reasoning !== undefined) update.aiReasoning = !!body.ai_reasoning;
@@ -1210,7 +1258,7 @@ async function buildBoardContentUpdate(body = {}, prev) {
     update.autoTagNextRunAt = null;
   }
 
-  return { update, error: null, sweep: eff.autoTag && !prev.auto_tag };
+  return { update, error: null, sweep: eff.autoTag && !prev.auto_tag, demote };
 }
 
 // Clamp a requested auto-tag interval to something sane; null when unparsable.
@@ -1448,7 +1496,7 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const id = req.params.id;
   const prev = await getBoard(db, id);
   if (!prev) return res.status(404).json({ error: "not found" });
-  const { update, error, sweep } = await buildBoardContentUpdate(req.body, prev);
+  const { update, error, sweep, demote } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
 
   // Admin-only fields, layered on top of the shared content set.
@@ -1510,6 +1558,9 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   }
 
   if (Object.keys(update).length > 0) await updateBoard(db, id, update);
+  // See the board-manager PATCH: a redefined facet's finding no longer describes
+  // it, but its stats are the baseline the next measurement is read against.
+  await demoteFacetDiagnostics(db, id, demote);
   if (inputSwitched) await setIngestState(db, id, null);
   else if (update.ingest !== undefined) await clearIngestDrain(db, id);
 

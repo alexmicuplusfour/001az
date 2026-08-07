@@ -557,3 +557,29 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .al-firing { cursor: pointer; }
 .al-firing:hover { background: #f6f7f8; }
 .al-firing.al-new .job-label { font-weight: 600; }
+
+/* ─── facet diagnosis (planning/facet-diagnosis-plan.md §6) ───
+   One block shape, used in two places: inline under the description being
+   edited (facet editor) and inside the Diagnostics modal. Indented to the same
+   22px gutter as .fe-desc so it reads as belonging to its facet. */
+.fd-block { margin: 0 0 8px 22px; padding: 7px 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; border-left: 2px solid transparent; }
+.fd-finding { background: #fff7ed; border-left-color: #f59e0b; color: #7c4a03; }
+.fd-note, .fd-awaiting { background: #f6f6f9; border-left-color: #d8d8de; color: #6b6b72; }
+.fd-improved { background: #f0fdf4; border-left-color: #22c55e; color: #14532d; }
+.fd-head { display: block; font-weight: 500; margin: 0 0 3px; }
+.fd-why { color: inherit; opacity: .9; }
+.fd-suggestion { margin-top: 5px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.fd-note { font-size: 11px; opacity: .85; margin-top: 3px; }
+.fd-apply { flex: none; background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 0; white-space: nowrap; }
+.fd-apply:hover { text-decoration: underline; }
+
+/* The modal's own survey chrome. Read-only by construction — the only control
+   in here is the one that hands the user off to the editor. */
+.fd-intro { font-size: 12px; color: #6b6b72; line-height: 1.5; margin: 0 0 14px; }
+.fd-card { padding: 10px 0; border-top: 1px solid #eee; }
+.fd-card:first-of-type { border-top: none; }
+.fd-card-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+.fd-stat { font-size: 11px; color: #9aa0aa; margin-left: auto; white-space: nowrap; }
+.fd-card .fd-block { margin-left: 0; }
+.fd-edit { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 0; }
+.fd-edit:hover { text-decoration: underline; }

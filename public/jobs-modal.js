@@ -22,6 +22,7 @@ const KIND_LABELS = {
   retag: "Retag pass",
   embed: "Embedding",
   refresh: "Refresh",
+  diagnose: "Facet review",
 };
 const OUTCOME_LABELS = {
   ok: "done",
@@ -61,6 +62,16 @@ function summaryFor(j) {
       return bits.join(" · ");
     }
     if (j.kind === "retag") return d.skipped ? `skipped (${d.skipped})` : `queued ${d.queued ?? 0} item${d.queued === 1 ? "" : "s"}`;
+    if (j.kind === "diagnose") {
+      // The RUN belongs in the ledger; the finding itself does not — it is a
+      // standing assessment of a definition, keyed by facet and replaced rather
+      // than appended, so it lives on the board and this row just says a look
+      // was taken. Read the verdict here and go to the facet for the paragraph.
+      const bits = [`${d.unanimous ?? 0}/${d.items ?? 0} unanimous`];
+      if (d.verdict) bits.push(d.verdict.replace(/-/g, " "));
+      if (d.scoped) bits.push("this facet alone");
+      return bits.join(" · ");
+    }
     if (j.kind === "refresh") {
       // detail.fields = the moved values only ({ key: { v } }) — show a few.
       const moved = Object.entries(d.fields || {});

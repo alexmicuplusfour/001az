@@ -56,6 +56,7 @@ import {
 } from "./db.js";
 import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
+import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
 import { pluginInstalled, pluginState } from "./plugins.js";
@@ -367,12 +368,16 @@ export function parseRun(input, facets, allowed) {
 // Merge N independent taggings of ONE item. `runs` is in call order, so runs[0]
 // is the first (cache-warming) call and wins every tie.
 //
-// Per facet the merge records { of, agreed, votes }:
+// Per facet the merge records { of, agreed, votes, d }:
 //   of      — how many runs actually completed (NOT the configured ai_votes;
 //             a failed vote leaves fewer, and an escalating count would vary)
 //   agreed  — how many of them selected exactly what was kept. One definition
 //             for both facet kinds; agreed === of always means unanimous.
 //   votes   — the full tally, INCLUDING the values that lost.
+//   d       — the definition stamp (facetStamp): WHICH wording and WHICH prompt
+//             shape produced the three numbers above. Omitted when `stamps`
+//             doesn't carry the facet, which is what a pre-stamp entry looks
+//             like and must never be mistaken for a current one.
 //
 // The losing values are the reason this is an object rather than a bare
 // fraction. A facet that fails to converge keeps nothing, so the merged answer
@@ -380,7 +385,11 @@ export function parseRun(input, facets, allowed) {
 // exactly what the facet-diagnosis pass needs to read (work item 3). Discarding
 // it would leave "construction is unstable on 18 items" with no way to say what
 // it was unstable BETWEEN.
-export function mergeVotes(facets, runs) {
+//
+// `stamps` is optional and defaults to none: an unstamped merge is exactly what
+// a caller with no board prompt behind it (a test, anything pre-migration) has,
+// and forcing one would mean inventing a definition nobody measured against.
+export function mergeVotes(facets, runs, stamps = {}) {
   if (runs.length === 1) return { ...runs[0], confidence: {} }; // votes=1 is the identity
   // STRICT majority, and floor+1 rather than ceil on purpose: ceil(N/2) is a
   // real majority only for odd N — at N=4 it would let a value supported by
@@ -414,6 +423,7 @@ export function mergeVotes(facets, runs) {
       of: runs.length,
       agreed: runs.filter((r) => sameSet(r.picks[f.key] || [], chosen)).length,
       votes: Object.fromEntries(count),
+      ...(stamps[f.key] ? { d: stamps[f.key] } : {}),
     };
 
     // The justification must belong to the answer that was KEPT — take it from
@@ -643,7 +653,7 @@ export function buildFieldsPrompt(mapping) {
   return { systemText, schema };
 }
 
-// Per-board cache: board_id -> { systemText, schema, allowed, facets, research, aiKeyId, aiModel }
+// Per-board cache: board_id -> { systemText, schema, allowed, facets, stamps, research, aiKeyId, aiModel }
 // Invalidated on board PATCH (server.js) and cleared entirely on key deletion.
 const boardPromptCache = new Map();
 
@@ -689,7 +699,13 @@ async function getBoardPrompt(db, boardId, scope = null) {
   // so N votes multiply a cost the token estimate never sees. Anyone enabling
   // votes by touching the column directly gets the same protection.
   const votes = research ? 1 : Math.max(1, Math.min(5, Number(board.ai_votes) || 1));
-  const entry = { systemText, schema, allowed, facets, allFacets, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  // One stamp per facet this pass asks about, computed HERE rather than per item:
+  // the cache is already keyed by board AND scope, which is exactly the
+  // granularity the hash needs (§2 of the diagnosis plan). Keyed by facet key
+  // rather than stamped onto the facet objects, which are board.facets and
+  // shared with allFacets.
+  const stamps = Object.fromEntries(facets.map((f) => [f.key, facetStamp(f, !!scope?.length)]));
+  const entry = { systemText, schema, allowed, facets, allFacets, stamps, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
   if (byScope) byScope.set(key, entry);
   else boardPromptCache.set(boardId, new Map([[key, entry]]));
   return entry;
@@ -1371,6 +1387,9 @@ export async function resolveIdentity(db, boardId, key, display, reusable, resol
 
 export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBackup = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
+  // The diagnose loop's own cadence. Its settle gate is ten minutes wide, so
+  // ticking it at POLL_MS would re-fail that gate two hundred times to no end.
+  const DIAGNOSE_POLL_MS = Number(process.env.DIAGNOSE_POLL_MS || 60000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
   // Per-resource lanes (worker-rework Stage 1) replace the single global "4": AI
@@ -1519,7 +1538,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   async function tagOne(row) {
     const prompt = await getBoardPrompt(db, row.board_id, row.tag_facets);
     if (!prompt) throw new Error(`board ${row.board_id} has no facets configured`);
-    const { systemText, schema, allowed, facets, votes } = prompt;
+    const { systemText, schema, allowed, facets, stamps, votes } = prompt;
 
     const ai = await resolveBoardAi(db, prompt);
     if (!ai) throw noKeyError();
@@ -1572,7 +1591,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       }
     }
 
-    const merged = mergeVotes(facets, runs);
+    const merged = mergeVotes(facets, runs, stamps);
     const tags = [];
     let filledFacets = 0;
     for (const f of facets) {
@@ -2297,6 +2316,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   let refreshWake = () => {};
   let transcribeWake = () => {};
   let alertsWake = () => {};
+  let diagnoseWake = () => {};
 
   // Fill one lane that has room with a single board-fair BATCH of its stage, sized to
   // the free slots — so boards interleave (a small board's items claim ahead of a big
@@ -2422,6 +2442,40 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   })();
 
+  // Facet diagnosis (planning/facet-diagnosis-plan.md §4), on its own loop for
+  // the alertsLoop reason: this is outbound provider I/O and must not sit inside
+  // the maintenance tick delaying recovery, ingestion or scheduled retags.
+  // Nothing here creates claimable work, so no wake() — the alertsLoop precedent
+  // again. It runs on the slow cadence because its own settle gate is ten
+  // minutes wide; ticking it at POLL_MS would just re-fail that gate 200 times.
+  //
+  // The cursor lives here rather than in the module: it is an ordering, not
+  // state worth a column, and a restart re-starting at the lowest board id costs
+  // one redundant staleness check.
+  //
+  // The provider and the tagger are injected. facet-diagnosis.js sits BELOW this
+  // file in the import graph — worker.js reaches in there for facetStamp — so it
+  // must never reach back, and passing the two functions is what keeps that true.
+  let diagnoseCursor = null;
+  const diagnoseDeps = {
+    resolveAi: (board) => resolveBoardAi(db, { aiKeyId: board.ai_key_id, aiModel: board.ai_model }),
+    tagger: (args) => trackedTagger(db, args),
+  };
+  const diagnoseLoop = (async () => {
+    while (running) {
+      try {
+        const done = await diagnoseDue(db, diagnoseDeps, diagnoseCursor);
+        diagnoseCursor = done?.boardId ?? null;
+        if (done?.calls) console.log(`diagnosed ${done.calls} facet(s) on board ${done.boardId}`);
+      } catch (e) { console.error("worker diagnose error:", e.message); }
+      if (!running) break;
+      await new Promise((r) => {
+        const t = setTimeout(r, DIAGNOSE_POLL_MS);
+        diagnoseWake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
   // Transcription loop — dedicated, separate from the tick, so a multi-minute
   // clip never blocks tagging/embedding/ingestion. It's I/O-bound (awaits the
   // sidecar), so it runs concurrently. It queries audio by payload (not status),
@@ -2528,11 +2582,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     refreshWake();
     transcribeWake();
     alertsWake();
+    diagnoseWake();
     // Drain: let the loops finish their current pass and stop claiming, THEN await the
     // in-flight pipelines (captured after the loops settle, so a final fill's launches
     // are included). server.js caps the total wait.
     return (async () => {
-      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, transcribeLoop, alertsLoop]);
+      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, transcribeLoop, alertsLoop, diagnoseLoop]);
       await Promise.all([...pipelines]);
     })();
   };

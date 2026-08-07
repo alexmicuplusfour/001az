@@ -1,0 +1,26 @@
+-- Facet diagnosis (planning/facet-diagnosis-plan.md §3). Why each facet's
+-- tagging is inconsistent and what wording might fix it — one entry per facet,
+-- written by the worker's diagnose loop:
+--
+--   { construction: { verdict, explanation, values[], suggestion,
+--                     stats: { items, unanimous }, split[], d, scoped, at,
+--                     previous: { stats, description, d, scoped, at } } }
+--
+-- Its own column rather than a field inside boards.facets, because that column
+-- is user data: updateBoard rewrites it wholesale on every modal save, so a
+-- worker writing in there would race the user and one would clobber the other.
+-- ingest_state is the precedent — deliberately excluded from updateBoard,
+-- written only by its own setter, and db.js says so where it is left out.
+--
+-- Not quite ingest_state's single-writer discipline though, and the difference
+-- is deliberate rather than an oversight. A facet edit DEMOTES its entry here:
+-- the stats survive as the baseline for "was 60% unanimous, now 88%", the
+-- finding does not, because a paragraph quoting wording the user just replaced
+-- is worse than no paragraph at all. So the user's save writes here too, in a
+-- transaction, and only to the facets whose definition actually moved.
+--
+-- NOT NULL DEFAULT for 0029's reason, and it is load-bearing rather than tidy:
+-- backup.js loadTable INSERTs only the columns an archive's manifest names, so a
+-- pre-0031 archive relies on this default to restore into a post-0031 schema. A
+-- NOT NULL column without one would make every existing archive unrestorable.
+ALTER TABLE boards ADD COLUMN facet_diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb;
