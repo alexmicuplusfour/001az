@@ -76,6 +76,28 @@ header.header-collapsed {
   height: 120px;
 }
 
+/* The collapsing track. Emptying it collapses the row's CONTENT, and a
+   stretched grid item keeps its own padding, border and margin regardless —
+   which is why the row lives one level in, where those go down with it. Only
+   the track height animates, so there is nothing here to keep in sync.
+
+   min-height frees the track to shrink and its overflow hides the row on the
+   way down. The top padding is headroom for corner alert dots, which overhang
+   their buttons and would otherwise be shaved by that overflow; the negative
+   margin cancels it, in both states — border-box floors the closed track at its
+   own padding, and -8 takes that back. */
+#toolbar-fold {
+  min-height: 0;
+  overflow: hidden;
+  margin-top: -8px;
+  padding-top: 8px;
+  transition: opacity 0.18s ease;
+}
+
+header.header-collapsed #toolbar-fold {
+  opacity: 0;
+}
+
 #toolbar {
   display: flex;
   align-items: center;
@@ -83,32 +105,11 @@ header.header-collapsed {
   margin-bottom: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  /* The collapsing row. min-height frees it to shrink and its own overflow
-     hides the content on the way down. The top padding is headroom for corner
-     alert dots, which overhang their buttons and would otherwise be shaved by
-     that overflow; the negative margin cancels it so the row still sits exactly
-     where it did. */
-  min-height: 0;
-  overflow: hidden;
-  margin-top: -8px;
-  padding-top: 8px;
-  transition: opacity 0.18s ease, margin-block 0.28s ease,
-    padding-block 0.28s ease, border-bottom-width 0.28s ease;
-}
-
-/* Emptying the track collapses the row's CONTENT; a stretched grid item keeps
-   its own padding, border and margin regardless, so those are folded away here
-   too — otherwise the card stops ~21px short of closed. */
-header.header-collapsed #toolbar {
-  opacity: 0;
-  margin-block: 0;
-  padding-block: 0;
-  border-bottom-width: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
   header,
-  #toolbar {
+  #toolbar-fold {
     transition: none;
   }
 }

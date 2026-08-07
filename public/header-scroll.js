@@ -15,22 +15,29 @@ const space = document.getElementById("header-space");
 const COLLAPSE_AFTER = 8;
 const REVEAL_AFTER = 40;
 const REVEAL_AT_TOP = 80; // within this many px of the top, always open
+// Long enough to outlast the card's transition (0.28s, in styles.css). Erring
+// long only postpones a rare re-measure; erring short would take one mid-fold.
+const FOLD_MS = 400;
 
 let lastY = 0;
 let travel = 0; // signed run of movement in the current direction
 let collapsed = false;
 let ticking = false;
+let folding = 0; // timer id while the card is between its two heights
 
 // The card is fixed, so it holds no place in the flow; the spacer holds it for
-// them. Its height is the card's bottom edge, which folds in the 12px the card
-// floats below the viewport top.
+// them. Its height is the OPEN card's bottom edge, which folds in the 12px the
+// card floats below the viewport top — and it keeps that height through the
+// whole fold, so the page below never moves when the card does. That is the
+// entire point of the spacer.
 //
-// Measured only while the card is open, because the reserved space has to
-// describe the open card — rewriting it mid-fold would reflow the page, the one
-// thing this design is built to avoid. The spacer never affects the card's own
-// size, so the observer cannot chase its own tail.
+// Hence the two refusals. Closed, the box is the wrong card to describe.
+// Mid-fold it is neither card: the observer fires on every frame of the
+// transition, so measuring there would drag the gallery up by the height of row
+// 1 and then walk it back down over the next 280ms — a page that visibly jerks
+// every time the header reopens.
 function measure() {
-  if (collapsed) return;
+  if (collapsed || folding) return;
   space.style.height = `${Math.round(header.getBoundingClientRect().bottom)}px`;
 }
 
@@ -38,6 +45,14 @@ function setCollapsed(next) {
   if (next === collapsed) return;
   collapsed = next;
   header.classList.toggle("header-collapsed", next);
+  // One measurement once the card settles, for anything that resized it while
+  // it was closed and got turned away — a filter row that wrapped on a rotate,
+  // say. Costs a single reflow at the end of a fold instead of one per frame.
+  clearTimeout(folding);
+  folding = setTimeout(() => {
+    folding = 0;
+    measure();
+  }, FOLD_MS);
 }
 
 // Where the page actually is, ignoring rubber-band. Touch platforms let you

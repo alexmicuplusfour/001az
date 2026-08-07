@@ -15,7 +15,10 @@
   </head>
   <body>
     <header>
-      <div id="toolbar"></div>
+      <!-- Row 1 sits in its own wrapper: that wrapper is the grid track the
+           scroll collapse empties (header-scroll.js), and the row's spacing and
+           dividing rule go down inside it. -->
+      <div id="toolbar-fold"><div id="toolbar"></div></div>
       <div id="toolbar-sub"></div>
     </header>
     <div id="header-space" aria-hidden="true"></div>
