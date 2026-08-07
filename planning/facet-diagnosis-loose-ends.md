@@ -702,6 +702,89 @@ those two rules outright, and it is fixed here. 840 tests pass.
   that makes a previously-impossible state reachable needs its own coverage, and
   the suite cannot ask for it.
 
+- [x] **41. The freshness key tracked WHICH twelve items, never WHAT THEY SAY.**
+  *(fixed — demonstrated with both prompts printed side by side)*
+
+  `questionKey` was `v3 | d | rate bucket | the twelve ids`. The comment above it
+  said the evidence term was *"the split values, and the identity **and tallies**
+  of the worked examples"*, and its worked table claimed `133 items re-measured →
+  tallies move → re-ask`. Neither was true of the code. The split values were not
+  in the key at all, and the examples contributed only their ids.
+
+  The ids are close to immovable, which is what makes this bad rather than
+  cosmetic. `facetEvidenceIds` ordered contested rows by `agreed/of` and broke
+  ties on `i.id`; on a three-vote board that ratio takes three values, so ties are
+  dense and the eight slots belong to the eight oldest qualifying rows more or
+  less permanently. The four unanimous examples are `ORDER BY i.id LIMIT 4` —
+  the oldest four, outright.
+
+  Reproduced by inverting every contested tally and rewriting every description
+  while preserving each `agreed/of`:
+
+  ```
+  key before   v3|557d0f9dd609|80|1,2,3,4,5,6,7,8,18,19,20,21
+  key after    v3|557d0f9dd609|80|1,2,3,4,5,6,7,8,18,19,20,21
+
+  model saw    "mark 0: a rounded wordmark"
+  model would  "a broad angular slab, nothing rounded about it"
+  re-asked?    false
+  ```
+
+  The suite already contained the proof and had it filed as acceptable: *"the
+  blind spot: a re-measurement that reproduces the counts exactly is missed"* was
+  written when the key was counts-only (defect 37) and kept passing after the
+  evidence term landed — a green test asserting exactly the behaviour the module's
+  own comment said was impossible.
+
+  This is also what made 39 lethal rather than self-healing. Lose the `stale` mark
+  on a whole-board retag and the backstop is this key; the key could not see the
+  retag; the finding stood forever.
+
+  **Fixed by keying on what the prompt SHOWS**: each example's id, `agreed/of`,
+  vote tally and description, hashed. The tally is sorted before hashing rather
+  than trusted to arrive in a stable jsonb order — otherwise a facet re-diagnoses
+  on which nothing happened.
+
+  **And `facetEvidenceIds` is deleted rather than extended.** It existed to be a
+  cheaper twin of `facetExamples`, under a comment warning that the two "must stay
+  byte-identical in WHERE and ORDER BY or it would be tracking a different twelve
+  from the ones the model reads" — which is the weakest guard there is, and they
+  had already diverged in the way that mattered. The loop now calls `facetExamples`
+  itself and hands the rows down to `diagnosisSample`, so the check and the prompt
+  read the same twelve **by construction**. The paying path drops from four
+  queries to two; the check path goes from one to two, run in parallel, which is
+  the same two scans the UNION ALL was already doing.
+
+  Measured before being claimed, on a seeded 4,600-item board with nine facets —
+  the same shape defect 37 benchmarked:
+
+  ```
+  facetRollup, the READ path both modals use     68 ms   untouched by this
+  check path, nine facets in parallel — new      87 ms
+  check path, nine facets in parallel — old      80 ms
+  check path, one facet — new                    25 ms
+  check path, one facet — old                    39 ms
+  ```
+
+  Within noise, which is the expected answer: the UNION ALL was already executing
+  both branches, and two statements in parallel do the same two scans. The number
+  that matters is the first — 37's disaster was this question landing on a page
+  load, and it is still nowhere near one. In production the loop runs these
+  sequentially rather than nine-up, so the real per-tick cost is ~225 ms of worker
+  time, once a minute, on a board that has fallen quiet.
+
+  **What is deliberately still out, and now written down rather than implied:**
+  the "where they parted" line. It counts split values over every contested item
+  on the board, not just the twelve, so a tension that shifts across the bulk
+  while the twelve hold and the rate keeps its bucket is missed. Hashing its
+  counts was rejected because they move on a retag of ANY size — the one thing
+  rule 1 exists to prevent — and rank-hashing jitters on ties. Pinned as its own
+  test.
+
+  **Cost, stated here rather than discovered in the UI:** the key's shape changes,
+  so every stored `k` mismatches and every eligible facet re-diagnoses once on its
+  next settled tick. One call each, at ~1-2k input.
+
 ## Behaviour worth a decision (no change made)
 
 - **14. A diagnosis in flight can undo the save that demotes it.** *(half closed

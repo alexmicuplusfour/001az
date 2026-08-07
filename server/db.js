@@ -673,39 +673,21 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
   return rows;
 }
 
-// WHICH items the diagnosis would reason from — the same two groups
-// facetExamples returns, same filters, same ordering, ids only. The loop asks
-// this to decide whether the twelve have changed since the stored finding was
-// written, and it must stay byte-identical to facetExamples in its WHERE and
-// ORDER BY or it would be tracking a different twelve from the ones the model
-// reads.
+// There was a second query here — facetEvidenceIds — returning the ids of the
+// same two groups facetExamples returns, under a comment warning that it "must
+// stay byte-identical to facetExamples in its WHERE and ORDER BY or it would be
+// tracking a different twelve from the ones the model reads". A warning is the
+// weakest possible guard against that, and it was only ever half the problem:
+// ids are not what the model reads. It reads each item's DESCRIPTION and vote
+// TALLY, and the ordering keys on `agreed/of` alone — so a re-measurement that
+// inverts every tally and rewrites every description while preserving the ratios
+// left the id list byte-identical and the freshness key unmoved. Demonstrated,
+// not argued: same key, "a rounded wordmark" becoming "a broad angular slab".
 //
-// The worker only. It ranks every contested row on the board, which is why it
-// must never end up on a page load — that mistake took the board modal to
-// 611ms.
-export async function facetEvidenceIds(db, boardId, key, stamp, contested, unanimous) {
-  const { rows } = await db.query(
-    `(SELECT i.id::text AS id
-      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
-      WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
-        AND e.key = $2 AND e.value->>'d' = $3
-        AND (e.value->>'agreed')::int < (e.value->>'of')::int
-        AND i.tag_reasoning ? 'description'
-      ORDER BY (e.value->>'agreed')::numeric / (e.value->>'of')::int ASC, i.id
-      LIMIT $4)
-     UNION ALL
-     (SELECT i.id::text AS id
-      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
-      WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
-        AND e.key = $2 AND e.value->>'d' = $3
-        AND (e.value->>'agreed')::int = (e.value->>'of')::int
-        AND i.tag_reasoning ? 'description'
-      ORDER BY i.id
-      LIMIT $5)`,
-    [boardId, key, stamp, contested, unanimous]
-  );
-  return rows.map((r) => r.id);
-}
+// So the loop calls facetExamples itself and hashes the rows it gets back
+// (facet-diagnosis.js, facetEvidence). One query pair serves the check and the
+// prompt, which is what makes "the same twelve" true by construction rather than
+// by a comment nobody re-reads.
 
 // Of the given item ids, which are currently queued for tagging. A primary-key
 // lookup over at most a dozen ids per facet — the cheap half of the arming

@@ -396,30 +396,68 @@ test("a scoped retag supersedes only the facets it names", async () => {
   assert.equal(all.motif.stale, undefined, "nothing is re-measuring motif");
 });
 
-test("the blind spot: a re-measurement that reproduces the counts exactly is missed", async () => {
-  // Recorded rather than fixed, and pinned so it is visible to whoever next
-  // touches the key. Every item's votes are rewritten and every agreed/of is
-  // preserved, so `unanimous/items` is untouched and the loop sees no reason to
-  // re-ask — even though the worked examples now say something different.
-  //
-  // The version that caught this hashed the examples, and cost 128-244ms per
-  // modal open to do it. What survives the trade is the shape of the risk: it
-  // needs a re-measurement to land on the SAME unanimous count, which is
-  // plausible on twenty items and vanishing on two thousand — and the boards
-  // where a stale paragraph matters are the large ones.
-  const b = await board("blindspot");
+// Was "the blind spot: a re-measurement that reproduces the counts exactly is
+// missed", and it stayed one after the key gained an evidence term, because that
+// term held the twelve items' IDS. The ordering keys on `agreed/of` and ties
+// break on `i.id`, so preserving every ratio pins the same eight rows in the same
+// slots — on a three-vote board the ratio takes three values, so ties are dense
+// and those slots belong to the oldest rows more or less permanently.
+//
+// Demonstrated before it was fixed: same key `v3|557d0f9dd609|80|1,2,…,21`, and
+// the model would have been shown "a broad angular slab, nothing rounded about
+// it" where it had read "a rounded wordmark".
+test("a re-measurement that reproduces the counts is caught by what the twelve SAY", async () => {
+  const b = await board("re-measured");
   await seedUnstable(b);
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 1);
 
+  // A full retag lands: the tension inverts and the tagger re-describes every
+  // item. Every agreed/of is preserved, so the rate, the ordering and the id list
+  // are all untouched — nothing a summary or an identity could see.
   await db.query(
-    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', $2::jsonb)
+    `UPDATE items SET
+       tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', '{"round":1,"wide":2}'::jsonb),
+       tag_reasoning  = jsonb_build_object('description', 'a broad angular slab')
      WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
-    [b, JSON.stringify({ round: 1, wide: 2 })]
+    [b]
   );
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 1, "the counts did not move, so nothing re-asks");
+  assert.equal(deps.calls.length, 2, "the examples say something else, so it is a different question");
+
+  // And it is the CONTENT, not the churn: re-running the same write changes
+  // nothing, so the third tick spends nothing.
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 2);
+});
+
+test("…but a change that reaches none of the twelve, at an unmoved rate, is still not caught", async () => {
+  // The residual, pinned rather than left to be rediscovered. The key holds what
+  // the prompt SHOWS: the rate to five points, and the twelve worked examples.
+  // The "where they parted" line summarises every contested item on the board and
+  // is deliberately absent — its counts move on a retag of any size, which is the
+  // one thing rule 1 exists to prevent.
+  //
+  // seedUnstable's contested rows take the lowest ids, so the eight shown are the
+  // first eight; anything past them is outside the sample the finding was
+  // reasoned from, and re-measuring it is invisible here by design.
+  const b = await board("outside");
+  await seedUnstable(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  const shown = (await diagnosticsOf(b)).shape.evidence;
+  assert.equal(shown.length, 12, "eight contested and four unanimous");
+
+  const { rowCount } = await db.query(
+    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', '{"round":1,"wide":2}'::jsonb)
+     WHERE board_id=$1 AND NOT (id = ANY($2::bigint[]))
+       AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
+    [b, shown]
+  );
+  assert.ok(rowCount > 0, "there are contested items outside the twelve");
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1, "nothing the model would be shown has changed");
 });
 
 test("…but a moved rate re-diagnoses", async () => {

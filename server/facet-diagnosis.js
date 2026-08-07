@@ -10,7 +10,7 @@
 // provider, the tagger) has to be injected by the caller rather than imported.
 import crypto from "node:crypto";
 import {
-  boardFacetSegments, facetSplitValues, facetExamples, facetEvidenceIds,
+  boardFacetSegments, facetSplitValues, facetExamples,
   boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog, bumpUsage,
 } from "./db.js";
 
@@ -213,21 +213,24 @@ export async function facetRollup(db, board) {
 // the one segment pickSegment chose. Returns null for an unmeasured facet rather
 // than an empty sample — there is nothing to ask about, and an empty sample
 // would be asked anyway.
-// Reached only when a call is about to be paid for. It used to carry a
-// `withExamples: false` mode so the staleness check could ask for the cheap
-// third of it (defect 2, which cut that path from three queries to one); the
-// freshness key reads nothing at all now, so the check never comes here and the
-// mode had no callers left.
-export async function diagnosisSample(db, boardId, segment) {
+// Reached only when a call is about to be paid for, and it now costs ONE query
+// to get there: the freshness check has already read the worked examples — it has
+// to, since what they say is the question — so the only thing left to fetch is
+// the split line. The history is worth keeping because it went round twice: this
+// once carried a `withExamples: false` mode so the check could buy the cheap
+// third of it (defect 2), then the check stopped reading anything at all (defect
+// 37) and the mode lost its callers, and now the check reads MORE than this does
+// and hands its result down.
+export async function diagnosisSample(db, boardId, segment, examples = null) {
   if (!segment.d) return null;
-  const [split, contested, unanimous] = await Promise.all([
+  // `examples` is the freshness check's own read, handed down. It fetched exactly
+  // these two groups a moment ago to decide whether to spend at all, so fetching
+  // them again would be two wasted queries AND a second chance for the check and
+  // the prompt to disagree about which twelve items this paragraph is about.
+  const [split, { contested, unanimous }] = await Promise.all([
     facetSplitValues(db, boardId, segment.key, segment.d),
-    facetExamples(db, boardId, segment.key, segment.d, { contested: true, limit: CONTESTED_SHOWN }),
-    facetExamples(db, boardId, segment.key, segment.d, { contested: false, limit: UNANIMOUS_SHOWN }),
+    examples || facetEvidence(db, boardId, segment),
   ]);
-  // All three at once now, where the split query used to run first and alone so
-  // its result could answer the staleness question before the other two were
-  // paid for. Nothing asks that of it any more.
   // `unanimous` empty is a legitimate and informative state (a facet that never
   // once converged), not a reason to fall back to the contested set — reusing
   // those would make the comparison the prompt asks for circular.
@@ -398,73 +401,54 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
   return { systemText, schema: DIAGNOSE_SCHEMA, parts: [{ kind: "text", text }] };
 }
 
-// What "this diagnosis is still current" means: the same measurements, of the
-// same definition, parting on the same values.
-//
-// `d` does most of the work — it already carries both the wording and the prompt
-// shape — so this only has to catch the case where the numbers moved under an
-// unchanged definition.
-//
-// Two halves, and every version that shipped one without the other broke:
-//
-//   rate alone, bucketed  a whole re-tag passed unnoticed — 2,143 items to
-//                         2,276 at 37% on both sides is one bucket, so the key
-//                         matched and a finding about a sample that no longer
-//                         existed stood indefinitely
-//   counts, exact         the opposite — 20 new items on 3,000 changed the key
-//                         and bought a re-read of all 3,020, which returns the
-//                         same paragraph because the new items are 0.7% of the
-//                         sample and reach none of the worked examples
-//
-// The bucket was never the mistake. Keying on a SUMMARY and nothing else was:
-// with no term for the evidence, a re-measurement that preserved the average
-// was invisible. Adding exact counts made the summary sharper, which is the
-// wrong axis — a count is not evidence either, it just moves more often.
-//
-// So both, each answering the question it can:
-//
-//   EVIDENCE   the split values, and the identity and tallies of the worked
-//              examples. Changes when the items the model reasons from change,
-//              whatever the average does.
-//   RATE       bucketed to 5 points. Changes when the SEVERITY changes, whatever
-//              the individual items do — 81% inconsistent and 40% inconsistent
-//              are different questions even over the same eight examples, and
-//              the second is far likelier to be "these items really are mixed".
-//
-//   +20 items not in the top eight    evidence same, bucket same    skip
-//   133 items re-measured             tallies move                  re-ask
-//   the contested items hand-fixed    they leave the sample         re-ask
-//   21 clean items land, 81% -> 40%   bucket moves                  re-ask
-//
-// Five points is an absolute step on a bounded quantity, which is why it needs
-// no justification of the kind a tolerance on a raw count would: it is "the
-// rate moved enough to read differently", not a guess about how much churn is
-// too much.
-//
-// The reader hides a finding on exactly this condition — `current` on the
-// roll-up row, from this same function. The two must stay in step: whatever
-// this re-diagnoses the UI hides, and whatever the UI hides this re-diagnoses,
-// or a facet goes silent with nothing coming to replace it.
 // A finding goes out of date in exactly two ways, and they are checked in
 // different places because they cost different amounts.
 //
 //   THE NUMBER MOVED. The headline says "the tagger contradicted itself on 37%
 //     of items". Add 500 items that all tag cleanly and that becomes a lie.
 //     Bucketed to five points, so growth that cannot change how the sentence
-//     reads does not invalidate it — and free, because both operands are
-//     already on the row. The reader and the loop both compute it.
+//     reads does not invalidate it — and free, because both operands are already
+//     on the row, which is why this is the half the READER can also compute.
+//     Five points is an absolute step on a bounded quantity, so it needs no
+//     defence of the kind a tolerance on a raw count would: it is "the rate moved
+//     enough to read differently", not a guess about how much churn is too much.
 //
-//   THE EVIDENCE MOVED. The explanation was written from twelve specific items.
-//     Re-tag, correct or delete any of those and the reasoning is about data
-//     that is gone. Exact, and about ROWS rather than about size, so re-tagging
-//     five items on a board of 2,500 answers "no" and nothing happens. It costs
-//     a ranking query, so ONLY the worker asks it — putting that on a page load
-//     is what took the board modal to 611ms — and a retag answers it inline
-//     from the stored ids instead (supersedeFacetDiagnostics).
+//   THE EVIDENCE MOVED. The explanation was reasoned from twelve specific items,
+//     and what makes it out of date is not that those items were touched but that
+//     they now SAY something else. So the key holds what the prompt puts in front
+//     of the model about each one — its id, its agreed/of, its vote tally and its
+//     description — and nothing the prompt does not show. It costs a ranking
+//     query, so ONLY the worker asks it (that on a page load took the board modal
+//     to 611ms), and a retag answers a cheaper version inline from the stored ids
+//     (supersedeFacetDiagnostics).
 //
-// Adding items trips the first and not the second, which is the point: two
-// values that overlap definitionally still overlap after 500 more logos arrive,
-// so the paragraph survives while the percentage is re-checked.
+// Adding items trips the first and not the second, which is the point: two values
+// that overlap definitionally still overlap after 500 more logos arrive, so the
+// paragraph survives while the percentage is re-checked.
+//
+//   +20 items, none in the twelve      evidence same, bucket same    skip
+//   5 of 2,500 retagged, not the 12    evidence same, bucket same    skip
+//   133 items re-measured              tallies and prose move        re-ask
+//   the contested items hand-fixed     they leave the sample         re-ask
+//   21 clean items land, 81% -> 40%    bucket moves                  re-ask
+//
+// Every earlier version keyed on a SUMMARY of the sample and was blind in the
+// same place — a re-measurement that preserves the average. Bucketed rate missed
+// it; exact counts made the summary sharper, which is the wrong axis; the id list
+// looked like evidence and is not, because the ordering keys on `agreed/of` and
+// ties break on `i.id`, so the same eight rows hold their slots while everything
+// about them changes.
+//
+// WHAT IS STILL NOT IN IT, named rather than left to be rediscovered: the "where
+// they parted" line, which counts split values over EVERY contested item, not
+// just the twelve. A tension that shifts across the bulk of the board while the
+// twelve stay byte-identical and the rate holds its bucket is missed. Hashing it
+// was considered and rejected — its counts move on a retag of ANY size, which is
+// precisely what rule 1 exists to prevent, and rank-hashing it jitters on ties.
+//
+// The reader hides a finding on the FIRST half only (rateHeld) and learns the
+// second from `stale`. It must never be stricter than this, or a facet goes
+// silent with nothing coming to replace it.
 const RATE_BUCKET = 5;
 const rateBucket = (unanimous, items) =>
   (items ? Math.round(((items - unanimous) / items) * (100 / RATE_BUCKET)) * RATE_BUCKET : 0);
@@ -476,13 +460,51 @@ export function rateHeld(entry, segment) {
   return rateBucket(entry.stats.unanimous, entry.stats.items) === rateBucket(segment.unanimous, segment.items);
 }
 
+// The twelve worked examples, in the two labelled groups the prompt shows. The
+// SAME call serves the freshness check and the prompt — one read, handed down —
+// so "the key tracks what the model reads" is true by construction. The previous
+// arrangement was two queries under a comment asking them to please stay
+// identical, and they were not: one returned ids, the other returned what the
+// items say.
+export function facetEvidence(db, boardId, segment) {
+  return Promise.all([
+    facetExamples(db, boardId, segment.key, segment.d, { contested: true, limit: CONTESTED_SHOWN }),
+    facetExamples(db, boardId, segment.key, segment.d, { contested: false, limit: UNANIMOUS_SHOWN }),
+  ]).then(([contested, unanimous]) => ({ contested, unanimous }));
+}
+
+// One worked example, reduced to everything about it the prompt puts in front of
+// the model — and nothing else, so a column the prompt ignores cannot trigger a
+// paid call.
+//
+// The id ALONE was the bug. The ordering keys on `agreed/of`, and on a three-vote
+// board that takes three values, so the contested slots fill with whatever ties
+// at the worst ratio and the tie breaks on `i.id` — which pins the eight oldest
+// rows in place across re-measurement after re-measurement. Every tally could
+// inverts and every description be rewritten under a byte-identical id list.
+//
+// The tally is sorted rather than trusted to arrive in a stable order: it comes
+// back as jsonb, and a key order that changed between reads would re-diagnose a
+// facet on which nothing had happened at all.
+const tallyKey = (v) =>
+  Object.entries(v || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k}=${n}`).join(",");
+const exampleKey = (r) => `${r.id}:${r.agreed}/${r.of}:${tallyKey(r.votes)}:${r.description || ""}`;
+
 // The whole question, worker-side: the definition, the prompt version, the
-// bucketed rate, and which twelve items the model would be shown.
+// bucketed rate, and what the twelve worked examples actually say.
+//
+// Hashed, where the id list used to ride in plain. It has to be: the descriptions
+// alone would put kilobytes of prose into a board column, once per facet. The ids
+// stay legible on `entry.evidence`, which is what a retag looks items up by and
+// what anyone debugging this reads.
 export async function questionKey(db, boardId, segment) {
-  const evidence = await facetEvidenceIds(db, boardId, segment.key, segment.d, CONTESTED_SHOWN, UNANIMOUS_SHOWN);
+  const examples = await facetEvidence(db, boardId, segment);
+  const shown = [...examples.contested, ...examples.unanimous];
+  const digest = crypto.createHash("sha1").update(shown.map(exampleKey).join("|")).digest("hex").slice(0, 16);
   return {
-    k: [`v${PROMPT_VERSION}`, segment.d, rateBucket(segment.unanimous, segment.items), evidence.join(",")].join("|"),
-    evidence,
+    k: [`v${PROMPT_VERSION}`, segment.d, rateBucket(segment.unanimous, segment.items), digest].join("|"),
+    evidence: shown.map((r) => r.id),
+    examples,
   };
 }
 
@@ -499,7 +521,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // ranking query per unstable facet per tick, in the worker, off every page
   // load. It answers both rules at once — the bucketed rate and the twelve items
   // the model would be shown.
-  const { k: fresh, evidence } = await questionKey(db, board.id, segment);
+  const { k: fresh, evidence, examples } = await questionKey(db, board.id, segment);
   // Nothing worth spending on — and it is TWO independent questions, which the
   // single condition this replaces ran together. The cap is about money against
   // an unchanged question; `stale` is about whether the data moved. Neither
@@ -557,7 +579,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   }, false);
 
   const t0 = Date.now();
-  const sample = await diagnosisSample(db, board.id, segment);
+  const sample = await diagnosisSample(db, board.id, segment, examples);
   // Recorded on the entry as what the passes were parting on when this was
   // written. Taken from the sample rather than probed for separately: it is no
   // longer part of the freshness key, so this is the only path that needs it,
