@@ -10,7 +10,7 @@
 // provider, the tagger) has to be injected by the caller rather than imported.
 import crypto from "node:crypto";
 import {
-  boardFacetSegments, facetSplitValues, facetExamples, facetExampleKeys,
+  boardFacetSegments, facetSplitValues, facetExamples,
   boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog, bumpUsage,
 } from "./db.js";
 
@@ -162,16 +162,12 @@ export function pickSegment(facet, rows, queued = 0) {
 // health, and a stored key whose facet has left the board has to not appear at
 // all. Both directions matter, and only one of them is what the data would give
 // you on its own.
-// `fresh: true` adds `current` — whether each stored finding still describes the
-// evidence that is there now (sampleKey). The reader needs it and the loop does
-// not: the loop computes the key itself for the facets it is about to diagnose,
-// and it runs this once per board per tick, where two more queries per facet
-// would be a standing cost to answer a question it is about to ask anyway.
-//
-// It is off by default for that reason, and the routes turn it on. The cost is
-// bounded by the number of facets that actually carry a finding, which on a
-// healthy board is none.
-export async function facetRollup(db, board, { fresh = false } = {}) {
+// Every row carries `current` — whether its stored finding still describes what
+// is measured now. Unconditionally, because sampleKey reads nothing: it is two
+// numbers already on the row, compared to two numbers already on the entry. The
+// flag that used to gate this existed only while the answer cost two queries a
+// facet, and gating it was the smaller half of that mistake.
+export async function facetRollup(db, board) {
   const [rows, scopes] = await Promise.all([
     boardFacetSegments(db, board.id),
     boardQueuedScopes(db, board.id),
@@ -187,14 +183,13 @@ export async function facetRollup(db, board, { fresh = false } = {}) {
   // handing them the halves separately is how one ends up rendering a paragraph
   // beside numbers it was not written about.
   const out = (board.facets || []).map((f) => ({ ...pickSegment(f, rows, queuedFor(f.key)), diagnostic: found[f.key] || null }));
-  if (!fresh) return out;
-  await Promise.all(out.map(async (r) => {
+  for (const r of out) {
     // No stored key means a pre-`k` entry or an attempts-only record; nothing to
     // compare, and `current` stays undefined so the reader falls back to showing
     // it rather than hiding something it cannot reason about.
-    if (!r.diagnostic?.k || !r.d) return;
-    r.current = (await sampleKey(db, board.id, r)).k === r.diagnostic.k;
-  }));
+    if (!r.diagnostic?.k || !r.d) continue;
+    r.current = sampleKey(r) === r.diagnostic.k;
+  }
   return out;
 }
 
@@ -202,19 +197,21 @@ export async function facetRollup(db, board, { fresh = false } = {}) {
 // the one segment pickSegment chose. Returns null for an unmeasured facet rather
 // than an empty sample — there is nothing to ask about, and an empty sample
 // would be asked anyway.
-export async function diagnosisSample(db, boardId, segment, { withExamples = true } = {}) {
+// Reached only when a call is about to be paid for. It used to carry a
+// `withExamples: false` mode so the staleness check could ask for the cheap
+// third of it (defect 2, which cut that path from three queries to one); the
+// freshness key reads nothing at all now, so the check never comes here and the
+// mode had no callers left.
+export async function diagnosisSample(db, boardId, segment) {
   if (!segment.d) return null;
-  // The split values alone answer "has anything moved since the stored finding"
-  // (they are two thirds of the freshness key), and on a settled board that
-  // question is asked every tick and answered "no" every time. Fetching the
-  // worked examples to decide it would be three queries per unstable facet per
-  // minute, forever, to change nothing.
-  const split = await facetSplitValues(db, boardId, segment.key, segment.d);
-  if (!withExamples) return { split, contested: [], unanimous: [] };
-  const [contested, unanimous] = await Promise.all([
+  const [split, contested, unanimous] = await Promise.all([
+    facetSplitValues(db, boardId, segment.key, segment.d),
     facetExamples(db, boardId, segment.key, segment.d, { contested: true, limit: CONTESTED_SHOWN }),
     facetExamples(db, boardId, segment.key, segment.d, { contested: false, limit: UNANIMOUS_SHOWN }),
   ]);
+  // All three at once now, where the split query used to run first and alone so
+  // its result could answer the staleness question before the other two were
+  // paid for. Nothing asks that of it any more.
   // `unanimous` empty is a legitimate and informative state (a facet that never
   // once converged), not a reason to fall back to the contested set — reusing
   // those would make the comparison the prompt asks for circular.
@@ -432,19 +429,44 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 // roll-up row, from this same function. The two must stay in step: whatever
 // this re-diagnoses the UI hides, and whatever the UI hides this re-diagnoses,
 // or a facet goes silent with nothing coming to replace it.
-export async function sampleKey(db, boardId, segment) {
-  const split = (await facetSplitValues(db, boardId, segment.key, segment.d))
-    .slice(0, 5).map((s) => s.value).sort();
-  const rows = await facetExampleKeys(db, boardId, segment.key, segment.d, CONTESTED_SHOWN, UNANIMOUS_SHOWN);
-  const evidence = crypto.createHash("sha1")
-    .update(JSON.stringify(rows.map((r) => [r.id, r.votes])))
-    .digest("hex").slice(0, 12);
-  const bucket = Math.round(((segment.items - segment.unanimous) / segment.items) * 20) * 5;
-  // `d`, the prompt version and the rate stay readable in front of the hash: the
-  // reasons a finding goes stale that a person might have to reason about are
-  // "the wording changed", "we ask a different question now" and "it got better",
-  // and none of them should need a debugger to see.
-  return { k: [`v${PROMPT_VERSION}`, segment.d, bucket, split.join(","), evidence].join("|"), split };
+// It READS NOTHING. Every input is already on the segment the caller is holding,
+// which is what makes it usable on a page load at all.
+//
+// The version this replaces hashed the evidence itself — the split values plus
+// the identity and tallies of the eight worked examples — because that is
+// exactly the question "would the model be shown something different". It is the
+// right predicate and it is unaffordable. Measured on a 4,600-item board:
+//
+//   boardFacetSegments, the roll-up's own scan        34 ms
+//   evidence hash, one query pair per facet          128 ms   (nine in parallel)
+//   evidence hash, batched across the board          244 ms   (a full sort where
+//                                                              LIMIT 8 could top-N)
+//
+// and on a real board it took the board-modal fetch to 611 ms. Both shapes lose
+// for the same reason, which more SQL does not fix: knowing whether the eight
+// MOST-CONTESTED items changed means ranking every contested item, per facet,
+// every time anyone opens a modal.
+//
+// So: the counts, exact. What that gives up, stated plainly —
+//
+//   +20 items on 3,000    counts move, so it re-diagnoses. A wasted call: the
+//                         new items reach none of the worked examples, so the
+//                         paragraph comes back saying the same thing.
+//   any re-measurement    counts move, so it re-diagnoses. The case that
+//                         matters, and the one a 5-point rate bucket missed
+//                         for good.
+//
+// It over-triggers and never under-triggers. That is the safe direction: an
+// extra call costs ~1-2k input tokens and is bounded by the settle gate to one
+// per three minutes, while under-triggering leaves a finding about a sample that
+// no longer exists on screen indefinitely — the bug this whole sequence began
+// with. And the board has to BOTH grow AND then fall quiet to pay, which is a
+// daily event on a real board, not a per-item one.
+//
+// One function for both callers, still. The loop and the reader have to agree
+// about what "current" means, or a facet goes silent with nothing coming.
+export function sampleKey(segment) {
+  return [`v${PROMPT_VERSION}`, segment.d, `${segment.unanimous}/${segment.items}`].join("|");
 }
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
@@ -456,9 +478,13 @@ const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : 
 // facetStamp) and must stay there.
 async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   if (!segment.d) return null;
-  const { k: fresh, split } = await sampleKey(db, board.id, segment);
+  const fresh = sampleKey(segment);
   // Nothing has moved since the last attempt on this facet — either it produced
   // a finding, or it has failed enough times that asking again is just spending.
+  //
+  // Free, and that matters here: this is the answer on almost every tick of a
+  // settled board, and it used to cost a query (defect 2 cut it from three).
+  // Now the whole skip path is arithmetic on numbers the roll-up already read.
   if (prior?.k === fresh && (prior.verdict || (prior.attempts || 0) >= MAX_ATTEMPTS)) return null;
 
   const ai = await deps.resolveAi(board);
@@ -487,6 +513,11 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
 
   const t0 = Date.now();
   const sample = await diagnosisSample(db, board.id, segment);
+  // Recorded on the entry as what the passes were parting on when this was
+  // written. Taken from the sample rather than probed for separately: it is no
+  // longer part of the freshness key, so this is the only path that needs it,
+  // and it is the path that has already paid for the query.
+  const split = sample.split.slice(0, 5).map((s) => s.value).sort();
   const { systemText, schema, parts } = buildDiagnosePrompt(board, facet, segment, sample, prior?.previous);
   let input, usage;
   try {

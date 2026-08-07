@@ -602,6 +602,57 @@ here is wrong inside any single unit.
   this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
   read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
 
+- [x] **37. The freshness key went on the read path and took the board modal to
+  611ms.** *(fixed, reported from the running app — "the edit board and tagging
+  consistency modals now take significantly more to open")*
+
+  35's evidence hash is the correct predicate and it is unaffordable. The reader
+  has to agree with the loop about whether a finding is current, so the hash had
+  to be computed for every facet on every `/settings` and `/facet-stats` fetch —
+  two full `jsonb_each` expansions of `items` per facet, eighteen scans to draw
+  one modal.
+
+  Measured, on a seeded 4,600-item board with nine facets:
+
+  ```
+  boardFacetSegments, the roll-up's own scan     34 ms
+  evidence hash, one query pair per facet       128 ms   (nine in parallel)
+  evidence hash, batched across the board       244 ms   (window function: a full
+                                                          sort where LIMIT 8 could top-N)
+  counts only                                    33 ms   (reads nothing)
+  ```
+
+  Batching it was my first instinct and it was **worse** — the per-facet version
+  was only fast because `Promise.all` ran nine of them at once, and a
+  `row_number() OVER (PARTITION BY …)` has to sort every partition where the
+  per-facet `ORDER BY … LIMIT 8` could top-N. More SQL does not rescue this:
+  knowing whether the eight most-contested items changed means ranking every
+  contested item, per facet, on every page load.
+
+  So the key is `v{PROMPT_VERSION} | d | unanimous/items` — exact counts, read
+  from numbers the roll-up already has. It **over-triggers and never
+  under-triggers**, which is the safe direction:
+
+  - **over**: +20 items on 3,000 re-diagnoses and the paragraph comes back the
+    same. One 1–2k-token call, bounded by the settle gate to one per three
+    minutes, and only when the board both grows *and* then falls quiet.
+  - **the blind spot**: a re-measurement that reproduces the unanimous count
+    exactly is missed. Pinned as a test rather than left to be rediscovered. It
+    needs the retag to land on the same count, which is plausible on twenty
+    items and vanishing on two thousand — and the boards where a stale paragraph
+    matters are the large ones.
+
+  Two things fell out. `facetRollup`'s `fresh` flag is gone: it existed only to
+  keep the loop from paying for an answer the reader needed, and there is no
+  longer anything to pay. And `diagnosisSample`'s `withExamples: false` mode is
+  gone with it — defect 2 added that so the staleness check could buy the cheap
+  third of the sample, and the check now reads nothing at all, so the skip path
+  on a settled board costs **zero queries** where it once cost three.
+
+  Worth recording for the next person: I twice "fixed" this by changing what the
+  key measures without measuring what it cost. The benchmark took ten minutes
+  and reversed the decision both times.
+
 - [x] **36. A finding never said when it was written, and a superseded one went
   blank rather than saying why.** *(fixed, from the user reasoning about the
   behaviour rather than from a screenshot)*

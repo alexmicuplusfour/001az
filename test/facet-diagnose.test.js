@@ -259,24 +259,27 @@ test("a second pass over unchanged measurements spends nothing", async () => {
   assert.equal(deps.calls.length, 1, "the paragraph still describes the data");
 });
 
-test("…and neither does a trickle of new items on an established sample", async () => {
-  // The question that found this: "I have thousands of items and a diagnosis,
-  // then I add 20 more — does that re-diagnose?" It did, and the re-read was
-  // worthless. The sample is read WHOLE, with no recency filter anywhere: the
-  // worked examples are the eight most-contested items on the board and the
-  // four oldest unanimous ones, so twenty arrivals reach neither, the split
-  // values do not move, and the model is asked the same question for money.
+test("a trickle of new items DOES re-diagnose — the price of a key that reads nothing", async () => {
+  // Pinned as a cost, not as a feature. The sample is read whole with no
+  // recency filter: the worked examples are the eight most-contested items on
+  // the board and the four oldest unanimous ones, so twenty arrivals reach
+  // neither group and the paragraph comes back saying the same thing.
   //
-  // Seeded proportionally rather than at the real 3,000 — 100 items with 20
-  // arriving is a HARSHER test than 3,000 with 20, since the same twenty are a
-  // fifth of the sample here instead of 0.7% of it.
+  // Knowing that in advance means ranking every contested item per facet, which
+  // was built and measured and cost 128-244ms on a 4,600-item board — on every
+  // modal open, since the reader has to agree with the loop about what "current"
+  // means. Paying an occasional 1-2k-token call to keep a page load at 33ms is
+  // the trade, and the settle gate bounds it to one per three minutes.
+  //
+  // Seeded proportionally rather than at the real 3,000: 100 items with 20
+  // arriving makes the twenty a fifth of the sample instead of 0.7% of it.
   const b = await board("trickle");
   await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 1);
 
-  // Twenty more in the same proportion, so the rate lands in the same bucket.
+  // Twenty more in the same proportion, so the rate does not move either.
   for (let i = 0; i < 8; i++) {
     await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `new contested ${i}` });
   }
@@ -284,31 +287,59 @@ test("…and neither does a trickle of new items on an established sample", asyn
     await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `new clean ${i}` });
   }
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 1, "same evidence, same severity — nothing to re-ask");
+  assert.equal(deps.calls.length, 2, "it re-asks, and the answer will be the same");
 });
 
-test("…while a re-measurement that leaves the rate alone DOES re-diagnose", async () => {
-  // The other half, and the one a rate-only key could never see: the retag that
-  // started this went 2,143 items to 2,276 with the rate at 37% on both sides,
-  // so a 5-point bucket matched and a finding about a sample that no longer
-  // existed stood indefinitely. Here the numbers do not move at all — same
-  // items, same agreed/of — and only what the passes CHOSE is different, which
-  // is the whole content of the worked examples.
+test("…while a re-measurement that moves the counts re-diagnoses, at 37% either side", async () => {
+  // The case that started all of this and the one a 5-point rate bucket missed
+  // for good: the retag went 2,143 items to 2,276 with the rate at 37% on BOTH
+  // sides, so the bucketed key matched and a finding about a sample that no
+  // longer existed stood indefinitely. Exact counts catch it — the rate is
+  // deliberately held still here so nothing but the counts can be doing the
+  // work.
   const b = await board("remeasured");
+  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 }); // 40%
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+  assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 100, unanimous: 60 });
+
+  for (let i = 0; i < 4; i++) {
+    await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `more contested ${i}` });
+  }
+  for (let i = 0; i < 6; i++) {
+    await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `more clean ${i}` });
+  }
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 2, "110 items is not the 100 the paragraph was written about");
+  assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 110, unanimous: 66 },
+    "…and the rate is 40% on both sides, so only the counts can have caught it");
+});
+
+test("the blind spot: a re-measurement that reproduces the counts exactly is missed", async () => {
+  // Recorded rather than fixed, and pinned so it is visible to whoever next
+  // touches the key. Every item's votes are rewritten and every agreed/of is
+  // preserved, so `unanimous/items` is untouched and the loop sees no reason to
+  // re-ask — even though the worked examples now say something different.
+  //
+  // The version that caught this hashed the examples, and cost 128-244ms per
+  // modal open to do it. What survives the trade is the shape of the risk: it
+  // needs a re-measurement to land on the SAME unanimous count, which is
+  // plausible on twenty items and vanishing on two thousand — and the boards
+  // where a stale paragraph matters are the large ones.
+  const b = await board("blindspot");
   await seedUnstable(b);
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 1);
 
-  const before = (await diagnosticsOf(b)).shape.stats;
   await db.query(
     `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape,votes}', $2::jsonb)
      WHERE board_id=$1 AND (tag_confidence->'shape'->>'agreed')::int < (tag_confidence->'shape'->>'of')::int`,
     [b, JSON.stringify({ round: 1, wide: 2 })]
   );
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 2, "the passes are parting differently now");
-  assert.deepEqual((await diagnosticsOf(b)).shape.stats, before, "…on numbers that did not move at all");
+  assert.equal(deps.calls.length, 1, "the counts did not move, so nothing re-asks");
 });
 
 test("…but a moved rate re-diagnoses", async () => {
