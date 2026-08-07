@@ -23,7 +23,27 @@ const UNANIMOUS_SHOWN = 4;
 // The gates. Every one of these is a guess off one board's data and wants
 // revisiting once several boards have run — env-overridable so a test can move
 // them without pretending the defaults are settled.
-const SETTLE_MS = Number(process.env.DIAGNOSE_SETTLE_MS) || 600000;
+// Three minutes, down from the plan's ten. The reason §4 gave for ten — "a bulk
+// retag lands items over minutes and the tally moves the whole time" — is
+// already the OTHER half of this gate: retagBoardFacets arms every eligible row
+// in one UPDATE, so `busy > 0` holds for the entire run and only falls when the
+// last item lands, and a transient failure requeues to `pending` rather than
+// leaving the queue. What the window actually covers is the tail that `busy`
+// cannot see: a human correcting items one at a time (setItemTags moves the
+// counts with nothing ever queued) and a slow trickle of arrivals between
+// batches.
+//
+// Ten minutes also starves boards outright, which is loose end #16: auto-tag's
+// tightest cadence is 15 minutes, so a board retagging that often with a
+// five-minute drain never sees a ten-minute quiet spell and is silently never
+// diagnosed. Three fits inside that gap.
+//
+// The trade is real in one direction: with the freshness key now exact, a
+// diagnosis taken while the counts are still moving is guaranteed to be
+// superseded and re-asked, so a shorter window buys freshness with the
+// occasional wasted call. At ~1-2k input and ~200 output that is the right side
+// to err on.
+const SETTLE_MS = Number(process.env.DIAGNOSE_SETTLE_MS) || 180000;
 const MIN_ITEMS = Number(process.env.DIAGNOSE_MIN_ITEMS) || 20;
 const MIN_RATE = Number(process.env.DIAGNOSE_MIN_RATE) || 0.30;
 // The UI decides which of the five states a facet is in from the same two

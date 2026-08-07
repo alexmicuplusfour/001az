@@ -602,6 +602,32 @@ here is wrong inside any single unit.
   this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
   read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
 
+- [x] **34. `DIAGNOSE_SETTLE_MS` 10 min → 3 min.** *(changed, and the reason the
+  plan gave for ten turned out not to be a reason)*
+
+  §4 justified ten minutes as *"a bulk retag lands items over minutes and the
+  tally moves the whole time"*. That is the OTHER half of the same gate, not
+  this half: `retagBoardFacets` arms every eligible row in a single `UPDATE`, so
+  `busy > 0` holds for the whole run and drops only when the last item lands,
+  and `failOrRequeue` puts a transient failure back into `pending` rather than
+  out of the queue. The window never had that job. What it genuinely covers is
+  the tail `busy` cannot see: a human correcting items one at a time, where
+  `setItemTags` moves the counts with nothing ever queued, and arrivals
+  trickling in between batches.
+
+  Against which ten minutes actively starves boards — #16 below, now partly
+  answered. Auto-tag's tightest cadence is 15 minutes, so a board on it with a
+  five-minute drain never sees a ten-minute quiet spell and is silently never
+  diagnosed. Three fits in the gap.
+
+  One thing did get more expensive in the other direction, and it is worth
+  naming rather than discovering: defect 32 made the freshness key exact, so a
+  diagnosis taken while the counts are still moving is now *guaranteed* to be
+  superseded and re-asked, where the old 5-point bucket would often have
+  absorbed it. A shorter window therefore buys freshness with the occasional
+  wasted call, at roughly 1–2k input and 200 output each. Right side to err on,
+  but if diagnose spend ever looks high this is the first knob.
+
 - **16. Gate 2 can never pass on a board that never goes quiet**, and it is
   measuring more than it says. `boardTagActivity` reads
   `max(updated_at) FILTER (WHERE status='tagged')`, but `updated_at` is bumped by

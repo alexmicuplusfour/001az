@@ -18,7 +18,7 @@ import { startWorker } from "../server/worker.js";
 
 // The gates are read at module load, which ESM hoists above anything this file
 // could set — so these run against the SHIPPED defaults (20 items, 30%, a
-// ten-minute settle) rather than against convenient ones. Fixtures are sized to
+// three-minute settle) rather than against convenient ones. Fixtures are sized to
 // clear them, and `updated_at = 0` is what puts every seeded item outside the
 // settle window.
 const MIN_ITEMS = 20;
