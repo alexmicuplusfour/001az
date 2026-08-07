@@ -137,17 +137,22 @@ export const ICONS = {
   // beside it, and it read as a smudge in an empty square. Sizing is per-glyph
   // in this set, so reaching the edges of the viewBox is the glyph's own job.
   //
-  // The two ticks are IDENTICAL and share a baseline — same corner y, same tip
-  // y, same arm lengths — rather than the offset pair every icon set draws. The
-  // offset is not decoration: two 45° ticks large enough to fill this box
-  // overlap, and the only way to keep both legible is to slide the second one
-  // down and clip its short arm, which is what made the first attempt read as
-  // one big tick trailed by a small crooked one. Sitting them level costs
-  // height (9.5 units where the offset pair got 15) and buys it back in ink,
-  // since this is four strokes across the full width rather than two. The arms
-  // are steeper than the 45° of `check` for the same reason — that is the price
-  // of two ticks abreast in 20 units with a gap you can still see at 15px.
-  doubleCheck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13 4.5 16.5 10 7"/><path d="M14 13 16.5 16.5 22 7"/></svg>',
+  // Drawn by hand in Illustrator after two attempts here missed it, and the
+  // coordinates are kept ABSOLUTE so the thing that makes it work is legible
+  // rather than the sum of relative deltas: both corners sit at y 18.25 and
+  // both tips at y 5.25. The pair is level, and the second tick's SHORT arm is
+  // the only thing that differs — clipped to 2.7 units against the first's 5.2
+  // so it tucks behind the first's long arm instead of colliding with it.
+  //
+  // That is the move both earlier versions half-had. Offsetting the second tick
+  // downward (every icon set's answer) keeps them apart but reads as one big
+  // tick trailed by a fragment; sitting them level as identical twins fits only
+  // by shrinking both to a smudge. Level corners plus one clipped arm is what
+  // buys 13 units of height AND a pair that reads as a pair.
+  //
+  // `currentColor`, not the `#000000` the export carries: this button styles at
+  // `var(--text-dim)` and brightens on hover, and a hard-coded fill ignores both.
+  doubleCheck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.61 13.66 6.77 18.25 14.3 5.25"/><path d="M11.92 16.01 14.61 18.25 22.13 5.25"/></svg>',
 };
 
 // Corner presence dot for any button — sits centered on the top-right

@@ -273,17 +273,27 @@ that sentence is the one that quietly stops working.
   the same header; two overlapping circles, the runner-up, for sitting one
   button away from the coin chip.
 
-  Drawn twice. The first version used the offset pair every icon set draws —
-  second tick down-right, its short arm clipped — which fills the box but reads
-  as one big tick trailed by a small crooked one, and that is what it looked
-  like in the app. The offset is not decoration, though: two 45° ticks large
-  enough to fill a 24 box overlap, and sliding the second down is the only way
-  to keep both whole. Level ticks are therefore necessarily smaller — 9.5 units
-  of height against the offset pair's 15 — and steeper than the 45° of `check`,
-  which is the price of two abreast in 20 units with a gap still visible at
-  15px. Taken, because a pair that is obviously a *pair* beats a taller pair
-  that reads as one tick and a smudge. The ink lost to height comes back as
-  width: four strokes across the full box rather than two.
+  Drawn three times, and the third came from the user in Illustrator after the
+  first two each got half of it. Version one used the offset pair every icon set
+  draws — second tick down-right, short arm clipped — which fills the box and
+  reads as one big tick trailed by a fragment. Version two made them identical
+  twins on one baseline, which is a legible pair but fits only by shrinking both
+  to 9.5 units of height and steepening the arms past the 45° of `check`.
+
+  The answer holds both at once: **level corners, one clipped arm.** Both ticks
+  sit at y 18.25 and top out at y 5.25 — so the pair is level — and the only
+  thing that differs is the second's short arm, 2.7 units against the first's
+  5.2, clipped so it tucks behind the first's long arm rather than colliding
+  with it. 13 units of height, and unmistakably two of the same mark. The
+  coordinates are stored absolute rather than as the relative deltas the export
+  emits, so the baseline invariant is readable in the source instead of being
+  the sum of two additions.
+
+  The cleanup that matters beyond formatting: the export's `stroke="#000000"`
+  became `currentColor`. This button styles at `var(--text-dim)` and brightens
+  on hover, and a hard-coded stroke would have quietly ignored both — a fourth
+  way for this one button to render wrong, and the only one of the four that
+  would have looked deliberate.
 
   The note in `styles.css` now carries both halves of the lesson, since the next
   icon button will meet the second one too.
