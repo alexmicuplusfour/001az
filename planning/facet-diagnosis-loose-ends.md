@@ -301,8 +301,9 @@ that sentence is the one that quietly stops working.
 ## Third sweep, 2026-08-07 — the last mile, and a surface that does not know which board it is on
 
 A read of the landed code against the product it is supposed to be rather than
-against either surface on its own. Four defects, none fixed in this pass; the
-first three were reproduced against a live database before being believed.
+against either surface on its own. Four defects; the first is fixed here, the
+other three are recorded. All but the last were reproduced against a live
+database before being believed.
 
 Every one of them lives in a **seam**, which is why the suite is green on all of
 it. Two surfaces render the same finding and no test crosses between them, so a
@@ -312,8 +313,8 @@ a board and only one of them is written down. A hash and a prompt describe the
 same facet and are computed in different files from different fields. Nothing
 here is wrong inside any single unit.
 
-- [ ] **19. The `[replace description]` control is unreachable, so the loop's
-  last step is dead code.**
+- [x] **19. The `[replace description]` control is unreachable, so the loop's
+  last step is dead code.** *(fixed)*
 
   `diagnosisBlock` builds `fd-apply` only when `onApply` is passed **and** the
   block is not compact. Both call sites fail one half, and each fails the other
@@ -346,6 +347,36 @@ here is wrong inside any single unit.
   asked to reproduce a three-sentence paragraph they can no longer see. The
   model's proposal is the product; this is the one step where it is not on
   screen.
+
+  **Fixed as a copy in the modal, not as an apply in the editor.** The editor
+  stays read-only, which is 888f770's decision and still the right one: it is a
+  stack of 28px rows, and the argument that a finding cannot be rendered there at
+  a size worth reading applies to a proposal at least as strongly. So the control
+  goes where the text already is — beside the *Suggested description* label,
+  sharing its line — and the clipboard is what crosses the modal boundary. The
+  editor remains the only writer into `boards.facets`, which is the split §3
+  exists to protect; a control in the survey that wrote the description would
+  have dissolved it.
+
+  Three things went with it, and the third is the point:
+
+  - `.fd-apply` became `.fd-copy`, and `.fd-rewrite-cap` gained a flex head so
+    the label and the control share a baseline.
+  - `board-modal.js`'s `execCommand("insertText")` callback is deleted. Its
+    reasoning was sound (a programmatic `.value =` does not go on the textarea's
+    native undo stack, so Ctrl+Z would have skipped past the replacement and
+    silently lost the user's original) and it was reasoning about a call that
+    could never happen. It is recoverable from git if the editor ever writes.
+  - **The `onApply` parameter is gone rather than fixed.** It is what made the
+    defect possible: a callback that one density honoured, the other silently
+    dropped, and that was passed only by the density that dropped it. Removing it
+    means the two surfaces can no longer disagree about who writes, because
+    neither can. The test that pinned the old behaviour asserted the *letter* of
+    the intended rule (`fd-apply` absent from the editor) and passed for the
+    whole period the control existed nowhere at all; it now asserts by class in
+    both directions, and the modal has a test that the copy carries the proposal
+    verbatim — plus one for the no-clipboard path, which over plain HTTP would
+    otherwise be a button that does nothing when pressed.
 
 - [ ] **20. The facet editor renders diagnosis states on boards that measure
   nothing.**
@@ -430,6 +461,50 @@ here is wrong inside any single unit.
   again. Narrower than defect 1 — it needs a database fault, not a provider one —
   but it is the same standing order, and the whole point of `MAX_ATTEMPTS` was
   that no path reaches the next tick having spent money and recorded nothing.
+
+## Fourth sweep — the prompt asked a multi-value facet the single-value question
+
+- [x] **31. The advice did not branch on `single`, and the damage it caused
+  would have scored as a success.** *(fixed, reported from the running app —
+  the user read a finding and noticed it was giving the wrong kind of advice)*
+
+  The prompt states the arity in one line — *"the tagger may pick: any number of
+  values, including none"* — and then asked, unconditionally:
+
+  > The strongest rewrites carry a **precedence rule** for the case where two
+  > values could each stand alone, e.g. *"when a mark has both a uniform stroke
+  > and a colour blend, prefer gradient-blend"*.
+
+  That is single-value advice. Given a contradiction the model resolved it the
+  way it was instructed to, and the rewrite it produced for `construction`
+  (multi-value, 2,406 items, 63% consistent) reads *"if both could apply, prefer
+  gradient-blend only when the effect is a true color transition rather than
+  simple translucency"* — an instruction to the tagger to discard a value that
+  was genuinely present.
+
+  **Why this could not be left to be caught downstream.** Take that advice and
+  recall falls, while agreement *rises*: a facet with fewer values in play has
+  fewer ways to disagree with itself. So the loop would report the regression as
+  a win, state 5 would print *"63% consistent before, 81% now"* over it, and
+  nothing in the feature can distinguish that from a real fix — the whole
+  apparatus reads self-consistency and §10 already says a facet applied wrongly
+  but consistently scores 100%. Here the feature would not merely be blind to
+  the damage; it would be the thing that caused it and then certified it.
+
+  The advice now branches. `single: true` still asks for a precedence rule,
+  which is correct there — one value survives, so the description has to say
+  which. Multi-value is told that a precedence rule is the wrong instrument and
+  why, that two values applying at once is the expected outcome rather than a
+  conflict, and that what is actually unsettled is each value's **threshold**:
+  what earns it, and what near miss does not. Both branches now also carry the
+  warning that agreement bought by suppressing a real value is not a fix.
+
+  **The slip is inherited from the plan, not invented in the build.** §0
+  observes that the unstable facets are exactly the ones *"with values that can
+  both be true of one item"* and then prescribes *"one recurring fix: a
+  precedence rule in the facet description"*. Those two sentences only agree for
+  `single: true`, and every measurement §0 cites — `construction` at 60%,
+  `industry` at 64% — is from a facet where they do not.
 
 ## Behaviour worth a decision (no change made)
 

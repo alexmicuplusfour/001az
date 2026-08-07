@@ -38,6 +38,20 @@ globalThis.document ||= {
 };
 globalThis.document.createElement ||= el;
 
+// `navigator` is an accessor on globalThis in Node, so it cannot be assigned —
+// swap the property for the call and put the original descriptor back. Passing
+// `undefined` gives a navigator with no `clipboard` at all, which is what plain
+// HTTP looks like.
+function withClipboard(clipboard, fn) {
+  const had = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: clipboard ? { clipboard } : {}, configurable: true });
+  try { return fn(); }
+  finally {
+    if (had) Object.defineProperty(globalThis, "navigator", had);
+    else delete globalThis.navigator;
+  }
+}
+
 // Depth-first text of a built block, which is what a reader actually sees.
 const textOf = (n) => (n.textContent || "") + n.children.map(textOf).join("");
 const find = (n, cls) => (n.className?.split(" ").includes(cls) ? n : n.children.reduce((h, c) => h || find(c, cls), null));
@@ -329,7 +343,7 @@ test("the facet editor gets the headline, never the content", () => {
   // The complaint this exists to prevent: a finding rendered at survey size is
   // a panel taller than the facet it belongs to, pushing that facet's own
   // values off screen. The editor is a stack of 28px rows.
-  const block = diagnosisBlock(bigFinding(), G, null, { compact: true });
+  const block = diagnosisBlock(bigFinding(), G, { compact: true });
   const t = textOf(block);
   assert.match(t, /The tagger contradicted itself on 32% of items\./,
     "worded exactly as the modal words it — one finding, one sentence");
@@ -340,24 +354,54 @@ test("the facet editor gets the headline, never the content", () => {
   assert.doesNotMatch(t, /See Tagging consistency/);
 });
 
-test("no apply control can reach the editor, even if one is offered", () => {
+test("the editor carries no control at all, in either density's vocabulary", () => {
   // The two surfaces have separate jobs and the compact one has nowhere to put
-  // an action. Passing onApply must not smuggle the whole block back in.
-  let applied = false;
-  const block = diagnosisBlock(bigFinding(), G, () => { applied = true; }, { compact: true });
-  assert.equal(find(block, "fd-apply"), null);
-  assert.equal(applied, false);
+  // an action. Asserted by class rather than by text because the failure this
+  // replaces was structural: `diagnosisBlock` used to take an apply callback,
+  // honour it only in the density with nowhere to put it, and be handed one only
+  // by the density that dropped it — so the control the plan describes rendered
+  // in NEITHER surface, for two commits, with this file green. The parameter is
+  // gone; what is left is the assertion that nothing sneaks back in.
+  const block = diagnosisBlock(bigFinding(), G, { compact: true });
+  assert.equal(find(block, "fd-copy"), null);
+  assert.equal(find(block, "fd-rewrite"), null);
+  assert.equal(find(block, "fd-suggestion"), null);
+});
+
+test("the modal hands the proposed wording over, because it is the only surface holding it", () => {
+  // `onEdit` CLOSES this dialog before opening the board editor, and the editor
+  // renders the headline alone — so between the two the proposal leaves the
+  // screen entirely. Without a way to take it, the user is asked to reproduce
+  // three sentences from memory into a two-row textarea.
+  const block = diagnosisBlock(bigFinding(), G, { collapsible: true });
+  const btn = find(block, "fd-copy");
+  assert.ok(btn, "the copy control is present in the density that shows the text");
+
+  let wrote = null;
+  withClipboard({ writeText: (t) => { wrote = t; return Promise.resolve(); } }, () => btn.onclick());
+  assert.equal(wrote, bigFinding().diagnostic.rewrite,
+    "the whole proposal, verbatim — not the headline and not a truncation");
+});
+
+test("…and says so on the button when there is no clipboard to write to", () => {
+  // Plain HTTP has no navigator.clipboard at all. The optional chain yields
+  // undefined and `.then` would throw inside an onclick, where nothing surfaces
+  // it — leaving a control that does nothing when pressed, which is the one
+  // failure mode this file already carries an example of.
+  const btn = find(diagnosisBlock(bigFinding(), G, { collapsible: true }), "fd-copy");
+  withClipboard(undefined, () => btn.onclick());
+  assert.equal(btn.textContent, "couldn't copy");
 });
 
 test("the modal folds each finding, and opens to the whole thing", () => {
   // The survey is the list of facets and their numbers; the essays are what you
   // open one of. Six findings unfolded is the wall of text again, one surface
   // over.
-  const folded = diagnosisBlock(bigFinding(), G, null, { collapsible: true });
+  const folded = diagnosisBlock(bigFinding(), G, { collapsible: true });
   assert.equal(find(folded, "fd-detail").hidden, true, "folded by default");
   assert.match(textOf(find(folded, "fd-toggle")), /contradicted itself on 32%/);
 
-  const block = diagnosisBlock(bigFinding(), G, null);
+  const block = diagnosisBlock(bigFinding(), G);
   const t = textOf(block);
   assert.match(t, /The tagger contradicted itself on 32% of items\./);
   assert.match(t, /geometric-modernist/);
@@ -367,7 +411,7 @@ test("the modal folds each finding, and opens to the whole thing", () => {
 
 test("a one-line state says its whole piece in the editor", () => {
   // `awaiting` and `improved` are one sentence each and complete in themselves.
-  const block = diagnosisBlock(row({ items: 0, stale: 25 }), G, null, { compact: true });
+  const block = diagnosisBlock(row({ items: 0, stale: 25 }), G, { compact: true });
   const t = textOf(block);
   assert.match(t, /Not measured against the current wording yet/);
   assert.doesNotMatch(t, /See Tagging consistency/);
@@ -386,7 +430,7 @@ test("a facet being re-tagged says so, rather than that it was never measured", 
   assert.equal(s.state, "measuring");
   assert.equal(s.queued, 1827);
 
-  const block = diagnosisBlock(row({ items: 0, stale: 0, queued: 1827 }), G, null, { compact: true });
+  const block = diagnosisBlock(row({ items: 0, stale: 0, queued: 1827 }), G, { compact: true });
   const t = textOf(block);
   assert.match(t, /Re-tagging this facet — 1,827 items still queued/);
   assert.doesNotMatch(t, /Re-tag this board/, "never ask for a retag while one is running");
@@ -400,7 +444,7 @@ test("a facet the retag does NOT touch keeps reporting its own numbers", () => {
   // facets' worth of live measurements behind a re-tagging notice.
   const untouched = row({ items: 25, unanimous: 17, queued: 0, diagnostic: finding() });
   assert.equal(diagnosisState(untouched, G).state, "finding");
-  assert.doesNotMatch(textOf(diagnosisBlock(untouched, G, null, { compact: true })), /Re-tagging/);
+  assert.doesNotMatch(textOf(diagnosisBlock(untouched, G, { compact: true })), /Re-tagging/);
 });
 
 test("a facet stranded by an edit still says so once the queue is empty", () => {
@@ -408,7 +452,7 @@ test("a facet stranded by an edit still says so once the queue is empty", () => 
   // designed path, and the user genuinely does need to re-tag.
   const stranded = row({ items: 0, stale: 25 });
   assert.equal(diagnosisState(stranded, G).state, "awaiting");
-  assert.match(textOf(diagnosisBlock(stranded, G, null, { compact: true })), /Re-tag this board/);
+  assert.match(textOf(diagnosisBlock(stranded, G, { compact: true })), /Re-tag this board/);
 });
 
 test("a facet with a real sample reports it even while its own retag drains", () => {

@@ -139,6 +139,39 @@ export function markDiagnosticsSeen(boardId, facets) {
   localStorage.setItem(SEEN_KEY(boardId), String(Math.max(newestAt(facets), Date.now() - 1)));
 }
 
+// The only control on a read-only surface, and the one that closes the loop.
+//
+// This modal is the ONLY place the proposed wording is rendered — the facet
+// editor deliberately shows the headline and nothing else — and `onEdit` CLOSES
+// this dialog before opening the editor. So without this the user is asked to
+// carry three sentences across a modal boundary from memory, which is the one
+// step where the model's proposal, the whole point of the feature, is not on
+// screen.
+//
+// It copies rather than applies for the reason the two surfaces are split at
+// all: a control here that wrote the description would make this a second
+// writer into `boards.facets`, which is the race the worker-owned
+// `facet_diagnostics` column exists to avoid. The clipboard crosses the
+// boundary; the editor stays the only writer.
+function copyControl(text) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "fd-copy";
+  b.textContent = "copy";
+  const flash = (t) => { b.textContent = t; setTimeout(() => { b.textContent = "copy"; }, 1200); };
+  b.onclick = () => {
+    // Not `navigator.clipboard?.writeText(…).then(…)`: over plain HTTP there is
+    // no `clipboard` at all, the optional chain yields undefined, and `.then`
+    // throws into an onclick where nobody sees it. Say so on the button instead
+    // — a control that does nothing when pressed is the failure this file
+    // already carries one of (the modal's own swallowed fetch).
+    const p = navigator.clipboard?.writeText(text);
+    if (!p) return flash("couldn't copy");
+    p.then(() => flash("copied"), () => flash("couldn't copy"));
+  };
+  return b;
+}
+
 // One facet's block, in two densities.
 //
 // The Tagging consistency modal owns the CONTENT — the explanation and the
@@ -149,8 +182,16 @@ export function markDiagnosticsSeen(boardId, facets) {
 // facet it belongs to.
 //
 // So one surface reports and one explains, and neither pretends to be the other.
-// `onApply` is honoured only in the density that has somewhere to put it.
-export function diagnosisBlock(row, gates, onApply, { compact = false, collapsible = false } = {}) {
+// Neither of them WRITES either: the modal offers the proposed wording as a copy
+// and the editor offers nothing at all.
+//
+// There is deliberately no apply callback. The first version took one, honoured
+// it only in the density that had nowhere to put it, and was passed one only by
+// the density that dropped it — so the control the plan describes existed in
+// NEITHER surface, for two commits, with a green suite. A parameter that can be
+// handed in and silently ignored is what made that possible, so the parameter is
+// gone rather than fixed.
+export function diagnosisBlock(row, gates, { compact = false, collapsible = false } = {}) {
   const s = diagnosisState(row, gates);
   if (s.state === "none") return null;
 
@@ -252,21 +293,17 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
     // wording are one thought, and framing the second half separately made the
     // notice read as two nested panels. The heading does the separating.
     const cap = document.createElement("div");
-    cap.className = "fd-rewrite-cap";
-    cap.textContent = "Suggested description";
+    cap.className = "fd-rewrite-head";
+    const capText = document.createElement("span");
+    capText.className = "fd-rewrite-cap";
+    capText.textContent = "Suggested description";
+    cap.appendChild(capText);
+    cap.appendChild(copyControl(s.entry.rewrite));
     sug.appendChild(cap);
     const quoted = document.createElement("div");
     quoted.className = "fd-rewrite";
     quoted.textContent = s.entry.rewrite;
     sug.appendChild(quoted);
-    if (onApply) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "fd-apply";
-      btn.textContent = "replace description";
-      btn.onclick = () => onApply(s.entry.rewrite);
-      sug.appendChild(btn);
-    }
     into.appendChild(sug);
   }
 
@@ -289,8 +326,9 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
 // ─── the modal ───────────────────────────────────────────────────────────────
 
 // Read-only. Every facet carrying confidence data, its stability, and its
-// finding if it has one. Each finding offers a way into the board modal, which
-// is the only place a suggestion can actually be applied.
+// finding if it has one. Two controls, neither of which writes: a finding's
+// proposed wording can be copied, and one link hands the user off to the board
+// modal, which is the only place a description can actually be changed.
 export async function openDiagnosticsModal({ onEdit } = {}) {
   let data;
   try { data = await api("GET", `/api/boards/${state.boardId}/facet-stats`); }
@@ -389,7 +427,7 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
     title.append(stat, score);
     card.appendChild(title);
 
-    const block = diagnosisBlock(row, gates, null, { collapsible: true });
+    const block = diagnosisBlock(row, gates, { collapsible: true });
     if (block) card.appendChild(block);
 
     body.appendChild(card);

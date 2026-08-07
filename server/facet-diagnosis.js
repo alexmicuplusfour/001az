@@ -254,6 +254,23 @@ const tally = (votes = {}) => Object.entries(votes).map(([v, n]) => `${v} x${n}`
 // the system turn — stable across every item and every pass, so a provider-side
 // prompt cache can hold them. The measurement and the worked examples go in the
 // user turn, because they are the thing that changed.
+//
+// The advice BRANCHES on `facet.single`, and the branch is the whole point
+// rather than a nicety. Telling the model the arity (one line, above) and then
+// asking unconditionally for a precedence rule is a contradiction, and the
+// model resolves it the way it was told to: on a multi-value facet it writes
+// "when both could apply, prefer X", which instructs the tagger to discard a
+// value that was really there. Recall drops — and agreement goes UP, because
+// fewer values in play means fewer ways to disagree, so this feature scores the
+// damage as a success and state 5 prints "63% before, 81% now" over it. Nothing
+// downstream can tell that apart from a real fix, which is why it has to be
+// prevented in the prompt rather than caught later.
+//
+// The slip is inherited from the plan: §0 observes that the unstable facets are
+// exactly the ones "with values that can both be true of one item" and then
+// prescribes "one recurring fix: a precedence rule". Those two sentences only
+// agree for `single: true`. On a multi-value facet what is actually unsettled
+// is each value's own threshold — what earns it, and what near miss does not.
 export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
   const unstable = segment.items - segment.unanimous;
   const pct = Math.round((unstable / segment.items) * 100);
@@ -273,7 +290,7 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
     `You will be shown two labelled groups of items: ones where the passes disagreed, and ones ` +
     `where they agreed. Ask what the first group has that the second doesn't. That comparison is ` +
     `the task — do not ask "what is wrong with this facet", which assumes its own answer.\n\n` +
-    `Three things to hold on to:\n` +
+    `A few things to hold on to:\n` +
     `- You cannot see the items. Every description you are shown was written by the tagger ` +
     `itself, so any claim about what an item looks like has to rest on those words.\n` +
     `- "genuinely-ambiguous-items" — the taxonomy is fine and these particular items really are ` +
@@ -283,10 +300,21 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
     `keeping every judgement the current wording already establishes — you are making it unambiguous, ` +
     `not substituting your own idea of what the facet is for. Where the current wording already tries ` +
     `to draw the distinction and fails, say it better rather than saying it twice.\n` +
-    `- The strongest rewrites carry a precedence rule for the case where two values could each stand ` +
-    `alone, e.g. "when a mark has both a uniform stroke and a colour blend, prefer gradient-blend". ` +
-    `A rule that merely tells the tagger to apply the facet less often is not a fix — a facet that ` +
-    `ends up empty is no more useful than one that keeps changing its mind.\n\n` +
+    (facet.single
+      ? `- Exactly one value survives, so the strongest rewrites carry a PRECEDENCE RULE for the case ` +
+        `where two values could each stand alone, e.g. "when a mark has both a uniform stroke and a ` +
+        `colour blend, prefer gradient-blend". Name which one wins, and on what evidence.\n`
+      : `- This facet takes ANY NUMBER of values, so a precedence rule is the wrong instrument here and ` +
+        `writing one would be a regression: when two of these are genuinely both present, tagging BOTH ` +
+        `is the correct answer, and "prefer X over Y" tells the tagger to throw one away. What is ` +
+        `unsettled is the THRESHOLD for each value on its own — what has to be visible before that value ` +
+        `is earned, and what near miss does not earn it. Rewrite so each contested value can be decided ` +
+        `without reference to the others, and say plainly that two of them applying at once is expected ` +
+        `rather than a conflict to resolve.\n`) +
+    `- A rule that merely tells the tagger to apply the facet less often is not a fix — a facet that ` +
+    `ends up empty is no more useful than one that keeps changing its mind. Nor is one that buys ` +
+    `agreement by suppressing a value that was really there: fewer values in play means fewer ways to ` +
+    `disagree, so that scores as an improvement here while making the tagging worse.\n\n` +
     `Record your answer with the ${DIAGNOSE_TOOL.name} tool.`;
 
   const group = (rows, empty) => (rows.length

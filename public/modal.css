@@ -625,11 +625,16 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    under it, the way a form field's button does. Beside it, the box was squeezed
    into a column while the link floated in the whitespace next to it. */
 .fd-suggestion { margin-top: 9px; }
+/* The label and the copy share a line, because the control belongs to the box
+   below them and a row of its own would read as a step after the proposal
+   rather than a handle on it. Baseline-aligned, not centred: the two are set at
+   different sizes and centring floats the smaller one off the label's line. */
+.fd-rewrite-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
 /* A heading, not a frame. The proposed wording used to sit in a panel of its
    own inside the notice, which read as two nested boxes for what is one
    thought; the label alone does the separating, so it takes the weight the
    frame used to carry and the notice's own colour. */
-.fd-rewrite-cap { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 4px; }
+.fd-rewrite-cap { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 /* Unclamped. It was capped and scrollable back when it rendered inside the
    facet editor, where its natural height dwarfed the two-row textarea it was
    proposing to replace. It only lives in the modal now, which has the room —
@@ -645,11 +650,14 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    panel inside the green one, and the ambiguous block silently rendered a point
    smaller than every other state. One class, one meaning. */
 .fd-caveat { font-size: 11px; opacity: .85; margin-top: 3px; }
-.fd-apply { display: block; margin-top: 5px; background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; font-size: 11.5px; padding: 0; white-space: nowrap; }
-.fd-apply:hover { text-decoration: underline; }
+/* Sans and nowrap, against the serif label beside it: it is a control, not part
+   of the sentence, and it must not be what wraps when the label runs long. */
+.fd-copy { flex: none; background: none; border: none; color: #2563eb; cursor: pointer; font-family: var(--sans); font-size: 11.5px; padding: 0; white-space: nowrap; }
+.fd-copy:hover { text-decoration: underline; }
 
-/* The modal's own survey chrome. Read-only by construction — the only control
-   in here is the one that hands the user off to the editor. */
+/* The modal's own survey chrome. Read-only by construction — the two controls
+   in here copy the proposed wording and hand the user off to the editor.
+   Neither writes: the editor is the only writer into boards.facets. */
 .fd-intro { font-size: 12px; color: #6b6b72; line-height: 1.5; margin: 0 0 14px; }
 /* Qualifies every figure below it, so it sits above the list rather than in it.
    A .mute-box, like every other "nothing to report yet" panel in the app. */

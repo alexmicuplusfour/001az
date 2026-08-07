@@ -386,6 +386,40 @@ test("the prompt labels both groups and names the escape hatches", () => {
   assert.match(text, /a circle/);
 });
 
+test("a multi-value facet is never asked for a precedence rule", async () => {
+  // Reported from the running app. The prompt states the arity in one line and
+  // then, unconditionally, asked for "a precedence rule … e.g. prefer
+  // gradient-blend" — single-value advice. On `construction`, which takes any
+  // number of values, the model did as it was told and proposed "if both could
+  // apply, prefer gradient-blend", i.e. instructed the tagger to discard a value
+  // that was really present.
+  //
+  // The reason this cannot be left to be caught downstream: taking that advice
+  // LOWERS recall and RAISES agreement, because a facet with fewer values in
+  // play has fewer ways to disagree with itself. This feature would score the
+  // damage as a success and print "63% consistent before, 81% now" over it.
+  const segment = { key: "shape", label: "Shape", items: 10, unanimous: 2, d: FULL.shape, scoped: false, stale: 0 };
+  const sample = { split: [], contested: [], unanimous: [] };
+  const prompt = (facet) => buildDiagnosePrompt({ context: "marks" }, facet, segment, sample, null).systemText;
+
+  const multi = prompt({ key: "construction", label: "Construction", values: ["a", "b"], description: "how it is built" });
+  // Not "the words never appear" — the branch names the instrument in order to
+  // forbid it. What must not appear is the ASK.
+  assert.doesNotMatch(multi, /carry a PRECEDENCE RULE/, "never solicited here");
+  assert.match(multi, /precedence rule is the wrong instrument/, "…and it is told why, not merely left uninstructed");
+  assert.match(multi, /tagging BOTH\s+is the correct answer/, "two at once is the expected outcome, not a conflict");
+  assert.match(multi, /THRESHOLD for each value on its own/, "…which is what is actually unsettled");
+
+  const single = prompt({ ...BF[0], single: true });
+  assert.match(single, /carry a PRECEDENCE RULE/, "where exactly one value survives it is still the right fix");
+  assert.doesNotMatch(single, /wrong instrument/);
+
+  // The other half, on both branches: agreement bought by suppressing a real
+  // value is the failure this whole feature is blind to, so the prompt has to
+  // name it rather than trusting the reader to notice.
+  for (const p of [multi, single]) assert.match(p, /fewer values in play means fewer ways to disagree/);
+});
+
 test("a facet that never converged says so, rather than showing an empty heading", () => {
   const segment = { key: "shape", items: 4, unanimous: 0, d: FULL.shape, scoped: false };
   const sample = {

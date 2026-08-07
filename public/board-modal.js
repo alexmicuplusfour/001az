@@ -170,33 +170,23 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
       descIn.oninput = () => { f.description = descIn.value; sync(); };
       facetEl.appendChild(descIn);
 
-      // The facet's finding, rendered under the description it is about —
-      // which is exactly where the fix gets typed. Display only: the per-facet
-      // retag control deliberately lives on the boards-list row instead, where
-      // retagging against a gloss the user has edited but not saved is
-      // impossible rather than merely guarded against.
+      // The facet's finding, as one line under the description it is about.
+      //
+      // The HEADLINE only, and no control of any kind. Two separate reasons,
+      // and each would be enough on its own: this is a stack of 28px rows, so a
+      // finding rendered here at any size worth reading is a panel taller than
+      // the facet it belongs to; and the per-facet retag lives on the
+      // boards-list row instead, because retagging against a gloss the user has
+      // edited but not saved is impossible rather than merely guarded against.
+      // The proposed wording, and the one control that hands it over, live in
+      // the Tagging consistency modal — which is where the reader came from.
       //
       // Keyed on the STORED facet key, so a facet the user is still naming has
       // no stats to look up and renders nothing — right, since nothing has
       // measured it under that name.
       const row = statsByKey.get(f.key);
       if (row) {
-        // Compact here, and open only for the facet the user came to edit.
-        const block = diagnosisBlock(row, gates, (rewrite) => {
-          // Applied through execCommand rather than by assigning `.value`,
-          // because this REPLACES words the user wrote and they have to be able
-          // to take it back. A programmatic assignment does not go on the
-          // textarea's native undo stack, so Ctrl+Z after one would skip past
-          // the replacement to whatever was typed before it — silently losing
-          // the original. insertText over a full selection does, so the
-          // replacement undoes like any other edit.
-          descIn.focus();
-          descIn.select();
-          if (!document.execCommand?.("insertText", false, rewrite)) descIn.value = rewrite;
-          f.description = descIn.value;
-          sync();
-          descIn.setSelectionRange(descIn.value.length, descIn.value.length);
-        }, { compact: true });
+        const block = diagnosisBlock(row, gates, { compact: true });
         if (block) facetEl.appendChild(block);
       }
 
