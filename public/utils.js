@@ -135,9 +135,19 @@ export const ICONS = {
   // It replaces a dial whose ink spanned y 7.5–17.4 of the 24 box: at the 15px
   // every icon button here renders at, that is half the ink of the pencil
   // beside it, and it read as a smudge in an empty square. Sizing is per-glyph
-  // in this set, so reaching the edges of the viewBox is the glyph's own job —
-  // this one spans x 2–22 and y 4.5–19.5.
-  doubleCheck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12.5 7 17.5 17 4.5"/><path d="M22 9.5 14.5 19.5l-2-2"/></svg>',
+  // in this set, so reaching the edges of the viewBox is the glyph's own job.
+  //
+  // The two ticks are IDENTICAL and share a baseline — same corner y, same tip
+  // y, same arm lengths — rather than the offset pair every icon set draws. The
+  // offset is not decoration: two 45° ticks large enough to fill this box
+  // overlap, and the only way to keep both legible is to slide the second one
+  // down and clip its short arm, which is what made the first attempt read as
+  // one big tick trailed by a small crooked one. Sitting them level costs
+  // height (9.5 units where the offset pair got 15) and buys it back in ink,
+  // since this is four strokes across the full width rather than two. The arms
+  // are steeper than the 45° of `check` for the same reason — that is the price
+  // of two ticks abreast in 20 units with a gap you can still see at 15px.
+  doubleCheck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13 4.5 16.5 10 7"/><path d="M14 13 16.5 16.5 22 7"/></svg>',
 };
 
 // Corner presence dot for any button — sits centered on the top-right

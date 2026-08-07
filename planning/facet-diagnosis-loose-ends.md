@@ -264,13 +264,26 @@ that sentence is the one that quietly stops working.
   about 7px where the pencil draws 13. Half the ink, in a button of identical
   padding, sitting in the same cluster.
 
-  Replaced with two ticks (`ICONS.doubleCheck`, spanning x 2–22, y 4.5–19.5),
-  which also fixes what the dial was saying. A gauge is the universal
-  "performance" glyph and this measures nothing of the kind; two ticks draw the
-  name of the switch that produces the data — **Double-check tags** — so the
-  icon and the setting share a metaphor, the way the button's label was made to
-  in the first sweep. A bar chart was the other candidate and was ruled out for
-  colliding with `viewRows`, two bars, in the same header.
+  Replaced with two ticks (`ICONS.doubleCheck`), which also fixes what the dial
+  was saying. A gauge is the universal "performance" glyph and this measures
+  nothing of the kind; two ticks draw the name of the switch that produces the
+  data — **Double-check tags** — so the icon and the setting share a metaphor,
+  the way the button's label was made to in the first sweep. A bar chart was the
+  other candidate and was ruled out for colliding with `viewRows`, two bars, in
+  the same header; two overlapping circles, the runner-up, for sitting one
+  button away from the coin chip.
+
+  Drawn twice. The first version used the offset pair every icon set draws —
+  second tick down-right, its short arm clipped — which fills the box but reads
+  as one big tick trailed by a small crooked one, and that is what it looked
+  like in the app. The offset is not decoration, though: two 45° ticks large
+  enough to fill a 24 box overlap, and sliding the second down is the only way
+  to keep both whole. Level ticks are therefore necessarily smaller — 9.5 units
+  of height against the offset pair's 15 — and steeper than the 45° of `check`,
+  which is the price of two abreast in 20 units with a gap still visible at
+  15px. Taken, because a pair that is obviously a *pair* beats a taller pair
+  that reads as one tick and a smudge. The ink lost to height comes back as
+  width: four strokes across the full box rather than two.
 
   The note in `styles.css` now carries both halves of the lesson, since the next
   icon button will meet the second one too.
