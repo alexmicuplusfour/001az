@@ -12,6 +12,7 @@ import { startServer, adminSession, req } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
   updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
+  retagBoard,
 } from "../server/db.js";
 import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
 import { startWorker } from "../server/worker.js";
@@ -433,6 +434,117 @@ test("…but a moved rate re-diagnoses", async () => {
   }
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 2, "81% unstable then 40% is not the same finding");
+});
+
+// The retag drains and every count reproduces exactly — the blind spot above,
+// which is what makes the arming hook the only thing standing between these two
+// tests and a finding that never expires.
+const landUnchanged = (b) =>
+  db.query("UPDATE items SET status='tagged', tag_facets=NULL, updated_at=0 WHERE board_id=$1", [b]);
+
+test("a retag armed DURING the provider call survives that call's own write", async () => {
+  // diagnoseDue reads facet_diagnostics once at the top of a pass and diagnoses
+  // every facet against that snapshot, sequentially, with a provider call apiece
+  // — so the gap between the read and the write is the whole pass, not one call.
+  // A plain merge writes an entry with no `stale` over a mark armed inside it,
+  // and the entry's freshness key was computed before the retag existed. Land the
+  // re-measurement on the same counts and nothing ever re-asks: the hook is gone
+  // and the key was blind to this case by design.
+  const b = await board("mid-call");
+  await seedUnstable(b);
+  await diagnoseDue(db, stubTagger(), null);
+  assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
+  for (let i = 0; i < 4; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) } });
+
+  const deps = stubTagger();
+  const inner = deps.tagger;
+  let hit;
+  deps.tagger = async (args) => {
+    await retagBoard(db, b);                                  // the user clicks retag
+    hit = await supersedeFacetDiagnostics(db, b, null);        // …mid-flight
+    return inner(args);
+  };
+  await diagnoseDue(db, deps, null);
+  assert.deepEqual(hit, ["shape"], "the retag did mark it");
+  assert.equal((await diagnosticsOf(b)).shape.stale, true, "and the pass did not erase the mark it never read");
+
+  await landUnchanged(b);
+  const next = stubTagger();
+  await diagnoseDue(db, next, null);
+  assert.equal(next.calls.length, 1, "so the re-measurement is re-read, counts identical or not");
+});
+
+test("…but a pass that ANSWERS a stale mark still clears it", async () => {
+  // The other direction, and what a blanket "always preserve" would break: a
+  // superseded finding that has just been re-diagnosed is current again, and
+  // leaving the flag on renders "re-reading this facet" over a paragraph written
+  // a moment ago, for good.
+  const b = await board("clears");
+  await seedUnstable(b);
+  await diagnoseDue(db, stubTagger(), null);
+  await retagBoard(db, b);
+  assert.deepEqual(await supersedeFacetDiagnostics(db, b, null), ["shape"]);
+  await landUnchanged(b);
+
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1, "the mark is what makes it re-ask over unmoved counts");
+  assert.equal((await diagnosticsOf(b)).shape.stale, undefined, "and the answer retires it");
+});
+
+test("a recorded failure never clears a stale mark either", async () => {
+  // attempted() rebuilds the entry from scratch, so it dropped `stale` with
+  // everything else it did not name — and a provider blip between a retag and its
+  // re-diagnosis is the one moment that flag is load-bearing.
+  const b = await board("fail-stale");
+  await seedUnstable(b);
+  await diagnoseDue(db, stubTagger(), null);
+  await retagBoard(db, b);
+  await supersedeFacetDiagnostics(db, b, null);
+  await landUnchanged(b);
+
+  const deps = stubTagger();
+  deps.tagger = async () => { throw new Error("provider 503"); };
+  await diagnoseDue(db, deps, null);
+  const e = (await diagnosticsOf(b)).shape;
+  assert.equal(e.attempts, 1, "the attempt is recorded, as defect 1 requires");
+  assert.equal(e.stale, true, "…and the mark outlives it, because nothing was answered");
+});
+
+test("…and MAX_ATTEMPTS still bounds a SUPERSEDED finding", async () => {
+  // The other half of the test above, and the reason it needs one. The cap used
+  // to hold on this path only because attempted() rebuilt the entry without
+  // `stale` — a failure silently retracting a fact about the data, which is what
+  // let the skip check short-circuit on the flag and still terminate. Guard the
+  // flag properly and that accident goes with it: `stale` is permanent until
+  // something answers it, so a flag-first skip check never caps and the loop pays
+  // every tick, for as long as the provider is unwell. 1,440 calls a facet a day
+  // — defect 1's own number, reached by fixing defect 39.
+  //
+  // So the cap is asked FIRST and unconditionally, and the two facts stay
+  // independent: money spent against an unchanged question, and whether the data
+  // moved.
+  const b = await board("cap-stale");
+  await seedUnstable(b);
+  await diagnoseDue(db, stubTagger(), null);
+  await retagBoard(db, b);
+  await supersedeFacetDiagnostics(db, b, null);
+  await landUnchanged(b); // counts reproduce exactly — `stale` is the ONLY reason it re-asks
+
+  let paid = 0;
+  const deps = stubTagger();
+  deps.tagger = async () => { paid++; throw new Error("provider 503"); };
+  for (let i = 0; i < 8; i++) await diagnoseDue(db, deps, null);
+
+  assert.equal(paid, 3, "three tries, then silence — the WEBHOOK_MAX_ATTEMPTS precedent");
+  const e = (await diagnosticsOf(b)).shape;
+  assert.equal(e.attempts, 3);
+  assert.equal(e.stale, true, "the flag is still true; it is simply not what bounds the spending");
+
+  // And the cap is per QUESTION, not permanent: move the data and it re-asks.
+  for (let i = 0; i < 8; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) } });
+  await diagnoseDue(db, deps, null);
+  assert.equal(paid, 4, "a moved rate is a new question and earns a clean slate");
 });
 
 // ─── the escape hatches ──────────────────────────────────────────────────────

@@ -521,10 +521,34 @@ export async function boardTagActivity(db, boardId) {
 // rather than a whole-column write, because two facets diagnosed in the same
 // pass must not overwrite each other and the user's save may be demoting a third
 // at the same moment.
-export async function setFacetDiagnostic(db, boardId, key, entry) {
+//
+// `clearsStale` is the compare-and-swap that keeps invalidate-on-write honest,
+// and without it this setter can destroy the mark that is the WHOLE mechanism.
+// diagnoseDue reads facet_diagnostics ONCE at the top of a pass and diagnoses
+// every facet against that snapshot, sequentially, with a provider call apiece —
+// so the gap between the read and this write is the whole pass, tens of seconds,
+// not the duration of one call. A retag armed anywhere in it sets stale:true, and
+// a plain `||` merge writes an entry with no `stale` straight over it. From there
+// the finding looks current, the loop's freshness key was computed pre-retag, and
+// if the re-measurement reproduces the counts — the key's documented blind spot,
+// and the exact reason the arming hook exists — nothing ever re-asks.
+//
+// So a write may only clear a mark it KNEW about:
+//
+//   pass read stale, DB stale     the finding is being replaced   -> clear
+//   pass read clean, DB stale     armed mid-pass                  -> KEEP
+//   a recorded failure            answered nothing                -> KEEP (false)
+//
+// The failure path passes false deliberately, which is the other half of the same
+// bug: attempted() rebuilds the entry from scratch and drops `stale` with it, so a
+// provider blip between a retag and its re-diagnosis erased the mark too.
+export async function setFacetDiagnostic(db, boardId, key, entry, clearsStale = false) {
   await db.query(
-    "UPDATE boards SET facet_diagnostics = facet_diagnostics || jsonb_build_object($1::text, $2::jsonb) WHERE id=$3",
-    [key, JSON.stringify(entry), boardId]
+    `UPDATE boards SET facet_diagnostics = facet_diagnostics || jsonb_build_object($1::text,
+       $2::jsonb || CASE WHEN NOT $4::bool AND COALESCE((facet_diagnostics->$1->>'stale')::bool, FALSE)
+                         THEN '{"stale":true}'::jsonb ELSE '{}'::jsonb END)
+     WHERE id=$3`,
+    [key, JSON.stringify(entry), boardId, clearsStale]
   );
 }
 

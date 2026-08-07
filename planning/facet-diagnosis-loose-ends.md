@@ -575,9 +575,138 @@ here is wrong inside any single unit.
   is the same blindness seen from the other side: the key cannot tell that
   anything needs re-asking. Now 3.
 
+## Fifth sweep — the pass erases the mark that supersedes it
+
+A read of the re-diagnosis mechanism end to end, against the rule it is now
+supposed to implement: *a finding expires when the twelve items move, or when the
+percentage moves, and for no other reason*. The mechanism answers all four of the
+canonical cases correctly — five items retagged: no; the whole board: yes; 500
+clean arrivals: yes; twenty arrivals: no. One defect below breaks the first of
+those two rules outright, and it is fixed here. 840 tests pass.
+
+- [x] **39. A retag armed during the provider call is erased by that call's own
+  write.** *(fixed — reproduced A/B before being believed)*
+
+  `diagnoseDue` reads `board.facet_diagnostics` **once**, at the top of a pass,
+  and diagnoses every facet against that snapshot — sequentially, with a provider
+  call apiece. So the gap between the read and `setFacetDiagnostic` is not the
+  duration of one call; for the last facet of a ten-facet pass it is all ten,
+  tens of seconds out of a sixty-second cadence. `candidates` checks the settle
+  gate once, at the top, and never again.
+
+  Anything armed inside that window calls `supersedeFacetDiagnostics`, which sets
+  `stale: true` — and then the pass's `facet_diagnostics || jsonb_build_object(…)`
+  merge writes an entry with no `stale` straight over it, carrying a freshness key
+  computed before the retag existed.
+
+  From there the finding is indistinguishable from a fresh one. The reader shows
+  it (`stale` gone, `rateHeld` true). The loop skips it — *if* the re-measurement
+  reproduces the counts and the twelve keep their slots, which is the key's
+  documented blind spot (defect 37) and the exact case the arming hook was built
+  to cover. 38's own summary of why is what fails here: *invalidate-on-write fails
+  by leaving a finding standing when a writer was never hooked*. The writer was
+  hooked. It was overwritten.
+
+  Reproduced as an A/B on one board, one retag, one variable — when it lands:
+
+  ```
+  armed DURING the provider call    stale: gone     next pass: 0 calls
+  armed one moment later            stale: true     next pass: 1 call
+  ```
+
+  Priced as `#14` below, which is the same window seen through the demotion, and
+  underpriced there: `#14` costs a baseline, this costs the whole rule.
+
+  **Fixed as a compare-and-swap in the setter, not as a lock.** A write may only
+  clear a mark it knew about — `setFacetDiagnostic` takes `clearsStale` and
+  re-reads the flag inside the same statement:
+
+  ```
+  pass read stale, DB stale     the finding is being replaced     clear
+  pass read clean, DB stale     armed mid-pass                    KEEP
+  a recorded failure            answered nothing                  KEEP
+  ```
+
+  One statement, no `FOR UPDATE`. The third row looked like a second defect
+  closed for free — `attempted()` rebuilds the entry from scratch and dropped
+  `stale` with everything else it does not name, so a provider blip between a
+  retag and its re-diagnosis erased the mark too. It was not free, and it was not
+  a second defect. See 40.
+
+  What is deliberately NOT done is preserve `stale` unconditionally. A pass that
+  re-diagnoses a superseded finding has answered the mark, and leaving it on
+  renders *"the measurements have changed, re-reading this facet"* over a
+  paragraph written moments ago, permanently. That direction is pinned by its own
+  test, which passes with the fix and without it.
+
+  Three tests, two of which fail on the pre-fix setter. The A/B is the one worth
+  keeping: everything else about this bug is invisible, including to the reader,
+  including to the loop, and including — this is the part worth remembering — to
+  a green suite of 837.
+
+- [x] **40. Fixing 39 unbounded the retry loop, because the cap was holding by
+  accident.** *(fixed — found by asking what else the failure path drops, and
+  measured before being believed)*
+
+  `attempted()` dropping `stale` looked like a defect of the same family as 39: a
+  provider blip erasing the one signal that knows for certain the measurements
+  moved. It was not. It was the **only thing bounding the retry loop**, and 39's
+  guard removed it.
+
+  The skip check tested the flag first:
+
+  ```js
+  if (!prior?.stale && prior?.k === fresh && (prior.verdict || attempts >= MAX_ATTEMPTS)) return null;
+  ```
+
+  With `stale` true the whole condition is false, so it never skips — cap
+  included. That terminated before 39 only because a failure silently retracted
+  the flag, so from attempt two the entry was clean and the cap took over.
+  Guarding the flag properly makes `stale` permanent until something answers it,
+  and permanent means the loop pays every tick forever.
+
+  Measured on a board whose retag reproduced the counts exactly, so the freshness
+  key never moves and `stale` is the only reason to re-ask:
+
+  ```
+  eight ticks, provider failing        before 39   3 paid calls   (capped)
+                                        after 39   8 paid calls   (unbounded)
+  ```
+
+  On the shipped 60-second cadence that is **1,440 paid calls per facet per day** —
+  defect 1's exact number, reached by fixing something else, on the one path
+  defect 1 never covered.
+
+  **Fixed by separating two facts that were never one.** The cap is about money
+  spent against an unchanged question; `stale` is about whether the data moved.
+  Neither answers the other, so they get a line each and the cap goes first and
+  unconditionally:
+
+  ```js
+  if (prior?.k === fresh) {
+    if ((prior.attempts || 0) >= MAX_ATTEMPTS) return null;   // spending, unconditional
+    if (!prior.stale && prior.verdict) return null;           // already answered
+  }
+  ```
+
+  `stale` survives a failure, which is correct and is also now inert: an
+  attempts-only entry has no verdict, so the absent verdict already forces the
+  retries the flag used to force. That is the point. Under the old code the two
+  were entangled — the cap worked *because* a failure retracted a data-fact it
+  knew nothing about — and anyone touching either half broke the other silently.
+
+  **The lesson is the shape of the bug, not the bug.** 39 was found by reading,
+  reproduced A/B, fixed, and shipped with three tests and a green suite of 840 —
+  and it introduced this. Nothing in the suite covered "the cap, on a superseded
+  finding", because before 39 that state could not persist past one tick. A fix
+  that makes a previously-impossible state reachable needs its own coverage, and
+  the suite cannot ask for it.
+
 ## Behaviour worth a decision (no change made)
 
-- **14. A diagnosis in flight can undo the save that demotes it.** The worker
+- **14. A diagnosis in flight can undo the save that demotes it.** *(half closed
+  by 39 — the `stale` half. The demotion half below is unchanged: `setFacetDiagnostic`
+  now guards the flag, and nothing guards `previous`.)* The worker
   reads `board.facet_diagnostics` once at the top of a pass and writes with an
   unconditional `facet_diagnostics || jsonb_build_object(...)` merge, and between
   the two sits a provider call. `demoteFacetDiagnostics` takes `FOR UPDATE`, so

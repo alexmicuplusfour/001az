@@ -500,14 +500,31 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // load. It answers both rules at once — the bucketed rate and the twelve items
   // the model would be shown.
   const { k: fresh, evidence } = await questionKey(db, board.id, segment);
-  // Nothing has moved since the last attempt on this facet — either it produced
-  // a finding, or it has failed enough times that asking again is just spending.
-  //
-  // `stale` beats the key, because a retag that has been ARMED has not landed:
-  // the items are queued rather than re-measured, so the evidence still looks
-  // untouched and the key still matches. Without this the loop would skip and
-  // only notice once the pass had drained.
-  if (!prior?.stale && prior?.k === fresh && (prior.verdict || (prior.attempts || 0) >= MAX_ATTEMPTS)) return null;
+  // Nothing worth spending on — and it is TWO independent questions, which the
+  // single condition this replaces ran together. The cap is about money against
+  // an unchanged question; `stale` is about whether the data moved. Neither
+  // answers the other, and entangling them is what hid the defect below.
+  if (prior?.k === fresh) {
+    // The cap is UNCONDITIONAL, a superseded finding included. `stale` says a
+    // retag re-measured the sample; it does not say the provider will work this
+    // time, and three failures against one question is three failures whatever
+    // made us ask.
+    //
+    // This used to hold only by accident. `attempted()` rebuilt the entry from
+    // scratch and dropped `stale` with it, so a failure silently retracted a fact
+    // about the data and the cap took over from attempt two. Guarding the flag
+    // properly (setFacetDiagnostic's compare-and-swap) removed that side effect
+    // and with it the only bound on this path — every tick, forever, which on the
+    // 60-second cadence is 1,440 paid calls per facet per day. Defect 1's exact
+    // number, reached by fixing something else.
+    if ((prior.attempts || 0) >= MAX_ATTEMPTS) return null;
+    // `stale` beats a stored VERDICT, and only that: a retag has re-measured the
+    // items this finding was reasoned from, so the answer is out of date even
+    // though the question looks identical. That case is not hypothetical — it is
+    // the freshness key's documented blind spot, a re-measurement that reproduces
+    // the counts, and covering it is the whole reason the flag exists.
+    if (!prior.stale && prior.verdict) return null;
+  }
 
   const ai = await deps.resolveAi(board);
   if (!ai) return null; // no key is a configuration gap, not a finding
@@ -526,12 +543,18 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // the user to fix. The verdict is deliberately NOT carried: it described
   // measurements that have since moved, and keeping it would also make the skip
   // check above read a stale finding as a current one and never ask again.
+  // Never clears `stale` (the trailing false, and setFacetDiagnostic's default):
+  // an attempt that failed has answered nothing, so a retag's mark has to outlive
+  // it. Carrying it in this object instead would be wrong in the other direction —
+  // it would re-assert a mark that a concurrent write may have legitimately
+  // cleared. The setter's compare-and-swap is the only thing that can tell those
+  // apart, because it is the only thing holding the row.
   const attempted = (fields) => setFacetDiagnostic(db, board.id, facet.key, {
     k: fresh, at: Date.now(), attempts: (prior?.k === fresh ? prior.attempts || 0 : 0) + 1,
     ...(prior?.previous ? { previous: prior.previous } : {}),
     ...(prior?.stats ? { stats: prior.stats, d: prior.d ?? null, scoped: prior.scoped ?? null } : {}),
     ...fields,
-  });
+  }, false);
 
   const t0 = Date.now();
   const sample = await diagnosisSample(db, board.id, segment);
@@ -595,7 +618,11 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
     // computable.
     ...(prior?.previous ? { previous: prior.previous } : {}),
   };
-  await setFacetDiagnostic(db, board.id, facet.key, entry);
+  // The one write entitled to clear `stale`, and only the mark this pass actually
+  // read. A mark armed while the provider call was in flight describes a
+  // re-measurement this finding has not seen, so it survives and the next settled
+  // tick re-asks.
+  await setFacetDiagnostic(db, board.id, facet.key, entry, !!prior?.stale);
   // Warn, never throw — the app's standing rule is that a writer must not throw
   // into the job it observes. Thrown from here the finding would already be
   // stored, the caller would log "diagnose failed", and the rotation would count
