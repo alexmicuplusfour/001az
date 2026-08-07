@@ -228,7 +228,13 @@ const ACTIONABLE = new Set(["overlapping-values", "unclear-definition"]);
 // against an older schema get replaced instead of lingering unactionable.
 //   1 -> 2: `suggestion` (one sentence to append) became `rewrite` (a complete
 //           replacement description).
-const PROMPT_VERSION = 2;
+//   2 -> 3: the advice branches on `single`. Under v2 a multi-value facet was
+//           asked for a precedence rule and answered with one — "if both could
+//           apply, prefer gradient-blend" — which tells the tagger to discard a
+//           value that was really there. Every v2 finding on a multi-value facet
+//           carries that defect, and the bump is what replaces them rather than
+//           leaving them on screen with a control that hands the wording over.
+const PROMPT_VERSION = 3;
 
 const DIAGNOSE_SCHEMA = {
   type: "object",

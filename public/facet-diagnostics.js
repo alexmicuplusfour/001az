@@ -79,9 +79,25 @@ export function diagnosisState(row, ctx = {}) {
       };
     }
   }
-  if (entry?.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate };
+  // A finding reports the rate IT was written about, never the live one.
+  //
+  // `rate` here is recomputed on every render from whatever the roll-up says
+  // now; `entry.explanation` was written once, against the sample stored in
+  // `entry.stats`. Pairing them puts a number that tracks the latest tagging
+  // run above prose that does not, so a re-tag appears to have refreshed the
+  // finding when nothing re-read anything — and the staleness key cannot
+  // always tell that it should (a 5-point rate bucket means 33% and 37% are
+  // the same key, so the headline can visibly move with no re-diagnosis due).
+  // Reporting the finding's own numbers makes the box internally consistent;
+  // `drifted` is how far the live sample has since moved, for the caller to
+  // say out loud.
+  const measured = entry?.stats?.items
+    ? { rate: (entry.stats.items - entry.stats.unanimous) / entry.stats.items, items: entry.stats.items }
+    : { rate, items };
+  const drifted = measured.items !== items;
+  if (entry?.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate, measured, drifted };
   if (entry?.verdict && entry.verdict !== "no-problem-found" && entry.explanation) {
-    return { state: "finding", entry, items, rate };
+    return { state: "finding", entry, items, rate, measured, drifted };
   }
   if (!items && queued) return { state: "measuring", previous: null, items, rate, queued };
   return { state: "none", items, rate };
@@ -259,10 +275,12 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
     return el;
   }
 
+  // s.measured, not s.rate: the number the finding was written about. See
+  // diagnosisState — the live rate over stored prose reads as a fresh finding.
   setText(
     s.state === "note"
-      ? `The tagger contradicted itself on ${pct(s.rate)} of items, and the wording may not be the reason.`
-      : `The tagger contradicted itself on ${pct(s.rate)} of items.`,
+      ? `The tagger contradicted itself on ${pct(s.measured.rate)} of items, and the wording may not be the reason.`
+      : `The tagger contradicted itself on ${pct(s.measured.rate)} of items.`,
   );
   // The headline is the whole compact block. It used to carry "See Tagging
   // consistency for the detail." as well, which was a second sentence competing
@@ -279,6 +297,19 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
   why.className = "fd-why";
   why.textContent = s.entry.explanation;
   into.appendChild(why);
+
+  // The sample moved after this was written. Said plainly, because the card
+  // header beside it shows the CURRENT figures and the reader is entitled to
+  // know the paragraph is not an answer to those. A re-diagnosis is not
+  // guaranteed to follow either: the staleness key buckets the rate to 5 points
+  // and reads the same contested values, so a re-tag that lands inside the
+  // bucket leaves this standing indefinitely.
+  if (s.drifted) {
+    const drift = document.createElement("div");
+    drift.className = "fd-caveat";
+    drift.textContent = `Written against ${s.measured.items.toLocaleString()} item${s.measured.items === 1 ? "" : "s"}; ${s.items.toLocaleString()} now carry a measurement of this wording.`;
+    into.appendChild(drift);
+  }
 
   // A REPLACEMENT description, not a sentence to bolt on. Appending was the
   // original design and it was wrong in both directions: where the current

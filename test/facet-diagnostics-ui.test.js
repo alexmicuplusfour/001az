@@ -96,6 +96,35 @@ test("an actionable verdict with enough items is a finding", () => {
   assert.equal(Math.round(s.rate * 100), 40, "the rate is read off the measurements, not off the entry");
 });
 
+test("a finding reports the rate it was written about, not the latest one", () => {
+  // Reported from the running app. A retag lands 133 more items and the live
+  // rate moves — but nothing re-read the facet, because the staleness key
+  // buckets the rate to 5 points and 33% and 37% are the same key. The headline
+  // tracked the live number while the paragraph under it did not, so a re-tag
+  // looked like it had refreshed the finding when no call had been made.
+  const s = diagnosisState(row({
+    items: 2276, unanimous: 1434,                                    // 37% now
+    diagnostic: finding({ stats: { items: 2143, unanimous: 1436 } }), // 33% when written
+  }), G);
+  assert.equal(s.state, "finding");
+  assert.equal(Math.round(s.measured.rate * 100), 33, "the headline belongs to the finding's own sample");
+  assert.equal(Math.round(s.rate * 100), 37, "…and the live rate stays available for the card header");
+  assert.equal(s.drifted, true);
+
+  const t = textOf(diagnosisBlock(row({
+    items: 2276, unanimous: 1434,
+    diagnostic: finding({ stats: { items: 2143, unanimous: 1436 } }),
+  }), G));
+  assert.match(t, /contradicted itself on 33% of items/);
+  assert.match(t, /Written against 2,143 items; 2,276 now/, "and the gap is stated, not left to be inferred");
+});
+
+test("a finding measured on the live sample says nothing about drift", () => {
+  const s = diagnosisState(row({ items: 25, unanimous: 15, diagnostic: finding() }), G);
+  assert.equal(s.drifted, false);
+  assert.doesNotMatch(textOf(diagnosisBlock(row({ items: 25, unanimous: 15, diagnostic: finding() }), G)), /Written against/);
+});
+
 test("a verdict with no explanation is not a finding", () => {
   // A box with a heading and no body is worse than no box.
   const s = diagnosisState(row({ items: 25, unanimous: 15, diagnostic: finding({ explanation: "" }) }), G);
@@ -334,6 +363,10 @@ test("…and hidden on a single-pass board, which measures nothing to show", () 
 const bigFinding = () => row({
   items: 25, unanimous: 17,
   diagnostic: finding({
+    // Coherent with the row on purpose: these tests are about LAYOUT, and a
+    // fixture whose stored stats disagree with its row would make every
+    // headline assertion here quietly also a drift assertion.
+    stats: { items: 25, unanimous: 17 },
     explanation: "minimalist-modern and geometric-modernist overlap badly across most of the disputed marks.",
     rewrite: "The dominant stylistic school of the mark. Use minimalist-modern for reduced, clean, contemporary marks; use geometric-modernist for marks built from strict geometry, and prefer it whenever both could apply.",
   }),

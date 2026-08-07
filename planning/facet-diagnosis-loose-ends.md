@@ -506,6 +506,51 @@ here is wrong inside any single unit.
   `single: true`, and every measurement §0 cites — `construction` at 60%,
   `industry` at 64% — is from a facet where they do not.
 
+- [x] **32. A live headline over a stored paragraph made a re-tag look like a
+  re-diagnosis.** *(fixed, reported from the running app — the user retagged 133
+  items, saw the percentage move, and correctly guessed the prose had not)*
+
+  `diagnosisBlock` composed two things of different ages and said nothing about
+  it. The headline — *"The tagger contradicted itself on 37% of items"* — came
+  from `s.rate`, recomputed from the roll-up on every render. Everything under
+  it came from `entry.explanation` and `entry.rewrite`, written once against
+  `entry.stats`. A tagging run moves the first and not the second, so the box
+  reads as a fresh finding.
+
+  **And a re-diagnosis is not necessarily coming.** The staleness key is
+  `v{PROMPT_VERSION} | d | rate bucketed to 5 points | top-5 split values`, and
+  it holds no notion of the sample's identity. `construction` on the live board
+  moved from 2,143 items to 2,276 with the rate landing at 37% either side of
+  the retag — same `d`, same bucket, same contested values, therefore the same
+  `k` and the loop skips. Bucketing is right for drift (§4 chose it so one more
+  tagged item does not invalidate a good paragraph) and blind to a wholesale
+  re-measurement, and the two are indistinguishable in the key. Note that 33%
+  and 37% bucket together, so the headline can visibly move four points with no
+  call due, forever.
+
+  The finding now reports **its own** rate, from `entry.stats`, so the box is
+  internally consistent; the card header beside it already carries the live
+  figure, which is where "what is true now" belongs. When the two samples differ
+  the block says so outright — *"Written against 2,143 items; 2,276 now carry a
+  measurement of this wording."* Left deliberately as a statement rather than a
+  warning: a paragraph about a taxonomy does not expire because the sample grew,
+  and claiming otherwise would be its own kind of lie.
+
+  The test fixture had the same defect baked in — `bigFinding` paired a row at
+  25/17 with stored stats of 25/15 — so every headline assertion in that file
+  was quietly also asserting the buggy composition. Made coherent, with the
+  drift case pinned separately.
+
+- [x] **33. `PROMPT_VERSION` was not bumped for the `single` branch.** *(fixed)*
+  Defect 31 changed the QUESTION, which is exactly what that constant exists to
+  track, and the commit that made the change did not touch it. Every v2 finding
+  on a multi-value facet carries advice to discard a co-present value, and
+  without the bump they would have sat on screen indefinitely — the measurements
+  had not moved, so `k` matched and the loop would never have replaced them,
+  with `[copy]` still offering the wording. Found while investigating 32, which
+  is the same blindness seen from the other side: the key cannot tell that
+  anything needs re-asking. Now 3.
+
 ## Behaviour worth a decision (no change made)
 
 - **14. A diagnosis in flight can undo the save that demotes it.** The worker
