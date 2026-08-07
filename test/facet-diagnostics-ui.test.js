@@ -114,12 +114,59 @@ test("a re-measured sample discards the old finding — it does not annotate it"
     items: 133, unanimous: 84, current: false,
     diagnostic: finding({ stats: { items: 25, unanimous: 15 } }),
   });
-  assert.equal(diagnosisState(superseded(), G).state, "none", "a run that has been superseded says nothing");
-  assert.equal(diagnosisBlock(superseded(), G), null, "and renders no box at all");
+  const t = textOf(diagnosisBlock(superseded(), G));
+  assert.doesNotMatch(t, /round and wide overlap/, "the superseded explanation is gone");
+  assert.doesNotMatch(t, /prefer wide/, "…and so is the wording it wanted pasted over the description");
+  assert.doesNotMatch(t, /contradicted itself/, "…and the headline that made it look freshly computed");
 
   // …and an entry the server vouched for still shows, on the same numbers.
   const vouched = row({ items: 133, unanimous: 84, current: true, diagnostic: finding() });
   assert.equal(diagnosisState(vouched, G).state, "finding");
+});
+
+test("an unstable facet nobody has diagnosed yet does not throw", () => {
+  // The commonest row on any board — every facet is in this state until its
+  // first diagnosis lands. `current` used to be computed FROM the entry, so it
+  // could not be true without one; now it comes from the server and can be, and
+  // the verdict lookup under it went from safe to a null dereference. Nothing
+  // else in the file covers "over the rate floor, no entry".
+  const s = diagnosisState(row({ items: 40, unanimous: 20 }), G);
+  assert.equal(s.state, "none");
+  assert.equal(diagnosisBlock(row({ items: 40, unanimous: 20 }), G), null);
+});
+
+test("a superseded finding says a re-reading is coming, rather than going blank", () => {
+  // Blank is the same rendering as "nothing wrong here", which is how a reader
+  // ends up asking whether the feature is working at all. The wait is a few
+  // minutes — the loop holds until the board settles.
+  const s = diagnosisState(row({ items: 133, unanimous: 84, current: false, diagnostic: finding() }), G);
+  assert.equal(s.state, "rereading");
+  assert.match(textOf(diagnosisBlock(row({ items: 133, unanimous: 84, current: false, diagnostic: finding() }), G)),
+    /measurements have changed/);
+
+  // With a retag still draining it names that instead, since "re-reading" would
+  // understate a job the user can watch.
+  const draining = row({ items: 133, unanimous: 84, current: false, queued: 900, diagnostic: finding() });
+  assert.match(textOf(diagnosisBlock(draining, G)), /900 items still queued/);
+});
+
+test("a facet under the rate floor is silent, not 'being re-read'", () => {
+  // Both conditions live in one `current`, and only one of them means a
+  // replacement is coming. A facet that simply got better has earned silence.
+  const better = row({ items: 133, unanimous: 120, current: false, diagnostic: finding() });
+  assert.ok((133 - 120) / 133 < G.minRate);
+  assert.equal(diagnosisState(better, G).state, "none");
+});
+
+test("a finding says when it was written", () => {
+  // Stored since the column shipped and never rendered. A finding outliving a
+  // tagging run is now the CORRECT outcome when the evidence did not move, so
+  // its age is the difference between "still true" and "forgotten".
+  const t = textOf(diagnosisBlock(row({
+    items: 25, unanimous: 15, current: true,
+    diagnostic: finding({ at: Date.now() - 3 * 86400000 }),
+  }), G));
+  assert.match(t, /Diagnosed 3d ago\./);
 });
 
 test("a facet that now reads healthy shows no warning, whatever is stored", () => {

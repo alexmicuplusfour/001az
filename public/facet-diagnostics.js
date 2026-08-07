@@ -14,7 +14,7 @@
 import { state } from './state.js';
 import { api } from './api.js';
 import { createModal } from './modal.js';
-import { ICONS } from './utils.js';
+import { ICONS, fmtDuration } from './utils.js';
 
 // Which of the five states a facet is in, from one roll-up row (server shape:
 // { key, label, items, unanimous, d, scoped, stale, diagnostic }).
@@ -101,16 +101,36 @@ export function diagnosisState(row, ctx = {}) {
   // The rate test is the plainer of the two, and local because it needs
   // nothing: a facet at 86% consistent against a 70% floor is not a problem,
   // whatever a paragraph written when it was 60% has to say about it.
+  // `entry?.` and not `entry.` — `current` used to imply an entry existed (it
+  // was computed from entry.stats) and no longer does, so an unstable facet
+  // that has never been diagnosed reaches here with entry === null. That is the
+  // commonest row on any board: every facet is in it until its first diagnosis.
   const current = row?.current !== false && rate >= minRate;
-  if (current && entry.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate };
-  if (current && entry.verdict !== "no-problem-found" && entry.explanation) {
-    return { state: "finding", entry, items, rate };
+  const renderable = entry?.verdict && entry.verdict !== "no-problem-found" && entry.explanation;
+  if (current && entry?.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate };
+  if (current && renderable) return { state: "finding", entry, items, rate };
+
+  // The evidence moved and the replacement has not landed yet — a few minutes,
+  // since the loop waits for the board to settle. Without this the facet simply
+  // goes blank, which is the same rendering as "nothing wrong here" and is how
+  // a user ends up asking whether the feature is working.
+  //
+  // Both conditions from `current` have to be re-tested separately here, and
+  // only one of them means a replacement is coming. Evidence moved -> the loop
+  // will re-ask. Rate under the floor -> gate 4 means it will NOT, because the
+  // facet is fine, and a notice over a facet that simply got better would put
+  // words on the one state that has earned silence.
+  if (row?.current === false && renderable && rate >= minRate) {
+    return { state: "rereading", items, rate, queued };
   }
   if (!items && queued) return { state: "measuring", previous: null, items, rate, queued };
   return { state: "none", items, rate };
 }
 
 const pct = (n) => `${Math.round(n * 100)}%`;
+// The same one-liner alerts-modal, jobs-modal, ingest-modal and plugin-modal
+// each keep locally over fmtDuration. Copied rather than shared, matching them.
+const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 // Whether the header shows the door at all. Both halves are load-bearing and
 // each alone leaves a button that opens something useless: without
@@ -249,6 +269,13 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
     return el;
   }
 
+  if (s.state === "rereading") {
+    setText(s.queued
+      ? `Re-tagging this facet — ${s.queued.toLocaleString()} item${s.queued === 1 ? "" : "s"} still queued. A fresh reading follows.`
+      : `The measurements have changed. Re-reading this facet.`);
+    return el;
+  }
+
   if (s.state === "awaiting") {
     // Three ways to be here and they are not one sentence. An edit is the
     // designed path; nothing measured at all is the pre-stamp board; and a
@@ -331,6 +358,19 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
     quoted.textContent = s.entry.rewrite;
     sug.appendChild(quoted);
     into.appendChild(sug);
+  }
+
+  // When this was written. Stored since the column shipped and never rendered,
+  // which is the whole reason a reader who retagged a board and saw a surviving
+  // finding had no way to tell whether it was minutes or weeks old — and asked.
+  // A finding that outlives a tagging run is now the CORRECT outcome when the
+  // evidence did not move, so the age is the difference between "still true"
+  // and "forgotten", and only one of those is worth reading.
+  if (s.entry?.at) {
+    const when = document.createElement("div");
+    when.className = "fd-caveat";
+    when.textContent = `Diagnosed ${relTime(s.entry.at)}.`;
+    into.appendChild(when);
   }
 
   if (collapsible) {

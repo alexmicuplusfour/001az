@@ -602,6 +602,42 @@ here is wrong inside any single unit.
   this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
   read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
 
+- [x] **36. A finding never said when it was written, and a superseded one went
+  blank rather than saying why.** *(fixed, from the user reasoning about the
+  behaviour rather than from a screenshot)*
+
+  Two gaps left by 35, both of which the user found by thinking through what
+  they would see. Their mental model had been *"every tagging job re-diagnoses"*
+  — it never did, and after 35 the rule is *"a job re-diagnoses when it changes
+  the evidence or the severity"*, which is not something a reader can infer from
+  a modal that shows only the result.
+
+  **A timestamp.** `entry.at` has been stored since the column shipped and
+  rendered nowhere. It matters more now than it would have before: a finding
+  outliving a tagging run is the CORRECT outcome when the evidence did not move,
+  so its age is the whole difference between "still true" and "forgotten", and
+  the reader had no way to see which. *"Diagnosed 3d ago."*
+
+  **A state for the gap.** `current: false` with no replacement yet — the
+  evidence moved, the loop will re-ask on its next settled tick, and until then
+  the facet rendered as nothing. Blank is the same rendering as *no problem
+  here*, which is exactly how someone ends up asking whether the feature works.
+  Now *"The measurements have changed. Re-reading this facet."*, or the queued
+  count when a retag is still draining.
+
+  Not a blanket "re-tagging in progress" over the whole modal, which the user
+  offered and which the third sweep already rejected for the right reason: a
+  scoped retag leaves the other facets' measurements entirely current, and
+  hiding them behind a notice was defect 20. The re-reading line is per facet
+  and only where the evidence actually moved.
+
+  **A crash, found while writing it.** `current` used to be computed FROM the
+  entry, so it could not be true without one; 35 made it the server's answer,
+  and the `entry.verdict` lookup under it became a null dereference for any
+  facet over the rate floor with no diagnosis yet. That is the commonest row on
+  any board — every facet is in it until its first diagnosis — and no test
+  covered "unstable, never diagnosed". It does now.
+
 - [x] **35. The freshness key needed two halves, and every version so far shipped
   one.** *(fixed — found by the user asking "I have thousands of items and a
   diagnosis, then I add 20 more; does that re-diagnose?")*
