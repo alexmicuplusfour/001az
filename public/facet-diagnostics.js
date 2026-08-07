@@ -286,6 +286,23 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
   head.appendChild(headText);
   const setText = (t) => { headText.textContent = t; };
 
+  // The age, on the headline row and pushed right. Bare — "3m ago", not
+  // "Diagnosed 3m ago" — because the line it sits on already says what was
+  // diagnosed, and the word was doing nothing the sentence beside it wasn't.
+  //
+  // Up here rather than at the foot of the detail so it survives BOTH the
+  // compact variant (the facet editor, which is a headline and nothing else)
+  // and the folded collapsible one. It matters most exactly where it used to be
+  // invisible: a finding that outlives a tagging run is now the correct outcome
+  // when the evidence did not move, so its age is what separates "still true"
+  // from "forgotten".
+  if (s.entry?.at) {
+    const when = document.createElement("span");
+    when.className = "fd-when";
+    when.textContent = relTime(s.entry.at);
+    head.appendChild(when);
+  }
+
   if (s.state === "measuring") {
     setText(`Re-tagging this facet — ${s.queued.toLocaleString()} item${s.queued === 1 ? "" : "s"} still queued. Its figures return as they land.`);
     return el;
@@ -380,19 +397,6 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
     quoted.textContent = s.entry.rewrite;
     sug.appendChild(quoted);
     into.appendChild(sug);
-  }
-
-  // When this was written. Stored since the column shipped and never rendered,
-  // which is the whole reason a reader who retagged a board and saw a surviving
-  // finding had no way to tell whether it was minutes or weeks old — and asked.
-  // A finding that outlives a tagging run is now the CORRECT outcome when the
-  // evidence did not move, so the age is the difference between "still true"
-  // and "forgotten", and only one of those is worth reading.
-  if (s.entry?.at) {
-    const when = document.createElement("div");
-    when.className = "fd-caveat";
-    when.textContent = `Diagnosed ${relTime(s.entry.at)}.`;
-    into.appendChild(when);
   }
 
   if (collapsible) {

@@ -158,15 +158,35 @@ test("a facet under the rate floor is silent, not 'being re-read'", () => {
   assert.equal(diagnosisState(better, G).state, "none");
 });
 
-test("a finding says when it was written", () => {
-  // Stored since the column shipped and never rendered. A finding outliving a
-  // tagging run is now the CORRECT outcome when the evidence did not move, so
-  // its age is the difference between "still true" and "forgotten".
-  const t = textOf(diagnosisBlock(row({
+test("a finding says when it was written, on the headline row, in both densities", () => {
+  // A finding outliving a tagging run is the CORRECT outcome when the evidence
+  // did not move, so its age is the difference between "still true" and
+  // "forgotten" — which makes it useless anywhere it can be folded away. It
+  // rides the headline, so the editor's one-line summary and the modal's folded
+  // section both carry it.
+  //
+  // Bare: the line beside it already says what was diagnosed.
+  const aged = () => row({
     items: 25, unanimous: 15, current: true,
     diagnostic: finding({ at: Date.now() - 3 * 86400000 }),
-  }), G));
-  assert.match(t, /Diagnosed 3d ago\./);
+  });
+  for (const opts of [{}, { compact: true }, { collapsible: true }]) {
+    const head = find(diagnosisBlock(aged(), G, opts), "fd-when");
+    assert.ok(head, `no stamp in ${JSON.stringify(opts)}`);
+    assert.equal(head.textContent, "3d ago");
+  }
+  // Folded, it is still visible — it sits in the head, not the detail.
+  const folded = diagnosisBlock(aged(), G, { collapsible: true });
+  assert.equal(find(folded, "fd-detail").hidden, true);
+  assert.ok(find(find(folded, "fd-toggle"), "fd-when"), "the stamp is in the head, not behind the fold");
+
+  assert.doesNotMatch(textOf(diagnosisBlock(aged(), G)), /Diagnosed/);
+});
+
+test("a state with no diagnosis carries no timestamp", () => {
+  // `awaiting` and `measuring` have a `previous` at most — nothing was
+  // diagnosed, so there is no date to put on the row.
+  assert.equal(find(diagnosisBlock(row({ items: 0, stale: 25 }), G), "fd-when"), null);
 });
 
 test("a facet that now reads healthy shows no warning, whatever is stored", () => {
