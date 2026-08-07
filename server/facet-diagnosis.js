@@ -209,18 +209,31 @@ const VERDICTS = ["overlapping-values", "unclear-definition", "genuinely-ambiguo
 // hand over wording to paste into the description.
 const ACTIONABLE = new Set(["overlapping-values", "unclear-definition"]);
 
+// Bumped whenever the QUESTION changes. It rides in the freshness key for the
+// same reason `d` carries the prompt shape: a stored finding is an answer to one
+// specific question, and a finding produced by a different question is not
+// current however unchanged the measurements are. Bumping re-diagnoses every
+// facet on its next settled tick, which is also the only way entries written
+// against an older schema get replaced instead of lingering unactionable.
+//   1 -> 2: `suggestion` (one sentence to append) became `rewrite` (a complete
+//           replacement description).
+const PROMPT_VERSION = 2;
+
 const DIAGNOSE_SCHEMA = {
   type: "object",
   properties: {
     verdict: { type: "string", enum: VERDICTS },
     explanation: { type: "string", description: "Two sentences at most, naming the specific values involved." },
     values: { type: "array", items: { type: "string" }, description: "The values in tension, or empty." },
-    suggestion: {
+    rewrite: {
       type: "string",
-      description: "One sentence that could be appended to the facet description, or empty when there is nothing to suggest.",
+      description:
+        "A COMPLETE replacement for the facet description — not an addition to it. Keep every judgement " +
+        "the current description already establishes, and restate it precisely enough that the ambiguity " +
+        "above cannot recur. Three sentences at most. Empty when there is nothing worth changing.",
     },
   },
-  required: ["verdict", "explanation", "values", "suggestion"],
+  required: ["verdict", "explanation", "values", "rewrite"],
   additionalProperties: false,
 };
 
@@ -254,10 +267,15 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
     `itself, so any claim about what an item looks like has to rest on those words.\n` +
     `- "genuinely-ambiguous-items" — the taxonomy is fine and these particular items really are ` +
     `mixed — is a correct and expected answer, and so is "no-problem-found". Reach for them when ` +
-    `the evidence does not support a wording change. Neither takes a suggestion.\n` +
-    `- A suggestion is ONE sentence that could be appended to the description as written. The ` +
-    `strongest are precedence rules for the case where two values could each stand alone, e.g. ` +
-    `"when a mark has both a uniform stroke and a colour blend, prefer gradient-blend".\n\n` +
+    `the evidence does not support a wording change. Neither takes a rewrite.\n` +
+    `- Your rewrite REPLACES the description; it is not appended to it. Rewrite the whole thing, ` +
+    `keeping every judgement the current wording already establishes — you are making it unambiguous, ` +
+    `not substituting your own idea of what the facet is for. Where the current wording already tries ` +
+    `to draw the distinction and fails, say it better rather than saying it twice.\n` +
+    `- The strongest rewrites carry a precedence rule for the case where two values could each stand ` +
+    `alone, e.g. "when a mark has both a uniform stroke and a colour blend, prefer gradient-blend". ` +
+    `A rule that merely tells the tagger to apply the facet less often is not a fix — a facet that ` +
+    `ends up empty is no more useful than one that keeps changing its mind.\n\n` +
     `Record your answer with the ${DIAGNOSE_TOOL.name} tool.`;
 
   const group = (rows, empty) => (rows.length
@@ -292,6 +310,7 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 // shape — so this only has to catch the case where the numbers moved under an
 // unchanged definition.
 const freshness = (segment, split) => [
+  `v${PROMPT_VERSION}`,
   segment.d,
   Math.round(((segment.items - segment.unanimous) / segment.items) * 20) * 5,
   split.join(","),
@@ -375,8 +394,8 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
     values: arr(input.values),
     // Forced empty on the two non-actionable verdicts rather than trusted: a
     // model that has just said nothing is wrong must not also hand the UI
-    // wording to offer as a fix.
-    suggestion: ACTIONABLE.has(verdict) ? str(input.suggestion) : "",
+    // wording to paste over the user's own.
+    rewrite: ACTIONABLE.has(verdict) ? str(input.rewrite) : "",
     stats: { items: segment.items, unanimous: segment.unanimous },
     split,
     d: segment.d,

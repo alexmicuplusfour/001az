@@ -159,12 +159,19 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
       // measured it under that name.
       const row = statsByKey.get(f.key);
       if (row) {
-        const block = diagnosisBlock(row, gates, (suggestion) => {
-          const base = descIn.value.trim();
-          descIn.value = base ? `${base} ${suggestion}` : suggestion;
+        const block = diagnosisBlock(row, gates, (rewrite) => {
+          // Applied through execCommand rather than by assigning `.value`,
+          // because this REPLACES words the user wrote and they have to be able
+          // to take it back. A programmatic assignment does not go on the
+          // textarea's native undo stack, so Ctrl+Z after one would skip past
+          // the replacement to whatever was typed before it — silently losing
+          // the original. insertText over a full selection does, so the
+          // replacement undoes like any other edit.
+          descIn.focus();
+          descIn.select();
+          if (!document.execCommand?.("insertText", false, rewrite)) descIn.value = rewrite;
           f.description = descIn.value;
           sync();
-          descIn.focus();
           descIn.setSelectionRange(descIn.value.length, descIn.value.length);
         });
         if (block) facetEl.appendChild(block);

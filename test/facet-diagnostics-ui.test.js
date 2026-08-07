@@ -36,7 +36,7 @@ const row = (over = {}) => ({
 });
 const finding = (over = {}) => ({
   verdict: "overlapping-values", explanation: "round and wide overlap", values: ["round"],
-  suggestion: "prefer wide", stats: { items: 25, unanimous: 15 }, split: ["wide"],
+  rewrite: "prefer wide", stats: { items: 25, unanimous: 15 }, split: ["wide"],
   d: "aaa", scoped: false, k: "x", at: 1000, ...over,
 });
 
@@ -53,7 +53,7 @@ test("no-problem-found renders exactly like no entry at all", () => {
   // ABSENCE MUST NEVER READ AS "FINE" — so the converse has to hold too: a
   // measured, healthy facet must not get a badge that an unmeasured one lacks,
   // or the unmeasured one starts reading as the broken one.
-  const measured = diagnosisState(row({ items: 40, unanimous: 39, diagnostic: finding({ verdict: "no-problem-found", suggestion: "" }) }), G);
+  const measured = diagnosisState(row({ items: 40, unanimous: 39, diagnostic: finding({ verdict: "no-problem-found", rewrite: "" }) }), G);
   assert.equal(measured.state, "none");
 });
 
@@ -62,7 +62,7 @@ test("no-problem-found renders exactly like no entry at all", () => {
 test("an actionable verdict with enough items is a finding", () => {
   const s = diagnosisState(row({ items: 25, unanimous: 15, diagnostic: finding() }), G);
   assert.equal(s.state, "finding");
-  assert.equal(s.entry.suggestion, "prefer wide");
+  assert.equal(s.entry.rewrite, "prefer wide");
   assert.equal(Math.round(s.rate * 100), 40, "the rate is read off the measurements, not off the entry");
 });
 
@@ -75,7 +75,7 @@ test("a verdict with no explanation is not a finding", () => {
 // ─── state 2: information, not a task ────────────────────────────────────────
 
 test("genuinely-ambiguous-items is its own state, not a finding", () => {
-  const s = diagnosisState(row({ items: 25, unanimous: 15, diagnostic: finding({ verdict: "genuinely-ambiguous-items", suggestion: "" }) }), G);
+  const s = diagnosisState(row({ items: 25, unanimous: 15, diagnostic: finding({ verdict: "genuinely-ambiguous-items", rewrite: "" }) }), G);
   assert.equal(s.state, "note");
 });
 

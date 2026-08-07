@@ -89,7 +89,7 @@ function stubTagger(answer = {}, calls = []) {
           verdict: "overlapping-values",
           explanation: "round and wide overlap",
           values: ["round", "wide"],
-          suggestion: "prefer wide when both read true",
+          rewrite: "The silhouette. When a mark reads both round and wide, prefer wide.",
           ...answer,
         },
         // The shape bumpUsage actually reads — input_tokens/output_tokens
@@ -125,7 +125,7 @@ test("an unstable facet is diagnosed, stored, billed and logged", async () => {
 
   const e = (await diagnosticsOf(b)).shape;
   assert.equal(e.verdict, "overlapping-values");
-  assert.equal(e.suggestion, "prefer wide when both read true");
+  assert.equal(e.rewrite, "The silhouette. When a mark reads both round and wide, prefer wide.");
   assert.deepEqual(e.stats, { items: 21, unanimous: 4 });
   assert.equal(e.d, FULL.shape);
   assert.equal(e.scoped, false);
@@ -263,26 +263,26 @@ test("…but a moved rate re-diagnoses", async () => {
 
 // ─── the escape hatches ──────────────────────────────────────────────────────
 
-test("no-problem-found stores, and stores without a suggestion", async () => {
+test("no-problem-found stores, and stores without a rewrite", async () => {
   // It has to store, or staleness never records and every tick re-calls. And the
-  // suggestion is forced empty rather than trusted: a model that has just said
+  // rewrite is forced empty rather than trusted: a model that has just said
   // nothing is wrong must not also hand the UI wording to paste in.
   const b = await board("no-problem");
   await seedUnstable(b);
-  const deps = stubTagger({ verdict: "no-problem-found", suggestion: "prefer wide anyway" });
+  const deps = stubTagger({ verdict: "no-problem-found", rewrite: "some replacement anyway" });
   await diagnoseDue(db, deps, null);
 
   const e = (await diagnosticsOf(b)).shape;
   assert.equal(e.verdict, "no-problem-found");
-  assert.equal(e.suggestion, "");
+  assert.equal(e.rewrite, "");
 });
 
-test("genuinely-ambiguous-items likewise carries no suggestion", async () => {
+test("genuinely-ambiguous-items likewise carries no rewrite", async () => {
   const b = await board("ambiguous");
   await seedUnstable(b);
-  const deps = stubTagger({ verdict: "genuinely-ambiguous-items", suggestion: "split the facet" });
+  const deps = stubTagger({ verdict: "genuinely-ambiguous-items", rewrite: "split the facet" });
   await diagnoseDue(db, deps, null);
-  assert.equal((await diagnosticsOf(b)).shape.suggestion, "");
+  assert.equal((await diagnosticsOf(b)).shape.rewrite, "");
 });
 
 test("an off-schema verdict is never coerced into a finding", async () => {
@@ -311,7 +311,7 @@ test("a provider error on one facet neither throws nor stops the other", async (
     resolveAi: async () => ({ provider: "openai", apiKey: "sk-test", model: "m" }),
     tagger: async () => {
       if (++n === 1) throw new Error("provider exploded");
-      return { input: { verdict: "unclear-definition", explanation: "e", values: [], suggestion: "s" }, usage: null };
+      return { input: { verdict: "unclear-definition", explanation: "e", values: [], rewrite: "s" }, usage: null };
     },
   };
   await diagnoseDue(db, deps, null); // must not reject
@@ -398,7 +398,7 @@ test("a re-diagnosis after an edit quotes the old wording and the old rate", () 
 // ─── the demotion ────────────────────────────────────────────────────────────
 
 const finding = (d = FULL.shape) => ({
-  verdict: "overlapping-values", explanation: "e", values: ["round"], suggestion: "s",
+  verdict: "overlapping-values", explanation: "e", values: ["round"], rewrite: "s",
   stats: { items: 25, unanimous: 15 }, split: ["round"], d, scoped: false, k: "x", at: 1000,
 });
 
@@ -484,7 +484,7 @@ test("end to end: diagnose, take the advice, re-measure, and the baseline surviv
   assert.equal(deps.calls.length, 1);
   assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
 
-  // 2. the user appends the suggestion and saves
+  // 2. the user takes the rewrite and saves
   const admin = await adminSession(db);
   const edited = BF.map((f) => (f.key === "shape" ? { ...f, description: "the silhouette. prefer wide when both read true" } : f));
   await req(srv.base, "PATCH", `/api/admin/boards/${b}`, { sid: admin.sid, body: { facets: edited } });
@@ -533,7 +533,7 @@ test("startWorker's diagnose loop reaches a real board through the real tagger",
         name: body.tools?.[0]?.function?.name,
         arguments: JSON.stringify({
           verdict: "unclear-definition", explanation: "round and wide are not pinned down",
-          values: ["round", "wide"], suggestion: "prefer wide for lockups",
+          values: ["round", "wide"], rewrite: "The silhouette; prefer wide for lockups.",
         }),
       } }] } }],
       usage: { prompt_tokens: 900, completion_tokens: 120 },
@@ -550,7 +550,7 @@ test("startWorker's diagnose loop reaches a real board through the real tagger",
 
   assert.equal(calls[0].tools[0].function.name, "record_diagnosis", "the real tagger carried the diagnosis tool");
   const e = (await diagnosticsOf(b)).shape;
-  assert.equal(e.suggestion, "prefer wide for lockups");
+  assert.equal(e.rewrite, "The silhouette; prefer wide for lockups.");
 
   // Billed through the same ledger as any other call, in the shape bumpUsage
   // actually reads — asserting only `count` would pass with the tokens at zero.
@@ -606,7 +606,7 @@ test("attempts reset when the measurements actually move", async () => {
     tagger: async () => {
       seen.push(1);
       if (fail) throw new Error("nope");
-      return { input: { verdict: "unclear-definition", explanation: "e", values: [], suggestion: "s" }, usage: null };
+      return { input: { verdict: "unclear-definition", explanation: "e", values: [], rewrite: "s" }, usage: null };
     },
   };
   for (let i = 0; i < 5; i++) await diagnoseDue(db, deps, null);
@@ -676,4 +676,56 @@ test("…and it keeps the stats that are the NEXT baseline, not only the last on
   const after = (await diagnosticsOf(b)).shape;
   assert.deepEqual(after.previous.stats, { items: 21, unanimous: 4 }, "the edit had something to demote");
   assert.equal(after.previous.description, "the silhouette");
+});
+
+// ─── the rewrite replaces, it does not accumulate ────────────────────────────
+
+test("the prompt asks for a replacement description, not a sentence to bolt on", () => {
+  // Appending was the original design and it was wrong in both directions.
+  // Where the current wording already tries to draw the distinction and fails —
+  // which is what the first live run actually found — a second sentence saying
+  // it harder is worse than saying it once properly. And two or three
+  // apply-and-retag cycles leave a description that is one original plus three
+  // appendages.
+  const segment = { key: "shape", items: 25, unanimous: 10, d: FULL.shape, scoped: false };
+  const sample = { split: [], contested: [], unanimous: [] };
+  const { systemText, schema } = buildDiagnosePrompt({}, BF[0], segment, sample, null);
+
+  assert.match(systemText, /rewrite REPLACES the description/);
+  assert.match(systemText, /keeping every judgement the current wording already establishes/,
+    "the user's intent is not the model's to replace");
+  assert.doesNotMatch(systemText, /appended to the description/);
+  assert.ok(schema.required.includes("rewrite"));
+  assert.equal(schema.properties.suggestion, undefined, "the old field is gone, not shadowed");
+});
+
+test("the prompt refuses 'just tag it less often' as a fix", () => {
+  // The first live run produced exactly this for the worst facet: "do not tag
+  // these unless explicitly evident". That makes the facet emptier, not more
+  // consistent, and empty is not fixed — vote mode already showed unresolved
+  // multi-value facets getting emptier rather than settling.
+  const segment = { key: "shape", items: 25, unanimous: 10, d: FULL.shape, scoped: false };
+  const { systemText } = buildDiagnosePrompt({}, BF[0], segment, { split: [], contested: [], unanimous: [] }, null);
+  assert.match(systemText, /a facet that ends up empty is no more useful/i);
+});
+
+test("changing the question re-diagnoses every facet, even when the numbers have not moved", async () => {
+  // A stored finding is an answer to one specific question. Bump the question
+  // and it is no longer current, however unchanged the measurements are — the
+  // same logic that puts the prompt SHAPE inside `d`. Without this, entries
+  // written against an older schema sit there unactionable forever, because
+  // staleness only ever looks at the data.
+  const b = await board("prompt-version");
+  await seedUnstable(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+
+  const e = (await diagnosticsOf(b)).shape;
+  assert.match(e.k, /^v\d+\|/, "the freshness key names the question it answered");
+
+  // Same board, same numbers, an entry stored under a different question.
+  await setFacetDiagnostic(db, b, "shape", { ...e, k: e.k.replace(/^v\d+/, "v0") });
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 2, "a finding from an older prompt is not a current finding");
 });

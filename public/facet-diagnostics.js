@@ -180,21 +180,27 @@ export function diagnosisBlock(row, gates, onApply) {
   why.textContent = s.entry.explanation;
   el.appendChild(why);
 
-  if (s.state === "finding" && s.entry.suggestion) {
+  // A REPLACEMENT description, not a sentence to bolt on. Appending was the
+  // original design and it was wrong in both directions: where the current
+  // wording already tries to draw the distinction and fails, a second sentence
+  // saying it harder is worse than saying it once properly — and two or three
+  // diagnose-and-apply cycles leave a description that is one original plus
+  // three appendages.
+  if (s.state === "finding" && s.entry.rewrite) {
     const sug = document.createElement("div");
     sug.className = "fd-suggestion";
-    const quoted = document.createElement("span");
-    quoted.textContent = `Suggested: “${s.entry.suggestion}”`;
+    const quoted = document.createElement("div");
+    quoted.className = "fd-rewrite";
+    quoted.textContent = s.entry.rewrite;
     sug.appendChild(quoted);
     if (onApply) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "fd-apply";
-      btn.textContent = "add to description";
-      // Appends into the textarea and leaves the cursor there: a text edit the
-      // user can undo, retype or ignore before saving. The model never writes
-      // to the board.
-      btn.onclick = () => onApply(s.entry.suggestion);
+      // Named for what it does. "Add to" would be a lie now, and this one
+      // overwrites words the user wrote.
+      btn.textContent = "replace description";
+      btn.onclick = () => onApply(s.entry.rewrite);
       sug.appendChild(btn);
     }
     el.appendChild(sug);

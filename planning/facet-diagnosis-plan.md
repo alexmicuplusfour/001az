@@ -381,7 +381,7 @@ next person "simplifying" it.
     "verdict": "overlapping-values",
     "explanation": "monoline-linework and gradient-blend are not mutually exclusive…",
     "values": ["monoline-linework", "gradient-blend"],
-    "suggestion": "when a mark has both a uniform stroke and a colour blend, prefer gradient-blend",
+    "rewrite": "The construction methods visible in the mark. When a mark has both a uniform stroke and a colour blend, prefer gradient-blend.",
     "stats": { "items": 25, "unanimous": 15 },
     "split": ["gradient-blend", "monoline-linework"],
     "d": "7f3a1c0b91e4", "scoped": true, "k": "7f3a1c0b91e4|40|gradient-blend,monoline-linework",
@@ -493,6 +493,14 @@ Five gates, all of which must pass:
    scope-tagged. Both failures present as "diagnosis is quiet today", which is
    also what a healthy board looks like.
 
+**The question is versioned.** A stored finding answers one specific question,
+so a finding produced by a *different* question is not current however unchanged
+the measurements are — the same logic that puts the prompt shape inside `d`, one
+level up. `PROMPT_VERSION` rides in the freshness key, so changing what is asked
+re-diagnoses every facet on its next settled tick. Without it, entries written
+against an older schema sit unactionable forever, because staleness only ever
+looks at the data. (1 → 2 was append-a-sentence → rewrite-the-description.)
+
 **Staleness** is the stored `d` plus the bucketed instability rate (5-point
 steps, so one more tagged item doesn't invalidate a good paragraph) and the top-5
 split values sorted (1b). Skip when all three match. Note that `d` now does most
@@ -534,9 +542,9 @@ const schema = {
     ] },
     explanation: { type: "string", description: "Two sentences at most, naming the specific values involved." },
     values: { type: "array", items: { type: "string" }, description: "The values in tension, or empty." },
-    suggestion: { type: "string", description: "One sentence to append to the facet description, or empty when there is nothing to suggest." },
+    rewrite: { type: "string", description: "A COMPLETE replacement for the facet description — not an addition to it. Keep every judgement the current description already establishes; three sentences at most; empty when there is nothing worth changing." },
   },
-  required: ["verdict", "explanation", "values", "suggestion"],
+  required: ["verdict", "explanation", "values", "rewrite"],
   additionalProperties: false,
 };
 ```
@@ -554,7 +562,7 @@ are — "the runs parted on *gradient-blend* in 12 of the 18 items where they
 disagreed", not a raw vote total, which invites the model to read the most
 frequent value as the most troublesome), **the contested examples and the
 unanimous ones as two labelled groups** (1c and 1d), and ask what the contested
-items have that the unanimous ones don't — then for a precedence rule in the
+items have that the unanimous ones don't — then for a REWRITTEN description in the
 style of the strongest existing glosses ("where each could stand alone"). Ask the
 comparative question, not "what is wrong with this facet", which presupposes its
 own answer. Say explicitly that the tagger saw images and the diagnosis does not,
@@ -674,9 +682,21 @@ CONSTRUCTION TECHNIQUES                     [single value: off]
 ```
 
 1. **finding** — `overlapping-values` / `unclear-definition`, as above.
-   `[add to description]` appends the suggestion to the textarea and leaves the
-   cursor there: a text edit the user can undo, retype or ignore before saving.
-   The model never writes to the board.
+   `[replace description]` puts the proposed wording into the textarea: a text
+   edit the user can undo, retype or ignore before saving. The model never
+   writes to the board.
+
+   **A replacement, not an appendage** — rev. 3 asked for one sentence to append
+   and the first live run showed why that is wrong. On `shape` the model
+   reported that *"the facet wording says to judge the symbol rather than the
+   full lockup, but several examples still invite layout-based readings"* — the
+   current text already tries to draw the distinction and fails, so a second
+   sentence saying it harder is worse than saying it once properly. And the
+   damage compounds: two or three diagnose-and-apply cycles leave a description
+   that is one original plus three appendages, each written without sight of the
+   next. Applied through `execCommand("insertText")` rather than by assigning
+   `.value`, because this overwrites words the user wrote and a programmatic
+   assignment does not go on the textarea's native undo stack.
 2. **`genuinely-ambiguous-items`** — a muted note, no suggestion. Information,
    not a task.
 3. **`no-problem-found`, or no entry** — nothing. **Absence must never read as

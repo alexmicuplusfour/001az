@@ -568,7 +568,10 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .fd-improved { background: #f0fdf4; border-left-color: #22c55e; color: #14532d; }
 .fd-head { display: block; font-weight: 500; margin: 0 0 3px; }
 .fd-why { color: inherit; opacity: .9; }
-.fd-suggestion { margin-top: 5px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.fd-suggestion { margin-top: 6px; display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+/* The proposed description is a block of prose that replaces the textarea
+   above it, so it is set apart rather than run inline as a quoted clause. */
+.fd-rewrite { flex: 1 1 240px; padding: 5px 8px; background: rgba(255,255,255,.65); border: 1px solid rgba(0,0,0,.07); border-radius: 5px; font-style: italic; }
 /* The prompt-shape caveat inside an `improved` block. NOT .fd-note: that is the
    state class for the whole `genuinely-ambiguous-items` block two rules up, and
    sharing the name made each rule apply where it was not meant to — a grey
