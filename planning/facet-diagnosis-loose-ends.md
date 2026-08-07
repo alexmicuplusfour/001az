@@ -173,10 +173,12 @@ Everything here is from the running app, not from a fixture.
 ## Second sweep, 2026-08-07 — the baseline, and the state that outranks it
 
 A read of the landed code against the states it is supposed to render rather
-than against the plan, with two of the three findings reproduced against a live
-database before being believed. All three are fixed here. 801 tests pass.
+than against the plan, with the first two reproduced against a live database
+before being believed. Four defects, all fixed here. 801 tests pass. The fourth
+came from the user looking at the running app again, which is now twice for the
+same button and neither time from anything a test could hold.
 
-The theme is that both defects destroy the **same thing** — the `stats` that
+The theme of the first two is that they destroy the **same thing** — the `stats` that
 `demoteFacetDiagnostics` turns into `previous` — by two different routes, and
 `previous` is the only operand state 5 has. The feature's whole thesis is
 *diagnose → edit → re-tag → find out whether it worked*, and the last step of
@@ -251,9 +253,31 @@ that sentence is the one that quietly stops working.
   sweep's defect 5 — CSS is not in the suite — but unlike that one this was
   legible from the stylesheet, since the two rules sit seven lines apart.
 
+- [x] **13. The button's icon was a smudge in an empty square.** *(fixed,
+  reported from the running app — the second time this button's rendering has
+  been caught only by looking at it)*
+
+  The first sweep's defect 5 was that `.tool-btn` sizes no glyph generically, so
+  the new button rendered at zero. Fixing the declared size did not make the
+  icon *look* the size of the pencil beside it, because 15px is the box and not
+  the ink: the dial's strokes spanned y 7.5–17.4 of a 24 viewBox, so it drew
+  about 7px where the pencil draws 13. Half the ink, in a button of identical
+  padding, sitting in the same cluster.
+
+  Replaced with two ticks (`ICONS.doubleCheck`, spanning x 2–22, y 4.5–19.5),
+  which also fixes what the dial was saying. A gauge is the universal
+  "performance" glyph and this measures nothing of the kind; two ticks draw the
+  name of the switch that produces the data — **Double-check tags** — so the
+  icon and the setting share a metaphor, the way the button's label was made to
+  in the first sweep. A bar chart was the other candidate and was ruled out for
+  colliding with `viewRows`, two bars, in the same header.
+
+  The note in `styles.css` now carries both halves of the lesson, since the next
+  icon button will meet the second one too.
+
 ## Behaviour worth a decision (no change made)
 
-- **13. A diagnosis in flight can undo the save that demotes it.** The worker
+- **14. A diagnosis in flight can undo the save that demotes it.** The worker
   reads `board.facet_diagnostics` once at the top of a pass and writes with an
   unconditional `facet_diagnostics || jsonb_build_object(...)` merge, and between
   the two sits a provider call. `demoteFacetDiagnostics` takes `FOR UPDATE`, so
@@ -268,7 +292,7 @@ that sentence is the one that quietly stops working.
   matching what the pass read; not done because it wants a decision about whether
   that belongs in the setter or in the caller.
 
-- **14. Nothing renders between a re-measurement and the next diagnosis.** Edit,
+- **15. Nothing renders between a re-measurement and the next diagnosis.** Edit,
   re-tag, and the facet clears the item minimum again with its rate unmoved:
   the verdict is gone (demoted), *improved* needs the rate to have crossed the
   threshold, so `diagnosisState` returns `none` — which renders identically to a
@@ -278,7 +302,7 @@ that sentence is the one that quietly stops working.
   this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
   read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
 
-- **15. Gate 2 can never pass on a board that never goes quiet**, and it is
+- **16. Gate 2 can never pass on a board that never goes quiet**, and it is
   measuring more than it says. `boardTagActivity` reads
   `max(updated_at) FILTER (WHERE status='tagged')`, but `updated_at` is bumped by
   writers that are not tagging — `setItemEntities` on every face/entity
@@ -289,13 +313,13 @@ that sentence is the one that quietly stops working.
   numbers with no findings, which is indistinguishable from a healthy board.
   Cheap version: read the tagging lane's own stamp rather than `updated_at`.
 
-- **16. The roll-up is a whole-board jsonb expansion, run per board per tick.**
+- **17. The roll-up is a whole-board jsonb expansion, run per board per tick.**
   `candidates` calls `facetRollup` for every vote board it scans (up to eight a
   minute), each one a `jsonb_each` over every tagged row, plus `facetSplitValues`
   per unstable facet. At `logos`'s 2,406 items this is nothing; nobody has looked
   at what it costs at 100k. Same family as #6 and worth measuring together.
 
-- **17. `state.facetStats` is fetched once per board and never invalidated.**
+- **18. `state.facetStats` is fetched once per board and never invalidated.**
   `ensureFacetStats` keys on `state.boardId`, so a save that demotes a finding
   leaves the toolbar reading the pre-save roll-up — the dot can stay lit for a
   finding that no longer exists until the user switches boards. A failed fetch is

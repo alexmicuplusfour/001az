@@ -125,10 +125,19 @@ export const ICONS = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   // AI-derived content (the boards page's custom-mapping chip)
   sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/></svg>',
-  // Tagging consistency — a dial reading somewhere short of full. Its own glyph
-  // rather than `sparkle`, which is taken by the boards page's AI-fields chip
-  // and would mean two things one click apart; `activity` is the jobs ledger.
-  gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 16a9 9 0 1 1 17 0"/><path d="m12 15 4.5-4.5"/><circle cx="12" cy="16" r="1.4"/></svg>',
+  // Tagging consistency — two ticks, the second offset up-right. It draws the
+  // name of the switch that produces the data it reads: "Double-check tags".
+  // Its own glyph rather than `sparkle`, which is the boards page's AI-fields
+  // chip and would mean two things one click apart; `activity` is the jobs
+  // ledger, and `viewRows` is two bars — which is why a bar chart was ruled out
+  // for something sitting in the same header.
+  //
+  // It replaces a dial whose ink spanned y 7.5–17.4 of the 24 box: at the 15px
+  // every icon button here renders at, that is half the ink of the pencil
+  // beside it, and it read as a smudge in an empty square. Sizing is per-glyph
+  // in this set, so reaching the edges of the viewBox is the glyph's own job —
+  // this one spans x 2–22 and y 4.5–19.5.
+  doubleCheck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12.5 7 17.5 17 4.5"/><path d="M22 9.5 14.5 19.5l-2-2"/></svg>',
 };
 
 // Corner presence dot for any button — sits centered on the top-right

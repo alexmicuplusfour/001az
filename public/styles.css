@@ -258,10 +258,13 @@ header.header-collapsed #toolbar {
   align-items: center;
   gap: 6px;
 }
-/* The pencil and the tagging-stability dial are one cluster and must look it.
+/* The pencil and the tagging-consistency ticks are one cluster and must look it.
    Note that .tool-btn carries NO generic `svg` sizing — every icon button sizes
    its own glyph — so a new icon button that skips this renders as an empty box:
-   the SVG collapses to nothing and the button's padding is all that is left. */
+   the SVG collapses to nothing and the button's padding is all that is left.
+   The other half of that: 15px is the BOX, not the ink. A glyph whose strokes
+   sit in the middle of its viewBox renders visibly smaller than the pencil at
+   the same declared size, which is how the first icon here read as a smudge. */
 .tool-btn.board-edit-btn,
 .tool-btn.board-diag-btn {
   display: inline-flex;

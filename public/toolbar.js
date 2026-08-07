@@ -105,7 +105,7 @@ function diagnosticsBtn() {
   // the ingest-chip pattern: the button is drawn immediately either way, and
   // only the dot waits.
   ensureFacetStats();
-  const b = toolBtn(ICONS.gauge, "board-diag-btn", () => openDiagnosticsModal({
+  const b = toolBtn(ICONS.doubleCheck, "board-diag-btn", () => openDiagnosticsModal({
     onEditFacet: (key) => openBoardModal(state.boardId, {
       canEditAI: !!state.me?.is_admin,
       focusFacet: key,
