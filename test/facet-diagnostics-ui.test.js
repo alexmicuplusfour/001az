@@ -96,33 +96,35 @@ test("an actionable verdict with enough items is a finding", () => {
   assert.equal(Math.round(s.rate * 100), 40, "the rate is read off the measurements, not off the entry");
 });
 
-test("a finding reports the rate it was written about, not the latest one", () => {
-  // Reported from the running app. A retag lands 133 more items and the live
-  // rate moves — but nothing re-read the facet, because the staleness key
-  // buckets the rate to 5 points and 33% and 37% are the same key. The headline
-  // tracked the live number while the paragraph under it did not, so a re-tag
-  // looked like it had refreshed the finding when no call had been made.
+test("a re-measured sample discards the old finding — it does not annotate it", () => {
+  // Reported from the running app, twice. The first version paired the LIVE
+  // percentage with the STORED paragraph, so a retag looked like it had
+  // refreshed the finding. The second explained the gap in a sentence, which
+  // nobody asked for and nobody could parse: "Written against 25 items; 133 now
+  // carry a measurement of this wording."
+  //
+  // The answer is neither. A superseded finding is not a finding — the loop
+  // will replace it within a settled tick, and until then the honest rendering
+  // is nothing at all.
   const s = diagnosisState(row({
-    items: 2276, unanimous: 1434,                                    // 37% now
-    diagnostic: finding({ stats: { items: 2143, unanimous: 1436 } }), // 33% when written
+    items: 133, unanimous: 84,                                      // 37% now
+    diagnostic: finding({ stats: { items: 25, unanimous: 15 } }),   // measured on 25
   }), G);
-  assert.equal(s.state, "finding");
-  assert.equal(Math.round(s.measured.rate * 100), 33, "the headline belongs to the finding's own sample");
-  assert.equal(Math.round(s.rate * 100), 37, "…and the live rate stays available for the card header");
-  assert.equal(s.drifted, true);
-
-  const t = textOf(diagnosisBlock(row({
-    items: 2276, unanimous: 1434,
-    diagnostic: finding({ stats: { items: 2143, unanimous: 1436 } }),
-  }), G));
-  assert.match(t, /contradicted itself on 33% of items/);
-  assert.match(t, /Written against 2,143 items; 2,276 now/, "and the gap is stated, not left to be inferred");
+  assert.equal(s.state, "none", "a run that has been superseded says nothing");
+  assert.equal(diagnosisBlock(row({
+    items: 133, unanimous: 84,
+    diagnostic: finding({ stats: { items: 25, unanimous: 15 } }),
+  }), G), null, "and renders no box at all");
 });
 
-test("a finding measured on the live sample says nothing about drift", () => {
-  const s = diagnosisState(row({ items: 25, unanimous: 15, diagnostic: finding() }), G);
-  assert.equal(s.drifted, false);
-  assert.doesNotMatch(textOf(diagnosisBlock(row({ items: 25, unanimous: 15, diagnostic: finding() }), G)), /Written against/);
+test("a facet that now reads healthy shows no warning, whatever is stored", () => {
+  // 86% consistent against a 70% floor. The paragraph was written when it was
+  // worse and is not a claim about this. Independent of the sample test above,
+  // and cheap to state, because "why am I being warned about a facet that is
+  // fine" is the question it exists to never provoke.
+  const healthy = row({ items: 133, unanimous: 115, diagnostic: finding({ stats: { items: 133, unanimous: 115 } }) });
+  assert.ok((133 - 115) / 133 < G.minRate, "the fixture really is under the threshold");
+  assert.equal(diagnosisState(healthy, G).state, "none");
 });
 
 test("a verdict with no explanation is not a finding", () => {
@@ -475,7 +477,7 @@ test("a facet the retag does NOT touch keeps reporting its own numbers", () => {
   // stored answer was untouched and still current — `scopeResult` preserves them
   // — so treating "the board is busy" as if it applied to all nine hid eight
   // facets' worth of live measurements behind a re-tagging notice.
-  const untouched = row({ items: 25, unanimous: 17, queued: 0, diagnostic: finding() });
+  const untouched = row({ items: 25, unanimous: 17, queued: 0, diagnostic: finding({ stats: { items: 25, unanimous: 17 } }) });
   assert.equal(diagnosisState(untouched, G).state, "finding");
   assert.doesNotMatch(textOf(diagnosisBlock(untouched, G, { compact: true })), /Re-tagging/);
 });
@@ -490,6 +492,6 @@ test("a facet stranded by an edit still says so once the queue is empty", () => 
 
 test("a facet with a real sample reports it even while its own retag drains", () => {
   // Partial, but partial of something — the banner is what says so.
-  const s = diagnosisState(row({ items: 25, unanimous: 17, queued: 900, diagnostic: finding() }), G);
+  const s = diagnosisState(row({ items: 25, unanimous: 17, queued: 900, diagnostic: finding({ stats: { items: 25, unanimous: 17 } }) }), G);
   assert.equal(s.state, "finding");
 });

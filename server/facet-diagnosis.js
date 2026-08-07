@@ -348,16 +348,33 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 }
 
 // What "this diagnosis is still current" means: the same measurements, of the
-// same definition, parting on the same values. The rate is bucketed to 5 points
-// so one more tagged item does not invalidate a good paragraph.
+// same definition, parting on the same values.
 //
 // `d` does most of the work — it already carries both the wording and the prompt
 // shape — so this only has to catch the case where the numbers moved under an
 // unchanged definition.
+//
+// The counts are EXACT. §4 bucketed the rate to 5 points so that one more tagged
+// item could not invalidate a good paragraph, and that optimisation is what let
+// a whole re-tag pass unnoticed: `construction` went from 2,143 items to 2,276
+// with the rate at 37% on both sides of the run, so the key was identical and
+// the loop skipped — a finding written about a sample that no longer existed,
+// standing indefinitely. Drift and wholesale re-measurement are the same shape
+// through a bucket, and there is no width that separates them.
+//
+// The re-diagnoses this costs are bounded by the settle gate rather than by the
+// bucket: nothing is diagnosed until the board has been quiet for ten minutes,
+// so the counts have stopped moving by the time this is read. A board that is
+// genuinely being re-tagged is a board whose diagnosis genuinely is out of date.
+//
+// The reader hides a finding on exactly this condition (diagnosisState's
+// `sameSample`). The two must stay in step: whatever this would re-diagnose,
+// the UI hides — and anything the UI hides, this must re-diagnose, or a facet
+// goes silent with nothing coming to replace it.
 const freshness = (segment, split) => [
   `v${PROMPT_VERSION}`,
   segment.d,
-  Math.round(((segment.items - segment.unanimous) / segment.items) * 20) * 5,
+  `${segment.unanimous}/${segment.items}`,
   split.join(","),
 ].join("|");
 

@@ -528,18 +528,42 @@ here is wrong inside any single unit.
   and 37% bucket together, so the headline can visibly move four points with no
   call due, forever.
 
-  The finding now reports **its own** rate, from `entry.stats`, so the box is
-  internally consistent; the card header beside it already carries the live
-  figure, which is where "what is true now" belongs. When the two samples differ
-  the block says so outright — *"Written against 2,143 items; 2,276 now carry a
-  measurement of this wording."* Left deliberately as a statement rather than a
-  warning: a paragraph about a taxonomy does not expire because the sample grew,
-  and claiming otherwise would be its own kind of lie.
+  **Fixed twice, and the first fix was wrong.** It made the headline report the
+  finding's own rate and added a sentence explaining the gap — *"Written against
+  2,143 items; 2,276 now carry a measurement of this wording."* The user's
+  verdict on that was the correct one: *"why did you make it so complicated? I
+  don't even know what that means. I don't need old irrelevant diagnosis
+  messages."* Reconciling two numbers is work the reader should never have been
+  handed, and the sentence existed only because the box was still being shown
+  when it should not have been.
 
-  The test fixture had the same defect baked in — `bigFinding` paired a row at
-  25/17 with stored stats of 25/15 — so every headline assertion in that file
-  was quietly also asserting the buggy composition. Made coherent, with the
-  drift case pinned separately.
+  A superseded finding is **discarded, not annotated.** `diagnosisState` renders
+  a stored finding only while the stored sample equals the live one, exactly —
+  and the freshness key was made exact in the same change so the two conditions
+  are the same condition. Whatever the loop would re-diagnose, the reader hides;
+  whatever the reader hides, the loop re-diagnoses. They have to move together
+  or a facet goes silent with nothing coming to replace it, which is the one
+  outcome worse than a stale paragraph.
+
+  Dropping the bucket costs re-diagnoses, and less than it looks: the settle
+  gate means nothing is diagnosed until the board has been quiet for ten
+  minutes, so the counts have stopped moving by the time the key is read. A
+  board that is genuinely being re-tagged is a board whose diagnosis genuinely
+  is out of date.
+
+  The same change added the plainer half, which had simply never been written: a
+  facet whose LIVE rate is under `DIAGNOSE_MIN_RATE` shows nothing. `color` sat
+  at 86% consistent against a 70% floor with a warning on it, because
+  `diagnosisState` tested the rate for *awaiting* and *improved* and never for a
+  finding. The loop would not diagnose such a facet in the first place (gate 4),
+  so a stored finding under the floor can only ever be stale — but the reader
+  should not have needed that argument to stay quiet.
+
+  The test fixtures had the defect baked in three times over: `bigFinding` and
+  both scoped-retag rows paired a live 25/17 with stored stats of 25/15, so
+  every headline assertion in that file was quietly also asserting the buggy
+  composition. Made coherent, with the supersession and the healthy-facet cases
+  pinned on their own.
 
 - [x] **33. `PROMPT_VERSION` was not bumped for the `single` branch.** *(fixed)*
   Defect 31 changed the QUESTION, which is exactly what that constant exists to
