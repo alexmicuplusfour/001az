@@ -547,3 +547,24 @@ test("a facet with a real sample reports it even while its own retag drains", ()
   const s = diagnosisState(row({ items: 25, unanimous: 17, queued: 900, diagnostic: finding({ stats: { items: 25, unanimous: 17 } }) }), G);
   assert.equal(s.state, "finding");
 });
+
+test("five queued items on a board of 2,228 is not a re-tagging notice", () => {
+  // Reported from the running app: retagging five items put "Re-tagging this
+  // facet — 5 items still queued" on three facets and a banner over all nine
+  // saying every figure below was partial. The reading was over 2,223 of 2,228
+  // items — 99.8% complete.
+  //
+  // The threshold is RATE_BUCKET, not a preference: five points is the
+  // granularity at which the rate is judged everywhere else, and a slice
+  // smaller than that cannot move the reading by a bucket even if every queued
+  // item came back the other way.
+  const thin = row({ items: 2223, unanimous: 1400, queued: 5, diagnostic: finding({ stats: { items: 2223, unanimous: 1400 } }) });
+  assert.equal(diagnosisState(thin, G).state, "finding", "the finding is untouched");
+  assert.doesNotMatch(textOf(diagnosisBlock(thin, G)), /Re-tagging|still queued/);
+
+  // …and a retag that HAS taken the sample away still says so. The per-facet
+  // notice is for a facet with nothing left to report; the banner above the list
+  // is what qualifies a reading that is merely incomplete.
+  const drained = row({ items: 10, unanimous: 5, queued: 1100, diagnostic: finding() });
+  assert.match(textOf(diagnosisBlock(drained, G)), /1,100 items still queued/);
+});

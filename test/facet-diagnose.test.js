@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { startServer, adminSession, req } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
-  updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics,
+  updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
 } from "../server/db.js";
 import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
 import { startWorker } from "../server/worker.js";
@@ -259,27 +259,22 @@ test("a second pass over unchanged measurements spends nothing", async () => {
   assert.equal(deps.calls.length, 1, "the paragraph still describes the data");
 });
 
-test("a trickle of new items DOES re-diagnose — the price of a key that reads nothing", async () => {
-  // Pinned as a cost, not as a feature. The sample is read whole with no
-  // recency filter: the worked examples are the eight most-contested items on
-  // the board and the four oldest unanimous ones, so twenty arrivals reach
-  // neither group and the paragraph comes back saying the same thing.
+test("a trickle of new items does NOT re-diagnose", async () => {
+  // Rule one, from the other side. A finding is a claim about the TAXONOMY —
+  // "these two values overlap, here is wording that separates them" — and 20
+  // more logos arriving does not refute it. The explanation was reasoned from
+  // twelve specific items, none of which the new arrivals displace, and the
+  // rate stays in the same bucket. Nothing about it has become untrue, so
+  // nothing is re-asked.
   //
-  // Knowing that in advance means ranking every contested item per facet, which
-  // was built and measured and cost 128-244ms on a 4,600-item board — on every
-  // modal open, since the reader has to agree with the loop about what "current"
-  // means. Paying an occasional 1-2k-token call to keep a page load at 33ms is
-  // the trade, and the settle gate bounds it to one per three minutes.
-  //
-  // Seeded proportionally rather than at the real 3,000: 100 items with 20
-  // arriving makes the twenty a fifth of the sample instead of 0.7% of it.
+  // Seeded proportionally rather than at the real 2,500: 100 items with 20
+  // arriving makes the twenty a fifth of the sample instead of under a percent.
   const b = await board("trickle");
   await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 1);
 
-  // Twenty more in the same proportion, so the rate does not move either.
   for (let i = 0; i < 8; i++) {
     await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `new contested ${i}` });
   }
@@ -287,33 +282,50 @@ test("a trickle of new items DOES re-diagnose — the price of a key that reads 
     await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `new clean ${i}` });
   }
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 2, "it re-asks, and the answer will be the same");
+  assert.equal(deps.calls.length, 1, "same claim, same evidence, same rate — nothing to ask");
 });
 
-test("…while a re-measurement that moves the counts re-diagnoses, at 37% either side", async () => {
-  // The case that started all of this and the one a 5-point rate bucket missed
-  // for good: the retag went 2,143 items to 2,276 with the rate at 37% on BOTH
-  // sides, so the bucketed key matched and a finding about a sample that no
-  // longer existed stood indefinitely. Exact counts catch it — the rate is
-  // deliberately held still here so nothing but the counts can be doing the
-  // work.
-  const b = await board("remeasured");
-  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 }); // 40%
+test("…but growth that moves the rate does re-diagnose", async () => {
+  // Rule two. The paragraph survives arrivals; the HEADLINE does not. A facet
+  // that read 40% inconsistent and now reads 12% cannot keep a sentence that
+  // says 40%, whatever the explanation still gets right.
+  const b = await board("grown");
+  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
   assert.equal(deps.calls.length, 1);
-  assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 100, unanimous: 60 });
 
-  for (let i = 0; i < 4; i++) {
-    await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `more contested ${i}` });
-  }
-  for (let i = 0; i < 6; i++) {
-    await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `more clean ${i}` });
+  // 25 clean arrivals: 40 contested of 125 is 32%, a different bucket from 40%
+  // and still over the instability floor. Overshooting the floor instead would
+  // test gate 4 — a facet that has become healthy is dropped before any of this
+  // is consulted — which is a different (and also correct) reason not to ask.
+  for (let i = 0; i < 25; i++) {
+    await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `clean arrival ${i}` });
   }
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 2, "110 items is not the 100 the paragraph was written about");
-  assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 110, unanimous: 66 },
-    "…and the rate is 40% on both sides, so only the counts can have caught it");
+  assert.equal(deps.calls.length, 2, "40% then 32% is not the same finding");
+});
+
+test("a re-measurement of the evidence items re-diagnoses", async () => {
+  // Rule one, the case it exists for. Nothing is added or removed — the twelve
+  // items the model reasoned from are re-tagged in place, so the reasoning is
+  // about data that is gone.
+  const b = await board("remeasured");
+  await seedUnstable(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+  const evidence = (await diagnosticsOf(b)).shape.evidence;
+  assert.ok(evidence.length > 0, "the finding records what it was reasoned from");
+
+  // Flip the agreement on the items it read, and only those.
+  await db.query(
+    `UPDATE items SET tag_confidence = jsonb_set(tag_confidence, '{shape}', $2::jsonb)
+     WHERE id = ANY($1::bigint[])`,
+    [evidence, JSON.stringify(conf(FULL.shape, 3, 1, { round: 1, wide: 1, tall: 1 }))]
+  );
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 2, "the twelve it read are not the twelve that are there");
 });
 
 test("arming a retag supersedes the finding immediately, before an item lands", async () => {
@@ -338,6 +350,30 @@ test("arming a retag supersedes the finding immediately, before an item lands", 
 
   const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
   assert.equal(row.current, false, "the reader hides it on the flag alone");
+});
+
+test("a retag that misses the twelve leaves the finding alone", async () => {
+  // The report this was built for: five items retagged on a board of 2,500, and
+  // three findings marked stale. The question at arming is about ROWS — does
+  // this retag touch any of the items the explanation was reasoned from — and
+  // for five items picked from thousands the answer is almost always no.
+  const b = await board("misses");
+  await seedUnstable(b, "shape", FULL.shape, { contested: 40, clean: 60 });
+  await diagnoseDue(db, stubTagger(), null);
+  const evidence = (await diagnosticsOf(b)).shape.evidence;
+  assert.ok(evidence.length, "the finding recorded what it read");
+
+  // Arm five items that are NOT among them, exactly as a retag would.
+  const { rows } = await db.query(
+    `UPDATE items SET status='pending', updated_at=$2
+     WHERE id IN (SELECT id FROM items WHERE board_id=$1 AND NOT (id = ANY($3::bigint[])) LIMIT 5)
+     RETURNING id`,
+    [b, Date.now(), evidence]
+  );
+  assert.equal(rows.length, 5);
+  const hit = await supersedeFacetDiagnostics(db, b, null);
+  assert.deepEqual(hit, [], "nothing it reasoned from was touched");
+  assert.equal((await diagnosticsOf(b)).shape.stale, undefined);
 });
 
 test("a scoped retag supersedes only the facets it names", async () => {

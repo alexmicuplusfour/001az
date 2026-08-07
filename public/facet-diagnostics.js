@@ -40,7 +40,11 @@ export function diagnosisState(row, ctx = {}) {
   // retag on one facet leaves the other eight untouched, and treating their
   // items as in-flight hid eight facets' worth of current measurements and told
   // the user to re-tag facets that nothing was going to re-measure.
-  const queued = row?.queued || 0;
+  //
+  // And only when enough of the facet's own sample is in the queue to make its
+  // figures misleading (sampleThin). Any-queue-at-all put "re-tagging this
+  // facet" on rows whose numbers were 99.8% complete.
+  const queued = sampleThin(row) ? row.queued : 0;
   const entry = row?.diagnostic || null;
   const previous = entry?.previous || null;
   const items = row?.items || 0;
@@ -128,6 +132,24 @@ export function diagnosisState(row, ctx = {}) {
 }
 
 const pct = (n) => `${Math.round(n * 100)}%`;
+
+// Is enough of this facet's sample in the queue to make its figures misleading?
+//
+// Queued items drop out of the roll-up entirely (it counts `tagged` rows), so
+// the percentage shown is computed over what is left. Five of 2,500 leaves a
+// reading over 2,495 items, which is not "partial" by any honest use of the
+// word — but the check was `queued > 0`, so a five-item retag put a banner over
+// nine facets announcing that every figure below was unreliable.
+//
+// The threshold is not a taste: RATE_BUCKET is five points, and if the missing
+// slice is smaller than that it cannot move the reading by a whole bucket even
+// if every queued item came back the opposite way. Below it there is nothing
+// truthful to warn about.
+const RATE_BUCKET = 0.05;
+const sampleThin = (row) => {
+  const queued = row?.queued || 0;
+  return queued > 0 && queued / (queued + (row?.items || 0)) >= RATE_BUCKET;
+};
 // The same one-liner alerts-modal, jobs-modal, ingest-modal and plugin-modal
 // each keep locally over fmtDuration. Copied rather than shared, matching them.
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
@@ -425,7 +447,7 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
   // the facets that came back thin. A facet that has landed 89 of 2,400 items
   // reports a real percentage of an unrepresentative sample, and nothing in its
   // own row can say so.
-  const busyFacets = facets.filter((f) => f.queued > 0);
+  const busyFacets = facets.filter(sampleThin);
   if (busyFacets.length) {
     const n = Math.max(...busyFacets.map((f) => f.queued));
     const banner = document.createElement("p");

@@ -528,31 +528,46 @@ export async function setFacetDiagnostic(db, boardId, key, entry) {
   );
 }
 
-// A retag is about to re-measure these facets, so whatever is stored about them
-// describes a sample that is on its way out. Marked at the moment the retag is
-// ARMED — one statement, at the one point in the system that knows for certain
-// the measurements are about to move — rather than inferred later by comparing
-// numbers on every page load. That comparison stays as a backstop, because this
-// is invalidate-on-write and its failure mode is a writer nobody hooked.
+// A retag has just been armed. Mark stale only the findings it actually
+// undermines — the ones whose stored evidence it is about to re-measure.
 //
-// `stale` and not a delete: the finding still supplies the sentence the reader
-// sees while it waits ("the measurements have changed"), and `stats`/`previous`
-// are the baseline a later facet edit demotes into place. Attempts go, because
-// new data has earned fresh tries.
+// The question is exact and it is about ROWS, not about size: a finding names
+// the twelve items the model reasoned from, so "does this retag touch any of
+// them" has a yes or no answer. Retag five items on a board of 2,500 and the
+// answer is almost always no, and nothing happens. Retag the board and it is
+// yes for everything. There is no threshold anywhere in it.
 //
-// `keys = null` means an unscoped retag — every facet on the board.
+// A finding with no stored evidence predates this and cannot answer, so it is
+// marked — the safe direction, and it drains as findings are rewritten.
+//
+// `stale` rather than a delete: the finding still supplies the sentence the
+// reader shows while it waits, and `stats`/`previous` are the baseline a later
+// facet edit demotes into place. Only attempts/error go, because new data has
+// earned fresh tries.
 export async function supersedeFacetDiagnostics(db, boardId, keys = null) {
-  const { rows } = await db.query(
+  const { rows } = await db.query("SELECT facet_diagnostics AS d FROM boards WHERE id=$1", [boardId]);
+  const found = rows[0]?.d || {};
+  const scoped = keys ? new Set(keys) : null;
+  const candidates = Object.entries(found).filter(([k, v]) => v?.verdict && (!scoped || scoped.has(k)));
+  if (!candidates.length) return [];
+
+  // One lookup for every facet's evidence at once, by primary key.
+  const queued = await queuedAmong(db, [...new Set(candidates.flatMap(([, v]) => v.evidence || []))]);
+  const hit = candidates
+    .filter(([, v]) => !v.evidence?.length || v.evidence.some((id) => queued.has(id)))
+    .map(([k]) => k);
+  if (!hit.length) return [];
+
+  await db.query(
     `UPDATE boards SET facet_diagnostics = (
-       SELECT COALESCE(jsonb_object_agg(k, CASE WHEN $2::text[] IS NULL OR k = ANY($2::text[])
+       SELECT COALESCE(jsonb_object_agg(k, CASE WHEN k = ANY($2::text[])
                                                 THEN (v - 'attempts' - 'error') || '{"stale":true}'::jsonb
                                                 ELSE v END), '{}'::jsonb)
        FROM jsonb_each(facet_diagnostics) AS e(k, v))
-     WHERE id=$1 AND facet_diagnostics <> '{}'::jsonb
-     RETURNING id`,
-    [boardId, keys]
+     WHERE id=$1`,
+    [boardId, hit]
   );
-  return rows.length > 0;
+  return hit;
 }
 
 // Demote the findings for facets whose definition the user just changed.
@@ -617,7 +632,8 @@ export async function demoteFacetDiagnostics(db, boardId, edits) {
 // ordering on `agreed` alone would rank 1-of-2 above 2-of-5.
 export async function facetExamples(db, boardId, key, stamp, { contested, limit }) {
   const { rows } = await db.query(
-    `SELECT i.tag_reasoning->>'description' AS description,
+    `SELECT i.id::text AS id,
+            i.tag_reasoning->>'description' AS description,
             e.value->'votes' AS votes,
             (e.value->>'agreed')::int AS agreed,
             (e.value->>'of')::int AS of
@@ -631,6 +647,53 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
     [boardId, key, stamp, limit]
   );
   return rows;
+}
+
+// WHICH items the diagnosis would reason from — the same two groups
+// facetExamples returns, same filters, same ordering, ids only. The loop asks
+// this to decide whether the twelve have changed since the stored finding was
+// written, and it must stay byte-identical to facetExamples in its WHERE and
+// ORDER BY or it would be tracking a different twelve from the ones the model
+// reads.
+//
+// The worker only. It ranks every contested row on the board, which is why it
+// must never end up on a page load — that mistake took the board modal to
+// 611ms.
+export async function facetEvidenceIds(db, boardId, key, stamp, contested, unanimous) {
+  const { rows } = await db.query(
+    `(SELECT i.id::text AS id
+      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
+      WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+        AND e.key = $2 AND e.value->>'d' = $3
+        AND (e.value->>'agreed')::int < (e.value->>'of')::int
+        AND i.tag_reasoning ? 'description'
+      ORDER BY (e.value->>'agreed')::numeric / (e.value->>'of')::int ASC, i.id
+      LIMIT $4)
+     UNION ALL
+     (SELECT i.id::text AS id
+      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
+      WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+        AND e.key = $2 AND e.value->>'d' = $3
+        AND (e.value->>'agreed')::int = (e.value->>'of')::int
+        AND i.tag_reasoning ? 'description'
+      ORDER BY i.id
+      LIMIT $5)`,
+    [boardId, key, stamp, contested, unanimous]
+  );
+  return rows.map((r) => r.id);
+}
+
+// Of the given item ids, which are currently queued for tagging. A primary-key
+// lookup over at most a dozen ids per facet — the cheap half of the arming
+// check, and the reason it can run inline on a retag.
+export async function queuedAmong(db, ids) {
+  if (!ids?.length) return new Set();
+  const { rows } = await db.query(
+    `SELECT id::text AS id FROM items
+     WHERE id = ANY($1::bigint[]) AND status IN ('pending','processing')`,
+    [ids]
+  );
+  return new Set(rows.map((r) => r.id));
 }
 
 // The mapping to stamp for AI extraction: the given mapping when it has AI
