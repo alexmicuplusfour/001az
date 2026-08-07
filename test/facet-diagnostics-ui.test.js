@@ -47,7 +47,7 @@ const G = { minItems: 20, minRate: 0.30 };
 
 // One roll-up row, as the server serves it.
 const row = (over = {}) => ({
-  key: "shape", label: "Shape", items: 0, unanimous: 0, d: null, scoped: null, stale: 0, diagnostic: null,
+  key: "shape", label: "Shape", items: 0, unanimous: 0, d: null, scoped: null, stale: 0, queued: 0, diagnostic: null,
   ...over,
 });
 const finding = (over = {}) => ({
@@ -375,20 +375,31 @@ test("a one-line state says its whole piece in the editor", () => {
 
 // ─── a retag in flight is not an absence of data ────────────────────────────
 
-test("a queued facet says it is re-tagging, not that it was never measured", () => {
-  // Reported from the running app: a scoped retag on ONE facet moved most of the
-  // board to `pending`, the roll-up counts only TAGGED items, and every other
-  // facet reported "Not measured against the current wording yet. Re-tag this
-  // board on X." The measurements were never gone — they were in the queue — and
-  // the advice was to start a second retag on top of the one already running.
-  const s = diagnosisState(row({ items: 0, stale: 0 }), { ...G, busy: 1827 });
+test("a facet being re-tagged says so, rather than that it was never measured", () => {
+  // Reported from the running app: a scoped retag moved most of the board to
+  // `pending`, the roll-up counted only TAGGED items, and every facet reported
+  // "Not measured against the current wording yet. Re-tag this board on X." The
+  // measurements were never gone, and the advice was to start a second retag on
+  // top of the one already running.
+  const s = diagnosisState(row({ items: 0, stale: 0, queued: 1827 }), G);
   assert.equal(s.state, "measuring");
-  assert.equal(s.busy, 1827);
+  assert.equal(s.queued, 1827);
 
-  const block = diagnosisBlock(row({ items: 0, stale: 0 }), { ...G, busy: 1827 }, null, { compact: true });
+  const block = diagnosisBlock(row({ items: 0, stale: 0, queued: 1827 }), G, null, { compact: true });
   const t = textOf(block);
-  assert.match(t, /Re-tagging — 1,827 items still queued/);
+  assert.match(t, /Re-tagging this facet — 1,827 items still queued/);
   assert.doesNotMatch(t, /Re-tag this board/, "never ask for a retag while one is running");
+});
+
+test("a facet the retag does NOT touch keeps reporting its own numbers", () => {
+  // The second half of the same report, and the sharper half: a scoped retag on
+  // `construction` armed 1,579 items for construction ALONE. Every other facet's
+  // stored answer was untouched and still current — `scopeResult` preserves them
+  // — so treating "the board is busy" as if it applied to all nine hid eight
+  // facets' worth of live measurements behind a re-tagging notice.
+  const untouched = row({ items: 25, unanimous: 17, queued: 0, diagnostic: finding() });
+  assert.equal(diagnosisState(untouched, G).state, "finding");
+  assert.doesNotMatch(textOf(diagnosisBlock(untouched, G, null, { compact: true })), /Re-tagging/);
 });
 
 test("a facet stranded by an edit still says so once the queue is empty", () => {
@@ -399,9 +410,8 @@ test("a facet stranded by an edit still says so once the queue is empty", () => 
   assert.match(textOf(diagnosisBlock(stranded, G, null, { compact: true })), /Re-tag this board/);
 });
 
-test("a facet that has fully landed reports normally even while others queue", () => {
-  // The banner qualifies the board; a facet with a real sample still gets to
-  // report it.
-  const s = diagnosisState(row({ items: 25, unanimous: 17, diagnostic: finding() }), { ...G, busy: 1827 });
+test("a facet with a real sample reports it even while its own retag drains", () => {
+  // Partial, but partial of something — the banner is what says so.
+  const s = diagnosisState(row({ items: 25, unanimous: 17, queued: 900, diagnostic: finding() }), G);
   assert.equal(s.state, "finding");
 });

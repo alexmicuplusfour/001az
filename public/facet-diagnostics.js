@@ -36,10 +36,11 @@ import { ICONS } from './utils.js';
 export function diagnosisState(row, ctx = {}) {
   const minItems = ctx.minItems ?? 20;
   const minRate = ctx.minRate ?? 0.30;  // fallback only; the server serves the real one
-  // Items the board currently has queued or processing. Every figure here is
-  // computed over TAGGED items — a queued one has no settled answer to count —
-  // so a retag makes a facet's whole sample vanish until it lands again.
-  const busy = ctx.busy || 0;
+  // Items queued to rewrite THIS facet — not "the board is busy". A scoped
+  // retag on one facet leaves the other eight untouched, and treating their
+  // items as in-flight hid eight facets' worth of current measurements and told
+  // the user to re-tag facets that nothing was going to re-measure.
+  const queued = row?.queued || 0;
   const entry = row?.diagnostic || null;
   const previous = entry?.previous || null;
   const items = row?.items || 0;
@@ -63,7 +64,7 @@ export function diagnosisState(row, ctx = {}) {
     // asks for a second retag on top of the one already running (which
     // retagBoardFacets would silently no-op anyway, since an armed row is
     // `pending` and it only takes `tagged` ones).
-    if (busy) return { state: "measuring", previous, items, rate, busy };
+    if (queued) return { state: "measuring", previous, items, rate, queued };
     return { state: "awaiting", previous, items, rate };
   }
   if (previous?.stats?.items) {
@@ -82,7 +83,7 @@ export function diagnosisState(row, ctx = {}) {
   if (entry?.verdict && entry.verdict !== "no-problem-found" && entry.explanation) {
     return { state: "finding", entry, items, rate };
   }
-  if (!items && busy) return { state: "measuring", previous: null, items, rate, busy };
+  if (!items && queued) return { state: "measuring", previous: null, items, rate, queued };
   return { state: "none", items, rate };
 }
 
@@ -107,9 +108,7 @@ export function ensureFacetStats() {
   api("GET", `/api/boards/${state.boardId}/facet-stats`)
     .then((d) => {
       state.facetStats = d.facets || [];
-      // `busy` rides with the thresholds because diagnosisState needs both to
-      // decide what a thin sample MEANS.
-      state.facetGates = { ...(d.gates || {}), busy: d.busy || 0 };
+      state.facetGates = d.gates || {};
       document.dispatchEvent(new Event('app:render'));
     })
     .catch(() => { state.facetStats = []; }); // no dot rather than a broken header
@@ -189,7 +188,7 @@ export function diagnosisBlock(row, gates, onApply, { compact = false, collapsib
   };
 
   if (s.state === "measuring") {
-    setText(`Re-tagging — ${s.busy.toLocaleString()} item${s.busy === 1 ? "" : "s"} still queued. This facet's figures return as they land.`);
+    setText(`Re-tagging this facet — ${s.queued.toLocaleString()} item${s.queued === 1 ? "" : "s"} still queued. Its figures return as they land.`);
     return el;
   }
 
@@ -302,7 +301,7 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
   catch { return; }
 
   const facets = data.facets || [];
-  const gates = { ...(data.gates || {}), busy: data.busy || 0 };
+  const gates = data.gates || {};
   // Opening the modal is the freshest read there is — keep the toolbar's copy
   // in step so the dot clears against the same data the user just saw.
   state.facetStats = facets;
@@ -326,10 +325,20 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
   // the facets that came back thin. A facet that has landed 89 of 2,400 items
   // reports a real percentage of an unrepresentative sample, and nothing in its
   // own row can say so.
-  if (gates.busy) {
+  const busyFacets = facets.filter((f) => f.queued > 0);
+  if (busyFacets.length) {
+    const n = Math.max(...busyFacets.map((f) => f.queued));
     const banner = document.createElement("p");
     banner.className = "fd-busy";
-    banner.textContent = `A tagging pass is running — ${gates.busy.toLocaleString()} item${gates.busy === 1 ? "" : "s"} still queued. These figures cover only what has landed so far, and facets waiting in the queue read as unmeasured until they return.`;
+    // Names the facets, because that is the whole difference between "your
+    // board is mid-pass" and "these three numbers are partial". A scoped retag
+    // is the thing this feature tells people to run, so it is the common case.
+    banner.textContent =
+      `A re-tag is running on ${busyFacets.map((f) => f.label || f.key).join(", ")} — ` +
+      `${n.toLocaleString()} item${n === 1 ? "" : "s"} still queued. ` +
+      (busyFacets.length === facets.length
+        ? "Every figure below is partial until it finishes."
+        : "Only those figures are partial; the rest are current.");
     body.appendChild(banner);
   }
 

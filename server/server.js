@@ -103,7 +103,6 @@ import {
   setIngestNextRun,
   setIngestState,
   demoteFacetDiagnostics,
-  boardTagActivity,
   clearIngestDrain,
   ingestedKeys,
   ingestedAmong,
@@ -963,16 +962,8 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
 // NOT MEASURED, never zero agreement — and a reader has to tell that from a
 // board that measured and found no problem.
 app.get("/api/boards/:id/facet-stats", requireAuth, requireBoardManager, wrap(async (req, res) => {
-  // How much of the board is in flight. Every figure below is computed over
-  // TAGGED items — a queued one has no settled answer to count — so during a
-  // retag most of a board can be temporarily invisible here. Without this the
-  // reader cannot tell "never measured" from "measured, currently re-measuring",
-  // and the UI told users to start a second retag on facets that were already
-  // mid-pass.
-  const activity = await boardTagActivity(db, req.board.id);
   res.json({
     votes: req.board.ai_votes || 1,
-    busy: activity.busy,
     // The thresholds the loop gates on ride out with the numbers they apply to.
     // The client decides which of the five states a facet is in, and a copy of
     // these in the browser would drift the first time either is retuned — with

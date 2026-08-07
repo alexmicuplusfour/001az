@@ -431,8 +431,36 @@ export async function boardFacetSegments(db, boardId) {
             count(*)::int AS items,
             count(*) FILTER (WHERE (e.value->>'agreed')::int = (e.value->>'of')::int)::int AS unanimous
      FROM items i, jsonb_each(i.tag_confidence) AS e(key, value)
-     WHERE i.board_id = $1 AND i.status = 'tagged' AND NOT i.undecided
+     WHERE i.board_id = $1 AND NOT i.undecided
+       AND (
+         i.status = 'tagged'
+         -- A QUEUED item's stored answer still stands for every facet its
+         -- pending pass will not touch. A scoped retag rewrites only the facets
+         -- it is armed for and preserves the rest (scopeResult's pick), so
+         -- dropping the whole item would hide eight facets' worth of perfectly
+         -- current measurements because a ninth is being re-measured.
+         OR (i.status IN ('pending','processing')
+             AND i.tag_facets IS NOT NULL
+             AND NOT (e.key = ANY (i.tag_facets)))
+       )
      GROUP BY 1, 2`,
+    [boardId]
+  );
+  return rows;
+}
+
+// What the tagging queue is armed to rewrite, grouped by scope. NULL means a
+// full pass (every facet); an array names the facets a scoped retag will
+// replace. One row per distinct scope, so the caller can work out per FACET how
+// much is in flight rather than treating "the board is busy" as if it applied
+// to all nine equally — which is exactly backwards for the case this feature
+// tells users to run.
+export async function boardQueuedScopes(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT tag_facets AS facets, count(*)::int AS n
+     FROM items
+     WHERE board_id = $1 AND status IN ('pending','processing') AND NOT undecided
+     GROUP BY 1`,
     [boardId]
   );
   return rows;

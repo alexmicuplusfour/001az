@@ -11,7 +11,7 @@
 import crypto from "node:crypto";
 import {
   boardFacetSegments, facetSplitValues, facetExamples,
-  boardsWithVotes, boardTagActivity, setFacetDiagnostic, addJobLog, bumpUsage,
+  boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog, bumpUsage,
 } from "./db.js";
 
 // How many worked examples of each kind the prompt carries. Four unanimous is
@@ -103,7 +103,7 @@ export function facetStamp(facet, scoped = false) {
 // new one fills. What the retag cannot reach — failed, held and undecided rows —
 // keeps the old stamp, which is why this is "more items" and not "any scoped
 // item wins".
-export function pickSegment(facet, rows) {
+export function pickSegment(facet, rows, queued = 0) {
   const mine = rows.filter((r) => r.facet === facet.key);
   const seg = (scoped) => {
     const d = facetStamp(facet, scoped);
@@ -128,6 +128,9 @@ export function pickSegment(facet, rows) {
     d: chosen.items ? chosen.d : null,
     scoped: chosen.items ? chosen.scoped : null,
     stale,
+    // Items queued to rewrite THIS facet — zero for the eight facets a scoped
+    // retag leaves alone, however much of the board is in flight for the ninth.
+    queued,
   };
 }
 
@@ -140,13 +143,21 @@ export function pickSegment(facet, rows) {
 // all. Both directions matter, and only one of them is what the data would give
 // you on its own.
 export async function facetRollup(db, board) {
-  const rows = await boardFacetSegments(db, board.id);
+  const [rows, scopes] = await Promise.all([
+    boardFacetSegments(db, board.id),
+    boardQueuedScopes(db, board.id),
+  ]);
+  // A queued item rewrites a facet when its pass is unscoped (every facet) or
+  // when the facet is named in its scope. Nothing else in the queue is that
+  // facet's business.
+  const queuedFor = (key) =>
+    scopes.reduce((n, r) => n + (!r.facets || r.facets.includes(key) ? r.n : 0), 0);
   const found = board.facet_diagnostics || {};
   // The finding rides on the same row as the measurements it describes. Two
   // surfaces read this — the Diagnostics modal and the facet editor — and
   // handing them the halves separately is how one ends up rendering a paragraph
   // beside numbers it was not written about.
-  return (board.facets || []).map((f) => ({ ...pickSegment(f, rows), diagnostic: found[f.key] || null }));
+  return (board.facets || []).map((f) => ({ ...pickSegment(f, rows, queuedFor(f.key)), diagnostic: found[f.key] || null }));
 }
 
 // Everything the diagnosis prompt reads about one facet, all of it confined to

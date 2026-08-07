@@ -347,3 +347,60 @@ test("facet-stats is board-manager only, on the edit pencil's terms not the jobs
   const denied = await req(srv.base, "GET", `/api/boards/${b}/facet-stats`, { sid: viewer.sid });
   assert.ok(denied.status === 403 || denied.status === 404, `expected a refusal, got ${denied.status}`);
 });
+
+// ─── a scoped retag in flight ────────────────────────────────────────────────
+
+test("a scoped retag hides only the facet it will rewrite", async () => {
+  // Reported from the running app. A scoped retag on `shape` armed most of the
+  // board; the roll-up counted only `status='tagged'` rows, so `motif` — which
+  // nothing was going to re-measure — reported zero items and the UI told the
+  // user to re-tag it. A queued item's answer for every facet OUTSIDE its scope
+  // is untouched and still current (scopeResult preserves it), so it counts.
+  const b = await board("scoped-inflight");
+  const ids = [];
+  for (let i = 0; i < 6; i++) {
+    ids.push(await item(b, { confidence: {
+      shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }),
+      motif: conf(FULL.motif, 3, 3, { star: 3 }),
+    } }));
+  }
+  // Four of the six are queued, armed for `shape` alone.
+  await db.query(
+    "UPDATE items SET status='pending', tag_facets=ARRAY['shape']::text[] WHERE id = ANY($1)",
+    [ids.slice(0, 4)]
+  );
+
+  const r = byKey(await facetRollup(db, await getBoard(db, b)));
+  assert.equal(r.shape.items, 2, "only the two that have landed count for the facet being rewritten");
+  assert.equal(r.shape.queued, 4, "…and it says how many are still coming");
+  assert.equal(r.motif.items, 6, "the facet nobody is re-measuring keeps its whole sample");
+  assert.equal(r.motif.queued, 0, "…and is not reported as in flight");
+});
+
+test("an unscoped retag puts every facet in flight", async () => {
+  // tag_facets NULL is a full pass: it rewrites everything, so nothing queued
+  // can be counted for any facet.
+  const b = await board("full-inflight");
+  const ids = [];
+  for (let i = 0; i < 5; i++) {
+    ids.push(await item(b, { confidence: {
+      shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }),
+      motif: conf(FULL.motif, 3, 3, { star: 3 }),
+    } }));
+  }
+  await db.query("UPDATE items SET status='pending', tag_facets=NULL WHERE id = ANY($1)", [ids.slice(0, 3)]);
+
+  const r = byKey(await facetRollup(db, await getBoard(db, b)));
+  assert.deepEqual([r.shape.items, r.shape.queued], [2, 3]);
+  assert.deepEqual([r.motif.items, r.motif.queued], [2, 3], "a full pass rewrites this one too");
+});
+
+test("an undecided item stays excluded even when queued", async () => {
+  // The exclusion that flatters us is not relaxed by any of this.
+  const b = await board("inflight-undecided");
+  const id = await item(b, { undecided: true, confidence: { shape: conf(FULL.shape, 3, 3, {}) } });
+  await db.query("UPDATE items SET status='pending', tag_facets=ARRAY['motif']::text[] WHERE id=$1", [id]);
+  const r = byKey(await facetRollup(db, await getBoard(db, b)));
+  assert.equal(r.shape.items, 0);
+  assert.equal(r.shape.queued, 0);
+});
