@@ -106,9 +106,8 @@ function diagnosticsBtn() {
   // only the dot waits.
   ensureFacetStats();
   const b = toolBtn(ICONS.doubleCheck, "board-diag-btn", () => openDiagnosticsModal({
-    onEditFacet: (key) => openBoardModal(state.boardId, {
+    onEdit: () => openBoardModal(state.boardId, {
       canEditAI: !!state.me?.is_admin,
-      focusFacet: key,
       onSaved: () => document.dispatchEvent(new Event('app:render')),
     }),
   }));

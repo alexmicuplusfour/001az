@@ -159,6 +159,7 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
       // measured it under that name.
       const row = statsByKey.get(f.key);
       if (row) {
+        // Compact here, and open only for the facet the user came to edit.
         const block = diagnosisBlock(row, gates, (rewrite) => {
           // Applied through execCommand rather than by assigning `.value`,
           // because this REPLACES words the user wrote and they have to be able
@@ -173,7 +174,7 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
           f.description = descIn.value;
           sync();
           descIn.setSelectionRange(descIn.value.length, descIn.value.length);
-        });
+        }, { compact: true });
         if (block) facetEl.appendChild(block);
       }
 
@@ -335,7 +336,7 @@ export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null }
 //                    edits that's the sent payload, incl. `mapping` when the
 //                    pane was touched).
 export async function openBoardModal(boardId, opts = {}) {
-  const { canEditAI = false, onSaved, focusFacet = null } = opts;
+  const { canEditAI = false, onSaved } = opts;
   let board = null;
   if (boardId) {
     try { board = await api("GET", `/api/boards/${boardId}/settings`); }
@@ -392,18 +393,6 @@ export async function openBoardModal(boardId, opts = {}) {
   // New boards open with an empty taxonomy (the "[]" prefilled above) — boards
   // own their facets, and an empty taxonomy is a valid, non-tagging board.
   buildFacetEditor(facetsTextarea, { stats: board?.facet_stats, gates: board?.facet_gates });
-
-  // Arrived from the Diagnostics modal's "Edit this facet": bring that facet's
-  // description into view and put the cursor in it. Without this the user lands
-  // at the top of a nine-facet taxonomy and has to find the one they clicked.
-  if (focusFacet) {
-    const idx = (board?.facets || []).findIndex((f) => f.key === focusFacet);
-    const desc = idx >= 0 ? facetsTextarea.nextElementSibling?.querySelectorAll("textarea.fe-desc")[idx] : null;
-    if (desc) {
-      desc.scrollIntoView({ block: "center" });
-      desc.focus();
-    }
-  }
 
   // Mapping pane. Visibility is via `display` (not the `hidden` attribute) so
   // the pane's own flex layout can't override it.

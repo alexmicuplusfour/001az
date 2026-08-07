@@ -24,10 +24,26 @@ globalThis.localStorage = {
   setItem: (k, v) => store.set(k, String(v)),
   removeItem: (k) => store.delete(k),
 };
-globalThis.document ||= { addEventListener() {}, dispatchEvent() { return true; } };
-const { diagnosisState, diagnosticsUnseen, markDiagnosticsSeen, canSeeDiagnostics } = await import("../public/facet-diagnostics.js");
+// Just enough element for diagnosisBlock to build its tree. Deliberately tiny:
+// the assertions below read the tree the module produces, not this shim's
+// behaviour, so the only thing it has to get right is structure.
+const el = (tag) => ({
+  tag, className: "", textContent: "", hidden: false, children: [], attrs: {},
+  appendChild(c) { this.children.push(c); return c; },
+  prepend(c) { this.children.unshift(c); return c; },
+  setAttribute(k, v) { this.attrs[k] = v; },
+});
+globalThis.document ||= {
+  addEventListener() {}, dispatchEvent() { return true; }, createElement: el,
+};
+globalThis.document.createElement ||= el;
 
-const G = { minItems: 20, minRate: 0.15 };
+// Depth-first text of a built block, which is what a reader actually sees.
+const textOf = (n) => (n.textContent || "") + n.children.map(textOf).join("");
+const find = (n, cls) => (n.className?.split(" ").includes(cls) ? n : n.children.reduce((h, c) => h || find(c, cls), null));
+const { diagnosisState, diagnosticsUnseen, markDiagnosticsSeen, canSeeDiagnostics, diagnosisBlock } = await import("../public/facet-diagnostics.js");
+
+const G = { minItems: 20, minRate: 0.30 };
 
 // One roll-up row, as the server serves it.
 const row = (over = {}) => ({
@@ -296,4 +312,96 @@ test("…and hidden on a single-pass board, which measures nothing to show", () 
   // leaves a button, and it opens something useless in a different way.
   assert.equal(canSeeDiagnostics({ boardManage: true, boardVotes: 1 }), false);
   assert.equal(canSeeDiagnostics({ boardManage: true, boardVotes: 3 }), true);
+});
+
+
+// ─── density: the editor reports, the modal explains ────────────────────────
+
+const bigFinding = () => row({
+  items: 25, unanimous: 17,
+  diagnostic: finding({
+    explanation: "minimalist-modern and geometric-modernist overlap badly across most of the disputed marks.",
+    rewrite: "The dominant stylistic school of the mark. Use minimalist-modern for reduced, clean, contemporary marks; use geometric-modernist for marks built from strict geometry, and prefer it whenever both could apply.",
+  }),
+});
+
+test("the facet editor gets the headline and a pointer, never the content", () => {
+  // The complaint this exists to prevent: a finding rendered at survey size is
+  // a panel taller than the facet it belongs to, pushing that facet's own
+  // values off screen. The editor is a stack of 28px rows.
+  const block = diagnosisBlock(bigFinding(), G, null, { compact: true });
+  const t = textOf(block);
+  assert.match(t, /The tagger contradicted itself on 32% of items\./,
+    "worded exactly as the modal words it — one finding, one sentence");
+  assert.match(t, /See Tagging consistency/);
+  assert.doesNotMatch(t, /geometric-modernist/, "no explanation here");
+  assert.doesNotMatch(t, /Suggested description/, "and no proposal here");
+});
+
+test("no apply control can reach the editor, even if one is offered", () => {
+  // The two surfaces have separate jobs and the compact one has nowhere to put
+  // an action. Passing onApply must not smuggle the whole block back in.
+  let applied = false;
+  const block = diagnosisBlock(bigFinding(), G, () => { applied = true; }, { compact: true });
+  assert.equal(find(block, "fd-apply"), null);
+  assert.equal(applied, false);
+});
+
+test("the modal folds each finding, and opens to the whole thing", () => {
+  // The survey is the list of facets and their numbers; the essays are what you
+  // open one of. Six findings unfolded is the wall of text again, one surface
+  // over.
+  const folded = diagnosisBlock(bigFinding(), G, null, { collapsible: true });
+  assert.equal(find(folded, "fd-detail").hidden, true, "folded by default");
+  assert.match(textOf(find(folded, "fd-toggle")), /contradicted itself on 32%/);
+
+  const block = diagnosisBlock(bigFinding(), G, null);
+  const t = textOf(block);
+  assert.match(t, /The tagger contradicted itself on 32% of items\./);
+  assert.match(t, /geometric-modernist/);
+  assert.match(t, /Suggested description/);
+  assert.doesNotMatch(t, /See Tagging consistency/, "it IS Tagging consistency");
+});
+
+test("a one-line state says its whole piece in the editor", () => {
+  // `awaiting` and `improved` are one sentence each and complete in themselves —
+  // no pointer, because there is nothing further to go and read.
+  const block = diagnosisBlock(row({ items: 0, stale: 25 }), G, null, { compact: true });
+  const t = textOf(block);
+  assert.match(t, /Not measured against the current wording yet/);
+  assert.doesNotMatch(t, /See Tagging consistency/);
+});
+
+
+// ─── a retag in flight is not an absence of data ────────────────────────────
+
+test("a queued facet says it is re-tagging, not that it was never measured", () => {
+  // Reported from the running app: a scoped retag on ONE facet moved most of the
+  // board to `pending`, the roll-up counts only TAGGED items, and every other
+  // facet reported "Not measured against the current wording yet. Re-tag this
+  // board on X." The measurements were never gone — they were in the queue — and
+  // the advice was to start a second retag on top of the one already running.
+  const s = diagnosisState(row({ items: 0, stale: 0 }), { ...G, busy: 1827 });
+  assert.equal(s.state, "measuring");
+  assert.equal(s.busy, 1827);
+
+  const block = diagnosisBlock(row({ items: 0, stale: 0 }), { ...G, busy: 1827 }, null, { compact: true });
+  const t = textOf(block);
+  assert.match(t, /Re-tagging — 1,827 items still queued/);
+  assert.doesNotMatch(t, /Re-tag this board/, "never ask for a retag while one is running");
+});
+
+test("a facet stranded by an edit still says so once the queue is empty", () => {
+  // The `awaiting` copy is right when nothing is in flight — that is the
+  // designed path, and the user genuinely does need to re-tag.
+  const stranded = row({ items: 0, stale: 25 });
+  assert.equal(diagnosisState(stranded, G).state, "awaiting");
+  assert.match(textOf(diagnosisBlock(stranded, G, null, { compact: true })), /Re-tag this board/);
+});
+
+test("a facet that has fully landed reports normally even while others queue", () => {
+  // The banner qualifies the board; a facet with a real sample still gets to
+  // report it.
+  const s = diagnosisState(row({ items: 25, unanimous: 17, diagnostic: finding() }), { ...G, busy: 1827 });
+  assert.equal(s.state, "finding");
 });

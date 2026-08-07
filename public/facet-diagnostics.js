@@ -14,6 +14,7 @@
 import { state } from './state.js';
 import { api } from './api.js';
 import { createModal } from './modal.js';
+import { ICONS } from './utils.js';
 
 // Which of the five states a facet is in, from one roll-up row (server shape:
 // { key, label, items, unanimous, d, scoped, stale, diagnostic }).
@@ -32,9 +33,13 @@ import { createModal } from './modal.js';
 //   identically. **Absence must never read as "fine"**: a single-pass board has
 //   no diagnostics whatsoever, and its empty state has to look exactly like it
 //   does today.
-export function diagnosisState(row, gates = {}) {
-  const minItems = gates.minItems ?? 20;
-  const minRate = gates.minRate ?? 0.15;
+export function diagnosisState(row, ctx = {}) {
+  const minItems = ctx.minItems ?? 20;
+  const minRate = ctx.minRate ?? 0.30;  // fallback only; the server serves the real one
+  // Items the board currently has queued or processing. Every figure here is
+  // computed over TAGGED items — a queued one has no settled answer to count —
+  // so a retag makes a facet's whole sample vanish until it lands again.
+  const busy = ctx.busy || 0;
   const entry = row?.diagnostic || null;
   const previous = entry?.previous || null;
   const items = row?.items || 0;
@@ -53,6 +58,12 @@ export function diagnosisState(row, gates = {}) {
   // back items: 3, stale: 0, previous: null — with the finding still stored.
   // That is the sampling bias §10 names, arriving as a rendering bug.
   if (items < minItems && (previous || (row?.stale || 0) > 0 || entry?.verdict)) {
+    // A pass is running: the sample did not go away, it is in the queue. Saying
+    // "not measured — re-tag this board" here is false AND actively harmful, it
+    // asks for a second retag on top of the one already running (which
+    // retagBoardFacets would silently no-op anyway, since an armed row is
+    // `pending` and it only takes `tagged` ones).
+    if (busy) return { state: "measuring", previous, items, rate, busy };
     return { state: "awaiting", previous, items, rate };
   }
   if (previous?.stats?.items) {
@@ -71,6 +82,7 @@ export function diagnosisState(row, gates = {}) {
   if (entry?.verdict && entry.verdict !== "no-problem-found" && entry.explanation) {
     return { state: "finding", entry, items, rate };
   }
+  if (!items && busy) return { state: "measuring", previous: null, items, rate, busy };
   return { state: "none", items, rate };
 }
 
@@ -95,7 +107,9 @@ export function ensureFacetStats() {
   api("GET", `/api/boards/${state.boardId}/facet-stats`)
     .then((d) => {
       state.facetStats = d.facets || [];
-      state.facetGates = d.gates || {};
+      // `busy` rides with the thresholds because diagnosisState needs both to
+      // decide what a thin sample MEANS.
+      state.facetGates = { ...(d.gates || {}), busy: d.busy || 0 };
       document.dispatchEvent(new Event('app:render'));
     })
     .catch(() => { state.facetStats = []; }); // no dot rather than a broken header
@@ -126,19 +140,58 @@ export function markDiagnosticsSeen(boardId, facets) {
   localStorage.setItem(SEEN_KEY(boardId), String(Math.max(newestAt(facets), Date.now() - 1)));
 }
 
-// One facet's block, shared shape between the modal and the facet editor. The
-// editor passes `onApply` (it owns a textarea to append into); the modal never
-// does, because it must not be able to write.
-export function diagnosisBlock(row, gates, onApply) {
+// One facet's block, in two densities.
+//
+// The Tagging consistency modal owns the CONTENT — the explanation and the
+// proposed description — and keeps each finding folded until asked, so the
+// survey stays a survey and you open the one you care about. The facet editor
+// gets the headline and a pointer, nothing more: it is a dense stack of 28px
+// rows, and a finding rendered there at any size worth reading is a panel taller
+// than the facet it belongs to.
+//
+// So one surface reports and one explains, and neither pretends to be the other.
+// `onApply` is honoured only in the density that has somewhere to put it.
+export function diagnosisBlock(row, gates, onApply, { compact = false, collapsible = false } = {}) {
   const s = diagnosisState(row, gates);
   if (s.state === "none") return null;
 
   const el = document.createElement("div");
-  el.className = `fd-block fd-${s.state}`;
+  el.className = `fd-block fd-${s.state}` + (compact ? " fd-compact" : "");
 
-  const head = document.createElement("div");
-  head.className = "fd-head";
+  const head = document.createElement(collapsible ? "button" : "div");
+  head.className = compact ? "fd-sum" : "fd-head";
+  if (collapsible) { head.type = "button"; head.className += " fd-toggle"; }
   el.appendChild(head);
+
+  // The same glyph as the toolbar button this finding came from, so the line
+  // reads as belonging to that feature rather than as a generic form warning.
+  if (compact) {
+    const icon = document.createElement("span");
+    icon.className = "fd-icon";
+    icon.innerHTML = ICONS.doubleCheck;
+    head.appendChild(icon);
+  }
+  // A span, not the head's own textContent: the head has children now, and
+  // assigning textContent to a parent deletes them.
+  const headText = document.createElement("span");
+  head.appendChild(headText);
+  const setText = (t) => { headText.textContent = t; };
+
+  // The pointer to the surface that holds the content. Plain text rather than a
+  // link on purpose: the reader is inside an unsaved board modal, and a control
+  // that navigated out of it would either lose their edits or stack a second
+  // dialog on top of the one they are typing in.
+  const pointTo = () => {
+    const more = document.createElement("span");
+    more.className = "fd-more";
+    more.textContent = " See Tagging consistency for the detail.";
+    head.appendChild(more);
+  };
+
+  if (s.state === "measuring") {
+    setText(`Re-tagging — ${s.busy.toLocaleString()} item${s.busy === 1 ? "" : "s"} still queued. This facet's figures return as they land.`);
+    return el;
+  }
 
   if (s.state === "awaiting") {
     // Three ways to be here and they are not one sentence. An edit is the
@@ -146,11 +199,13 @@ export function diagnosisBlock(row, gates, onApply) {
     // handful of items is what curation leaves behind, where "not measured yet"
     // would be a plain lie — those items WERE measured, there are just too few
     // of them left to say anything.
-    head.textContent = s.previous
-      ? `This description changed. Re-tag this board on ${row.label} to measure whether it helped.`
-      : s.items
-        ? `Only ${s.items} item${s.items === 1 ? "" : "s"} still carry a measurement of the current wording — too few to judge. Re-tag this board on ${row.label}.`
-        : `Not measured against the current wording yet. Re-tag this board on ${row.label} to see how stable it is.`;
+    setText(
+      s.previous
+        ? `This description changed. Re-tag this board on ${row.label} to measure whether it helped.`
+        : s.items
+          ? `Only ${s.items} item${s.items === 1 ? "" : "s"} still carry a measurement of the current wording — too few to judge. Re-tag this board on ${row.label}.`
+          : `Not measured against the current wording yet. Re-tag this board on ${row.label} to see how stable it is.`,
+    );
     return el;
   }
 
@@ -160,8 +215,8 @@ export function diagnosisBlock(row, gates, onApply) {
     // 100% here and is invisible to the whole feature. And never "your edit did
     // this" — hand-corrections between the two measurements move the same
     // number, and nothing here can tell the two apart.
-    head.textContent = `${pct(1 - was)} consistent before, ${pct(1 - s.rate)} now.`;
-    if (s.shapeChanged) {
+    setText(`${pct(1 - was)} consistent before, ${pct(1 - s.rate)} now.`);
+    if (s.shapeChanged && !compact) {
       const note = document.createElement("div");
       // Not "fd-note" — that is the state class of the whole ambiguous block.
       note.className = "fd-caveat";
@@ -171,14 +226,24 @@ export function diagnosisBlock(row, gates, onApply) {
     return el;
   }
 
-  head.textContent = s.state === "note"
-    ? `The tagger contradicted itself on ${pct(s.rate)} of items, and the wording may not be the reason.`
-    : `The tagger contradicted itself on ${pct(s.rate)} of items.`;
+  setText(
+    s.state === "note"
+      ? `The tagger contradicted itself on ${pct(s.rate)} of items, and the wording may not be the reason.`
+      : `The tagger contradicted itself on ${pct(s.rate)} of items.`,
+  );
+  if (compact) {
+    pointTo();
+    return el;
+  }
+
+  const detail = document.createElement("div");
+  detail.className = "fd-detail";
+  const into = collapsible ? detail : el;
 
   const why = document.createElement("div");
   why.className = "fd-why";
   why.textContent = s.entry.explanation;
-  el.appendChild(why);
+  into.appendChild(why);
 
   // A REPLACEMENT description, not a sentence to bolt on. Appending was the
   // original design and it was wrong in both directions: where the current
@@ -189,6 +254,12 @@ export function diagnosisBlock(row, gates, onApply) {
   if (s.state === "finding" && s.entry.rewrite) {
     const sug = document.createElement("div");
     sug.className = "fd-suggestion";
+    // A quiet label, because without one the box is an unattributed slab of
+    // italic prose sitting under a paragraph of different italic prose.
+    const cap = document.createElement("div");
+    cap.className = "fd-rewrite-cap";
+    cap.textContent = "Suggested description";
+    sug.appendChild(cap);
     const quoted = document.createElement("div");
     quoted.className = "fd-rewrite";
     quoted.textContent = s.entry.rewrite;
@@ -197,13 +268,25 @@ export function diagnosisBlock(row, gates, onApply) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "fd-apply";
-      // Named for what it does. "Add to" would be a lie now, and this one
-      // overwrites words the user wrote.
       btn.textContent = "replace description";
       btn.onclick = () => onApply(s.entry.rewrite);
       sug.appendChild(btn);
     }
-    el.appendChild(sug);
+    into.appendChild(sug);
+  }
+
+  if (collapsible) {
+    el.appendChild(detail);
+    const caret = document.createElement("span");
+    caret.className = "fd-caret";
+    caret.textContent = "›"; // points right; expanding turns it down
+    head.prepend(caret);
+    const show = (on) => {
+      detail.hidden = !on;
+      head.setAttribute("aria-expanded", String(on));
+    };
+    show(false); // folded by default — the survey is the list, not the essays
+    head.onclick = () => show(detail.hidden);
   }
   return el;
 }
@@ -213,13 +296,13 @@ export function diagnosisBlock(row, gates, onApply) {
 // Read-only. Every facet carrying confidence data, its stability, and its
 // finding if it has one. Each finding offers a way into the board modal, which
 // is the only place a suggestion can actually be applied.
-export async function openDiagnosticsModal({ onEditFacet } = {}) {
+export async function openDiagnosticsModal({ onEdit } = {}) {
   let data;
   try { data = await api("GET", `/api/boards/${state.boardId}/facet-stats`); }
   catch { return; }
 
   const facets = data.facets || [];
-  const gates = data.gates || {};
+  const gates = { ...(data.gates || {}), busy: data.busy || 0 };
   // Opening the modal is the freshest read there is — keep the toolbar's copy
   // in step so the dot clears against the same data the user just saw.
   state.facetStats = facets;
@@ -238,6 +321,31 @@ export async function openDiagnosticsModal({ onEditFacet } = {}) {
     ? "Whether the tagger applies each facet the same way twice. It tags every item more than once, and this is where those passes contradicted each other — which measures consistency, not correctness: a facet applied wrongly but consistently still reads 100%."
     : "This board tags each item once, so there is nothing to compare. Turn on Double-check tags in the board editor to start measuring.";
   body.appendChild(intro);
+
+  // Said once at the top, because it qualifies EVERY number below it — not just
+  // the facets that came back thin. A facet that has landed 89 of 2,400 items
+  // reports a real percentage of an unrepresentative sample, and nothing in its
+  // own row can say so.
+  if (gates.busy) {
+    const banner = document.createElement("p");
+    banner.className = "fd-busy";
+    banner.textContent = `A tagging pass is running — ${gates.busy.toLocaleString()} item${gates.busy === 1 ? "" : "s"} still queued. These figures cover only what has landed so far, and facets waiting in the queue read as unmeasured until they return.`;
+    body.appendChild(banner);
+  }
+
+  // ONE way out, at the top, rather than one per finding. The per-facet version
+  // read "Edit this facet" and could not deliver it: it opened the board editor
+  // scrolled to that facet, which is a different promise, and now that the
+  // editor shows only the headline it would be pointing at less than the reader
+  // was already looking at.
+  if (onEdit && facets.length) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "fd-edit";
+    edit.textContent = "Edit this board's facets";
+    edit.onclick = () => { close(); onEdit(); };
+    body.appendChild(edit);
+  }
 
   for (const row of facets) {
     const card = document.createElement("div");
@@ -259,17 +367,9 @@ export async function openDiagnosticsModal({ onEditFacet } = {}) {
     title.appendChild(stat);
     card.appendChild(title);
 
-    const block = diagnosisBlock(row, gates, null);
+    const block = diagnosisBlock(row, gates, null, { collapsible: true });
     if (block) card.appendChild(block);
 
-    if (block && diagnosisState(row, gates).state === "finding" && onEditFacet) {
-      const edit = document.createElement("button");
-      edit.type = "button";
-      edit.className = "fd-edit";
-      edit.textContent = "Edit this facet";
-      edit.onclick = () => { close(); onEditFacet(row.key); };
-      card.appendChild(edit);
-    }
     body.appendChild(card);
   }
 

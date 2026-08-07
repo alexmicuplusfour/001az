@@ -25,7 +25,7 @@ const UNANIMOUS_SHOWN = 4;
 // them without pretending the defaults are settled.
 const SETTLE_MS = Number(process.env.DIAGNOSE_SETTLE_MS) || 600000;
 const MIN_ITEMS = Number(process.env.DIAGNOSE_MIN_ITEMS) || 20;
-const MIN_RATE = Number(process.env.DIAGNOSE_MIN_RATE) || 0.15;
+const MIN_RATE = Number(process.env.DIAGNOSE_MIN_RATE) || 0.30;
 // The UI decides which of the five states a facet is in from the same two
 // numbers the gates use, so they ride out with the payload rather than being
 // re-declared client-side. A copy in the browser would drift the first time

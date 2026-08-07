@@ -476,7 +476,7 @@ Five gates, all of which must pass:
 3. **Enough signal.** At least `DIAGNOSE_MIN_ITEMS` (20) items carrying
    confidence for that facet. Below that the tally is noise and a confident
    paragraph about it is worse than silence.
-4. **Actually unstable.** Non-unanimous on ≥ `DIAGNOSE_MIN_RATE` (15%) of those
+4. **Actually unstable.** Non-unanimous on ≥ `DIAGNOSE_MIN_RATE` (30%) of those
    items. `presentation` at 100% unanimous must never generate a paragraph
    explaining what is wrong with it.
 5. **Measured under the current definition, in one prompt shape** (new). A facet
@@ -901,7 +901,7 @@ Each step is shippable and independently useful.
   turns out to be real and large, the cheap fix is to recommend re-measuring the
   baseline scoped once before editing — an extra pass to make the comparison
   honest.
-- **Threshold values are guesses.** 20 items / 15% / 10-minute settle come from
+- **Threshold values are guesses.** 20 items / 30% / 10-minute settle come from
   one board's data. They want revisiting once several boards have run — and see
   the curation bias above, which pushes the instability rate the wrong way on
   exactly the boards whose owners care most.

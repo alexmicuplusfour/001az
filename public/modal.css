@@ -562,32 +562,79 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    One block shape, used in two places: inline under the description being
    edited (facet editor) and inside the Diagnostics modal. Indented to the same
    22px gutter as .fe-desc so it reads as belonging to its facet. */
-.fd-block { margin: 0 0 8px 22px; padding: 7px 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; border-left: 2px solid transparent; }
+/* Square corners, both densities: the 2px state rule runs the block's full
+   height cleanly, where rounding left it detaching at the top and bottom. */
+.fd-block { margin: 0 0 8px 22px; padding: 7px 10px; font-size: 12px; line-height: 1.45; border-left: 2px solid transparent; }
 .fd-finding { background: #fff7ed; border-left-color: #f59e0b; color: #7c4a03; }
 .fd-note, .fd-awaiting { background: #f6f6f9; border-left-color: #d8d8de; color: #6b6b72; }
 .fd-improved { background: #f0fdf4; border-left-color: #22c55e; color: #14532d; }
+
+/* ── compact: the same block inline in the facet editor ──
+   KEEPS the panel — the tint is what makes a finding findable in a stack of
+   otherwise identical facet rows — but collapses to ONE line, because expanded
+   it runs to ~15 and pushes the facet's own values off screen. The caret is the
+   leading mark: it says "there is more here" where a dot only said "look". */
+.fd-block.fd-compact { margin: -2px 0 8px 22px; padding: 5px 9px; }
+.fd-sum { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; font-weight: 600; line-height: 1.5; }
+/* The toolbar button's own glyph, so the line reads as belonging to that
+   feature rather than as a generic form warning. Nudged down a hair: the row is
+   baseline-aligned for the text, which sits an icon slightly high. */
+.fd-icon { flex: none; display: inline-flex; position: relative; top: 2px; }
+.fd-icon svg { width: 13px; height: 13px; }
+/* The pointer to the surface that holds the content. Normal weight so the
+   finding itself stays the bold thing on the line. */
+.fd-more { font-weight: 400; opacity: .78; }
+
+/* ── collapsible: the modal's per-facet sections ──
+   Folded by default. The survey is the list of facets and their numbers; the
+   essays are what you open one of. */
+/* .fd-head.fd-toggle, not .fd-toggle: the element carries both classes and
+   `.fd-head { display: block }` is declared further down, so at equal
+   specificity it won and quietly un-flexed this — which cost the gap AND the
+   caret's rotation, since transforms do not apply to non-replaced inline
+   elements. Two symptoms, one missing tenth of specificity. */
+.fd-head.fd-toggle { display: flex; align-items: baseline; gap: 8px; width: 100%; margin: 0; padding: 0; background: none; border: none; font: inherit; font-weight: 500; line-height: 1.45; color: inherit; text-align: left; cursor: pointer; }
+/* The glyph points right already, so collapsed is UNROTATED — it points at what
+   it will open — and expanding turns it down. */
+/* inline-block is load-bearing, not tidiness: a bare inline span ignores
+   `transform` outright, so the caret would sit there unrotated with nothing in
+   the console to say why. */
+.fd-caret { flex: none; display: inline-block; font-size: 15px; line-height: 1; opacity: .9; transition: transform .15s; }
+.fd-head.fd-toggle[aria-expanded="true"] .fd-caret { transform: rotate(90deg); }
+.fd-detail { padding: 6px 0 1px; }
 .fd-head { display: block; font-weight: 500; margin: 0 0 3px; }
 .fd-why { color: inherit; opacity: .9; }
-.fd-suggestion { margin-top: 6px; display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
-/* The proposed description is a block of prose that replaces the textarea
-   above it, so it is set apart rather than run inline as a quoted clause. */
-.fd-rewrite { flex: 1 1 240px; padding: 5px 8px; background: rgba(255,255,255,.65); border: 1px solid rgba(0,0,0,.07); border-radius: 5px; font-style: italic; }
+/* Stacked, not side by side: the box is the content and the action belongs
+   under it, the way a form field's button does. Beside it, the box was squeezed
+   into a column while the link floated in the whitespace next to it. */
+.fd-suggestion { margin-top: 7px; }
+.fd-rewrite-cap { font-size: 9.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; opacity: .6; margin-bottom: 3px; }
+/* Unclamped. It was capped and scrollable back when it rendered inside the
+   facet editor, where its natural height dwarfed the two-row textarea it was
+   proposing to replace. It only lives in the modal now, which has the room —
+   and a nested scroller inside a scrolling dialog is a worse way to read a
+   paragraph than simply letting it be as long as it is. */
+.fd-rewrite { padding: 6px 8px; background: rgba(255,255,255,.7); border: 1px solid rgba(0,0,0,.08); font-style: italic; }
 /* The prompt-shape caveat inside an `improved` block. NOT .fd-note: that is the
    state class for the whole `genuinely-ambiguous-items` block two rules up, and
    sharing the name made each rule apply where it was not meant to — a grey
    panel inside the green one, and the ambiguous block silently rendered a point
    smaller than every other state. One class, one meaning. */
 .fd-caveat { font-size: 11px; opacity: .85; margin-top: 3px; }
-.fd-apply { flex: none; background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 0; white-space: nowrap; }
+.fd-apply { display: block; margin-top: 5px; background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; font-size: 11.5px; padding: 0; white-space: nowrap; }
 .fd-apply:hover { text-decoration: underline; }
 
 /* The modal's own survey chrome. Read-only by construction — the only control
    in here is the one that hands the user off to the editor. */
 .fd-intro { font-size: 12px; color: #6b6b72; line-height: 1.5; margin: 0 0 14px; }
+/* Qualifies every figure below it, so it sits above the list rather than in it. */
+.fd-busy { font-size: 12px; line-height: 1.5; margin: 0 0 14px; padding: 7px 10px; background: #f6f6f9; border-left: 2px solid #b9bcc6; color: #5d5d66; }
+.fd-measuring { background: #f6f6f9; border-left-color: #b9bcc6; color: #6b6b72; }
 .fd-card { padding: 10px 0; border-top: 1px solid #eee; }
 .fd-card:first-of-type { border-top: none; }
 .fd-card-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
 .fd-stat { font-size: 11px; color: #9aa0aa; margin-left: auto; white-space: nowrap; }
 .fd-card .fd-block { margin-left: 0; }
-.fd-edit { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 0; }
+/* One per modal, above the list — not one per finding. */
+.fd-edit { display: block; background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; font-size: 12px; padding: 0; margin: -6px 0 14px; }
 .fd-edit:hover { text-decoration: underline; }

@@ -17,7 +17,7 @@ import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt } from "../s
 import { startWorker } from "../server/worker.js";
 
 // The gates are read at module load, which ESM hoists above anything this file
-// could set — so these run against the SHIPPED defaults (20 items, 15%, a
+// could set — so these run against the SHIPPED defaults (20 items, 30%, a
 // ten-minute settle) rather than against convenient ones. Fixtures are sized to
 // clear them, and `updated_at = 0` is what puts every seeded item outside the
 // settle window.
@@ -175,10 +175,22 @@ test("no diagnosis below the item minimum", async () => {
 
 test("no diagnosis below the instability rate", async () => {
   const b = await board("steady");
-  await seedUnstable(b, "shape", FULL.shape, { contested: 2, clean: 22 });
+  // Just under, so this pins the floor rather than passing at any floor above a
+  // token rate: 7 of 25 is 28%.
+  await seedUnstable(b, "shape", FULL.shape, { contested: 7, clean: 18 });
   const deps = stubTagger();
   await diagnoseDue(db, deps, null);
-  assert.equal(deps.calls.length, 0, "2 in 24 is under the 15% floor");
+  assert.equal(deps.calls.length, 0, "28% is under the 30% floor");
+});
+
+test("…and one more contested item is enough to clear it", async () => {
+  // The other side of the same boundary. Apart, these two would both survive a
+  // floor set anywhere between them; together they fix it at 30%.
+  const b = await board("just-over");
+  await seedUnstable(b, "shape", FULL.shape, { contested: 8, clean: 17 });
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1, "32% clears it");
 });
 
 test("no diagnosis while items are still queued", async () => {
@@ -497,7 +509,11 @@ test("end to end: diagnose, take the advice, re-measure, and the baseline surviv
   // 4. a scoped retag of that one facet lands, and this time it mostly agrees
   await db.query("DELETE FROM items WHERE board_id=$1", [b]);
   const scopedStamp = facetStamp(edited[0], true);
-  await seedUnstable(b, "shape", scopedStamp, { contested: 4, clean: 17 });
+  // A PARTIAL fix: 8 of 21 is 38%, down from 81% but still over the floor, so
+  // there is a second diagnosis to make. A fix that took it under 30% would
+  // correctly produce no call at all and show "improved" instead — which is the
+  // test two above this one.
+  await seedUnstable(b, "shape", scopedStamp, { contested: 8, clean: 13 });
 
   // 5. now it re-diagnoses — and the prompt carries the old wording and rate
   await diagnoseDue(db, deps, null);
@@ -507,7 +523,7 @@ test("end to end: diagnose, take the advice, re-measure, and the baseline surviv
   assert.match(sent, /4 of\s*21 items were unanimous/, "…and what the rate used to be");
 
   const e = (await diagnosticsOf(b)).shape;
-  assert.deepEqual(e.stats, { items: 21, unanimous: 17 }, "19% unanimous -> 81%, which is the whole point");
+  assert.deepEqual(e.stats, { items: 21, unanimous: 13 }, "19% consistent -> 62%, and still worth a second look");
   assert.equal(e.scoped, true);
   assert.deepEqual(e.previous.stats, { items: 21, unanimous: 4 }, "the baseline survived the re-diagnosis");
 });
