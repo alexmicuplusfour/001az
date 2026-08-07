@@ -65,6 +65,7 @@ import {
   boardAiUsage,
   retagBoard,
   retagBoardFacets,
+  supersedeFacetDiagnostics,
   releaseHeld,
   queueUntagged,
   getBoardMemberIds,
@@ -1614,6 +1615,11 @@ app.post("/api/admin/boards/:id/retag", requireAdmin, wrap(async (req, res) => {
   const { scope, error } = readFacetScope(req.body, board);
   if (error) return res.status(400).json({ error });
   const queued = scope ? await retagBoardFacets(db, req.params.id, scope) : await retagBoard(db, req.params.id);
+  // The findings for whatever is being re-measured are superseded from this
+  // moment, and this is the moment that knows it — one statement, here, rather
+  // than a comparison the reader has to make on every modal open. Scoped
+  // retag marks only its own facets; a full pass marks them all.
+  if (queued) await supersedeFacetDiagnostics(db, req.params.id, scope);
   invalidateBoardCache(req.params.id);
   console.log(`retag queued: ${queued} item(s) in board ${req.params.id}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
   res.json({ ok: true, queued, ...(scope ? { facets: scope } : {}) });

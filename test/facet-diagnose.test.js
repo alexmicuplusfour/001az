@@ -13,7 +13,7 @@ import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
   updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics,
 } from "../server/db.js";
-import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt } from "../server/facet-diagnosis.js";
+import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
 import { startWorker } from "../server/worker.js";
 
 // The gates are read at module load, which ESM hoists above anything this file
@@ -314,6 +314,49 @@ test("…while a re-measurement that moves the counts re-diagnoses, at 37% eithe
   assert.equal(deps.calls.length, 2, "110 items is not the 100 the paragraph was written about");
   assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 110, unanimous: 66 },
     "…and the rate is 40% on both sides, so only the counts can have caught it");
+});
+
+test("arming a retag supersedes the finding immediately, before an item lands", async () => {
+  // Invalidate-on-write. The retag route is the one place that knows for certain
+  // the measurements are about to move, and it knows it a pass EARLIER than any
+  // comparison of numbers can: at arming time nothing has landed, so the counts
+  // still match and every read-side check would call the finding current.
+  const b = await board("armed");
+  await seedUnstable(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal((await diagnosticsOf(b)).shape.verdict, "overlapping-values");
+
+  const admin = await adminSession(db);
+  const r = await req(srv.base, "POST", `/api/admin/boards/${b}/retag`, { sid: admin.sid, body: { facets: ["shape"] } });
+  assert.equal(r.status, 200);
+
+  const e = (await diagnosticsOf(b)).shape;
+  assert.equal(e.stale, true, "marked at arming, not inferred later");
+  assert.ok(e.stats, "…and the baseline a later edit demotes survives it");
+  assert.equal(e.verdict, "overlapping-values", "…as does the sentence the reader sees while it waits");
+
+  const row = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
+  assert.equal(row.current, false, "the reader hides it on the flag alone");
+});
+
+test("a scoped retag supersedes only the facets it names", async () => {
+  // scopeResult leaves the other facets' confidence entirely intact, so their
+  // findings are still answers to the sample that is still there.
+  const b = await board("armed-scoped");
+  await seedUnstable(b);
+  for (let i = 0; i < MIN_ITEMS + 1; i++) {
+    await item(b, { confidence: { motif: conf(FULL.motif, 3, 1, { star: 1, leaf: 2 }) } });
+  }
+  await setFacetDiagnostic(db, b, "motif", { verdict: "unclear-definition", explanation: "e", rewrite: "r", stats: { items: 21, unanimous: 0 }, d: FULL.motif, scoped: false, k: "x", at: 1 });
+  await diagnoseDue(db, stubTagger(), null);
+
+  const admin = await adminSession(db);
+  await req(srv.base, "POST", `/api/admin/boards/${b}/retag`, { sid: admin.sid, body: { facets: ["shape"] } });
+
+  const all = await diagnosticsOf(b);
+  assert.equal(all.shape.stale, true);
+  assert.equal(all.motif.stale, undefined, "nothing is re-measuring motif");
 });
 
 test("the blind spot: a re-measurement that reproduces the counts exactly is missed", async () => {

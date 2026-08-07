@@ -528,6 +528,33 @@ export async function setFacetDiagnostic(db, boardId, key, entry) {
   );
 }
 
+// A retag is about to re-measure these facets, so whatever is stored about them
+// describes a sample that is on its way out. Marked at the moment the retag is
+// ARMED — one statement, at the one point in the system that knows for certain
+// the measurements are about to move — rather than inferred later by comparing
+// numbers on every page load. That comparison stays as a backstop, because this
+// is invalidate-on-write and its failure mode is a writer nobody hooked.
+//
+// `stale` and not a delete: the finding still supplies the sentence the reader
+// sees while it waits ("the measurements have changed"), and `stats`/`previous`
+// are the baseline a later facet edit demotes into place. Attempts go, because
+// new data has earned fresh tries.
+//
+// `keys = null` means an unscoped retag — every facet on the board.
+export async function supersedeFacetDiagnostics(db, boardId, keys = null) {
+  const { rows } = await db.query(
+    `UPDATE boards SET facet_diagnostics = (
+       SELECT COALESCE(jsonb_object_agg(k, CASE WHEN $2::text[] IS NULL OR k = ANY($2::text[])
+                                                THEN (v - 'attempts' - 'error') || '{"stale":true}'::jsonb
+                                                ELSE v END), '{}'::jsonb)
+       FROM jsonb_each(facet_diagnostics) AS e(k, v))
+     WHERE id=$1 AND facet_diagnostics <> '{}'::jsonb
+     RETURNING id`,
+    [boardId, keys]
+  );
+  return rows.length > 0;
+}
+
 // Demote the findings for facets whose definition the user just changed.
 // `edits` is [{ key, description }] — the description being the wording being
 // REPLACED, which the next diagnosis quotes back to the model so it can say

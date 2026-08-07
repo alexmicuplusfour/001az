@@ -602,6 +602,45 @@ here is wrong inside any single unit.
   this" from "nothing is wrong". A sixth state (*re-measured, waiting on a fresh
   read*, keyed on `previous && !verdict && items >= minItems`) would cover it.
 
+- [x] **38. Nothing had to ASK whether the data moved — the retag already knew.**
+  *(the user's question, and the right one: "why would the freshness need to be
+  assessed on demand on the frontend?")*
+
+  It never did, quite — the check runs on the server and is now one comparison of
+  numbers already loaded. But the instinct was correct about the shape. Every
+  version of this from 32 onward INFERRED staleness by comparing measurements,
+  when the code that moves the measurements knows it is about to, and knows it a
+  pass earlier than any comparison can: at arming time nothing has landed, so the
+  counts still match and every read-side check calls the finding current.
+
+  `supersedeFacetDiagnostics` marks the affected facets at the moment a retag is
+  armed — one statement, at the two places that arm one (the retag route and the
+  worker's scheduled sweep). A scoped retag marks only the facets it names,
+  because `scopeResult` leaves the others' confidence entirely intact and their
+  findings are still answers to a sample that is still there.
+
+  `stale: true` rather than a delete, for three reasons that each matter: the
+  verdict is what the reader shows while it waits (*"the measurements have
+  changed"* needs something to hang on), `stats` is the baseline a later facet
+  edit demotes into `previous`, and only `attempts`/`error` deserve to go —
+  new data has earned fresh tries.
+
+  **Both readers honour it, and the flag is tested before anything needing a
+  segment.** While a pass is draining there are no `tagged` rows, so the facet
+  has no stamp to resolve and any check gated on `r.d` would skip exactly the
+  window the flag exists to cover. The loop tests it too, and for the same
+  reason: the counts have not moved yet, so it would otherwise skip and only
+  notice once the pass had drained.
+
+  **The number comparison stays as a backstop.** Invalidate-on-write fails by
+  leaving a finding standing when a writer was never hooked, silently and
+  forever; compute-on-read is dumber and self-correcting. Keeping both costs
+  nothing now that the comparison is free, and the two failure modes do not
+  overlap.
+
+  What is deliberately NOT hooked: a single-item retag and ordinary curation.
+  One item cannot move a real sample, and the backstop catches it if it does.
+
 - [x] **37. The freshness key went on the read path and took the board modal to
   611ms.** *(fixed, reported from the running app — "the edit board and tagging
   consistency modals now take significantly more to open")*

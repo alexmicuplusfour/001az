@@ -187,7 +187,17 @@ export async function facetRollup(db, board) {
     // No stored key means a pre-`k` entry or an attempts-only record; nothing to
     // compare, and `current` stays undefined so the reader falls back to showing
     // it rather than hiding something it cannot reason about.
-    if (!r.diagnostic?.k || !r.d) continue;
+    if (!r.diagnostic) continue;
+    // `stale` is set by supersedeFacetDiagnostics the moment a retag is armed —
+    // the authoritative answer, from the one place that knows for certain the
+    // measurements are about to move. Tested FIRST and without needing a
+    // segment: while the pass is draining there are no tagged rows to resolve a
+    // stamp from, so anything gated on `r.d` would skip exactly the window this
+    // flag exists to cover.
+    if (r.diagnostic.stale) { r.current = false; continue; }
+    // The backstop, for a writer nobody hooked — invalidate-on-write's failure
+    // mode is a finding left standing, and this catches it on the next read.
+    if (!r.diagnostic.k || !r.d) continue;
     r.current = sampleKey(r) === r.diagnostic.k;
   }
   return out;
@@ -485,7 +495,12 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // Free, and that matters here: this is the answer on almost every tick of a
   // settled board, and it used to cost a query (defect 2 cut it from three).
   // Now the whole skip path is arithmetic on numbers the roll-up already read.
-  if (prior?.k === fresh && (prior.verdict || (prior.attempts || 0) >= MAX_ATTEMPTS)) return null;
+  // `stale` beats the key both ways: a retag has been armed, so the counts may
+  // not have moved YET — the items are queued, not landed — and without this the
+  // loop would look at an unchanged sample, skip, and only notice once the pass
+  // had drained. Falling through here does nothing rash either, since gate 2
+  // holds everything until the board is quiet again.
+  if (!prior?.stale && prior?.k === fresh && (prior.verdict || (prior.attempts || 0) >= MAX_ATTEMPTS)) return null;
 
   const ai = await deps.resolveAi(board);
   if (!ai) return null; // no key is a configuration gap, not a finding
