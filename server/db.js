@@ -2253,11 +2253,17 @@ export async function latestSettledJob(db, boardId, kind, itemId = null) {
 // 3,000 of them) correctly counts as no news at all. The cost is a job that
 // started before your last look and fails after it: its row is older than the
 // watermark, so it waits for the next distinct failure to be announced.
+// Exported as one string so the test that pins its query PLAN pins the query
+// the app actually runs. This read happens on a background tick, per open tab,
+// and migration 0032 cuts a partial index for exactly this shape; a copy of the
+// SQL in the test would keep passing while this drifted off it — a widened
+// ORDER BY, a second outcome — and the regression is invisible from the outside,
+// since a sequential scan returns the right answer, slowly.
+export const LATEST_JOB_FAILURE_SQL =
+  "SELECT started_at FROM job_log WHERE board_id=$1 AND outcome='failed' ORDER BY started_at DESC LIMIT 1";
+
 export async function latestJobFailureAt(db, boardId) {
-  const { rows } = await db.query(
-    "SELECT started_at FROM job_log WHERE board_id=$1 AND outcome='failed' ORDER BY started_at DESC LIMIT 1",
-    [boardId]
-  );
+  const { rows } = await db.query(LATEST_JOB_FAILURE_SQL, [boardId]);
   return rows[0]?.started_at ?? null;
 }
 

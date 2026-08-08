@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, seedBoard, seedUser, adminSession, req } from "./helpers.js";
-import { addJobLog, latestJobFailureAt } from "../server/db.js";
+import { addJobLog, latestJobFailureAt, LATEST_JOB_FAILURE_SQL } from "../server/db.js";
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
@@ -344,6 +344,45 @@ test("a folded repeat is not a new failure", async () => {
   assert.equal(await latestJobFailureAt(db, b), 4000);
   await db.query("UPDATE job_log SET ended_at=$1, detail='{\"attempts\":2}' WHERE id=$2", [Date.now(), id]);
   assert.equal(await latestJobFailureAt(db, b), 4000, "the re-stamp moved ended_at, not the news");
+});
+
+test("…and the lookup that asks it has an index the planner actually takes", async () => {
+  // This read runs on a background tick, per open tab, forever — the whole
+  // reason /jobs/errors is its own route is that it was supposed to be the
+  // cheap thing to poll. It wasn't. idx_job_log_board (board_id, started_at
+  // DESC, id DESC) does not help and, measured, the planner never even tried
+  // it: outcome='failed' was unindexed and estimates as selective, so under
+  // LIMIT 1 the planner bets a sequential scan will meet a match early — and
+  // with none, or one, it reads the whole TABLE. Every board's history, not
+  // this board's. At 100k rows that was 7.8ms and ~11MB of buffers per tick,
+  // with no cheap case: a board whose newest row IS the failure measured the
+  // same, because the scan is unconditional. Migration 0032 cuts the partial
+  // index; the same query becomes an Index Only Scan at 0.05ms.
+  //
+  // Pinned as a PLAN rather than as a row in pg_indexes, because the regression
+  // this guards is the query drifting off the index cut for it, which an
+  // existence check reads as healthy. And pinned against the app's own SQL
+  // string rather than a copy, for the same reason.
+  const b = await seedBoard(db, "dot-index");
+  // Enough rows that a sequential scan is not simply the cheapest thing
+  // available — the planner picks the index from a couple of hundred up.
+  await db.query(
+    `INSERT INTO job_log (board_id, kind, outcome, started_at, ended_at)
+     SELECT $1, 'tag', 'ok', 1000000 + g, 1000000 + g FROM generate_series(1, 500) g`,
+    [b]
+  );
+  await db.query("ANALYZE job_log");
+
+  // The board with NO failures is the case that used to be worst and is the one
+  // every healthy instance is in.
+  const { rows } = await db.query(`EXPLAIN ${LATEST_JOB_FAILURE_SQL}`, [b]);
+  const plan = rows.map((r) => r["QUERY PLAN"]).join("\n");
+  assert.match(plan, /idx_job_log_failed/, `expected the partial index:\n${plan}`);
+  assert.doesNotMatch(plan, /Seq Scan/, `expected no sequential scan:\n${plan}`);
+  // …and it still answers correctly through the index.
+  assert.equal(await latestJobFailureAt(db, b), null);
+  await logged(b, "failed", 2000000);
+  assert.equal(await latestJobFailureAt(db, b), 2000000);
 });
 
 // ─── the route ───────────────────────────────────────────────────────────────

@@ -426,24 +426,85 @@ every surface here rather than as a note about one watermark.
   The measurement above is what stands in for it, and the probe was deleted
   rather than kept, since it asserts a race rather than a rule.
 
-- [ ] **5. `latestJobFailureAt` has no index that matches it, and the healthier
-  the board the more it costs.**
+- [x] **5. `latestJobFailureAt` sequentially scans the whole `job_log` table, on
+  every tick, for every board.** *(fixed — migration 0032)*
 
   The only index is `idx_job_log_board (board_id, started_at DESC, id DESC)`
-  (`0021_job_log.sql:24`). The query is
+  (`0021_job_log.sql:24`), and the query is
   `WHERE board_id=$1 AND outcome='failed' ORDER BY started_at DESC LIMIT 1`
-  (`db.js:latestJobFailureAt`): `outcome` is not in the index, so the plan walks
-  the board's entries newest-first and heap-fetches each one to test it, stopping
-  at the first match.
+  (`db.js:latestJobFailureAt`).
 
-  On a board with a recent failure that is one or two tuples. On a board with
-  50 k `ok` rows and **no** failures — the state the feature is designed to
-  reward — it is a 50 k-row scan, every 20 s, per open tab, returning `null`
-  each time. The cost is inverted against the outcome.
+  **Corrected after measuring — this entry's first write-up reasoned the
+  mechanism out of the index definition and got it wrong twice.** It claimed the
+  planner walks that index newest-first and stops at the first match, so a board
+  with a recent failure is cheap and a clean board is expensive. Neither is true.
+  `EXPLAIN (ANALYZE, BUFFERS)` over 100 k rows across two boards, one with no
+  failures and one whose newest row is a failure:
 
-  `CREATE INDEX … ON job_log (board_id, started_at DESC) WHERE outcome='failed'`
-  makes it O(1) and is the highest-value single change in this list. It also
-  shrinks by construction, since failures are the rare row.
+  ```
+  Limit  (actual time=7.734..7.735 rows=0 loops=1)
+    Buffers: shared hit=1429
+    ->  Sort  (actual time=7.733..7.734 rows=0 loops=1)
+          Sort Key: started_at DESC
+          ->  Seq Scan on job_log  (actual time=7.721..7.722 rows=0 loops=1)
+                Filter: ((board_id = '…') AND (outcome = 'failed'))
+                Rows Removed by Filter: 100001
+  ```
+
+  The planner does not use `idx_job_log_board` **at all**. `outcome='failed'` has
+  no index and estimates as highly selective, so under a `LIMIT 1` it bets that a
+  sequential scan will hit a match early — and when there are none, or one, it
+  reads the lot. Three consequences, none of them what the entry first said:
+
+  - **It scans the whole TABLE, not the board.** `Rows Removed by Filter:
+    100001` on a 100,001-row table holding two boards. The cost of polling one
+    board scales with every other board's history on the instance.
+  - **There is no cheap case.** Clean board 7.77 ms; board whose newest row is
+    the failure 7.73 ms. Identical, because the scan is unconditional.
+  - **1429 buffer hits per call** — roughly 11 MB touched to answer "has
+    anything failed".
+
+  This is the route that exists *specifically* so the gallery has something cheap
+  to poll: `server.js` justifies splitting it out because the log page "costs
+  five queries to answer, which is exactly why /tokens is its own route too". The
+  cheap route is the expensive one — and the page pays it too, since
+  `latestJobFailureAt` rides that `Promise.all` as well, so an open job log
+  re-scans the table every 5 s.
+
+  With the partial index:
+
+  ```
+  ->  Index Only Scan using idx_job_log_failed (actual time=0.022..0.022 rows=0)
+
+  clean board            7.77 ms  ->  0.05 ms
+  fresh failure on top   7.73 ms  ->  0.05 ms
+  ```
+
+  ### What was done
+
+  `0032_job_log_failed.sql` — `CREATE INDEX … ON job_log (board_id, started_at
+  DESC) WHERE outcome='failed'`. Partial, not composite: the predicate *is* the
+  selectivity, so Postgres walks `(board_id, started_at DESC)` among failures
+  alone and stops at the first. ~165× on this data, and flat as the table grows
+  rather than linear in it. The index stays small by construction — a failure is
+  the rare row, so on a healthy instance it indexes almost nothing, which is
+  exactly the case that used to be worst. Plain `CREATE INDEX`, like 0014 and
+  0028: the runner wraps each file in a transaction and `CONCURRENTLY` cannot run
+  inside one.
+
+  Only `'failed'` is indexed because only `'failed'` is ever asked for — the
+  other three non-ok outcomes are deliberately not news — and a wider index would
+  be a larger one serving no query.
+
+  Test: the query's **plan**, not a row in `pg_indexes`. The regression this
+  guards is the query drifting off the index cut for it — a widened `ORDER BY`, a
+  second outcome — and an existence check reads that as healthy. It asserts the
+  partial index appears and `Seq Scan` does not, on a board with **no** failures,
+  which is the case that used to be worst and the one a healthy instance is in.
+  Pinned against `LATEST_JOB_FAILURE_SQL`, now exported from `db.js`, rather than
+  a copy of the SQL: a copy would keep passing while the app's own query moved,
+  and the regression is invisible from outside, since a sequential scan returns
+  the right answer, slowly.
 
 - [ ] **6. `seen-mark.js` can throw, and one caller is outside every `try`.**
 

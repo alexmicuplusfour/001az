@@ -1,0 +1,44 @@
+-- The jobs chip's attention dot asks one question — "has anything failed on
+-- this board?" — and asks it on a background tick, per open tab, forever
+-- (latestJobFailureAt in db.js; the /jobs/errors route exists precisely so the
+-- gallery has something cheap to poll). It was the most expensive read on the
+-- header.
+--
+-- 0021's idx_job_log_board (board_id, started_at DESC, id DESC) does not help
+-- and, measured, the planner does not even try it. `outcome='failed'` has no
+-- index and estimates as highly selective, so under LIMIT 1 the planner bets a
+-- sequential scan will meet a match early — and when there are none, or one, it
+-- reads everything. EXPLAIN (ANALYZE, BUFFERS) over 100k rows across two boards:
+--
+--   Limit  (actual time=7.734..7.735 rows=0 loops=1)
+--     Buffers: shared hit=1429
+--     ->  Sort  (Sort Key: started_at DESC)
+--           ->  Seq Scan on job_log  (actual time=7.721..7.722 rows=0 loops=1)
+--                 Filter: ((board_id = '…') AND (outcome = 'failed'))
+--                 Rows Removed by Filter: 100001
+--
+-- Three things follow, and none of them is the shape you would guess from the
+-- query. It scans the whole TABLE rather than the board — 100,001 rows removed
+-- on a 100,001-row table holding two boards — so polling one board's dot costs
+-- every other board's history on the instance. There is no cheap case: a clean
+-- board took 7.77ms and a board whose newest row IS the failure took 7.73ms,
+-- because the scan is unconditional. And it touches ~11MB of buffers to answer
+-- a question whose answer is one bigint.
+--
+-- Partial, not composite: the predicate IS the selectivity. Postgres can then
+-- walk (board_id, started_at DESC) among failures alone and stop at the first,
+-- which is an Index Only Scan — 0.05ms on the same data, ~165x, and flat as the
+-- table grows rather than linear in it. The index stays small by construction
+-- too, since a failure is the rare row; on a healthy instance it indexes almost
+-- nothing, which is exactly the case that used to be worst.
+--
+-- Only 'failed' is indexed because only 'failed' is ever asked for — requeued,
+-- discarded, interrupted and running are deliberately not news
+-- (planning/header-signals-plan.md), and a wider index would be a larger one
+-- serving no query.
+--
+-- Plain CREATE INDEX, like 0014 and 0028: the migration runner wraps each file
+-- in a transaction, and CONCURRENTLY cannot run inside one.
+CREATE INDEX IF NOT EXISTS idx_job_log_failed
+  ON job_log (board_id, started_at DESC)
+  WHERE outcome = 'failed';
