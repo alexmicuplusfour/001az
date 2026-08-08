@@ -2,6 +2,13 @@
 // shell's gate pattern — /api/me flips #profile-ui visible or bounces to login.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
+import { ICONS } from "/utils.js";
+
+// The rail names its glyphs in data-icon; fill them in before the gate resolves
+// so nothing renders half-drawn. Mirrors admin.js.
+for (const el of document.querySelectorAll("[data-icon]")) {
+  el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon]);
+}
 
 const me = await fetch("/api/me", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
 if (!me) {

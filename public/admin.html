@@ -27,11 +27,15 @@
       /* meta line under the description: key/connection state + category badges */
       .p-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
       .p-note { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+      /* the key glyph in the badge — sized here now that it comes from the
+         shared set instead of carrying its own width/height */
+      .p-note svg { width: 12px; height: 12px; flex: none; }
       .p-note.warn { color: #8a5a12; background: #fdf3e3; }
       .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
       .plugin-row .badge { flex: none; }
       .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
       .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
+      .gear svg { width: 15px; height: 15px; }
       .gear:hover { background: #f1f1f3; color: #111; }
       /* kind filter chips between Add and the list — the gallery's pill look,
          colors inlined since this page doesn't load styles.css */
@@ -99,31 +103,19 @@
         <h1>Admin</h1>
       </div>
       <div class="layout">
+        <!-- Each row names a glyph in data-icon; admin.js fills them in from the
+             shared set. Six pasted <svg> blocks lived here, and three of them
+             were also pasted somewhere else (grid in admin-boards.js, user and
+             arrow-left in profile.html) — one drawing, four copies to keep in
+             step. The rail is behind the access gate and rendered by JS
+             anyway, so nothing shows before the fill runs. -->
         <nav class="tabs" id="tabs">
-          <button class="tab active" data-tab="members">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            Members
-          </button>
-          <button class="tab" data-tab="boards">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-            Boards
-          </button>
-          <button class="tab" data-tab="plugins">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 13.4a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.7 1.7"/><path d="M13.4 10.6a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.7-1.7"/></svg>
-            Plugins
-          </button>
-          <button class="tab" data-tab="backups">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-            Backups
-          </button>
-          <button class="tab" data-tab="logs">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-            Logs
-          </button>
-          <a class="tab-link" href="/">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
-            Gallery
-          </a>
+          <button class="tab active" data-tab="members" data-icon="users">Members</button>
+          <button class="tab" data-tab="boards" data-icon="grid">Boards</button>
+          <button class="tab" data-tab="plugins" data-icon="plugin">Plugins</button>
+          <button class="tab" data-tab="backups" data-icon="database">Backups</button>
+          <button class="tab" data-tab="logs" data-icon="terminal">Logs</button>
+          <a class="tab-link" href="/" data-icon="arrowLeft">Gallery</a>
         </nav>
         <main class="panels">
           <section class="panel" id="panel-members">

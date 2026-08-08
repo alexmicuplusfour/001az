@@ -6,6 +6,7 @@ import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openBoardModal } from "/board-modal.js";
 import { openDropdown, ddRow, ddCheckRow, ddSep, ddAction } from "/dropdown.js";
+import { ICONS } from "/utils.js";
 
 const boardsContent = document.getElementById("boards-content");
 
@@ -75,7 +76,7 @@ export async function renderBoards() {
       ? `next scheduled run: ${new Date(b.auto_tag_next_run_at).toLocaleString()}`
       : "";
     tr.innerHTML = `
-      <td><span class="name-cell"><svg class="row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></span></td>
+      <td><span class="name-cell">${ICONS.grid}<a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></span></td>
       <td>${b.item_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="uploads waiting while auto-tagging is off">(${b.held_count} held)</span>` : ""}</td>
       <td>${usageCell(b.ai_usage)}</td>
       <td></td>`;
@@ -92,7 +93,8 @@ export async function renderBoards() {
 
     const accessBtn = document.createElement("button");
     accessBtn.className = "ghost";
-    accessBtn.textContent = "access ▾";
+    // Label then caret, the way every other dropdown trigger in the app reads.
+    accessBtn.innerHTML = "<span>access</span>" + ICONS.chevron;
     accessBtn.onclick = (e) => { e.stopPropagation(); openAccessPop(b, accessBtn); };
     wrap.appendChild(accessBtn);
 
@@ -110,7 +112,9 @@ export async function renderBoards() {
     const facets = Array.isArray(b.facets) ? b.facets : [];
     const retagBtn = document.createElement("button");
     retagBtn.className = "danger";
-    retagBtn.textContent = facets.length ? "retag ↺ ▾" : "retag ↺";
+    // Action glyph, label, then the caret only when there is a menu behind it —
+    // which is the same thing the two-branch label was saying with "▾".
+    retagBtn.innerHTML = ICONS.redo + "<span>retag</span>" + (facets.length ? ICONS.chevron : "");
     retagBtn.title = "Re-queue this board for AI tagging" + passNote + (nextRun ? ` (${nextRun})` : "");
 
     const runRetag = async (facet) => {
@@ -121,7 +125,10 @@ export async function renderBoards() {
         ? ` This board runs ${votes} agreement passes per item, so that is up to ~${(b.item_count * votes).toLocaleString()} paid tagging calls.`
         : "";
       if (!confirm(`Re-tag all ${b.item_count} item(s) in "${b.name}" ${what}?${keeps}${cost}`)) return;
-      const label = retagBtn.textContent;
+      // Markup, not text: the label to put back is a glyph plus a span now. The
+      // in-flight states below stay plain words — they replace the whole button,
+      // icon included, which is what they already did.
+      const label = retagBtn.innerHTML;
       try {
         retagBtn.disabled = true;
         retagBtn.textContent = "queuing…";
@@ -131,7 +138,7 @@ export async function renderBoards() {
         setTimeout(renderBoards, 1500);
       } catch (err) {
         toast.error(err.message);
-        retagBtn.textContent = label;
+        retagBtn.innerHTML = label;
         retagBtn.disabled = false;
       }
     };
@@ -145,7 +152,7 @@ export async function renderBoards() {
     if (b.held_count > 0) {
       const tagHeldBtn = document.createElement("button");
       tagHeldBtn.className = "ghost";
-      tagHeldBtn.textContent = "tag held ▸";
+      tagHeldBtn.innerHTML = ICONS.play + "<span>tag held</span>";
       // Informational only — this button deliberately has no confirm, so the
       // pass count rides the title rather than adding friction to it.
       tagHeldBtn.title = `Tag the ${b.held_count} held item(s) now, without turning auto-tagging back on`
@@ -168,7 +175,7 @@ export async function renderBoards() {
     if (b.pending_count > 0) {
       const stopBtn = document.createElement("button");
       stopBtn.className = "danger";
-      stopBtn.textContent = "stop ■";
+      stopBtn.innerHTML = ICONS.stop + "<span>stop</span>";
       stopBtn.title = "Cancel queued AI tagging for this board";
       stopBtn.onclick = async () => {
         if (!confirm(`Stop the tagging queue for "${b.name}"? ${b.pending_count} queued item(s) will be pulled out — ones with previous tags keep them, the rest show as untagged for review.`)) return;
@@ -214,7 +221,7 @@ export async function renderBoards() {
   createSec.style.marginTop = "20px";
   const createBtn = document.createElement("button");
   createBtn.className = "ghost";
-  createBtn.textContent = "+ New board";
+  createBtn.innerHTML = ICONS.plus + "<span>New board</span>"; // same button as the gallery's
   createBtn.onclick = () => openBoardModal(null, { canEditAI: true, onSaved: renderBoards });
   createSec.appendChild(createBtn);
   sec.appendChild(createSec);

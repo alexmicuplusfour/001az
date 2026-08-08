@@ -70,6 +70,16 @@ button {
   color: #fff;
 }
 button:disabled { opacity: .5; cursor: default; }
+/* A button that carries a glyph — same contract as the gallery's .tool-btn: the
+   caller passes `ICONS.foo + "<span>Label</span>"` and the BUTTON owns the size
+   and the gap, so any glyph in the set drops in and lines up. The span is what
+   makes the label one flex item; without it the words space out individually.
+   Selected by :has rather than a class so a call site can't forget it — the
+   admin buttons that grew a typed "+ " or " ▾" instead of an icon are exactly
+   what happens when the styling is opt-in. The two buttons that size their own
+   glyph (.gear, .log-icon-btn) out-specify this. */
+button:has(svg) { display: inline-flex; align-items: center; gap: 6px; }
+button svg { width: 14px; height: 14px; flex: none; }
 button.sm { padding: 5px 12px; font-size: 12px; }
 button.ghost { background: #f1f1f3; color: #111; }
 button.ghost:hover:not(:disabled) { background: #e6e6ea; }
@@ -81,7 +91,10 @@ th { color: #6b6b72; font-weight: 600; }
 td .email { color: #6b6b72; font-size: 12px; }
 .badge { font-size: 11px; background: #eef; color: #224; padding: 1px 6px; border-radius: 999px; }
 .name-cell { display: flex; align-items: center; gap: 10px; }
-.row-icon { width: 16px; height: 16px; flex: none; color: inherit; }
+/* The leading glyph in a table row's name cell. Was a .row-icon class the two
+   render sites had to remember to put on their hand-written <svg>; the cell is
+   the thing that knows how big its icon should be, so it says so itself. */
+.name-cell > svg { width: 16px; height: 16px; flex: none; }
 .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .muted { color: #9aa0aa; }
 .section { margin-top: 40px; }

@@ -107,8 +107,8 @@ export const tag = (facet, value) => `${facet}/${value}`;
 // one currentColor stroke with round caps and joins. `glyph` is where that
 // agreement lives, so an entry below is its paths and nothing else. Written out
 // per icon, the attribute block had already drifted — `plus` lost its
-// stroke-linejoin, and the copies of it in admin.html and profile.html carry a
-// stray 2.2 weight.
+// stroke-linejoin, and the copies of it in admin.html and profile.html had
+// picked up a stray 2.2 weight.
 //
 // `stroke` is in the 24-unit box, so it scales with the icon: what the eye gets
 // is `stroke × size / 24`, and 2 units is 1.08px at 13px but 1.42px at 17px.
@@ -199,6 +199,53 @@ export const ICONS = {
   // `currentColor`, not the `#000000` the export carries: this button styles at
   // `var(--text-dim)` and brightens on hover, and a hard-coded fill ignores both.
   doubleCheck: glyph('<path d="M1.61 13.66 6.77 18.25 14.3 5.25"/><path d="M11.92 16.01 14.61 18.25 22.13 5.25"/>'),
+
+  // ── The member pages (admin.html, profile.html) ─────────────────────────────
+  // Everything below was hand-pasted markup in those two pages and the
+  // admin-*.js renders — the exact drift this file exists to stop. It had
+  // already started: `key` carried its own 2.2, `grid` was a third copy of the
+  // entry twenty lines up, and `user` was pasted in two files. The pages now
+  // name a glyph and get it from here like every other surface.
+  //
+  // These render at 16px in the rail and the table rows, which is the small end
+  // of the set — 2 units is 1.33px there. They hold at that size because they
+  // are drawn wide in the box; nothing here needed a per-glyph bump except the
+  // key, below.
+  users: glyph('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
+  user: glyph('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  database: glyph('<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>'),
+  // A shell prompt, >_ — the logs tab. Was a <polyline> and a <line>; paths
+  // say the same thing and keep every entry here the same kind of object.
+  terminal: glyph('<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>'),
+  arrowLeft: glyph('<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>'),
+  // A puzzle piece: one rounded shoulder top-right, a tab out of the left edge
+  // and one out of the bottom, each a semicircle on a short neck, centred on
+  // the edge it leaves. Drawn in Illustrator; the export sat off-centre enough
+  // that the left tab's stroke fell outside the viewBox and the rail clipped
+  // it, so the coordinates here are the centred ones — ink spans x 2–22 and
+  // y 2.5–21.5, and they are absolute so that stays legible.
+  //
+  // It replaces a chain/link glyph, which was mostly negative space at 16px and
+  // read as "external link" in a rail whose last row is a link off the page.
+  plugin: glyph('<path d="M22 6.5A4 4 0 0 0 18 2.5H6V7.5H4.5A2.5 2.5 0 0 0 4.5 12.5H6V17.5H11.5V19A2.5 2.5 0 0 0 16.5 19V17.5H22Z"/>'),
+  gear: glyph('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>'),
+  // 12px inside the "1 key" badge — the smallest anything in the set renders,
+  // and the busiest glyph in it (bow, shaft and two teeth). 2.2 units is 1.1px
+  // there, and it is the weight this shipped with: the bump is per-glyph and
+  // earned, like the tick's 3, not the stray attribute it looked like while it
+  // sat in admin-plugins.js as a hand-written <svg>.
+  key: glyph('<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>', { stroke: 2.2 }),
+  // The logs console's own pair: corners with an arrow between them, out for
+  // full-page and in for back. Four subpaths each, so the arrowheads keep their
+  // round caps instead of joining the corner brackets.
+  expand: glyph('<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/>'),
+  collapse: glyph('<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="m14 10 7-7"/><path d="m10 14-7 7"/>'),
+  // Transport pair for the boards table: run the held items now, cancel what is
+  // queued. New drawings rather than transfers — these two were the typed ■ and
+  // ▸ that the lightbox's arrows already got taken off (beda504), and a
+  // character's weight is whichever font wins the race.
+  stop: glyph('<rect x="5" y="5" width="14" height="14" rx="2"/>'),
+  play: glyph('<path d="M6 4.5 20 12 6 19.5Z"/>'),
 };
 
 // Corner presence dot for any button — sits centered on the top-right

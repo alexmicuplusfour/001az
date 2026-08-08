@@ -4,15 +4,14 @@
 // its in-memory backlog on every connect (same reason onopen clears the pane
 // before the replay lands, so auto-reconnects don't duplicate rows). The
 // expand button lifts the console over the whole page; Escape drops it back.
+import { ICONS } from "/utils.js";
+
 const content = document.getElementById("logs-content");
 const MAX_ROWS = 2000;
 
 let es = null;
 let active = false; // tab selection state, set before or after build resolves
 let viewer, lines, status, dot, follow, expandBtn;
-
-const ICON_EXPAND = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
-const ICON_COLLAPSE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
 
 export async function renderLogs() {
   const me = await fetch("/api/me").then((r) => r.json());
@@ -49,7 +48,7 @@ function build() {
         <span class="log-spacer"></span>
         <label><input type="checkbox" id="log-follow" checked /> follow</label>
         <button id="log-clear">clear</button>
-        <button id="log-expand" class="log-icon-btn" title="Expand">${ICON_EXPAND}</button>
+        <button id="log-expand" class="log-icon-btn" title="Expand">${ICONS.expand}</button>
       </div>
       <div class="log-lines" id="log-lines"></div>
     </div>`;
@@ -69,7 +68,7 @@ function build() {
 
 function setFullbleed(on) {
   viewer.classList.toggle("fullbleed", on);
-  expandBtn.innerHTML = on ? ICON_COLLAPSE : ICON_EXPAND;
+  expandBtn.innerHTML = on ? ICONS.collapse : ICONS.expand;
   expandBtn.title = on ? "Collapse (Esc)" : "Expand";
   // The pane just changed height under the scroll position — re-stick.
   if (follow.checked) lines.scrollTop = lines.scrollHeight;

@@ -23,15 +23,11 @@
         <h1>Profile</h1>
       </div>
       <div class="layout">
+        <!-- data-icon, filled by profile.js from the shared set — same rail as
+             admin.html, and these were the same two drawings pasted twice. -->
         <nav class="tabs">
-          <button class="tab active">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            Account
-          </button>
-          <a class="tab-link" href="/">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
-            Gallery
-          </a>
+          <button class="tab active" data-icon="user">Account</button>
+          <a class="tab-link" href="/" data-icon="arrowLeft">Gallery</a>
         </nav>
         <main class="panels">
           <section class="panel">

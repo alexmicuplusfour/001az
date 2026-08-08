@@ -9,6 +9,7 @@ import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openPluginModal } from "/plugin-modal.js";
 import { openAddPluginModal } from "/plugin-add-modal.js";
+import { ICONS } from "/utils.js";
 
 // The kind filter above the list: chip labels per card family, in display
 // order. "all" is the default; the selection lives at module level so the
@@ -16,8 +17,6 @@ import { openAddPluginModal } from "/plugin-add-modal.js";
 const KIND_FILTERS = [["ai", "AI"], ["connector", "Data"], ["media", "Media"], ["source", "Sources"]];
 let activeKind = "all";
 
-const GEAR_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
-const KEY_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`;
 
 // Which provider currently backs the tagger / embedder slots (for badges + tag).
 // The tagger falls back to the anthropic env var when no default key is set.
@@ -119,7 +118,7 @@ export async function renderPlugins(prefetched) {
   add.className = "plugin-add";
   const addBtn = document.createElement("button");
   addBtn.type = "button";
-  addBtn.textContent = "+ Add plugin";
+  addBtn.innerHTML = ICONS.plus + "<span>Add plugin</span>";
   // Always openable — the modal browses the whole connection catalog (added ones
   // shown as "Added"), so it stays useful even when nothing new is available.
   addBtn.onclick = () => openAddPluginModal(connections, ctx);
@@ -222,7 +221,7 @@ function pluginRow(p, ctx) {
   if (note) {
     const el = document.createElement("span");
     el.className = "p-note" + (note.warn ? " warn" : "");
-    el.innerHTML = KEY_SVG; // stroke=currentColor → matches the badge text color
+    el.innerHTML = ICONS.key; // stroke=currentColor → matches the badge text color
     const txt = document.createElement("span");
     txt.textContent = note.text;
     el.appendChild(txt);
@@ -239,7 +238,7 @@ function pluginRow(p, ctx) {
   const gear = document.createElement("button");
   gear.className = "gear";
   gear.title = `Configure ${p.label}`;
-  gear.innerHTML = GEAR_SVG;
+  gear.innerHTML = ICONS.gear;
   gear.onclick = () => openPluginModal(p, ctx);
   row.appendChild(gear);
 

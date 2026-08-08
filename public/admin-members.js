@@ -4,6 +4,7 @@
 // first from admin.js. The boards and AI tabs each re-check access themselves.
 import { toast } from "/toast.js";
 import { api, copy } from "/api.js";
+import { ICONS } from "/utils.js";
 
 const content = document.getElementById("content");
 const gate = document.getElementById("gate");
@@ -42,7 +43,7 @@ export async function renderMembers() {
     const tr = document.createElement("tr");
     const last = u.last_login_at ? new Date(u.last_login_at).toLocaleDateString() : '<span class="muted">never</span>';
     tr.innerHTML = `
-      <td><div class="name-cell"><svg class="row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><div><div>${u.name || "—"} ${u.is_admin ? '<span class="badge">admin</span>' : ""}</div><div class="email">${u.email}</div></div></div></td>
+      <td><div class="name-cell">${ICONS.user}<div><div>${u.name || "—"} ${u.is_admin ? '<span class="badge">admin</span>' : ""}</div><div class="email">${u.email}</div></div></div></td>
       <td>${last}</td>
       <td>${u.hearts_given}</td>
       <td><div class="row-actions"></div></td>`;
