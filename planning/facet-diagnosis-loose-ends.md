@@ -875,6 +875,61 @@ those two rules outright, and it is fixed here. 840 tests pass.
   sample, and the backstop catches it if it does"* — was a promise the backstop
   could not keep when it was written, and 41 is what made it true.
 
+- [x] **43. The reader promised a re-read for a facet the loop could never
+  reach.** *(fixed — and two of the three cases I filed under this turned out not
+  to exist)*
+
+  `diagnosisState` renders a superseded finding as *"The measurements have
+  changed. Re-reading this facet."* That is a promise, and it is kept only if the
+  loop gets to that facet. Three ways it might not, all three filed on reasoning
+  and none of them measured. Measured now:
+
+  ```
+  A  eleventh facet, past MAX_FACETS   0 calls across 10 ticks, stale: true    REAL
+  B  no AI key anywhere                stored {} — and nothing tags either     degenerate
+  C  a settle window pushed by
+     non-tagging writers               deleteEntity did NOT push it; 0         does not exist
+  ```
+
+  **A is real and permanent.** `candidates` walked `facetRollup` in board order
+  and `break`-ed at ten, and the bound was re-applied identically every tick — so
+  the tail was not diagnosed *later*, it was never diagnosed. That is `#23`, which
+  filed it as a coverage gap; the sharper version is that the reader makes a
+  promise about exactly that facet, and nothing was ever coming to keep it.
+
+  Fixed by ordering before the bound, which turns it from a wall into a queue:
+
+  - `stale` first, ahead of severity. A superseded finding is one the reader is
+    actively promising to replace, and honouring that outranks reaching the worst
+    facet first.
+  - instability descending for the rest — `#23`'s own request, now satisfied.
+
+  When a full retag marks every facet at once the tail waits exactly one tick,
+  because the ten served stop being stale as they land. Both cases pinned, plus
+  the priority itself (the least unstable of eleven is the one left out). All
+  three tests fail on the code they replace.
+
+  **B is degenerate.** With no key resolvable anywhere the board cannot tag
+  either, so the facet is frozen along with everything else on it. Recorded, not
+  fixed: there is nothing the loop can do, and the honest fix would be for
+  `/facet-stats` to report that AI is unconfigured — which is a bigger claim than
+  this sentence is worth.
+
+  **C does not exist, and `#16` is wrong about why.** That entry says
+  `updated_at` is pushed by "writers that are not tagging — `setItemEntities` on
+  every face/entity assignment, entity deletion". Neither holds.
+  `setItemEntities` runs only inside the extract leg, on a row that is not
+  `tagged`, and `markTagged` stamps `updated_at` afterwards regardless.
+  `deleteEntity` deletes the item outright when it is its entity's sole member,
+  which is every item on a raw board; the `array_remove` branch that does bump
+  `updated_at` only reaches multi-entity rows. Measured: `lastTagged` unmoved
+  after a `deleteEntity`. `#16` is corrected below rather than left standing.
+
+  The one genuine way a board never settles is the plain one that needs no
+  mechanism — a continuously non-empty tag queue — and there the reader says the
+  accurate thing rather than the promise, because `row.queued` is non-zero and
+  the copy branches on it: *"Re-tagging this facet — N items still queued."*
+
 ## Behaviour worth a decision (no change made)
 
 - **14. A diagnosis in flight can undo the save that demotes it.** *(half closed
@@ -1105,16 +1160,31 @@ those two rules outright, and it is fixed here. 840 tests pass.
   wasted call, at roughly 1–2k input and 200 output each. Right side to err on,
   but if diagnose spend ever looks high this is the first knob.
 
-- **16. Gate 2 can never pass on a board that never goes quiet**, and it is
-  measuring more than it says. `boardTagActivity` reads
-  `max(updated_at) FILTER (WHERE status='tagged')`, but `updated_at` is bumped by
-  writers that are not tagging — `setItemEntities` on every face/entity
-  assignment, entity deletion — so face work on a settled board pushes the
-  window while the tally does not move at all. Combined with the board-level
-  `busy > 0` check, a board that ingests faster than (drain + ten minutes) is
-  silently ineligible forever, and the surface that would say so shows healthy
-  numbers with no findings, which is indistinguishable from a healthy board.
-  Cheap version: read the tagging lane's own stamp rather than `updated_at`.
+- **16. Gate 2 can never pass on a board that never goes quiet.** *(the second
+  half of this was wrong; measured under 43 and corrected here.)*
+
+  What it claimed: `boardTagActivity` reads
+  `max(updated_at) FILTER (WHERE status='tagged')`, and `updated_at` is bumped by
+  writers that are not tagging — "`setItemEntities` on every face/entity
+  assignment, entity deletion" — so face work on a settled board pushes the
+  window while the tally does not move.
+
+  Neither writer does that. `setItemEntities` runs only inside the extract leg,
+  on a row that is not `tagged`, and `markTagged` stamps `updated_at` afterwards
+  regardless, so its write is always superseded. `deleteEntity` deletes the item
+  outright when it is its entity's sole member — every item on a raw board; the
+  `array_remove` branch that does bump `updated_at` only reaches multi-entity
+  rows. Measured: `lastTagged` unmoved after a `deleteEntity` on a seeded board.
+  The one non-tagging writer that legitimately pushes the window is `setItemTags`,
+  and it pushes it because hand-correcting an item genuinely moves the sample.
+
+  What survives is the first sentence, and it needs no mechanism: a board with a
+  continuously non-empty tag queue holds `busy > 0` and is never diagnosed. That
+  is now MORE reachable than it was, because 42 widened `busy` to all six
+  in-flight states. It is also mostly self-describing — `row.queued` is non-zero
+  in that state, so the reader says "Re-tagging this facet — N items still
+  queued" rather than promising a re-read. Worth measuring on a real
+  high-ingestion board before anything is done to it.
 
 - **17. The roll-up is a whole-board jsonb expansion, run per board per tick.**
   `candidates` calls `facetRollup` for every vote board it scans (up to eight a
@@ -1165,7 +1235,7 @@ those two rules outright, and it is fixed here. 840 tests pass.
 
 Added by the third sweep:
 
-- **23. `MAX_FACETS` takes the first ten qualifying facets, not the worst ten.**
+- [x] **23. `MAX_FACETS` takes the first ten qualifying facets, not the worst ten.** *(closed by 43 — ordered before the bound, stale first then severity, so it is a queue rather than a wall.)*
   `candidates` walks `facetRollup` in board order and breaks at ten, so on a
   board with more than ten unstable facets the tail is never diagnosed — not
   "later", never, because the bound is re-applied identically every tick. The

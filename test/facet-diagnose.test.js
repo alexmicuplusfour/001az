@@ -673,6 +673,100 @@ test("…and every one of the six in-flight states counts, claimed ones included
   }
 });
 
+// ─── MAX_FACETS is a priority, not a truncation ─────────────────────────────
+
+// Eleven facets at eleven different instability rates over one set of items:
+// facet i is contested on the first 10+i of 30, so f0 sits at 33% and f10 at
+// 67%, every one of them clear of both gates.
+const ELEVEN = Array.from({ length: 11 }, (_, i) => ({
+  key: `f${i}`, label: `F${i}`, single: true, description: `the f${i}`, values: ["round", "wide"],
+}));
+async function seedLadder(b) {
+  for (let j = 0; j < 30; j++) {
+    const c = {};
+    for (let i = 0; i < ELEVEN.length; i++) {
+      c[`f${i}`] = j < 10 + i
+        ? conf(facetStamp(ELEVEN[i], false), 3, 2, { round: 2, wide: 1 })
+        : conf(facetStamp(ELEVEN[i], false), 3, 3, { round: 3 });
+    }
+    await item(b, { confidence: c, description: `mark ${j}` });
+  }
+}
+const diagnosed = async (b) => Object.keys(await diagnosticsOf(b)).sort();
+
+test("over the facet bound, the WORST ten are diagnosed rather than the first ten", async () => {
+  // The bound is right (§4: a fleet of newly vote-enabled boards must not fan out
+  // into a burst) but it used to be applied by walking board order and breaking
+  // at ten, so the tail was not diagnosed later — it was never diagnosed, the
+  // bound being re-applied identically every tick.
+  const b = await board("priority", { facets: ELEVEN });
+  await seedLadder(b);
+  await diagnoseDue(db, stubTagger(), null);
+  assert.deepEqual(await diagnosed(b), ["f1", "f10", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9"],
+    "f0, the least unstable, is the one left out");
+});
+
+test("…and a superseded finding outranks severity, because the reader promised it", async () => {
+  // The sharper half. A facet past the bound whose finding has been superseded
+  // renders "The measurements have changed. Re-reading this facet." — and under
+  // the old truncation nothing was ever coming, so that sentence stood for good.
+  // Measured before the fix: zero calls naming the eleventh facet across ten
+  // ticks, `stale` still true.
+  //
+  // f0 is the LEAST unstable facet, so severity alone would keep it last for
+  // ever; the mark is what pulls it to the front.
+  const b = await board("stale-first", { facets: ELEVEN });
+  await seedLadder(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.ok(!(await diagnosticsOf(b)).f0, "f0 starts out past the bound");
+
+  await setFacetDiagnostic(db, b, "f0", {
+    verdict: "overlapping-values", explanation: "e", values: [], rewrite: "r",
+    stats: { items: 30, unanimous: 20 }, evidence: [], d: facetStamp(ELEVEN[0], false),
+    scoped: false, k: "old", at: Date.now(),
+  });
+  // Scoped, so f0 is the ONLY facet with a mark outstanding — which is what
+  // isolates the claim. Severity alone would keep the least unstable facet last
+  // for ever; the mark is what pulls it to the front.
+  await retagBoard(db, b);
+  assert.deepEqual(await supersedeFacetDiagnostics(db, b, ["f0"]), ["f0"]);
+  await landUnchanged(b);
+
+  const before = deps.calls.length;
+  await diagnoseDue(db, deps, null);
+  assert.ok(deps.calls.slice(before).some((c) => c.systemText.includes("key: f0\n")), "f0 is re-read on the next tick");
+  assert.equal((await diagnosticsOf(b)).f0.stale, undefined, "and the mark retires");
+});
+
+test("…and when a full retag marks ALL of them, the tail waits one tick, not for ever", async () => {
+  // The realistic path, and the one that shows the bound is now a queue rather
+  // than a wall: eleven marks, ten served this tick, the eleventh first in line
+  // on the next because the ten it was behind stopped being stale as they landed.
+  const b = await board("all-stale", { facets: ELEVEN });
+  await seedLadder(b);
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+
+  await setFacetDiagnostic(db, b, "f0", {
+    verdict: "overlapping-values", explanation: "e", values: [], rewrite: "r",
+    stats: { items: 30, unanimous: 20 }, evidence: [], d: facetStamp(ELEVEN[0], false),
+    scoped: false, k: "old", at: Date.now(),
+  });
+  await retagBoard(db, b);
+  assert.equal((await supersedeFacetDiagnostics(db, b, null)).length, 11, "every finding is superseded");
+  await landUnchanged(b);
+
+  const saw = (from) => deps.calls.slice(from).some((c) => c.systemText.includes("key: f0\n"));
+  let at = deps.calls.length;
+  await diagnoseDue(db, deps, null);
+  assert.equal(saw(at), false, "tick one goes to the ten worst, all of them equally stale");
+  at = deps.calls.length;
+  await diagnoseDue(db, deps, null);
+  assert.equal(saw(at), true, "tick two is f0's, alone at the front");
+  assert.equal((await diagnosticsOf(b)).f0.stale, undefined);
+});
+
 // ─── the escape hatches ──────────────────────────────────────────────────────
 
 test("no-problem-found stores, and stores without a rewrite", async () => {

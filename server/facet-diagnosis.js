@@ -657,8 +657,30 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   return entry;
 }
 
+// How unstable a segment is — the number the rate gate reads and the ordering
+// below ranks on. Callers have all checked `items` first.
+const instability = (s) => (s.items - s.unanimous) / s.items;
+
 // The facets on one board worth spending a call on, or null when the board
 // itself is not ready. Gates 2-5; gate 1 (vote mode) is boardsWithVotes.
+//
+// ORDERED before MAX_FACETS is applied, which is the difference between a
+// priority and a truncation. This used to walk board order and `break` at ten,
+// and the bound was re-applied identically every tick — so on a board with more
+// than ten unstable facets the tail was not diagnosed LATER, it was never
+// diagnosed at all. Measured on an eleven-facet board: zero calls naming the
+// eleventh across ten ticks.
+//
+// That is worse than a coverage gap, because the reader makes a promise about
+// it. A superseded finding renders "The measurements have changed. Re-reading
+// this facet." — and on the eleventh facet nothing was ever coming, so the
+// sentence stood for good.
+//
+// So `stale` sorts first, ahead of severity: a superseded finding is one the
+// reader is actively promising to replace, and honouring that outranks getting
+// to the worst facet first. When a full retag marks every facet at once the tail
+// waits a tick and no longer, because the ten served stop being stale as they
+// land. Severity breaks the remaining ties, which is what #23 asked for.
 async function candidates(db, board) {
   const act = await boardTagActivity(db, board.id);
   if (act.busy > 0 || Date.now() - act.lastTagged < SETTLE_MS) return null;
@@ -669,11 +691,13 @@ async function candidates(db, board) {
     // measurements of the CURRENT definition, never a pool of two. Below the
     // minimum the facet is awaiting re-measurement — a UI state, not a silence.
     if (segment.items < MIN_ITEMS) continue;
-    if ((segment.items - segment.unanimous) / segment.items < MIN_RATE) continue;
+    if (instability(segment) < MIN_RATE) continue;
     out.push(segment);
-    if (out.length >= MAX_FACETS) break;
   }
-  return out;
+  out.sort((a, b) =>
+    Number(!!b.diagnostic?.stale) - Number(!!a.diagnostic?.stale) ||
+    instability(b) - instability(a));
+  return out.slice(0, MAX_FACETS);
 }
 
 // One pass of the loop. Walks boards from `afterBoardId` and diagnoses the first
