@@ -182,23 +182,20 @@ function pluginRow(p, ctx) {
 
   const main = document.createElement("div");
   main.className = "p-main";
+  const head = document.createElement("div");
+  head.className = "p-head";
   const label = document.createElement("div");
   label.className = "p-label";
   label.textContent = p.label;
-  const desc = document.createElement("div");
-  desc.className = "p-desc";
-  desc.textContent = p.description || "";
-  main.append(label, desc);
-  if (p.external && p.source) main.appendChild(sourceLine(p.source));
-  row.appendChild(main);
+  head.appendChild(label);
 
-  // slot default badges
+  // slot default badges — inline with the title, since they name what the row IS
   if (p.kind === "ai") {
     if (ctx.defaults.tagger === p.name)
-      row.appendChild(badge(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env"));
-    if (ctx.defaults.embedder === p.name) row.appendChild(badge("default embedder"));
-    if (ctx.defaults.transcriber === p.name) row.appendChild(badge("default transcriber"));
-    if (ctx.defaults.detector === p.name) row.appendChild(badge("default detector"));
+      head.appendChild(badge(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env"));
+    if (ctx.defaults.embedder === p.name) head.appendChild(badge("default embedder"));
+    if (ctx.defaults.transcriber === p.name) head.appendChild(badge("default transcriber"));
+    if (ctx.defaults.detector === p.name) head.appendChild(badge("default detector"));
   }
   if (p.kind === "connector") {
     const d = ctx.slots.domains[p.connector.domain] || {};
@@ -207,26 +204,37 @@ function pluginRow(p, ctx) {
     // active fallback as default. Note when the star points elsewhere (e.g. it
     // was removed): the star setting is preserved so re-adding restores it.
     if (d.effective === p.name) {
-      row.appendChild(badge("default"));
-      if (d.setting && d.setting !== d.effective) row.appendChild(badge(`was ${d.setting}`, "warn"));
+      head.appendChild(badge("default"));
+      if (d.setting && d.setting !== d.effective) head.appendChild(badge(`was ${d.setting}`, "warn"));
     }
   }
 
+  const desc = document.createElement("div");
+  desc.className = "p-desc";
+  desc.textContent = p.description || "";
+  main.append(head, desc);
+  if (p.external && p.source) main.appendChild(sourceLine(p.source));
+
+  // meta line under the description: connection state + category, both badges
+  const meta = document.createElement("div");
+  meta.className = "p-meta";
   const note = keyNote(p);
   if (note) {
     const el = document.createElement("span");
     el.className = "p-note" + (note.warn ? " warn" : "");
-    el.innerHTML = KEY_SVG; // stroke=currentColor → matches the label text color
+    el.innerHTML = KEY_SVG; // stroke=currentColor → matches the badge text color
     const txt = document.createElement("span");
     txt.textContent = note.text;
     el.appendChild(txt);
-    row.appendChild(el);
+    meta.appendChild(el);
   }
 
   const tag = document.createElement("span");
   tag.className = "p-tag";
   tag.textContent = tagFor(p, ctx.defaults);
-  row.appendChild(tag);
+  meta.appendChild(tag);
+  main.appendChild(meta);
+  row.appendChild(main);
 
   const gear = document.createElement("button");
   gear.className = "gear";
@@ -279,12 +287,16 @@ function erroredRow(p, ctx) {
   main.append(label);
   if (p.source) main.appendChild(sourceLine(p.source));
   main.appendChild(err);
-  row.appendChild(main);
 
+  // same meta placement as a healthy row — just the category, no key note
+  const meta = document.createElement("div");
+  meta.className = "p-meta";
   const tag = document.createElement("span");
   tag.className = "p-tag";
   tag.textContent = tagFor(p, ctx.defaults);
-  row.appendChild(tag);
+  meta.appendChild(tag);
+  main.appendChild(meta);
+  row.appendChild(main);
 
   const retry = document.createElement("button");
   retry.type = "button";
