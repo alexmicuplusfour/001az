@@ -30,11 +30,23 @@ export default (wires) => ({
   // ("flagged as potentially violating our usage policy") — live-bisected;
   // "required" and "auto" pass, and with one tool defined "required" is the
   // same guarantee.
-  // temperature 0 for the tagging path (see compatRequest for the measurement);
-  // noTemperature exempts the o-series, which 400s on any non-default value and
-  // whose ids pass the modelFilter above. Both live-probed 2026-08-06:
-  // gpt-5.4-mini and gpt-5.1 accept 0, o3 rejects it.
-  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models", temperature: 0, noTemperature: "^o\\d" },
+  // temperature 0 for the tagging path (see compatRequest for the measurement).
+  // noTemperature lists the families that 400 on any non-default value — all of
+  // whose ids pass the modelFilter above, so they'd otherwise be offered and
+  // then fail every item:
+  //   o-series          o3, o4-mini …
+  //   gpt-5 BASE family gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-chat-latest,
+  //                     gpt-5-2025-08-07 — reasoning models with sampling
+  //                     locked to the default. Hyphen-or-end anchored so the
+  //                     dot-versioned successors (gpt-5.1, gpt-5.4-mini), which
+  //                     accept 0, keep sending it. Added 2026-08-09 after
+  //                     gpt-5-mini — this descriptor's OWN defaultModel — failed
+  //                     a real board with "Unsupported value: 'temperature' does
+  //                     not support 0.0 with this model."
+  // The list is the fast path, not the safety net: an id nobody has tried yet is
+  // caught by the wire's rejection recovery instead.
+  // Live-probed 2026-08-06: gpt-5.4-mini and gpt-5.1 accept 0, o3 rejects it.
+  compat: { maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models", temperature: 0, noTemperature: "^(o\\d|gpt-5(-|$))" },
   embeds: {
     default: "text-embedding-3-small",
     models: [

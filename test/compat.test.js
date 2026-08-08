@@ -84,22 +84,29 @@ test("GLM quirks: auto tool_choice, no strict, thinking disabled, legacy max_tok
 // (1.0) re-judged 22.4% of facet answers on an identical rerun vs 18.3% at 0
 // (measured 2026-08-06, gpt-5.4-mini). The parameter rides the `compat` quirk
 // block, NOT a provider name, and `noTemperature` exempts families that reject
-// it — o-series 400s ("Unsupported value: 'temperature' does not support 0
-// with this model") and o-ids pass OpenAI's tagging modelFilter, so an
-// unguarded send would permanently fail every item on such a board.
-test("temperature: 0 rides the quirk block, and the o-series guard exempts it", () => {
+// it — the o-series and the gpt-5 base family both 400 ("Unsupported value:
+// 'temperature' does not support 0 with this model"), and both pass OpenAI's
+// tagging modelFilter, so an unguarded send costs a round trip on every item.
+test("temperature: 0 rides the quirk block, and the refusing families are exempt", () => {
   for (const [provider, model] of [["openai", "gpt-5.4-mini"], ["openai", "gpt-5.1"], ["gemini", "gemini-3.5-flash"]]) {
     const r = compatRequest({ provider, model, systemText: "s", schema, parts });
     assert.equal(r.temperature, 0, `${provider}/${model} should send temperature 0`);
   }
-  // o-series: the guard must drop the field entirely, not send a different value
-  for (const model of ["o3", "o4-mini"]) {
+  // The guard must drop the field entirely, not send a different value.
+  // gpt-5-mini is the id that broke a live board (2026-08-09) — and it is this
+  // descriptor's own defaultModel, so an unguarded send is the DEFAULT path.
+  for (const model of ["o3", "o4-mini", "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5-chat-latest", "gpt-5-2025-08-07"]) {
     const r = compatRequest({ provider: "openai", model, systemText: "s", schema, parts });
     assert.equal(r.temperature, undefined, `${model} must not carry a temperature`);
     assert.ok(!("temperature" in r), `${model} must omit the key, not send undefined`);
   }
-  // The guard is anchored — a model that merely CONTAINS an o-digit still gets it
-  assert.equal(compatRequest({ provider: "openai", model: "gpt-4o-2024", systemText: "s", schema, parts }).temperature, 0);
+  // Anchored and hyphen-delimited: a model that merely CONTAINS an o-digit still
+  // gets it, and the dot-versioned gpt-5 successors (which accept 0) are not
+  // swept up by the base-family guard.
+  for (const model of ["gpt-4o-2024", "gpt-5.1", "gpt-5.4-mini", "gpt-51"]) {
+    assert.equal(compatRequest({ provider: "openai", model, systemText: "s", schema, parts }).temperature, 0,
+      `${model} should still send temperature 0`);
+  }
 });
 
 test("providers whose temperature support is unverified send none", () => {
@@ -212,6 +219,113 @@ test("compat wire: hidden thinking tokens are billed as output", async () => {
   const plain = await withFetch(openaiShaped, () =>
     compatWire.tag(PROVIDERS.openai, tagOpts({ name: "record_tags", description: "d" })));
   assert.equal(plain.usage.output, 50);
+});
+
+// ─── temperature refusal: recovered at call time, never fatal ────────────────
+// The descriptor's noTemperature regex saves the doomed first call for families
+// we already know about, but OpenAI's tagging model comes from a LIVE /models
+// list — any id can turn up. When gpt-5-mini started refusing the parameter it
+// 400'd, and a 400 is permanent-shaped: failOrRequeue failed every item on its
+// FIRST attempt. The wire must drop the field and re-send instead.
+
+// A fetch stub recording each request body, answering 400/200 by a per-call rule.
+const recorder = (reply) => {
+  const bodies = [];
+  const fetch = async (_url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return reply(bodies.length, bodies[bodies.length - 1]);
+  };
+  return { fetch, bodies };
+};
+// The exact body OpenAI returns (verified against the upstream bug reports):
+// HTTP 400, param names the field, code says why.
+const tempRefusal = () => new Response(JSON.stringify({
+  error: {
+    message: "Unsupported value: 'temperature' does not support 0.0 with this model. Only the default (1) value is supported.",
+    type: "invalid_request_error", param: "temperature", code: "unsupported_value",
+  },
+}), { status: 400 });
+const tagOk = () => new Response(JSON.stringify({
+  choices: [{ message: { tool_calls: [{ function: { name: "record_tags", arguments: '{"kind":["a"]}' } }] } }],
+  usage: { prompt_tokens: 10, completion_tokens: 5 },
+}), { status: 200 });
+
+test("compat wire: a refused temperature is dropped and re-sent, not failed", async () => {
+  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  temperatureRejected.clear();
+  // gpt-5.4-mini passes the noTemperature regex, so the first call really does
+  // carry temperature 0 — this is the unknown-id path the regex can't cover.
+  const { fetch, bodies } = recorder((n) => (n === 1 ? tempRefusal() : tagOk()));
+  const result = await withFetch(fetch, () =>
+    compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5.4-mini" }));
+  // The item is tagged — the whole point. Failing here killed real boards.
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].temperature, 0);
+  assert.ok(!("temperature" in bodies[1]), "the retry must omit the field, not send another value");
+  // Everything else about the request is unchanged by the retry
+  assert.equal(bodies[1].model, "gpt-5.4-mini");
+  assert.equal(bodies[1].tool_choice, "required");
+  assert.deepEqual(bodies[1].messages, bodies[0].messages);
+  temperatureRejected.clear();
+});
+
+test("compat wire: the refusal is learned, so only the first item pays for it", async () => {
+  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  temperatureRejected.clear();
+  const { fetch, bodies } = recorder((_n, body) => ("temperature" in body ? tempRefusal() : tagOk()));
+  const tag = () => compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5.4-mini" });
+  await withFetch(fetch, async () => { await tag(); await tag(); await tag(); });
+  // 2 calls for the first item (discovery), then 1 each — not 2 forever.
+  assert.equal(bodies.length, 4);
+  assert.ok(bodies.slice(1).every((b) => !("temperature" in b)), "later items must omit the field up front");
+  temperatureRejected.clear();
+});
+
+test("compat wire: an unrelated 400 still fails, and fails once", async () => {
+  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  temperatureRejected.clear();
+  const { fetch, bodies } = recorder(() => new Response(JSON.stringify({
+    error: { message: "Invalid API key provided", code: "invalid_api_key" },
+  }), { status: 401 }));
+  await withFetch(fetch, () => assert.rejects(
+    compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5.4-mini" }),
+    (e) => /Invalid API key/.test(e.message) && e.status === 401
+  ));
+  assert.equal(bodies.length, 1, "a non-temperature failure must not be re-paid");
+  temperatureRejected.clear();
+});
+
+// The loop guard: if we sent no temperature (the regex already exempted the
+// model) a 400 that happens to mention the word is somebody else's fault, and
+// re-sending the identical request would just buy the same rejection twice.
+test("compat wire: no retry when the request carried no temperature", async () => {
+  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  temperatureRejected.clear();
+  const { fetch, bodies } = recorder(() => tempRefusal());
+  await withFetch(fetch, () => assert.rejects(
+    compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5-mini" }),
+    (e) => e.status === 400
+  ));
+  assert.ok(!("temperature" in bodies[0]), "gpt-5-mini is exempt by regex — nothing to drop");
+  assert.equal(bodies.length, 1);
+  temperatureRejected.clear();
+});
+
+// Vendors other than OpenAI have no structured `param`, only prose — the
+// recovery must read either. (Any compat plugin can hit this.)
+test("compat wire: a prose-only refusal is recognised too", async () => {
+  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  temperatureRejected.clear();
+  const proseOnly = () => new Response(JSON.stringify({
+    error: { message: "temperature is not supported for this model" },
+  }), { status: 400 });
+  const { fetch, bodies } = recorder((n) => (n === 1 ? proseOnly() : tagOk()));
+  const result = await withFetch(fetch, () =>
+    compatWire.tag(PROVIDERS.gemini, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gemini-3.5-flash" }));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  temperatureRejected.clear();
 });
 
 test("compat wire: the right-name call is found past an invented one", async () => {

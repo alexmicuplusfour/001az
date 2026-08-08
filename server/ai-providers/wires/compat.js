@@ -36,13 +36,55 @@ const keyTestSignal = () => AbortSignal.timeout(30000); // admin Test button —
 // wire up to par.
 async function compatError(r, label) {
   const body = await r.json().catch(() => ({}));
-  const msg = body.error?.metadata?.raw || body.error?.message;
+  const e = body.error || {};
+  const msg = e.metadata?.raw || e.message;
   const err = new Error(msg || `${label} HTTP ${r.status}`);
   err.status = r.status;
+  // OpenAI names the offending field and the reason in structured form
+  // (param:"temperature", code:"unsupported_value") alongside the prose. Keep
+  // both — the parameter-rejection recovery below reads them, and they're
+  // strictly more reliable than matching an error sentence. Nothing else in the
+  // app reads .code off a provider error (it's Postgres/fs errors that use it).
+  if (e.param) err.param = e.param;
+  if (e.code) err.code = e.code;
   const ra = r.headers?.get?.("retry-after");
   if (ra != null) err.retryAfter = ra;
   return err;
 }
+
+// ─── temperature: a parameter the provider may refuse, per MODEL ─────────────
+// `noTemperature` (descriptor data) is a best-effort list of families known to
+// reject it — but on OpenAI the tagging model comes from a LIVE /models list, so
+// any id can appear and no static regex stays right. gpt-5-mini is exactly that
+// case: it rejects temperature, it's the descriptor's own defaultModel, and the
+// original guard only covered the o-series. A 400 is permanent-shaped, so
+// failOrRequeue failed each item on its FIRST attempt — one board, every item
+// dead, with a provider error most users can do nothing about.
+//
+// So the regex is now only an optimisation, and this is the correctness path:
+// when the provider says the parameter is unsupported, drop it and re-send. A
+// tagging call is worth more than the 4 points of stability temperature buys.
+const rejectsTemperature = (e) =>
+  Number(e?.status) === 400 &&
+  (e.param === "temperature" ||
+    (/temperature/i.test(e.message || "") &&
+      /unsupported|not support|invalid|only the default/i.test(e.message || "")));
+
+// Learned per (endpoint, model), so the board pays the extra round trip once
+// rather than on every item. Not locked: the worker runs AI_INFLIGHT items at a
+// time, so the first WAVE can each discover it independently — a rejected call
+// bills nothing and every one of them still recovers, which is cheaper than
+// serialising the wire for it. Keyed by endpoint too: two connections of one
+// provider can point at different boxes. Bounded by the number of distinct
+// models actually used. Exported as a test seam.
+export const temperatureRejected = new Set();
+
+// Would a request for this model carry a temperature at all? The one definition
+// — compatRequest builds from it, and the recovery above uses it to tell "the
+// provider refused what we sent" from "we sent none and something else broke".
+const temperatureAsked = (compat, model) =>
+  compat.temperature !== undefined &&
+  !(compat.noTemperature && new RegExp(compat.noTemperature).test(model));
 
 // OpenAI-compatible chat-completions request. A forced function call mirrors
 // the Anthropic tool shape and the same strict JSON schema works — but the
@@ -70,14 +112,12 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
     // model's own decode variance; temperature does not touch it.)
     //
     // Quirk data, not a global: `noTemperature` is a model-id regex for
-    // families that REJECT the parameter. OpenAI's o-series 400s on it
-    // ("Unsupported value: 'temperature' does not support 0 with this model")
-    // and o-ids pass the tagging modelFilter, so a blanket send would
-    // permanently fail every item on a board using one. Live-probed
-    // 2026-08-06: gpt-5.4-mini/gpt-5.1/gemini-3.5-flash accept, o3 rejects.
-    ...(compat.temperature !== undefined &&
-        !(compat.noTemperature && new RegExp(compat.noTemperature).test(model))
-          ? { temperature: compat.temperature } : {}),
+    // families known to REJECT the parameter (OpenAI's o-series and gpt-5 base
+    // family both 400 on it). It's an optimisation — it saves the doomed first
+    // call — not the guarantee: the tagging model comes from a live /models
+    // list, so an unlisted id can always turn up, and the wire recovers from
+    // the rejection at call time. See `rejectsTemperature`.
+    ...(temperatureAsked(compat, model) ? { temperature: compat.temperature } : {}),
     messages: [
       { role: "system", content: systemText },
       { role: "user", content },
@@ -128,13 +168,33 @@ export const compatWire = {
     // input. Fail loud with the fix, rather than degrading silently.
     if (parts.some((p) => p.kind === "document"))
       throw new Error(`${desc.label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
-    const r = await compatFetch(desc.label, `${baseOf(desc, base)}/chat/completions`, {
+    const url = `${baseOf(desc, base)}/chat/completions`;
+    const send = (compat) => compatFetch(desc.label, url, {
       method: "POST",
       headers: compatHeaders(apiKey),
-      body: JSON.stringify(compatRequest({ compat: desc.compat, model, systemText, schema, parts, tool })),
+      body: JSON.stringify(compatRequest({ compat, model, systemText, schema, parts, tool })),
       signal: chatSignal(),
     });
-    if (!r.ok) throw await compatError(r, desc.label);
+    // Sending the field is conditional on this model never having refused it.
+    // `undefined` is how compatRequest is told to omit a quirk, so dropping it
+    // needs no second code path.
+    const learned = `${url}|${model}`;
+    const dropped = { ...desc.compat, temperature: undefined };
+    const sent = !temperatureRejected.has(learned) && temperatureAsked(desc.compat, model);
+    let r = await send(sent ? desc.compat : dropped);
+    if (!r.ok) {
+      const err = await compatError(r, desc.label);
+      // Recoverable only if THIS request carried the field. A 400 on a request
+      // that sent none is a different fault and must surface — retrying an
+      // identical call would just re-pay for the same rejection.
+      if (!sent || !rejectsTemperature(err)) throw err;
+      temperatureRejected.add(learned);
+      // Once per model per process, not per item — this is a provider fact worth
+      // seeing in the logs, not noise.
+      console.warn(`${desc.label}: ${model} rejects temperature — re-sending without it (tagging keeps working, minus ~4 points of run-to-run stability)`);
+      r = await send(dropped);
+      if (!r.ok) throw await compatError(r, desc.label);
+    }
     const data = await r.json();
     const choice = data.choices?.[0];
     // Find the call BY NAME, like the Anthropic wire: a provider whose tool

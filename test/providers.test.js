@@ -26,12 +26,15 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
   // openai forces via "required" (2026-07-29: the gpt-5 family flags the
   // NAMED force as invalid_prompt; with one tool the guarantee is the same),
   // accepts strict, keeps thinking, probes /models
-  // …and samples tagging at temperature 0, except on the o-series (noTemperature
-  // is a model-id regex; o3 hard-400s on any non-default value and o-ids pass
-  // the tagging modelFilter). Both live-probed 2026-08-06.
+  // …and samples tagging at temperature 0, except on the families that hard-400
+  // on any non-default value: the o-series and the gpt-5 BASE family (gpt-5-mini
+  // included — this descriptor's own defaultModel). noTemperature is a model-id
+  // regex and both families' ids pass the tagging modelFilter. It is a fast
+  // path, not the safety net — compat.js recovers from the rejection at call
+  // time for ids no regex anticipated.
   assert.deepEqual(PROVIDERS.openai.compat, {
     maxTokensField: "max_completion_tokens", forceToolChoice: "required", strictTools: true, disableThinking: false, keyTest: "models",
-    temperature: 0, noTemperature: "^o\\d",
+    temperature: 0, noTemperature: "^(o\\d|gpt-5(-|$))",
   });
   // gemini additionally normalizes its compat layer's "models/…" listing ids,
   // and takes temperature 0 with no guard — no Gemini family rejects it
