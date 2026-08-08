@@ -256,9 +256,30 @@ function copyControl(text) {
 // NEITHER surface, for two commits, with a green suite. A parameter that can be
 // handed in and silently ignored is what made that possible, so the parameter is
 // gone rather than fixed.
+//
+// The two densities also differ in WHICH states they carry, and that is the
+// second half of "one surface reports and one explains".
+//
+// A state is either a MEASUREMENT of the facet — a finding, a note that these
+// items are genuinely mixed, a rate that improved — or a report on the pipeline:
+// nothing measured yet, a retag draining, evidence that moved and a re-read
+// coming. The survey modal is where you go to ask about tagging consistency, so
+// it answers all six; the pipeline states are most of what it has to say on a
+// board that has just been re-tagged, and saying nothing there would read as
+// "no problem here".
+//
+// The editor is not that surface. You opened it to write a description, and a
+// grey panel under every facet saying "Not measured against the current wording
+// yet. Re-tag this board on Use Case / Domain" is nine copies of a sentence
+// about the queue wrapped around the field you are trying to type in — and on a
+// board that has never been vote-tagged it is EVERY facet, permanently, because
+// that state is the whole board's condition rather than any one facet's news.
+export const EDITOR_STATES = new Set(["finding", "note", "improved"]);
+
 export function diagnosisBlock(row, gates, { compact = false, collapsible = false } = {}) {
   const s = diagnosisState(row, gates);
   if (s.state === "none") return null;
+  if (compact && !EDITOR_STATES.has(s.state)) return null;
 
   const el = document.createElement("div");
   // The tone carries the message, and it is one of the three shared notice

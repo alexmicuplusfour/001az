@@ -516,12 +516,40 @@ test("the modal folds each finding, and opens to the whole thing", () => {
   assert.doesNotMatch(t, /See Tagging consistency/, "it IS Tagging consistency");
 });
 
-test("a one-line state says its whole piece in the editor", () => {
-  // `awaiting` and `improved` are one sentence each and complete in themselves.
-  const block = diagnosisBlock(row({ items: 0, stale: 25 }), G, { compact: true });
-  const t = textOf(block);
-  assert.match(t, /Not measured against the current wording yet/);
-  assert.doesNotMatch(t, /See Tagging consistency/);
+test("the editor carries measurements, and the modal carries the pipeline too", () => {
+  // Reported from the running app: opening the board editor on a board that had
+  // never been vote-tagged put "Not measured against the current wording yet.
+  // Re-tag this board on Use Case / Domain" under every facet — nine copies of a
+  // sentence about the QUEUE wrapped around the fields the user came to type in.
+  //
+  // The split is by what the state is ABOUT. A measurement is news about the
+  // facet you are editing; the pipeline states are news about the board, they are
+  // most of what there is to say right after a retag, and on a board with no
+  // votes at all they are permanent and identical on every row.
+  //
+  // The survey modal keeps all six, and has to: it is the surface you open to ask
+  // about tagging consistency, so silence there reads as "no problem here".
+  const pipeline = {
+    awaiting: row({ items: 0, stale: 25 }),
+    measuring: row({ items: 0, stale: 0, queued: 1827 }),
+    rereading: row({ items: 133, unanimous: 84, current: false, diagnostic: finding() }),
+  };
+  for (const [state, r] of Object.entries(pipeline)) {
+    assert.equal(diagnosisState(r, G).state, state, `${state}: the fixture is what it says`);
+    assert.equal(diagnosisBlock(r, G, { compact: true }), null, `${state}: silent in the editor`);
+    assert.ok(textOf(diagnosisBlock(r, G, { collapsible: true })).length, `${state}: still said in the modal`);
+  }
+
+  // Everything that reports a measured number survives in both.
+  const measured = {
+    finding: bigFinding(),
+    note: row({ items: 25, unanimous: 15, diagnostic: finding({ verdict: "genuinely-ambiguous-items" }) }),
+    improved: row({ items: 100, unanimous: 90, diagnostic: { previous: { stats: { items: 50, unanimous: 20 } } } }),
+  };
+  for (const [state, r] of Object.entries(measured)) {
+    assert.equal(diagnosisState(r, G).state, state, `${state}: the fixture is what it says`);
+    assert.ok(textOf(diagnosisBlock(r, G, { compact: true })).length, `${state}: the editor reports it`);
+  }
 });
 
 
@@ -537,8 +565,8 @@ test("a facet being re-tagged says so, rather than that it was never measured", 
   assert.equal(s.state, "measuring");
   assert.equal(s.queued, 1827);
 
-  const block = diagnosisBlock(row({ items: 0, stale: 0, queued: 1827 }), G, { compact: true });
-  const t = textOf(block);
+  // In the modal, which is the surface that carries the pipeline states.
+  const t = textOf(diagnosisBlock(row({ items: 0, stale: 0, queued: 1827 }), G, { collapsible: true }));
   assert.match(t, /Re-tagging this facet — 1,827 items still queued/);
   assert.doesNotMatch(t, /Re-tag this board/, "never ask for a retag while one is running");
 });
@@ -559,7 +587,7 @@ test("a facet stranded by an edit still says so once the queue is empty", () => 
   // designed path, and the user genuinely does need to re-tag.
   const stranded = row({ items: 0, stale: 25 });
   assert.equal(diagnosisState(stranded, G).state, "awaiting");
-  assert.match(textOf(diagnosisBlock(stranded, G, { compact: true })), /Re-tag this board/);
+  assert.match(textOf(diagnosisBlock(stranded, G, { collapsible: true })), /Re-tag this board/);
 });
 
 test("a facet with a real sample reports it even while its own retag drains", () => {
