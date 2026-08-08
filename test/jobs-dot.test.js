@@ -33,8 +33,9 @@ globalThis.document ||= {
 };
 
 const { state } = await import("../public/state.js");
-const { jobsUnseen, markJobsSeen } = await import("../public/jobs-modal.js");
+const { jobsUnseen, markJobsSeen, failureDrawn } = await import("../public/jobs-modal.js");
 const { diagnosticsUnseen, markDiagnosticsSeen } = await import("../public/facet-diagnostics.js");
+const { signalLanded, refreshAlerts, refreshJobErrors } = await import("../public/signals.js");
 const { noteServerNow } = await import("../public/seen-mark.js");
 
 // ─── the dot's memory ────────────────────────────────────────────────────────
@@ -129,6 +130,138 @@ test("the two local dots do not share a watermark", () => {
   markDiagnosticsSeen("b7", facets);
   state.jobsFailedAt = Date.now() + 1000; // a fresh failure
   assert.equal(jobsUnseen(), true, "…and reading the findings is not reading the job log");
+});
+
+// ─── what the open dialog is allowed to acknowledge ──────────────────────────
+//
+// Opening the log clears the dot unconditionally — you opened the log. Every
+// LATER acknowledgement, on the 5s refresh, makes a much narrower claim: not
+// "you had the log" but "this landed while you were watching". The dialog is
+// only entitled to that when the row is actually on screen, and three ordinary
+// states put it out of view. Each of them used to clear the dot anyway, which
+// is the one outcome that loses a failure permanently: the dot is the only
+// thing that was ever going to mention it again.
+
+const row = (outcome, startedAt, kind = "tag") => ({ kind, outcome, started_at: startedAt });
+
+test("a filtered page cannot acknowledge a failure it does not contain", () => {
+  // The server deliberately serves failed_at board-wide and independent of the
+  // page's kind filter, and jobs-dot's route test pins that. It would be given
+  // away here: a reader who clicked the Ingestion pill, watching a page with no
+  // tagging rows in it, must not have a tagging failure marked read.
+  const tagFailedAt = 5_000_000;
+  const ingestPage = [row("ok", 6_000_000, "ingest"), row("failed", 900_000, "ingest")];
+  assert.equal(failureDrawn(ingestPage, tagFailedAt), false);
+  assert.equal(failureDrawn([...ingestPage, row("failed", tagFailedAt)], tagFailedAt), true);
+});
+
+test("a reader paged deeper acknowledges nothing, because nothing was redrawn", () => {
+  // Off page one the refresh interval re-pulls the pipeline half and pointedly
+  // NOT history — a reader on page three should not be yanked back to the top.
+  // So a failure landing then is never drawn, and the list it would have been
+  // drawn into still holds the older pages it was fetched with.
+  const deepPages = [row("ok", 4_000), row("failed", 3_000), row("ok", 2_000)];
+  assert.equal(failureDrawn(deepPages, 9_000_000), false, "the new failure is in no page held");
+  assert.equal(failureDrawn(deepPages, 3_000), true, "…while one that IS held still counts");
+});
+
+test("only a failed row acknowledges a failure", () => {
+  // The stamp is a started_at, and an ok row can share one — a folded repeat
+  // re-stamped, or simply two jobs starting in the same millisecond. Matching
+  // on the stamp alone would let a successful run mark a failure read.
+  assert.equal(failureDrawn([row("ok", 7_000)], 7_000), false);
+  assert.equal(failureDrawn([row("requeued", 7_000)], 7_000), false, "nor a retry");
+});
+
+test("nothing to acknowledge is not something drawn", () => {
+  // A board with no failures at all, and the empty list before the first page
+  // lands. Neither is a licence to write a mark.
+  assert.equal(failureDrawn([], 5_000), false);
+  assert.equal(failureDrawn([row("failed", 5_000)], null), false);
+});
+
+// ─── what counts as a baseline ───────────────────────────────────────────────
+//
+// announce.js takes one reading at boot and calls whatever is lit "already
+// there, not news". That is only honest for a signal whose data actually
+// arrived. What a failed fetch leaves behind — a null stamp, an empty alert
+// list — is the same value a clean board leaves behind, so recording it as the
+// baseline arms the NEXT successful read to announce, with a chime, news that
+// predates the session. It is the one fault in this feature that degrades
+// towards noise rather than silence, which is what the flag is for.
+
+const withFetch = async (impl, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = impl;
+  try { return await fn(); } finally { globalThis.fetch = real; }
+};
+const dead = async () => { throw new Error("offline"); };
+const replies = (body, ok = true) => async () => ({ ok, json: async () => body });
+
+// One test rather than four: `landed` is a latch, so the un-landed assertions
+// are only meaningful before the landing one — splitting them would leave the
+// order load-bearing and invisible.
+test("a baseline is only taken for a signal whose data actually arrived", async () => {
+  state.boardId = "b-land";
+  assert.equal(signalLanded("jobErrors"), false, "nothing has been fetched yet");
+
+  await withFetch(dead, refreshJobErrors);
+  assert.equal(signalLanded("jobErrors"), false, "a dead network is not an answer");
+
+  await withFetch(replies({}, false), refreshJobErrors);
+  assert.equal(signalLanded("jobErrors"), false, "…nor is a non-2xx");
+
+  // "This board has never failed" IS an answer, and it is the case that makes
+  // the flag necessary rather than merely tidy: it leaves state.jobsFailedAt at
+  // exactly the null a failed fetch leaves, so no reader of the VALUE can ever
+  // tell the two apart. That is the whole defect.
+  await withFetch(replies({ failed_at: null, now: Date.now() }), refreshJobErrors);
+  assert.equal(signalLanded("jobErrors"), true);
+  assert.equal(state.jobsFailedAt, null, "…and the value is still ambiguous, as it must be");
+});
+
+test("…and the same for alerts, where the ambiguous value is an empty list", async () => {
+  state.boardId = "b-land";
+  assert.equal(signalLanded("alerts"), false);
+
+  await withFetch(dead, refreshAlerts);
+  await withFetch(replies([], false), refreshAlerts);
+  assert.equal(signalLanded("alerts"), false);
+
+  await withFetch(replies([]), refreshAlerts);
+  assert.equal(signalLanded("alerts"), true, "a board with no alerts on it is an answer");
+});
+
+test("discovering an alert starts the item poll it entitles", async () => {
+  // An alert holds the slow item poll because an alert is a standing statement
+  // that arrivals on this board matter, and arrivals are items. A tab can learn
+  // it holds one WITHOUT having been the tab that made it — created on another
+  // device, or missed by a failed boot fetch — and before this that discovery
+  // moved the dot and nothing else, because the tick that would have restarted
+  // the poll is the tick that had already stopped.
+  //
+  // setTimeout is stubbed rather than spied: it both makes the scheduling
+  // observable and keeps a real pollTick from being armed against a test server.
+  const realTimeout = globalThis.setTimeout;
+  let scheduled = 0;
+  globalThis.setTimeout = () => { scheduled++; return 0; };
+  try {
+    state.boardId = "b-poll";
+    state.items = [];
+    state.uploading = [];
+    state.boardIngest = false;
+    state.boardMapping = null; // the other two things that would hold the poll
+    state.alerts = [];
+
+    await withFetch(replies([]), refreshAlerts);
+    assert.equal(scheduled, 0, "a board with no alerts has nothing to keep listening for");
+
+    await withFetch(replies([{ id: 1, name: "watch", unseen: 0 }]), refreshAlerts);
+    assert.ok(scheduled > 0, "the first alert this tab has seen starts the poll");
+  } finally {
+    globalThis.setTimeout = realTimeout;
+    state.alerts = [];
+  }
 });
 
 // ─── the sound ───────────────────────────────────────────────────────────────

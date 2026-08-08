@@ -191,9 +191,19 @@ export async function refreshFacetStats() {
     state.facetStats = d.facets || [];
     state.facetGates = d.gates || {};
   } catch {
-    // No dot rather than a broken header — but only if there is nothing to keep.
-    // A failed REFRESH must not throw away the findings already on screen.
-    if (state.facetStats === null) state.facetStats = [];
+    // Left exactly as found, which for a first read means `null` stands.
+    //
+    // This used to fall back to [] "so there is no dot rather than a broken
+    // header" — defending against a hazard that did not exist. state.facetStats
+    // has two readers (toolbar.js, announce.js) and both hand it straight to
+    // diagnosticsUnseen, whose first line is `(facets || [])`; null was always
+    // safe. What the fallback DID do was destroy the sentinel announce.js reads
+    // through ready(), recording a baseline of "nothing here" for a signal whose
+    // data never arrived — which is precisely how a pre-existing finding
+    // announces itself as new a minute later.
+    //
+    // And a failed REFRESH must not throw away findings already on screen,
+    // which is the same rule stated for the other direction.
   }
 }
 

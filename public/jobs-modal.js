@@ -27,6 +27,15 @@ const SEEN = "jobErrSeen";
 export const jobsUnseen = () => unseen(SEEN, state.boardId, state.jobsFailedAt);
 export const markJobsSeen = () => markSeen(SEEN, state.boardId, state.jobsFailedAt);
 
+// Is the newest failure among the rows currently on screen? This is the whole
+// of the dialog's licence to acknowledge on a refresh — see the comment on
+// ack() — and it is a predicate over rendered rows rather than a flag, because
+// every state that hides the row hides it the same way: the row is not there.
+// Module-scope and pure so it can be tested; the dialog's own `drawn()` closes
+// over its list and calls this.
+export const failureDrawn = (rows, failedAt) =>
+  !!failedAt && rows.some((j) => j.outcome === "failed" && j.started_at === failedAt);
+
 const KIND_LABELS = {
   transcribe: "Transcription",
   ingest: "Ingestion",
@@ -179,6 +188,13 @@ function liveItemRow(img) {
 }
 
 let modalEl = null;
+
+// While the dialog is up it polls the board's stamp four times as often as the
+// background tick and acknowledges what it draws, so it is the authority on
+// state.jobsFailedAt for as long as it lives. signals.js stands its own read
+// down against this — see the `when` on the jobErrors signal for why a second
+// writer here is not merely redundant but wrong.
+export const jobsModalOpen = () => !!modalEl;
 
 export function openJobsModal() {
   if (modalEl) return; // already open
@@ -337,27 +353,55 @@ export function openJobsModal() {
     return r.json();
   }
 
-  // Opening IS the acknowledgement — the alert-history precedent. Repeated
-  // after every refresh as well, because a failure landing while the modal is
-  // open has been seen by definition, and would otherwise leave a dot behind on
-  // a chip the reader was looking straight at. Guarded so the common case (no
-  // dot) neither writes storage nor forces a re-render every REFRESH_MS.
-  // Declared above load() — which calls it — rather than below, where it would
-  // work only by the grace of load's first await.
+  // Opening IS the acknowledgement — the alert-history precedent — and that
+  // one is unconditional: opening the log is the reader's chance at whatever is
+  // in it. Every LATER acknowledgement makes a different and much narrower
+  // claim — not "you had the log" but "this landed while you were watching" —
+  // which is only true if the row was actually drawn. See drawn().
+  //
+  // Mutates and REPORTS rather than rendering, and so does noteStamp below. The
+  // stamp and the mark have to move with no app:render between them:
+  // announce.js reads the dots on that event, so a stamp recorded without its
+  // mark is a rising edge, and it would toast and chime about a row the reader
+  // is looking straight at.
+  //
+  // Declared above load() — which calls them — rather than below, where they
+  // would work only by the grace of load's first await.
   const ack = () => {
-    if (!jobsUnseen()) return;
+    if (!jobsUnseen()) return false;
     markJobsSeen();
-    document.dispatchEvent(new Event('app:render')); // clear the dot
+    return true;
   };
+
+  // Was the newest failure actually put on screen? Three ordinary states say
+  // no, and the dot has to survive the refresh in every one of them:
+  //
+  //   · a kind filter that excludes it. The stamp is deliberately board-wide
+  //     and independent of the filter (server.js) precisely so a reader who
+  //     clicked the Ingestion pill isn't cleared by a page with no failures in
+  //     it — acknowledging it here would give that argument away on the client.
+  //   · a reader paged deeper than page one, where the interval stops
+  //     re-pulling history on purpose (see the setInterval below).
+  //   · the moment before the first page lands.
+  const drawn = () => failureDrawn(jobs, state.jobsFailedAt);
 
   // Every response carries the chip's stamp, so take it from whichever read
   // just happened — fresher than the background tick's, and the only path that
   // notices a Clear having destroyed everything the dot was pointing at.
   const noteStamp = (data) => {
     const at = data.failed_at ?? null;
-    if (state.jobsFailedAt === at) return;
+    if (state.jobsFailedAt === at) return false;
     state.jobsFailedAt = at;
-    document.dispatchEvent(new Event('app:render'));
+    return true;
+  };
+
+  // The pair, settled together and rendered once. Both sides are evaluated
+  // before the test — `moved || ack()` would short-circuit past the
+  // acknowledgement in exactly the case that needs it, the one where the stamp
+  // has just moved.
+  const settle = (moved) => {
+    const acked = drawn() && ack();
+    if (moved || acked) document.dispatchEvent(new Event('app:render'));
   };
 
   // reset=true replaces the list (open, filter switch, interval refresh of
@@ -377,7 +421,7 @@ export function openJobsModal() {
       if (reset) { jobs = data.jobs; pages = 1; }
       else { jobs = jobs.concat(data.jobs); pages++; }
       cursor = data.nextCursor;
-      noteStamp(data);
+      const moved = noteStamp(data);
       for (const j of [...data.running, ...data.jobs]) seenKinds.add(j.kind);
       // Refresh history lives outside job_log (field_snapshots) — the flag is
       // how its pill appears before the kind is ever fetched.
@@ -386,7 +430,7 @@ export function openJobsModal() {
       renderLive();
       renderFilters();
       renderHistory();
-      ack(); // against what was just rendered, not what the tick last knew
+      settle(moved); // against what was just rendered, not what the tick last knew
     } catch {
       if (g === gen && !jobs.length) { histList.replaceChildren(); note(histList, "Failed to load — retrying…"); }
     }
@@ -396,14 +440,25 @@ export function openJobsModal() {
 
   renderLive(); // the client half needs no fetch — show it immediately
   load(true);
-  ack();
+  // The unconditional one: you opened the log. Ahead of load's first page, so
+  // the dot clears on the click rather than a round trip later.
+  if (ack()) document.dispatchEvent(new Event('app:render'));
   // The delta poll re-renders the pipeline half as statuses move; the interval
   // re-pulls the server half (running rows tick, fresh completions land) but
   // only refreshes history when the reader hasn't paged deeper.
   document.addEventListener("app:render", onRender);
   timer = setInterval(() => {
-    ack();
-    if (pages <= 1) load(true);
-    else fetchPage(null).then((d) => { running = d.running; noteStamp(d); renderScheduled(d.scheduled); renderLive(); }).catch(() => {});
+    if (pages <= 1) { load(true); return; }
+    // Paged deeper, so history is deliberately NOT re-pulled — a reader on page
+    // three should not be yanked back to the top. Which is exactly why nothing
+    // acknowledges here: a failure landing now is never drawn, so the dot (and
+    // the toast the rising edge earns it) is the only notice it will get.
+    fetchPage(null).then((d) => {
+      running = d.running;
+      const moved = noteStamp(d);
+      renderScheduled(d.scheduled);
+      renderLive();
+      if (moved) document.dispatchEvent(new Event('app:render'));
+    }).catch(() => {});
   }, REFRESH_MS);
 }

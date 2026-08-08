@@ -24,29 +24,50 @@ import { chime } from './chime.js';
 import { alertsUnseen, openAlertHistory } from './alerts-modal.js';
 import { jobsUnseen, openJobsModal } from './jobs-modal.js';
 import { diagnosticsUnseen, canSeeDiagnostics } from './facet-diagnostics.js';
+import { signalLanded } from './signals.js';
 import { openDiagnosticsDoor } from './toolbar.js';
 
 // `ready` guards the baseline, not the dot: a signal whose data has not landed
 // yet is skipped entirely rather than recorded as dark, because recording it
-// dark is what turns the arrival of PRE-EXISTING news into a toast. Facet stats
-// are the case — the toolbar fetches them after the first paint, so they are
-// still null when this module takes its first reading.
+// dark is what turns the arrival of PRE-EXISTING news into a toast.
+//
+// All three carry it, because all three HAVE the state. Facet stats are only
+// the conspicuous case — the toolbar fetches them after the first paint, so
+// they are still null here on a perfectly good day. The other two are fetched
+// inside boot's Promise.all and so are never null on a good day and always null
+// on a bad one, which is the harder version of the same bug and not a different
+// bug (signals.js: `landed`).
 const DOTS = [
   {
     name: "alerts",
+    ready: () => signalLanded("alerts"),
     lit: () => alertsUnseen() > 0,
     say() {
       const hot = state.alerts.filter((a) => a.unseen > 0);
       const n = alertsUnseen();
+      // Resolved at CLICK time rather than captured, and here the question is
+      // whether the alert still EXISTS: this toast outlives its own reading by
+      // up to eight seconds, longer if hovered, and opening a history modal for
+      // a deleted alert gets a 404 and "Failed to load the history". (Handing
+      // it a merely stale object is safe — openAlertHistory re-resolves by id
+      // before it touches state, because the alerts dropdown can hand it one
+      // too.)
+      const id = hot[0]?.id;
+      const open = () => {
+        const live = state.alerts.find((a) => a.id === id);
+        if (live) openAlertHistory(live);
+      };
       // One alert can be named and opened; several can only be counted, since
       // the list lives in a dropdown that needs its anchor to open.
       return hot.length === 1
-        ? { msg: `${n} new match${n === 1 ? "" : "es"} for "${hot[0].name}"`, open: () => openAlertHistory(hot[0]) }
+        ? { msg: `${n} new match${n === 1 ? "" : "es"} for "${hot[0].name}"`, open }
         : { msg: `New matches on ${hot.length} alerts` };
     },
   },
   {
     name: "jobs",
+    // The signal's name, not the dot's — signals.js owns the fetch that lands.
+    ready: () => signalLanded("jobErrors"),
     lit: jobsUnseen,
     // Not a count: the dot's stamp says WHEN, not how many, and a number here
     // would need a second query to be true. "Open" is the answer either way.
@@ -81,7 +102,17 @@ function check() {
       duration: "long",
       actions: open ? [{ label: "Open", onClick: () => { handle?.remove(); open(); } }] : [],
     });
-    chime();
+    // Only for a toast that was actually shown NOW. A chime with nothing to
+    // read is a notification that says only "something", which is worse than
+    // silence and is how a sound gets switched off for good.
+    //
+    // toast() returns null in two cases and this covers both, deliberately. The
+    // one that recurs is the dedup — an identical message still on screen, so
+    // the news is already being read. The other is the MAX_VISIBLE queue, where
+    // the toast does arrive later and the sound is genuinely dropped; that is
+    // the right trade anyway, since three toasts are already up and the reader
+    // is not short of notice.
+    if (handle) chime();
   }
 }
 

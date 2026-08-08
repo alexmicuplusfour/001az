@@ -24,8 +24,32 @@
 // each signal names its own interval, and a signal whose surface isn't on
 // screen is never fetched at all.
 import { state } from './state.js';
+import { ensurePolling } from './data.js';
 import { refreshFacetStats, canSeeDiagnostics } from './facet-diagnostics.js';
+import { jobsModalOpen } from './jobs-modal.js';
 import { noteServerNow } from './seen-mark.js';
+
+// "Has this signal's data ever landed?" — which is the BASELINE's question and
+// not the dot's. A dot with nothing behind it is correctly dark: there is
+// nothing to point at. A BASELINE with nothing behind it is a lie, because the
+// first real reading then looks like a rising edge, and the feature announces
+// news that predates the session — a chime for a failure from last week.
+//
+// The plan gave this gate to facet stats alone, for a reason that reads local:
+// they are fetched after the first paint, so they are visibly null when
+// announce.js takes its first reading. But the state is not theirs. These two
+// are fetched inside boot's Promise.all, so on every successful run they are
+// populated before the baseline and the nullness never shows — it shows the
+// moment one request fails while the rest succeed, which is exactly when nobody
+// is looking. And it is the one fault in this feature that degrades towards
+// NOISE: everything else here (a failed refresh, a refused autoplay, a dead
+// watermark) fails towards silence.
+//
+// Read by announce.js's ready() and by nothing else. What the dot should do
+// with a value it hasn't got is a different question, and "stay dark" is
+// already the right answer to it.
+const landed = new Set();
+export const signalLanded = (name) => landed.has(name);
 
 export async function refreshAlerts() {
   if (!state.boardId) return;
@@ -33,7 +57,26 @@ export async function refreshAlerts() {
     const r = await fetch(`/api/alerts?board=${state.boardId}`, { cache: "no-store" });
     if (!r.ok) return;
     const list = await r.json();
-    if (Array.isArray(list)) state.alerts = list;
+    if (!Array.isArray(list)) return;
+    const had = state.alerts.length;
+    state.alerts = list;
+    landed.add("alerts");
+    // Holding an alert holds the slow item poll (pollDelay) — an alert is a
+    // standing statement that arrivals on this board matter, and arrivals are
+    // items. This read is the only place a tab can LEARN it holds one without
+    // having been the tab that made it: a first alert created on another
+    // device, or one a failed boot fetch missed. Without this the poll it
+    // entitles never starts, because the tick that would have noticed is the
+    // tick that had already stopped. (alerts-modal does the same on create; the
+    // last delete needs nothing — the running tick sees the empty list and
+    // stops itself.)
+    //
+    // On the TRANSITION only. While alerts are held the poll cannot stop —
+    // pollDelay never returns 0 — so a call on every tick would be a no-op
+    // except in the one state where it isn't: with work in flight the cadence
+    // is 4 s, and ensurePolling re-schedules it, so a 20 s heartbeat would keep
+    // nudging the fast poll's timer back out.
+    if (!had && list.length) ensurePolling();
   } catch { /* keep the last known counts */ }
 }
 
@@ -48,6 +91,10 @@ export async function refreshJobErrors() {
     // server stamps against a server-floored mark.
     noteServerNow(d.now);
     state.jobsFailedAt = d.failed_at ?? null;
+    // …including a response that says null. "This board has never failed" is an
+    // answer; not having asked successfully is not, and the two were the same
+    // value until this line.
+    landed.add("jobErrors");
   } catch { /* keep the last known stamp */ }
 }
 
@@ -58,7 +105,16 @@ const SIGNALS = [
   // created in another tab, or missed by a failed boot fetch, must still light
   // the dot here.
   { name: "alerts", every: 20000, run: refreshAlerts },
-  { name: "jobErrors", every: 20000, run: refreshJobErrors },
+  // Stood down while the job log is open, and not merely because the dialog
+  // already re-reads the same stamp four times as often. Two writers of
+  // state.jobsFailedAt is two chances to record a stamp without the mark that
+  // acknowledges it, and announce.js reads exactly that gap as a rising edge —
+  // so the redundant read is also the one that toasts and chimes about a row
+  // the reader is looking straight at. One writer at a time; the dialog's,
+  // because only it knows whether the row was drawn. `when` skipping a signal
+  // leaves its lastAt alone, so closing the modal refreshes on the next tick
+  // rather than up to `every` later.
+  { name: "jobErrors", every: 20000, when: () => !jobsModalOpen(), run: refreshJobErrors },
   // Slower on purpose, and the only one that needs to be. The roll-up is an
   // aggregate over every tagged item's confidence on the board — the costly one
   // of the three, and the one whose data moves slowest, since the loop that

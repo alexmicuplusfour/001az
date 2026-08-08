@@ -704,10 +704,17 @@ test("history: unseen counts, seen acknowledgement, and the ?event= fetch by boa
   assert.equal(firings.json.firings.length, 1);
   assert.equal(firings.json.nextCursor, null); // one row, no more pages
   const firingId = firings.json.firings[0].id;
+  // The flag `.al-new` bolds on, in both directions — the list is READ before
+  // the acknowledgement and must still say so. Untested until now, and the one
+  // failure here is silent: a list that stopped carrying `seen` would simply
+  // never bold a row, which looks exactly like a reader who is up to date.
+  assert.equal(firings.json.firings[0].seen, false);
 
   await req(base, "POST", `/api/alerts/${alert.id}/seen`, { sid: admin.sid });
   const after = await req(base, "GET", `/api/alerts?board=${boardId}`, { sid: admin.sid });
   assert.equal(after.json.find((a) => a.id === alert.id).unseen, 0);
+  const reread = await req(base, "GET", `/api/alerts/${alert.id}/firings`, { sid: admin.sid });
+  assert.equal(reread.json.firings[0].seen, true, "…and the acknowledgement is what flips it");
 
   // The firing view opens for any board member — a webhook link pasted in a
   // team channel — but not for an outsider.

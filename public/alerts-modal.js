@@ -417,10 +417,40 @@ export function openAlertEditor(existing) {
 export function openAlertHistory(alert) {
   const { body, footer, close } = createModal({ title: alert.name, id: "alert-history-modal" });
 
-  // Opening IS the acknowledgement — the caret dot and row badge clear now.
-  if (alert.unseen > 0) {
-    fetch(`/api/alerts/${alert.id}/seen`, { method: "POST" }).catch(() => {});
-    alert.unseen = 0;
+  // Opening IS the acknowledgement — but of the LIST, so it waits for the list,
+  // and it is the server's answer that clears the dot rather than our hope.
+  // Both halves of that used to be the other way round, and each cost something:
+  //
+  //   · The POST raced the GET below that renders the history, and it marks
+  //     every firing seen. Measured against a local server, the GET came back
+  //     already-acknowledged in 3 opens out of 25 — and in those the `.al-new`
+  //     marking, which is the whole answer to the question the dot provokes,
+  //     simply was not there. (header-signals-plan.md cites this modal as the
+  //     PRECEDENT for `.job-new`'s frozen watermark, and states the rule it
+  //     followed: read before anything acknowledges, or it always says "nothing
+  //     new". The jobs log learned that here; this file never applied it.)
+  //   · The local zero was written without waiting to see whether the server
+  //     took the POST, so a dropped one left the reader acknowledged locally and
+  //     unacknowledged on the server. Twenty seconds later refreshAlerts
+  //     restores the count — a rising edge, so now a toast AND a chime, naming
+  //     firings that were just read.
+  //
+  // A refusal now leaves the dot lit, which is honest, silent, and self-healing:
+  // reopening tries again. The list still pages from page one only, so a reader
+  // with more than a page of unseen firings loses `.al-new` on the pages fetched
+  // after this — they are the oldest, and unseen firings are the newest.
+  async function acknowledge() {
+    if (!(alert.unseen > 0)) return;
+    try {
+      const r = await fetch(`/api/alerts/${alert.id}/seen`, { method: "POST" });
+      if (!r.ok) return;
+    } catch { return; }
+    // The LIVE object, not the one we were handed. The alerts dropdown builds
+    // its rows once and does not close on app:render, while refreshAlerts
+    // replaces state.alerts wholesale every 20 s — so a menu that has been open
+    // a while hands us an orphan, and zeroing an orphan clears nothing.
+    const live = state.alerts.find((a) => a.id === alert.id) || alert;
+    live.unseen = 0;
     document.dispatchEvent(new Event('app:render'));
   }
 
@@ -483,7 +513,13 @@ export function openAlertHistory(alert) {
     cursor = data.nextCursor;
     render();
   }
-  load().catch(() => note("Failed to load the history."));
+  // Acknowledge on success only, and as the fulfilment handler rather than
+  // after a .catch — a failed load leaves the dot lit, because the reader was
+  // shown "Failed to load" and has seen nothing. (Two handlers, not
+  // .then().catch(): the second form would report a load failure for anything
+  // acknowledge() threw, and it is the one place that must not lie about which
+  // request broke.)
+  load().then(acknowledge, () => note("Failed to load the history."));
   more.addEventListener("click", async () => {
     more.disabled = true; // one page per click — a double-click must not fetch the same cursor twice
     try { await load(); } catch { /* the button stays; another click retries */ }
