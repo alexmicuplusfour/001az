@@ -1158,12 +1158,14 @@ body.bulk-mode .heart {
 }
 .te-header {
   position: relative;
-  background: #f3f3f6;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 20px;
   min-height: 80px;
-  max-height: 220px;
+  /* the thumb's own cap plus this padding — move one and move the other, or
+     a tall image clips against the header instead of shrinking inside it */
+  max-height: 260px;
   flex-shrink: 0;
   overflow: hidden;
 }
@@ -1172,25 +1174,29 @@ body.bulk-mode .heart {
   max-width: 100%;
   max-height: 220px;
   object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
 }
+/* the header lost its grey, so this sits on white now — a white glyph on a
+   dark scrim would be the unreadable half of the old design */
 .te-close {
   position: absolute;
   top: 8px;
   right: 10px;
-  background: rgba(0,0,0,0.18);
+  background: none;
   border: none;
   border-radius: 50%;
   width: 26px;
   height: 26px;
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1;
-  color: #fff;
+  color: #aaa;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
 }
-.te-close:hover { background: rgba(0,0,0,0.35); }
+.te-close:hover { color: #111; }
 .te-body {
   flex: 1;
   overflow-y: auto;
