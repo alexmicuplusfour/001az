@@ -21,12 +21,42 @@ import {
 } from "../server/db.js";
 
 const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgres://gallery:gallery@127.0.0.1:5433/postgres";
+const TEMPLATE_DB = process.env.TEST_TEMPLATE_DB || "gallery_test_template";
 export const ADMIN_EMAIL = "admin@test.local";
+
+// The three sidecars default to compose hostnames, which don't resolve outside
+// that network — so the admin plugins page's health probes burned their full 2 s
+// AbortSignal timeout, twice, in every file that loaded the route. A closed local
+// port takes the same unreachable-sidecar branch and is refused instantly.
+//
+// Set at module scope, NOT inside startServer(): worker.js reads these into
+// consts when it loads, and a test file that imports it statically loads it long
+// before any before() hook runs. Every such file imports this helper first, so
+// this assignment lands ahead of it. Tests that exercise sidecar behaviour stub
+// the wire themselves and don't depend on these.
+process.env.TRANSCRIBER_URL = "http://127.0.0.1:1";
+process.env.OBJECT_DETECTOR_URL = "http://127.0.0.1:1";
+process.env.EXTRACTOR_URL = "http://127.0.0.1:1";
 
 export async function startServer() {
   const name = "gallery_test_" + crypto.randomBytes(6).toString("hex");
-  const admin = new pg.Pool({ connectionString: ADMIN_URL });
-  await admin.query(`CREATE DATABASE ${name}`);
+  // max 2: files run in parallel, and every worker holds one of these alongside
+  // the app's own pool. The admin pool only creates and drops a database, so two
+  // clients is ample and keeps the whole suite well inside max_connections.
+  const admin = new pg.Pool({ connectionString: ADMIN_URL, max: 2 });
+  admin.on("error", () => {}); // same idle-client race close() guards on `db`, below
+  // Clone the pre-migrated template (scripts/build-test-template.mjs) instead of
+  // replaying every migration here — ~90 ms rather than ~460 ms per file. The
+  // app still runs the ledger at import; against a clone it finds everything
+  // applied and no-ops. 3D000 = the template isn't there (running a file directly
+  // without `npm test`), so fall back to a bare database and let that same
+  // import-time run build the schema the slow way. Correct either way.
+  try {
+    await admin.query(`CREATE DATABASE ${name} TEMPLATE ${TEMPLATE_DB}`);
+  } catch (e) {
+    if (e.code !== "3D000") throw e;
+    await admin.query(`CREATE DATABASE ${name}`);
+  }
   const dbUrl = ADMIN_URL.replace(/\/[^/]+$/, "/" + name);
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gallery-test-"));

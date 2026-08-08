@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "server": "node server/server.js",
-    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
+    "pretest": "node scripts/build-test-template.mjs",
+    "test": "node --test --test-concurrency=8 \"test/**/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.108.0",

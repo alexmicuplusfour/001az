@@ -173,6 +173,23 @@ Postgres database per test file, so it needs a reachable Postgres whose role can
 locally; point elsewhere with `TEST_ADMIN_URL`. CI runs this against a Postgres
 service on every push and PR (`.github/workflows/ci.yml`).
 
+Files run eight at a time, and each is independent by construction: its own
+process, its own randomly-named database, its own temp tree, and port 0. A
+`pretest` step migrates one template database (`scripts/build-test-template.mjs`)
+that every file then clones — `CREATE DATABASE ... TEMPLATE` copies the schema in
+about a fifth of the time it takes to replay the ledger.
+
+To run one file, just point at it:
+
+```sh
+node --test test/backup.test.js
+```
+
+That skips `pretest`, so the template may be absent or stale; the harness falls
+back to a plain database and the app's import-time migration run builds the
+schema. Correct either way, only slower. Override with `TEST_TEMPLATE_DB`, and
+adjust `--test-concurrency` if your Postgres has a tight `max_connections`.
+
 ## Configuration
 
 | Env var | Default | Purpose |
