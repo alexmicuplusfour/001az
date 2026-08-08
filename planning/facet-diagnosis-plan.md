@@ -637,6 +637,18 @@ server-side: this is advisory, not a ledger, and it does not need to survive a
 device change. Lit by states 1 and 5 only — `genuinely-ambiguous-items` is
 information, not a task, and must not raise a signal that reads as a to-do.
 
+**Amended 2026-08-09** (`header-signals-plan.md`): the roll-up this reads was
+fetched once per page load and never again, so a finding written by the loop
+five minutes into a session did not appear until the tab was reloaded — the dot
+was the least live thing on the header. `ensureFacetStats()` keeps the first
+read; the repeats belong to the header's shared signal timer (`signals.js`, 60 s
+here, and skipped entirely when `canSeeDiagnostics` is false, so a board without
+vote mode never pays for the query). A failed refresh now keeps the findings
+already on screen instead of blanking them. The stamp itself moved to
+`public/seen-mark.js`, shared with the jobs dot — same storage key, so no
+reader's mark reset — and its floor is now server-clocked, since the `at` values
+it compares against are written by the worker, not by the reader's browser.
+
 ### Why not a tab in the jobs modal
 
 The jobs modal is a **ledger**: reverse-chronological, one row per event,

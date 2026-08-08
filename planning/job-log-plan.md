@@ -295,60 +295,12 @@ as the ingestion caret's unseen alerts and the Tagging-consistency finding:
 - **`Clear` takes the dot with it** — the reload after the delete reads
   `failed_at: null` back off the same response.
 
-**Live dots (2026-08-09).** The pass above turned up the reason none of this
-felt reliable: each of the three header dots had invented its own freshness
-story. Alerts rode the item poll; facet-stats was fetched **once per page load**
-and never again, so a finding written five minutes into a session did not exist
-until reload; job failures rode the item poll too, which stops the moment the
-queue drains — i.e. immediately after the failure that mattered. The item poll
-is the wrong horse for all three: it keeps the *grid* current and correctly
-stops when the grid is settled, while these are about what happened while
-nothing was going on.
-
-`public/signals.js` now owns all three on one timer — 20 s base tick, per-signal
-intervals (alerts and job errors 20 s; facet-stats 60 s, since it aggregates
-every tagged item's confidence and its writer only runs on a settled board),
-nothing while the tab is hidden with an immediate catch-up on return, one
-`app:render` per batch, and a signal whose surface isn't on screen never
-fetched (`canSeeDiagnostics`). Boot fills them through the same two functions.
-`pollDelay()` keeps alerts on the slow poll but for the honest reason now — an
-alert is a standing statement that *arrivals* on this board matter.
-
-**Toasts and a chime (2026-08-09).** A dot is missable by design — small,
-quiet, in a header you aren't looking at — so `public/announce.js` gives all
-three a voice, on one rule: **fire on the edge from dark to lit, once, and never
-again while it stays lit.** Everything else falls out of it. A retag failing
-three hundred items is one toast, not three hundred, because the dot is already
-up and there is no edge; acknowledge the log and the next failure announces
-again, because it is genuinely new. No cooldown timer, no burst counter, no
-"and N more" arithmetic — the state the dot already tracks answers all of it.
-
-Checked on `app:render`, since every path that can move these three ends in
-one. The baseline is taken at boot so what is *already* lit when the page opens
-is never news, and a signal whose data hasn't landed yet (facet stats, fetched
-after the first paint) is skipped rather than recorded dark — recording it dark
-is exactly what would turn the arrival of pre-existing news into a toast.
-Each toast carries an **Open** action onto the surface it is about, which is why
-`toolbar.js` exports `openDiagnosticsDoor`: two doors onto one modal that differ
-in what they wire is how one of them quietly loses the `onEdit` hand-off.
-
-`public/chime.js` is the audible half — **one** tone for all three (three would
-have to be learned, and nothing here is urgent enough to earn that), at 0.35
-volume, on the same edge. `public/notification.mp3`, built on first use so a
-tab with the sound off never fetches it. The autoplay refusal on an untouched
-tab is swallowed on purpose: the toast and the dot have already said the same
-thing, which is what lets the sound be the part that doesn't always arrive.
-Off switch in the **user menu** (`ddCheckRow`), because sound is the only part
-of this that reaches someone not looking at the tab; turning it ON plays the
-tone, which both confirms the setting and is the click the autoplay policy
-wants before the first real notification.
-
-`seen-mark.js` also carries the fix for the quietest bug in the feature: every
-stamp compared is the SERVER's, so the acknowledgement floor runs on the
-server's clock (`noteServerNow`, fed by the errors route's `now`). A browser a
-few minutes fast used to write its watermark into the future and then ignore
-everything until the clock caught up — invisibly, since a dot that never lights
-looks exactly like a board where nothing went wrong.
+The shared layer this joined — one refresh cadence for all three header dots,
+the watermark they compare against, and the toast and chime that announce one
+lighting — is `header-signals-plan.md`. It was written out of this pass: the
+jobs dot was the third of three, and building it surfaced that the other two did
+not work the same way (and that the facet one stopped working after the first
+paint).
 
 ## Config surface
 

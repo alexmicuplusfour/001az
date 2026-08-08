@@ -312,6 +312,13 @@ recording, HMAC, test-fire — webhook target is an in-test `http.createServer`.
 - Unseen-count refresh (the plus-caret dot and the dropdown row badges)
   piggybacks the existing delta-poll cadence (data.js) — no new timer, no SSE;
   the 4 s in-flight poll is already the app's liveness.
+  **Superseded 2026-08-09** (`header-signals-plan.md`): riding the item poll
+  made this live only while items moved, and that poll correctly stops when the
+  grid is settled. The unseen count now refreshes on the header's own signal
+  timer (`signals.js`, 20 s, paused while the tab is hidden), alongside the
+  facet-finding and job-failure dots. `pollDelay()` still holds the slow item
+  poll open for a board with alerts, but for arrivals reaching the grid — not
+  for the dot, which no longer depends on it.
 
 ## Out of scope (deliberately)
 
