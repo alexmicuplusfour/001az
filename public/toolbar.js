@@ -3,7 +3,7 @@ import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration, attachBtnDot } from './utils.js';
 import { openJobsModal } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
-import { openDropdown, ddRow, ddSep } from './dropdown.js';
+import { openDropdown, ddRow, ddSep, ddAction } from './dropdown.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
@@ -181,24 +181,20 @@ function openBoardPop(anchorEl) {
     },
     // The footer is always built now: "All boards" is every member's way to
     // the boards page (planning/boards-page-plan.md), while CREATING one stays
-    // a global-admin power. A real <a>, so middle-click opens it in a tab.
+    // a global-admin power. The first navigates (href, so middle-click opens a
+    // tab), the second acts — ddAction renders both at the same height.
     footer: (foot, { close }) => {
-      const all = document.createElement("a");
-      all.className = "tp-edit";
-      all.href = "/boards";
-      all.innerHTML = ICONS.grid + "<span>All boards</span>";
-      foot.appendChild(all);
+      foot.appendChild(ddAction({ label: "All boards", icon: ICONS.grid, href: "/boards" }));
 
       if (!state.me?.is_admin) return;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "tp-edit";
-      btn.innerHTML = ICONS.plus + "<span>New board</span>";
-      btn.addEventListener("click", () => {
-        close();
-        openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}`; } });
-      });
-      foot.appendChild(btn);
+      foot.appendChild(ddAction({
+        label: "New board",
+        icon: ICONS.plus,
+        onClick: () => {
+          close();
+          openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}`; } });
+        },
+      }));
     },
   });
 }

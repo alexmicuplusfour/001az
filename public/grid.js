@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { ICONS, actionBtn, hasIdentity, instanceTagCounts } from './utils.js';
-import { openDropdown } from './dropdown.js';
+import { openDropdown, ddAction } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, needsTags } from './filters.js';
 import { ensurePolling, dropPendingUploadId } from './data.js';
@@ -252,15 +252,15 @@ function openTagPop(chip, img) {
       }
     },
     footer: (state.me && state.facets.length) ? (foot, { close }) => {
-      const editBtn = document.createElement("button");
-      editBtn.className = "tp-edit";
-      editBtn.innerHTML = ICONS.pencil + "<span>Edit tags</span>";
-      editBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        openTagEditor(img);
-      });
-      foot.appendChild(editBtn);
+      foot.appendChild(ddAction({
+        label: "Edit tags",
+        icon: ICONS.pencil,
+        onClick: (e) => {
+          e.stopPropagation();
+          close();
+          openTagEditor(img);
+        },
+      }));
     } : undefined,
     onClose: () => {
       if (!card) return;

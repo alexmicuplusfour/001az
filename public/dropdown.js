@@ -10,7 +10,7 @@
 //
 // Callers describe content with `build(body, ctx)` (the scrollable area) and an
 // optional `footer(foot, ctx)` (pinned below the scroll area), composing rows
-// from the ddRow / ddSep / ddInput helpers plus any custom elements.
+// from the ddRow / ddAction / ddSep / ddInput helpers plus any custom elements.
 
 const MARGIN = 8; // gap kept between the pop and the viewport edges
 const GAP = 6;    // gap between the anchor and the pop
@@ -126,7 +126,8 @@ export function openDropdown(anchor, {
       return;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const rows = [...el.querySelectorAll(".dd-row")];
+      // footer actions are part of the same walk — they're the last stops
+      const rows = [...el.querySelectorAll(".dd-row, .dd-action")];
       if (!rows.length) return;
       e.preventDefault();
       const i = rows.indexOf(document.activeElement);
@@ -217,6 +218,26 @@ export function ddRow({ label, labelEl, active = false, href, leading, trailing,
     });
   }
   return row;
+}
+
+// A full-width footer action: [icon] label. An action that navigates is built
+// as a real <a> (middle-click opens a tab); one that acts is a <button>. They
+// are only ever built here, so the two render as the same box — callers pick
+// the element by passing href or onClick, not by hand-rolling the markup.
+export function ddAction({ label, icon, href, onClick } = {}) {
+  const el = document.createElement(href ? "a" : "button");
+  el.className = "dd-action";
+  if (href) el.href = href;
+  else el.type = "button";
+  if (icon) {
+    const wrap = document.createElement("span");
+    wrap.className = "dd-icon";
+    wrap.innerHTML = icon;
+    el.appendChild(wrap);
+  }
+  el.appendChild(Object.assign(document.createElement("span"), { className: "dd-label", textContent: label }));
+  if (onClick) el.addEventListener("click", onClick);
+  return el;
 }
 
 export function ddSep() {

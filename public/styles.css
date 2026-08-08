@@ -1095,23 +1095,6 @@ body.bulk-mode .heart {
   font-size: 10px;
   color: #7a8089;
 }
-.tp-edit {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 6px;
-  padding: 4px 8px;
-  background: rgba(255,255,255,0.1);
-  border: none;
-  border-radius: 6px;
-  color: #cdd2da;
-  font-size: 11px;
-  cursor: pointer;
-  width: 100%;
-  text-decoration: none; /* footer actions can be <a> (board pop's All boards) */
-}
-.tp-edit:hover { background: rgba(255,255,255,0.18); }
-.tp-edit svg { width: 11px; height: 11px; flex-shrink: 0; }
 
 /* tag editor modal */
 .te-overlay {

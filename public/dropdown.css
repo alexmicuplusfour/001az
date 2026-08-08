@@ -59,6 +59,43 @@
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
 }
+/* A footer action wears the row's box — same padding, type size and icon size —
+   so the pinned actions line up with the list above them. It only differs by a
+   resting fill, which is what marks it as an action rather than a choice.
+   The type/alignment resets are load-bearing: a <button> otherwise takes the
+   UA's centred text and an absolute line-height from `font: inherit`, which is
+   what made the button and the <a> beside it two different heights. */
+.dd-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #cdd2da;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  text-decoration: none; /* an action that navigates is a real <a> */
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+}
+/* spacing off the body above and off each other — one value, so a footer of
+   one action and a footer of three are rhythmically the same */
+.dd-footer > .dd-action:first-child,
+.dd-action + .dd-action {
+  margin-top: 6px;
+}
+.dd-action:hover,
+.dd-action:focus-visible {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
 .dd-label {
   flex: 1;
   min-width: 0;

@@ -17,7 +17,7 @@ import { taggedFiltered, instanceMatches } from './filters.js';
 import { effectiveView } from './view.js';
 import { ACTIVE, QUEUED, ensurePolling } from './data.js';
 import { ICONS, actionBtn, refreshEntityTags, mappingHasAiWork } from './utils.js';
-import { openDropdown } from './dropdown.js';
+import { openDropdown, ddAction } from './dropdown.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
 import { toast } from './toast.js';
@@ -165,25 +165,28 @@ function openInstTagPop(chip, img, inst) {
       }
     },
     footer: (state.me && state.facets.length) ? (foot, { close }) => {
-      const editBtn = document.createElement("button");
-      editBtn.className = "tp-edit";
-      editBtn.innerHTML = ICONS.pencil + "<span>Edit tags</span>";
-      editBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        // Re-resolve at click, not pop-open — the pop can sit open across a
-        // poll tick, and the editor's save mutates what it's handed.
-        openTagEditor(img, liveInst(img, inst));
-      });
-      const retagBtn = document.createElement("button");
-      retagBtn.className = "tp-edit";
-      retagBtn.innerHTML = ICONS.tag + "<span>Retag</span>";
-      retagBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        close();
-        doRetag(img, inst);
-      });
-      foot.append(editBtn, retagBtn);
+      foot.append(
+        ddAction({
+          label: "Edit tags",
+          icon: ICONS.pencil,
+          onClick: (e) => {
+            e.stopPropagation();
+            close();
+            // Re-resolve at click, not pop-open — the pop can sit open across a
+            // poll tick, and the editor's save mutates what it's handed.
+            openTagEditor(img, liveInst(img, inst));
+          },
+        }),
+        ddAction({
+          label: "Retag",
+          icon: ICONS.tag,
+          onClick: (e) => {
+            e.stopPropagation();
+            close();
+            doRetag(img, inst);
+          },
+        }),
+      );
     } : undefined,
     onClose: () => {
       if (!tile) return;
