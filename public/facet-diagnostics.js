@@ -36,6 +36,7 @@ import { ICONS, fmtDuration } from './utils.js';
 export function diagnosisState(row, ctx = {}) {
   const minItems = ctx.minItems ?? 20;
   const minRate = ctx.minRate ?? 0.30;  // fallback only; the server serves the real one
+  const maxAttempts = ctx.maxAttempts ?? 3;
   // Items queued to rewrite THIS facet — not "the board is busy". A scoped
   // retag on one facet leaves the other eight untouched, and treating their
   // items as in-flight hid eight facets' worth of current measurements and told
@@ -114,17 +115,30 @@ export function diagnosisState(row, ctx = {}) {
   if (current && entry?.verdict === "genuinely-ambiguous-items") return { state: "note", entry, items, rate };
   if (current && renderable) return { state: "finding", entry, items, rate };
 
-  // The evidence moved and the replacement has not landed yet — a few minutes,
-  // since the loop waits for the board to settle. Without this the facet simply
-  // goes blank, which is the same rendering as "nothing wrong here" and is how
-  // a user ends up asking whether the feature is working.
+  // Nothing to report right now, and there are two ways to be here. The evidence
+  // moved under a stored finding (`current === false`), or a re-read was ATTEMPTED
+  // and the provider refused — `attempted()` writes an entry carrying attempts and
+  // an error and no verdict, deliberately, because a failed call has no claim to
+  // make about the taxonomy.
   //
-  // Both conditions from `current` have to be re-tested separately here, and
-  // only one of them means a replacement is coming. Evidence moved -> the loop
-  // will re-ask. Rate under the floor -> gate 4 means it will NOT, because the
-  // facet is fine, and a notice over a facet that simply got better would put
-  // words on the one state that has earned silence.
-  if (row?.current === false && renderable && rate >= minRate) {
+  // Either way the facet has to say something. Without this it renders blank,
+  // which is identical to "nothing wrong here" — and one provider blip used to be
+  // enough: the finding was destroyed by the attempt that replaced it, `renderable`
+  // went false, and a facet mid-re-read went silent with an error nobody could see.
+  //
+  // The rate floor is re-tested rather than taken from `current`, and it is the
+  // half that decides whether anything is COMING: under the floor gate 4 means the
+  // loop will not re-ask at all, so a facet that simply got better keeps the
+  // silence it has earned.
+  const failing = entry?.attempts > 0 && !entry.verdict;
+  if (rate >= minRate && (failing || (row?.current === false && renderable))) {
+    // Out of tries. The loop has stopped, and only new measurements will restart
+    // it, so "re-reading this facet" would be the promise #43 went to the trouble
+    // of making true everywhere else. Say what actually happened instead — this is
+    // the only surface on which a user learns their provider is refusing.
+    if (failing && entry.attempts >= maxAttempts) {
+      return { state: "unreadable", items, rate, error: entry.error };
+    }
     return { state: "rereading", items, rate, queued };
   }
   if (!items && queued) return { state: "measuring", previous: null, items, rate, queued };
@@ -333,6 +347,17 @@ export function diagnosisBlock(row, gates, { compact = false, collapsible = fals
     setText(s.queued
       ? `Re-tagging this facet — ${s.queued.toLocaleString()} item${s.queued === 1 ? "" : "s"} still queued. A fresh reading follows.`
       : `The measurements have changed. Re-reading this facet.`);
+    return el;
+  }
+
+  // The provider's own words, on the ingest-modal precedent (`error: <message>`).
+  // Raw rather than softened: "something went wrong" would send someone to the
+  // logs, and the whole point of this state is that the logs were the only place
+  // this had ever been said.
+  if (s.state === "unreadable") {
+    setText(s.error
+      ? `Couldn't re-read this facet — ${s.error}`
+      : `Couldn't re-read this facet. It will try again when the measurements next change.`);
     return el;
   }
 

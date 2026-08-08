@@ -30,16 +30,6 @@ const UNANIMOUS_SHOWN = 4;
 const SETTLE_MS = Number(process.env.DIAGNOSE_SETTLE_MS) || 180000;
 const MIN_ITEMS = Number(process.env.DIAGNOSE_MIN_ITEMS) || 20;
 const MIN_RATE = Number(process.env.DIAGNOSE_MIN_RATE) || 0.30;
-// Served with the payload rather than re-declared client-side: the reader decides
-// which state a facet is in from these same two numbers, and a browser copy would
-// drift the first time either is retuned — with a symptom (a facet stuck
-// "awaiting re-measurement" while the loop happily re-diagnoses it) that reads as
-// a bug in neither half.
-export const GATES = { minItems: MIN_ITEMS, minRate: MIN_RATE };
-// Bounded per pass so a fleet of newly vote-enabled boards cannot fan out into a
-// burst of calls, and so the rotation below actually rotates.
-const MAX_FACETS = 10;
-const SCAN_BOARDS = 8;
 // Tries before giving up on one unchanged question. Every other outbound-I/O path
 // here carries one (failOrRequeue's attempts, alerts.js's WEBHOOK_MAX_ATTEMPTS)
 // for the same reason: nothing about a failure changes the gates, so without a
@@ -47,6 +37,18 @@ const SCAN_BOARDS = 8;
 // for as long as the condition lasts. Attempts are keyed to the freshness string,
 // so the moment the data moves the facet gets a clean slate.
 const MAX_ATTEMPTS = 3;
+// Served with the payload rather than re-declared client-side: the reader decides
+// which state a facet is in from these same numbers, and a browser copy would
+// drift the first time any of them is retuned — with a symptom (a facet stuck
+// "awaiting re-measurement" while the loop happily re-diagnoses it) that reads as
+// a bug in neither half. `maxAttempts` is here because hitting the cap is the
+// moment the loop stops trying, and a facet that goes quiet for that reason has
+// to say so rather than render as healthy.
+export const GATES = { minItems: MIN_ITEMS, minRate: MIN_RATE, maxAttempts: MAX_ATTEMPTS };
+// Bounded per pass so a fleet of newly vote-enabled boards cannot fan out into a
+// burst of calls, and so the rotation below actually rotates.
+const MAX_FACETS = 10;
+const SCAN_BOARDS = 8;
 
 // ─── the definition stamp ────────────────────────────────────────────────────
 
@@ -462,14 +464,26 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // by the setter (the trailing false): a failed attempt has answered nothing, so
   // a retag's mark must outlive it, and only the setter can tell that apart from a
   // mark a concurrent write legitimately cleared.
-  const attempted = (fields) => setFacetDiagnostic(db, board.id, facet.key, {
-    k: fresh, at: Date.now(), attempts: (prior?.k === fresh ? prior.attempts || 0 : 0) + 1,
-    ...(prior?.previous ? { previous: prior.previous } : {}),
-    ...(prior?.stats ? { stats: prior.stats, d: prior.d ?? null, scoped: prior.scoped ?? null } : {}),
-    ...fields,
-  }, false);
-
   const t0 = Date.now();
+  const attempted = async (error) => {
+    const attempts = (prior?.k === fresh ? prior.attempts || 0 : 0) + 1;
+    await setFacetDiagnostic(db, board.id, facet.key, {
+      k: fresh, at: Date.now(), attempts, error,
+      ...(prior?.previous ? { previous: prior.previous } : {}),
+      ...(prior?.stats ? { stats: prior.stats, d: prior.d ?? null, scoped: prior.scoped ?? null } : {}),
+    }, false);
+    // …and a row in the job log, on the app's standing convention for a failed
+    // pass (jobs-modal renders "N attempts · <error>" for a non-ok outcome). The
+    // success path already logs; without this the one surface that answers "what
+    // did the worker do, and did it work" showed diagnosis as though it never
+    // failed. Warn-never-throw for the same reason as the success row.
+    await addJobLog(db, {
+      boardId: board.id, target: facet.key, kind: "diagnose", outcome: "failed", error,
+      detail: { attempts, items: segment.items, unanimous: segment.unanimous },
+      startedAt: t0, endedAt: Date.now(),
+    }).catch((e) => console.warn(`diagnose job log write failed: ${e.message}`));
+  };
+
   const sample = await diagnosisSample(db, board.id, segment, examples);
   // What the passes were parting on when this was written. Taken from the sample
   // rather than probed for: this is the only path that needs it, and it has
@@ -486,7 +500,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
     // Recorded before rethrowing, so the caller still logs it and the next tick
     // still knows this was tried. Without the record the gates pass identically a
     // minute later and the same call is made again, indefinitely.
-    await attempted({ error: String(e.message).slice(0, 200) });
+    await attempted(String(e.message).slice(0, 200));
     throw e;
   }
   // One row per paid call, whatever came back — the token ledger tracks spend, not
@@ -501,7 +515,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   const verdict = VERDICTS.includes(input?.verdict) ? input.verdict : null;
   if (!verdict) {
     console.warn(`diagnose: board ${board.id} facet ${facet.key} — unusable verdict ${JSON.stringify(input?.verdict)}`);
-    await attempted({ error: `unusable verdict: ${JSON.stringify(input?.verdict)}`.slice(0, 200) });
+    await attempted(`unusable verdict: ${JSON.stringify(input?.verdict)}`.slice(0, 200));
     return null;
   }
 

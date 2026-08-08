@@ -57,7 +57,11 @@ const textOf = (n) => (n.textContent || "") + n.children.map(textOf).join("");
 const find = (n, cls) => (n.className?.split(" ").includes(cls) ? n : n.children.reduce((h, c) => h || find(c, cls), null));
 const { diagnosisState, diagnosticsUnseen, markDiagnosticsSeen, canSeeDiagnostics, diagnosisBlock } = await import("../public/facet-diagnostics.js");
 
-const G = { minItems: 20, minRate: 0.30 };
+// The server's own gates, not a copy of them. A literal here drifts the moment a
+// threshold is retuned — which is the exact failure the GATES export exists to
+// prevent, so a test asserting against a hand-written duplicate would be pinning
+// the bug. (Line 436 already checks the route serves this same object.)
+const G = GATES;
 
 // One roll-up row, as the server serves it.
 const row = (over = {}) => ({
@@ -148,6 +152,39 @@ test("a superseded finding says a re-reading is coming, rather than going blank"
   // understate a job the user can watch.
   const draining = row({ items: 133, unanimous: 84, current: false, queued: 900, diagnostic: finding() });
   assert.match(textOf(diagnosisBlock(draining, G)), /900 items still queued/);
+});
+
+test("a provider failure does not take the facet silent with it", () => {
+  // `attempted()` writes an entry with attempts and an error and NO verdict —
+  // deliberately, since a failed call has no claim to make about the taxonomy.
+  // The reader used to gate every "something is happening" state on `renderable`,
+  // so one blip destroyed the finding AND the notice that a re-read was coming,
+  // and the facet rendered blank: identical to "nothing wrong here", which is the
+  // failure state 36 exists to prevent. The error was stored and shown nowhere.
+  const failed = (attempts) => row({
+    items: 133, unanimous: 84, current: false,
+    diagnostic: { k: "x", at: Date.now(), attempts, error: "503 upstream unavailable" },
+  });
+
+  // Still trying: the honest thing is the same sentence a live re-read gets.
+  assert.equal(diagnosisState(failed(1), G).state, "rereading");
+  assert.match(textOf(diagnosisBlock(failed(1), G, { collapsible: true })), /measurements have changed/);
+
+  // Out of tries. Only new measurements restart the loop, so "re-reading this
+  // facet" would be exactly the promise 43 went to the trouble of making true
+  // everywhere else. Say what happened, in the provider's own words.
+  assert.equal(diagnosisState(failed(G.maxAttempts), G).state, "unreadable");
+  assert.match(textOf(diagnosisBlock(failed(G.maxAttempts), G, { collapsible: true })),
+    /Couldn't re-read this facet — 503 upstream unavailable/);
+
+  // A failure on a facet the loop would not revisit anyway (gate 4) stays silent —
+  // a notice over a facet that simply got better is words on the one state that
+  // has earned none.
+  const better = row({ items: 133, unanimous: 120, current: false, diagnostic: { attempts: 3, error: "503" } });
+  assert.equal(diagnosisState(better, G).state, "none");
+
+  // And it is a pipeline state, so the editor stays out of it.
+  assert.equal(diagnosisBlock(failed(G.maxAttempts), G, { compact: true }), null);
 });
 
 test("a facet under the rate floor is silent, not 'being re-read'", () => {

@@ -1127,6 +1127,17 @@ test("a provider error is recorded, retried a bounded number of times, then left
   assert.equal(e.attempts, 3);
   assert.match(e.error, /provider exploded/);
   assert.equal(e.verdict, undefined, "a failure is not a finding");
+
+  // …and it lands in the job log, on the app's standing convention for a failed
+  // pass. Only the success path logged before, so the one surface that answers
+  // "what did the worker do, and did it work" showed diagnosis as though it never
+  // failed — while the entry quietly carried an error nothing rendered.
+  const { rows } = await db.query(
+    "SELECT outcome, error, detail FROM job_log WHERE board_id=$1 AND kind='diagnose' ORDER BY started_at", [b]);
+  assert.equal(rows.length, 3, "one row per attempt, like every other failing lane");
+  assert.ok(rows.every((r) => r.outcome === "failed"));
+  assert.match(rows[2].error, /provider exploded/);
+  assert.deepEqual(rows.map((r) => r.detail.attempts), [1, 2, 3], "jobs-modal renders 'N attempts · <error>'");
 });
 
 test("an unusable verdict is recorded as an attempt — it cost money either way", async () => {
