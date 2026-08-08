@@ -163,11 +163,10 @@ header.header-collapsed #toolbar-fold {
   color: var(--text-dim);
 }
 /* the × inks only the middle half of its viewBox — at the shared 13px it reads
-   as a speck beside 12px type */
+   as a speck beside 12px type (its weight comes with the glyph) */
 .tool-btn.clear svg {
   width: 14px;
   height: 14px;
-  stroke-width: 2.5;
 }
 
 /* semantic search box: shaped like a tool-btn, with an × once results are active */
@@ -210,10 +209,14 @@ header.header-collapsed #toolbar-fold {
   margin-right: 5px;
   flex: none;
 }
+/* One of the three lone glyphs on a saturated dark pill (with .crates-clear and
+   .upload). Light ink on a dark ground reads thinner than it measures, and
+   there is no drawing around these to carry them, so they take the one step up
+   from the glyph's own 1.5. Device pixels — see `glyph` in utils.js. */
 .search-clear svg {
   width: 12px;
   height: 12px;
-  stroke-width: 3; /* the 2px shared default reads too thin at this size */
+  stroke-width: 1.75px;
 }
 .search-clear:hover {
   background: #333;
@@ -589,6 +592,7 @@ body.bulk-mode .inst-tag-chip {
 .tool-btn.upload svg {
   width: 17px;
   height: 17px;
+  stroke-width: 1.75px; /* lone glyph on a dark pill — see .search-clear svg */
 }
 .tool-btn.upload:hover {
   background: #000;
@@ -1300,7 +1304,15 @@ body.bulk-mode .heart {
 }
 .heart.on {
   color: #ff5a78;
-  --hf: #ff5a78;
+}
+/* The three favourite hearts, filled. Each of them set a --hf custom property
+   that the heart glyph read as its `fill` — and each set it to the very colour
+   it was already tinting the outline with, so the whole indirection was a long
+   way of writing currentColor. */
+.heart.on svg,
+.tool-btn.fav.active svg,
+.lightbox-fav.on svg {
+  fill: currentColor;
 }
 .heart-pop {
   position: absolute;
@@ -1380,7 +1392,7 @@ body.bulk-mode .heart {
 .tool-btn.crates-clear svg {
   width: 14px;
   height: 14px;
-  stroke-width: 3; /* heavier than the toolbar's × — it has to hold up on black */
+  stroke-width: 1.75px; /* lone glyph on a dark pill — see .search-clear svg */
 }
 .tool-btn.crates-clear:hover {
   background: #333;
@@ -1392,7 +1404,6 @@ body.bulk-mode .heart {
   background: var(--pill-active);
   color: #fff;
   border-color: var(--pill-active);
-  --hf: #fff;
 }
 .auth {
   display: inline-flex;
@@ -1670,7 +1681,6 @@ body.bulk-mode .heart {
 
 .lightbox-fav.on {
   color: #ff5a78;
-  --hf: #ff5a78;
 }
 
 .lightbox-nav {
@@ -2131,7 +2141,6 @@ body.bulk-mode .heart {
   width: 15px;
   height: 15px;
   flex: none;
-  stroke-width: 2.5;
 }
 .filter-drawer-clear:hover {
   color: var(--text);
