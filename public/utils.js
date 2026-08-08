@@ -110,38 +110,27 @@ export const tag = (facet, value) => `${facet}/${value}`;
 // stroke-linejoin, and the copies of it in admin.html and profile.html carry a
 // stray 2.2 weight.
 //
-// `stroke` is in DEVICE PIXELS — 1.25 draws a 1.25px line whatever size the
-// icon is set to. That is what `non-scaling-stroke` below buys, and it is worth
-// being clear about what it fixes, because the natural reading of an SVG is the
-// opposite: normally the weight is in the 24-unit box and the viewBox scale
-// carries it down with everything else.
+// `stroke` is in the 24-unit box, so it scales with the icon: what the eye gets
+// is `stroke × size / 24`, and 2 units is 1.08px at 13px but 1.42px at 17px.
 //
-// The trouble is that the box size is not a weight decision. Every surface here
-// picks its px size to normalise a glyph's INK — the pencil gets 15px and the ×
-// gets 14px because their strokes sit in the middle of the viewBox and read
-// small, while a glyph that reaches the edges holds up at 13. With the weight
-// riding in the same units, each of those ink decisions silently set a weight
-// too, and the set drifted to a 2.1× spread nobody chose: 0.83px on a 10px
-// field icon, 1.77px on the 17px upload plus. Every correction ever made to it
-// pushed a weight UP, five of them on this one × alone.
+// DO NOT try to make that absolute with `vector-effect: non-scaling-stroke`.
+// It is the obvious fix — the box size is chosen to normalise a glyph's INK (the
+// pencil renders at 15px and the × at 14px because their strokes sit mid-viewBox
+// and read small), so having the weight ride along on that decision is genuinely
+// accidental. But non-scaling-stroke holds the stroke constant in DEVICE pixels,
+// and a phone at devicePixelRatio 3 then draws a 1.25 line as 0.42 CSS px. It
+// looks right on a desktop and renders as a hairline on every retina screen —
+// which is exactly how it shipped in a31c30a and came back from a phone.
 //
-// So: size the box for ink, set the weight here. Three values, and the two that
-// aren't the default say why.
+// Scaling with the icon is the resolution-independent behaviour and the one to
+// keep. If the weights ever want recalibrating, do it in these units, per glyph,
+// against the size each one actually renders at.
 //
 // width/height are a floor, not a preference: every surface sizes its own icons
 // in CSS, but one that forgets gets text-sized ink instead of the SVG default
 // of 300×150 — which is what the boards page's New board button was doing.
-//
-// `vector-effect` is not an inherited property, so it belongs on each shape
-// rather than on the <svg>; stamping it here beats both writing it into forty
-// path strings and a CSS rule, which would quietly not apply on a page that
-// doesn't load styles.css.
-const SHAPES = /<(path|rect|circle|ellipse|line|polyline|polygon)\b/g;
-
-export const glyph = (body, { stroke = 1.25 } = {}) =>
-  `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${
-    body.replace(SHAPES, '<$1 vector-effect="non-scaling-stroke"')
-  }</svg>`;
+export const glyph = (body, { stroke = 2 } = {}) =>
+  `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
 export const ICONS = {
   viewRows: glyph('<rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/>'),
@@ -153,22 +142,24 @@ export const ICONS = {
   // same colour it wanted inside.
   heart: glyph('<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.7 1-1a5.5 5.5 0 0 0 0-7.8z"/>'),
   crate: glyph('<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>'),
-  chevron: glyph('<path d="m6 9 6 6 6-6"/>'),
+  chevron: glyph('<path d="m6 9 6 6 6-6"/>', { stroke: 2.5 }),
   // The lightbox's prev/next. Sparse like the tick and the cross, and bolder
   // still: these are the only glyphs in the set that sit alone in a 44×66
   // target over a photograph, where they have to survive whatever is behind
   // them. They replace a literal ‹ and › typed into index.html, whose weight
   // came from whichever font happened to load.
-  chevronLeft: glyph('<path d="m15 18-6-6 6-6"/>', { stroke: 3 }),
-  chevronRight: glyph('<path d="m9 18 6-6-6-6"/>', { stroke: 3 }),
+  // 2.6 units at the 28px box these render at is the ~3px asked for.
+  chevronLeft: glyph('<path d="m15 18-6-6 6-6"/>', { stroke: 2.6 }),
+  chevronRight: glyph('<path d="m9 18 6-6-6-6"/>', { stroke: 2.6 }),
   pencil: glyph('<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>'),
   // A tick, a cross and a plus are two or three bare strokes with no drawing
-  // around them to give them presence — 1.5 is where they stop reading as
-  // scratches. It is also, within a rounding error, what all five × sites had
-  // already talked themselves into one override at a time.
-  check: glyph('<path d="M20 6 9 17l-5-5"/>', { stroke: 1.5 }),
-  x: glyph('<path d="M18 6 6 18M6 6l12 12"/>', { stroke: 1.5 }),
-  plus: glyph('<path d="M12 5v14M5 12h14"/>', { stroke: 1.5 }),
+  // around them to give them presence, so they carry more than the shared 2.
+  // The × in particular: every one of the five places it lands had already
+  // overridden 2 upward one at a time, so the glyph holds the 2.5 and only the
+  // two chips on black still step up from there.
+  check: glyph('<path d="M20 6 9 17l-5-5"/>', { stroke: 3 }),
+  x: glyph('<path d="M18 6 6 18M6 6l12 12"/>', { stroke: 2.5 }),
+  plus: glyph('<path d="M12 5v14M5 12h14"/>', { stroke: 2.5 }),
   eye: glyph('<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>'),
   eyeOff: glyph('<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/>'),
   info: glyph('<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>'),

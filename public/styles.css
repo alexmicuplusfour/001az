@@ -209,14 +209,14 @@ header.header-collapsed #toolbar-fold {
   margin-right: 5px;
   flex: none;
 }
-/* One of the three lone glyphs on a saturated dark pill (with .crates-clear and
-   .upload). Light ink on a dark ground reads thinner than it measures, and
-   there is no drawing around these to carry them, so they take the one step up
-   from the glyph's own 1.5. Device pixels — see `glyph` in utils.js. */
+/* A lone × on a saturated dark pill: light ink on a dark ground reads thinner
+   than it measures, and there is no drawing around it to carry it, so it steps
+   up from the glyph's own 2.5. Same units as the glyph — the 24-unit box, not
+   pixels (see `glyph` in utils.js). */
 .search-clear svg {
   width: 12px;
   height: 12px;
-  stroke-width: 1.75px;
+  stroke-width: 3;
 }
 .search-clear:hover {
   background: #333;
@@ -592,7 +592,6 @@ body.bulk-mode .inst-tag-chip {
 .tool-btn.upload svg {
   width: 17px;
   height: 17px;
-  stroke-width: 1.75px; /* lone glyph on a dark pill — see .search-clear svg */
 }
 .tool-btn.upload:hover {
   background: #000;
@@ -1392,7 +1391,7 @@ body.bulk-mode .heart {
 .tool-btn.crates-clear svg {
   width: 14px;
   height: 14px;
-  stroke-width: 1.75px; /* lone glyph on a dark pill — see .search-clear svg */
+  stroke-width: 3; /* lone × on a dark pill — see .search-clear svg */
 }
 .tool-btn.crates-clear:hover {
   background: #333;
