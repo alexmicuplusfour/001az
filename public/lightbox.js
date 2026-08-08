@@ -856,6 +856,11 @@ export function initLightbox() {
 
   elLightbox.addEventListener("click", closeLightbox);
 
+  // The arrows come from the icon set like every other button's, rather than
+  // being characters in the markup — index.html carries the aria-label, which
+  // is the part a caret can't say.
+  elLightboxPrev.innerHTML = ICONS.chevronLeft;
+  elLightboxNext.innerHTML = ICONS.chevronRight;
   elLightboxPrev.addEventListener("click", (e) => { e.stopPropagation(); navLightbox(-1); });
   elLightboxNext.addEventListener("click", (e) => { e.stopPropagation(); navLightbox(1); });
 

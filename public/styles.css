@@ -1693,13 +1693,18 @@ body.bulk-mode .heart {
   border-radius: 10px;
   background: rgba(18, 18, 22, 0.5);
   color: #fff;
-  font-size: 30px;
-  line-height: 1;
   cursor: pointer;
   display: grid;
   place-items: center;
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
+}
+/* A chevron is a narrow glyph — 6 of its 24 units wide — so the box has to run
+   large for the arrow to read at arm's length across a photo: 28px of box is
+   about 7px of ink across and 14px down, in a 44×66 target. */
+.lightbox-nav svg {
+  width: 28px;
+  height: 28px;
 }
 .lightbox-nav:hover {
   background: rgba(18, 18, 22, 0.78);
