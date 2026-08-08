@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { tag, pill } from './utils.js';
+import { tag, pill, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
 
@@ -491,7 +491,7 @@ export function renderFacets() {
   const clear = document.getElementById("filter-drawer-clear");
   const n = activeCount();
   clear.hidden = n === 0;
-  clear.textContent = `Clear filters (${n})`;
+  clear.innerHTML = ICONS.x + `<span>Clear filters (${n})</span>`;
 }
 
 function toggleFiltersDesktop() {

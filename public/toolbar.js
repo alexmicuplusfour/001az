@@ -439,7 +439,7 @@ export function renderToolbar(resultCount) {
 
   if (state.me) {
     elToolbarSub.appendChild(toolBtn(
-      `${ICONS.heart} Your favorites`,
+      ICONS.heart + "<span>Your favorites</span>",
       "fav" + (state.showFavorites ? " active" : ""),
       () => {
         state.showFavorites = !state.showFavorites;
@@ -499,7 +499,9 @@ export function renderToolbar(resultCount) {
 
   const active = activeCount();
   if (active > 0) {
-    elToolbarSub.appendChild(toolBtn(`Clear filters (${active})`, "clear", clearAll));
+    // toolBtn takes markup: the × names the undo before the words do, which is
+    // what tells this borderless button apart from the labels beside it.
+    elToolbarSub.appendChild(toolBtn(ICONS.x + `<span>Clear filters (${active})</span>`, "clear", clearAll));
   }
 
   // One sort control: a dropdown over the board's sortable attributes —

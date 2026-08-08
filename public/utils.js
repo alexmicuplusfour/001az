@@ -201,6 +201,11 @@ function appendCount(el, count) {
   el.appendChild(c);
 }
 
+// The toolbar button. `label` is markup: an icon button passes an ICONS glyph,
+// a labelled one passes `ICONS.foo + "<span>Text</span>"` — the span is what
+// makes the label one flex item, so the button's own 5px gap spaces it from
+// the icon. Nothing here sizes the glyph or sets the gap: .tool-btn owns both,
+// which is what lets a caller pass any icon and get the same button.
 export function toolBtn(label, cls, onClick, count) {
   const b = document.createElement("button");
   b.className = "tool-btn" + (cls ? " " + cls : "");

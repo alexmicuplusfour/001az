@@ -54,7 +54,6 @@ function renderToolbar() {
     const newBtn = document.createElement("button");
     newBtn.className = "tool-btn";
     newBtn.innerHTML = ICONS.plus + "<span>New board</span>";
-    newBtn.style.gap = "5px";
     newBtn.addEventListener("click", () =>
       openBoardModal(null, {
         canEditAI: true,
