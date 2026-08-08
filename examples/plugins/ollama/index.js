@@ -26,15 +26,19 @@ export default function (ctx) {
     label: "Ollama",
     description: "Self-hosted models via Ollama's OpenAI-compatible API — keyless",
     base,
-    // Tagging needs a tool-calling-capable model (the wire hard-fails without a
-    // tool call in the response) — llama3.1+, qwen2.5/3, mistral-nemo, etc.
-    // These two are recommendations pinned atop the live list, and the fallback
-    // when the server can't be reached; any pulled model can be typed/picked.
+    // NO `models` list — the picker is whatever your box has actually
+    // `ollama pull`ed, asked per connection via /v1/models (the shared compat
+    // wire's listModels). That answer differs per box and changes every time
+    // you pull, so a curated array here could only ever be wrong for someone.
+    //
+    // `defaultModel` is the one model id this file names, and it is not a
+    // catalog — it is the pre-selection for a picker nobody has touched yet
+    // (the contract requires one of any tagging provider), and the sole option
+    // shown if the server can't be reached. Tagging needs a tool-calling-capable
+    // model — llama3.1+, qwen2.5/3, mistral-nemo — since the wire hard-fails
+    // without a tool call in the response; if you haven't pulled this one, pick
+    // yours from the picker, which lists what you actually have.
     defaultModel: "llama3.1:8b",
-    models: [
-      { id: "llama3.1:8b", note: "solid tool calling · ~8 GB" },
-      { id: "qwen2.5:14b", note: "stronger tagging · ~9 GB" },
-    ],
     // The tagger picker excludes what the embeds filter below claims (the
     // wire hard-fails on a model that can't tool-call, and an embedder never
     // can) — keep the two patterns mirror images when editing either.
@@ -54,10 +58,16 @@ export default function (ctx) {
     // Embeddings via /v1/embeddings — pull the model first (`ollama pull nomic-embed-text`).
     // The filter carves embedding models out of the live /v1/models dump by
     // name (Ollama reports no capabilities there): nomic-embed-text,
-    // mxbai-embed-large, snowflake-arctic-embed, bge-m3, …
+    // mxbai-embed-large, snowflake-arctic-embed, bge-m3, … A PATTERN, not a
+    // list: it claims this catalog's slice of whatever your box reports, so
+    // pulling a new embedder shows it here without touching this file.
     embeds: {
       default: "nomic-embed-text",
-      models: [{ id: "nomic-embed-text", note: "768-dim · runs on your Ollama box" }],
+      // Empty for the same reason tagging has no list — the picker is your
+      // box's pulled models, filtered by the pattern above. It stays an array
+      // rather than being omitted because the admin modal reads `.length` on
+      // the capability catalogs (only the tagging list is optional server-side).
+      models: [],
       filter: "embed|bge",
     },
     wire: ctx.wires.compat,

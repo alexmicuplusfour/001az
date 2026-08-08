@@ -1,0 +1,7 @@
+{
+  "id": "community.deepseek",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "DeepSeek",
+  "main": "index.js"
+}

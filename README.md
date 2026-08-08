@@ -38,9 +38,12 @@ a live connector.
   Multi-provider — **Anthropic Claude, OpenAI, Gemini, GLM, and OpenRouter** —
   selectable per board, plus an optional web-research step. Retries, stuck-job
   recovery, and a concurrency cap included. More providers install as
-  **plugins** from a local path, GitHub, or npm — including keyless self-hosted
-  ones (see [`examples/plugins/ollama`](examples/plugins/ollama) for tagging
-  and embeddings against your own Ollama server).
+  **plugins** from a local path, GitHub, or npm — a provider is one descriptor,
+  no protocol code. Two worked examples ship in-tree:
+  [`examples/plugins/ollama`](examples/plugins/ollama) (keyless self-hosted —
+  tagging and embeddings against your own Ollama server) and
+  [`examples/plugins/deepseek`](examples/plugins/deepseek) (keyed and hosted,
+  text-only, with a vendor whose quirks diverge from the OpenAI defaults).
 - **Entities & instances** — an entity is a thin row (its identity + structured
   fields) sitting above one or more per-file *instances*, each with their own
   fields and tags. Merge re-parents instances, split breaks them out, and both
