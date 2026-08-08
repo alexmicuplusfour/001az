@@ -13,8 +13,17 @@ const KEY = "notifySound";
 
 // On unless explicitly turned off. An unset preference should behave like the
 // feature was asked for, and the dots are quiet enough to miss on their own.
-export const soundOn = () => localStorage.getItem(KEY) !== "off";
-export const setSoundOn = (on) => localStorage.setItem(KEY, on ? "on" : "off");
+//
+// Guarded like sort.js, view.js and seen-mark.js: a preference that cannot be
+// written is one that won't stick, not an exception thrown out of a checkbox's
+// change handler. An unreadable one falls back to ON — the same answer an unset
+// one gives, so the two indistinguishable states behave indistinguishably.
+export const soundOn = () => {
+  try { return localStorage.getItem(KEY) !== "off"; } catch { return true; }
+};
+export const setSoundOn = (on) => {
+  try { localStorage.setItem(KEY, on ? "on" : "off"); } catch { /* won't stick */ }
+};
 
 let el = null;
 

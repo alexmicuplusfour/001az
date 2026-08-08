@@ -506,17 +506,83 @@ every surface here rather than as a note about one watermark.
   and the regression is invisible from outside, since a sequential scan returns
   the right answer, slowly.
 
-- [ ] **6. `seen-mark.js` can throw, and one caller is outside every `try`.**
+- [x] **6. `seen-mark.js` is the one persistence module that doesn't follow the
+  convention the codebase writes down twice.** *(fixed)*
 
-  `seenAt` and `markSeen` touch `localStorage` unguarded
-  (`seen-mark.js:37`, `:54`). A quota error, or a context where storage access
-  itself throws, propagates. Most callers are inside a `try` by luck;
-  `jobs-modal.js:399` and `:405` are not, and a throw at `:399` escapes
-  `openJobsModal` after `modalEl` is set but before the render listener and the
-  refresh interval are wired — leaving the dialog open, dead, and unrefreshable.
+  `seenAt` and `markSeen` touch `localStorage` unguarded (`seen-mark.js:37`,
+  `:54`). The rest of the client does not, and it is explicit about why:
 
-  The module is the right place to fix it: the whole point of a watermark is that
-  it degrades to "no memory", not to an exception.
+  ```
+  sort.js:161  } catch { /* private mode / quota — sort just won't stick */ }
+  view.js:93   } catch { /* private mode / quota — the choice just won't stick */ }
+  sort.js:191  } catch { /* corrupted entry — fall through to default */ }
+  ```
+
+  Both modules guard the read as well as the write. So the house rule already
+  exists — **storage is fallible and a persistence miss degrades to "it just
+  won't stick"** — and this module simply didn't inherit it. That is a stronger
+  argument than the one the first draft of this entry made ("it can throw"), and
+  it also bounds the finding honestly, below.
+
+  **The trigger is narrower than "it can throw", and the first draft had the
+  wrong exposure.** Total unavailability — storage blocked, a sandboxed iframe —
+  throws on the property access itself, and `app.js:110` does an unguarded
+  `localStorage.setItem("lastBoard", …)` on every board load, before `render()`,
+  `ensurePolling()`, `startSignals()` or `startAnnouncing()`. `main()` is invoked
+  bare at `app.js:184` with no `.catch`, so that case is a half-booted blank
+  gallery and an unhandled rejection, and no dot code runs at all. (Pre-existing,
+  outside this feature, and the one place `sort.js`'s own convention would have
+  helped most — worth its own entry someday.)
+
+  What is left is the path where **reads work and writes throw**: quota, or the
+  Safari private-browsing behaviour `sort.js`'s comment names. Quota is
+  implausible for this app's own keys — four short strings per board — so this is
+  a low-probability finding. It stays worth the four lines because the
+  *consequence* is worse than `sort.js`'s, which is exactly "it won't stick".
+
+  **Two unguarded callers, and the one the first draft named is not the worse
+  one.** (It cited `jobs-modal.js:399` and `:405`; `:405` no longer exists — the
+  defect 1 fix deleted that `ack()` — and `:399` is now `:445`.)
+
+  - **`facet-diagnostics.js:504`** — `markDiagnosticsSeen` runs *before*
+    `createModal`, so a throw means the Tagging-consistency modal never opens.
+    The button does nothing at all. Not in the first draft.
+  - **`jobs-modal.js:445`** — `if (ack()) …` sits after `modalEl = overlay` and
+    before both `addEventListener("app:render", onRender)` (`:449`) and
+    `timer = setInterval(…)` (`:450`). A throw leaves the dialog on screen frozen
+    on whatever the in-flight `load(true)` delivers, with no live half and no
+    5 s refresh — and the chip inert, since `openJobsModal` early-returns on
+    `modalEl`. Closing recovers, because `onClose` is wired by `createModal`.
+  - **`chime.js:17`** — `setSoundOn` is the same class with a trivial
+    consequence: the checkbox toggles, the preference doesn't persist.
+
+  ### What was done
+
+  Guarded in the module rather than at the call sites, because the whole point of
+  a watermark is that it degrades to "no memory". A mark that fails to write
+  leaves the dot lit — visible, honest, self-correcting on the next visit, and
+  **silent**, since `announce.js` speaks only on the edge from dark to lit and a
+  dot that never goes dark never rises. An exception takes a modal with it.
+
+  `seenAt` returns `0` on a refusing read, which reads as "never looked" and so
+  lights every dot that has news. That is the failing direction to choose: a
+  signal nobody can acknowledge beats a signal nobody is shown.
+
+  `chime.js` was guarded in the same pass — `setSoundOn` is a checkbox's change
+  handler, and `soundOn` now falls back to ON, which is what an *unset*
+  preference already returns, so the two indistinguishable states behave
+  indistinguishably. Leaving one module unguarded immediately after arguing for
+  the convention would have been the odd choice.
+
+  Test: a `localStorage` stub whose every method throws. The dot lights, the
+  acknowledgement doesn't throw, and the dot *stays* lit because nothing could be
+  written — the last assertion being the one that says this degrades rather than
+  merely survives.
+
+  `app.js:110` is deliberately **not** touched. It is the same convention
+  violation and a worse one, but it belongs to boot rather than to this feature,
+  and fixing it means deciding what a gallery with no storage should do — which
+  is a bigger question than a watermark's.
 
 - [ ] **7. The first-ever open bolds the entire failure history.**
 

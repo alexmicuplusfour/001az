@@ -132,6 +132,41 @@ test("the two local dots do not share a watermark", () => {
   assert.equal(jobsUnseen(), true, "…and reading the findings is not reading the job log");
 });
 
+test("a storage that refuses leaves a usable dot rather than a broken dialog", async () => {
+  // sort.js and view.js both guard their reads AND their writes, on the stated
+  // grounds that in private mode or at quota "the choice just won't stick".
+  // seen-mark.js was the one persistence module that didn't inherit that, and
+  // it is the one where a throw does the most damage: markDiagnosticsSeen runs
+  // before createModal, so the Tagging-consistency dialog would never open at
+  // all, and the jobs modal's acknowledgement runs after modalEl is set but
+  // before its render listener and refresh interval are wired — a frozen dialog
+  // behind a chip that early-returns on modalEl.
+  const real = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem() { throw new Error("SecurityError: storage is denied"); },
+    setItem() { throw new Error("QuotaExceededError"); },
+    removeItem() { throw new Error("QuotaExceededError"); },
+  };
+  try {
+    state.boardId = "b-nostore";
+    state.jobsFailedAt = 5_000_000;
+    // No memory reads as "never looked", so the dot LIGHTS. That is the failing
+    // direction to choose: a signal nobody can acknowledge beats a signal nobody
+    // is shown.
+    assert.equal(jobsUnseen(), true);
+    assert.doesNotThrow(markJobsSeen);
+    assert.equal(jobsUnseen(), true, "…and stays lit, because nothing could be written");
+
+    // The same rule one module over — the sound toggle is a change handler, and
+    // an unreadable preference must give the same answer as an unset one.
+    const { soundOn, setSoundOn } = await import("../public/chime.js");
+    assert.equal(soundOn(), true);
+    assert.doesNotThrow(() => setSoundOn(false));
+  } finally {
+    globalThis.localStorage = real;
+  }
+});
+
 // ─── what the open dialog is allowed to acknowledge ──────────────────────────
 //
 // Opening the log clears the dot unconditionally — you opened the log. Every

@@ -32,9 +32,33 @@ export function noteServerNow(now) {
 }
 const serverNow = () => Date.now() + skew;
 
+// Both accessors below are guarded, which is the house rule rather than a new
+// idea: sort.js and view.js each wrap their reads AND their writes, on the
+// stated grounds that "private mode / quota — the choice just won't stick".
+// This module is the one that didn't inherit it.
+//
+// It matters more here than there, because a watermark's whole job is to
+// degrade to NO MEMORY. Unwritten, the dot stays lit: visible, honest,
+// self-correcting on the next visit, and silent — announce.js only speaks on the
+// edge from dark to lit, and a dot that never goes dark never rises. Thrown, it
+// takes a modal with it, and the two callers are both mid-construction:
+// markDiagnosticsSeen runs before createModal, so the Tagging-consistency dialog
+// would never open at all, and the jobs modal's runs after `modalEl` is set but
+// before its render listener and refresh interval are wired, leaving a frozen
+// dialog behind a chip that early-returns on `modalEl`.
+
 // The raw watermark — for a surface that wants to show WHICH things are new
 // rather than only whether any are.
-export const seenAt = (scope, boardId) => Number(localStorage.getItem(key(scope, boardId))) || 0;
+export function seenAt(scope, boardId) {
+  try {
+    return Number(localStorage.getItem(key(scope, boardId))) || 0;
+  } catch {
+    // No memory reads as "never looked", which lights every dot that has news.
+    // The failing direction to pick: a signal nobody can acknowledge beats a
+    // signal nobody is shown.
+    return 0;
+  }
+}
 
 // Is `newestAt` (the stamp of the newest thing worth a dot) newer than the last
 // look? A falsy/absent stamp means there is nothing to signal — the dot stays
@@ -51,5 +75,7 @@ export function unseen(scope, boardId, newestAt) {
 // cleared cache), and "I looked, just now" is the honest thing to record
 // either way.
 export function markSeen(scope, boardId, newestAt) {
-  localStorage.setItem(key(scope, boardId), String(Math.max(Number(newestAt) || 0, serverNow() - 1)));
+  try {
+    localStorage.setItem(key(scope, boardId), String(Math.max(Number(newestAt) || 0, serverNow() - 1)));
+  } catch { /* private mode / quota — the acknowledgement just won't stick */ }
 }
