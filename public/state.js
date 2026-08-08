@@ -21,6 +21,7 @@ export const state = {
   crates: [],
   filterConfigs: [],
   alerts: [],           // the user's alerts on this board (with unseen counts)
+  jobsFailedAt: null,   // newest failed job on this board (ms); drives the jobs chip's dot
   alertEvent: null,     // ?event= view: { id, name, count, ids: Set<entityId> }
   selectedCrateId: null,
   showFavorites: false,

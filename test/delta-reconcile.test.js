@@ -120,8 +120,9 @@ test("poll cadence: fast while work is in flight, slow on a live board, off othe
   assert.equal(pollDelay(), 30000, "ingestion-enabled board: slow poll");
   state.boardIngest = false;
 
-  // Alerts fire in the worker sweep (and off a teammate's manual tag) — a
-  // tab holding one must keep listening or the unseen dot never lights.
+  // An alert is a standing statement that arrivals on this board matter, and
+  // arrivals are items — a tab holding one keeps listening for them. (Its DOT
+  // is signals.js's own timer and does not depend on this.)
   state.alerts = [{ id: 1, name: "watch", unseen: 0 }];
   assert.equal(pollDelay(), 30000, "a held alert: slow poll");
   state.alerts = [];

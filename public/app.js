@@ -11,6 +11,8 @@ import { initFilterConfigsUI } from './filterconfigs.js';
 import { initUpload } from './upload.js';
 import { initLightbox, openLightbox } from './lightbox.js';
 import { openAlertEvent } from './alert-event.js';
+import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
+import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
 import { initHeaderScroll } from './header-scroll.js';
 
@@ -83,7 +85,7 @@ async function main() {
     }
   }
 
-  const [boardData, itemsData, meData, cratesData, boardsData, filterConfigsData, alertsData] = await Promise.all([
+  const [boardData, itemsData, meData, cratesData, boardsData, filterConfigsData] = await Promise.all([
     state.boardId
       ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
       : Promise.resolve(null),
@@ -98,9 +100,11 @@ async function main() {
     state.boardId
       ? fetch(`/api/filter-configs?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
       : Promise.resolve([]),
-    state.boardId
-      ? fetch(`/api/alerts?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
-      : Promise.resolve([]),
+    // The header's dots, filled by the same functions that keep them fresh
+    // afterwards (signals.js) — they write state themselves, so they ride the
+    // boot batch for the parallelism rather than for a return value.
+    refreshAlerts(),
+    refreshJobErrors(),
   ]);
 
   if (boardData) localStorage.setItem("lastBoard", String(state.boardId));
@@ -136,7 +140,6 @@ async function main() {
   if (typeof firstPage.now === 'number') state.itemsSince = firstPage.now;
   state.crates = Array.isArray(cratesData) ? cratesData : [];
   state.filterConfigs = Array.isArray(filterConfigsData) ? filterConfigsData : [];
-  state.alerts = Array.isArray(alertsData) ? alertsData : [];
   initFilterConfigsUI();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   // The viewer's per-board sort — needs boardMapping (identity mode) in place.
@@ -144,6 +147,10 @@ async function main() {
   restoreView();
   render();
   ensurePolling();
+  startSignals(); // the header's dots, on their own cadence from here on
+  // …and their voice. After the first render, so whatever is ALREADY lit when
+  // the page opens becomes the baseline instead of three toasts on arrival.
+  startAnnouncing();
   // Rest of the board streams in behind the first paint.
   drainItems(firstPage.nextCursor);
 

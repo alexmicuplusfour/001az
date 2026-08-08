@@ -15,6 +15,7 @@ import { state } from './state.js';
 import { api } from './api.js';
 import { createModal } from './modal.js';
 import { ICONS, fmtDuration } from './utils.js';
+import { unseen, markSeen } from './seen-mark.js';
 
 // Which of the five states a facet is in, from one roll-up row (server shape:
 // { key, label, items, unanimous, d, scoped, stale, diagnostic }).
@@ -176,28 +177,41 @@ const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 export const canSeeDiagnostics = (s) => !!s.boardManage && Number(s.boardVotes) > 1;
 
 // The roll-up is board-manager data on its own endpoint, so it is deliberately
-// not in the gallery's board payload. Fetched once per board, cached on state,
-// and re-rendered on arrival — the refreshBoardIngest pattern. Keyed on the
-// board id so switching boards re-fetches, and marked BEFORE the request so a
-// burst of toolbar rebuilds fires one.
+// not in the gallery's board payload. Cached on state and re-rendered on
+// arrival — the refreshBoardIngest pattern.
+//
+// This used to be the ONLY read: once per page load, guarded, and then never
+// again, so a finding the diagnose loop wrote at minute five of a session did
+// not exist until the tab was reloaded. The dot it feeds is the whole point of
+// the feature and it was the least live thing on the header. The repeat read is
+// signals.js's now; what stays here is the first one and the shape of the data.
+export async function refreshFacetStats() {
+  try {
+    const d = await api("GET", `/api/boards/${state.boardId}/facet-stats`);
+    state.facetStats = d.facets || [];
+    state.facetGates = d.gates || {};
+  } catch {
+    // No dot rather than a broken header — but only if there is nothing to keep.
+    // A failed REFRESH must not throw away the findings already on screen.
+    if (state.facetStats === null) state.facetStats = [];
+  }
+}
+
+// The first read, from the toolbar. Keyed on the board id so switching boards
+// re-fetches, and marked BEFORE the request so a burst of toolbar rebuilds
+// fires one.
 let statsFetchedFor = null;
 export function ensureFacetStats() {
   if (statsFetchedFor === state.boardId) return;
   statsFetchedFor = state.boardId;
-  api("GET", `/api/boards/${state.boardId}/facet-stats`)
-    .then((d) => {
-      state.facetStats = d.facets || [];
-      state.facetGates = d.gates || {};
-      document.dispatchEvent(new Event('app:render'));
-    })
-    .catch(() => { state.facetStats = []; }); // no dot rather than a broken header
+  refreshFacetStats().then(() => document.dispatchEvent(new Event('app:render')));
 }
 
-// The dot's memory. localStorage per board rather than server-side, unlike
-// alerts: this is advisory, not a ledger, and it does not need to survive a
-// device change. Keyed on the newest `at` the board carries, so a finding
-// written after the user last looked re-lights it.
-const SEEN_KEY = (boardId) => `facetDiagSeen:${boardId}`;
+// The dot's memory (seen-mark.js — the jobs chip's dot keeps its in the same
+// place, for the same reasons). Keyed on the newest `at` the board carries, so
+// a finding written after the user last looked re-lights it. The scope string
+// is the storage prefix and predates the shared module: leave it alone.
+const SEEN = "facetDiagSeen";
 
 const newestAt = (facets = []) =>
   facets.reduce((n, f) => Math.max(n, Number(f.diagnostic?.at) || 0), 0);
@@ -210,12 +224,11 @@ export function diagnosticsUnseen(boardId, facets, gates) {
     return s === "finding" || s === "improved";
   });
   if (!worth.length) return false;
-  const seen = Number(localStorage.getItem(SEEN_KEY(boardId))) || 0;
-  return newestAt(worth) > seen;
+  return unseen(SEEN, boardId, newestAt(worth));
 }
 
 export function markDiagnosticsSeen(boardId, facets) {
-  localStorage.setItem(SEEN_KEY(boardId), String(Math.max(newestAt(facets), Date.now() - 1)));
+  markSeen(SEEN, boardId, newestAt(facets));
 }
 
 // The only control on a read-only surface, and the one that closes the loop.

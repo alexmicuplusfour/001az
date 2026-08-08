@@ -397,9 +397,9 @@ export function openAlertEditor(existing) {
       const i = state.alerts.findIndex((a) => a.id === saved.id);
       if (i >= 0) state.alerts[i] = { ...state.alerts[i], ...saved };
       else state.alerts.push(saved);
-      // Alerts hold the slow poll (pollDelay) — the first one on a quiet
-      // board must START it, or its own firings never light the dot. (The
-      // last delete needs nothing: the tick sees the empty list and stops.)
+      // Alerts hold the slow poll (pollDelay) — the first one on a quiet board
+      // must START it, or the arrivals it watches for never reach the grid.
+      // (The last delete needs nothing: the tick sees the empty list and stops.)
       ensurePolling();
       toast(isNew ? `Alert "${saved.name}" created` : "Alert saved");
       close();

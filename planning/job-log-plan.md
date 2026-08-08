@@ -118,8 +118,13 @@ cap 200). Returns:
 
 ```
 { running: [...],            // all outcome='running' rows for the board (tiny, unpaginated)
-  jobs: [...], nextCursor, now }
+  jobs: [...], nextCursor, now,
+  failed_at }                // newest failure board-wide — the chip's dot, NOT part of the page
 ```
+
+`GET /api/boards/:id/jobs/errors` — the same `failed_at` alone, plus `now`.
+Its own route because the gallery re-reads it on a background tick and the page
+above costs five queries to answer (the `/tokens` precedent).
 
 Rows carry `entity_display` (live join, `target` fallback) so the client renders
 without a second fetch.
@@ -266,6 +271,85 @@ history is field_snapshots (movement data, not this ledger) — both survive
 the wipe. The button renders only for managers (`state.boardManage`) and
 only when there's history behind it. Suite 438/438.
 
+**Attention dot (2026-08-09).** The chip said work was HAPPENING and nothing
+said work had gone WRONG — so a tagging error sat unread until the user was
+already suspicious about missing tags. The chip now carries the same corner dot
+as the ingestion caret's unseen alerts and the Tagging-consistency finding:
+`latestJobFailureAt` (newest `outcome='failed'` row) against a local watermark,
+`public/seen-mark.js`.
+
+- **`failed` alone.** `requeued` is the pipeline retrying, `discarded` is a
+  stale result the fence dropped, `interrupted` is a restart — a dot on every
+  reader's header after every deploy. A signal that lights for self-healing
+  states is one people learn to ignore.
+- **Keyed on `started_at`**, which is also the history list's `ORDER BY`: the
+  dot and the row it sends you to agree on which failure is newest, and a
+  *folded* repeat (§ the fold, above — one wedged scan re-stamping one row
+  rather than 3,000 of them) correctly counts as no news. The cost is a job that
+  started before your last look and fails after it: its row is older than the
+  watermark, so it waits for the next distinct failure.
+- **Opening acknowledges**, and the modal marks the failures above the
+  watermark it opened with (`.job-new`, weight only) — the dot's question is
+  "which of these haven't I seen", and the list is where it gets answered. The
+  alert history modal's `.al-new` precedent.
+- **`Clear` takes the dot with it** — the reload after the delete reads
+  `failed_at: null` back off the same response.
+
+**Live dots (2026-08-09).** The pass above turned up the reason none of this
+felt reliable: each of the three header dots had invented its own freshness
+story. Alerts rode the item poll; facet-stats was fetched **once per page load**
+and never again, so a finding written five minutes into a session did not exist
+until reload; job failures rode the item poll too, which stops the moment the
+queue drains — i.e. immediately after the failure that mattered. The item poll
+is the wrong horse for all three: it keeps the *grid* current and correctly
+stops when the grid is settled, while these are about what happened while
+nothing was going on.
+
+`public/signals.js` now owns all three on one timer — 20 s base tick, per-signal
+intervals (alerts and job errors 20 s; facet-stats 60 s, since it aggregates
+every tagged item's confidence and its writer only runs on a settled board),
+nothing while the tab is hidden with an immediate catch-up on return, one
+`app:render` per batch, and a signal whose surface isn't on screen never
+fetched (`canSeeDiagnostics`). Boot fills them through the same two functions.
+`pollDelay()` keeps alerts on the slow poll but for the honest reason now — an
+alert is a standing statement that *arrivals* on this board matter.
+
+**Toasts and a chime (2026-08-09).** A dot is missable by design — small,
+quiet, in a header you aren't looking at — so `public/announce.js` gives all
+three a voice, on one rule: **fire on the edge from dark to lit, once, and never
+again while it stays lit.** Everything else falls out of it. A retag failing
+three hundred items is one toast, not three hundred, because the dot is already
+up and there is no edge; acknowledge the log and the next failure announces
+again, because it is genuinely new. No cooldown timer, no burst counter, no
+"and N more" arithmetic — the state the dot already tracks answers all of it.
+
+Checked on `app:render`, since every path that can move these three ends in
+one. The baseline is taken at boot so what is *already* lit when the page opens
+is never news, and a signal whose data hasn't landed yet (facet stats, fetched
+after the first paint) is skipped rather than recorded dark — recording it dark
+is exactly what would turn the arrival of pre-existing news into a toast.
+Each toast carries an **Open** action onto the surface it is about, which is why
+`toolbar.js` exports `openDiagnosticsDoor`: two doors onto one modal that differ
+in what they wire is how one of them quietly loses the `onEdit` hand-off.
+
+`public/chime.js` is the audible half — **one** tone for all three (three would
+have to be learned, and nothing here is urgent enough to earn that), at 0.35
+volume, on the same edge. `public/notification.mp3`, built on first use so a
+tab with the sound off never fetches it. The autoplay refusal on an untouched
+tab is swallowed on purpose: the toast and the dot have already said the same
+thing, which is what lets the sound be the part that doesn't always arrive.
+Off switch in the **user menu** (`ddCheckRow`), because sound is the only part
+of this that reaches someone not looking at the tab; turning it ON plays the
+tone, which both confirms the setting and is the click the autoplay policy
+wants before the first real notification.
+
+`seen-mark.js` also carries the fix for the quietest bug in the feature: every
+stamp compared is the SERVER's, so the acknowledgement floor runs on the
+server's clock (`noteServerNow`, fed by the errors route's `now`). A browser a
+few minutes fast used to write its watermark into the future and then ignore
+everything until the clock caught up — invisibly, since a dot that never lights
+looks exactly like a board where nothing went wrong.
+
 ## Config surface
 
 `JOB_LOG_RETENTION_DAYS` (default 30) — .env.example entry + compose passthrough
@@ -284,5 +368,11 @@ the ledger observes, it doesn't schedule.
 - Stage 3: each leg's outcome mapping — ok (tags count), failed vs requeued (the
   `failOrRequeue` boolean), discarded (fence), facet-less ok.
 - Endpoint: auth required; pagination; `running` array shape.
+- Attention dot (`test/jobs-dot.test.js`): what counts as a failure and what
+  pointedly doesn't; board scope; a folded repeat is not new news; the watermark
+  per board, its floor, and that the jobs and facet dots don't share a key; a
+  reader whose clock runs fast still sees the next failure; the page and the
+  errors route agree on `failed_at` regardless of the page's kind filter; the
+  route is member-visible, 404s an outsider, and doesn't shadow the page.
 - **The cardinal rule pinned:** stub `addJobLog` to throw → transcription and
   ingestion still complete (the ledger can never break the job).

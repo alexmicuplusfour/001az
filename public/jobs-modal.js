@@ -12,6 +12,20 @@ import { state } from './state.js';
 import { createModal, sectionHeadingEl } from './modal.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { fmtDuration, pill } from './utils.js';
+import { unseen, markSeen, seenAt } from './seen-mark.js';
+
+// ── the chip's attention dot ──
+// "A job failed while you weren't looking." The count on the chip already says
+// work is HAPPENING; nothing said work had gone wrong, and a failure is the one
+// thing in here nobody goes looking for — a tagging error sits in the log
+// unread until the user is already suspicious about missing tags.
+//
+// state.jobsFailedAt is the newest failure's stamp (server: latestJobFailureAt,
+// which is where the choice of what counts as a failure is argued), against a
+// local watermark — the Tagging-consistency dot's arrangement exactly.
+const SEEN = "jobErrSeen";
+export const jobsUnseen = () => unseen(SEEN, state.boardId, state.jobsFailedAt);
+export const markJobsSeen = () => markSeen(SEEN, state.boardId, state.jobsFailedAt);
 
 const KIND_LABELS = {
   transcribe: "Transcription",
@@ -87,9 +101,16 @@ function summaryFor(j) {
   return (Number(d.attempts) > 1 ? `${d.attempts} attempts · ` : "") + (j.error || "");
 }
 
-function jobRow(j) {
+// `newSince` is the reader's watermark as it stood when the dialog opened — the
+// dot's own number. Marking the failures above it is the answer to the question
+// the dot provokes and cannot itself answer: not "has something gone wrong"
+// (the red text has always said that) but WHICH of these I haven't seen. The
+// alert history modal marks its unseen firings the same way and for the same
+// reason; only failures are marked here, because a fresh `ok` row is not what
+// the signal was about and would dilute it to noise.
+function jobRow(j, newSince = 0) {
   const row = document.createElement("div");
-  row.className = "job-row";
+  row.className = "job-row" + (j.outcome === "failed" && j.started_at > newSince ? " job-new" : "");
 
   const badge = document.createElement("span");
   badge.className = `job-kind job-kind-${j.kind}`;
@@ -173,6 +194,13 @@ export function openJobsModal() {
     },
   });
   modalEl = overlay;
+
+  // Read BEFORE anything acknowledges, and held for the life of the dialog:
+  // reading the log is what moves the watermark, so a copy taken later always
+  // says "nothing new". Frozen rather than re-read on each refresh so a failure
+  // landing while you watch stays marked instead of un-marking itself a tick
+  // after it appears.
+  const newSince = seenAt(SEEN, state.boardId);
 
   // ── In progress ──
   // Both sections share one skeleton: .jobs-section > .jobs-head > h3, then
@@ -294,7 +322,7 @@ export function openJobsModal() {
 
   function renderHistory() {
     histList.replaceChildren();
-    for (const j of jobs) histList.appendChild(jobRow(j));
+    for (const j of jobs) histList.appendChild(jobRow(j, newSince));
     if (!jobs.length) note(histList, "No jobs recorded yet.");
     more.style.display = cursor ? "" : "none";
     if (clearBtn) clearBtn.style.display = jobs.length ? "" : "none";
@@ -308,6 +336,29 @@ export function openJobsModal() {
     if (!r.ok) throw new Error(String(r.status));
     return r.json();
   }
+
+  // Opening IS the acknowledgement — the alert-history precedent. Repeated
+  // after every refresh as well, because a failure landing while the modal is
+  // open has been seen by definition, and would otherwise leave a dot behind on
+  // a chip the reader was looking straight at. Guarded so the common case (no
+  // dot) neither writes storage nor forces a re-render every REFRESH_MS.
+  // Declared above load() — which calls it — rather than below, where it would
+  // work only by the grace of load's first await.
+  const ack = () => {
+    if (!jobsUnseen()) return;
+    markJobsSeen();
+    document.dispatchEvent(new Event('app:render')); // clear the dot
+  };
+
+  // Every response carries the chip's stamp, so take it from whichever read
+  // just happened — fresher than the background tick's, and the only path that
+  // notices a Clear having destroyed everything the dot was pointing at.
+  const noteStamp = (data) => {
+    const at = data.failed_at ?? null;
+    if (state.jobsFailedAt === at) return;
+    state.jobsFailedAt = at;
+    document.dispatchEvent(new Event('app:render'));
+  };
 
   // reset=true replaces the list (open, filter switch, interval refresh of
   // page one); reset=false appends the next Load-more page. Guards: never
@@ -326,6 +377,7 @@ export function openJobsModal() {
       if (reset) { jobs = data.jobs; pages = 1; }
       else { jobs = jobs.concat(data.jobs); pages++; }
       cursor = data.nextCursor;
+      noteStamp(data);
       for (const j of [...data.running, ...data.jobs]) seenKinds.add(j.kind);
       // Refresh history lives outside job_log (field_snapshots) — the flag is
       // how its pill appears before the kind is ever fetched.
@@ -334,6 +386,7 @@ export function openJobsModal() {
       renderLive();
       renderFilters();
       renderHistory();
+      ack(); // against what was just rendered, not what the tick last knew
     } catch {
       if (g === gen && !jobs.length) { histList.replaceChildren(); note(histList, "Failed to load — retrying…"); }
     }
@@ -343,12 +396,14 @@ export function openJobsModal() {
 
   renderLive(); // the client half needs no fetch — show it immediately
   load(true);
+  ack();
   // The delta poll re-renders the pipeline half as statuses move; the interval
   // re-pulls the server half (running rows tick, fresh completions land) but
   // only refreshes history when the reader hasn't paged deeper.
   document.addEventListener("app:render", onRender);
   timer = setInterval(() => {
+    ack();
     if (pages <= 1) load(true);
-    else fetchPage(null).then((d) => { running = d.running; renderScheduled(d.scheduled); renderLive(); }).catch(() => {});
+    else fetchPage(null).then((d) => { running = d.running; noteStamp(d); renderScheduled(d.scheduled); renderLive(); }).catch(() => {});
   }, REFRESH_MS);
 }

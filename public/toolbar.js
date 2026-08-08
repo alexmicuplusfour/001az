@@ -1,9 +1,10 @@
 import { state } from './state.js';
 import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration, attachBtnDot } from './utils.js';
-import { openJobsModal } from './jobs-modal.js';
+import { openJobsModal, jobsUnseen } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
-import { openDropdown, ddRow, ddSep, ddAction } from './dropdown.js';
+import { openDropdown, ddRow, ddSep, ddAction, ddCheckRow } from './dropdown.js';
+import { chime, soundOn, setSoundOn } from './chime.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
@@ -98,6 +99,18 @@ function ingestChip() {
 // advice no way back in to check whether it worked; it conflates "there is a
 // finding" with "there is a NEW finding", which is the dot's job and it does it
 // better; and the header reflows as it comes and goes.
+// The door itself, exported: the toast that announces a finding has to open
+// exactly what the button opens. Two doors onto one modal that differ in what
+// they wire is how one of them quietly loses `onEdit` — the hand-off to the
+// only surface that can act on a finding, and the reason the modal is worth
+// opening at all.
+export const openDiagnosticsDoor = () => openDiagnosticsModal({
+  onEdit: () => openBoardModal(state.boardId, {
+    canEditAI: !!state.me?.is_admin,
+    onSaved: () => document.dispatchEvent(new Event('app:render')),
+  }),
+});
+
 function diagnosticsBtn() {
   if (!canSeeDiagnostics(state)) return null;
   // The roll-up is board-manager data on its own endpoint, so it is not in the
@@ -105,12 +118,7 @@ function diagnosticsBtn() {
   // the ingest-chip pattern: the button is drawn immediately either way, and
   // only the dot waits.
   ensureFacetStats();
-  const b = toolBtn(ICONS.doubleCheck, "board-diag-btn", () => openDiagnosticsModal({
-    onEdit: () => openBoardModal(state.boardId, {
-      canEditAI: !!state.me?.is_admin,
-      onSaved: () => document.dispatchEvent(new Event('app:render')),
-    }),
-  }));
+  const b = toolBtn(ICONS.doubleCheck, "board-diag-btn", openDiagnosticsDoor);
   b.title = "Tagging consistency";
   b.setAttribute("aria-label", "Tagging consistency");
   // The ambient "a finding landed while you were away" signal, exactly the
@@ -124,13 +132,24 @@ function diagnosticsBtn() {
 // already streams), so it refreshes for free on every toolbar rebuild — no
 // extra requests. Sweep jobs the client can't see (a transcription, an ingest
 // run) live inside the modal, which does its own fetching.
+//
+// The dot is the other half, and says the opposite thing: the count is work
+// HAPPENING and goes away on its own, the dot is work that went WRONG and
+// doesn't. Same corner treatment as the plus-caret's unseen alerts and the
+// Tagging-consistency finding — three signals, one vocabulary.
 function jobsChip() {
   const n = state.items.reduce((k, i) => k + (ACTIVE.has(i.status) || QUEUED.has(i.status) ? 1 : 0), 0);
+  const failed = jobsUnseen();
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = "mapping-chip jobs-chip" + (n > 0 ? " busy" : "");
-  chip.title = n > 0 ? `${n} item${n === 1 ? "" : "s"} in the pipeline — click for the job log` : "Job log";
-  chip.setAttribute("aria-label", "Job log");
+  const busyNote = n > 0 ? `${n} item${n === 1 ? "" : "s"} in the pipeline` : "";
+  // Both facts when both hold — a queue draining while an earlier item failed
+  // is the ordinary case, and the tooltip is the only place either is named.
+  chip.title = [busyNote, failed ? "something failed since you last looked" : ""]
+    .filter(Boolean).join(" — ") || "Job log";
+  if (busyNote || failed) chip.title += " — click for the job log";
+  chip.setAttribute("aria-label", failed ? "Job log — new errors" : "Job log");
   const icon = document.createElement("span");
   icon.className = "jobs-chip-icon";
   icon.innerHTML = ICONS.activity;
@@ -141,17 +160,35 @@ function jobsChip() {
     chip.appendChild(count);
   }
   chip.addEventListener("click", () => openJobsModal());
+  if (failed) attachBtnDot(chip);
   return chip;
 }
 
 function openUserMenu(anchorEl) {
   openDropdown(anchorEl, {
     className: "user-menu-pop",
-    build: (body, { close }) => {
+    build: (body, { close, variant }) => {
       if (state.me && state.me.is_admin) {
         body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
       }
       body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
+      body.appendChild(ddSep());
+      // The header's dots chime when one lights. Sound is the only part of this
+      // that reaches someone not looking at the tab, so its off switch lives
+      // where a person looks for their own settings — not behind a page nobody
+      // opens. Turning it ON plays the tone: it confirms what was enabled, and
+      // it is a click, which is what the browser's autoplay policy wants before
+      // it will let the first real notification through.
+      // `onChange` is the raw change listener (checkbox.js), so the new state
+      // is read off the handle, not off an argument — an Event is truthy, and a
+      // toggle that reads one can only ever turn the sound ON.
+      const sound = ddCheckRow({
+        label: "Notification sound",
+        variant,
+        checked: soundOn(),
+        onChange: () => { setSoundOn(sound.checked); if (sound.checked) chime(); },
+      });
+      body.appendChild(sound.el);
       body.appendChild(ddSep());
       body.appendChild(ddRow({
         label: "Sign out",

@@ -1519,6 +1519,13 @@ body.bulk-mode .heart {
   color: var(--text-dim);
 }
 .job-err { color: #b3261e; }
+/* a failure newer than the reader's last visit — what the chip's dot was
+   about. Weight only, on the two cells that name the row and its verdict: the
+   red is already carrying "went wrong", and this row is scanned for while the
+   list is still moving, so nothing here may change a row's height or width
+   (.al-new bolds its label for the same reason). */
+.job-row.job-new .job-label,
+.job-row.job-new .job-outcome { font-weight: 600; }
 .job-when { flex: none; margin-left: auto; color: var(--text-dim); white-space: nowrap; }
 .jobs-note { margin: 6px 0; color: var(--text-dim); font-size: 12.5px; }
 .jobs-sched { margin: 8px 0 0; color: var(--text-dim); font-size: 12px; }

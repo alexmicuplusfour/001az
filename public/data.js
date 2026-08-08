@@ -196,26 +196,6 @@ async function refreshTokens() {
   } catch { /* leave the last known total */ }
 }
 
-// Alert firings happen server-side (the worker sweep), so unseen counts only
-// move while arrivals do — exactly when we're already polling. Piggyback the
-// tick, throttled: the counts drive an ambient dot, not a live feed. No
-// zero-alert skip: this poll is also how a tab DISCOVERS alerts — a first
-// alert created in another tab (or missed by a failed boot fetch) must still
-// light the dot here, and what the skip saved was one owner-scoped SELECT
-// every 30s.
-let alertsFetchAt = 0;
-async function refreshAlerts() {
-  if (!state.boardId) return;
-  // Under the tick cadence, not at it: a 30s throttle under the 30s slow poll
-  // would alias — ticks landing a hair early skip, and "within 30s" doubles.
-  if (Date.now() - alertsFetchAt < 25000) return;
-  alertsFetchAt = Date.now();
-  try {
-    const r = await fetch(`/api/alerts?board=${state.boardId}`, { cache: "no-store" });
-    if (r.ok) state.alerts = await r.json();
-  } catch { /* keep the last known counts */ }
-}
-
 // A live board (connector fields or a live chart face) changes server-side on
 // its own cadence: values refresh, and chart faces regenerate under NEW
 // filenames — the old webp is deleted, since /gallery caches immutably. A tab
@@ -231,11 +211,10 @@ function liveBoard() {
 
 // Exported for tests: the cadence decision in one place. Ingestion-enabled
 // boards keep the slow poll too — the sweep admits items server-side, so a
-// quiet tab would otherwise never see them arrive. Alerts hold it for the
-// same reason: firings happen in the worker sweep (and off a teammate's
-// manual tag), so a tab with alerts but no poll would never light the dot.
-// A zero-alert tab still stops — refreshAlerts can only DISCOVER an alert
-// created elsewhere while something else keeps the tick alive (or on boot).
+// quiet tab would otherwise never see them arrive. Alerts hold it for the same
+// reason and NOT for their dot: an alert is a standing statement that arrivals
+// on this board matter, and the arrivals themselves are items. (The dot is
+// signals.js's, on its own timer — it lights whether this poll runs or not.)
 export function pollDelay() {
   if (needsPoll()) return 4000;
   if (liveBoard() || state.boardIngest || state.alerts.length) return 30000;
@@ -278,7 +257,6 @@ async function pollTick() {
     // than feed reconcile an empty presentIds set — that reads as "everything
     // merged away" and would wrongly drop in-flight items.
     await refreshTokens();
-    await refreshAlerts();
     document.dispatchEvent(new Event('app:render'));
   } catch {
     /* keep polling */

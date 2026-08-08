@@ -97,6 +97,7 @@ import {
   getBoardTokenTotal,
   listJobLog,
   listRunningJobs,
+  latestJobFailureAt,
   clearJobLog,
   listRefreshHistory,
   boardHasRefreshHistory,
@@ -883,17 +884,25 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
         outcome: req.query.outcome || null,
         limit,
       }).then((page) => ({ jobs: page.jobs.map(pick), nextCursor: page.nextCursor }));
-  const [running, history, hasRefresh, nextRefreshAt] = await Promise.all([
+  const [running, history, hasRefresh, nextRefreshAt, failedAt] = await Promise.all([
     listRunningJobs(db, board.id),
     historyP,
     boardHasRefreshHistory(db, board.id),
     boardNextRefreshAt(db, board.id),
+    // Board-wide and independent of the kind filter above — this is the chip's
+    // dot, not part of the page. Served here as well as on its own route so the
+    // reader with the modal OPEN acknowledges against what they are actually
+    // looking at, rather than against a stamp the background tick last
+    // refreshed up to twenty seconds ago. Same function either way, so the two
+    // cannot disagree.
+    latestJobFailureAt(db, board.id),
   ]);
   res.json({
     running: running.map(pick),
     jobs: history.jobs,
     nextCursor: history.nextCursor,
     has_refresh: hasRefresh,
+    failed_at: failedAt,
     // Upcoming automatic work — the modal's "scheduled" strip. Null = that
     // family isn't scheduled on this board.
     scheduled: {
@@ -903,6 +912,22 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
     },
     now: Date.now(),
   });
+}));
+
+// The jobs chip's attention dot: one stamp, the newest failure on this board,
+// which the client holds against its own local watermark. Its own route rather
+// than a field on the page above — the gallery re-reads this on the poll tick
+// and a page costs four queries to answer, which is exactly why /tokens is its
+// own route too. Member-visible on the same terms as the log it summarises.
+app.get("/api/boards/:id/jobs/errors", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  // `now` travels with it: the client's watermark is compared against server
+  // stamps, so it has to be floored on the server's clock, not the reader's
+  // (public/seen-mark.js). Free here, and this is the read that happens often
+  // enough to keep the offset honest.
+  res.json({ failed_at: await latestJobFailureAt(db, board.id), now: Date.now() });
 }));
 
 // Clear the board's job history — the modal's red button. Manager-gated:

@@ -2237,6 +2237,30 @@ export async function latestSettledJob(db, boardId, kind, itemId = null) {
   return rows[0] || null;
 }
 
+// The newest FAILED row's stamp — the jobs chip's attention dot, which the
+// client compares against its own "last looked" watermark (public/seen-mark.js).
+//
+// `failed` ALONE, and the other three non-ok outcomes are excluded on purpose:
+// `requeued` is the pipeline retrying and resolves itself, `discarded` is a
+// stale result dropped by the fence (a merge landed mid-flight — nothing was
+// lost that the user can see), and `interrupted` is a restart, which would put
+// a dot on every reader's header after each deploy. A signal that lights for
+// self-healing states is a signal people learn to ignore.
+//
+// Keyed on started_at, which is also the history list's ORDER BY — so the dot
+// and the row it sends you to agree about which failure is newest, and a FOLDED
+// repeat (a wedged scan re-stamping one row every 30 s rather than writing
+// 3,000 of them) correctly counts as no news at all. The cost is a job that
+// started before your last look and fails after it: its row is older than the
+// watermark, so it waits for the next distinct failure to be announced.
+export async function latestJobFailureAt(db, boardId) {
+  const { rows } = await db.query(
+    "SELECT started_at FROM job_log WHERE board_id=$1 AND outcome='failed' ORDER BY started_at DESC LIMIT 1",
+    [boardId]
+  );
+  return rows[0]?.started_at ?? null;
+}
+
 // The modal's Clear button: drop the board's settled history in one go.
 // Running rows survive — they're live work whose stamp is still coming (and
 // the worker's fold lookups tolerate a vanished prior row: the next attempt
