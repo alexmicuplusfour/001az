@@ -10,10 +10,36 @@
 //
 // Callers describe content with `build(body, ctx)` (the scrollable area) and an
 // optional `footer(foot, ctx)` (pinned below the scroll area), composing rows
-// from the ddRow / ddAction / ddSep / ddInput helpers plus any custom elements.
+// from the ddRow / ddCheckRow / ddAction / ddSep / ddInput helpers plus any
+// custom elements.
+
+import { createCheckbox } from "./checkbox.js";
 
 const MARGIN = 8; // gap kept between the pop and the viewport edges
 const GAP = 6;    // gap between the anchor and the pop
+
+// Where the pop goes, as arithmetic — no DOM, so the cases that are awkward to
+// reach in a browser (an anchor low enough to force a flip, one so low that
+// neither side fits, one hard against a window edge) are pinned in
+// test/dropdown-place.test.js instead of being eyeballed.
+//
+// Rects are {top, bottom, left, right, width, height} in viewport coordinates,
+// exactly as getBoundingClientRect gives them.
+export function placePop({ anchor, pop, viewport, align = "end", gap = GAP, margin = MARGIN }) {
+  let left = align === "start" ? anchor.left : anchor.right - pop.width;
+  // clamp to the window; the left clamp wins, so a pop wider than the viewport
+  // starts at the margin rather than being pushed off the near edge
+  left = Math.min(Math.max(left, margin), viewport.width - margin - pop.width);
+  left = Math.max(left, margin);
+
+  let top = anchor.bottom + gap;
+  if (top + pop.height > viewport.height - margin) {
+    const above = anchor.top - gap - pop.height;
+    // flip above when it fits there; otherwise sit as low as the margin allows
+    top = above >= margin ? above : Math.max(margin, viewport.height - margin - pop.height);
+  }
+  return { left: Math.round(left), top: Math.round(top) };
+}
 
 let current = null; // { anchor, hover, close }
 
@@ -26,6 +52,7 @@ export function openDropdown(anchor, {
   build,
   footer,
   align = "end",   // "end": right edges aligned; "start": left edges aligned
+  variant = "dark", // "dark" | "light" — the surface it sits on (cf. createCheckbox)
   hover = false,   // hover popover: closes when the pointer leaves anchor + pop
   minWidth,
   maxWidth,
@@ -42,7 +69,9 @@ export function openDropdown(anchor, {
   }
 
   const el = document.createElement("div");
-  el.className = "dropdown" + (className ? " " + className : "");
+  el.className = "dropdown"
+    + (variant === "light" ? " dropdown--light" : "")
+    + (className ? " " + className : "");
   el.setAttribute("role", "menu");
   if (minWidth != null) el.style.minWidth = minWidth + "px";
   if (maxWidth != null) el.style.maxWidth = maxWidth + "px";
@@ -55,7 +84,9 @@ export function openDropdown(anchor, {
   el.appendChild(body);
 
   let closed = false;
-  const ctx = { el, body, close: (reason = "manual") => close(reason), reposition };
+  // `variant` rides on the ctx so a builder can hand it to the parts that need
+  // to know their surface (ddCheckRow) without the caller repeating itself.
+  const ctx = { el, body, variant, close: (reason = "manual") => close(reason), reposition };
   build?.(body, ctx);
   if (footer) {
     const foot = document.createElement("div");
@@ -100,17 +131,14 @@ export function openDropdown(anchor, {
 
   function reposition() {
     capBodyHeight();
-    const a = anchor.getBoundingClientRect();
-    const r = el.getBoundingClientRect();
-    let left = align === "start" ? a.left : a.right - r.width;
-    left = Math.min(Math.max(left, MARGIN), window.innerWidth - MARGIN - r.width);
-    let top = a.bottom + GAP;
-    if (top + r.height > window.innerHeight - MARGIN) {
-      const above = a.top - GAP - r.height;
-      top = above >= MARGIN ? above : Math.max(MARGIN, window.innerHeight - MARGIN - r.height);
-    }
-    el.style.left = Math.round(left) + "px";
-    el.style.top = Math.round(top) + "px";
+    const { left, top } = placePop({
+      anchor: anchor.getBoundingClientRect(),
+      pop: el.getBoundingClientRect(),
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      align,
+    });
+    el.style.left = left + "px";
+    el.style.top = top + "px";
   }
 
   const onOutside = (e) => {
@@ -201,14 +229,27 @@ export function openDropdown(anchor, {
 
 // A standard menu row: [leading?] label [trailing?]. Clicks on the embedded
 // leading/trailing controls are theirs to handle; onClick gets the rest.
-export function ddRow({ label, labelEl, active = false, href, leading, trailing, onClick } = {}) {
+//
+// `sublabel` stacks a dim second line under the label — for a choice whose
+// human name and machine name are both worth showing (a facet's label over its
+// key). The main text keeps its ellipsis; the sub gets its own.
+export function ddRow({ label, labelEl, sublabel, active = false, href, leading, trailing, onClick } = {}) {
   const row = document.createElement(href ? "a" : "div");
-  row.className = "dd-row" + (active ? " active" : "");
+  row.className = "dd-row" + (active ? " active" : "") + (sublabel ? " has-sub" : "");
   row.setAttribute("role", "menuitem");
   row.tabIndex = -1;
   if (href) row.href = href;
   if (leading) row.appendChild(leading);
-  const lbl = labelEl || Object.assign(document.createElement("span"), { className: "dd-label", textContent: label });
+  let lbl = labelEl;
+  if (!lbl) {
+    lbl = Object.assign(document.createElement("span"), { className: "dd-label" });
+    if (sublabel) {
+      lbl.appendChild(Object.assign(document.createElement("span"), { className: "dd-label-text", textContent: label }));
+      lbl.appendChild(Object.assign(document.createElement("span"), { className: "dd-sub", textContent: sublabel }));
+    } else {
+      lbl.textContent = label;
+    }
+  }
   row.appendChild(lbl);
   if (trailing) row.appendChild(trailing);
   if (onClick) {
@@ -226,7 +267,9 @@ export function ddRow({ label, labelEl, active = false, href, leading, trailing,
 // the element by passing href or onClick, not by hand-rolling the markup.
 export function ddAction({ label, icon, href, onClick } = {}) {
   const el = document.createElement(href ? "a" : "button");
-  el.className = "dd-action";
+  // An action with an icon is a row and reads left-to-right from its glyph. One
+  // without is a button, and a button's label belongs in the middle of it.
+  el.className = "dd-action" + (icon ? "" : " dd-action--plain");
   if (href) el.href = href;
   else el.type = "button";
   if (icon) {
@@ -238,6 +281,24 @@ export function ddAction({ label, icon, href, onClick } = {}) {
   el.appendChild(Object.assign(document.createElement("span"), { className: "dd-label", textContent: label }));
   if (onClick) el.addEventListener("click", onClick);
   return el;
+}
+
+// A checkbox as a menu row. The row IS the <label>, so the hit target is the
+// whole row rather than a 16px box, and it carries dd-row's metrics — a menu of
+// choices should not be packed tighter than a menu of actions just because the
+// choices happen to be checkboxes.
+//
+// Returns createCheckbox's handle with the row as its `el`, so callers read
+// `.checked` and set `.disabled` exactly as they would on a bare one.
+// `child: true` indents a row that belongs to the one above it, to the column
+// where the parent's text starts.
+export function ddCheckRow({ label, checked, disabled, variant = "dark", child = false, onChange } = {}) {
+  const cb = createCheckbox({ variant, checked, disabled, label, onChange });
+  cb.el.classList.add("dd-row", "dd-check");
+  if (child) cb.el.classList.add("dd-row--child");
+  cb.el.setAttribute("role", "menuitemcheckbox");
+  cb.el.tabIndex = -1; // joins the arrow-key walk; Enter/Space clicks the label
+  return cb;
 }
 
 export function ddSep() {

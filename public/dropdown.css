@@ -84,6 +84,11 @@
   user-select: none;
   outline: none;
 }
+/* An icon-less action has no glyph anchoring it to the left edge, so its label
+   sits where a button's label belongs — the middle. */
+.dd-action--plain .dd-label {
+  text-align: center;
+}
 /* spacing off the body above and off each other — one value, so a footer of
    one action and a footer of three are rhythmically the same */
 .dd-footer > .dd-action:first-child,
@@ -102,6 +107,49 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Checkbox row (ddCheckRow): the checkbox component's own <label> wearing the
+   row's box, so the whole row is the hit target. The two-class selector settles
+   it against .cb's inline-flex whichever order the stylesheets load in. */
+.dd-row.dd-check {
+  display: flex; /* blockified, so it fills the body — no width needed, and a
+                    width of 100% plus the child row's indent would be 100% + 24px,
+                    which the body answers with a horizontal scrollbar */
+  box-sizing: border-box;
+}
+/* a dead row shouldn't light up under the pointer as if it would do something */
+.dd-row.dd-check.is-disabled:hover {
+  background: none;
+}
+/* A row that belongs to the one above it, indented to where the parent's text
+   starts (8px padding + a 16px box + an 8px gap), and a size down — the
+   hierarchy is what the indent is for, so the type only has to agree with it. */
+.dd-row--child {
+  margin-left: 24px;
+  font-size: 12px;
+  color: #8a90a0;
+}
+
+/* two-line row (ddRow's `sublabel`): the label column stacks, and each line
+   ellipsises on its own — the shell sizes to content, so a long machine key
+   must not be what decides the pop's width */
+.dd-row.has-sub .dd-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  overflow: visible;
+}
+.dd-row.has-sub .dd-label-text,
+.dd-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dd-sub {
+  font-size: 11px;
+  color: #6a7080;
 }
 .crate-owner {
   color: #8a90a0;
@@ -255,4 +303,80 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
   user-select: none;
+}
+
+/* ─── light surface (cards, forms, admin) ───────────────────────────────────
+   The shell above is drawn for a dark popover over the gallery. A surface that
+   is already white asks for the inverse, and the component takes it the way
+   createCheckbox does — `variant: "light"` on the caller, one modifier class
+   here, overriding only what differs.
+
+   The values are lifted from the admin's own popovers, which this variant
+   replaced: #fff / #d8d8de / the softer shadow from .access-drop, #f3f3f6 hover
+   from .retag-opt, #ececef from .retag-sep, #9aa0aa from .retag-key. */
+
+.dropdown--light {
+  background: #fff;
+  border-color: #d8d8de;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+.dropdown--light .dd-body {
+  scrollbar-color: #c9c9d0 transparent;
+}
+.dropdown--light .dd-body::-webkit-scrollbar-thumb {
+  background: #c9c9d0;
+}
+
+.dropdown--light .dd-row {
+  color: #111;
+}
+.dropdown--light .dd-row:hover,
+.dropdown--light .dd-row:focus-visible {
+  background: #f3f3f6;
+}
+.dropdown--light .dd-row.active {
+  background: #ececef;
+  color: #111;
+}
+.dropdown--light .dd-sub,
+.dropdown--light .dd-empty,
+.dropdown--light .dd-head,
+.dropdown--light .crate-owner,
+.dropdown--light .dd-row--child,
+.dropdown--light .dd-row.al-off .dd-label {
+  color: #9aa0aa;
+}
+.dropdown--light .dd-sep {
+  background: #ececef;
+}
+
+.dropdown--light .dd-action {
+  background: #111;
+  color: #fff;
+}
+.dropdown--light .dd-action:hover,
+.dropdown--light .dd-action:focus-visible {
+  background: #000;
+  color: #fff;
+}
+
+.dropdown--light .dd-input {
+  background: #fff;
+  border-color: #d8d8de;
+  color: #111;
+}
+.dropdown--light .dd-input:focus {
+  border-color: #9aa0aa;
+}
+.dropdown--light .dd-input::placeholder {
+  color: #b4b4bd;
+}
+
+.dropdown--light .dd-del,
+.dropdown--light .dd-vis {
+  color: #9aa0aa;
+}
+.dropdown--light .dd-vis:hover {
+  background: #f3f3f6;
+  color: #111;
 }

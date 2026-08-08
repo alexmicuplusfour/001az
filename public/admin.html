@@ -10,27 +10,11 @@
     <link rel="stylesheet" href="/toast.css" />
     <link rel="stylesheet" href="/modal.css" />
     <link rel="stylesheet" href="/dropdown.css" />
+    <link rel="stylesheet" href="/checkbox.css" />
     <link rel="stylesheet" href="/panel.css" />
     <style>
       .row-actions-wrap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
 
-      .access-wrap { position: relative; }
-      .access-drop { position: absolute; top: calc(100% + 4px); right: 0; background: #fff; border: 1px solid #d8d8de; border-radius: 8px; padding: 10px 12px; min-width: 240px; box-shadow: 0 4px 16px rgba(0,0,0,.1); z-index: 100; }
-      .access-drop-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
-      .access-drop-list .access-user { display: flex; flex-direction: column; gap: 3px; }
-      .access-drop-list label { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
-      .access-drop-list label.is-admin { color: #9aa0aa; cursor: default; }
-      .access-drop-list input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; cursor: pointer; }
-      .access-drop-list .access-admin-row { margin-left: 24px; font-size: 11px; color: #9aa0aa; }
-      .access-drop-list .access-admin-row input:disabled { cursor: default; }
-
-      /* retag scope picker — borrows .access-drop's shell, but its rows are
-         actions rather than checkboxes, so they get hover/press affordances. */
-      .retag-drop { min-width: 220px; padding: 6px; }
-      .retag-opt { display: block; width: 100%; text-align: left; background: none; border: 0; border-radius: 6px; padding: 7px 9px; font-size: 13px; color: inherit; cursor: pointer; }
-      .retag-opt:hover { background: #f3f3f6; }
-      .retag-opt .retag-key { display: block; font-size: 11px; color: #9aa0aa; }
-      .retag-sep { height: 1px; background: #ececef; margin: 5px 2px; }
 
       /* plugins tab — the plugin row and the add-modal row share the .p-* parts */
       .plugin-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }

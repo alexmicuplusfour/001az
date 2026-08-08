@@ -5,6 +5,7 @@
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openBoardModal } from "/board-modal.js";
+import { openDropdown, ddRow, ddCheckRow, ddSep, ddAction } from "/dropdown.js";
 
 const boardsContent = document.getElementById("boards-content");
 
@@ -89,14 +90,11 @@ export async function renderBoards() {
     editBtn.onclick = () => openBoardModal(b.id, { canEditAI: true, onSaved: renderBoards });
     wrap.appendChild(editBtn);
 
-    const accessWrap = document.createElement("div");
-    accessWrap.className = "access-wrap";
     const accessBtn = document.createElement("button");
     accessBtn.className = "ghost";
     accessBtn.textContent = "access ▾";
-    accessBtn.onclick = (e) => { e.stopPropagation(); toggleAccessDrop(b, accessWrap); };
-    accessWrap.appendChild(accessBtn);
-    wrap.appendChild(accessWrap);
+    accessBtn.onclick = (e) => { e.stopPropagation(); openAccessPop(b, accessBtn); };
+    wrap.appendChild(accessBtn);
 
     // A voting board bills once per PASS, not once per item, so the item count
     // stops being the cost. "Up to" is doing real work in both directions: the
@@ -110,8 +108,6 @@ export async function renderBoards() {
     // all of them at 18-22% instability, so fixing one facet's gloss otherwise
     // shakes the rest for nothing (planning/facet-addressable-tagging-plan.md).
     const facets = Array.isArray(b.facets) ? b.facets : [];
-    const retagWrap = document.createElement("div");
-    retagWrap.className = "access-wrap";
     const retagBtn = document.createElement("button");
     retagBtn.className = "danger";
     retagBtn.textContent = facets.length ? "retag ↺ ▾" : "retag ↺";
@@ -142,10 +138,9 @@ export async function renderBoards() {
 
     // No facets: nothing to scope to, so the button stays a plain action.
     retagBtn.onclick = facets.length
-      ? (e) => { e.stopPropagation(); toggleRetagDrop(b, facets, retagWrap, runRetag); }
+      ? (e) => { e.stopPropagation(); openRetagPop(facets, retagBtn, runRetag); }
       : () => runRetag(null);
-    retagWrap.appendChild(retagBtn);
-    wrap.appendChild(retagWrap);
+    wrap.appendChild(retagBtn);
 
     if (b.held_count > 0) {
       const tagHeldBtn = document.createElement("button");
@@ -230,130 +225,120 @@ export async function renderBoards() {
 // The retag scope picker. Purely local — the board row already carries `facets`
 // (BOARD_COLS selects it and /api/admin/boards spreads the row), so opening this
 // costs no fetch.
-function toggleRetagDrop(board, facets, container, run) {
-  const id = `retag-drop-${board.id}`;
-  const existing = document.getElementById(id);
-  document.querySelectorAll(".retag-drop, .access-drop").forEach((d) => d.remove());
-  if (existing) return; // second click closes
-
-  const drop = document.createElement("div");
-  drop.className = "access-drop retag-drop";
-  drop.id = id;
-
-  const opt = (label, key, onPick) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "retag-opt";
-    b.textContent = label;
-    if (key) {
-      const k = document.createElement("span");
-      k.className = "retag-key";
-      k.textContent = key;
-      b.appendChild(k);
-    }
-    b.onclick = (e) => { e.stopPropagation(); drop.remove(); onPick(); };
-    return b;
-  };
-
-  drop.appendChild(opt("Everything", null, () => run(null)));
-  const sep = document.createElement("div");
-  sep.className = "retag-sep";
-  drop.appendChild(sep);
-  for (const f of facets) {
-    if (!f?.key) continue;
-    drop.appendChild(opt(f.label || f.key, f.key, () => run(f)));
-  }
-
-  container.appendChild(drop);
-  // Same dismiss contract as the access drop: the next click anywhere closes it.
-  setTimeout(() => document.addEventListener("click", function away() {
-    drop.remove();
-    document.removeEventListener("click", away);
-  }, { once: true }), 0);
+//
+// The shell is the app's dropdown component in its light variant: it brings the
+// viewport-aware placement this menu needs most, since the boards table runs
+// long and a picker on the last row used to open straight off the bottom of the
+// window. Scroll cap, Escape, re-click-to-close, one-open-at-a-time and arrow
+// keys come with it.
+function openRetagPop(facets, anchorEl, run) {
+  openDropdown(anchorEl, {
+    variant: "light",
+    align: "end",
+    minWidth: 220,
+    build: (body, { close }) => {
+      body.appendChild(ddRow({
+        label: "Everything",
+        onClick: () => { close(); run(null); },
+      }));
+      body.appendChild(ddSep());
+      for (const f of facets) {
+        if (!f?.key) continue;
+        // label over key: a facet is picked by its human name, but the key is
+        // what the retag call sends, and they are worth seeing together
+        body.appendChild(ddRow({
+          label: f.label || f.key,
+          sublabel: f.key,
+          onClick: () => { close(); run(f); },
+        }));
+      }
+    },
+  });
 }
 
-async function toggleAccessDrop(board, container) {
-  const existing = document.getElementById(`access-drop-${board.id}`);
-  if (existing) { existing.remove(); return; }
-  document.querySelectorAll(".access-drop").forEach((d) => d.remove());
+// The board access picker: who can see this board, and which of them may edit
+// it from the gallery. Same shell as the retag picker.
+//
+// It opens BEFORE its data arrives, on purpose. The user list is a fetch, and
+// awaiting it first would both delay the popover and hand openDropdown a stale
+// view of what is open — its "click the same anchor again to close" check would
+// run a round-trip after the click that should have closed it. So: open with a
+// placeholder, fill the body when the list lands, then re-measure.
+function openAccessPop(board, anchorEl) {
+  let live = true; // the fetch can outlive the popover — closing it wins
+  const ctx = openDropdown(anchorEl, {
+    variant: "light",
+    align: "end",
+    minWidth: 240,
+    // rows, not users: a member with a board-admin toggle contributes two, so
+    // this is roughly six people before the list starts scrolling
+    maxItems: 12,
+    onClose: () => { live = false; },
+    build: (body) => {
+      const hint = document.createElement("div");
+      hint.className = "dd-empty";
+      hint.textContent = "Loading…";
+      body.appendChild(hint);
+    },
+    footer: (foot) => {
+      foot.appendChild(ddAction({ label: "Save", onClick: () => save() }));
+    },
+  });
+  if (!ctx) return; // second click on the same button: toggled closed
 
-  let users;
-  try { users = await api("GET", "/api/admin/users"); }
-  catch { return; }
-
-  const drop = document.createElement("div");
-  drop.className = "access-drop";
-  drop.id = `access-drop-${board.id}`;
-
-  const listEl = document.createElement("div");
-  listEl.className = "access-drop-list";
   const memberSet = new Set(board.memberIds || []);
   const adminSet = new Set(board.adminIds || []);
-  for (const u of users) {
-    const row = document.createElement("div");
-    row.className = "access-user";
+  let rows = []; // { id, member, admin } — the handles, not the DOM
 
-    const lbl = document.createElement("label");
-    lbl.className = "access-member-row" + (u.is_admin ? " is-admin" : "");
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.className = "member-cb";
-    cb.value = u.id;
-    cb.checked = u.is_admin || memberSet.has(u.id);
-    cb.disabled = !!u.is_admin;
-    const nameEl = document.createElement("span");
-    nameEl.textContent = (u.name || u.email) + (u.is_admin ? " (admin)" : "");
-    lbl.append(cb, nameEl);
-    row.appendChild(lbl);
-
-    // Board-admin toggle: lets a member edit this board from the gallery.
-    // Its own indented row + own <label> so it toggles natively; only for
-    // non-global-admins (global admins already manage every board), and
-    // only active once they're a member.
-    if (!u.is_admin) {
-      const adminLbl = document.createElement("label");
-      adminLbl.className = "access-admin-row";
-      adminLbl.title = "Can edit this board's settings from the gallery";
-      const adminCb = document.createElement("input");
-      adminCb.type = "checkbox";
-      adminCb.className = "admin-cb";
-      adminCb.value = u.id;
-      adminCb.checked = adminSet.has(u.id);
-      adminCb.disabled = !cb.checked;
-      const adminTxt = document.createElement("span");
-      adminTxt.textContent = "board admin";
-      adminLbl.append(adminCb, adminTxt);
-      cb.addEventListener("change", () => {
-        adminCb.disabled = !cb.checked;
-        if (!cb.checked) adminCb.checked = false;
-      });
-      row.appendChild(adminLbl);
-    }
-    listEl.appendChild(row);
-  }
-  drop.appendChild(listEl);
-
-  const saveBtn = document.createElement("button");
-  saveBtn.textContent = "Save";
-  saveBtn.onclick = async () => {
-    const memberIds = [...listEl.querySelectorAll("input.member-cb:not(:disabled):checked")].map((cb) => Number(cb.value));
-    const adminIds = [...listEl.querySelectorAll("input.admin-cb:not(:disabled):checked")].map((cb) => Number(cb.value));
+  async function save() {
+    const memberIds = rows.filter((r) => !r.member.disabled && r.member.checked).map((r) => r.id);
+    const adminIds = rows.filter((r) => r.admin && !r.admin.disabled && r.admin.checked).map((r) => r.id);
     try {
       await api("PATCH", `/api/admin/boards/${board.id}`, { memberIds, adminIds });
       board.memberIds = memberIds;
       board.adminIds = adminIds;
-      drop.remove();
+      ctx.close();
       toast("Access updated");
     } catch (err) { toast.error(err.message); }
-  };
-  drop.appendChild(saveBtn);
-  container.appendChild(drop);
-
-  function onOutside(e) {
-    if (!container.contains(e.target)) {
-      drop.remove();
-      document.removeEventListener("click", onOutside);
-    }
   }
-  setTimeout(() => document.addEventListener("click", onOutside), 0);
+
+  api("GET", "/api/admin/users").then((users) => {
+    if (!live) return;
+    const list = document.createDocumentFragment();
+    rows = users.map((u) => {
+      // A global admin is a member of every board and can't be removed from
+      // one, so their box is checked and dead.
+      const member = ddCheckRow({
+        variant: ctx.variant,
+        checked: u.is_admin || memberSet.has(u.id),
+        disabled: !!u.is_admin,
+        label: (u.name || u.email) + (u.is_admin ? " (admin)" : ""),
+      });
+      list.appendChild(member.el);
+
+      // Board-admin lets a member edit this board's settings from the gallery.
+      // Global admins already can, so they get no toggle; everyone else's is a
+      // child of their membership — live only while they are a member.
+      let admin = null;
+      if (!u.is_admin) {
+        admin = ddCheckRow({
+          variant: ctx.variant,
+          child: true,
+          checked: adminSet.has(u.id),
+          disabled: !member.checked,
+          label: "board admin",
+        });
+        admin.el.title = "Can edit this board's settings from the gallery";
+        member.addEventListener("change", () => {
+          admin.disabled = !member.checked;
+          if (!member.checked) admin.checked = false;
+        });
+        list.appendChild(admin.el);
+      }
+
+      return { id: u.id, member, admin };
+    });
+    ctx.body.replaceChildren(list);
+    ctx.reposition(); // the body just changed height
+  }).catch(() => { if (live) ctx.close(); });
 }
