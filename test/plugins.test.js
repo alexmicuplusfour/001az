@@ -370,6 +370,44 @@ test("resolvers: a not-installed AI plugin drops out; fallbacks stay graceful", 
   }
 });
 
+// GET /api/admin/ai-default — what the board modal's "App default" rows name.
+// It must walk the SAME ladder as the tagger (a label that disagrees with what
+// tags the items is worse than no label), and never carry the secret.
+test("ai-default: names the key and model the app default resolves to — never the secret", async () => {
+  const savedEnv = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    assert.equal((await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid })).json, null,
+      "nothing configured → null, so the row can say so");
+
+    const keyId = await createAiKey(db, "prod", "openai", "sk-t9"); // named "prod", not "openai" — the label must be the row's own name
+    await setSetting(db, "default_key_id", String(keyId));
+    await setSetting(db, "model", "gpt-5.4-mini");
+    // Not installed yet: the ladder skips it, and so does the label.
+    assert.equal((await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid })).json, null);
+
+    await setPluginState(db, "ai:openai", { installed: true });
+    const r = await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid });
+    assert.deepEqual(r.json, { name: "prod", provider: "openai", model: "gpt-5.4-mini" });
+
+    // The env rung has no row to name, so the route names it.
+    await setSetting(db, "default_key_id", null);
+    await setSetting(db, "model", null);
+    process.env.ANTHROPIC_API_KEY = "sk-env";
+    const env = (await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid })).json;
+    assert.equal(env.name, "environment key");
+    assert.equal(env.provider, "anthropic");
+    assert.ok(env.model);
+    assert.ok(!JSON.stringify(env).includes("sk-env"), "the key itself never leaves the server");
+  } finally {
+    if (savedEnv !== undefined) process.env.ANTHROPIC_API_KEY = savedEnv;
+    else delete process.env.ANTHROPIC_API_KEY;
+    await setPluginState(db, "ai:openai", { installed: false });
+    await setSetting(db, "default_key_id", null);
+    await setSetting(db, "model", null);
+  }
+});
+
 test("health ledger: connector traffic records failures and heals through the runtime", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async () => { const e = new Error("boom"); e.status = 500; throw e; };

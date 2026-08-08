@@ -1653,6 +1653,19 @@ app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
 }));
 
 // --- admin: AI tagger config (key registry + app default) ---
+
+// What "App default" actually resolves to, for the UI rows that inherit it
+// (the board modal's tagger and extraction pickers). The worker's own ladder
+// answers — settings key, else the env key, skipping a provider whose plugin
+// isn't installed — so the label can't drift from what tags the items; the
+// secret stays behind. null = nothing configured.
+app.get("/api/admin/ai-default", requireAdmin, wrap(async (_req, res) => {
+  const ai = await resolveDefaultAi(db);
+  if (!ai) return res.json(null);
+  const key = ai.keyId === "env" ? null : await getAiKey(db, ai.keyId);
+  res.json({ name: key?.name || "environment key", provider: ai.provider, model: ai.model });
+}));
+
 app.get("/api/admin/ai-keys", requireAdmin, wrap(async (_req, res) => {
   const keys = await listAiKeys(db);
   res.json(

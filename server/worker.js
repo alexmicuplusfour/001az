@@ -89,7 +89,9 @@ const trackedTagger = async (db, args) => {
 };
 
 // The app-default tagger: settings-designated key, else the legacy env var.
-// Returns { provider, apiKey, model } or null when nothing is configured.
+// Returns { provider, apiKey, model, keyId } or null when nothing is
+// configured. `keyId` is which rung answered — a connection row, or "env" —
+// which only this function knows; naming it for a human is the route's job.
 export async function resolveDefaultAi(db) {
   const defId = Number(await getSetting(db, "default_key_id")) || 0;
   if (defId) {
@@ -98,7 +100,7 @@ export async function resolveDefaultAi(db) {
       const model = (await getSetting(db, "model")) || PROVIDERS[key.provider].defaultModel;
       // `base`: the connection's own server URL (self-hosted providers) — rides
       // every resolved-ai object so the wire can point at the right box.
-      return { provider: key.provider, apiKey: key.api_key, model, base: key.base_url || undefined };
+      return { provider: key.provider, apiKey: key.api_key, model, base: key.base_url || undefined, keyId: key.id };
     }
   }
   if (process.env.ANTHROPIC_API_KEY && (await aiPluginInstalled(db, "anthropic"))) {
@@ -106,6 +108,7 @@ export async function resolveDefaultAi(db) {
       provider: "anthropic",
       apiKey: process.env.ANTHROPIC_API_KEY,
       model: (await getSetting(db, "model")) || process.env.MODEL || PROVIDERS.anthropic.defaultModel,
+      keyId: "env",
     };
   }
   return null;
@@ -174,6 +177,7 @@ export async function resolveBoardAi(db, boardEntry) {
         apiKey: key.api_key,
         model: boardEntry.aiModel || PROVIDERS[key.provider].defaultModel,
         base: key.base_url || undefined,
+        keyId: key.id,
       };
     }
     if (key) console.log(`board AI provider ${key.provider} is not installed — falling back to the default tagger`);

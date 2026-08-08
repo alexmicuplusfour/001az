@@ -339,6 +339,16 @@ export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null }
   attachLiveModels(sel, keyId, kind, saved);
 }
 
+// How every connection row names itself — plus the model where the row's whole
+// point is which one runs (the default rows below).
+export const keyLabel = (key, model = key.model) =>
+  `${key.name} — ${key.provider}${model ? ` · ${model}` : ""}`;
+
+// A default row inherits a key and a model, and neither is visible from the row
+// itself — so it says: "App default (prod — openai · gpt-5.4-mini)". No note =
+// nothing trustworthy to add, and the bare label stands.
+export const withDefaultNote = (base, note) => (note ? `${base} (${note})` : base);
+
 // Open the board editor — the ONE board modal, same shape everywhere (admin
 // page, gallery pencil, and both "New board" buttons): a Mapping|Tagging pane
 // toggle over a single Save.
@@ -443,6 +453,11 @@ export async function openBoardModal(boardId, opts = {}) {
             : null,
         });
       }
+      // The panes are mutually exclusive, so a reveal is the only moment the
+      // extraction row can be read — one push here covers every way the tagger
+      // moved while Mapping was hidden, including a provider's live model list
+      // landing (which repaints the select without firing `change`).
+      if (showMapping) mappingPane?.setBoardTagger(boardTaggerLabel());
     });
   }
 
@@ -561,6 +576,9 @@ export async function openBoardModal(boardId, opts = {}) {
   // Per-board tagger override (admin only) — key registry is fetched async; the
   // selects stay disabled until it arrives.
   let aiKeySel, aiModelSel, aiLoaded = false;
+  // Defined below only where there's a tagger picker to read it off; a
+  // board-admin has none, so their Mapping pane just says "Board default".
+  let boardTaggerLabel = () => null;
   if (canEditAI) {
     const aiWrap = document.getElementById("board-modal-ai");
     aiKeySel = document.createElement("select");
@@ -572,6 +590,18 @@ export async function openBoardModal(boardId, opts = {}) {
     aiWrap.append(aiKeySel, aiModelSel);
     let aiKeys = [];
     let aiCatalog = {}; // provider name -> catalog entry
+    let appDefault; // the /api/admin/ai-default payload; undefined until (and unless) it lands
+    // What App default inherits. undefined = the probe failed, so say nothing
+    // rather than claim an app with no tagger at all.
+    const appDefaultNote = () =>
+      appDefault === undefined ? null : appDefault ? keyLabel(appDefault) : "none configured";
+    // What the Mapping pane's "Board default" row inherits: the tagger THIS
+    // modal currently shows — unsaved edits included, so the two panes can't
+    // disagree — or, with nothing pinned, whatever App default resolves to.
+    boardTaggerLabel = () => {
+      const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
+      return key ? keyLabel(key, aiModelSel.value || aiCatalog[key.provider]?.defaultModel) : appDefaultNote();
+    };
     const syncAiModelSel = () => {
       const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
       aiModelSel.hidden = !key;
@@ -582,12 +612,18 @@ export async function openBoardModal(boardId, opts = {}) {
         saved: key && board && board.ai_key_id === key.id ? board.ai_model : null,
       });
     };
-    Promise.all([api("GET", "/api/admin/ai-keys"), loadProviders()]).then(([keys, catalog]) => {
+    Promise.all([
+      api("GET", "/api/admin/ai-keys"),
+      loadProviders(),
+      // Not fatal: a failed probe costs the parenthetical, not the picker.
+      api("GET", "/api/admin/ai-default").catch(() => undefined),
+    ]).then(([keys, catalog, def]) => {
       aiKeys = keys;
       aiCatalog = byName(catalog);
+      appDefault = def;
       const defOpt = document.createElement("option");
       defOpt.value = "";
-      defOpt.textContent = "App default";
+      defOpt.textContent = withDefaultNote("App default", appDefaultNote());
       aiKeySel.appendChild(defOpt);
       for (const k of keys) {
         const opt = document.createElement("option");
@@ -595,7 +631,7 @@ export async function openBoardModal(boardId, opts = {}) {
         // A not-installed provider's keys stay pickable (defaults not laws) but
         // say so — the worker falls back to the app default while it's not added.
         const off = aiCatalog[k.provider]?.installed === false;
-        opt.textContent = `${k.name} — ${k.provider}${off ? " · not installed" : ""}`;
+        opt.textContent = keyLabel(k) + (off ? " · not installed" : "");
         aiKeySel.appendChild(opt);
       }
       if (board && board.ai_key_id && keys.find((k) => k.id === board.ai_key_id)) {

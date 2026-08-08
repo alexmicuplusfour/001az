@@ -1,7 +1,7 @@
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
-import { loadProviders, byName, syncModelPicker, switchRow } from './board-modal.js';
+import { loadProviders, byName, syncModelPicker, switchRow, keyLabel, withDefaultNote } from './board-modal.js';
 import { sectionHeadingEl } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date", "object"];
@@ -12,9 +12,10 @@ const CADENCES = [[0, "Off"], [1, "1 min"], [5, "5 min"], [15, "15 min"], [60, "
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, collect }: the host folds collect()'s payload into its one
-// PATCH/POST. Fully parameterized (no gallery-state reads), so it works on
-// admin.html and for not-yet-created boards:
+// Returns { isDirty, collect, setBoardTagger }: the host folds collect()'s
+// payload into its one PATCH/POST, and names the tagger behind "Board default"
+// via setBoardTagger. Fully parameterized (no gallery-state reads), so it works
+// on admin.html and for not-yet-created boards:
 //   isAdmin  — editable pane + extraction row; false = read-only view
 //   mapping  — the board's current mapping (null for a new/unmapped board)
 //   hasItems — locks the connector-template picker (templates rewire the whole
@@ -52,6 +53,16 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   let extractKeySel = null;
   let extractModelSel = null;
   let extractLoaded = false;
+  // The "Board default" row names the tagger it falls back to. Only the host
+  // can say — the answer includes tagger edits it hasn't saved yet — so it
+  // pushes on every reveal of this pane, which may be before or after the
+  // option below exists. Whichever lands second does the rendering.
+  let boardTagger = null;
+  let extractDefOpt = null;
+  const setBoardTagger = (label) => {
+    boardTagger = label;
+    if (extractDefOpt) extractDefOpt.textContent = withDefaultNote("Board default", boardTagger);
+  };
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
@@ -799,14 +810,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     ]).then(([keys, catalog]) => {
       aiKeys = keys;
       aiCatalog = byName(catalog);
-      const defOpt = document.createElement("option");
-      defOpt.value = "";
-      defOpt.textContent = "Board default";
-      extractKeySel.appendChild(defOpt);
+      extractDefOpt = document.createElement("option");
+      extractDefOpt.value = "";
+      extractKeySel.appendChild(extractDefOpt);
+      setBoardTagger(boardTagger); // fills the option — the host may have pushed before this landed
       for (const k of keys) {
         const opt = document.createElement("option");
         opt.value = String(k.id);
-        opt.textContent = `${k.name} — ${k.provider}`;
+        opt.textContent = keyLabel(k);
         extractKeySel.appendChild(opt);
       }
       if (extractKeyId && keys.find((k) => k.id === extractKeyId)) {
@@ -961,5 +972,5 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     };
   }
 
-  return { isDirty: () => dirty, collect };
+  return { isDirty: () => dirty, collect, setBoardTagger };
 }
