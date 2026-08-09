@@ -41,6 +41,12 @@ marks. The rule the plan states for `.job-new` — *read before anything
 acknowledges* — is the general one, and it is worth reading as a property of
 every surface here rather than as a note about one watermark.
 
+**Defect 7 was filed here and closed on a closer look** — it is correct behaviour,
+and the fix this document first proposed for it was worse than the thing it
+fixed. It has moved to *Behaviour worth a decision* with the evidence. Numbering
+is global across the sections, as in `facet-scope-loose-ends.md`, so it keeps
+its number where it stands.
+
 ## Verified sound (checked because a break here would be silent)
 
 - **`started_at` arrives as a number, not a bigint string.** `db.js:11` sets
@@ -584,24 +590,85 @@ every surface here rather than as a note about one watermark.
   and fixing it means deciding what a gallery with no storage should do — which
   is a bigger question than a watermark's.
 
-- [ ] **7. The first-ever open bolds the entire failure history.**
+- [ ] **8. Opening the diagnostics modal over itself leaves the page permanently
+  scroll-locked.** *(real, but latent — see the reachability note below; the
+  trigger this entry first claimed does not exist)*
 
-  `newSince` is `seenAt(...)`, which is `0` before any acknowledgement
-  (`jobs-modal.js:203`), so a reader who has never opened the log gets every
-  historical `failed` row in `.job-new`. Literally correct — none of them has
-  been seen — and wrong for the one visit where the reader is learning what the
-  bold means. The natural floor is the same one `markSeen` already uses: on a
-  board with no watermark at all, treat the session start as the mark.
+  **What this entry was filed as is not a defect.** It claimed the modal "never
+  re-acks, so it can be toasted at too" — pattern-matched to defect 1 without
+  checking whether the consequence was bad. It isn't. `openDiagnosticsModal`
+  (`facet-diagnostics.js:493-609`) has *no* refresh path: one `app:render`
+  dispatch to clear the dot, no interval, no listener. So a finding arriving
+  while it is open is genuinely not on screen — and by the reasoning defect 1b
+  settled, a toast for something not on screen is the **only** notice it will get,
+  and the dot re-lighting behind the dialog is correct. Nothing to fix. (Second
+  time in this sweep, after 7, that a finding filed by analogy dissolved on
+  inspection.)
 
-- [ ] **8. The diagnostics modal never re-acks, so it can be toasted at too.**
+  **The real bug is the line under it.** `facet-diagnostics.js:507` clears any
+  existing dialog with a raw DOM removal:
 
-  `openDiagnosticsModal` marks seen once, on open (`facet-diagnostics.js:494`),
-  and has no refresh loop. The 60 s tick keeps running underneath it: a finding
-  written while the modal is open updates `state.facetStats`, dispatches
-  `app:render`, and produces a rising edge behind a dialog whose contents are a
-  one-shot fetch and will not show it. Same class as defect 1, an order of
-  magnitude rarer, and it wants the same answer the jobs modal already has — an
-  `ack` the refresh path calls.
+  ```js
+  document.getElementById("facet-diagnostics-modal")?.remove();
+  ```
+
+  That bypasses `mountModal`'s `close()` (`modal.js:52-60`), so the orphan never
+  reaches `finishClose` and never calls `unlockScroll()` (`modal.js:31-35`) — and
+  the scroll lock is **ref-counted**, by deliberate design (`modal.js:16-21`:
+  *"Ref-counted so a modal opened from another modal doesn't unlock early or pad
+  twice"*).
+
+  ```
+  A mounts                      scrollLocks 1
+  second open: A removed raw    scrollLocks 1   (A's teardown never runs)
+  B mounts                      scrollLocks 2
+  close B with × or click-out   scrollLocks 1   -> body.style.overflow stays "hidden"
+  ```
+
+  **The gallery is unscrollable until reload.** Escape recovers it by accident:
+  A's `keydown` listener is still on `document`, so Escape fires both closes and
+  the count unwinds to 0. The × button and click-out are bound to B's overlay
+  alone, so they do not.
+
+  Each orphan also leaks its `document` keydown listener.
+
+  **Reachable one way, and it is rare. The "double-click the button" route this
+  entry first claimed does not exist.** `.modal-overlay` is
+  `position: fixed; inset: 0; z-index: 500` (`modal.css:3-6`) and nothing
+  disables its pointer events until `.is-closing`, so the instant the overlay is
+  appended it covers the toolbar — a second click lands on the overlay and
+  *closes* the dialog. The only gap is the one before the overlay exists, i.e.
+  the facet-stats fetch, and this entry sized that gap from the plan's 611 ms —
+  which is a recorded past performance *problem*, not the ordinary case. On a
+  normal board the dialog is up before a second click arrives.
+
+  What is left is the toast's **Open**, and that one needs no timing at all:
+
+  ```
+  #toast-wrap  z-index: 700   /* its own comment: "above modals (500)" */
+  .toast       pointer-events: auto
+  ```
+
+  Toasts are deliberately stacked above modals and are clickable, so with the
+  dialog open, Open on a "New tagging consistency finding" calls
+  `openDiagnosticsDoor` and does replace it. Deterministic — but it needs a new
+  finding to land inside the minute the reader happens to have the dialog open,
+  which is rare enough that this is a latent bug, not a live one.
+
+  `board-modal.js:374` carries the identical pattern. Its exposure is worth its
+  own look rather than assuming it matches.
+
+  **Method note, because it cost two entries.** This defect and 7 were both filed
+  on a mechanism that *can* misfire, without checking whether anything can
+  actually reach it. Mechanism and reachability are separate questions and the
+  second one is the one that decides severity.
+
+  **Fix shape.** The codebase has the other idiom — `jobs-modal.js:200` and
+  `ingest-modal.js:45` both `if (modalEl) return` — but guard-and-return is the
+  wrong answer *here*: the toast's Open exists precisely to show the reader the
+  finding that was just announced, and an Open that does nothing is the thing
+  criticised in 1a. Hold the live `close` and call it, so the predecessor tears
+  down through the path that balances the lock.
 
 ## Documented but not built
 
@@ -626,6 +693,50 @@ every surface here rather than as a note about one watermark.
   where the comments carry the argument, both are load-bearing.
 
 ## Behaviour worth a decision (no change made)
+
+- **7. The first-ever open bolds the entire failure history — and that is
+  correct.** *(closed on a closer look; filed as a defect first, downgraded on
+  the evidence)*
+
+  `newSince` is `seenAt(...)`, which is `0` before any acknowledgement
+  (`jobs-modal.js:219`), so a reader who has never opened the log on this board
+  gets every historical `failed` row in `.job-new`. The first draft of this entry
+  called that "wrong for the one visit where the reader is learning what the bold
+  means", and proposed flooring the mark at session start. Three things say
+  otherwise, and the third is decisive.
+
+  **The proposed fix was worse than the behaviour.** `newSince` is a frozen copy
+  of the watermark that `jobsUnseen()` also reads, so flooring it at session start
+  floors the **dot** too — darkening it on first contact and hiding a failure from
+  the one reader who has genuinely never seen it. And under the `started_at`
+  keying it would additionally swallow a long-running job that began before the
+  first page load and failed after it, which is the exact miss the plan already
+  accepts once and should not accept twice.
+
+  **The plan has already ruled on the general case.** *"The baseline is taken at
+  boot, so whatever is **already** lit when the page opens is never news. Three
+  toasts on arrival would be the feature's worst first impression."* A dot lit on
+  arrival is explicitly fine; only *announcing* it is not, and it doesn't. A first
+  visit to a board with history is precisely that case.
+
+  **And the failure mode is no-signal, not wrong-signal.** A failed row is already
+  red twice over before `.job-new` touches it — `.job-outcome-failed` on the
+  verdict cell (`styles.css:1511`) and `.job-err` on the summary (`:1521`). All
+  `.job-new` adds is `font-weight: 600` on two cells. So on a first visit with N
+  failures in the 50-row page you get N red-and-bold rows instead of N red rows:
+  the bold stops *distinguishing*, but nothing is hidden and nothing is misstated.
+  On a healthy board N is 0–3 and it reads normally; on a board where N is large,
+  every row is red anyway and the reader's problem is not the typography.
+
+  The shipped precedent agrees. `.al-new` (`alerts-modal.js:480`,
+  `modal.css:559`) has the identical property — a first-time reader has every
+  firing unseen, so every firing bolds — and has lived with it.
+
+  The one change that would be defensible is presentational and costs no
+  semantics: **bold nothing when every failed row on the page is new**, since the
+  mark exists to separate new from old and there is nothing to separate. Not
+  taken. It trades a rule you can state in a sentence for one with a special case,
+  to remove an effect whose whole cost is that some emphasis is redundant.
 
 - **11. The toast is silent to a screen reader, and two of three dots never
   change their accessible name.** There is no `aria-live` region anywhere in the
@@ -656,24 +767,107 @@ every surface here rather than as a note about one watermark.
   on any change. The catch-up-on-return behaviour already covers the case that
   matters, so the widening is nearly free.
 
-- **13. Clock skew is re-learned from scratch every page load, from one feeder.**
-  `skew` lives in a module-level `let` (`seen-mark.js:28`) and is written only by
-  `refreshJobErrors`. If that route fails at boot — the same failure as defect 2 —
-  `markSeen`'s floor silently reverts to the reader's own clock, i.e. the
-  documented bug is back and, being a dot that doesn't light, invisible. Two
-  cheap hardenings: persist the last offset in `localStorage` so a bad boot
-  inherits a known-good one, and add `now` to the `/jobs` page response so the
-  open modal feeds the offset too.
+- **13. Clock skew has one feeder, and the dialog that needs it most had stood
+  that feeder down.** *(the reachable half fixed; the rest left, see below)*
+  `skew` lives in a module-level `let` (`seen-mark.js:28`), starts at `0`, and
+  had exactly one feeder — `refreshJobErrors`. At `0`, `markSeen`'s floor reverts
+  to the reader's own clock, which is the documented bug back again and invisible,
+  since a dot that never lights looks like a board where nothing went wrong.
 
-- **14. The watermark keys accumulate forever.** `jobErrSeen:<board>` and
-  `facetDiagSeen:<board>` are written per board and never pruned — not on board
-  deletion, not on sign-out. Small, unbounded, and the kind of thing that is
-  easier to decide now than to migrate later.
+  **Reachability, checked rather than assumed.** The jobs chip does not exist
+  until `app.js:148`, which is after the boot `Promise.all` containing
+  `refreshJobErrors` has settled. So nothing acknowledgeable is on screen before
+  the offset is normally learned, and reaching the bug needs all three of: the
+  boot errors fetch failing, an interaction within the next 20 s, *and* a
+  materially wrong clock — a right clock makes `skew = 0` the correct value
+  anyway. On its own that is not worth a change.
+
+  **What made it worth one is that defect 1's fix widened it.** Standing the
+  `jobErrors` signal down while the log is open (`signals.js`) means the only
+  feeder is silent for exactly as long as the dialog lives. In the scenario
+  above, *opening the log* now prevents the offset from being learned, where the
+  20 s tick would previously have repaired it.
+
+  **And the fix this entry first proposed rested on a false premise.** It asked
+  to "add `now` to the `/jobs` page response". It has been there since `b743290`,
+  long before the dot needed it — `server.js:913`. The client simply dropped it:
+  `noteStamp` read `data.failed_at` and nothing else.
+
+  ### What was done
+
+  One line: `noteStamp` calls `noteServerNow(data.now)`, ahead of its own
+  early-return, so the clock is recorded on every response even when the stamp
+  has not moved — a stale stamp is still fresh news about the time. The dialog
+  therefore feeds the offset for as long as it suppresses the route that used to.
+
+  Test: the page payload carries `now`, asserted beside the `failed_at` it
+  already pins. That contract is now load-bearing and its failure is silent —
+  `noteServerNow(undefined)` is a no-op, so a dropped field leaves the offset at
+  whatever it was and the watermark quietly goes back to the reader's clock.
+
+  **Left undone, deliberately:** persisting the offset across page loads. It only
+  helps in the window before the first successful read of either route, which the
+  above shows is not reachable from the UI, and it would trade a live measurement
+  for a stored one that a corrected clock makes wrong.
+
+  Adjacent and unfixed, same root: the log's relative times
+  (`relTime`, and the running rows' elapsed) compute `Date.now() - started_at` —
+  the reader's clock against a server stamp. A fast clock inflates every "3m ago"
+  in the list. Cosmetic, and `serverNow()` is now sitting right there.
+
+- **14. The watermark keys accumulate forever — and that is fine.** *(closed on a
+  closer look)*
+
+  `jobErrSeen:<board>` and `facetDiagSeen:<board>` are written per board and
+  never pruned, on board deletion or sign-out. Filed as "small, unbounded, and
+  easier to decide now than to migrate later". Checked, all three parts of that
+  turn out not to hold.
+
+  **The size is nothing.** A key is `jobErrSeen:` plus a 36-character UUID, and
+  the value is a millisecond stamp — about 60 bytes, two per board. Against a
+  5 MB quota that is roughly 40,000 boards to reach one percent.
+
+  **There is no stale-key hazard.** Board ids are `crypto.randomUUID()`
+  (`db.js:1178`), so a deleted board's mark can never be inherited by a new one.
+
+  **And the pattern is already the house one.** `sort.js` and `view.js` write
+  `boardSort:<board>` and `boardView:<board>` on exactly the same terms and prune
+  exactly as much, and sign-out clears nothing at all (`toolbar.js:194-199` posts
+  `/api/logout` and reloads). This feature did not introduce the stance; it
+  joined it.
+
+  The one genuinely interesting question underneath is **not** size but a second
+  user signing in on the same browser and inheriting the first's
+  acknowledgements. That is a decision the plan already made and stated: these
+  two dots are deliberately not a per-user ledger — *"nobody needs them to follow
+  a device change"* — and the signal that does keep one, alerts, keeps it
+  server-side for that reason. It is also already true of the sort order and the
+  grid/rows choice, which nobody has minded.
+
+  Namespacing the keys by user would fix it, and would cost a one-time re-light
+  of every dot for every reader on the format change — the exact cost the plan
+  went out of its way to avoid when it left `facetDiagSeen:` alone rather than
+  renaming it into the shared module. A guaranteed false alarm for everyone, to
+  close a shared-browser edge the design has already ruled on. Not taken.
 
 - **15. `ddCheckRow` sets `role="menuitemcheckbox"` and never `aria-checked`**
   (`dropdown.js:299`). Pre-existing — `admin-boards.js:318,331` got there first —
-  but the notification-sound toggle is now a user-facing instance of it, in the
-  menu a person opens looking for their own settings.
+  and it no longer has anything to do with this feature: the notification-sound
+  toggle was its only user here, and that control has left the dropdown (below).
+  What remains is the board-members list in the admin UI, which is where the
+  defect started and where it should be fixed.
+
+  **The sound toggle was unrequested scope and is out of the user menu**
+  (2026-08-09, at the author's direction). It shipped as a `ddCheckRow` there on
+  the argument that a person looks for their own settings in that menu; the menu
+  is doors and a sign-out, so a preference was the one item in it that didn't go
+  anywhere — and the page it was supposedly avoiding, Profile, is one row above
+  it in the same menu and is exactly the page of the reader's own settings. It
+  now sits under **Notifications** on `/profile.html`, beside Name and Password,
+  with the turn-it-on-plays-the-tone behaviour intact, since that gesture is also
+  what unlocks the browser's autoplay policy. The sound itself, `chime.js`, and
+  the `notifySound` key are unchanged. `header-signals-plan.md` records the
+  revision.
 
 - **16. `announce.js` has no test of any kind, and it owns the rule.** The plan
   explains why it can't be imported under Node (`board-modal.js`'s root-absolute

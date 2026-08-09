@@ -476,6 +476,14 @@ test("the log page carries the same stamp, so the open modal acknowledges what i
   await logged(b, "failed", 2000);
   const page = await req(srv.base, "GET", `/api/boards/${b}/jobs`, { sid: admin.sid });
   assert.equal(page.json.failed_at, 2000);
+  // …and the server's clock, which this page is now the client's only source of
+  // while the dialog is open: the errors route feeds seen-mark's offset and the
+  // dialog stands that route down for as long as it lives. Dropping `now` from
+  // this payload fails silently — noteServerNow(undefined) is a no-op, the
+  // offset stays at whatever it was, and the watermark quietly goes back to
+  // being floored on the reader's own clock.
+  assert.equal(typeof page.json.now, "number");
+  assert.ok(Math.abs(page.json.now - Date.now()) < 60_000);
 
   // Board-wide, NOT a property of the filtered page — a reader who clicked the
   // Ingestion pill must not have the dot cleared by a page with no failures in

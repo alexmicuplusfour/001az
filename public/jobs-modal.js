@@ -12,7 +12,7 @@ import { state } from './state.js';
 import { createModal, sectionHeadingEl } from './modal.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { fmtDuration, pill } from './utils.js';
-import { unseen, markSeen, seenAt } from './seen-mark.js';
+import { unseen, markSeen, seenAt, noteServerNow } from './seen-mark.js';
 
 // ── the chip's attention dot ──
 // "A job failed while you weren't looking." The count on the chip already says
@@ -388,7 +388,16 @@ export function openJobsModal() {
   // Every response carries the chip's stamp, so take it from whichever read
   // just happened — fresher than the background tick's, and the only path that
   // notices a Clear having destroyed everything the dot was pointing at.
+  //
+  // It carries the server's clock too, and that had been thrown away. The
+  // watermark's floor is server-clocked (seen-mark.js) precisely because the
+  // reader's own clock may be minutes out, and the offset had exactly one
+  // feeder — signals.js's /jobs/errors read, which this dialog now stands down
+  // while it is open. So with the log up, the one response the client still
+  // receives was the one response nobody was reading the clock off. `now` has
+  // been in this payload since b743290, long before the dot needed it.
   const noteStamp = (data) => {
+    noteServerNow(data.now);
     const at = data.failed_at ?? null;
     if (state.jobsFailedAt === at) return false;
     state.jobsFailedAt = at;
