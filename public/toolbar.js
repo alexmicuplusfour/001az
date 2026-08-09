@@ -3,8 +3,7 @@ import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration, attachBtnDot } from './utils.js';
 import { openJobsModal, jobsUnseen } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
-import { openDropdown, ddRow, ddSep, ddAction, ddCheckRow } from './dropdown.js';
-import { chime, soundOn, setSoundOn } from './chime.js';
+import { openDropdown, ddRow, ddSep, ddAction } from './dropdown.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
@@ -167,28 +166,11 @@ function jobsChip() {
 function openUserMenu(anchorEl) {
   openDropdown(anchorEl, {
     className: "user-menu-pop",
-    build: (body, { close, variant }) => {
+    build: (body, { close }) => {
       if (state.me && state.me.is_admin) {
         body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
       }
       body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
-      body.appendChild(ddSep());
-      // The header's dots chime when one lights. Sound is the only part of this
-      // that reaches someone not looking at the tab, so its off switch lives
-      // where a person looks for their own settings — not behind a page nobody
-      // opens. Turning it ON plays the tone: it confirms what was enabled, and
-      // it is a click, which is what the browser's autoplay policy wants before
-      // it will let the first real notification through.
-      // `onChange` is the raw change listener (checkbox.js), so the new state
-      // is read off the handle, not off an argument — an Event is truthy, and a
-      // toggle that reads one can only ever turn the sound ON.
-      const sound = ddCheckRow({
-        label: "Notification sound",
-        variant,
-        checked: soundOn(),
-        onChange: () => { setSoundOn(sound.checked); if (sound.checked) chime(); },
-      });
-      body.appendChild(sound.el);
       body.appendChild(ddSep());
       body.appendChild(ddRow({
         label: "Sign out",

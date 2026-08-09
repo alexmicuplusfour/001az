@@ -186,11 +186,21 @@ said the same thing, which is what lets the sound be the part that doesn't
 always arrive.
 
 Sound is the only part of this that reaches someone who isn't looking at the
-tab, so the off switch is in the **user menu** (`ddCheckRow`), where a person
-looks for their own settings, not behind a page nobody opens. On unless
-explicitly turned off. Turning it **on** plays the tone: it confirms what was
-enabled, and it is a click — which is what the browser's autoplay policy wants
-before it will let the first real notification through.
+tab, so it gets an off switch. On unless explicitly turned off. Turning it **on**
+plays the tone: it confirms what was enabled, and it is a click — which is what
+the browser's autoplay policy wants before it will let the first real
+notification through, so the confirmation and the unlock are one gesture.
+
+**Revised 2026-08-09.** It first shipped as a `ddCheckRow` in the gallery's
+**user menu**, on the argument that a person looks for their own settings there
+rather than behind a page nobody opens. Wrong on two counts. That menu is doors
+and a sign-out — Admin, Profile, Sign out — so a preference in it is the only
+item that doesn't go anywhere, and the page it was avoiding is *Profile*, which
+is literally the page of the reader's own settings and one row above it in the
+same menu. It now sits under **Notifications** on `/profile.html`, beside Name
+and Password. Kept in `localStorage` rather than on `/api/account`: this settles
+how loud one **browser** is, so following the reader to another device is the
+wrong behaviour, not a missing one.
 
 ## API
 

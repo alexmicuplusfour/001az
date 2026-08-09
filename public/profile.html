@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
     <link rel="stylesheet" href="/toast.css" />
     <link rel="stylesheet" href="/panel.css" />
+    <link rel="stylesheet" href="/checkbox.css" />
     <style>
       /* panel.css zeroes .panel .section for the admin tabs; this page stacks
          two sections in one panel, so the follow-ups get their spacing back */
@@ -43,6 +44,14 @@
               <h2>Password</h2>
               <p class="sub">Changing it signs you out everywhere else.</p>
               <a href="/login.html?change=1&amp;next=%2Fprofile.html">Change password</a>
+            </div>
+            <div class="section">
+              <h2>Notifications</h2>
+              <p class="sub">
+                The gallery header marks unread alerts, tagging findings and failed jobs
+                with a dot. A short tone plays when one of them lights.
+              </p>
+              <div id="sound-row"></div>
             </div>
           </section>
         </main>
