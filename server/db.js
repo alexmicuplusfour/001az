@@ -557,6 +557,23 @@ export async function boardTagActivity(db, boardId) {
   return { busy: rows[0]?.busy || 0, lastTagged: Number(rows[0]?.last_tagged) || 0 };
 }
 
+// The whole tagging pipeline's waiting depth, all boards — the number the
+// capabilities payload attaches to a blocked/degraded tagger ("N items
+// waiting"). TAG_QUEUE, not 'pending' alone: an item parked in an extract or
+// face leg is waiting on the same missing binding.
+export async function tagQueueDepth(db) {
+  const { rows } = await db.query(`SELECT COUNT(*)::int AS c FROM items WHERE status IN ${TAG_QUEUE}`);
+  return rows[0].c;
+}
+
+// Boards pinning their own key for a board-scoped capability. `column` comes
+// from CAPABILITY_DEFS binding.boardKeys — module constants, never input (the
+// same rule the deleteAiKey loop follows).
+export async function countBoardOverrides(db, column) {
+  const { rows } = await db.query(`SELECT COUNT(*)::int AS c FROM boards WHERE ${column} IS NOT NULL`);
+  return rows[0].c;
+}
+
 // The diagnose loop's own setter, on setIngestState's terms — and a jsonb MERGE
 // rather than a whole-column write, because two facets diagnosed in the same
 // pass must not overwrite each other and the user's save may be demoting a third

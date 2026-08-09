@@ -27,18 +27,24 @@ import { CAPABILITY } from "./capabilities.js";
 import { getSetting, getAiKey } from "./db.js";
 import { pluginInstalled } from "./plugins.js";
 
-// A provider is usable for a capability when it advertises it, its plugin is
-// installed, and it can actually PERFORM it — the wire method has to exist.
-// That last check is what retires the old `provider !== "whisper"` /
-// `!== "localDetector"` sentinels: those two advertise their capability with
-// `wire: null`, so they fail here and fall to the floor engine that serves them.
-async function usable(db, cap, provider) {
+// Why can this provider NOT serve this capability right now? Null = it can.
+// One implementation, two consumers: resolution reads it as a boolean (usable →
+// otherwise fall to the next rung), the status projection reads the string as
+// the card's reason line — which is what keeps the reason and the fallback from
+// ever disagreeing. The checks are what retire the old `provider !== "whisper"`
+// / `!== "localDetector"` sentinels: the two sidecar-backed built-ins advertise
+// their capability with `wire: null`, so they land on the no-wire check and fall
+// to the floor engine that serves them — for THEM that is routing, not a fault,
+// and the state machine knows a stored floor name is never "degraded".
+async function disqualified(db, cap, provider) {
   const desc = PROVIDERS[provider];
-  if (!declaredCatalog(desc, cap.declaredBy)) return null; // never declared it, or a stale name from an uninstalled plugin
-  if (typeof desc.wire?.[cap.verb] !== "function") return null; // advertises it but cannot make the call
-  if (!(await pluginInstalled(db, `ai:${provider}`))) return null; // removed on the Plugins page → drops out of resolution
-  return desc;
+  if (!desc) return `"${provider}" is not installed`; // an uninstalled plugin's name lingering in a setting
+  if (!declaredCatalog(desc, cap.declaredBy)) return `${desc.label} does not advertise ${cap.noun}`;
+  if (typeof desc.wire?.[cap.verb] !== "function") return `${desc.label} has no ${cap.noun} wire of its own`;
+  if (!(await pluginInstalled(db, `ai:${provider}`))) return `${desc.label} is removed on the Plugins page`;
+  return null;
 }
+const usable = async (db, cap, provider) => ((await disqualified(db, cap, provider)) ? null : PROVIDERS[provider]);
 
 // The model in effect: the capability's own setting wins, else whatever the
 // provider declares as its default for that capability.
@@ -51,29 +57,43 @@ async function modelFor(db, cap, desc) {
 // one implied by the connection row. One rule for all four capabilities —
 // `embed_provider` used to mean "on-device only", transcribe/detect's meant "the
 // engine, with sentinel names", and tagging had no provider setting at all.
+// Returns { binding } when the stored choice serves, { miss: reason } when
+// something is stored but cannot serve, {} when nothing is stored at all. The
+// resolver reads `.binding` and falls through; storedBindingMiss (the status
+// projection) reads `.miss` — same walk, so the reason can never disagree with
+// what resolution actually did.
 async function storedBinding(db, cap) {
   const keys = cap.binding.keys;
-  if (!keys) return null;
+  if (!keys) return {};
   const named = keys.provider ? await getSetting(db, keys.provider) : null;
   const keyId = keys.keyId ? Number(await getSetting(db, keys.keyId)) || 0 : 0;
   const key = keyId ? await getAiKey(db, keyId) : null;
   const provider = named || key?.provider || null;
-  if (!provider) return null;
+  if (!provider) {
+    // A keyId whose row is GONE is a real miss, not "nothing stored" — the live
+    // cleanup clears the setting with the row, but a restored backup can
+    // resurrect the pointer without the key.
+    return keyId ? { miss: "the stored key no longer exists" } : {};
+  }
 
-  const desc = await usable(db, cap, provider);
-  if (!desc) return null;
+  const miss = await disqualified(db, cap, provider);
+  if (miss) return { miss };
+  const desc = PROVIDERS[provider];
   // A key/connection row is required unless the provider runs in-process. A
   // KEYLESS-networked provider (a self-hosted Ollama) still needs its row: that
   // is where its base_url lives, which is the whole point of the row.
-  if (!desc.onDevice && (!key || key.provider !== provider)) return null;
+  if (!desc.onDevice && (!key || key.provider !== provider))
+    return { miss: `no ${desc.keyless ? "connection" : "key"} stored for ${desc.label}` };
 
   return {
-    provider,
-    apiKey: key?.api_key ?? null,
-    model: await modelFor(db, cap, desc),
-    base: key?.base_url || undefined,
-    keyId: key?.id ?? null,
-    viaFloor: false,
+    binding: {
+      provider,
+      apiKey: key?.api_key ?? null,
+      model: await modelFor(db, cap, desc),
+      base: key?.base_url || undefined,
+      keyId: key?.id ?? null,
+      viaFloor: false,
+    },
   };
 }
 
@@ -125,7 +145,18 @@ export async function resolveCapability(db, capId, { ignoreEnabled = false } = {
   // An `off` capability is gated before anything else is read: a disabled
   // embedder must not resolve just because a key is still stored.
   if (!ignoreEnabled && keys?.enabled && (await getSetting(db, keys.enabled)) !== "1") return null;
-  return (await storedBinding(db, cap)) || (await envBinding(db, cap)) || (await floorBinding(db, cap));
+  const stored = await storedBinding(db, cap);
+  if (stored.binding) return stored.binding;
+  return (await envBinding(db, cap)) || (await floorBinding(db, cap));
+}
+
+// Why is the STORED choice not the thing serving? Null when it serves — or when
+// nothing is stored (an empty binding is not a fault; the state machine reads
+// "nothing stored" off capabilityBinding instead). This is the `reason` line on
+// a degraded capability card, produced by the same walk resolution takes.
+export async function storedBindingMiss(db, capId) {
+  const cap = CAPABILITY[capId];
+  return cap ? (await storedBinding(db, cap)).miss ?? null : null;
 }
 
 // Can this provider serve this capability right now? Returns its descriptor, or
@@ -147,11 +178,15 @@ export async function capabilityBinding(db, capId) {
   const cap = CAPABILITY[capId];
   const keys = cap?.binding.keys;
   if (!keys) return null;
+  const keyId = keys.keyId ? Number(await getSetting(db, keys.keyId)) || null : null;
   const out = {
     provider: keys.provider ? (await getSetting(db, keys.provider)) || cap.floor?.provider || null : null,
-    keyId: keys.keyId ? Number(await getSetting(db, keys.keyId)) || null : null,
+    keyId,
     model: keys.model ? (await getSetting(db, keys.model)) || null : null,
   };
+  // A capability with no provider setting (tagging) still has a stored
+  // provider — the key row's. Stored information, just stored in the row.
+  if (!keys.provider && keyId) out.provider = (await getAiKey(db, keyId))?.provider || null;
   if (keys.enabled) out.enabled = (await getSetting(db, keys.enabled)) === "1";
   return out;
 }

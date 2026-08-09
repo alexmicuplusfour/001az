@@ -133,6 +133,21 @@ export async function activeProvider(db, conn) {
   return { name, provider, apiKey: (await providerKey(db, conn, name)) || null };
 }
 
+// The domain's stored-vs-effective pair — the two admin surfaces that expose
+// domain state (the Plugins payload's `slots.domains`, the capabilities feed)
+// both need it, and the try/catch-around-activeProvider pattern was growing a
+// second copy. `setting` is the raw star, which may name a provider that can't
+// serve; `effective` is the full activeProvider result, null when no provider
+// of the domain is installed — the one case activeProvider throws.
+export async function standing(db, conn) {
+  const setting = (await getSetting(db, `${conn.name}_provider`)) || null;
+  try {
+    return { setting, effective: await activeProvider(db, conn) };
+  } catch {
+    return { setting, effective: null };
+  }
+}
+
 // The per-call context every provider method receives: the key plus the
 // pacing handle (see callProvider — request-pacing providers await it before
 // each raw fetch). Built fresh per logical call; `pace` closes over the

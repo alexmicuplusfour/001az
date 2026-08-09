@@ -31,6 +31,7 @@ function bind(name, mod) {
     fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
     testConnection: (db, opts) => runtime.testConnection(db, conn, opts),
     activeProvider: (db) => runtime.activeProvider(db, conn),
+    standing: (db) => runtime.standing(db, conn),
     refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
     produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
     // Annotate the declared face producers for a given provider: `available`

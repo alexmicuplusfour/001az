@@ -7,9 +7,13 @@ which fixes THREE dead-pointer bugs (`detect_key_id`, `detect_provider`, and
 tagging's shared `model`, §2.10). SLICE 2b SHIPPED too: `capability-bind.js` +
 `capability-probe.js` replace the four duplicated blocks in
 `/api/admin/ai-config` and the four `*-test` routes, which become adapters over
-them; `server.js` is 240 lines lighter. Suite green at 937, repeated runs, still
-zero edits to existing test files. Slices 3–6 remain plan-only. The proposal:
-make CAPABILITY a
+them; `server.js` is 240 lines lighter. SLICE 3 SHIPPED 2026-08-10:
+`capability-status.js` + `GET /api/admin/capabilities` — the five-state
+computation (+`viaFloor`), reasons via `storedBindingMiss`, `supportedBy` off
+one `pluginCatalog` call, demand where it is indexed-cheap, domains generated
+from `listConnectors()`, and the secrets-scan test. Suite green at 941, repeated
+runs, still zero edits to existing test files. Slices 4–6 remain plan-only. The
+proposal: make CAPABILITY a
 first-class registry (`server/capabilities.js`, one `CAPABILITY_DEFS` entry per
 capability) exactly the way `KIND_DEFS` made plugin kinds first-class, then
 render a Capabilities page as a pure projection of it. Adding a capability
@@ -948,14 +952,181 @@ Existing suites that must stay green: [audio.test.js](../test/audio.test.js),
 [plugin-install.test.js](../test/plugin-install.test.js).
 
 ### Slice 3 — `GET /api/admin/capabilities`
-The six-state computation, `supportedBy`, `demand`. One generic
-`POST /api/admin/capabilities/:id/probe` replaces the four `*-test` routes
-(keep the old paths as aliases one release). One generic
-`POST /api/admin/capabilities/:id/bind` absorbs the duplicated
-transcribe/detect/embed validation in
-[`/api/admin/ai-config`](../server/server.js#L2232) — ~120 lines to ~30.
-**New test file** `capabilities.test.js`: assert each of the six states is
-reachable and that `degraded` is produced by deleting a bound key.
+
+**Scope correction:** the original slice-3 text also carried the bind and probe
+routes — those shipped in 2b. What remains is the *status projection*: the
+state computation, `supportedBy`, `demand`, and the reason string. Deep-dived
+2026-08-10; the spec below supersedes the sketch.
+
+#### 3.1 What already exists, verified
+
+| need | source |
+|---|---|
+| effective binding + `viaFloor` | [`resolveCapability`](../server/capability-resolve.js) — shipped 2a |
+| stored binding, floor-filled | [`capabilityBinding`](../server/capability-resolve.js) — shipped in the 2b review pass |
+| per-provider installed / keyCount / hasKey / connectionCount / health | [`pluginCatalog(db)`](../server/plugins.js) — **one call powers every `supportedBy`** |
+| per-capability advertise flags | `entry.capabilities[declaredBy]` on the same catalog rows (works for `extract`, whose `declaredBy` is `tag`) |
+| domain stored-vs-effective | the [`slots.domains`](../server/server.js) block: `setting` + `activeProvider` (throws when no provider installed) |
+| tag demand | **missing** — [`boardTagActivity`](../server/db.js#L550) counts `TAG_QUEUE` per board only; a global `tagQueueDepth(db)` is one new query beside it, reusing the same `TAG_QUEUE` constant (which derives from `IN_FLIGHT_FOR`, all six pipeline states — not just `pending`) |
+| embed demand | [`embeddingStats(db, model)`](../server/db.js#L2559) — tagged/embedded/failed; remaining = tagged − embedded − failed |
+| board overrides count | pattern at [db.js:1104](../server/db.js#L1104) (`boards_using`); generalize to `countBoardOverrides(db, column)` with the column injected from `binding.boardKeys.keyId` (module constants, same rule as the cleanup loop) |
+| sidecar live models | `transcriberSidecarModel()` / `detectorSidecarModel()` (worker exports, 60s-cached) |
+| source readiness incl. the folder/`INGEST_ROOT` check | [`listSources(db)`](../server/ingestion/files.js#L273) already computes `ready` — compose it, never read `process.env` in the projection |
+
+**Transcribe demand is deliberately null.** The only counting query
+([`oneAudioNeedingTranscription`](../server/db.js#L2530)) filters on
+`payload->'files'->0->>'kind'` — an unindexed JSON predicate, a full items scan.
+Fine in the worker's paced loop; not on an admin page load. And transcription's
+floor is `builtin`, so it is never blocked — the count would be "in progress",
+not a consequence. Detect and extract demand: null likewise (field-triggered /
+conflated with the tag queue).
+
+#### 3.2 The reason string — design correction
+
+The plan said the resolver would return the binding "stamped `viaFloor` and (for
+slice 3) the reason it fell". That cannot work as written: **the null contracts
+are pinned.** `resolveDefaultAi` must return exactly `null` when unconfigured
+([plugins.test.js:337](../test/plugins.test.js#L337) asserts strict equality),
+so a degraded-tag reason has nowhere to ride — the resolver returns null, not an
+annotatable object.
+
+Instead, `capability-resolve.js` refactors internally and exports one new
+function:
+
+- `usable()`'s three checks become `disqualified(db, cap, provider) → string |
+  null` (the reason, or null = usable); `usable` stays as `disqualified ? null :
+  desc`. Distinct strings for the two removal shapes: a name whose descriptor is
+  **gone** (uninstalled plugin lingering in a setting) vs. installed-but-removed
+  on the Plugins page.
+- `storedBinding` returns `{ binding }` or `{ miss: reason }` internally —
+  adding the key-row reasons (`no key stored for X`, and `the stored key no
+  longer exists` for a keyId whose row is gone, reachable via backup restore).
+  `resolveCapability` reads `.binding`; behavior identical.
+- **`storedBindingMiss(db, capId) → string | null`** is the export the
+  projection reads. One implementation of the predicates, two consumers — no
+  drift, no widened resolver contract, zero existing-test edits.
+
+#### 3.3 The state algorithm
+
+Emitted as **five states + a `viaFloor` flag** (`active` + `viaFloor` ≡ the
+plan's "active (floor)" — fewer strings for the page to branch on):
+
+```
+miss  = storedBindingMiss(db, id)          // why the stored choice isn't serving
+eff   = resolveCapability(db, id)
+storedNonFloor = binding names something ≠ the floor (for tag: a keyId is stored)
+
+if (keys.enabled && !enabled)                     → off          // explicit choice wins
+else if (miss && storedNonFloor)                  → degraded     // YOUR choice isn't serving, whatever is
+else if (eff)                                     → active (+viaFloor)
+else if (supplyEmpty && floor.kind !== "builtin") → unavailable  // nothing installed advertises it
+else                                              → blocked      // + demand
+```
+
+Cases that make the order load-bearing, all test-pinned:
+
+- **Stored `"whisper"`** (bindCapability normalizes a clear to the floor name):
+  `miss` is "no wire of its own" but `storedNonFloor` is false → active(floor),
+  not degraded. Naming the floor is a choice, not a fault.
+- **Broken stored key + env rung serving**: eff is the env binding
+  (`viaFloor: false`!) — an effective-first rule would call it healthy. `miss
+  && storedNonFloor` catches it first → degraded, with `running` showing what
+  actually serves (`keyId: "env"`).
+- **Embed enabled + bound + plugin later removed**: floor is `off` but the admin
+  explicitly enabled → degraded (backfill accumulates), not off, not blocked.
+- **unavailable is reachable**: tag on a fresh instance minus anthropic (the
+  other tag providers are available-not-installed by default); domains on a
+  fresh instance (no connector provider is `defaultInstalled`, so
+  `activeProvider` throws).
+
+#### 3.4 Domains, and the two `select:"all"` entries
+
+Domain entries are **generated from `listConnectors()`**, cashing the roster
+promise. Their state reuses the same five strings with one addition to blocked's
+meaning: `activeProvider` resolves regardless of keys, so *effective provider
+`needsKey` without a stored key* → **blocked** with reason "X needs an API key"
+— which is exactly what blocked means for tag (a configured target that cannot
+serve until a key arrives). Degraded = `setting && setting !== effective` (the
+divergence the payload already computes today). Unavailable = the
+no-provider-installed throw.
+
+`ingest` (one entry, media handlers collapsed) and `source` are permanently
+`active`, `select: "all"`; source rows carry `connectionCount` (pluginCatalog)
+and `ready` (listSources — the folder row honestly reports a missing
+`INGEST_ROOT`).
+
+#### 3.5 The payload
+
+```jsonc
+{ "capabilities": [
+  { "id": "transcribe", "kind": "ai", "label": "…", "noun": "…", "blurb": "…",
+    "state": "degraded", "viaFloor": true,
+    "bound":   { "provider": "openai", "keyId": 3, "model": "whisper-1" },
+    "running": { "provider": "whisper", "model": "large-v3", "keyId": null },
+    "reason": "OpenAI is removed on the Plugins page",
+    "supportedBy": [ { "name": "openai", "label": "OpenAI", "installed": true,
+                        "keyCount": 0, "onDevice": false, "health": null } ],
+    "demand": null, "scope": "global",
+    "config": [ { "key": "detect_threshold", "value": 0.3 } ] },   // detect only
+  { "id": "tag", "…": "…",
+    "modifiers": [ { "id": "research", "supportedBy": ["anthropic"],
+                     "availableNow": true } ] },                    // research nests, never a row
+  { "id": "extract", "delegatesTo": "tag", "scope": "board", "boardOverrides": 2 },
+  { "id": "crypto", "kind": "domain", "…": "…" },
+  { "id": "ingest", "kind": "always-on", "state": "active", "handlers": [ "…" ] }
+] }
+```
+
+- `running` is built **field-by-field** (`provider`, `model`, `keyId`,
+  `viaFloor`) — never a spread of the resolver result, which carries `apiKey`.
+  A test seeds a key `sk-SECRET-…` and asserts the serialized payload never
+  contains it. This is the one place slice 3 can create a leak; treat it as the
+  primary review point.
+- Floor `running.model` overlays the sidecar's live `/health` model (whisper
+  declares `default: null` — the descriptor's own comment says the sidecar
+  names its model), so the card states the truth rather than "—".
+- `bound.provider` for tag fills from the key row (`capabilityBinding` gains
+  that lookup) — stored info, just stored in the row.
+
+New module `server/capability-status.js` (projection only, no writes), one
+route `GET /api/admin/capabilities` (requireAdmin), two db helpers
+(`tagQueueDepth`, `countBoardOverrides`). The `DEMAND` and sidecar-overlay maps
+live in the status module keyed by capability id — they cannot live in
+`capabilities.js`, which is pure data imported by `db.js`; each carries a
+comment saying a queue-owning capability adds its entry there.
+
+**Not touched:** the `slots.domains` block and both legacy GET payloads keep
+their shapes (zero-existing-test-edits rule); folding them over the domain-state
+helper is slice-4 cleanup.
+
+#### 3.6a Review pass — what the first cut of slice 3 missed
+
+1. **`domainEntry` was the third copy of stored-vs-effective.** The
+   `slots.domains` block in server.js and the new projection each hand-read
+   `${domain}_provider` and try/catch'd around `activeProvider`. Folded into
+   [`standing(db, conn)`](../server/connectors/runtime.js) beside
+   `activeProvider` itself — the two admin surfaces now read one function and
+   cannot disagree. (The spec had marked this "slice-4 cleanup"; it was six
+   lines and drift-prone, so it moved up.)
+2. **The ordering decision wasn't pinned.** §3.3's justification for checking
+   the miss before the effective binding — a broken stored key while the env
+   rung silently serves — had no test. It does now: tag reports `degraded` with
+   `running.keyId: "env"` and the dead choice still visible in `bound`.
+3. **Deliberately left alone:** `aiEntry` walks the settings three times
+   (capabilityBinding + storedBindingMiss + resolveCapability, the latter two
+   sharing `storedBinding` internally). A merged
+   "resolve-with-status" export would save a handful of indexed reads on an
+   admin-page load and cost a third resolver entry point; not worth it.
+
+#### 3.6 Tests (extend `capabilities.test.js`, same shared server)
+
+Anon 403; every state reachable — fresh-instance defaults (transcribe/detect
+active+viaFloor, embed off, tag blocked with `demand.waiting` counting a seeded
+`TAG_QUEUE` item), degraded with the exact reason string, unavailable for tag
+(remove anthropic, env cleared) and for a fresh domain, domain blocked on
+needs-key (`stocks_key_financialmodelingprep` unset) and degraded on
+starred-then-removed; the secrets scan; ingest/source present and active.
+State-mutating tests restore what they change (shared server, §2.10 rule 5).
 
 ### Slice 4 — the page
 Generic renderer + nav entry. Plugins-page badges become links. `plugin-modal`'s

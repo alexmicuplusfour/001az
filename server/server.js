@@ -131,6 +131,7 @@ import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateM
 import { MODEL_CAPABILITIES } from "./capabilities.js";
 import { bindCapability, setCapabilityConfig } from "./capability-bind.js";
 import { capabilityBinding, capabilityConfig } from "./capability-resolve.js";
+import { capabilityStatus } from "./capability-status.js";
 import { probeCapability } from "./capability-probe.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -1866,12 +1867,10 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   const embedder = await resolveEmbedder(db);
   const domains = {};
   for (const c of listConnectors()) {
-    const conn = getConnector(c.name);
     // setting = the stored star; effective = what resolution lands on (they
     // diverge when the starred provider isn't installed — the UI shows both).
-    let effective = null;
-    try { effective = (await conn.activeProvider(db)).name; } catch { /* no provider installed */ }
-    domains[c.name] = { setting: (await getSetting(db, `${c.name}_provider`)) || null, effective };
+    const s = await getConnector(c.name).standing(db);
+    domains[c.name] = { setting: s.setting, effective: s.effective?.name ?? null };
   }
   // The stored bindings come from capabilityBinding — one reader of a
   // capability's settings keys and of its floor default, so this payload and
@@ -2252,6 +2251,15 @@ app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
   }
   console.log(`ai-config updated by admin: ${Object.keys(body).join(", ") || "(nothing)"}`);
   res.json({ ok: true });
+}));
+
+// The capabilities status feed (capabilities-plan.md slice 3): every capability
+// — AI, connector domain, always-on — with its state, what serves it, why it
+// fell if it fell, who else could serve it, and what the outage costs. The
+// capabilities page renders this verbatim; nothing here is authored per
+// capability.
+app.get("/api/admin/capabilities", requireAdmin, wrap(async (_req, res) => {
+  res.json({ capabilities: await capabilityStatus(db) });
 }));
 
 // The capability-native peers. Same rules, addressed by capability id rather
