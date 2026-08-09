@@ -462,6 +462,50 @@ test("…but a change that reaches none of the twelve, at an unmoved rate, is st
   assert.equal(deps.calls.length, 1, "nothing the model would be shown has changed");
 });
 
+test("one uploaded image does not clear a diagnosis (a tolerance, not a bucket)", async () => {
+  // Reported from the running app, and reproduced from its numbers. `ui` was at
+  // 93 items / 59 unanimous; two images arrived, one at a time:
+  //
+  //   93/59  36.56%   bucket 35
+  //   96/60  37.50%   bucket 40   <- re-diagnosed
+  //   97/61  37.11%   bucket 35   <- re-diagnosed again, back to the first key
+  //
+  // 0.55 points of real movement and two paid calls, because 37.5 sits exactly on
+  // a boundary and Math.round takes it up. A bucket answers "which side of an
+  // arbitrary line", not "how far did it move" — so two rates 0.9 points apart
+  // differ while two 4.9 points apart match. On a 97-item sample one item moves
+  // the rate about a point, so roughly one upload in five crossed a line.
+  const b = await board("one-upload");
+  for (let i = 0; i < 34; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `c${i}` });
+  for (let i = 0; i < 59; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `u${i}` });
+  const deps = stubTagger();
+  await diagnoseDue(db, deps, null);
+  assert.equal(deps.calls.length, 1);
+  assert.deepEqual((await diagnosticsOf(b)).shape.stats, { items: 93, unanimous: 59 });
+
+  // The images land in two batches with a settled tick between them, which is the
+  // part that matters: the board PASSES THROUGH 96/60, and jumping straight to
+  // 97/61 would miss it entirely — both ends bucket to 35 and only the middle
+  // crosses.
+  const land = async (contested, unanimous, tag) => {
+    for (let i = 0; i < contested; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 2, { round: 2, wide: 1 }) }, description: `${tag} c${i}` });
+    for (let i = 0; i < unanimous; i++) await item(b, { confidence: { shape: conf(FULL.shape, 3, 3, { round: 3 }) }, description: `${tag} u${i}` });
+    const r = (await facetRollup(db, await getBoard(db, b))).find((f) => f.key === "shape");
+    await diagnoseDue(db, deps, null);
+    return r;
+  };
+
+  const mid = await land(2, 1, "batch1");
+  assert.deepEqual([mid.items, mid.unanimous], [96, 60], "37.50% — the boundary");
+  assert.equal(deps.calls.length, 1, "0.94 points is not a different question");
+  assert.equal(mid.current, true, "…and the reader keeps showing the finding");
+
+  const end = await land(0, 1, "batch2");
+  assert.deepEqual([end.items, end.unanimous], [97, 61], "37.11% — where the live board ended up");
+  assert.equal(deps.calls.length, 1, "still the same question, 0.55 points from where it started");
+  assert.equal(end.current, true);
+});
+
 test("…but a moved rate re-diagnoses", async () => {
   const b = await board("moved");
   await seedUnstable(b);

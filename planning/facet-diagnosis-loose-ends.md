@@ -930,6 +930,62 @@ those two rules outright, and it is fixed here. 840 tests pass.
   accurate thing rather than the promise, because `row.queued` is non-zero and
   the copy branches on it: *"Re-tagging this facet — N items still queued."*
 
+- [x] **45. A bucket is a threshold, not a tolerance — one uploaded image cleared
+  a diagnosis.** *(fixed, reported from the running app and reproduced from its
+  own numbers)*
+
+  The user uploaded a single image to `ui` (4,573 items) and `core_components`
+  went to *"The measurements have changed. Re-reading this facet."* Their read was
+  that the conditions could not have been met, and it was right. From `job_log`:
+
+  ```
+  08-07 19:01  diagnose  93 items, 59 unanimous   36.56%   bucket 35
+  08-09 01:10  1 item tagged
+  08-09 01:14  diagnose  96 items, 60 unanimous   37.50%   bucket 40   re-diagnosed
+  08-09 01:22  1 item tagged
+  08-09 01:26  diagnose  97 items, 61 unanimous   37.11%   bucket 35   re-diagnosed again
+  ```
+
+  **0.55 points of real movement, two paid calls, ending on the key it started
+  from.** 37.5 sits exactly on the 35/40 boundary and `Math.round` takes it up.
+
+  The flaw is generic to bucketing used as a tolerance: a bucket answers *which
+  side of an arbitrary line*, not *how far did it move*. Two rates 0.9 points
+  apart differ when they straddle a boundary; two 4.9 points apart match when they
+  do not. On a 97-item sample one item moves the rate about a point, so roughly
+  one upload in five crossed a line. The comment defended five points as *"an
+  absolute step on a bounded quantity… it is 'the rate moved enough to read
+  differently'"*. It never meant that. It meant "the rate crossed a multiple of
+  five", which is not a statement about movement at all.
+
+  **Fixed as an actual tolerance**: `|rate now − rate then| < 5 points`. No lines
+  to cross, symmetric, and it says what the sentence always claimed.
+
+  **The rate comes OUT of the freshness key**, which is what forced the bucket in
+  the first place: a key is absolute, it can only carry a value, so a delta cannot
+  live in one. It is now `v3 | d | evidence hash`, and the rate half is `rateHeld`
+  — the reader's own function — inside `sameQuestion`. The two sides of "is this
+  finding current" finally run the same arithmetic instead of agreeing by
+  intention, which is what this defect cost.
+
+  **`asked`, a new field, and the reason it is not `stats`.** The cap and the skip
+  both key on `sameQuestion`, so the rate needs an operand on every entry. `stats`
+  cannot be it: on an attempts-only entry `stats` is an OLDER finding's, carried
+  as the demote baseline (defect 10), so comparing against it answers "changed"
+  for ever — a cap that never engages and a facet retried every tick. `asked` is
+  what this attempt was actually measured against; on a finding the two coincide
+  and `rateHeld` prefers `asked` where present. Caught by the existing "attempts
+  reset when the measurements actually move" test, which went red the moment the
+  rate left the key.
+
+  **A note on the test.** The first reproduction jumped 93 → 97 and passed on the
+  broken code, because both ends bucket to 35 and only the middle crosses. It has
+  to land in two batches with a settled tick between them, which is what the live
+  board did. A repro that does not fail on the code it describes is not a repro.
+
+  One-time cost: the key's shape changes, so every stored `k` mismatches and each
+  eligible facet re-diagnoses once.
+
 ## Behaviour worth a decision (no change made)
 
 - **14. A diagnosis in flight can undo the save that demotes it.** *(half closed

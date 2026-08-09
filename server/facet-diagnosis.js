@@ -371,15 +371,38 @@ export function buildDiagnosePrompt(board, facet, segment, sample, previous) {
 // across the bulk of the board while the twelve hold and the rate keeps its bucket
 // is missed. Hashing its counts was rejected because they move on a retag of ANY
 // size, which is what rule 1 exists to prevent, and rank-hashing jitters on ties.
-const RATE_BUCKET = 5;
-const rateBucket = (unanimous, items) =>
-  (items ? Math.round(((items - unanimous) / items) * (100 / RATE_BUCKET)) * RATE_BUCKET : 0);
+// Five percentage points, and a TOLERANCE rather than a bucket. The distinction
+// is the whole of it: a bucket answers "which side of an arbitrary line", not
+// "how far did it move", so two rates 0.9 points apart differ when they straddle
+// a boundary while two 4.9 points apart match when they do not.
+//
+// Observed on the live `ui` board, one uploaded image at a time:
+//
+//   93 items, 59 unanimous   36.56%   bucket 35
+//   96 items, 60 unanimous   37.50%   bucket 40   <- re-diagnosed
+//   97 items, 61 unanimous   37.11%   bucket 35   <- re-diagnosed again
+//
+// 0.55 points of real movement, two paid calls, ending on the key it started
+// from — because 37.5 sits exactly on a boundary and Math.round takes it up. On a
+// 97-item sample one item moves the rate about a point, so roughly one upload in
+// five crossed a line. A tolerance has no lines to cross.
+const RATE_TOLERANCE = 5;
+const rateOf = (unanimous, items) => (items ? ((items - unanimous) / items) * 100 : 0);
 
-// The half both readers can afford. `stats` is what the finding was written about;
-// the segment is what is there now.
+// Has the headline moved enough to read differently? `stats` is what the finding
+// was written about; the segment is what is there now.
+//
+// The loop asks this too, so both sides of "is this finding current" run the same
+// arithmetic. They used to agree only in intent — the reader compared buckets and
+// the loop carried a bucket inside its key string — and this is what that drift
+// cost.
+// `asked` before `stats`: they are the same thing on a finding, and differ only on
+// an entry that has only ever failed, where `stats` is an older finding's kept as
+// a demote baseline and `asked` is what was actually tried.
 export function rateHeld(entry, segment) {
-  if (!entry?.stats?.items) return true; // nothing to compare — never hide on a guess
-  return rateBucket(entry.stats.unanimous, entry.stats.items) === rateBucket(segment.unanimous, segment.items);
+  const was = entry?.asked || entry?.stats;
+  if (!was?.items) return true; // nothing to compare — never hide on a guess
+  return Math.abs(rateOf(segment.unanimous, segment.items) - rateOf(was.unanimous, was.items)) < RATE_TOLERANCE;
 }
 
 // The twelve worked examples, in the two groups the prompt shows. ONE call serves
@@ -408,20 +431,33 @@ const tallyKey = (v) =>
   Object.entries(v || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k}=${n}`).join(",");
 const exampleKey = (r) => `${r.id}:${r.agreed}/${r.of}:${tallyKey(r.votes)}:${r.description || ""}`;
 
-// The whole question, worker-side: the definition, the prompt version, the
-// bucketed rate, and what the twelve examples say. Hashed, because the
-// descriptions alone would put kilobytes of prose in a board column per facet; the
-// ids stay legible on `entry.evidence`, which is what a retag looks up by.
+// Half the question, worker-side: the prompt version, the definition, and what the
+// twelve examples say. Hashed, because the descriptions alone would put kilobytes
+// of prose in a board column per facet; the ids stay legible on `entry.evidence`,
+// which is what a retag looks up by.
+//
+// The RATE is deliberately not in here. A key is absolute — it can only carry a
+// value, so the rate had to enter it bucketed, and a bucket cannot express "moved
+// by less than five points". Comparing against the stored stats can, so the rate
+// half is `rateHeld` and lives in sameQuestion below, which is also what puts the
+// reader and the loop on one implementation instead of two that agree by
+// intention.
 export async function questionKey(db, boardId, segment) {
   const examples = await facetEvidence(db, boardId, segment);
   const shown = [...examples.contested, ...examples.unanimous];
   const digest = crypto.createHash("sha1").update(shown.map(exampleKey).join("|")).digest("hex").slice(0, 16);
   return {
-    k: [`v${PROMPT_VERSION}`, segment.d, rateBucket(segment.unanimous, segment.items), digest].join("|"),
+    k: [`v${PROMPT_VERSION}`, segment.d, digest].join("|"),
     evidence: shown.map((r) => r.id),
     examples,
   };
 }
+
+// Is this the same question the last attempt asked? Both halves — the identity of
+// what the model would be shown, and the severity it would be shown alongside.
+// Used for the skip AND for the attempts counter, so a facet whose rate has really
+// moved gets a clean slate of tries rather than inheriting the old one's.
+const sameQuestion = (prior, fresh, segment) => prior?.k === fresh && rateHeld(prior, segment);
 
 const str = (v) => (typeof v === "string" ? v.trim() : "");
 const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
@@ -437,7 +473,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // about money against an unchanged question; `stale` is about whether the data
   // moved. Neither answers the other, and running them together is what let a
   // superseded finding retry every tick forever.
-  if (prior?.k === fresh) {
+  if (sameQuestion(prior, fresh, segment)) {
     // Unconditional, a superseded finding included: `stale` says a retag
     // re-measured the sample, not that the provider will work this time.
     if ((prior.attempts || 0) >= MAX_ATTEMPTS) return null;
@@ -464,11 +500,19 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // by the setter (the trailing false): a failed attempt has answered nothing, so
   // a retag's mark must outlive it, and only the setter can tell that apart from a
   // mark a concurrent write legitimately cleared.
+  //
+  // `asked` is the numbers THIS attempt was made against, and it has to be its own
+  // field rather than reusing `stats`. The two differ on exactly this entry:
+  // `stats` here is an older finding's, kept as a demote baseline, so measuring
+  // "has the question changed" against it would answer yes for ever — a cap that
+  // never engages and a facet retried every tick. Written on the attempt path
+  // only; on a finding, `stats` already is what it asked about.
   const t0 = Date.now();
   const attempted = async (error) => {
-    const attempts = (prior?.k === fresh ? prior.attempts || 0 : 0) + 1;
+    const attempts = (sameQuestion(prior, fresh, segment) ? prior.attempts || 0 : 0) + 1;
     await setFacetDiagnostic(db, board.id, facet.key, {
       k: fresh, at: Date.now(), attempts, error,
+      asked: { items: segment.items, unanimous: segment.unanimous },
       ...(prior?.previous ? { previous: prior.previous } : {}),
       ...(prior?.stats ? { stats: prior.stats, d: prior.d ?? null, scoped: prior.scoped ?? null } : {}),
     }, false);
