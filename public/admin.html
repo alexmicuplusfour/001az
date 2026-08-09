@@ -64,6 +64,24 @@
       .pa-install .sub { margin: 0; }
       .pa-install-err { color: #d33; font-size: 12px; white-space: pre-wrap; }
 
+      /* capabilities tab — one card per capability; chips echo the .p-note look */
+      .cap-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+      .cap-card { padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; }
+      .cap-card.flash { border-color: #111; box-shadow: 0 0 0 1px #111; }
+      .cap-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .cap-label { font-weight: 600; }
+      .cap-chip { flex: none; font-size: 11px; border-radius: 999px; padding: 3px 10px; white-space: nowrap; color: #6b6b72; background: #f3f3f5; text-decoration: none; }
+      .cap-chip.ok { color: #1c7c3c; background: #e8f6ec; }
+      .cap-chip.warn { color: #8a5a12; background: #fdf3e3; }
+      .cap-chip.dim { color: #9aa0aa; }
+      .cap-blurb { color: #9aa0aa; font-size: 12px; margin-top: 2px; }
+      .cap-lines { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+      .cap-lines .k, .cap-config .k { color: #6b6b72; margin-right: 4px; }
+      .cap-roster { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+      .cap-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+      .cap-config { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12.5px; }
+      .cap-config input { flex: 0 0 90px; min-width: 90px; }
+
       /* logs tab — a dark embedded console (palette ported from logs.html);
          .fullbleed lifts the same element over the whole page */
       .log-viewer { display: flex; flex-direction: column; height: calc(100vh - 220px); min-height: 320px;
@@ -112,6 +130,7 @@
         <nav class="tabs" id="tabs">
           <button class="tab active" data-tab="members" data-icon="users">Members</button>
           <button class="tab" data-tab="boards" data-icon="grid">Boards</button>
+          <button class="tab" data-tab="capabilities" data-icon="activity">Capabilities</button>
           <button class="tab" data-tab="plugins" data-icon="plugin">Plugins</button>
           <button class="tab" data-tab="backups" data-icon="database">Backups</button>
           <button class="tab" data-tab="logs" data-icon="terminal">Logs</button>
@@ -125,6 +144,9 @@
           </section>
           <section class="panel" id="panel-boards" hidden>
             <div id="boards-content"></div>
+          </section>
+          <section class="panel" id="panel-capabilities" hidden>
+            <div id="capabilities-content"></div>
           </section>
           <section class="panel" id="panel-plugins" hidden>
             <div id="plugins-content"></div>

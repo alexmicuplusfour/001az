@@ -1,17 +1,20 @@
 // Per-plugin configuration modal, opened from the Plugins tab gear. Sections
 // vary by kind: connectors get their schema-driven config form (key, rate
 // limits) plus Test and the domain-default star; AI providers get their key
-// registry (this provider's slice of ai_keys) plus the default-tagger /
-// embeddings slots they can serve; media types are informational (core
-// capabilities, nothing to configure). The last recorded health error surfaces
-// at the top. All writes go through the plugins API + the existing
-// ai-keys/ai-config routes — this file owns no state of its own.
+// registry (this provider's slice of ai_keys) plus ONE generic section per
+// capability they advertise — planned by capability-present.js from the
+// capabilities payload, so a new capability needs no edit here; media types
+// are informational (core capabilities, nothing to configure). The last
+// recorded health error surfaces at the top. Writes go through the plugins
+// API, the ai-keys routes, and /api/admin/capabilities/:id/{bind,probe} —
+// this file owns no state of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
 import { syncModelPicker, switchRow } from "/board-modal.js";
 import { fillSelect, isUnset } from "/select.js";
 import { fmtDuration } from "/utils.js";
+import { planSection, fmtProbe } from "/capability-present.js";
 
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
@@ -32,7 +35,8 @@ function labeled(label, el) {
   return row;
 }
 
-const busy = (btn, label, fn) => async () => {
+// Exported: the Capabilities tab's buttons share it rather than keeping a copy.
+export const busy = (btn, label, fn) => async () => {
   btn.disabled = true;
   const prev = btn.textContent;
   btn.textContent = label;
@@ -72,45 +76,6 @@ function slotButton(label, isDefault, sels, apply) {
 // configured one.
 const pickKey = (p) => `Select a ${p.ai.keyless ? "connection" : "key"}`;
 const PICK_MODEL = "Select a model";
-
-// The connection picker the embedder / transcriber / detector sections share:
-// this provider's keys, the slot's own preselected where this provider holds
-// the slot, and select.js's empty state wherever there is a question to ask.
-// Appends its own labeled row and returns the select — or null for an on-device
-// provider, which has no connection to pick, so callers can hand the result
-// straight to slotButton's watch list.
-//
-// One key and already the holder is the case with no question in it: the row
-// stays hidden, and it gets no empty state either, because an unanswered picker
-// nobody can see is just a button that never enables.
-//
-// The tagger's picker stays hand-built. It carries the ANTHROPIC_API_KEY row as
-// an extra connection and preselects it by the "env" sentinel rather than a key
-// id, which is two exceptions in a twelve-line function.
-function connectionPicker(p, mine, sec, { active, keyId }) {
-  if (p.ai.onDevice) return null;
-  const sel = document.createElement("select");
-  sel.style.cssText = "width:100%;";
-  const ask = mine.length > 1 || !active;
-  fillSelect(sel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
-    value: active && keyId ? String(keyId) : null,
-    placeholder: ask ? pickKey(p) : null,
-  });
-  if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", sel));
-  return sel;
-}
-
-// Beside an enabled promote button: what you'd be replacing. providerName is
-// a slot's current holder (ctx.defaults.*) — resolved to its display label
-// via ctx.plugins; an empty slot reads "none".
-function currentDefaultNote(ctx, providerName, model) {
-  const span = document.createElement("span");
-  span.className = "muted";
-  span.style.cssText = "font-size:12px;";
-  const label = providerName ? (ctx.plugins?.find((x) => x.name === providerName)?.label || providerName) : "none";
-  span.textContent = `Current default: ${label}${model ? ` · ${model}` : ""}`;
-  return span;
-}
 
 // Live commit for a SETTINGS control — the plugin modals carry no Save
 // buttons; each field commits itself on `change` (blur for typed input,
@@ -159,7 +124,7 @@ export function openPluginModal(p, ctx) {
     let state;
     try { state = await ctx.getState(); } catch { return; }
     p = state.plugins.find((x) => x.id === p.id) || p;
-    ctx = { ...ctx, plugins: state.plugins, slots: state.slots, keys: state.keys, connections: state.connections, defaults: state.defaults };
+    ctx = { ...ctx, plugins: state.plugins, slots: state.slots, keys: state.keys, connections: state.connections, defaults: state.defaults, capabilities: state.capabilities };
     render();
     ctx.refresh(state); // repaint the cards behind, reusing the state we just fetched
   }
@@ -193,10 +158,14 @@ export function openPluginModal(p, ctx) {
       // — nothing to register. Keyless-NETWORKED providers still get the
       // section: their rows are connections without a secret.
       if (!p.ai.onDevice) built.push(keysSection(p, ctx, reload));
-      if (p.capabilities.tag) built.push(taggerSection(p, ctx, reload));
-      if (p.capabilities.embed) built.push(embedSection(p, ctx, reload));
-      if (p.capabilities.transcribe) built.push(transcribeSection(p, ctx, reload));
-      if (p.capabilities.detect) built.push(detectSection(p, ctx, reload));
+      // One generic section per capability this provider advertises, planned
+      // from the capabilities payload (capability-present.js) — a capability
+      // added to the server's registry gets its section with no edit here.
+      // Modifiers never appear in the payload's rows and delegates have no
+      // slot of their own to hold, so both fall out naturally.
+      for (const cap of ctx.capabilities || []) {
+        if (cap.kind === "ai" && !cap.delegatesTo && p.capabilities[cap.id]) built.push(capabilitySection(cap, p, ctx, reload));
+      }
       if (p.configSchema.length) built.push(pacingSection(p)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {
       built.push(sourceSection(p, ctx, reload));
@@ -542,412 +511,108 @@ function keysSection(p, ctx, reload) {
   return sec;
 }
 
-// --- ai: the default-tagger slot ---
-
-function taggerSection(p, ctx, reload) {
-  const mine = ctx.keys.filter((k) => k.provider === p.name);
-  const isDefault = ctx.defaults.tagger === p.name;
-  const sec = section("Default tagger", "Used by every board that doesn't set its own key.");
-
-  const envOption = p.name === "anthropic" && ctx.slots.tagger.envKey;
-  if (!mine.length && !envOption) {
-    const none = document.createElement("p");
-    none.className = "muted";
-    none.style.margin = "0";
-    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to make this provider the default tagger.`;
-    sec.appendChild(none);
-    return sec;
-  }
-
-  const keySel = document.createElement("select");
-  keySel.style.cssText = "width:100%;";
-  const conns = mine.map((k) => ({ value: String(k.id), label: k.name }));
-  if (envOption) conns.push({ value: "env", label: "ANTHROPIC_API_KEY env var" });
-  // Only the slot's own holder gets a selection to show. While the slot is
-  // someone else's, this section is a proposal, and a proposal that arrives
-  // pre-filled reads as a decision — so it starts empty.
-  const slotConn = ctx.slots.tagger.keyId ? String(ctx.slots.tagger.keyId) : "env";
-  fillSelect(keySel, conns, { value: isDefault ? slotConn : null, placeholder: pickKey(p) });
-  sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
-
-  const modelSel = document.createElement("select");
-  modelSel.style.cssText = "width:100%;";
-  // Options follow the selected connection ("env" has no ai_keys row, but
-  // the server holds that key — the route's env branch lists with it). The
-  // slot's persisted model rides as `saved` only when the selected
-  // connection IS the slot's; anywhere else the picker is empty, including
-  // after you repoint an already-default slot at a different connection.
-  const syncLive = () => syncModelPicker(modelSel, p.ai, keySel.value === "env" ? "env" : Number(keySel.value) || null, {
-    saved: isDefault && keySel.value === slotConn ? ctx.slots.tagger.model : null,
-    placeholder: PICK_MODEL,
-  });
-  keySel.addEventListener("change", syncLive);
-  syncLive();
-  sec.appendChild(labeled("Model", modelSel));
-
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-  const apply = async () => {
-    try {
-      await api("POST", "/api/admin/ai-config", {
-        defaultKeyId: keySel.value === "env" ? null : Number(keySel.value),
-        model: modelSel.value,
-      });
-      toast("Default tagger saved");
-      reload();
-    } catch (err) { toast.error(err.message); }
+// --- ai: one generic capability section (capabilities-plan.md, slice 4b) ---
+// The tagger/embedder/transcriber/detector sections used to be four ~110-line
+// copies of this, each free to disagree. Every DECISION now comes from
+// planSection (capability-present.js, pure and node-tested — including the
+// exact bind bodies); this shell only mounts the plan onto the shared pieces
+// (section/fillSelect/syncModelPicker/slotButton) and posts to the
+// capability-native routes.
+function capabilitySection(cap, p, ctx, reload) {
+  const plan = planSection(cap, p, ctx.keys.filter((k) => k.provider === p.name));
+  const sec = section(plan.title, plan.subtitle);
+  const muted = (text) => {
+    const el = document.createElement("p");
+    el.className = "muted";
+    el.style.margin = "0";
+    el.textContent = text;
+    return el;
   };
-  actions.appendChild(slotButton("Make default tagger", isDefault, [keySel, modelSel], apply));
-  if (!isDefault) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.tagger, ctx.slots.tagger.model));
-
-  if (isDefault) {
-    const test = document.createElement("button");
-    test.className = "ghost";
-    test.textContent = "Test";
-    test.onclick = busy(test, "Testing…", async () => {
-      try {
-        const { model: m, provider: pr } = await api("POST", "/api/admin/ai-config/test");
-        toast(`✓ ${pr}/${m} reachable`);
-      } catch (err) { toast.error(err.message); }
-    });
-    actions.appendChild(test);
-  }
-  sec.appendChild(actions);
-  return sec;
-}
-
-// --- ai: the embedder slot (semantic search) ---
-
-function embedSection(p, ctx, reload) {
-  const em = ctx.slots.embedder;
-  const active = ctx.defaults.embedder === p.name;
-  const mine = ctx.keys.filter((k) => k.provider === p.name);
-  const sec = section("Semantic search", "Free-text search that ranks a board's items by meaning. One embedder serves the whole app — vectors only compare within a model.");
-
-  if (!p.ai.onDevice && !mine.length) {
-    const none = document.createElement("p");
-    none.className = "muted";
-    none.style.margin = "0";
-    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to embed with this provider.`;
-    sec.appendChild(none);
+  if (plan.guard) {
+    sec.appendChild(muted(plan.guard));
     return sec;
   }
 
-  const keySel = connectionPicker(p, mine, sec, { active, keyId: em.keyId });
+  let keySel = null;
+  if (plan.rows) {
+    keySel = document.createElement("select");
+    keySel.style.cssText = "width:100%;";
+    fillSelect(keySel, plan.rows, { value: plan.preselect, placeholder: plan.ask ? pickKey(p) : null });
+    if (plan.ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
+  }
 
   let modelSel = null;
-  if (p.ai.embeds.models.length > 1 || !p.ai.onDevice) {
+  if (plan.model.catalog) {
     modelSel = document.createElement("select");
     modelSel.style.cssText = "width:100%;";
-    // Live options carved to embedders (descriptor embeds.filter) — an
-    // on-device provider has no connection row to ask (null keyId: curated
-    // render only). `saved` = the slot's persisted embed model, when the
-    // selected connection is the slot's.
-    const entry = { models: p.ai.embeds.models, defaultModel: p.ai.embeds.default };
-    const syncLive = () => syncModelPicker(modelSel, entry, keySel ? Number(keySel.value) || null : null, {
-      kind: "embed",
-      saved: active && (keySel ? Number(keySel.value) === em.keyId : true) ? em.model : null,
+    // Live options carved to this capability (kind = its declaring id); the
+    // slot's persisted model rides as `saved` only while the selected
+    // connection IS the slot's own.
+    const syncLive = () => syncModelPicker(modelSel, plan.model.catalog, keySel ? (keySel.value === "env" ? "env" : Number(keySel.value) || null) : null, {
+      kind: cap.declaredBy,
+      saved: plan.holder && (!keySel || keySel.value === plan.preselect) ? plan.savedModel : null,
       placeholder: PICK_MODEL,
     });
     if (keySel) keySel.addEventListener("change", syncLive);
     syncLive();
-    sec.appendChild(labeled("Embedding model", modelSel));
+    sec.appendChild(labeled("Model", modelSel));
   } else {
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.style.margin = "0";
-    note.textContent = p.ai.embeds.models[0].id + " — " + p.ai.embeds.models[0].note;
-    sec.appendChild(note);
-  }
-
-  if (active && em.enabled) {
-    // the backfill status line, honest about skipped items (they don't retry
-    // on their own — re-tagging does)
-    const { embedded = 0, tagged = 0, failed = 0 } = em.stats || {};
-    const remaining = tagged - embedded - failed;
-    const status = document.createElement("p");
-    status.className = "muted";
-    status.style.margin = "0";
-    status.textContent =
-      tagged && embedded < tagged
-        ? `${embedded} of ${tagged} tagged items embedded${remaining > 0 ? " — the rest backfill in the background" : ""}.`
-        : `All ${tagged} tagged items embedded.`;
-    if (failed) status.textContent += ` ${failed} skipped after embedding errors — re-tagging retries them.`;
-    sec.appendChild(status);
+    sec.appendChild(muted(plan.model.note));
   }
 
   const actions = document.createElement("div");
   actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-
-  const enabled = active && em.enabled;
-  const apply = async () => {
-    const model = modelSel?.value || p.ai.embeds.default;
-    if (enabled && em.model && em.model !== model &&
-        !confirm("Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?")) return;
+  const selVals = () => ({
+    key: keySel?.value ?? null,
+    model: modelSel?.value || plan.model.catalog?.defaultModel || null,
+  });
+  const post = (payload, okToast) => async () => {
     try {
-      // An on-device embedder is selected by name (no key row); everything else
-      // — keyed or keyless-networked — goes through its connection row.
-      await api("POST", "/api/admin/ai-config", p.ai.onDevice
-        ? { embedProvider: p.name, embedEnabled: true }
-        : { embedProvider: null, embedKeyId: Number(keySel.value), embedModel: model, embedEnabled: true });
-      toast("Semantic search settings saved");
+      await api("POST", `/api/admin/capabilities/${cap.id}/bind`, payload());
+      toast(okToast);
       reload();
     } catch (err) { toast.error(err.message); }
   };
-  actions.appendChild(slotButton("Make default embedder", enabled, [keySel, modelSel].filter(Boolean), apply));
-  if (!enabled) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.embedder, ctx.slots.embedder.model));
 
-  if (enabled) {
-    const test = document.createElement("button");
-    test.className = "ghost";
-    test.textContent = "Test";
-    test.onclick = busy(test, "Testing…", async () => {
-      try {
-        const { model: m, provider: pr } = await api("POST", "/api/admin/ai-config/embed-test");
-        toast(`✓ ${pr}/${m} reachable`);
-      } catch (err) { toast.error(err.message); }
-    });
-    const off = document.createElement("button");
-    off.className = "danger";
-    off.textContent = "Turn off";
-    off.onclick = busy(off, "Saving…", async () => {
-      try {
-        await api("POST", "/api/admin/ai-config", { embedEnabled: false });
-        toast("Semantic search turned off");
-        reload();
-      } catch (err) { toast.error(err.message); }
-    });
-    actions.append(test, off);
-  }
-  sec.appendChild(actions);
-  return sec;
-}
-
-// Transcription slot — audio → text so recordings can be tagged. Mirrors
-// embedSection, but transcription is always on (the whisper sidecar is the
-// default), so there's no enable toggle: the provider choice IS the toggle.
-// A provider advertises this via `transcribes`; the keyless whisper sidecar
-// shows the model it reports live (via the server's /health probe) as a note —
-// the model is baked into the sidecar image at deploy, not picked here.
-function transcribeSection(p, ctx, reload) {
-  const tr = ctx.slots.transcriber;
-  const active = ctx.defaults.transcriber === p.name;
-  const mine = ctx.keys.filter((k) => k.provider === p.name);
-  const sec = section("Transcription", "Audio → text so recordings can be tagged. One transcriber serves the whole app; the on-server whisper sidecar is the default.");
-
-  if (!p.ai.onDevice && !mine.length) {
-    const none = document.createElement("p");
-    none.className = "muted";
-    none.style.margin = "0";
-    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to transcribe with this provider.`;
-    sec.appendChild(none);
-    return sec;
-  }
-
-  const keySel = connectionPicker(p, mine, sec, { active, keyId: tr.keyId });
-
-  // Model picker — a provider gets a dropdown of its transcribes.models; the
-  // on-device sidecar shows its single baked model as a note.
-  let modelSel = null;
-  if (!p.ai.onDevice && p.ai.transcribes.models.length > 1) {
-    modelSel = document.createElement("select");
-    modelSel.style.cssText = "width:100%;";
-    // Live options carved to transcription models (descriptor
-    // transcribes.filter); `saved` = the slot's persisted model, when the
-    // selected connection is the slot's.
-    const entry = { models: p.ai.transcribes.models, defaultModel: p.ai.transcribes.default };
-    const syncLive = () => syncModelPicker(modelSel, entry, Number(keySel.value) || null, {
-      kind: "transcribe",
-      saved: active && Number(keySel.value) === tr.keyId ? tr.model : null,
-      placeholder: PICK_MODEL,
-    });
-    keySel.addEventListener("change", syncLive);
-    syncLive();
-    sec.appendChild(labeled("Transcription model", modelSel));
-  } else {
-    // `one` is whisper's live self-report (or a provider's single model); an
-    // absent entry means the sidecar didn't answer — the baked model still serves.
-    const one = p.ai.transcribes.models[0];
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.style.margin = "0";
-    note.textContent = one ? one.id + " — " + one.note : "model baked at deploy (WHISPER_MODEL) — sidecar not reachable right now";
-    sec.appendChild(note);
-  }
-
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-
-  if (p.ai.onDevice) {
-    // An on-device transcriber (the whisper sidecar, or a plugin with its own
-    // wire) is picked by name — nothing to configure, so the button just makes
-    // it the default, and sits disabled + secondary while it already is.
-    const apply = async () => {
-      try {
-        await api("POST", "/api/admin/ai-config", { transcribeProvider: p.name });
-        toast(`Transcription set to ${p.label}`);
-        reload();
-      } catch (err) { toast.error(err.message); }
-    };
-    actions.appendChild(slotButton("Make default transcriber", active, [], apply));
-  } else {
-    const apply = async () => {
-      const model = modelSel?.value || p.ai.transcribes.default;
-      try {
-        await api("POST", "/api/admin/ai-config", {
-          transcribeProvider: p.name,
-          transcribeKeyId: Number(keySel.value),
-          transcribeModel: model,
-        });
-        toast("Transcription settings saved");
-        reload();
-      } catch (err) { toast.error(err.message); }
-    };
-    actions.appendChild(slotButton("Make default transcriber", active, [keySel, modelSel].filter(Boolean), apply));
-
-    if (active) {
-      const test = document.createElement("button");
-      test.className = "ghost";
-      test.textContent = "Test";
-      test.onclick = busy(test, "Testing…", async () => {
+  for (const b of plan.buttons) {
+    if (b.kind === "apply") {
+      const apply = async () => {
+        const sel = selVals();
+        // The costly-rebind confirm (embed: a model change re-embeds everything)
+        // arms only while live with a pinned model — planned as data.
+        if (plan.confirm && sel.model && sel.model !== plan.confirm.priorModel && !confirm(plan.confirm.message)) return;
+        await post(() => b.payload(sel), b.toast)();
+      };
+      actions.appendChild(slotButton(b.label, plan.holder, [keySel, modelSel].filter(Boolean), apply));
+    } else if (b.kind === "probe") {
+      const t = document.createElement("button");
+      t.className = "ghost";
+      t.textContent = "Test";
+      t.onclick = busy(t, "Testing…", async () => {
         try {
-          const { model: m, provider: pr } = await api("POST", "/api/admin/ai-config/transcribe-test");
-          toast(`✓ ${pr}/${m} reachable`);
+          const r = await api("POST", `/api/admin/capabilities/${cap.id}/probe`);
+          toast(fmtProbe(r));
         } catch (err) { toast.error(err.message); }
       });
-      const off = document.createElement("button");
-      off.className = "danger";
-      off.textContent = "Use Whisper instead";
-      off.onclick = busy(off, "Saving…", async () => {
-        try {
-          await api("POST", "/api/admin/ai-config", { transcribeProvider: "whisper" });
-          toast("Transcription reverted to the on-device Whisper sidecar");
-          reload();
-        } catch (err) { toast.error(err.message); }
-      });
-      actions.append(test, off);
+      actions.appendChild(t);
+    } else {
+      // off | revert: a fixed-payload write, styled as the destructive half.
+      const btn = document.createElement("button");
+      btn.className = "danger";
+      btn.textContent = b.label;
+      btn.onclick = busy(btn, "Saving…", post(b.payload, b.toast));
+      actions.appendChild(btn);
     }
   }
-  if (!active) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.transcriber, ctx.slots.transcriber.model));
-
+  if (plan.currentDefault) {
+    const span = document.createElement("span");
+    span.className = "muted";
+    span.style.cssText = "font-size:12px;";
+    span.textContent = `Current default: ${plan.currentDefault.label}${plan.currentDefault.model ? ` · ${plan.currentDefault.model}` : ""}`;
+    actions.appendChild(span);
+  }
   if (actions.children.length) sec.appendChild(actions);
-  return sec;
-}
-
-// Object-detection slot — image → boxes from a text prompt. Mirrors
-// transcribeSection: the engine is picked by name, the on-device LLMDet detector
-// is the always-available default, so there's no enable toggle — the provider
-// choice IS the toggle. A provider advertises this via `detects`; the keyless
-// on-device detector shows its model as a note and offers a Test (which runs the
-// LLMDet sidecar on a probe image).
-function detectSection(p, ctx, reload) {
-  const dt = ctx.slots.detector;
-  const active = ctx.defaults.detector === p.name;
-  const mine = ctx.keys.filter((k) => k.provider === p.name);
-  const sec = section("Object detection", "Find objects in images from a text prompt. One detector serves the whole app; the on-device LLMDet model (object-detector sidecar) is the default.");
-
-  if (!p.ai.onDevice && !mine.length) {
-    const none = document.createElement("p");
-    none.className = "muted";
-    none.style.margin = "0";
-    none.textContent = `Add a ${p.ai.keyless ? "connection" : "key"} above to detect with this provider.`;
-    sec.appendChild(none);
-    return sec;
-  }
-
-  const keySel = connectionPicker(p, mine, sec, { active, keyId: dt.keyId });
-
-  // Model picker — a provider gets a dropdown of its detects.models; the
-  // on-device detector shows its single model as a note.
-  let modelSel = null;
-  if (!p.ai.onDevice && p.ai.detects.models.length > 1) {
-    modelSel = document.createElement("select");
-    modelSel.style.cssText = "width:100%;";
-    const entry = { models: p.ai.detects.models, defaultModel: p.ai.detects.default };
-    const syncLive = () => syncModelPicker(modelSel, entry, Number(keySel.value) || null, {
-      kind: "detect",
-      saved: active && Number(keySel.value) === dt.keyId ? dt.model : null,
-      placeholder: PICK_MODEL,
-    });
-    keySel.addEventListener("change", syncLive);
-    syncLive();
-    sec.appendChild(labeled("Detection model", modelSel));
-  } else {
-    const one = p.ai.detects.models[0];
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.style.margin = "0";
-    note.textContent = one ? one.id + " — " + one.note : "on-device model";
-    sec.appendChild(note);
-  }
-
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-
-  if (p.ai.onDevice) {
-    // Picked by name — nothing to configure, so the button just makes it the
-    // default (disabled + secondary while it already is). Test loads the model.
-    const apply = async () => {
-      try {
-        await api("POST", "/api/admin/ai-config", { detectProvider: p.name });
-        toast(`Object detection set to ${p.label}`);
-        reload();
-      } catch (err) { toast.error(err.message); }
-    };
-    actions.appendChild(slotButton("Make default detector", active, [], apply));
-    if (active) {
-      const test = document.createElement("button");
-      test.className = "ghost";
-      test.textContent = "Test";
-      test.onclick = busy(test, "Loading model…", async () => {
-        try {
-          const { model: m, count } = await api("POST", "/api/admin/ai-config/detect-test");
-          toast(`✓ ${m} ran (${count} found in probe)`);
-        } catch (err) { toast.error(err.message); }
-      });
-      actions.appendChild(test);
-    }
-  } else {
-    const apply = async () => {
-      const model = modelSel?.value || p.ai.detects.default;
-      try {
-        await api("POST", "/api/admin/ai-config", {
-          detectProvider: p.name,
-          detectKeyId: Number(keySel.value),
-          detectModel: model,
-        });
-        toast("Detection settings saved");
-        reload();
-      } catch (err) { toast.error(err.message); }
-    };
-    actions.appendChild(slotButton("Make default detector", active, [keySel, modelSel].filter(Boolean), apply));
-
-    if (active) {
-      const test = document.createElement("button");
-      test.className = "ghost";
-      test.textContent = "Test";
-      test.onclick = busy(test, "Testing…", async () => {
-        try {
-          const { model: m, provider: pr, count } = await api("POST", "/api/admin/ai-config/detect-test");
-          toast(`✓ ${pr}/${m} reachable (${count} found in probe)`);
-        } catch (err) { toast.error(err.message); }
-      });
-      const off = document.createElement("button");
-      off.className = "danger";
-      off.textContent = "Use on-device detector instead";
-      off.onclick = busy(off, "Saving…", async () => {
-        try {
-          await api("POST", "/api/admin/ai-config", { detectProvider: "localDetector" });
-          toast("Detection reverted to the on-device object detector");
-          reload();
-        } catch (err) { toast.error(err.message); }
-      });
-      actions.append(test, off);
-    }
-  }
-  if (!active) actions.appendChild(currentDefaultNote(ctx, ctx.defaults.detector, ctx.slots.detector.model));
-
-  if (actions.children.length) sec.appendChild(actions);
+  if (plan.progressLine) sec.appendChild(muted(plan.progressLine));
   return sec;
 }
 

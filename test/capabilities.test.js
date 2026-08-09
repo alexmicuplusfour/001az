@@ -128,6 +128,25 @@ test("the status payload on a fresh instance — every default state, in one rea
   assert.ok(caps.ingest.handlers.some((h) => h.name === "image"));
   assert.equal(caps.source.state, "active");
   assert.ok(caps.source.sources.find((s) => s.name === "folder")?.core);
+
+  // The page-facing fields (slice 4a): the floor's identity travels even when
+  // it isn't serving; Test buttons come from data; the env rung says whether
+  // the server holds its secret; the re-embed confirm is descriptor copy.
+  assert.deepEqual(caps.transcribe.floor, { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)" });
+  assert.deepEqual(caps.tag.floor, { kind: "blocked" });
+  assert.equal(caps.transcribe.probeable, true);
+  assert.equal(caps.extract.probeable, undefined, "a delegate has nothing of its own to probe");
+  assert.deepEqual(caps.tag.env, { configured: false, provider: "anthropic", var: "ANTHROPIC_API_KEY" }, "cleared for this test — presence is the point");
+  assert.match(caps.embed.rebindWarning, /re-embeds every item/);
+
+  // The modal-facing fields (slice 4b): the agent noun keeps "Make default
+  // tagger" verbatim; `binding` says which levers exist; declaredBy says which
+  // provides-slice carries the model catalog.
+  assert.equal(caps.tag.agent, "tagger");
+  assert.equal(caps.extract.declaredBy, "tag");
+  assert.deepEqual(caps.tag.binding, { provider: false, enable: false });
+  assert.deepEqual(caps.embed.binding, { provider: true, enable: true });
+  assert.deepEqual(caps.detect.binding, { provider: true, enable: false });
 });
 
 // --- cleanup: the two shipped bugs ---
@@ -237,6 +256,54 @@ test("bind and probe are addressed by capability id, with the same rules the leg
   await setSetting(db, "transcribe_model", null);
   await setSetting(db, "detect_threshold", null);
   await setSetting(db, "detect_provider", null);
+});
+
+test("the modal's bind bodies (4b): env-apply, one-call enable, revert, off", async (t) => {
+  const admin = await adminSession(db);
+  const bind = (id, body) => req(srv.base, "POST", `/api/admin/capabilities/${id}/bind`, { sid: admin.sid, body });
+  const created = await createAiKey(db, "bodies", "openai", "sk-test");
+  const keyId = created.id ?? created;
+  const saved = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-env";
+  t.after(async () => {
+    if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = saved;
+    await deleteAiKey(db, keyId);
+    await setSetting(db, "model", null);
+    await setSetting(db, "embed_provider", null);
+    await setSetting(db, "embed_enabled", null);
+  });
+
+  // Tagger, env row selected: keyId null + model — the env rung serves.
+  assert.equal((await bind("tag", { keyId: null, model: "claude-haiku-4-5" })).status, 200);
+  assert.equal(await getSetting(db, "default_key_id"), null);
+  assert.equal(await getSetting(db, "model"), "claude-haiku-4-5");
+  assert.equal((await resolveDefaultAi(db)).keyId, "env");
+
+  // Tagger, key row: same call shape, no provider field (tag binds by row).
+  assert.equal((await bind("tag", { keyId, model: "gpt-5-mini" })).status, 200);
+  assert.equal((await resolveDefaultAi(db)).keyId, keyId);
+
+  // Embed, one call binds AND enables — the enable judges the final state.
+  assert.equal((await bind("embed", { provider: null, keyId, model: "text-embedding-3-small", enabled: true })).status, 200);
+  assert.equal(await getSetting(db, "embed_enabled"), "1");
+  assert.equal((await resolveEmbedder(db)).model, "text-embedding-3-small");
+
+  // Turn off keeps the binding and closes the gate.
+  assert.equal((await bind("embed", { enabled: false })).status, 200);
+  assert.equal(await getSetting(db, "embed_key_id"), String(keyId), "binding kept");
+  assert.equal(await resolveEmbedder(db), null);
+
+  // On-device pick by name, enabling in the same call.
+  assert.equal((await bind("embed", { provider: "local", enabled: true })).status, 200);
+  assert.equal((await resolveEmbedder(db)).provider, "local");
+
+  // Revert to the floor clears the whole choice.
+  await bind("transcribe", { provider: "openai", keyId, model: "whisper-1" });
+  assert.equal((await bind("transcribe", { provider: "whisper" })).status, 200);
+  assert.equal(await getSetting(db, "transcribe_key_id"), null);
+  assert.equal(await getSetting(db, "transcribe_model"), null);
+  assert.equal((await resolveTranscriber(db)).id, "whisper");
 });
 
 test("degraded says why, shows what took over — and the payload never carries key material", async (t) => {

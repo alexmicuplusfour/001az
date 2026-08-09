@@ -1129,9 +1129,225 @@ starred-then-removed; the secrets scan; ingest/source present and active.
 State-mutating tests restore what they change (shared server, §2.10 rule 5).
 
 ### Slice 4 — the page
-Generic renderer + nav entry. Plugins-page badges become links. `plugin-modal`'s
-four sections collapse to one `capabilitySection(capId, …)` driven by the
-payload — 449 lines to roughly 130.
+
+**4a SHIPPED locally 2026-08-10 (uncommitted):** the payload fields (§4.2), the
+pure presenter (`public/capability-present.js`, det-geometry pattern, 7 tests),
+the page (`public/admin-capabilities.js`), the Capabilities tab (admin.html +
+admin.js with the shell's first `hashchange` listener and suffix-preserving
+deep links), and the Plugins-page slot badges as `#capabilities/<id>` links.
+Suite green at 948 ×2; browser import graph + tab wiring verified statically
+(the test harness serves no frontend — its `STATIC_DIR` is a temp dir, so
+static 404s in a harness smoke are an artifact). 4b remains plan-only.
+
+Deep-dived 2026-08-10. **Split 4a/4b like slice 2**: 4a is the page (new
+surface, additive payload fields, zero existing-client edits beyond nav +
+links); 4b is the modal collapse (rewrites 449 lines of existing UI and moves
+its writes to the capability-native routes). 4a ships alone.
+
+#### 4.1 What the frontend dive established
+
+- **The admin shell makes a tab cheap.** [admin.js](../public/admin.js) is 36
+  lines: `TAB_NAMES`, one button + one panel in
+  [admin.html](../public/admin.html), one render module. Hash deep-linking
+  exists (`#plugins`) but there is **no `hashchange` listener anywhere** — tab
+  switching is click-only after load. Badges-as-links need one; `#capabilities/tag`
+  needs `initialTab.split("/")` (two lines).
+- **The four modal sections, measured for real** ([plugin-modal.js](../public/plugin-modal.js)
+  547–953): a shared skeleton — no-keys guard → connection picker →
+  model picker (`syncModelPicker`, `kind: capId`) → `slotButton` → Test /
+  revert / `currentDefaultNote` — with per-capability variation that is
+  entirely expressible as data:
+
+  | | tag | embed | transcribe | detect |
+  |---|---|---|---|---|
+  | extra picker row | env option (`"env"` sentinel value) | — | — | — |
+  | enable semantics | — | apply implies `enabled:true`; Turn off | — | — |
+  | revert-to-floor button | none (floor is `blocked` — nothing to revert to) | — | "Use Whisper instead" | "Use on-device detector instead" |
+  | on-device holder | — | name-pick (local) | name-pick | name-pick + Test ("Loading model…") |
+  | extras | Test when default | stats line; **confirm on model change** (re-embed cost) | Test | Test |
+
+- **`detect_threshold` has no client UI at all.** Grep `public/` for
+  `threshold`/`detectThreshold`: zero hits outside unrelated modules. The
+  server stores, serves, and validates a knob nothing can set. The payload's
+  `config[]` was designed for exactly this — slice 4a closes the hole
+  generically (an autosave number input rendered from `config[]`), and it is
+  the first proof the config seam works.
+- **No browser harness** (established in the repo's own commit history), but
+  the house pattern exists: client modules are tested with hand-rolled DOM
+  stubs ([toast.test.js](../test/toast.test.js)), and pure presenter functions
+  are the testable surface.
+- **The page can reuse the plugin modal as its "Fix" action.**
+  `openPluginModal(p, ctx)` and `loadPluginState()` are exported — the page
+  opens the bound (or floor) provider's existing modal instead of growing its
+  own bind UI in 4a.
+
+#### 4.2 Payload additions (4a, additive only)
+
+Four small fields the page needs that the feed doesn't carry; all come from
+data that already exists server-side:
+
+1. `floor: { kind, provider, label } | null` — the revert button's target and
+   the "active (floor)" line need the floor's *name* even while a keyed
+   provider is serving; today it is only implicit in `running` when the floor
+   answers.
+2. `probeable: true` — re-export the probe roster from
+   [capability-probe.js](../server/capability-probe.js) (deleted as dead in the
+   2a review, needed after all — the page must not hardcode which four ids
+   have Test buttons).
+3. `env: { configured: boolean }` on capabilities with an env rung — the
+   modal's env-option row currently reads `slots.tagger.envKey`.
+4. `rebindWarning` (embed: the re-embeds-everything confirm copy) — moves the
+   one confirm dialog's trigger condition into descriptor data on
+   [capabilities.js](../server/capabilities.js).
+
+#### 4.3 The page (4a) — `public/admin-capabilities.js`
+
+One fetch of `/api/admin/capabilities`, one card per entry, **no capability
+knowledge**: every card renders state chip + blurb + Configured/Running lines +
+reason + demand + `supportedBy` chips (installed/keys state, health dot) +
+`config[]` inputs (autosave → `bind` with `config`) + modifiers line + Probe
+button (`probeable`) + "Configure →" (opens the bound-or-floor provider's
+plugin modal; supportedBy chips of not-installed providers link `#plugins`).
+Domain / always-on entries render from the same template minus what they lack.
+
+Pure presenter exported for stub-DOM tests: `presentCapability(entry) →
+{ chip, headline, lines, actions }` — state → chip class/copy, degraded →
+reason line, blocked → demand line — mirroring how
+[slotProviders/tagFor](../public/admin-plugins.js) are unit-tested today.
+
+Nav: tab + panel + `TAB_NAMES` entry + `hashchange` listener +
+`initialTab.split("/")` for `#capabilities/<id>` (scroll + highlight). The
+Plugins page's slot badges (`default tagger` …) become links to
+`#capabilities/<id>`.
+
+**Non-goals, decided:** admin-only (the page lives in admin.html; a member
+read-only view stays deferred). No gallery/first-run integration in this slice
+— the gallery already has the jobs surface; a "tagging is blocked" banner
+linking here is a candidate follow-up, not part of 4a.
+
+#### 4.4 The modal collapse (4b) — SHIPPED locally 2026-08-10 (uncommitted)
+
+As specced below, plus the small server additions it called for (`agent`,
+`declaredBy`, `binding` flags, `env.provider`/`env.var`, `progress` via a
+`PROGRESS` map beside `DEMAND`). plugin-modal.js went 1169 → 835 lines
+(the four sections + `connectionPicker` + `currentDefaultNote` deleted, one
+`capabilitySection` shell added); `planSection` in capability-present.js
+carries every decision, node-tested row by row including the exact bind
+bodies, with their server halves pinned in capabilities.test.js ("the modal's
+bind bodies"). loadPluginState fetches capabilities; the modal reload merge
+threads it. Suite green at 953 ×2. The legacy ai-config adapter + probe
+aliases now have zero client callers — deletion is a later cleanup slice,
+together with `slotProviders()`.
+
+**The whole client surface of the legacy routes is these four sections.** All
+15 `POST /api/admin/ai-config` + `*-test` call sites in `public/` live in
+[plugin-modal.js](../public/plugin-modal.js) 547–953; the GET has no client
+caller at all. After 4b, `LEGACY_BIND_FIELDS` and the four probe aliases serve
+only stale cached pages — kept one release (their server tests pin them),
+deleted in a later cleanup slice together with `slotProviders()` (the badges'
+hand-list, out of 4b's scope).
+
+**Correction to the earlier sketch: `capabilitySection` cannot be stub-DOM
+tested.** plugin-modal.js imports `/api.js`-path modules, so node cannot load
+it — the toast.test pattern only works for import-free modules. The testable
+seam is therefore a **pure planner** in
+[capability-present.js](../public/capability-present.js):
+
+```
+planSection(cap, provider, keys) → {
+  title, subtitle,                    // cap.label / cap.blurb
+  guard,                              // "add a key above…" when keyless-empty and no env row
+  rows, preselect, ask,               // connection options INCL. the env row; the
+                                      //   one-key-hidden rule as the `ask` flag
+  modelCatalog | modelNote,           // { models, defaultModel } for syncModelPicker
+                                      //   (kind = cap.id), or the single-model note
+  holder,                             // this provider is the acting one (running.provider)
+  buttons: [{ kind, label, payload(sel) }],  // apply / probe / revert / off — payload
+                                      //   is a closure over select values, so tests
+                                      //   assert the EXACT bind bodies
+  confirm,                            // rebindWarning predicate inputs
+  currentDefault,                     // from cap.running via cap.supportedBy labels
+  progressLine,
+}
+```
+
+plugin-modal keeps a thin DOM shell (~40 lines) that maps the plan onto the
+existing pieces — `section()`, `fillSelect`, `syncModelPicker`, `slotButton`
+(all untouched); `connectionPicker` loses its last callers and dies (the env
+row means the picker is rows-driven now, which is what the tagger hand-built
+around it for).
+
+**The bind bodies, pinned by planner tests AND server tests** (the risky
+mappings, one per current call site):
+
+| action today | bind body |
+|---|---|
+| tagger apply, env row selected (`defaultKeyId: null, model`) | `{ keyId: null, model }` — the env rung serves by falling through |
+| tagger apply, key row | `{ keyId, model }` |
+| embed apply, key path (`embedProvider: null, …, embedEnabled: true`) | `{ provider: null, keyId, model, enabled: true }` — one call; enable validates the FINAL state |
+| embed apply, on-device | `{ provider: "local", enabled: true }` (name from the roster, not a literal) |
+| embed Turn off | `{ enabled: false }` — binding kept, gate closed |
+| transcribe/detect apply | `{ provider, keyId, model }` |
+| revert ("Use Whisper instead") | `{ provider: cap.floor.provider }` — clears keyId/model per chooseBinding's floor branch |
+| all four Test buttons | `POST /api/admin/capabilities/:id/probe` |
+
+Server-side additions (small, all data): `agent` on the defs ("tagger",
+"embedder", …) so "Make default tagger" and its toasts stay verbatim;
+`declaredBy` emitted so the shell reads `p.ai.provides[cap.declaredBy]` instead
+of assuming id === declaredBy; `progress` on the embed entry (a `PROGRESS` map
+beside `DEMAND`, embeddingStats when enabled) replacing the stats line's
+`slots.embedder.stats` read — and rendered by the page too, for free.
+`loadPluginState()` gains the capabilities fetch; the modal's
+`active`/`isDefault` checks become `capsById[id].running?.provider === p.name`
+(the env→anthropic mapping already lives in `running`).
+
+**Accepted copy drift** (listed so it's a decision): the tagger section title
+becomes "Tagging" (`cap.label` — the other three titles already match); revert
+buttons read `Use the built-in ${noun} instead` (generic beats "Use Local
+Transcriber (Whisper) instead"); detect's on-device Test busy label unifies to
+"Testing…"; the embed stats line becomes the generic progress copy.
+
+Tests: planner table row by row (env payload, enable-on-apply, revert target,
+off, confirm predicate, guard, one-key `ask` rule) in
+capability-present.test.js; the four bind bodies added to the server-side bind
+test; the existing modal behaviors that survive only by hand-testing (select
+placeholder → disabled button interplay) stay in the DOM shell it already
+lives in, unchanged.
+
+Estimated diff: plugin-modal −449/+~170, capability-present +~120,
+capability-status/capabilities.js +~30, tests +~120.
+
+#### 4.4a Review pass — what the first cut of slice 4 missed
+
+1. **The probe toast existed twice** (page Test + modal Test, same template
+   string in two files) and **`busy` existed twice** (a local copy in
+   admin-capabilities). Both shared now: `fmtProbe` joins the presenter's
+   fmt exports; `busy` is exported from plugin-modal.
+2. **The Capabilities tab went stale after Plugins-tab edits.** The modal's
+   `refresh` from the Plugins tab repainted only the plugin cards, so a rebind
+   made the *diagnostics* page lie until a full reload — on the one page whose
+   job is truth. `refresh` now repaints both surfaces. Deliberate ESM module
+   cycle (admin-plugins ↔ admin-capabilities), safe because each side only
+   calls the other inside functions.
+3. **`presentSupported` under-warned keyless-networked providers**: an
+   installed Ollama with zero connections rendered a plain label, though it
+   cannot serve without a connection row (that's where the server URL lives).
+   Zero rows now warns for keyed and keyless alike, with the right noun.
+4. Small: the `labelOf` alias dropped; README's admin-panel bullet now names
+   the Capabilities tab.
+5. **Deliberately left**: the modal's caps fetch failing fails the whole modal
+   (same Promise.all strictness as its other three fetches); `renderCapabilities`
+   double-fetches when refresh chains from the modal (one extra admin-page GET).
+
+#### 4.5 Tests
+
+- 4a: presenter pure-fn tests (every state → chip/lines, secrets never in
+  presenter output by construction); config autosave posts `bind` with
+  `config` (route already tested server-side); `docs.test.js`-style check that
+  the new tab is wired (TAB_NAMES ↔ html panels) if cheap.
+- 4b: stub-DOM tests for `capabilitySection` covering the variation table row
+  by row — env option, enable, revert label from `floor.label`, on-device
+  name-pick, confirm-on-model-change gated by `rebindWarning`.
 
 ### Slice 5 — `binding.scope` honoured
 Per-board transcribe/detect (the two dead `board` params), and `extract` gains

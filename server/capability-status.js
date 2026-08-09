@@ -30,6 +30,7 @@ import { listConnectors, getConnector } from "./connectors/index.js";
 import { tagQueueDepth, embeddingStats, countBoardOverrides } from "./db.js";
 import { transcriberSidecarModel, detectorSidecarModel } from "./worker.js";
 import { listSources } from "./ingestion/files.js";
+import { probeable } from "./capability-probe.js";
 
 // Per-capability demand — what an outage costs, attached to blocked/degraded
 // cards ("14 items waiting"). Keyed by id HERE rather than on CAPABILITY_DEFS
@@ -46,6 +47,18 @@ const DEMAND = {
     if (!model) return null;
     const { tagged, embedded, failed } = await embeddingStats(db, model);
     return { waiting: Math.max(0, tagged - embedded - failed) };
+  },
+};
+
+// Per-capability PROGRESS — how far along the serving binding is, shown while
+// it is ACTIVE (demand is the outage view; this is the healthy one). Same home
+// and same reasoning as DEMAND: needs queries, so it cannot live on the pure
+// data module. Embed is the one capability with a backfill today.
+const PROGRESS = {
+  embed: async (db, running) => {
+    if (!running?.model) return null;
+    const { tagged, embedded, failed } = await embeddingStats(db, running.model);
+    return { done: embedded, total: tagged, failed };
   },
 };
 
@@ -121,6 +134,7 @@ async function aiEntry(db, cap, catalog) {
     (state === "blocked" || state === "degraded") && DEMAND[cap.id]
       ? await DEMAND[cap.id](db, { running, bound })
       : null;
+  const progress = state === "active" && PROGRESS[cap.id] ? await PROGRESS[cap.id](db, running) : null;
 
   const cfg = cap.binding.config?.length ? await capabilityConfig(db, cap.id) : null;
   const modifiers = CAPABILITY_DEFS.filter((m) => m.modifierOf === cap.id).map((m) => ({
@@ -137,7 +151,14 @@ async function aiEntry(db, cap, catalog) {
     kind: "ai",
     label: cap.label,
     noun: cap.noun,
+    agent: cap.agent,
     blurb: cap.blurb,
+    // Which `provides` slice backs this capability — the modal's model catalog
+    // reads p.ai.provides[declaredBy] instead of assuming it equals the id.
+    declaredBy: cap.declaredBy,
+    // Which levers this capability's binding has — so the section renders an
+    // enable toggle or a provider-by-name apply from data, not from its id.
+    binding: { provider: !!keys?.provider, enable: !!keys?.enabled },
     state,
     viaFloor,
     reason,
@@ -147,6 +168,24 @@ async function aiEntry(db, cap, catalog) {
     running,
     supportedBy: supported,
     demand,
+    ...(progress ? { progress } : {}),
+    // The floor's identity travels even while a keyed provider serves — the
+    // revert button ("Use Whisper instead") and the active(floor) line both
+    // need its NAME, which is otherwise only implicit when the floor answers.
+    floor: cap.floor
+      ? {
+          kind: cap.floor.kind,
+          ...(cap.floor.provider
+            ? { provider: cap.floor.provider, label: PROVIDERS[cap.floor.provider]?.label || cap.floor.provider }
+            : {}),
+        }
+      : null,
+    ...(probeable(cap.id) ? { probeable: true } : {}),
+    // An env rung is a binding the admin can't see in any key list — say
+    // whether the server holds that secret and WHO it belongs to, so the
+    // section knows which provider's card offers the env row.
+    ...(cap.env ? { env: { configured: !!process.env[cap.env.secret], provider: cap.env.provider, var: cap.env.secret } } : {}),
+    ...(cap.rebindWarning ? { rebindWarning: cap.rebindWarning } : {}),
     ...(cap.floor?.kind === "delegate" ? { delegatesTo: cap.floor.to } : {}),
     ...(cap.binding.boardKeys ? { boardOverrides: await countBoardOverrides(db, cap.binding.boardKeys.keyId) } : {}),
     ...(cfg ? { config: cap.binding.config.map((f) => ({ key: f.key, value: cfg[f.key] })) } : {}),

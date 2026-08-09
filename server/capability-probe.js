@@ -72,6 +72,11 @@ const PROBES = {
   },
 };
 
+// Which capabilities have a probe — the status payload carries this so the
+// page renders Test buttons from data instead of hardcoding four ids. (Deleted
+// once as dead code; the page is the consumer it was waiting for.)
+export const probeable = (capId) => !!PROBES[capId];
+
 export async function probeCapability(db, capId) {
   const probe = PROBES[capId];
   if (!probe) throw bad(`"${capId}" has nothing to probe`);

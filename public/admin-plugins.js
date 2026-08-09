@@ -9,6 +9,7 @@ import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openPluginModal } from "/plugin-modal.js";
 import { openAddPluginModal } from "/plugin-add-modal.js";
+import { renderCapabilities } from "/admin-capabilities.js";
 import { ICONS } from "/utils.js";
 
 // The kind filter above the list: chip labels per card family, in display
@@ -84,13 +85,16 @@ function keyNote(p) {
 // after every mutation so it can rebuild itself against fresh state without
 // closing.
 export async function loadPluginState() {
-  const [data, keys, connections] = await Promise.all([
+  const [data, keys, connections, caps] = await Promise.all([
     api("GET", "/api/admin/plugins"),
     api("GET", "/api/admin/ai-keys"),
     api("GET", "/api/admin/source-connections"),
+    api("GET", "/api/admin/capabilities"),
   ]);
   const { plugins, slots } = data;
-  return { plugins, slots, keys, connections, defaults: slotProviders(slots, keys) };
+  // `capabilities` feeds the modal's generic per-capability sections (and the
+  // Capabilities tab itself); the legacy slots/defaults stay for the cards.
+  return { plugins, slots, keys, connections, defaults: slotProviders(slots, keys), capabilities: caps.capabilities };
 }
 
 export async function renderPlugins(prefetched) {
@@ -108,7 +112,16 @@ export async function renderPlugins(prefetched) {
   sec.className = "section";
   sec.innerHTML = `<h2>Plugins</h2><p class="sub">Capabilities and connections in one place. Add the services you use; core capabilities are always on. Configure keys and options via the gear.</p>`;
 
-  const ctx = { plugins, slots, keys, connections: srcConnections, defaults, refresh: renderPlugins, getState: loadPluginState };
+  // refresh repaints BOTH admin surfaces that project this state — the cards
+  // here and the Capabilities tab, which would otherwise go stale the moment a
+  // modal opened from THIS tab rebinds something. (Deliberate module cycle with
+  // admin-capabilities; both sides only call each other's functions later, so
+  // ESM resolves it fine.)
+  const ctx = {
+    plugins, slots, keys, connections: srcConnections, defaults,
+    refresh: (state) => { renderPlugins(state); renderCapabilities(); },
+    getState: loadPluginState,
+  };
 
   // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
   // marking installed ones "Added" — so they stay visible across reopens, not
@@ -171,6 +184,17 @@ function badge(text, cls = "") {
   return b;
 }
 
+// A slot-default badge that is also a door: it names which capability this
+// card holds, so it links to that capability's card on the Capabilities tab
+// (admin.js switches tabs on hashchange; admin-capabilities flashes the card).
+function badgeLink(text, capId, cls = "") {
+  const a = document.createElement("a");
+  a.className = "badge" + (cls ? ` ${cls}` : "");
+  a.href = "#capabilities/" + capId;
+  a.textContent = text;
+  return a;
+}
+
 function pluginRow(p, ctx) {
   // An external plugin whose code failed to load never reached the live maps, so
   // it has no descriptor to render badges/keys/config from — its own errored card.
@@ -188,13 +212,14 @@ function pluginRow(p, ctx) {
   label.textContent = p.label;
   head.appendChild(label);
 
-  // slot default badges — inline with the title, since they name what the row IS
+  // slot default badges — inline with the title, since they name what the row
+  // IS; each links to its capability's card on the Capabilities tab
   if (p.kind === "ai") {
     if (ctx.defaults.tagger === p.name)
-      head.appendChild(badge(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env"));
-    if (ctx.defaults.embedder === p.name) head.appendChild(badge("default embedder"));
-    if (ctx.defaults.transcriber === p.name) head.appendChild(badge("default transcriber"));
-    if (ctx.defaults.detector === p.name) head.appendChild(badge("default detector"));
+      head.appendChild(badgeLink(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env", "tag"));
+    if (ctx.defaults.embedder === p.name) head.appendChild(badgeLink("default embedder", "embed"));
+    if (ctx.defaults.transcriber === p.name) head.appendChild(badgeLink("default transcriber", "transcribe"));
+    if (ctx.defaults.detector === p.name) head.appendChild(badgeLink("default detector", "detect"));
   }
   if (p.kind === "connector") {
     const d = ctx.slots.domains[p.connector.domain] || {};
@@ -203,8 +228,8 @@ function pluginRow(p, ctx) {
     // active fallback as default. Note when the star points elsewhere (e.g. it
     // was removed): the star setting is preserved so re-adding restores it.
     if (d.effective === p.name) {
-      head.appendChild(badge("default"));
-      if (d.setting && d.setting !== d.effective) head.appendChild(badge(`was ${d.setting}`, "warn"));
+      head.appendChild(badgeLink("default", p.connector.domain));
+      if (d.setting && d.setting !== d.effective) head.appendChild(badgeLink(`was ${d.setting}`, p.connector.domain, "warn"));
     }
   }
 

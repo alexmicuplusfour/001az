@@ -81,7 +81,10 @@ a live connector.
   the admin account (email + password). Sessions are HttpOnly cookies. No
   email infrastructure needed.
 - **Admin panel** — user management, board management, AI provider/model/key
-  config, connector config, backups, and live server logs over SSE.
+  config, connector config, backups, and live server logs over SSE. A
+  **Capabilities** tab answers "is it working, and if not, why" for every
+  capability — what serves it, what fell back to the built-in engine and why,
+  how many items wait on a missing key, and who else could serve it.
 - **Backup & restore** — one-click full backup from the admin panel: a single
   portable `.tar` holding a consistent DB snapshot (REPEATABLE READ, taken
   while the app keeps running) plus originals, thumbnails, and installed

@@ -45,6 +45,7 @@
 export const CAPABILITY_DEFS = [
   {
     id: "tag",
+    agent: "tagger",
     noun: "tagging",
     label: "Tagging",
     blurb: "labels an item against its board's own facet taxonomy",
@@ -68,6 +69,7 @@ export const CAPABILITY_DEFS = [
   },
   {
     id: "extract",
+    agent: "extractor",
     noun: "field extraction",
     label: "Field extraction",
     blurb: "reads a board's structured fields out of an item",
@@ -82,15 +84,22 @@ export const CAPABILITY_DEFS = [
   },
   {
     id: "embed",
+    agent: "embedder",
     noun: "embeddings",
     label: "Semantic search",
     blurb: "embeds items so search can rank them by meaning",
     declaredBy: "embed", verb: "embed", models: true,
     binding: { keys: { provider: "embed_provider", keyId: "embed_key_id", model: "embed_model", enabled: "embed_enabled" }, boardKeys: null },
     floor: { kind: "off" },
+    // The UI confirms before re-binding the model while enabled: vectors only
+    // compare within a model, so a model change re-embeds the whole collection.
+    // Copy lives here as data — the generic section renders a confirm for any
+    // capability that declares one, and knows nothing about embeddings.
+    rebindWarning: "Changing the embedding model re-embeds every item (costs cents, takes a while). Continue?",
   },
   {
     id: "transcribe",
+    agent: "transcriber",
     noun: "transcription",
     label: "Transcription",
     blurb: "turns audio into text so recordings can be tagged and searched",
@@ -109,6 +118,7 @@ export const CAPABILITY_DEFS = [
   },
   {
     id: "detect",
+    agent: "detector",
     noun: "object detection",
     label: "Object detection",
     blurb: "finds objects in an image so items can be searched by what is in them",
