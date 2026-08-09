@@ -125,11 +125,13 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
-import sharp from "sharp";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
 import { MODEL_CAPABILITIES } from "./capabilities.js";
+import { bindCapability, setCapabilityConfig } from "./capability-bind.js";
+import { capabilityBinding, capabilityConfig } from "./capability-resolve.js";
+import { probeCapability } from "./capability-probe.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
 import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./password.js";
@@ -1871,36 +1873,31 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
     try { effective = (await conn.activeProvider(db)).name; } catch { /* no provider installed */ }
     domains[c.name] = { setting: (await getSetting(db, `${c.name}_provider`)) || null, effective };
   }
+  // The stored bindings come from capabilityBinding — one reader of a
+  // capability's settings keys and of its floor default, so this payload and
+  // /api/admin/ai-config can't drift from each other or from the descriptor.
+  // The slot NAMES below are the client's vocabulary, kept until it moves to
+  // /api/admin/capabilities.
+  const [tag, embed, transcribe, detect] =
+    await Promise.all(["tag", "embed", "transcribe", "detect"].map((c) => capabilityBinding(db, c)));
   res.json({
     plugins,
     slots: {
-      tagger: {
-        keyId: Number(await getSetting(db, "default_key_id")) || null,
-        model: (await getSetting(db, "model")) || null,
-        envKey: !!process.env.ANTHROPIC_API_KEY,
-      },
+      // Tagging is spelled out rather than spread: it has no provider setting
+      // (the connection row implies one) and carries the env-rung flag instead.
+      tagger: { keyId: tag.keyId, model: tag.model, envKey: !!process.env.ANTHROPIC_API_KEY },
       embedder: {
-        enabled: (await getSetting(db, "embed_enabled")) === "1",
-        provider: (await getSetting(db, "embed_provider")) || null,
-        keyId: Number(await getSetting(db, "embed_key_id")) || null,
-        model: (await getSetting(db, "embed_model")) || null,
+        ...embed,
         stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
       },
       // Transcription is always on (local sidecar by default); `active` is what
       // actually resolves — a configured provider that lost its key falls to local.
-      transcriber: {
-        provider: (await getSetting(db, "transcribe_provider")) || "whisper",
-        keyId: Number(await getSetting(db, "transcribe_key_id")) || null,
-        model: (await getSetting(db, "transcribe_model")) || null,
-        active: (await resolveTranscriber(db)).id,
-      },
+      transcriber: { ...transcribe, active: (await resolveTranscriber(db)).id },
       // Detection resolves like transcription — the on-device LLMDet detector by
       // default; `active` is what actually resolves.
       detector: {
-        provider: (await getSetting(db, "detect_provider")) || "localDetector",
-        keyId: Number(await getSetting(db, "detect_key_id")) || null,
-        model: (await getSetting(db, "detect_model")) || null,
-        threshold: Number(await getSetting(db, "detect_threshold")) || 0.3,
+        ...detect,
+        threshold: (await capabilityConfig(db, "detect")).detect_threshold,
         active: (await resolveDetector(db)).id,
       },
       domains,
@@ -2194,14 +2191,16 @@ app.post("/api/admin/source-connections/test", requireAdmin, wrap(async (req, re
 }));
 
 app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
-  const defaultKeyId = Number(await getSetting(db, "default_key_id")) || null;
-  const model = (await getSetting(db, "model")) || process.env.MODEL || "claude-haiku-4-5";
+  // Same source as the Plugins payload's `slots` (capabilityBinding): one reader
+  // of a capability's settings keys and its floor default. These two used to be
+  // two hand-written copies of the same ~25 lines, free to disagree.
+  const [tag, embedBinding, transcribeBinding, detectBinding] =
+    await Promise.all(["tag", "embed", "transcribe", "detect"].map((c) => capabilityBinding(db, c)));
+  const defaultKeyId = tag.keyId;
+  const model = tag.model || process.env.MODEL || "claude-haiku-4-5";
   const embedder = await resolveEmbedder(db);
   const embed = {
-    enabled: (await getSetting(db, "embed_enabled")) === "1",
-    provider: (await getSetting(db, "embed_provider")) || null,
-    keyId: Number(await getSetting(db, "embed_key_id")) || null,
-    model: (await getSetting(db, "embed_model")) || null,
+    ...embedBinding,
     // Backfill progress against the model actually in effect (settings or
     // the provider default); zeros when not configured.
     stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
@@ -2211,9 +2210,7 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
   // effect — a configured provider that lost its key falls back to local.
   const transcriber = await resolveTranscriber(db);
   const transcribe = {
-    provider: (await getSetting(db, "transcribe_provider")) || "whisper",
-    keyId: Number(await getSetting(db, "transcribe_key_id")) || null,
-    model: (await getSetting(db, "transcribe_model")) || null,
+    ...transcribeBinding,
     active: transcriber.id, // the engine family actually in effect ("whisper" or a provider)
   };
   // Object detection: on-device LLMDet by default, a provider override slots in
@@ -2221,222 +2218,77 @@ app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
   // (a board's object field), not a global sweep, so there's no enabled flag.
   const detector = await resolveDetector(db);
   const detect = {
-    provider: (await getSetting(db, "detect_provider")) || "localDetector",
-    keyId: Number(await getSetting(db, "detect_key_id")) || null,
-    model: (await getSetting(db, "detect_model")) || null,
-    threshold: Number(await getSetting(db, "detect_threshold")) || 0.3,
+    ...detectBinding,
+    threshold: (await capabilityConfig(db, "detect")).detect_threshold,
     active: detector.id,
   };
   res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe, detect });
 }));
 
+// The pre-capability body names this route accepts, per capability. It is an
+// ADAPTER now: every rule lives in bindCapability, which reads the capability
+// descriptor, and this table only says which field carried which value. The
+// client moves to /api/admin/capabilities/:id/bind when the capabilities page
+// lands; until then a new capability needs one row here and nothing else.
+const LEGACY_BIND_FIELDS = {
+  tag: { keyId: "defaultKeyId", model: "model" }, // tagging predates the naming convention
+  embed: { provider: "embedProvider", keyId: "embedKeyId", model: "embedModel", enabled: "embedEnabled" },
+  transcribe: { provider: "transcribeProvider", keyId: "transcribeKeyId", model: "transcribeModel" },
+  detect: { provider: "detectProvider", keyId: "detectKeyId", model: "detectModel" },
+};
+
 app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const { model, defaultKeyId, embedEnabled, embedKeyId, embedModel, embedProvider,
-    transcribeProvider, transcribeKeyId, transcribeModel,
-    detectProvider, detectKeyId, detectModel, detectThreshold } = req.body || {};
-  if (defaultKeyId !== undefined) {
-    if (defaultKeyId === null) {
-      await setSetting(db, "default_key_id", null);
-    } else {
-      const key = await getAiKey(db, Number(defaultKeyId));
-      if (!key) return res.status(400).json({ error: "unknown key" });
-      await setSetting(db, "default_key_id", String(key.id));
+  const body = req.body || {};
+  try {
+    for (const [capId, fields] of Object.entries(LEGACY_BIND_FIELDS)) {
+      const patch = {};
+      for (const [field, name] of Object.entries(fields)) if (body[name] !== undefined) patch[field] = body[name];
+      if (Object.keys(patch).length) await bindCapability(db, capId, patch);
     }
+    // Threshold is a plain scalar knob (LLMDet scores run confident → 0.3 default).
+    await setCapabilityConfig(db, "detect", { detect_threshold: body.detectThreshold });
+  } catch (err) {
+    return res.status(err.status || 400).json({ error: err.message });
   }
-  if (model !== undefined) await setSetting(db, "model", model || null);
-  // Explicit provider selection: an on-device embedder is picked by NAME (it
-  // has no key row — 'local' today, any onDevice+embeds provider in general);
-  // null selects the key-based path. Capability-gated, no provider name
-  // special-cased.
-  if (embedProvider !== undefined) {
-    if (embedProvider) {
-      const desc = PROVIDERS[embedProvider];
-      if (!desc?.onDevice || !desc.embeds)
-        return res.status(400).json({ error: `"${embedProvider}" is not an on-device embedder — pick one of its keys instead` });
-      await setSetting(db, "embed_provider", embedProvider);
-      await setSetting(db, "embed_key_id", null);
-      await setSetting(db, "embed_model", null);
-    } else {
-      await setSetting(db, "embed_provider", null);
-    }
-  }
-  // Key-based path (skipped when an on-device provider was just picked).
-  if (embedKeyId !== undefined && !embedProvider) {
-    if (embedKeyId === null) {
-      await setSetting(db, "embed_key_id", null);
-    } else {
-      const key = await getAiKey(db, Number(embedKeyId));
-      if (!key) return res.status(400).json({ error: "unknown key" });
-      if (!PROVIDERS[key.provider]?.embeds) {
-        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].embeds && !PROVIDERS[n].onDevice).join(" or ");
-        return res.status(400).json({ error: `embeddings need an ${names} key — ${key.provider} has no embeddings API` });
-      }
-      await setSetting(db, "embed_key_id", String(key.id));
-    }
-  }
-  if (embedModel !== undefined) await setSetting(db, "embed_model", embedModel || null);
-  if (embedEnabled !== undefined) {
-    if (embedEnabled) {
-      // Validate final state: an on-device pick is always valid; key-based
-      // needs a stored key whose provider embeds.
-      const ep = await getSetting(db, "embed_provider");
-      if (!(ep && PROVIDERS[ep]?.onDevice && PROVIDERS[ep]?.embeds)) {
-        const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
-        const key = keyId ? await getAiKey(db, keyId) : null;
-        if (!key || !PROVIDERS[key.provider]?.embeds) {
-          return res.status(400).json({ error: "pick an embedding provider (or one of its keys) before enabling semantic search" });
-        }
-      }
-    }
-    await setSetting(db, "embed_enabled", embedEnabled ? "1" : null);
-  }
-  // Transcription: `transcribe_provider` names the engine directly — "whisper"
-  // (the always-on on-device sidecar) or any provider that ADVERTISES
-  // `transcribes` with a matching key. Capability-gated, no provider name special-cased.
-  if (transcribeProvider !== undefined) {
-    if (!transcribeProvider || transcribeProvider === "whisper" || PROVIDERS[transcribeProvider]?.onDevice) {
-      // On-device engines are picked by NAME, no key row — the whisper sidecar,
-      // or an on-device plugin shipping its own transcribe wire.
-      if (transcribeProvider && transcribeProvider !== "whisper" && !PROVIDERS[transcribeProvider]?.transcribes)
-        return res.status(400).json({ error: `${transcribeProvider} advertises no transcription` });
-      await setSetting(db, "transcribe_provider", transcribeProvider || "whisper");
-      await setSetting(db, "transcribe_key_id", null);
-      await setSetting(db, "transcribe_model", null);
-    } else {
-      const desc = PROVIDERS[transcribeProvider];
-      if (!desc?.transcribes) {
-        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].transcribes && !PROVIDERS[n].onDevice).join(" or ");
-        return res.status(400).json({ error: `transcription needs a ${names || "capable"} key — ${transcribeProvider} advertises none` });
-      }
-      const key = transcribeKeyId != null ? await getAiKey(db, Number(transcribeKeyId)) : null;
-      if (!key || key.provider !== transcribeProvider) {
-        return res.status(400).json({ error: `pick a ${desc.label} ${desc.keyless ? "connection" : "key"} to transcribe with it` });
-      }
-      // A pinned model must be one the provider advertises — otherwise every
-      // transcribe would throw at the wire and the item requeues forever. Unset
-      // (null) is fine: resolveTranscriber falls back to transcribes.default.
-      if (transcribeModel && !desc.transcribes.models.some((m) => m.id === transcribeModel)) {
-        return res.status(400).json({ error: `${desc.label} can't transcribe with model "${transcribeModel}"` });
-      }
-      await setSetting(db, "transcribe_provider", transcribeProvider);
-      await setSetting(db, "transcribe_key_id", String(key.id));
-      await setSetting(db, "transcribe_model", transcribeModel || null);
-    }
-  }
-  // Object detection: `detect_provider` names the engine directly — "localDetector"
-  // (the always-on on-device LLMDet) or any provider that ADVERTISES `detects`
-  // with a matching key. Capability-gated, no provider name special-cased.
-  if (detectProvider !== undefined) {
-    if (!detectProvider || detectProvider === "localDetector" || PROVIDERS[detectProvider]?.onDevice) {
-      if (detectProvider && detectProvider !== "localDetector" && !PROVIDERS[detectProvider]?.detects)
-        return res.status(400).json({ error: `${detectProvider} advertises no object detection` });
-      await setSetting(db, "detect_provider", detectProvider || "localDetector");
-      await setSetting(db, "detect_key_id", null);
-      await setSetting(db, "detect_model", null);
-    } else {
-      const desc = PROVIDERS[detectProvider];
-      if (!desc?.detects) {
-        const names = Object.keys(PROVIDERS).filter((n) => PROVIDERS[n].detects && !PROVIDERS[n].onDevice).join(" or ");
-        return res.status(400).json({ error: `object detection needs a ${names || "capable"} key — ${detectProvider} advertises none` });
-      }
-      const key = detectKeyId != null ? await getAiKey(db, Number(detectKeyId)) : null;
-      if (!key || key.provider !== detectProvider) {
-        return res.status(400).json({ error: `pick a ${desc.label} ${desc.keyless ? "connection" : "key"} to detect with it` });
-      }
-      if (detectModel && !desc.detects.models.some((m) => m.id === detectModel)) {
-        return res.status(400).json({ error: `${desc.label} can't detect with model "${detectModel}"` });
-      }
-      await setSetting(db, "detect_provider", detectProvider);
-      await setSetting(db, "detect_key_id", String(key.id));
-      await setSetting(db, "detect_model", detectModel || null);
-    }
-  }
-  // Threshold is a plain scalar knob (LLMDet scores run confident → 0.3 default).
-  if (detectThreshold !== undefined)
-    await setSetting(db, "detect_threshold", detectThreshold != null ? String(detectThreshold) : null);
-  console.log(`ai-config updated by admin: defaultKeyId=${defaultKeyId ?? "(unchanged)"} model=${model ?? "(unchanged)"} embed=${embedEnabled ?? "(unchanged)"} transcribe=${transcribeProvider ?? "(unchanged)"} detect=${detectProvider ?? "(unchanged)"}`);
+  console.log(`ai-config updated by admin: ${Object.keys(body).join(", ") || "(nothing)"}`);
   res.json({ ok: true });
 }));
 
-// One tiny embedding call to prove the semantic-search config works end to end.
-app.post("/api/admin/ai-config/embed-test", requireAdmin, wrap(async (_req, res) => {
-  const embedder = await resolveEmbedder(db);
-  if (!embedder) return res.status(400).json({ error: "semantic search is not enabled/configured" });
+// The capability-native peers. Same rules, addressed by capability id rather
+// than by a per-capability body field — so a new capability is reachable here
+// the moment it exists in CAPABILITY_DEFS.
+app.post("/api/admin/capabilities/:id/bind", requireAdmin, wrap(async (req, res) => {
   try {
-    await withPluginHealth(db, `ai:${embedder.provider}`, () =>
-      embedTexts({ ...embedder, texts: ["ping"] }));
-    res.json({ ok: true, provider: embedder.provider, model: embedder.model });
+    const { provider, keyId, model, enabled, config } = req.body || {};
+    await bindCapability(db, req.params.id, { provider, keyId, model, enabled });
+    if (config) await setCapabilityConfig(db, req.params.id, config);
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    return res.status(err.status || 400).json({ error: err.message });
+  }
+  res.json({ ok: true });
+}));
+
+app.post("/api/admin/capabilities/:id/probe", requireAdmin, wrap(async (req, res) => {
+  try {
+    res.json(await probeCapability(db, req.params.id));
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
   }
 }));
 
-// A ~0.25s 8 kHz mono PCM WAV of a quiet tone — small, valid audio for a
-// reachability probe. The endpoint accepts it and returns (transcript is
-// usually empty; a 200 is the signal that key + model + endpoint all work).
-function tinyWav() {
-  const sr = 8000, n = 2000, bytes = n * 2;
-  const b = Buffer.alloc(44 + bytes);
-  b.write("RIFF", 0); b.writeUInt32LE(36 + bytes, 4); b.write("WAVE", 8);
-  b.write("fmt ", 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
-  b.writeUInt32LE(sr, 24); b.writeUInt32LE(sr * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34);
-  b.write("data", 36); b.writeUInt32LE(bytes, 40);
-  for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(Math.sin(i / 6) * 6000), 44 + i * 2);
-  return b;
+// The pre-capability probe URLs. Each is now one line over probeCapability —
+// the sample input, the health-ledger wrapping, and the shape of the answer all
+// live with the capability. Kept because the plugin modal calls them by URL;
+// they retire when it moves to /api/admin/capabilities/:id/probe.
+for (const [path, capId] of Object.entries({ test: "tag", "embed-test": "embed", "transcribe-test": "transcribe", "detect-test": "detect" })) {
+  app.post(`/api/admin/ai-config/${path}`, requireAdmin, wrap(async (_req, res) => {
+    try {
+      res.json(await probeCapability(db, capId));
+    } catch (err) {
+      res.status(err.status || 400).json({ error: err.message });
+    }
+  }));
 }
-
-// Transcribe a tiny synthesized clip to prove the transcriber config works end
-// to end (the transcription analog of embed-test). Always resolves an engine —
-// local or a provider — so there's no "not configured" case.
-app.post("/api/admin/ai-config/transcribe-test", requireAdmin, wrap(async (_req, res) => {
-  const t = await resolveTranscriber(db);
-  const provider = t.id; // the engine family ("local" or a provider name)
-  try {
-    // The provider engine already wraps itself in the plugin-health ledger
-    // (resolveTranscriber); local has none, same as the sidecar path. The
-    // deadline keeps this admin-facing probe from waiting behind a long job —
-    // the sidecar's express lane answers tiny clips in seconds when healthy.
-    await t.transcribe(tinyWav(), "probe.wav", { deadlineMs: 30000 });
-    res.json({ ok: true, provider, model: t.model });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-}));
-
-// A tiny solid image — small, valid pixels for a reachability probe. detect-test
-// proves the detector runs end to end (the detection analog of embed-test /
-// transcribe-test); LLMDet finds nothing in a blank image, so a 200 with a count
-// is the signal the engine works. The sidecar bakes + loads its model at startup,
-// so a probe merely confirms it answers — but a queued image ahead of it (the
-// sidecar is single-threaded) can still make this take a few seconds.
-async function tinyImage() {
-  return sharp({ create: { width: 64, height: 64, channels: 3, background: { r: 128, g: 128, b: 128 } } }).png().toBuffer();
-}
-
-app.post("/api/admin/ai-config/detect-test", requireAdmin, wrap(async (_req, res) => {
-  const d = await resolveDetector(db);
-  try {
-    const objects = await d.detect(await tinyImage(), ["object."]);
-    // The on-device engine's model is baked in the sidecar — report what /health
-    // says so the toast can't drift from the served model; a paid provider names
-    // its own model on the descriptor.
-    const model = d.id === "localDetector" ? (await detectorSidecarModel()) || d.model : d.model;
-    res.json({ ok: true, provider: d.id, model, count: objects.length });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-}));
-
-app.post("/api/admin/ai-config/test", requireAdmin, wrap(async (_req, res) => {
-  const ai = await resolveDefaultAi(db);
-  if (!ai) return res.status(400).json({ error: "No default API key configured" });
-  try {
-    await withPluginHealth(db, `ai:${ai.provider}`, () => testKey(ai));
-    res.json({ ok: true, model: ai.model, provider: ai.provider });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-}));
 
 // Connector admin config lives on the Plugins surface now:
 // GET /api/admin/plugins (catalog + key presence), PATCH /api/admin/plugins/:id

@@ -1,10 +1,15 @@
 # Capabilities — a definition-driven capability registry (and the page it renders)
 
-**Status: SLICE 1 SHIPPED locally 2026-08-09 (uncommitted). Full suite green
-(930) with ZERO edits to existing test files — the proof it is read-side only.
-`server/capabilities.js` seeds the registry; `provides` is now the normal form
-on every descriptor in `PROVIDERS`. Slices 2–6 are still plan-only. The
-proposal: make CAPABILITY a
+**Status: SLICE 1 SHIPPED (commit 013235d). SLICE 2a SHIPPED locally 2026-08-09
+(uncommitted): `CAPABILITY_DEFS` is the registry, `capability-resolve.js` is the
+one resolver behind all four `resolveX`, and both cleanup paths iterate it —
+which fixes THREE dead-pointer bugs (`detect_key_id`, `detect_provider`, and
+tagging's shared `model`, §2.10). SLICE 2b SHIPPED too: `capability-bind.js` +
+`capability-probe.js` replace the four duplicated blocks in
+`/api/admin/ai-config` and the four `*-test` routes, which become adapters over
+them; `server.js` is 240 lines lighter. Suite green at 937, repeated runs, still
+zero edits to existing test files. Slices 3–6 remain plan-only. The proposal:
+make CAPABILITY a
 first-class registry (`server/capabilities.js`, one `CAPABILITY_DEFS` entry per
 capability) exactly the way `KIND_DEFS` made plugin kinds first-class, then
 render a Capabilities page as a pure projection of it. Adding a capability
@@ -100,6 +105,14 @@ to prevent — the Plugins page reports the provider as configured while
 [`resolveDetector`](../server/worker.js#L1180) silently serves the local
 sidecar. The fourth capability missed the cleanup the first three got. Nothing
 detects that class of omission today because there is no list to iterate.
+
+**And it is missed twice** — [`cleanupPluginConfig`](../server/plugin-loader.js#L460)
+clears `embed_provider` and `transcribe_provider` on uninstall but not
+`detect_provider`, so uninstalling an on-device detector plugin leaves the
+pointer naming it and a later reinstall silently re-activates a detector the
+admin removed, which is the exact failure that function's own comment warns
+about. Two independent hand-rolled loops over the capabilities, both stopping at
+three. See [§2.1](#21-the-bug-is-in-two-places-not-one).
 
 **Fixing this in isolation is the wrong move** — it is the fifth copy of a
 cleanup that should be `for (const cap of CAPABILITY_DEFS) …`. It gets fixed as
@@ -616,20 +629,323 @@ Existing suites that must pass untouched:
 [plugin-install.test.js](../test/plugin-install.test.js).
 
 ### Slice 2 — `CAPABILITY_DEFS` + `resolveCapability`
-The registry, the resolver, the four `resolveX` reduced to wrappers, generic
-`deleteAiKey` cleanup. Also the two loader tightenings Slice 1 deliberately left
-alone, since both change what is accepted: require `wire.embed` for an
-embed-advertising plugin (§1.7), and make `validateBuilt`'s emptiness rule
-`provides`-based so a descriptor with a truthy `wire` but no capability is
-rejected. Both need the `acme-embed` fixture given a real `wire.embed` — the
-first existing-test edit this plan calls for, and a deliberate one.
-**Tests:** [audio.test.js](../test/audio.test.js),
+
+**Split in two.** 2a is the correctness slice (registry, resolver, cleanup — it
+fixes the bugs); 2b is the API dedup (generic bind + probe routes). 2a is worth
+shipping alone; 2b is a diff twice its size with none of the risk-reduction.
+
+#### 2.1 The bug is in two places, not one
+
+The plan has been citing `deleteAiKey` missing `detect_key_id`. A second site has
+the same omission:
+
+| site | clears for tag | embed | transcribe | detect |
+|---|---|---|---|---|
+| [`deleteAiKey`](../server/db.js#L1140) — a key row is deleted | `default_key_id` | `embed_key_id`, `embed_enabled` | `transcribe_provider/_key_id/_model` | **nothing** |
+| [`cleanupPluginConfig`](../server/plugin-loader.js#L460) — a plugin is uninstalled | (via `deleteAiKey`) | `embed_provider`, `embed_enabled` | `transcribe_provider/_key_id/_model` | **nothing** |
+
+Both are hand-written iterations over the capabilities, and both stop at three.
+The second one is worse than a stale pointer — its own comment says why:
+
+> *"NAME-based slot pointers too: an on-device plugin is selected by name, not
+> key row, so no deleteAiKey cascade reaches these — left behind they would
+> silently re-activate the slot on a later reinstall."*
+
+So uninstalling an on-device detector plugin leaves `detect_provider` naming it,
+and reinstalling silently re-activates a detector the admin removed. Two
+independent hand-rolled loops, one capability missed by both, zero test
+coverage of the class. **This is the slice's justification**: not "the registry
+is tidier" but "the third and fourth copies of this loop don't exist."
+
+#### 2.2 The central fork: the four resolvers return two different kinds of thing
+
+This is the design decision Slice 2 turns on, and it isn't cosmetic:
+
+| resolver | returns | consumed by |
+|---|---|---|
+| [`resolveDefaultAi`](../server/worker.js#L95) | `{ provider, apiKey, model, base, keyId }` — **credentials** | spread into `callTagger`; `keyId`/`provider` also read for usage accounting, health, and the board cache |
+| [`resolveEmbedder`](../server/worker.js#L122) | `{ provider, apiKey, model, base }` — **credentials** | spread into `embedTexts` |
+| [`resolveTranscriber`](../server/worker.js#L1082) | `{ id, model, transcribe() }` — **an engine** | `.transcribe(buf, name)` |
+| [`resolveDetector`](../server/worker.js#L1180) | `{ id, model, detect() }` — **an engine** | `.detect(image, queries)` |
+
+The split is not arbitrary: transcribe and detect have a **sidecar floor that is
+not reachable through a wire at all** ([`whisperTranscriber`](../server/worker.js#L958),
+[`objectDetectorSidecar`](../server/worker.js#L1138) speak their own HTTP job
+protocols), so the only shape common to "a provider" and "the floor" is a
+callable. Tag and embed have no sidecar floor, so they never needed one.
+
+**Decision: `resolveCapability` returns the BINDING; engines are built by a
+per-capability `engine(binding)`.** The binding is the genuine common
+denominator — every one of the eight resolution steps produces it, and the
+engine is the part that differs. Building engines for tag/embed instead would
+touch ~20 call sites and the worker's per-board prompt cache (which stores
+`aiKeyId`/`aiModel`) to buy nothing.
+
+```js
+resolveCapability(db, "tag")        → { provider, apiKey, model, base, keyId, viaFloor: false } | null
+resolveCapability(db, "transcribe") → { provider: "whisper", model: null, apiKey: null, keyId: null, viaFloor: true }
+```
+
+**The four exported names stay** — permanently, not as a deprecation shim.
+`resolveEmbedder(db)` reads better at a call site than
+`resolveCapability(db, "embed")`, six test files import them, and the win was
+never the names: it is that all four become one-line wrappers over one
+implementation.
+
+```js
+export const resolveEmbedder = (db) => resolveCapability(db, "embed");
+export const resolveTranscriber = (db, board = null) => engineFor("transcribe", db, board);
+```
+
+#### 2.3 One rule for `<ns>_provider`, which today means three different things
+
+| capability | what the provider setting means today |
+|---|---|
+| `embed` | **on-device pick only** — [`resolveEmbedder`](../server/worker.js#L127) returns null if the named provider isn't `onDevice`, so a networked provider is unreachable through this setting and must come via `embed_key_id` |
+| `transcribe`, `detect` | **the engine**, on-device *or* keyed, with the sentinel names `"whisper"` / `"localDetector"` meaning the floor |
+| `tag` | **does not exist** — no `tag_provider`; the provider is implied by the `default_key_id` row |
+
+One rule replaces all three:
+
+```
+provider = <ns>_provider  ??  keyRow(<ns>_key_id)?.provider  ??  floor.provider
+```
+
+Backward compatible for every value currently in the settings table — checked
+case by case: `embed_provider="local"` resolves on-device as before;
+`embed_provider` null + `embed_key_id` set takes the key path as before;
+`transcribe_provider="whisper"` now resolves because whisper **is** the floor
+provider's name rather than because of a sentinel comparison. The sentinel
+checks (`provider !== "whisper"`, `provider !== "localDetector"`) disappear
+entirely: resolution picks the provider, and `engineFor` uses the floor engine
+because that provider has no `wire.transcribe`, not because of its name.
+
+The key requirement generalizes the same way: today transcribe/detect demand
+`key || desc.onDevice`. That is `needsRow = !desc.onDevice` — a keyless-networked
+provider (a self-hosted Ollama: `keyless: true`, `onDevice: false`) still has a
+connection row carrying its `base_url`, which is exactly why it must not be
+lumped in with on-device.
+
+#### 2.4 The floor taxonomy — five kinds, all present in the tree today
+
+| kind | capability | behaviour |
+|---|---|---|
+| `builtin` | transcribe, detect | a registered provider with no wire; engine comes from the capability's `floorEngine`. Never fails to resolve. |
+| `off` | embed | gated by `embed_enabled`; resolution returns null and the sweep pauses |
+| `blocked` | tag | returns null; [`noKeyError`](../server/worker.js#L191) sets `noCount` and the queue requeues without consuming an attempt |
+| `sibling` | connector domains | [`activeProvider`](../server/connectors/runtime.js#L119) scans for any installed provider before failing |
+| `delegate` | extract | falls back to the board's tagger ([worker.js:2064](../server/worker.js#L2064)), then to `blocked` |
+
+`sibling` is the richest and is currently reachable only by connector domains.
+Generalizing it is free once the registry exists, and it is what makes
+`degraded` distinguishable from `active`.
+
+#### 2.5 What `resolveCapability` actually does
+
+The eight steps every current resolver performs, once:
+
+1. floor gate (`off` → null if the enable setting is unset)
+2. `provider = <ns>_provider ?? keyRow?.provider ?? floor.provider` (§2.3)
+3. `supply.advertises(desc)` — the provider still declares this capability
+4. `aiPluginInstalled(db, provider)` — **pinned by
+   [plugins.test.js:337](../test/plugins.test.js#L337)**, "not installed → drops out"
+5. load the key row when `needsRow`; on failure fall to the floor (never throw)
+6. model = `<ns>_model` setting, else `desc.provides[cap].default`
+7. `aiRate(db, provider)` for pacing
+8. return the binding, stamped `viaFloor` and (for slice 3) the reason it fell
+
+Two capability-specific rungs stay in the descriptor rather than the resolver:
+tag's **env rung** (`ANTHROPIC_API_KEY` with `keyId: "env"`, itself gated on
+`aiPluginInstalled("anthropic")`) and detect's **threshold**, a capability-level
+config value closed over by the engine.
+
+#### 2.6 The cleanup loop — the actual fix
+
+```js
+// db.js deleteAiKey, plugin-loader.js cleanupPluginConfig
+for (const cap of CAPABILITY_DEFS) await clearBinding(db, cap, { keyId })   // or { provider }
+```
+
+`binding.keys` enumerates each capability's settings namespace, so clearing is
+total by construction and a sixth capability inherits both cleanups for free.
+The board-scoped bindings (`boards.ai_key_id`/`ai_model`,
+`boards.extract_key_id`/`extract_model`, and the `boards_using` count at
+[db.js:1103](../server/db.js#L1103)) enumerate from `binding.boardKeys` the same
+way.
+
+#### 2.7 Slice 2b — the routes
+
+`POST /api/admin/capabilities/:id/bind` absorbs the transcribe and detect blocks
+of [`/api/admin/ai-config`](../server/server.js#L2232), which are identical
+modulo the capability noun (~40 lines each: advertise check, key-provider match,
+model-is-advertised check, three `setSetting` calls). Embed keeps one extra
+rule — the `enabled` flag and its "validate final state" check.
+
+`POST /api/admin/capabilities/:id/probe` replaces the four `*-test` routes
+([test](../server/server.js#L2431), [embed-test](../server/server.js#L2360),
+[transcribe-test](../server/server.js#L2390), [detect-test](../server/server.js#L2415)),
+which differ only in the sample input the descriptor already names: `tinyWav()`,
+`tinyImage()`, `["ping"]`, and a bare `testKey`. Old paths stay as aliases for
+one release since the modal calls them by URL.
+
+#### 2.8 Landmines
+
+1. **`objectDetectorSidecar` hardcodes a provider name**:
+   `PROVIDERS.localDetector.detects.default` ([worker.js:1141](../server/worker.js#L1141)).
+   Must become `PROVIDERS[floor.provider].provides.detect.default`, or the floor
+   engine still names what the registry is supposed to own.
+2. **Health-wrapping happens at different layers per capability today** —
+   transcribe/detect wrap at *engine construction*
+   ([worker.js:1101](../server/worker.js#L1101)), tag at the *call site*
+   (`trackedTagger`), embed at *its* call site ([worker.js:742](../server/worker.js#L742)).
+   Unifying into `engineFor` is right but risks double-wrapping; do it only
+   where it provably doesn't change the ledger, and leave the rest for a later
+   pass rather than widening 2a.
+3. **The four null-vs-never-null contracts differ and are all pinned**:
+   transcribe and detect must never fail to resolve
+   ([audio.test.js:221](../test/audio.test.js#L221),
+   [detect.test.js:159](../test/detect.test.js#L159)); embed returns null when
+   off ([plugins.test.js:361](../test/plugins.test.js#L361)); tag returns null
+   when unconfigured ([plugins.test.js:337](../test/plugins.test.js#L337)). The
+   wrappers must preserve each exactly.
+4. **`embed_enabled` is checked before anything else** — it is a floor gate, not
+   a post-resolution filter. A generic resolver that checks it late would let a
+   disabled embedder resolve.
+5. **`whisperTranscriber` has a stateful `get model()`** filled from the job
+   payload after a transcription completes, so the engine must stay constructed
+   per resolution, not cached in the registry.
+6. **The two loader tightenings Slice 1 deferred** land here, since both change
+   what is accepted: require `wire.embed` for an embed-advertising plugin
+   (§1.7), and make `validateBuilt`'s emptiness rule `provides`-based. Both need
+   [acme-embed](../test/fixtures/plugins/acme-embed/index.js) given a real
+   `wire.embed` — the first deliberate edit to an existing test this plan calls
+   for.
+
+#### 2.10 What implementation changed about the spec above (slice 2a, shipped)
+
+1. **A third dead-pointer bug, of the same family.** Clearing the *whole*
+   settings namespace rather than a hand-picked subset turned out to matter
+   beyond `detect`: the three capabilities that WERE handled each cleared a
+   different subset. Tagging cleared only `default_key_id`, leaving `model`
+   behind — and `model` is read by the env rung too. So deleting an OpenAI
+   default key while `ANTHROPIC_API_KEY` was set left Claude being asked for
+   `gpt-5-mini` on every item. Pinned by its own test.
+2. **`clearBinding` could not live with the resolver.** `deleteAiKey` is *in*
+   `db.js`, so a helper in `capability-resolve.js` (which imports `db.js`) would
+   have made `db.js` import a module that imports it back. The key list lives in
+   `capabilities.js` instead — the pure-data module with no imports, which is
+   precisely why it has none. `bindingSettings(cap)` returns the namespace and
+   each caller uses its own `setSetting`.
+3. **The sentinels are genuinely gone.** No `provider !== "whisper"` or
+   `!== "localDetector"` remains: `usable()` rejects a provider whose
+   `wire[verb]` is not a function, so the two sidecar-backed built-ins fall to
+   their own floor by the general rule rather than by name. `objectDetectorSidecar`
+   now takes the binding instead of reading `PROVIDERS.localDetector` itself.
+4. **Resolution is slightly stricter, deliberately.** `usable()` applies the
+   advertise + wire checks to *every* capability, where `resolveDefaultAi` and
+   `resolveEmbedder` previously applied neither consistently — a key row whose
+   provider cannot tag used to resolve as the tagger and then throw at the wire;
+   it now falls to the floor. Unreachable through the UI (the key form only
+   offers networked providers), but it is a behaviour change, not a refactor.
+5. **A test file's server count is a load decision.** The first version stood up
+   six servers (one per test) and made the wall-clock-sensitive
+   `ingest-sweep` continuous-cadence test fail ~2 runs in 3 — while passing in
+   isolation, and while the same server changes with the test file removed
+   passed twice cleanly. The suite runs eight files at a time; six extra
+   databases is enough to starve a settle-window assertion. Consolidated to one
+   shared server, ordered pristine-state test first and state-leaving test last.
+   **House rule for the remaining slices: share a server unless a test needs
+   isolation.**
+
+#### 2.11 Slice 2b as shipped
+
+`capability-bind.js` (validate + write) and `capability-probe.js` (the sample
+input per capability) are the two new modules. `/api/admin/ai-config` keeps
+every one of its body names and becomes a **table adapter**: `LEGACY_BIND_FIELDS`
+says which field carried which value, and every rule lives in `bindCapability`.
+The four `*-test` routes collapse into a loop over `{path: capability}`. The
+capability-native `POST /api/admin/capabilities/:id/{bind,probe}` are the peers
+the client moves to in slice 4. `server.js` loses 240 lines net.
+
+Three things the merge forced, none of them cosmetic:
+
+1. **One error message had to satisfy two tests that assert different words.**
+   `embedProvider: "anthropic"` is pinned to match `/on-device/`
+   ([keyless-providers.test.js:147](../test/keyless-providers.test.js#L147)) and
+   `detectProvider: "anthropic"` to match `/advertises none|object detection/`
+   ([detect.test.js:175](../test/detect.test.js#L175)) — the same rejection, two
+   capabilities, two vocabularies. Rather than keep both strings, one message
+   states both true facts: *"anthropic advertises no object detection — try X or
+   Y (or an on-device engine, which needs no key)"*. It satisfies both regexes
+   because both are accurate, not because it was padded. This is what `noun` on
+   the descriptor is for.
+2. **A null provider next to a key means "use the key path", not "clear".** The
+   embedder's form posts `{ embedProvider: null, embedKeyId, embedModel }`
+   together. A first cut read the null as "unbind" and dropped the key with it.
+3. **An explicit model must survive a choice that doesn't set one.** Tagging
+   posts key and model together, and tagging's model is deliberately unvalidated
+   (live model lists make the curated catalog a recommendation, not the set of
+   ids that exist) — so the model write cannot be an `else` branch of the
+   provider write.
+
+`pinnedModelMustBeAdvertised` is on transcribe and detect only, which is where
+the check exists today: those two reject an unadvertised pinned model because it
+would throw at the wire on every item and requeue for ever.
+
+#### 2.12 Review pass — what the first cut of slice 2 missed
+
+1. **The writes were deduplicated and the READS were left in two copies.** The
+   `slots` block of `/api/admin/plugins` and `GET /api/admin/ai-config` each
+   hand-read the same four capabilities' settings — including hardcoded
+   `|| "whisper"` and `|| "localDetector"` floor defaults that the descriptor now
+   owns. `capabilityBinding(db, capId)` is the read-side peer of
+   `bindCapability`; both payloads keep their exact shapes and neither knows a
+   settings key any more. (I had written that helper during 2b and deleted it as
+   dead code, one slice too early.)
+2. **The same shape-guard existed three times** — `catalogOf` in
+   capability-resolve, `catalogOf` in capability-bind, `declared` in providers —
+   all answering "the `provides` entry for this capability, if it is a catalog".
+   Three chances to disagree about what *advertises* means. Now one exported
+   `declaredCatalog(desc, capKey)`.
+3. **Only one of the two floor engines got de-named.** `objectDetectorSidecar`
+   was changed to take the binding; `whisperTranscriber` was left hardcoding
+   `id: "whisper"`, with a comment referring to the `transcribe_provider`
+   sentinel that no longer exists. Both take the binding now.
+4. **The board-scoped tagger stayed loose while the global one got strict.**
+   `resolveBoardAi` checked only "is the plugin installed", so a board pinned to
+   an embed-only connection resolved as a tagger and threw at the wire, while
+   the app default fell through cleanly. It judges by `usableProvider` now —
+   board scope changes *where the choice is stored*, never what makes a provider
+   usable.
+5. **Dead code the extraction left**: `probeable` (never called),
+   `aiPluginInstalled` and its `pluginInstalled` import, and — a good signal —
+   `getSetting` and `PROVIDERS` became entirely unused in `worker.js`. The
+   worker no longer reads settings or the provider registry to resolve anything,
+   which is what "resolution moved out" should look like.
+
+#### 2.9 Tests
+
+The two that would have caught the shipped bugs, both iterating the registry so
+capability #6 inherits them:
+
+- *for every capability with a `keyId` binding, deleting the bound key clears
+  the whole binding* → catches `detect_key_id`
+- *for every capability with a `provider` binding, uninstalling the named
+  provider clears it* → catches `detect_provider`, including the
+  reinstall-re-activates case its comment warns about
+
+Plus: each of the five floor kinds resolves as specified; a bound-but-unresolvable
+capability reports `viaFloor` with a reason (the `degraded` input slice 3 needs);
+and the four wrapper contracts from landmine 3.
+
+Existing suites that must stay green: [audio.test.js](../test/audio.test.js),
 [detect.test.js](../test/detect.test.js),
 [embed-sweep.test.js](../test/embed-sweep.test.js),
 [extraction.test.js](../test/extraction.test.js),
-[queue.test.js](../test/queue.test.js) unchanged. Add a registry-iterating
-regression: *for every `select:"one"` capability, deleting its bound key clears
-the binding* — the test that would have caught `detect_key_id`.
+[queue.test.js](../test/queue.test.js),
+[plugins.test.js](../test/plugins.test.js),
+[keyless-providers.test.js](../test/keyless-providers.test.js),
+[plugin-install.test.js](../test/plugin-install.test.js).
 
 ### Slice 3 — `GET /api/admin/capabilities`
 The six-state computation, `supportedBy`, `demand`. One generic

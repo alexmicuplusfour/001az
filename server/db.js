@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { runMigrations } from "./migrate.js";
 import { selectFace } from "./faces/select.js";
 import { projectEntry } from "./media/index.js";
+import { CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
 
 // BIGINT (int8) comes back from pg as a string by default. Everything we store
 // in BIGINT is a ms epoch or a row id — both far below 2^53 — so parse to
@@ -1137,26 +1138,31 @@ export async function updateAiKey(db, id, { name, apiKey, baseUrl }) {
 // Boards referencing the key fall back to the default via ON DELETE SET NULL;
 // their model override goes with it, and if the key *was* the default, clear
 // the settings pointer too.
+// A deleted key/connection reverts every binding that pointed at it, honestly,
+// instead of leaving a dead pointer the UI shows as configured while resolution
+// silently falls to the floor. Both loops below iterate CAPABILITY_DEFS rather
+// than naming the capabilities: the hand-written version missed `detect`
+// entirely, and cleared only part of the namespace for the three it did cover.
 export async function deleteAiKey(db, id) {
-  await db.query("UPDATE boards SET ai_model=NULL WHERE ai_key_id=$1", [id]);
-  await db.query("UPDATE boards SET extract_model=NULL WHERE extract_key_id=$1", [id]);
+  // Board-scoped bindings first: the key column itself is FK ON DELETE SET NULL,
+  // so only the model it pinned needs clearing. Column names come from the
+  // capability table (module constants, not input).
+  for (const cap of CAPABILITY_DEFS) {
+    const bk = cap.binding.boardKeys;
+    if (bk) await db.query(`UPDATE boards SET ${bk.model}=NULL WHERE ${bk.keyId}=$1`, [id]);
+  }
   const result = await db.query("DELETE FROM ai_keys WHERE id=$1", [id]);
-  if (result.rowCount > 0 && Number(await getSetting(db, "default_key_id")) === id) {
-    await setSetting(db, "default_key_id", null);
+  if (result.rowCount === 0) return false;
+  // Global bindings: clear the WHOLE namespace of any capability bound to this
+  // key, not a hand-picked subset. Leaving tagging's `model` behind was its own
+  // bug — the env rung reads that setting, so deleting an OpenAI default key
+  // left Claude being asked for "gpt-5-mini" on every item.
+  for (const cap of CAPABILITY_DEFS) {
+    const keyIdSetting = cap.binding.keys?.keyId;
+    if (!keyIdSetting || Number(await getSetting(db, keyIdSetting)) !== id) continue;
+    for (const s of bindingSettings(cap)) await setSetting(db, s, null);
   }
-  if (result.rowCount > 0 && Number(await getSetting(db, "embed_key_id")) === id) {
-    await setSetting(db, "embed_key_id", null);
-    await setSetting(db, "embed_enabled", null);
-  }
-  // Transcription mirrors embed: a deleted key/connection reverts the slot to
-  // the whisper sidecar honestly, instead of leaving a dead pointer the UI
-  // shows as configured while resolveTranscriber silently falls back.
-  if (result.rowCount > 0 && Number(await getSetting(db, "transcribe_key_id")) === id) {
-    await setSetting(db, "transcribe_provider", null);
-    await setSetting(db, "transcribe_key_id", null);
-    await setSetting(db, "transcribe_model", null);
-  }
-  return result.rowCount > 0;
+  return true;
 }
 
 // --- boards ---

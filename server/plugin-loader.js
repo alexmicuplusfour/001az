@@ -20,7 +20,7 @@ import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { resolveSource, fetchModule } from "./plugin-fetch.js";
 import { registerProvider, unregisterProvider, invalidateModelListCache, normalizeProvides, WIRES } from "./providers.js";
-import { WIRE_VERB } from "./capabilities.js";
+import { WIRE_VERB, CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
 import {
   getConnector,
   registerConnector, unregisterConnector,
@@ -469,15 +469,13 @@ async function cleanupPluginConfig(db, manifest) {
     }
     // NAME-based slot pointers too: an on-device plugin is selected by name,
     // not key row, so no deleteAiKey cascade reaches these — left behind they
-    // would silently re-activate the slot on a later reinstall.
-    if ((await getSetting(db, "embed_provider")) === manifest.id) {
-      await setSetting(db, "embed_provider", null);
-      await setSetting(db, "embed_enabled", null);
-    }
-    if ((await getSetting(db, "transcribe_provider")) === manifest.id) {
-      await setSetting(db, "transcribe_provider", null); // → whisper fallback
-      await setSetting(db, "transcribe_key_id", null);
-      await setSetting(db, "transcribe_model", null);
+    // would silently re-activate the slot on a later reinstall. Iterated over
+    // CAPABILITY_DEFS: the hand-written version covered embed and transcribe
+    // and forgot detect, which is exactly the re-activation this warns about.
+    for (const cap of CAPABILITY_DEFS) {
+      const providerSetting = cap.binding.keys?.provider;
+      if (!providerSetting || (await getSetting(db, providerSetting)) !== manifest.id) continue;
+      for (const s of bindingSettings(cap)) await setSetting(db, s, null); // → the capability's floor
     }
     return;
   }

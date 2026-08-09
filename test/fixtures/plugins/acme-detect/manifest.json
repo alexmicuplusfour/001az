@@ -1,0 +1,8 @@
+{
+  "id": "acme.detect",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Acme Detector",
+  "description": "an on-device object detector (fixture) — selected by name, no key row",
+  "main": "index.js"
+}

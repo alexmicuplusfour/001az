@@ -17,7 +17,7 @@ import crypto from "node:crypto";
 import { acquire } from "./provider-pacing.js";
 import { BUILTIN_PROVIDERS } from "./ai-providers/index.js";
 import { WIRES } from "./ai-providers/wires/index.js";
-import { CATALOG_POLICY } from "./capabilities.js";
+import { CAPABILITY } from "./capabilities.js";
 
 // Re-exported for the plugin loader (ctx.wires) and tests — the wire families
 // themselves live in ./ai-providers/wires/, one module per protocol; the engine
@@ -256,7 +256,7 @@ export function testKey({ provider, ...rest }) {
 // capability catalog without a filter stays on its curated list — an
 // unfiltered dump into the embedder picker would be worse than hardcoding.
 // That asymmetry is capability POLICY, not a provider declaration, so it lives
-// in CATALOG_POLICY (capabilities.js), not in each descriptor.
+// on the capability (`unfilteredShowsAll`), not in each descriptor.
 // The descriptor lists are the recommended set + offline fallback, NOT the
 // catalog — a wire without listing, a fetch failure, or a filter that
 // matches nothing serves them alone (source: "fallback"); never a throw,
@@ -267,11 +267,13 @@ export function testKey({ provider, ...rest }) {
 // live list applies it owns existence: a retired curated id drops out,
 // everything else sorts in below the recommendations; descriptor notes win
 // the labels for ids both sides know.
-// One capability's declared catalog, or null when the provider doesn't advertise
-// it — or when the id names a modifier like `research`, which is `true`, not a
-// catalog. The one guard both projections below share.
-const declared = (desc, cap) => {
-  const p = desc?.provides?.[cap];
+// One capability's declared catalog on a descriptor, or null when the provider
+// doesn't advertise it — or when the key names a modifier like `research`, which
+// is `true`, not a catalog. THE shape guard: exported because resolution and
+// binding need exactly this question answered, and three copies of it would be
+// three chances to disagree about what "advertises" means.
+export const declaredCatalog = (desc, capKey) => {
+  const p = desc?.provides?.[capKey];
   return p && typeof p === "object" ? p : null;
 };
 
@@ -279,8 +281,8 @@ const declared = (desc, cap) => {
 // capability's policy. No capability is named here — it reads whatever
 // `provides` and CATALOG_POLICY hold.
 const catalogFor = (desc, cap) => {
-  const p = declared(desc, cap);
-  return p && { models: p.models, filter: p.filter, always: !!CATALOG_POLICY[cap]?.unfilteredShowsAll };
+  const p = declaredCatalog(desc, cap);
+  return p && { models: p.models, filter: p.filter, always: !!CAPABILITY[cap]?.unfilteredShowsAll };
 };
 function assembleModels(desc, kind, live) {
   const cat = catalogFor(desc, kind);
@@ -386,7 +388,7 @@ export async function cachedProviderModels(keyId, { provider, apiKey, base, kind
 // …and carved for the UI: deliberately narrower than the descriptor's own object
 // (no `filter` — that's server-side carving data, not a picker's business).
 const catalogEntry = (desc, cap) => {
-  const p = declared(desc, cap);
+  const p = declaredCatalog(desc, cap);
   return p ? { default: p.default, models: p.models } : null;
 };
 

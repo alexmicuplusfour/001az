@@ -14,7 +14,6 @@ import {
   bumpUsage,
   getBoard,
   getAiKey,
-  getSetting,
   dueBoards,
   retagBoard,
   supersedeFacetDiagnostics,
@@ -59,19 +58,13 @@ import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
-import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
-import { pluginInstalled, pluginState } from "./plugins.js";
+import { callTagger, embedTexts, transcribeAudio, detectObjects, declaredCatalog } from "./providers.js";
+import { pluginState } from "./plugins.js";
+import { resolveCapability, capabilityConfig, usableProvider } from "./capability-resolve.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields } from "./media/index.js";
-
-// A not-installed AI plugin (Plugins page) drops out of resolution — configs
-// that reference it fall through to the next rung instead of erroring, and
-// items hold pending via the existing no-key machinery when nothing is left.
-// (anthropic is pre-added; the local embedder is core; everything else is
-// available-until-added — pluginInstalled applies the tier rule.)
-const aiPluginInstalled = (db, provider) => pluginInstalled(db, `ai:${provider}`);
 
 // Every live tagger call lands in the plugin health ledger (structured error
 // or heal) so the Plugins page dot reflects real traffic — and the future
@@ -88,59 +81,17 @@ const trackedTagger = async (db, args) => {
   return withPluginHealth(db, `ai:${args.provider}`, () => callTagger({ ...args, rpm, burst }));
 };
 
-// The app-default tagger: settings-designated key, else the legacy env var.
-// Returns { provider, apiKey, model, keyId } or null when nothing is
-// configured. `keyId` is which rung answered — a connection row, or "env" —
-// which only this function knows; naming it for a human is the route's job.
-export async function resolveDefaultAi(db) {
-  const defId = Number(await getSetting(db, "default_key_id")) || 0;
-  if (defId) {
-    const key = await getAiKey(db, defId);
-    if (key && (await aiPluginInstalled(db, key.provider))) {
-      const model = (await getSetting(db, "model")) || PROVIDERS[key.provider].defaultModel;
-      // `base`: the connection's own server URL (self-hosted providers) — rides
-      // every resolved-ai object so the wire can point at the right box.
-      return { provider: key.provider, apiKey: key.api_key, model, base: key.base_url || undefined, keyId: key.id };
-    }
-  }
-  if (process.env.ANTHROPIC_API_KEY && (await aiPluginInstalled(db, "anthropic"))) {
-    return {
-      provider: "anthropic",
-      apiKey: process.env.ANTHROPIC_API_KEY,
-      model: (await getSetting(db, "model")) || process.env.MODEL || PROVIDERS.anthropic.defaultModel,
-      keyId: "env",
-    };
-  }
-  return null;
-}
+// The app-default tagger: settings-designated key, else the legacy env rung.
+// Returns { provider, apiKey, model, keyId } or null when nothing is configured
+// (tagging's floor is `blocked` — the queue waits rather than failing). `keyId`
+// is which rung answered — a connection row, or "env"; naming it for a human is
+// the route's job.
+export const resolveDefaultAi = (db) => resolveCapability(db, "tag");
 
-// The app-global embedder for semantic search: enabled flag + provider choice.
-// An on-device provider (the local ONNX model) is selected by NAME — it has no
-// key row; otherwise a stored key/connection row is looked up (a keyless
-// connection resolves with apiKey null and the wire sends no auth header).
-// Returns { provider, apiKey, model } or null when off/missing.
-export async function resolveEmbedder(db) {
-  if ((await getSetting(db, "embed_enabled")) !== "1") return null;
-  const embedProvider = await getSetting(db, "embed_provider");
-  if (embedProvider) {
-    const desc = PROVIDERS[embedProvider];
-    if (!desc?.onDevice || !desc.embeds) return null; // a stale name (uninstalled plugin) → off
-    if (!(await aiPluginInstalled(db, embedProvider))) return null; // core → always true; kept for symmetry
-    return { provider: embedProvider, apiKey: null, model: desc.embeds.default };
-  }
-  // Key-based path (backward compat: embed_provider null + embed_key_id set).
-  const keyId = Number(await getSetting(db, "embed_key_id")) || 0;
-  if (!keyId) return null;
-  const key = await getAiKey(db, keyId);
-  if (!key || !PROVIDERS[key.provider]?.embeds) return null;
-  if (!(await aiPluginInstalled(db, key.provider))) return null; // sweep pauses
-  return {
-    provider: key.provider,
-    apiKey: key.api_key,
-    model: (await getSetting(db, "embed_model")) || PROVIDERS[key.provider].embeds.default,
-    base: key.base_url || undefined,
-  };
-}
+// The app-global embedder for semantic search. Null when the enable flag is off
+// or nothing usable is bound (embed's floor is `off`), which is what pauses the
+// sweep.
+export const resolveEmbedder = (db) => resolveCapability(db, "embed");
 
 // The text an item's search vector is built from: whole-item description,
 // then the per-facet reasoning sentences, then the tags flattened to words
@@ -171,16 +122,20 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
 export async function resolveBoardAi(db, boardEntry) {
   if (boardEntry.aiKeyId) {
     const key = await getAiKey(db, boardEntry.aiKeyId);
-    if (key && (await aiPluginInstalled(db, key.provider))) {
+    // Judged by the SAME rule as the app default (usableProvider): advertises
+    // tagging, can make the call, plugin installed. Board scope changes where
+    // the choice is stored, never what makes a provider usable.
+    const desc = key ? await usableProvider(db, "tag", key.provider) : null;
+    if (desc) {
       return {
         provider: key.provider,
         apiKey: key.api_key,
-        model: boardEntry.aiModel || PROVIDERS[key.provider].defaultModel,
+        model: boardEntry.aiModel || declaredCatalog(desc, "tag").default,
         base: key.base_url || undefined,
         keyId: key.id,
       };
     }
-    if (key) console.log(`board AI provider ${key.provider} is not installed — falling back to the default tagger`);
+    if (key) console.log(`board AI provider ${key.provider} can't serve tagging (removed, or it doesn't tag) — falling back to the default tagger`);
   }
   return resolveDefaultAi(db);
 }
@@ -953,9 +908,10 @@ export async function transcriberSidecarModel() {
 //   - `scope: "job"` — this clip's job failed/stalled/vanished: transient for
 //     the ITEM (per-item backoff + attempt cap), the lane moves on.
 //   - `status: 422` — undecodable input: the loop parks it permanently.
-// id "whisper" matches the keyless `whisper` provider — its plugin card and the
-// transcribe_provider sentinel.
-function whisperTranscriber() {
+// `id` comes from the resolved floor binding, not from a literal here — the
+// registry owns which provider is transcription's floor, and this engine is
+// merely what serves it.
+function whisperTranscriber(binding) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // The sidecar names its own model: the done payload carries it, and `model`
   // fills in from there — null until a job completes. The cache stamp thus
@@ -963,7 +919,7 @@ function whisperTranscriber() {
   // sidecar redeploy.
   let model = null;
   return {
-    id: "whisper",
+    id: binding.provider,
     get model() { return model; },
     // opts.deadlineMs: give up (transient) if the job hasn't settled by then —
     // for interactive callers like the admin probe, not the worker loop.
@@ -1072,38 +1028,27 @@ export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_
   return attempts + 1 >= maxAttempts ? "park-capped" : "backoff-item";
 }
 
-// A board's audio→text engine. An app-wide `transcribe_provider` setting can
-// point at any provider that ADVERTISES `transcribes` (a stored key + installed
-// plugin); everything else — unset, "whisper", a no-audio provider (Claude has
-// `transcribes: null`), a missing key — falls back to the always-on whisper
-// sidecar. Never fails to resolve: audio must always become taggable. Fully
-// capability-driven — no provider name is hardcoded here. `board` is accepted
-// for a future per-board choice (unused today). Exported for tests + server.
+// A board's audio→text engine. Resolution is generic (capability-resolve.js);
+// this only decides which SHAPE the binding wears — the always-on sidecar, or a
+// provider wire. `viaFloor` covers every way the configured choice can fail to
+// resolve: unset, an uninstalled plugin, a no-audio provider, a missing key, or
+// whisper itself (which advertises transcription with no wire). Never fails to
+// resolve: audio must always become taggable. `board` is accepted for a future
+// per-board choice (unused today). Exported for tests + server.
 export async function resolveTranscriber(db, board = null) {
-  const provider = await getSetting(db, "transcribe_provider");
-  if (provider && provider !== "whisper" && PROVIDERS[provider]?.transcribes && (await aiPluginInstalled(db, provider))) {
-    const keyId = Number(await getSetting(db, "transcribe_key_id")) || 0;
-    const key = keyId ? await getAiKey(db, keyId) : null;
-    // A keyed/keyless-networked provider needs its stored key/connection row;
-    // an on-device plugin (own wire.transcribe, no rows — the loader rejects a
-    // transcribes descriptor without one) resolves bare. Whisper itself never
-    // reaches here (name-guarded above): it rides the sidecar, not a wire.
-    if (key || PROVIDERS[provider].onDevice) {
-      const model = (await getSetting(db, "transcribe_model")) || PROVIDERS[provider].transcribes.default;
-      const { rpm, burst } = await aiRate(db, provider); // per-provider pacing, same bucket as tagging
-      return {
-        id: provider, // the engine family; the cache stamp appends :model (→ "openai:gpt-4o-transcribe")
-        model,
-        // Runs under the plugin-health ledger like every other provider call
-        // (trackedTagger, embedBatch) so transcription traffic + errors show on
-        // the Plugins page — otherwise a paid provider transcribes invisibly.
-        transcribe: async (buf, filename) =>
-          (await withPluginHealth(db, `ai:${provider}`, () =>
-            transcribeAudio({ provider, apiKey: key?.api_key ?? null, base: key?.base_url || undefined, model, rpm, burst, audio: buf, filename }))).text,
-      };
-    }
-  }
-  return whisperTranscriber();
+  const b = await resolveCapability(db, "transcribe");
+  if (b.viaFloor) return whisperTranscriber(b);
+  const { rpm, burst } = await aiRate(db, b.provider); // per-provider pacing, same bucket as tagging
+  return {
+    id: b.provider, // the engine family; the cache stamp appends :model (→ "openai:gpt-4o-transcribe")
+    model: b.model,
+    // Runs under the plugin-health ledger like every other provider call
+    // (trackedTagger, embedBatch) so transcription traffic + errors show on
+    // the Plugins page — otherwise a paid provider transcribes invisibly.
+    transcribe: async (buf, filename) =>
+      (await withPluginHealth(db, `ai:${b.provider}`, () =>
+        transcribeAudio({ provider: b.provider, apiKey: b.apiKey, base: b.base, model: b.model, rpm, burst, audio: buf, filename }))).text,
+  };
 }
 
 const OBJECT_DETECTOR_URL = process.env.OBJECT_DETECTOR_URL || "http://object-detector:3004";
@@ -1135,10 +1080,12 @@ export async function detectorSidecarModel() {
 // image + noun-phrase queries to /detect and returns canonical
 // [{ label, box(0..1 xyxy), score }]. Unreachable/non-OK throws transient → the
 // extract leg requeues (mirrors the extractor contract), never a silent empty.
-function objectDetectorSidecar(threshold) {
+function objectDetectorSidecar(binding, threshold) {
   return {
-    id: "localDetector",
-    model: PROVIDERS.localDetector.detects.default, // the sidecar's baked default
+    // Both come from the resolved floor binding — naming the provider here would
+    // put the registry's job back in the engine.
+    id: binding.provider,
+    model: binding.model, // the sidecar's baked default
     detect: async (image, queries) => {
       let res;
       try {
@@ -1170,39 +1117,28 @@ function objectDetectorSidecar(threshold) {
   };
 }
 
-// A board's image→boxes engine. A `detect_provider` setting can point at any
-// provider that ADVERTISES `detects` (a stored key + installed plugin) and routes
-// through wire.detect; everything else — unset, "localDetector", a no-detect
-// provider, a missing key — falls back to the always-on on-server object-detector
-// sidecar (LLMDet). Never fails to resolve. Fully capability-driven; `board` is
-// accepted for a future per-board choice (unused today). Threshold is closed over
-// from settings. Exported for tests + server.
+// A board's image→boxes engine — the peer of resolveTranscriber, and the same
+// two-shape split over one generic resolution. `viaFloor` covers unset, an
+// uninstalled plugin, a no-detect provider, a missing key, and localDetector
+// itself. Never fails to resolve. `board` is accepted for a future per-board
+// choice (unused today). Threshold is a CAPABILITY-level knob (it belongs to
+// detection, not to whichever provider serves it), closed over from settings.
 export async function resolveDetector(db, board = null) {
-  const provider = (await getSetting(db, "detect_provider")) || "localDetector";
-  const threshold = Number(await getSetting(db, "detect_threshold")) || 0.3;
-  const desc = PROVIDERS[provider];
-  if (provider !== "localDetector" && desc?.detects && (await aiPluginInstalled(db, provider))) {
-    const keyId = Number(await getSetting(db, "detect_key_id")) || 0;
-    const key = keyId ? await getAiKey(db, keyId) : null;
-    // A keyed provider needs its stored key; an on-device detector plugin
-    // (own wire.detect, no rows) resolves bare — same shape as transcription.
-    if (key || desc.onDevice) {
-      const model = (await getSetting(db, "detect_model")) || desc.detects.default;
-      const { rpm, burst } = await aiRate(db, provider);
-      return {
-        id: provider,
-        model,
-        // Runs under the plugin-health ledger like every other provider call so
-        // detection traffic + errors show on the Plugins page.
-        detect: (image, queries) =>
-          withPluginHealth(db, `ai:${provider}`, () =>
-            detectObjects({ provider, apiKey: key?.api_key ?? null, base: key?.base_url || undefined, model, rpm, burst, image, queries, threshold })),
-      };
-    }
-  }
+  const b = await resolveCapability(db, "detect");
+  const { detect_threshold: threshold } = await capabilityConfig(db, "detect");
   // The always-on on-server object-detector sidecar — no key, resolved directly
   // (wire: null), like the whisper transcriber.
-  return objectDetectorSidecar(threshold);
+  if (b.viaFloor) return objectDetectorSidecar(b, threshold);
+  const { rpm, burst } = await aiRate(db, b.provider);
+  return {
+    id: b.provider,
+    model: b.model,
+    // Runs under the plugin-health ledger like every other provider call so
+    // detection traffic + errors show on the Plugins page.
+    detect: (image, queries) =>
+      withPluginHealth(db, `ai:${b.provider}`, () =>
+        detectObjects({ provider: b.provider, apiKey: b.apiKey, base: b.base, model: b.model, rpm, burst, image, queries, threshold })),
+  };
 }
 
 // One object field = one object type; its queries are the hint's comma/newline-
