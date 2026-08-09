@@ -20,7 +20,6 @@
 // that wins and no placeholder is rendered at all.
 
 // Options from `items` ({ value, label }), `value` selected if present.
-// Returns whether it was — i.e. false means the select came back empty.
 export function fillSelect(sel, items, { value = null, placeholder = null } = {}) {
   sel.replaceChildren();
   let matched = false;
@@ -35,12 +34,11 @@ export function fillSelect(sel, items, { value = null, placeholder = null } = {}
     sel.appendChild(opt);
   }
   if (!matched && placeholder) sel.insertBefore(placeholderOption(placeholder), sel.firstChild);
-  return matched;
 }
 
 // `disabled` is what makes this an empty state rather than an option: it can be
 // the selection you start with, and never one you can come back to.
-export function placeholderOption(text) {
+function placeholderOption(text) {
   const opt = document.createElement("option");
   opt.value = "";
   opt.textContent = text;
@@ -52,4 +50,4 @@ export function placeholderOption(text) {
 
 // Has this picker been answered? Ask before reading `.value` — an unanswered
 // one reads "", which arithmetic downstream will happily turn into key id 0.
-export const isUnset = (sel) => sel?.selectedOptions?.[0]?.dataset?.placeholder != null;
+export const isUnset = (sel) => sel.selectedOptions[0]?.dataset.placeholder != null;

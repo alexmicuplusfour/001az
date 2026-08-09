@@ -116,8 +116,11 @@
 /* The open list is painted from the select's own color, so dimming the closed
    control greys every row in the popup with it — an unanswered picker looked
    like a picker with nothing left to pick. The rows carry their color
-   themselves; only the prompt is dim. */
-.modal-dialog select option { color: #111; }
+   themselves; only the prompt is dim. `:enabled` because a disabled select is
+   dimmed ON PURPOSE (.mm-live, the extraction row while it loads) and its rows
+   should go with it — this rule is only here to undo an inherited dim, not to
+   give options a color of their own. */
+.modal-dialog select:enabled option { color: #111; }
 .modal-dialog select option[data-placeholder] { color: #9a9aa6; }
 .modal-dialog textarea {
   width: 100%;

@@ -73,6 +73,33 @@ function slotButton(label, isDefault, sels, apply) {
 const pickKey = (p) => `Select a ${p.ai.keyless ? "connection" : "key"}`;
 const PICK_MODEL = "Select a model";
 
+// The connection picker the embedder / transcriber / detector sections share:
+// this provider's keys, the slot's own preselected where this provider holds
+// the slot, and select.js's empty state wherever there is a question to ask.
+// Appends its own labeled row and returns the select — or null for an on-device
+// provider, which has no connection to pick, so callers can hand the result
+// straight to slotButton's watch list.
+//
+// One key and already the holder is the case with no question in it: the row
+// stays hidden, and it gets no empty state either, because an unanswered picker
+// nobody can see is just a button that never enables.
+//
+// The tagger's picker stays hand-built. It carries the ANTHROPIC_API_KEY row as
+// an extra connection and preselects it by the "env" sentinel rather than a key
+// id, which is two exceptions in a twelve-line function.
+function connectionPicker(p, mine, sec, { active, keyId }) {
+  if (p.ai.onDevice) return null;
+  const sel = document.createElement("select");
+  sel.style.cssText = "width:100%;";
+  const ask = mine.length > 1 || !active;
+  fillSelect(sel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
+    value: active && keyId ? String(keyId) : null,
+    placeholder: ask ? pickKey(p) : null,
+  });
+  if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", sel));
+  return sel;
+}
+
 // Beside an enabled promote button: what you'd be replacing. providerName is
 // a slot's current holder (ctx.defaults.*) — resolved to its display label
 // via ctx.plugins; an empty slot reads "none".
@@ -606,20 +633,7 @@ function embedSection(p, ctx, reload) {
     return sec;
   }
 
-  let keySel = null;
-  if (!p.ai.onDevice) {
-    keySel = document.createElement("select");
-    keySel.style.cssText = "width:100%;";
-    // One key and already the slot's holder means there is no question to ask,
-    // and the row stays hidden — so it gets no empty state either. An unanswered
-    // picker nobody can see is just a button that never enables.
-    const ask = mine.length > 1 || !active;
-    fillSelect(keySel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
-      value: active && em.keyId ? String(em.keyId) : null,
-      placeholder: ask ? pickKey(p) : null,
-    });
-    if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
-  }
+  const keySel = connectionPicker(p, mine, sec, { active, keyId: em.keyId });
 
   let modelSel = null;
   if (p.ai.embeds.models.length > 1 || !p.ai.onDevice) {
@@ -730,18 +744,7 @@ function transcribeSection(p, ctx, reload) {
     return sec;
   }
 
-  // Key picker (providers with connection rows — everything but on-device).
-  let keySel = null;
-  if (!p.ai.onDevice) {
-    keySel = document.createElement("select");
-    keySel.style.cssText = "width:100%;";
-    const ask = mine.length > 1 || !active; // see embedSection: a hidden row asks nothing
-    fillSelect(keySel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
-      value: active && tr.keyId ? String(tr.keyId) : null,
-      placeholder: ask ? pickKey(p) : null,
-    });
-    if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
-  }
+  const keySel = connectionPicker(p, mine, sec, { active, keyId: tr.keyId });
 
   // Model picker — a provider gets a dropdown of its transcribes.models; the
   // on-device sidecar shows its single baked model as a note.
@@ -852,18 +855,7 @@ function detectSection(p, ctx, reload) {
     return sec;
   }
 
-  // Key picker (providers with connection rows — everything but on-device).
-  let keySel = null;
-  if (!p.ai.onDevice) {
-    keySel = document.createElement("select");
-    keySel.style.cssText = "width:100%;";
-    const ask = mine.length > 1 || !active; // see embedSection: a hidden row asks nothing
-    fillSelect(keySel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
-      value: active && dt.keyId ? String(dt.keyId) : null,
-      placeholder: ask ? pickKey(p) : null,
-    });
-    if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
-  }
+  const keySel = connectionPicker(p, mine, sec, { active, keyId: dt.keyId });
 
   // Model picker — a provider gets a dropdown of its detects.models; the
   // on-device detector shows its single model as a note.
