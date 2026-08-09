@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { acquire } from "./provider-pacing.js";
 import { BUILTIN_PROVIDERS } from "./ai-providers/index.js";
 import { WIRES } from "./ai-providers/wires/index.js";
+import { CATALOG_POLICY } from "./capabilities.js";
 
 // Re-exported for the plugin loader (ctx.wires) and tests — the wire families
 // themselves live in ./ai-providers/wires/, one module per protocol; the engine
@@ -42,6 +43,72 @@ export function requireRateLimit(name, desc) {
     throw new Error(`AI provider "${name}" must declare positive rpm and burst (rate-limit contract)`);
 }
 
+// --- capability declaration: the `provides` normal form ---
+// A descriptor declares its capabilities three different ways for historical
+// reasons — tagging by the PRESENCE of wire.tag, embed/transcribe/detect by a
+// catalog OBJECT, research by a BOOLEAN. Every consumer therefore has to know
+// which shape each capability uses, which is why adding one costs an edit in a
+// dozen places. `provides` is the single normal form:
+//
+//   provides: { tag: { models, default, filter }, embed: {…}, transcribe: {…},
+//               detect: {…}, research: true }
+//
+// with an ABSENT key meaning "does not do this". Everything below reads
+// `provides`; the legacy fields stay on the descriptor untouched, so existing
+// consumers, published plugins, and the wires keep working unchanged. This is a
+// read-side normalization, not a migration.
+// Three of the five are a pure RENAME: the legacy field already holds exactly
+// the catalog object `provides` wants. Only `tag` (spread across three sibling
+// fields) and `research` (a bare boolean) need their own handling — which is
+// why they appear explicitly in both functions below and these three don't.
+const RENAMED = { embed: "embeds", transcribe: "transcribes", detect: "detects" };
+
+// Legacy fields → `provides`, with an explicitly-supplied `provides` winning per
+// capability (so a hybrid descriptor that writes provides.tag but still declares
+// legacy `embeds` keeps both instead of silently losing the legacy half).
+//
+// Invariant: the result carries NO undefined values and NO functions. It crosses
+// the JSON boundary in providerCatalog(), and the route-vs-catalog deepStrictEqual
+// in providers.test.js treats { a: undefined } and {} as different objects.
+// Exported so the plugin loader validates through this same code — one
+// implementation, or the loader and the registry drift.
+export function normalizeProvides(desc) {
+  const out = {};
+  // Tagging is declared by wire.tag EXISTING (local sets it to null, which is not
+  // the same as absent), and its catalog lives in three sibling fields.
+  if (desc.wire?.tag) out.tag = { models: desc.models || [], default: desc.defaultModel ?? null, filter: desc.modelFilter ?? null };
+  // Truthiness is the flag, deliberately: the whisper sidecar advertises
+  // transcription as { default: null, models: [] } — the model is baked into its
+  // image, so the catalog is legitimately empty and must still read as advertised.
+  for (const [cap, field] of Object.entries(RENAMED)) if (desc[field]) out[cap] = desc[field];
+  if (desc.research) out.research = true;
+  return { ...out, ...(desc.provides || {}) };
+}
+
+// The mirror image: fill the legacy fields FROM an explicit `provides`, so a
+// descriptor may declare either shape and every existing reader keeps working —
+// the wires read desc.defaultModel, the worker reads PROVIDERS[p].embeds, and
+// neither knows about `provides` yet. Without this, supplying `provides` alone
+// would silently produce a half-broken provider, which is worse than not
+// accepting it at all.
+//
+// Guarded on the provides side being PRESENT, never a blind `??=`: `embeds: null`
+// is a meaningful explicit declaration (providers.test.js asserts the null) and
+// must not be turned into `undefined`, which would then JSON-drop. For a
+// legacy-shaped descriptor every assignment below is a no-op by construction —
+// the value it would write is the one it was lifted from.
+function backfillLegacy(desc) {
+  const t = desc.provides.tag;
+  if (t) {
+    if (desc.defaultModel == null) desc.defaultModel = t.default;
+    if (desc.models == null) desc.models = t.models;
+    if (desc.modelFilter == null && t.filter != null) desc.modelFilter = t.filter;
+  }
+  for (const [cap, field] of Object.entries(RENAMED))
+    if (desc.provides[cap] && desc[field] == null) desc[field] = desc.provides[cap];
+  if (desc.provides.research && desc.research == null) desc.research = true;
+}
+
 // The ONE write into the registry: stamp the self-name, enforce the rate-limit
 // contract, insert. Built-ins and plugins both land here — the only difference is
 // a plugin flags `external` first (registerProvider), so a built-in is never
@@ -54,6 +121,14 @@ function install(name, desc) {
   // external calls (network). On-device implies keyless — normalize so the two
   // can never contradict (an on-device provider with a secret is nonsensical).
   if (desc.onDevice) desc.keyless = true;
+  // Normalize the capability declaration here, at the one registry write, so
+  // every descriptor in PROVIDERS — built-in, plugin, or test-registered —
+  // carries `provides` and no reader has to handle both shapes. NOTE: this does
+  // NOT check that an advertised capability has a backing wire; whisper and
+  // localDetector legitimately advertise one with wire null (sidecar-backed,
+  // assembled in worker.js). That check is a PLUGIN rule and lives in the loader.
+  desc.provides = normalizeProvides(desc);
+  backfillLegacy(desc);
   requireRateLimit(name, desc); // any networked provider declares its rate limit, or it's rejected
   PROVIDERS[name] = desc;
 }
@@ -81,6 +156,8 @@ export function unregisterProvider(name) {
 
 // Callers reach through the registry directly: PROVIDERS[p].defaultModel for
 // the default, PROVIDERS[p]?.embeds as the "does this provider embed" check.
+// New code should ask PROVIDERS[p].provides?.embed instead — same answer, but
+// one shape for every capability, so it survives a capability being added.
 // The one place a plain list is needed (validation error messages) derives it
 // inline from Object.keys(PROVIDERS).
 
@@ -168,15 +245,18 @@ export function testKey({ provider, ...rest }) {
 
 // The models a connection can use RIGHT NOW: the provider's own listing
 // endpoint (wire.listModels, asked with the connection's key/server), carved
-// per CATALOG KIND and merged under the descriptor's curated picks. One raw
-// fetch serves all three kinds — /models mixes chat, embedding, and audio ids
+// per CAPABILITY and merged under the descriptor's curated picks. One raw
+// fetch serves every capability — /models mixes chat, embedding, and audio ids
 // and the listing endpoints carry NO capability metadata (OpenAI's is bare
 // ids), so name-pattern filters carried as descriptor data are how a catalog
-// claims its slice: `modelFilter` (tagging), `embeds.filter`,
-// `transcribes.filter`, each a regex source tested against the id. Tagging
+// claims its slice: `provides.<cap>.filter`, a regex source tested against the
+// id (lifted from `modelFilter` / `embeds.filter` / `transcribes.filter` on a
+// legacy-shaped descriptor). Tagging
 // without a filter shows everything (a provider may be all-chat); a
 // capability catalog without a filter stays on its curated list — an
 // unfiltered dump into the embedder picker would be worse than hardcoding.
+// That asymmetry is capability POLICY, not a provider declaration, so it lives
+// in CATALOG_POLICY (capabilities.js), not in each descriptor.
 // The descriptor lists are the recommended set + offline fallback, NOT the
 // catalog — a wire without listing, a fetch failure, or a filter that
 // matches nothing serves them alone (source: "fallback"); never a throw,
@@ -187,15 +267,23 @@ export function testKey({ provider, ...rest }) {
 // live list applies it owns existence: a retired curated id drops out,
 // everything else sorts in below the recommendations; descriptor notes win
 // the labels for ids both sides know.
-const KIND_CATALOG = {
-  tagging: (desc) => ({ models: desc?.models, filter: desc?.modelFilter, always: true }),
-  embed: (desc) => desc?.embeds,
-  transcribe: (desc) => desc?.transcribes,
-  detect: (desc) => desc?.detects,
+// One capability's declared catalog, or null when the provider doesn't advertise
+// it — or when the id names a modifier like `research`, which is `true`, not a
+// catalog. The one guard both projections below share.
+const declared = (desc, cap) => {
+  const p = desc?.provides?.[cap];
+  return p && typeof p === "object" ? p : null;
 };
-export const MODEL_KINDS = Object.keys(KIND_CATALOG);
+
+// …carved for the live-list merge: the descriptor's declaration plus this
+// capability's policy. No capability is named here — it reads whatever
+// `provides` and CATALOG_POLICY hold.
+const catalogFor = (desc, cap) => {
+  const p = declared(desc, cap);
+  return p && { models: p.models, filter: p.filter, always: !!CATALOG_POLICY[cap]?.unfilteredShowsAll };
+};
 function assembleModels(desc, kind, live) {
-  const cat = KIND_CATALOG[kind](desc);
+  const cat = catalogFor(desc, kind);
   if (!cat) return { source: "fallback", models: [] }; // provider lacks the capability
   // `absent`: the provider ANSWERED and these ids weren't in the answer
   // (fresh Ollama box with nothing pulled, filter matched nothing). Still
@@ -241,7 +329,7 @@ async function fetchLiveModels(desc, opts) {
   try { return (await desc.wire.listModels(desc, opts)) || null; }
   catch { return null; }
 }
-export async function listProviderModels({ provider, apiKey, base, kind = "tagging" }) {
+export async function listProviderModels({ provider, apiKey, base, kind = "tag" }) {
   const desc = PROVIDERS[provider];
   return assembleModels(desc, kind, await fetchLiveModels(desc, { apiKey, base }));
 }
@@ -265,7 +353,7 @@ const modelListTtl = () => {
 export function invalidateModelListCache(keyId) {
   modelListCache.delete(Number(keyId));
 }
-export async function cachedProviderModels(keyId, { provider, apiKey, base, kind = "tagging" }, { refresh = false } = {}) {
+export async function cachedProviderModels(keyId, { provider, apiKey, base, kind = "tag" }, { refresh = false } = {}) {
   const desc = PROVIDERS[provider];
   const id = Number(keyId);
   let entry = modelListCache.get(id);
@@ -295,6 +383,13 @@ export async function cachedProviderModels(keyId, { provider, apiKey, base, kind
   return assembleModels(desc, kind, await entry.live);
 }
 
+// …and carved for the UI: deliberately narrower than the descriptor's own object
+// (no `filter` — that's server-side carving data, not a picker's business).
+const catalogEntry = (desc, cap) => {
+  const p = declared(desc, cap);
+  return p ? { default: p.default, models: p.models } : null;
+};
+
 // Public catalog for the admin UI — labels, model lists (with notes), defaults,
 // and capability flags. No secrets, safe to serve. The client renders its
 // provider/model pickers from this so the catalog isn't mirrored in two places.
@@ -307,7 +402,11 @@ export function providerCatalog() {
       description: p.description || "",
       defaultModel: p.defaultModel,
       models: p.models,
-      research: p.research,
+      // `!!` not a passthrough: a descriptor that omits `research` would put
+      // `undefined` here, which JSON-drops and then fails the route-vs-catalog
+      // deepStrictEqual. Every built-in sets it explicitly so that has never
+      // fired; deriving it removes the trap for plugins.
+      research: !!p.provides.research,
       keyless: !!p.keyless,
       onDevice: !!p.onDevice,
       // needsBase: connections carry the server URL (self-hosted providers —
@@ -315,9 +414,17 @@ export function providerCatalog() {
       // placeholder). Fixed-endpoint providers never store one.
       needsBase: !!p.needsBase,
       base: p.needsBase ? p.base || null : null,
-      embeds: p.embeds ? { default: p.embeds.default, models: p.embeds.models } : null,
-      transcribes: p.transcribes ? { default: p.transcribes.default, models: p.transcribes.models } : null,
-      detects: p.detects ? { default: p.detects.default, models: p.detects.models } : null,
+      // The per-capability catalogs, DERIVED from `provides` but still emitted
+      // under their legacy names: this payload is a wire format the plugin modal
+      // and the board modal read (p.ai.embeds.models, …). It can be extended,
+      // not swapped — the client moves to `provides` when the capabilities page
+      // lands, not before.
+      embeds: catalogEntry(p, "embed"),
+      transcribes: catalogEntry(p, "transcribe"),
+      detects: catalogEntry(p, "detect"),
+      // The normal form itself, so a capability-aware consumer can iterate
+      // instead of naming the three fields above.
+      provides: p.provides,
     };
   });
 }

@@ -19,6 +19,7 @@
 // field writes through to the existing `<domain>_key_<provider>` setting, and
 // AI keys stay in the ai_keys table.
 import { PROVIDERS, providerCatalog } from "./providers.js";
+import { CAPABILITY_IDS } from "./capabilities.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS, extOf } from "./sources/index.js";
 import { sourceManifests } from "./ingestion/sources/index.js";
@@ -41,7 +42,11 @@ function aiDefs() {
     // core value) must work out of the box; it's still removable.
     core: p.name === "local" || p.name === "whisper" || p.name === "localDetector",
     defaultInstalled: p.name === "anthropic",
-    capabilities: { tag: !!PROVIDERS[p.name].wire?.tag, embed: !!p.embeds, transcribe: !!p.transcribes, detect: !!p.detects, research: p.research },
+    // Derived from the descriptor's `provides` normal form over the capability
+    // id list — NOT over the provider's own keys, since the card wants an
+    // explicit false for what it can't do. Adding a capability adds a key here
+    // with no edit to this file.
+    capabilities: Object.fromEntries(CAPABILITY_IDS.map((c) => [c, !!p.provides?.[c]])),
     // Rate-limit config, mirroring connectors — networked providers only
     // (on-device local/whisper make no external calls; a keyless-networked
     // provider still paces). Defaults are the descriptor's grounded limits; an
@@ -55,6 +60,7 @@ function aiDefs() {
     // the board modal reads from /api/admin/ai-providers
     ai: {
       defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, detects: p.detects,
+      provides: p.provides, // the normal form, alongside the legacy per-capability fields the modal still reads
       keyless: p.keyless, onDevice: p.onDevice,
       needsBase: !!p.needsBase, base: p.needsBase ? p.base || null : null,
     },

@@ -19,7 +19,8 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { resolveSource, fetchModule } from "./plugin-fetch.js";
-import { registerProvider, unregisterProvider, invalidateModelListCache, WIRES } from "./providers.js";
+import { registerProvider, unregisterProvider, invalidateModelListCache, normalizeProvides, WIRES } from "./providers.js";
+import { WIRE_VERB } from "./capabilities.js";
 import {
   getConnector,
   registerConnector, unregisterConnector,
@@ -91,14 +92,23 @@ const KIND_DEFS = {
         throw new Error("ai-provider must return a descriptor with a wire (tagging), embeds, transcribes, or detects config");
       if (!built.label) throw new Error("ai-provider descriptor needs a label");
       // A capability is only real if its wire method exists: advertising
-      // `transcribes` requires wire.transcribe (mirrors how tagging requires wire.tag).
-      if (built.transcribes && typeof built.wire?.transcribe !== "function")
-        throw new Error("a transcribes ai-provider descriptor needs wire.transcribe");
-      if (built.detects && typeof built.wire?.detect !== "function")
-        throw new Error("a detects ai-provider descriptor needs wire.detect");
+      // `transcribes` requires wire.transcribe (mirrors how tagging requires
+      // wire.tag). Read off the `provides` normal form and WIRE_VERB so a new
+      // capability is covered by declaring it, not by editing this check.
+      //
+      // PLUGIN-ONLY, deliberately: the built-in whisper and localDetector
+      // descriptors advertise a capability with `wire: null` — they are
+      // sidecar-backed and their HTTP call is assembled in worker.js. Hoisting
+      // this into providers.js install() would reject two shipping providers.
+      const provides = normalizeProvides(built);
+      for (const cap of Object.keys(provides)) {
+        const verb = WIRE_VERB[cap]; // absent for `tag` (declared BY wire.tag) and `research` (a flag on the tagging call)
+        if (verb && typeof built.wire?.[verb] !== "function")
+          throw new Error(`a ${cap} ai-provider descriptor needs wire.${verb}`);
+      }
       // defaultModel names the tagging model; only a tagging (wire.tag) provider
       // needs one. An embed-only or transcribe-only descriptor legitimately has none.
-      if (built.wire?.tag && !built.defaultModel) throw new Error("a tagging ai-provider descriptor needs a defaultModel");
+      if (provides.tag && !provides.tag.default) throw new Error("a tagging ai-provider descriptor needs a defaultModel");
     },
     register: (m, built) => registerProvider(m.id, built),
     unregister: (m) => unregisterProvider(m.id),

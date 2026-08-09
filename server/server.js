@@ -128,7 +128,8 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDef
 import sharp from "sharp";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
-import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, MODEL_KINDS, PROVIDERS } from "./providers.js";
+import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
+import { MODEL_CAPABILITIES } from "./capabilities.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
 import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./password.js";
@@ -1798,7 +1799,9 @@ app.post("/api/admin/ai-keys/:id/test", requireAdmin, wrap(async (req, res) => {
 // box serves the descriptor's curated fallback rather than a 4xx (failure
 // semantics live in the engine; Test diagnoses).
 app.get("/api/admin/ai-keys/:id/models", requireAdmin, wrap(async (req, res) => {
-  const kind = MODEL_KINDS.includes(req.query.kind) ? req.query.kind : "tagging";
+  // An unrecognized kind falls to tagging — which also covers the pre-capability
+  // name for it ("tagging"), so a cached client page needs no alias.
+  const kind = MODEL_CAPABILITIES.includes(req.query.kind) ? req.query.kind : "tag";
   const refresh = req.query.refresh === "1"; // strict: ?refresh=0 must not bust
   // "env" is the ANTHROPIC_API_KEY-backed default-tagger option — no ai_keys
   // row, but the server holds the key, so it lists like any connection.
@@ -1838,29 +1841,26 @@ app.get("/api/admin/ai-providers", requireAdmin, wrap(async (_req, res) => {
 // legacy per-layer routes use, just composed.
 app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   const plugins = await pluginCatalog(db);
-  // The whisper card shows the model the sidecar ITSELF reports (its /health):
-  // the model is baked into the sidecar image, so the app never names it — an
-  // unreachable sidecar leaves the list empty and the card notes the fallback.
-  const whisper = plugins.find((p) => p.id === "ai:whisper");
-  if (whisper) {
-    const live = await transcriberSidecarModel();
-    whisper.ai = {
-      ...whisper.ai, // don't mutate: `ai` is shared with the memoized plugin defs
-      transcribes: { default: live, models: live ? [{ id: live, note: "runs on-server · no API key · baked at deploy (WHISPER_MODEL)" }] : [] },
-    };
-  }
-  // The on-device detector card, same treatment: the model is baked into the
-  // sidecar image (OBJECT_DETECTOR_MODEL), so the card reads what /health reports
-  // and can't drift when the image is rebuilt with a different model. Unreachable
-  // leaves the list empty and the card notes the fallback.
-  const localDetector = plugins.find((p) => p.id === "ai:localDetector");
-  if (localDetector) {
-    const live = await detectorSidecarModel();
-    localDetector.ai = {
-      ...localDetector.ai, // don't mutate: `ai` is shared with the memoized plugin defs
-      detects: { default: live, models: live ? [{ id: live, note: "runs in the object-detector sidecar · no API key · baked at deploy (OBJECT_DETECTOR_MODEL)" }] : [] },
-    };
-  }
+  // A sidecar-backed engine's card shows the model the sidecar ITSELF reports
+  // (its /health): the model is baked into the image at build, so the app never
+  // names it and the card can't drift when the image is rebuilt against a
+  // different one. An unreachable sidecar leaves the list empty and the card
+  // notes the fallback. The catalog is written in BOTH shapes from one value —
+  // the legacy per-capability field the modal reads today and the `provides`
+  // normal form — so neither can be read stale.
+  // `askModel` is the probe, not its answer: no card, no /health call.
+  const sidecarCatalog = async (id, cap, legacyField, askModel, note) => {
+    const entry = plugins.find((p) => p.id === id);
+    if (!entry) return;
+    const live = await askModel();
+    const catalog = { default: live, models: live ? [{ id: live, note }] : [] };
+    // don't mutate: `ai` is shared with the memoized plugin defs
+    entry.ai = { ...entry.ai, [legacyField]: catalog, provides: { ...entry.ai.provides, [cap]: catalog } };
+  };
+  await sidecarCatalog("ai:whisper", "transcribe", "transcribes", transcriberSidecarModel,
+    "runs on-server · no API key · baked at deploy (WHISPER_MODEL)");
+  await sidecarCatalog("ai:localDetector", "detect", "detects", detectorSidecarModel,
+    "runs in the object-detector sidecar · no API key · baked at deploy (OBJECT_DETECTOR_MODEL)");
   const embedder = await resolveEmbedder(db);
   const domains = {};
   for (const c of listConnectors()) {
