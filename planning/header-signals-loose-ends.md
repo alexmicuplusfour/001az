@@ -869,7 +869,9 @@ its number where it stands.
   the `notifySound` key are unchanged. `header-signals-plan.md` records the
   revision.
 
-- **16. `announce.js` has no test of any kind, and it owns the rule.** The plan
+- **16. `announce.js` had no test of any kind, and it owns the rule.** *(fixed —
+  `test/announce.test.js`, 8 cases; and see the correction below, because this
+  entry's proposed fix would not have worked)* The plan
   explains why it can't be imported under Node (`board-modal.js`'s root-absolute
   `/x.js` specifiers, reached via `alerts-modal.js`), and that reason is real. It
   is also an argument for extracting the ten lines that matter rather than for
@@ -881,11 +883,42 @@ its number where it stands.
   while a dot stays lit, re-fire after acknowledgement. **Defects 1–4 would all
   have failed that file.**
 
-  One caveat the sweep found while re-tracing defect 1: a test of `check()`
-  alone would have caught 1a and 1c but **not** 1b or 1d, which are not
-  edge-rule bugs at all — they are a claim in a comment (*"seen by definition"*)
-  that another comment in the same function contradicts. No unit test of
-  `announce.js` sees that. Those two needed reading the comments against each
-  other, which is what a sweep is for and a suite isn't. The fix did leave them
-  testable, though: `failureDrawn` is a pure predicate now, and the four cases
-  under defect 1 pin it.
+  ### What was done — and two corrections to the paragraph above
+
+  **The blocker was five lines, not a wall.** Walking the graph from
+  `announce.js`: 38 modules reachable, and exactly **one** of them used the
+  root-absolute form — `board-modal.js`, five specifiers. Those five are also
+  unnecessary. An ES module specifier resolves against the URL of the module
+  doing the importing, never the document's, so `./toast.js` inside
+  `/board-modal.js` is `/toast.js` whether the page is `/`, `/boards` or
+  `/admin.html`. The root-absolute form guards a hazard modules do not have; it
+  belongs on `<script src>`, which IS document-relative (hence `boards.html`'s
+  `/boards.js`). Made relative, and `announce.js` imports under Node behind a
+  browser shim — a real `EventTarget` for `document`, plus stubs for the
+  module-scope `IntersectionObserver`, `ResizeObserver` and `Audio` the chain
+  touches on the way in.
+
+  **And "extract `check()` into an injectable form" was the wrong fix.** It would
+  have tested the algorithm while leaving the thing that was actually broken
+  untestable: defect 2's bug was two entries missing from the `DOTS` **table**,
+  not a fault in `check()`. If the table is the test's input, a wrong table
+  cannot fail. Importing the module for real tests the table.
+
+  **The claim "defects 1–4 would all have failed that file" was overstated.**
+  Counted honestly, a test here reaches 2 of the 6: defect 2 (a dot with no
+  `ready`) and defect 1c (a chime with no toast). 1a, 1b and 1d live in
+  `jobs-modal.js`, 3 in `facet-diagnostics.js`, 4 in `alerts-modal.js`, and no
+  test of `announce.js` was ever going to see them. 1b and 1d in particular are
+  not edge-rule bugs at all — they are a claim in a comment (*"seen by
+  definition"*) that another comment in the same function contradicts, which is
+  what a sweep is for and a suite isn't. They are pinned separately: the defect-1
+  fix left `failureDrawn` a pure predicate, with four cases on it.
+
+  **Both of those 2 are verified by mutation, not assumed.** Deleting the jobs
+  dot's `ready` fails cases 2 and 3; restoring the unconditional `chime()` fails
+  cases 6 and 7. The first mutation initially passed — the test had been written
+  with a *lit* value before the baseline, which reads the same with the gate and
+  without it. The real bug's shape is a **null** value, because that is what a
+  failed fetch leaves, and only that setup discriminates. Worth recording: the
+  first draft of this test would have proved nothing, and only running it against
+  the broken code showed that.

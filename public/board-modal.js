@@ -4,11 +4,22 @@
 // read-only Mapping view. Styling for .switch / .switch-row / .modal-section /
 // .fe-* / .mm-* lives in modal.css, which both pages load (plus dropdown.css
 // for the pane's menus). Caches the provider catalog module-side.
-import { toast } from "/toast.js";
-import { createModal, sectionHeading } from "/modal.js";
-import { api } from "/api.js";
-import { buildMappingPane } from "/mapping-modal.js";
-import { diagnosisBlock } from "/facet-diagnostics.js";
+// Relative, not root-absolute, and the distinction is not stylistic. An ES
+// module specifier resolves against the URL of the module doing the importing,
+// never against the page's — so `./toast.js` here is `/toast.js` whether the
+// document is `/`, `/boards` or `/admin.html`. The root-absolute form defends
+// against a hazard modules do not have; it belongs on `<script src>` in HTML,
+// which IS document-relative (hence boards.html's `/boards.js`).
+//
+// What it cost was testability. This file is the only module in the 38
+// reachable from announce.js that used the root-absolute form, and Node cannot
+// resolve it — so the module owning the header's whole notification rule could
+// not be imported by a test at all. Five lines were the entire blocker.
+import { toast } from "./toast.js";
+import { createModal, sectionHeading } from "./modal.js";
+import { api } from "./api.js";
+import { buildMappingPane } from "./mapping-modal.js";
+import { diagnosisBlock } from "./facet-diagnostics.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
