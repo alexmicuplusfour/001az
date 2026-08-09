@@ -2,7 +2,7 @@
 // admin.html (edit + create) and the gallery toolbar (pencil + New board).
 // Admins get the full editor; board-admins a content-only Tagging pane and a
 // read-only Mapping view. Styling for .switch / .switch-row / .modal-section /
-// .fe-* / .mm-* lives in modal.css, which both pages load (plus dropdown.css
+// .fe-* / .clip-* / .mm-* lives in modal.css, which both pages load (plus dropdown.css
 // for the pane's menus). Caches the provider catalog module-side.
 // Relative, not root-absolute, and the distinction is not stylistic. An ES
 // module specifier resolves against the URL of the module doing the importing,
@@ -58,48 +58,25 @@ export function switchRow(label, hint, checked, onChange, opts = {}) {
   return row;
 }
 
+// A facet's key, derived from its label: lowercase, spaces to dashes, nothing
+// else survives. Derived exactly twice — while a new facet's label is still
+// being typed, and for a pasted facet that arrived without one.
+export const facetKey = (label) =>
+  String(label || "").toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+
 // `stats` is the roll-up rows keyed by facet, `gates` the thresholds the worker
 // gates on — both from the board payload, both optional so the admin page's
 // new-board path (which has neither) is unaffected.
+//
+// Returns a handle to the one thing an outside caller can do to a taxonomy it
+// doesn't own: replace it wholesale (the guidance clipboard's paste). Reading
+// goes the other way — through `textarea`, which every edit syncs and which the
+// Save handler already treats as the source of truth.
 export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
   const statsByKey = new Map((stats || []).map((r) => [r.key, r]));
   textarea.hidden = true;
   let facets = [];
   try { facets = JSON.parse(textarea.value) || []; } catch {}
-
-  const copyJsonBtn = document.createElement("button");
-  copyJsonBtn.type = "button";
-  copyJsonBtn.className = "fe-clip-btn";
-  copyJsonBtn.textContent = "Copy JSON";
-  copyJsonBtn.onclick = () => {
-    navigator.clipboard.writeText(textarea.value).then(() => {
-      const prev = copyJsonBtn.textContent;
-      copyJsonBtn.textContent = "Copied!";
-      setTimeout(() => (copyJsonBtn.textContent = prev), 1200);
-    });
-  };
-  const pasteJsonBtn = document.createElement("button");
-  pasteJsonBtn.type = "button";
-  pasteJsonBtn.className = "fe-clip-btn";
-  pasteJsonBtn.textContent = "Paste JSON";
-  pasteJsonBtn.onclick = async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      const parsed = JSON.parse(text);
-      if (!Array.isArray(parsed)) throw new Error();
-      facets = parsed;
-      render();
-      sync();
-    } catch { toast.warn("Clipboard doesn't contain valid facets JSON"); }
-  };
-  const prevLabel = textarea.previousElementSibling;
-  if (prevLabel) {
-    prevLabel.style.cssText += "; display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;";
-    const btnGroup = document.createElement("div");
-    btnGroup.className = "fe-toolbar";
-    btnGroup.append(copyJsonBtn, pasteJsonBtn);
-    prevLabel.appendChild(btnGroup);
-  }
 
   const root = document.createElement("div");
   root.className = "fe-root";
@@ -152,7 +129,7 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
       labelIn.oninput = () => {
         f.label = labelIn.value;
         if (f._new) {
-          f.key = f.label.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+          f.key = facetKey(f.label);
           keyHint.textContent = f.key;
         }
         sync();
@@ -266,6 +243,102 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
 
   render();
   sync();
+
+  return {
+    setFacets(next) {
+      facets = Array.isArray(next) ? next : [];
+      render();
+      sync();
+    },
+  };
+}
+
+// What "Paste JSON" accepts, and what it means. Exported for the test, and
+// because the rule is the feature: this is the only place that decides what a
+// pasted guidance document is allowed to be.
+//
+// A document replaces what it MENTIONS and leaves the rest alone. The two keys
+// are independently useful — re-wording what a board is for shouldn't require
+// carrying its taxonomy along, and a taxonomy shouldn't blank a context it
+// says nothing about. A bare array is read as facets-only: that is the shape
+// this button emitted before the guidance became one document, and the shape
+// an AI hands back when asked for "the taxonomy".
+//
+// Two fields are filled in rather than demanded, because both are things a
+// hand-written or AI-drafted document leaves out and neither is optional
+// downstream. The editor supplies them as you type; paste never went through
+// that path, which is why it could write shapes the editor cannot produce.
+//   key    — every tag the worker writes and every filter the gallery builds is
+//            keyed, so a keyless facet saves fine and then matches nothing,
+//            forever. Derived from the label.
+//   values — `for (const v of f.values)` runs unguarded in the tagging pass,
+//            the manual-tag route and the gallery's filter build, so a facet
+//            with no values list doesn't degrade, it throws — on a board the
+//            user has already saved and walked away from.
+//
+// Throws on anything else; the caller turns that into the warn toast.
+export function normalizeGuidance(parsed) {
+  const doc = Array.isArray(parsed) ? { facets: parsed } : parsed;
+  if (!doc || typeof doc !== "object") throw new Error("not a guidance document");
+  const out = {};
+  if ("context" in doc) {
+    if (typeof doc.context !== "string") throw new Error("context must be a string");
+    out.context = doc.context;
+  }
+  if ("facets" in doc) {
+    if (!Array.isArray(doc.facets)) throw new Error("facets must be an array");
+    out.facets = doc.facets.map((f) => {
+      if (!f || typeof f !== "object" || Array.isArray(f)) throw new Error("each facet must be an object");
+      return { ...f, key: f.key || facetKey(f.label), values: Array.isArray(f.values) ? f.values : [] };
+    });
+  }
+  if (out.context === undefined && out.facets === undefined) throw new Error("no context or facets");
+  return out;
+}
+
+// The Tagging Guidance clipboard — ONE JSON document for the whole section: the
+// AI context and the taxonomy together.
+//
+// It used to sit on the Taxonomy sub-title and carry the bare facets array,
+// which split the guidance in half at exactly the wrong seam. The context is
+// what tells a tagger what these items ARE; the facets are what it may say
+// about them. Moving a board's tagging to another board, or handing it to an AI
+// to extend, means moving both — and the old button silently moved one.
+//
+// Copy is pretty-printed. The compact form in the hidden textarea exists to be
+// parsed by the Save handler; this one exists to be read, edited by hand, and
+// pasted into a chat.
+function buildGuidanceClipboard({ contextEl, facetsEl, editor }) {
+  const bar = document.createElement("div");
+  bar.className = "clip-toolbar";
+  const chip = (label, onClick) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "clip-btn";
+    b.textContent = label;
+    b.onclick = () => onClick(b);
+    bar.appendChild(b);
+  };
+
+  chip("Copy JSON", async (b) => {
+    let facets = [];
+    try { facets = JSON.parse(facetsEl.value) || []; } catch {}
+    const doc = { context: contextEl.value.trim(), facets };
+    try { await navigator.clipboard.writeText(JSON.stringify(doc, null, 2)); }
+    catch { return toast.error("Couldn't write to the clipboard"); }
+    b.textContent = "Copied!";
+    setTimeout(() => (b.textContent = "Copy JSON"), 1200);
+  });
+
+  chip("Paste JSON", async () => {
+    let doc;
+    try { doc = normalizeGuidance(JSON.parse(await navigator.clipboard.readText())); }
+    catch { return toast.warn('Clipboard doesn\'t contain tagging guidance JSON ({ "context", "facets" })'); }
+    if (doc.context !== undefined) contextEl.value = doc.context;
+    if (doc.facets !== undefined) editor.setFacets(doc.facets);
+  });
+
+  return bar;
 }
 
 // The provider catalog (labels, model lists + notes, defaults, capabilities) is
@@ -419,7 +492,9 @@ export async function openBoardModal(boardId, opts = {}) {
         <div id="board-modal-autotag" style="font-size:13px"></div>
       </div>
       <div class="modal-section">
-        ${sectionHeading("Tagging Guidance", null, "margin-bottom:12px;")}
+        <div class="section-head-row" id="board-modal-guidance-head" style="margin-bottom:12px;">
+          ${sectionHeading("Tagging Guidance")}
+        </div>
         <label style="display:block;font-size:12px;color:#6b6b72;margin:0 0 4px;">AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>
         <textarea id="board-modal-context" rows="5" placeholder="e.g. Classify these clothing items and outfits. Identify what part of the body they are worn on, the most appropriate season, and how formal they are."></textarea>
         <div class="modal-section-title" style="margin-top:18px;">Taxonomy</div>
@@ -433,10 +508,16 @@ export async function openBoardModal(boardId, opts = {}) {
 
   footer.innerHTML = `<button id="board-modal-save">${isNew ? "Create board" : "Save"}</button><button class="ghost" id="board-modal-cancel">Cancel</button>`;
 
+  const contextTextarea = document.getElementById("board-modal-context");
   const facetsTextarea = document.getElementById("board-modal-facets");
   // New boards open with an empty taxonomy (the "[]" prefilled above) — boards
   // own their facets, and an empty taxonomy is a valid, non-tagging board.
-  buildFacetEditor(facetsTextarea, { stats: board?.facet_stats, gates: board?.facet_gates });
+  const facetEditor = buildFacetEditor(facetsTextarea, { stats: board?.facet_stats, gates: board?.facet_gates });
+  // Both halves of the section are built, so the clipboard that carries both
+  // can be hung off its heading.
+  document.getElementById("board-modal-guidance-head").appendChild(
+    buildGuidanceClipboard({ contextEl: contextTextarea, facetsEl: facetsTextarea, editor: facetEditor })
+  );
 
   // Mapping pane. Visibility is via `display` (not the `hidden` attribute) so
   // the pane's own flex layout can't override it.
@@ -666,9 +747,9 @@ export async function openBoardModal(boardId, opts = {}) {
   document.getElementById("board-modal-save").onclick = async () => {
     const name = document.getElementById("board-modal-name").value.trim();
     if (!name) return toast.warn("Name required");
-    const context = document.getElementById("board-modal-context").value.trim();
+    const context = contextTextarea.value.trim();
     let facets;
-    try { facets = JSON.parse(document.getElementById("board-modal-facets").value); }
+    try { facets = JSON.parse(facetsTextarea.value); }
     catch { return toast.warn("Facets JSON is invalid"); }
     if (!Array.isArray(facets)) return toast.warn("Facets must be a JSON array");
     const aiOverride = canEditAI && aiLoaded

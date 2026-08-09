@@ -87,6 +87,10 @@
   color: var(--text, #111);
   margin-bottom: 12px;
 }
+/* A section heading with controls parked on its right — the heading keeps its
+   own margins, so pass the row's bottom spacing inline where the section
+   needs it. */
+.section-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 /* base element styles — mirrors admin.html globals so the modal looks the same on all pages */
 .modal-dialog input {
@@ -230,9 +234,11 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .fe-add-val:hover { text-decoration: underline; }
 .fe-add-facet { display: block; width: 100%; margin-top: 4px; background: none; border: 1px dashed #ccc; border-radius: 6px; padding: 5px 14px; cursor: pointer; color: #6b6b72; font: inherit; font-size: 13px; }
 .fe-add-facet:hover { border-color: #999; color: #111; }
-.fe-toolbar { display: flex; gap: 6px; }
-.fe-clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }
-.fe-clip-btn:hover { border-color: #999; color: #111; }
+
+/* ─── clipboard chips (the Tagging Guidance copy/paste row) ─── */
+.clip-toolbar { display: flex; gap: 6px; }
+.clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }
+.clip-btn:hover { border-color: #999; color: #111; }
 
 /* ─── entity mapping modal: field-row components ─── */
 .mm-intro {
