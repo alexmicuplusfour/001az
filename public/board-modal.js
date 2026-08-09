@@ -20,6 +20,7 @@ import { createModal, sectionHeading } from "./modal.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
+import { fillSelect, isUnset } from "./select.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
@@ -282,24 +283,19 @@ export const byName = (list) => Object.fromEntries(list.map((p) => [p.name, p]))
 // the list is authoritative (a live listing); a curated render can't claim
 // absence, its list is just the recommendations. Internal to the picker
 // mechanism — modals go through syncModelPicker.
-function fillModelSelect(sel, entry, current, absentNote) {
-  sel.replaceChildren();
+//
+// `placeholder` asks for select.js's empty state, and the one thing it changes
+// here is that `defaultModel` stops being a fallback selection: the provider's
+// recommendation is a suggestion, and a picker that renders a suggestion as a
+// selection is telling the caller a model was chosen when none was.
+function fillModelSelect(sel, entry, current, { absentNote = null, placeholder = null } = {}) {
   const models = entry?.models || [];
-  const selected = current || entry?.defaultModel;
-  for (const m of models) {
-    const opt = document.createElement("option");
-    opt.value = m.id;
-    opt.textContent = m.note ? `${m.id} — ${m.note}` : m.id;
-    if (m.id === selected) opt.selected = true;
-    sel.appendChild(opt);
-  }
+  const selected = current || (placeholder ? null : entry?.defaultModel);
+  const items = models.map((m) => ({ value: m.id, label: m.note ? `${m.id} — ${m.note}` : m.id }));
   if (selected && !models.find((m) => m.id === selected)) {
-    const opt = document.createElement("option");
-    opt.value = selected;
-    opt.textContent = absentNote ? `${selected} — ${absentNote}` : selected;
-    opt.selected = true;
-    sel.insertBefore(opt, sel.firstChild);
+    items.unshift({ value: selected, label: absentNote ? `${selected} — ${absentNote}` : selected });
   }
+  fillSelect(sel, items, { value: selected, placeholder });
 }
 
 // Swap the select's options for the connection's model list (GET
@@ -318,7 +314,9 @@ function fillModelSelect(sel, entry, current, absentNote) {
 // select+connection sends refresh=1 — opening a picker is the "I just
 // `ollama pull`ed, show me" moment — and revisits within the same picker
 // ride the server's cache.
-function attachLiveModels(sel, keyId, kind, current) {
+// A picker still on its placeholder survives the swap as one: the live answer
+// settles WHICH models exist, never whether the user has picked one.
+function attachLiveModels(sel, keyId, kind, current, placeholder) {
   sel._modelKey = keyId || null;
   if (!keyId) return;
   const fetched = (sel._modelFetched ??= new Set());
@@ -327,11 +325,14 @@ function attachLiveModels(sel, keyId, kind, current) {
   const q = [kind && `kind=${kind}`, refresh && "refresh=1"].filter(Boolean).join("&");
   api("GET", `/api/admin/ai-keys/${keyId}/models${q ? `?${q}` : ""}`).then((r) => {
     if (sel._modelKey !== keyId || !r?.models?.length) return;
-    const alive = r.models.some((m) => m.id === sel.value);
+    const alive = !isUnset(sel) && r.models.some((m) => m.id === sel.value);
     const keep = alive ? sel.value : (current && sel.value === current ? current : null);
     // Absence is only claimable off a live answer; a fallback list is just
     // the recommendations and proves nothing about the saved id.
-    fillModelSelect(sel, { models: r.models }, keep, r.source === "live" ? "not listed by this connection" : null);
+    fillModelSelect(sel, { models: r.models }, keep, {
+      absentNote: r.source === "live" ? "not listed by this connection" : null,
+      placeholder,
+    });
   }).catch(() => {});
 }
 
@@ -345,9 +346,13 @@ function attachLiveModels(sel, keyId, kind, current) {
 // ai_keys row id, "env", or null. Persistence stays context-owned by design:
 // one connection serves many boards/slots, so no provider-level layer can
 // know which saved model matters to THIS picker — the caller says, once.
-export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null } = {}) {
-  if (entry) fillModelSelect(sel, entry, saved);
-  attachLiveModels(sel, keyId, kind, saved);
+// `placeholder` is the text for select.js's empty state, for the callers whose
+// picker starts unanswered (a slot this provider doesn't hold yet); omit it
+// where a picker always stands for something (the board's own model, which
+// falls back to the app default rather than to nothing).
+export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null, placeholder = null } = {}) {
+  if (entry) fillModelSelect(sel, entry, saved, { placeholder });
+  attachLiveModels(sel, keyId, kind, saved, placeholder);
 }
 
 // How every connection row names itself — plus the model where the row's whole

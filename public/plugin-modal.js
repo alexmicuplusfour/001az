@@ -10,6 +10,7 @@ import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
 import { syncModelPicker, switchRow } from "/board-modal.js";
+import { fillSelect, isUnset } from "/select.js";
 import { fmtDuration } from "/utils.js";
 
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
@@ -44,19 +45,33 @@ const busy = (btn, label, fn) => async () => {
 // disabled as a status marker and re-enables only once you change the key or
 // model, so you can still repoint the running default. `sels` are the selects
 // to watch; `apply` runs the write.
+//
+// A picker still on its empty state is not an answer, so it holds the button
+// down too — which is also what keeps `apply` from posting the placeholder's ""
+// as a key id. Note the ordering this relies on: each section wires the key
+// select's model-refill listener BEFORE building this button, so by the time
+// `sync` runs the model picker has already been emptied for the new connection.
 function slotButton(label, isDefault, sels, apply) {
   const btn = document.createElement("button");
   btn.className = "ghost";
   btn.textContent = label;
   const initial = sels.map((s) => s.value);
   const sync = () => {
-    btn.disabled = isDefault && !sels.some((s, i) => s.value !== initial[i]);
+    btn.disabled = sels.some(isUnset)
+      || (isDefault && !sels.some((s, i) => s.value !== initial[i]));
   };
   sels.forEach((s) => s.addEventListener("change", sync));
   sync();
   btn.onclick = busy(btn, "Saving…", apply);
   return btn;
 }
+
+// What a slot's pickers say before they have been answered. The key one echoes
+// the label above it — a keyless provider has connections, not keys — and both
+// read as instructions, so an untouched slot section can't be mistaken for a
+// configured one.
+const pickKey = (p) => `Select a ${p.ai.keyless ? "connection" : "key"}`;
+const PICK_MODEL = "Select a model";
 
 // Beside an enabled promote button: what you'd be replacing. providerName is
 // a slot's current holder (ctx.defaults.*) — resolved to its display label
@@ -519,19 +534,13 @@ function taggerSection(p, ctx, reload) {
 
   const keySel = document.createElement("select");
   keySel.style.cssText = "width:100%;";
-  for (const k of mine) {
-    const opt = document.createElement("option");
-    opt.value = String(k.id);
-    opt.textContent = k.name;
-    keySel.appendChild(opt);
-  }
-  if (envOption) {
-    const opt = document.createElement("option");
-    opt.value = "env";
-    opt.textContent = "ANTHROPIC_API_KEY env var";
-    keySel.appendChild(opt);
-  }
-  if (isDefault) keySel.value = ctx.slots.tagger.keyId ? String(ctx.slots.tagger.keyId) : "env";
+  const conns = mine.map((k) => ({ value: String(k.id), label: k.name }));
+  if (envOption) conns.push({ value: "env", label: "ANTHROPIC_API_KEY env var" });
+  // Only the slot's own holder gets a selection to show. While the slot is
+  // someone else's, this section is a proposal, and a proposal that arrives
+  // pre-filled reads as a decision — so it starts empty.
+  const slotConn = ctx.slots.tagger.keyId ? String(ctx.slots.tagger.keyId) : "env";
+  fillSelect(keySel, conns, { value: isDefault ? slotConn : null, placeholder: pickKey(p) });
   sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
 
   const modelSel = document.createElement("select");
@@ -539,10 +548,11 @@ function taggerSection(p, ctx, reload) {
   // Options follow the selected connection ("env" has no ai_keys row, but
   // the server holds that key — the route's env branch lists with it). The
   // slot's persisted model rides as `saved` only when the selected
-  // connection IS the slot's.
-  const slotConn = ctx.slots.tagger.keyId ? String(ctx.slots.tagger.keyId) : "env";
+  // connection IS the slot's; anywhere else the picker is empty, including
+  // after you repoint an already-default slot at a different connection.
   const syncLive = () => syncModelPicker(modelSel, p.ai, keySel.value === "env" ? "env" : Number(keySel.value) || null, {
     saved: isDefault && keySel.value === slotConn ? ctx.slots.tagger.model : null,
+    placeholder: PICK_MODEL,
   });
   keySel.addEventListener("change", syncLive);
   syncLive();
@@ -600,14 +610,15 @@ function embedSection(p, ctx, reload) {
   if (!p.ai.onDevice) {
     keySel = document.createElement("select");
     keySel.style.cssText = "width:100%;";
-    for (const k of mine) {
-      const opt = document.createElement("option");
-      opt.value = String(k.id);
-      opt.textContent = k.name;
-      keySel.appendChild(opt);
-    }
-    if (active && em.keyId) keySel.value = String(em.keyId);
-    if (mine.length > 1 || !active) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
+    // One key and already the slot's holder means there is no question to ask,
+    // and the row stays hidden — so it gets no empty state either. An unanswered
+    // picker nobody can see is just a button that never enables.
+    const ask = mine.length > 1 || !active;
+    fillSelect(keySel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
+      value: active && em.keyId ? String(em.keyId) : null,
+      placeholder: ask ? pickKey(p) : null,
+    });
+    if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
   }
 
   let modelSel = null;
@@ -622,6 +633,7 @@ function embedSection(p, ctx, reload) {
     const syncLive = () => syncModelPicker(modelSel, entry, keySel ? Number(keySel.value) || null : null, {
       kind: "embed",
       saved: active && (keySel ? Number(keySel.value) === em.keyId : true) ? em.model : null,
+      placeholder: PICK_MODEL,
     });
     if (keySel) keySel.addEventListener("change", syncLive);
     syncLive();
@@ -723,14 +735,12 @@ function transcribeSection(p, ctx, reload) {
   if (!p.ai.onDevice) {
     keySel = document.createElement("select");
     keySel.style.cssText = "width:100%;";
-    for (const k of mine) {
-      const opt = document.createElement("option");
-      opt.value = String(k.id);
-      opt.textContent = k.name;
-      keySel.appendChild(opt);
-    }
-    if (active && tr.keyId) keySel.value = String(tr.keyId);
-    if (mine.length > 1 || !active) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
+    const ask = mine.length > 1 || !active; // see embedSection: a hidden row asks nothing
+    fillSelect(keySel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
+      value: active && tr.keyId ? String(tr.keyId) : null,
+      placeholder: ask ? pickKey(p) : null,
+    });
+    if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
   }
 
   // Model picker — a provider gets a dropdown of its transcribes.models; the
@@ -746,6 +756,7 @@ function transcribeSection(p, ctx, reload) {
     const syncLive = () => syncModelPicker(modelSel, entry, Number(keySel.value) || null, {
       kind: "transcribe",
       saved: active && Number(keySel.value) === tr.keyId ? tr.model : null,
+      placeholder: PICK_MODEL,
     });
     keySel.addEventListener("change", syncLive);
     syncLive();
@@ -846,14 +857,12 @@ function detectSection(p, ctx, reload) {
   if (!p.ai.onDevice) {
     keySel = document.createElement("select");
     keySel.style.cssText = "width:100%;";
-    for (const k of mine) {
-      const opt = document.createElement("option");
-      opt.value = String(k.id);
-      opt.textContent = k.name;
-      keySel.appendChild(opt);
-    }
-    if (active && dt.keyId) keySel.value = String(dt.keyId);
-    if (mine.length > 1 || !active) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
+    const ask = mine.length > 1 || !active; // see embedSection: a hidden row asks nothing
+    fillSelect(keySel, mine.map((k) => ({ value: String(k.id), label: k.name })), {
+      value: active && dt.keyId ? String(dt.keyId) : null,
+      placeholder: ask ? pickKey(p) : null,
+    });
+    if (ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
   }
 
   // Model picker — a provider gets a dropdown of its detects.models; the
@@ -866,6 +875,7 @@ function detectSection(p, ctx, reload) {
     const syncLive = () => syncModelPicker(modelSel, entry, Number(keySel.value) || null, {
       kind: "detect",
       saved: active && Number(keySel.value) === dt.keyId ? dt.model : null,
+      placeholder: PICK_MODEL,
     });
     keySel.addEventListener("change", syncLive);
     syncLive();

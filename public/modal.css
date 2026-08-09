@@ -108,6 +108,17 @@
   cursor: pointer;
   background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b6b72' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 11px center;
 }
+/* A select still on select.js's placeholder is showing a prompt, not an answer,
+   and should read like the input placeholders next to it. Keyed on the marker
+   rather than on an empty value: "" is a real choice on the pickers that offer
+   an App/Board default. */
+.modal-dialog select:has(option[data-placeholder]:checked) { color: #9a9aa6; }
+/* The open list is painted from the select's own color, so dimming the closed
+   control greys every row in the popup with it — an unanswered picker looked
+   like a picker with nothing left to pick. The rows carry their color
+   themselves; only the prompt is dim. */
+.modal-dialog select option { color: #111; }
+.modal-dialog select option[data-placeholder] { color: #9a9aa6; }
 .modal-dialog textarea {
   width: 100%;
   font: 12px/1.5 "SF Mono", Consolas, monospace;
