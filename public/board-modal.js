@@ -21,6 +21,7 @@ import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
 import { fillSelect, isUnset } from "./select.js";
+import { planBoardPicker } from "./capability-present.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
@@ -467,10 +468,9 @@ export async function openBoardModal(boardId, opts = {}) {
     title: isNew ? "New board" : board.name,
   });
 
-  const aiKeyBlock = canEditAI
-    ? `<label>AI tagger <span style="font-weight:400;color:#9aa0aa">(which API key and model tag this board)</span></label>
-       <div id="board-modal-ai" style="display:flex;gap:8px;margin-bottom:14px;"></div>`
-    : "";
+  // The per-board pin pickers' mount point — one labeled row per capability
+  // the capabilities feed says boards may pin, built in the loop below.
+  const aiKeyBlock = canEditAI ? `<div id="board-modal-caps"></div>` : "";
   // Mapping|Tagging pane toggle. Tagging is the default — it's the
   // more-touched half — so it's the active (right) segment on open.
   const paneToggle = `
@@ -670,73 +670,67 @@ export async function openBoardModal(boardId, opts = {}) {
   );
   syncAt();
 
-  // Per-board tagger override (admin only) — key registry is fetched async; the
-  // selects stay disabled until it arrives.
-  let aiKeySel, aiModelSel, aiLoaded = false;
-  // Defined below only where there's a tagger picker to read it off; a
-  // board-admin has none, so their Mapping pane just says "Board default".
+  // Per-board capability pins (admin only) — one picker per capability the
+  // capabilities feed says boards may pin, each planned by planBoardPicker
+  // (capability-present.js, pure and node-tested: rows, preselect, model axis,
+  // and the exact column-named save body) and mounted here. Nothing in this
+  // loop names a capability — a new board-scoped capability gets its picker
+  // with no edit here. The hand-written tagger picker this replaces also
+  // offered keys whose provider can't serve; the plan filters those, because
+  // the write path now refuses them.
+  let capPickers = []; // { cap, plan, keySel, modelSel }
+  let aiLoaded = false;
+  // Defined below only where there are pickers to read it off; a board-admin
+  // has none, so their Mapping pane just says "Board default".
   let boardTaggerLabel = () => null;
   if (canEditAI) {
-    const aiWrap = document.getElementById("board-modal-ai");
-    aiKeySel = document.createElement("select");
-    aiKeySel.style.cssText = "flex:1;min-width:0;";
-    aiKeySel.disabled = true;
-    aiModelSel = document.createElement("select");
-    aiModelSel.style.cssText = "flex:1;min-width:0;";
-    aiModelSel.hidden = true;
-    aiWrap.append(aiKeySel, aiModelSel);
-    let aiKeys = [];
-    let aiCatalog = {}; // provider name -> catalog entry
-    let appDefault; // the /api/admin/ai-default payload; undefined until (and unless) it lands
-    // What App default inherits. undefined = the probe failed, so say nothing
-    // rather than claim an app with no tagger at all.
-    const appDefaultNote = () =>
-      appDefault === undefined ? null : appDefault ? keyLabel(appDefault) : "none configured";
-    // What the Mapping pane's "Board default" row inherits: the tagger THIS
-    // modal currently shows — unsaved edits included, so the two panes can't
-    // disagree — or, with nothing pinned, whatever App default resolves to.
-    boardTaggerLabel = () => {
-      const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
-      return key ? keyLabel(key, aiModelSel.value || aiCatalog[key.provider]?.defaultModel) : appDefaultNote();
-    };
-    const syncAiModelSel = () => {
-      const key = aiKeys.find((k) => String(k.id) === aiKeySel.value);
-      aiModelSel.hidden = !key;
-      // Called with null entry/keyId on the App-default row so a slow
-      // response for a previously-selected connection can't refill the
-      // now-hidden select. `saved` = the board's persisted model.
-      syncModelPicker(aiModelSel, key ? aiCatalog[key.provider] : null, key ? key.id : null, {
-        saved: key && board && board.ai_key_id === key.id ? board.ai_model : null,
-      });
-    };
+    const wrap = document.getElementById("board-modal-caps");
     Promise.all([
       api("GET", "/api/admin/ai-keys"),
       loadProviders(),
-      // Not fatal: a failed probe costs the parenthetical, not the picker.
-      api("GET", "/api/admin/ai-default").catch(() => undefined),
-    ]).then(([keys, catalog, def]) => {
-      aiKeys = keys;
-      aiCatalog = byName(catalog);
-      appDefault = def;
-      const defOpt = document.createElement("option");
-      defOpt.value = "";
-      defOpt.textContent = withDefaultNote("App default", appDefaultNote());
-      aiKeySel.appendChild(defOpt);
-      for (const k of keys) {
-        const opt = document.createElement("option");
-        opt.value = String(k.id);
-        // A not-installed provider's keys stay pickable (defaults not laws) but
-        // say so — the worker falls back to the app default while it's not added.
-        const off = aiCatalog[k.provider]?.installed === false;
-        opt.textContent = keyLabel(k) + (off ? " · not installed" : "");
-        aiKeySel.appendChild(opt);
+      api("GET", "/api/admin/capabilities"),
+    ]).then(([keys, catalog, feed]) => {
+      const catByName = byName(catalog);
+      const pinnable = (feed.capabilities || []).filter((c) => c.boardBinding && c.boardPickerHome !== "mapping");
+      for (const cap of pinnable) {
+        const plan = planBoardPicker(cap, keys, board, catByName);
+        const label = document.createElement("label");
+        const hint = document.createElement("span");
+        hint.style.cssText = "font-weight:400;color:#9aa0aa;";
+        hint.textContent = " " + plan.hint;
+        label.append(plan.title, hint);
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;gap:8px;margin-bottom:14px;";
+        const keySel = document.createElement("select");
+        keySel.style.cssText = "flex:1;min-width:0;";
+        const modelSel = document.createElement("select");
+        modelSel.style.cssText = "flex:1;min-width:0;";
+        modelSel.hidden = true;
+        fillSelect(keySel, plan.rows, { value: plan.preselect });
+        const syncModel = () => {
+          const axis = plan.modelAxis(keySel.value);
+          modelSel.hidden = !axis;
+          // Null entry/keyId on the default and built-in rows, so a slow model
+          // response for a previously-selected connection can't refill the
+          // now-hidden select.
+          syncModelPicker(modelSel, axis?.entry ?? null, axis?.keyId ?? null, { kind: axis?.kind ?? null, saved: axis?.saved ?? null });
+        };
+        keySel.onchange = syncModel;
+        syncModel();
+        row.append(keySel, modelSel);
+        wrap.append(label, row);
+        capPickers.push({ cap, plan, keySel, modelSel });
       }
-      if (board && board.ai_key_id && keys.find((k) => k.id === board.ai_key_id)) {
-        aiKeySel.value = String(board.ai_key_id);
+      // What the Mapping pane's "Board default" row inherits: the tagger THIS
+      // modal currently shows — unsaved edits included, so the two panes can't
+      // disagree. WHICH picker is the tagger's comes from data: the pane-owned
+      // capability's delegatesTo.
+      const bridgeId = (feed.capabilities || []).find((c) => c.boardPickerHome === "mapping")?.delegatesTo;
+      const bridge = capPickers.find((p) => p.cap.id === bridgeId);
+      if (bridge) {
+        boardTaggerLabel = () =>
+          bridge.plan.chosenLabel(bridge.keySel.value, bridge.modelSel.hidden ? null : bridge.modelSel.value || null);
       }
-      aiKeySel.disabled = false;
-      aiKeySel.onchange = syncAiModelSel;
-      syncAiModelSel();
       aiLoaded = true;
     }).catch(() => {});
   }
@@ -752,12 +746,15 @@ export async function openBoardModal(boardId, opts = {}) {
     try { facets = JSON.parse(facetsTextarea.value); }
     catch { return toast.warn("Facets JSON is invalid"); }
     if (!Array.isArray(facets)) return toast.warn("Facets must be a JSON array");
-    const aiOverride = canEditAI && aiLoaded
-      ? {
-          ai_key_id: aiKeySel.value ? Number(aiKeySel.value) : null,
-          ai_model: aiKeySel.value && !aiModelSel.hidden ? aiModelSel.value : null,
-        }
-      : {};
+    // Full-state per capability: every pin column rides every save (nulls
+    // clear), in the column names the feed shipped. Gated on aiLoaded so a
+    // quick Save before the registry lands can't wipe stored pins.
+    const aiOverride = {};
+    if (canEditAI && aiLoaded) {
+      for (const p of capPickers) {
+        Object.assign(aiOverride, p.plan.payload(p.keySel.value, p.modelSel.hidden ? null : p.modelSel.value || null));
+      }
+    }
     const payload = {
       name, context, facets,
       ai_reasoning: aiReasoning,

@@ -161,10 +161,12 @@ export function openPluginModal(p, ctx) {
       // One generic section per capability this provider advertises, planned
       // from the capabilities payload (capability-present.js) — a capability
       // added to the server's registry gets its section with no edit here.
-      // Modifiers never appear in the payload's rows and delegates have no
-      // slot of their own to hold, so both fall out naturally.
+      // `binding.global` gates: a capability with an app-wide default gets a
+      // section (extract's arrived in slice 5), a modifier (research) has none.
+      // `declaredBy`, not `id`: extract rides tagging's advertisement, so the
+      // provider flag to check is the declarer's.
       for (const cap of ctx.capabilities || []) {
-        if (cap.kind === "ai" && !cap.delegatesTo && p.capabilities[cap.id]) built.push(capabilitySection(cap, p, ctx, reload));
+        if (cap.kind === "ai" && cap.binding.global && p.capabilities[cap.declaredBy]) built.push(capabilitySection(cap, p, ctx, reload));
       }
       if (p.configSchema.length) built.push(pacingSection(p)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {

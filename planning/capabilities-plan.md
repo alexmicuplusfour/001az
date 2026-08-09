@@ -12,7 +12,17 @@ them; `server.js` is 240 lines lighter. SLICE 3 SHIPPED 2026-08-10:
 computation (+`viaFloor`), reasons via `storedBindingMiss`, `supportedBy` off
 one `pluginCatalog` call, demand where it is indexed-cheap, domains generated
 from `listConnectors()`, and the secrets-scan test. Suite green at 941, repeated
-runs, still zero edits to existing test files. Slices 4–6 remain plan-only. The
+runs, still zero edits to existing test files. SLICE 4 SHIPPED 2026-08-10
+(commit fa023ce): the Capabilities admin tab (4a) + the plugin modal's four
+hand-written capability sections collapsed onto the pure `planSection` planner
+(4b) — both surfaces render `capability-present.js` off the one feed; modal
+1169→835 lines; suite 953. SLICE 5 SHIPPED locally 2026-08-10 (uncommitted,
+5a+5b): the board rung in the one resolver (board pin → global → env → floor,
+delegate forwards the board), six board columns via migration 0033, the two
+route blocks collapsed into `boardBindingPatch` (stricter: advertisement
+checked at write), extract's global default, and the board modal's pickers
+generated from the feed via `planBoardPicker`. Suite 971, twice, §5.10 has the
+findings. Slice 6 remains plan-only. The
 proposal: make CAPABILITY a
 first-class registry (`server/capabilities.js`, one `CAPABILITY_DEFS` entry per
 capability) exactly the way `KIND_DEFS` made plugin kinds first-class, then
@@ -1350,9 +1360,422 @@ capability-status/capabilities.js +~30, tests +~120.
   name-pick, confirm-on-model-change gated by `rebindWarning`.
 
 ### Slice 5 — `binding.scope` honoured
-Per-board transcribe/detect (the two dead `board` params), and `extract` gains
-the global default it never had. Board modal renders a picker for every
-capability whose scope allows one, including future ones.
+
+Per-board transcribe/detect (the two dead `board` params go live), and
+`extract` gains the global default it never had. The board modal's pickers
+become registry-driven, so a future board-scoped capability gets a picker with
+zero client edits.
+
+**What this buys, concretely:** a board of podcast episodes uses a paid
+transcriber while every other board keeps the free Whisper sidecar — or the
+reverse: the app default is a paid engine and one junk board is pinned back to
+the built-in (cost control, the case that forces the design below). Same for
+detection. And an admin can set one app-wide extraction model instead of
+configuring it board by board.
+
+#### 5.1 Where things stand (the evidence)
+
+| capability | today | after |
+|---|---|---|
+| tag | board (`boards.ai_key_id/ai_model` → `resolveBoardAi`) + global | unchanged behaviour; the hand-written board walk collapses onto the generic rung |
+| extract | board only (`boards.extract_key_id/extract_model`), delegate chain board-extract → board-tag → global-tag | + a global rung between board-extract and the tag delegation |
+| transcribe | global only; `resolveTranscriber(db, board = null)` — param dead, call site doesn't even pass it ([worker.js:2454](../server/worker.js#L2454)) | board → global → floor |
+| detect | global only; `resolveDetector(db, board)` — call site ALREADY passes `board` ([worker.js:2074](../server/worker.js#L2074)), resolver ignores it | board → global → floor |
+| embed | global | **stays global, deliberately** (§5.8) |
+
+The dead plumbing is real: detect's call site has been handing the resolver a
+board for months. Slice 5 is mostly "make the parameter mean something".
+
+#### 5.2 Storage — migration 0033 + two registry edits
+
+Six new `boards` columns, mirroring the global namespace shapes:
+
+```sql
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS transcribe_provider TEXT;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS transcribe_key_id BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS transcribe_model TEXT;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS detect_provider TEXT;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS detect_key_id BIGINT REFERENCES ai_keys(id) ON DELETE SET NULL;
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS detect_model TEXT;
+```
+
+`ON DELETE SET NULL` is the same free referential cleanup `ai_key_id` gets;
+`deleteAiKey`'s board loop already NULLs the pinned model generically.
+
+Registry ([capabilities.js](../server/capabilities.js)):
+
+```js
+// transcribe + detect gain a provider column — the FIRST boardKeys with one:
+boardKeys: { provider: "transcribe_provider", keyId: "transcribe_key_id", model: "transcribe_model" }
+// extract gains the global namespace (settings, same names as its board columns):
+binding: { keys: { provider: null, keyId: "extract_key_id", model: "extract_model", enabled: null },
+           boardKeys: { keyId: "extract_key_id", model: "extract_model" } }
+```
+
+Why a **provider column**: a board pin of the built-in ("this board uses
+Whisper") names an engine that has no key row — a keyId can't express it, and
+sentinels are what this whole arc removed. Tag/extract don't get one (no
+on-device tagger exists), same reason the global tag namespace has none.
+
+**Provider XOR keyId** is the write invariant: `provider` is set only for an
+on-device pick (keyId forced NULL), `keyId` only for a keyed pick (provider
+NULL — the row implies it). This is also what keeps cleanup coherent: deleting
+a key FK-NULLs `*_key_id` and the loop clears `*_model`; a provider pin has no
+key to lose.
+
+`extract`'s global settings reuse the strings `extract_key_id`/`extract_model`
+— same names, two stores (settings KV vs boards columns). Precedent already
+exists in the other direction: transcribe's settings key `transcribe_key_id`
+now coexists with the board column of the same name. `bindingSettings(extract)`
+returning them means `deleteAiKey`'s whole-namespace clear and
+`cleanupPluginConfig` reach the new global binding with **zero edits** — that's
+the registry doing its job.
+
+#### 5.3 Resolution — one board rung in the one resolver
+
+`resolveCapability(db, capId, { ignoreEnabled, board })` — `board` is a board
+ROW (or a column-shaped fragment). The ladder becomes:
+
+```
+1. enabled gate (global — no per-board enable exists)
+2. boardBinding(db, cap, board)     NEW — skipped when !cap.binding.boardKeys || !board
+3. storedBinding(db, cap)           global, unchanged
+4. envBinding                       unchanged
+5. floorBinding                     delegate now FORWARDS board: resolveCapability(db, floor.to, { board })
+```
+
+`boardBinding` walks exactly like `storedBinding`, judged by the same
+`disqualified()` — the rule §2 already stated: *board scope changes where the
+choice is stored, never what makes a provider usable*. Three cases:
+
+- **provider named = the capability's builtin floor provider** → return the
+  floor binding directly, `viaFloor: true`. This is the deliberate-built-in
+  pin. `viaFloor` is what `resolveTranscriber`/`resolveDetector` key the
+  engine SHAPE on (`viaFloor → sidecar adapter`), so a board pinned to Whisper
+  gets the sidecar engine without any name check — and the status page never
+  sees board resolutions, so the flag's active·built-in chip semantics are
+  untouched (globally, storing the floor's name already falls through as
+  viaFloor:true today; the board pin now reads identically).
+- **provider named, anything else** → `disqualified()` judges it (an installed
+  on-device engine with its own wire binds normally; a keyed provider named
+  without a row misses on the row check, same as global).
+- **keyId** → row must exist, row's provider judged, model =
+  `board[bk.model] || declaredCatalog default`. Note the model deliberately
+  does NOT inherit the global pinned model — `resolveBoardAi` never did
+  (a global "claude-x" pin on a board's OpenAI key would be nonsense), and
+  slice 5 preserves that.
+
+**A board-rung miss falls to the GLOBAL rung, loudly** (one console.log, the
+generic form of `resolveBoardAi`'s) — never straight to the floor. That is
+`resolveBoardAi`'s exact contract, now for every scoped capability: a board
+pinned to a deleted key behaves like an unpinned board, and the item still
+gets served.
+
+`extract`'s chain after the change, all from one call —
+`resolveCapability(db, "extract", { board })`:
+
+```
+board extract pin → global extract default (NEW) → delegate→tag: board tagger → global tagger → env → null (blocked)
+```
+
+…which is character-for-character the current worker chain
+([worker.js:1999](../server/worker.js#L1999)) plus the new global rung in the
+one position that respects both intents: an explicit global extraction default
+outranks tag delegation (the admin set it FOR extraction), but a board's own
+extract pin still outranks everything.
+
+Collapses that fall out:
+- `resolveBoardAi` body → `resolveCapability(db, "tag", { board: { ai_key_id: e.aiKeyId, ai_model: e.aiModel } })`.
+  The adapter stays (its three callers pass cache-snapshot fragments, not
+  rows); the hand-written walk goes.
+- worker's extract block (4 lines of chain) → one call.
+- `resolveTranscriber`/`resolveDetector` forward `board` into the resolver;
+  their engine-shape logic is untouched.
+
+Call-site changes:
+- **detect**: none beyond the forward — `extractOne` already passes `board`.
+- **transcribe**: the loop has `row.board_id` but no row; fetch it —
+  `const board = row.board_id ? await getBoard(db, row.board_id) : null` —
+  one PK SELECT ahead of a multi-second sidecar/API call, per clip. The
+  job-log stamp already records `engine:model` per item, so per-board engines
+  are visible in job history for free.
+- The transcribe lane's backoff stays **lane-wide** even though the lane can
+  now run several engines: a 60s sleep because one board's paid engine 429'd
+  also pauses Whisper boards. Documented, deliberate — per-engine backoff is a
+  scheduler, and a 60s hiccup isn't worth one.
+
+#### 5.4 The write path — two hand blocks become one loop
+
+The board routes carry capability fields under their COLUMN names
+(`ai_key_id`, `extract_key_id`, … precedent) — so `transcribe_provider`,
+`transcribe_key_id`, `transcribe_model`, `detect_*` join the body contract.
+The two near-identical validation blocks in the admin PATCH
+([server.js:1533](../server/server.js#L1533)) and their create-route twins
+collapse into one registry loop shared by both routes:
+
+For each `cap` with `binding.boardKeys`, reading `body[column]`:
+- `keyId: null` → clear the whole pin (provider, keyId, model).
+- `keyId: n` → row must exist **and its provider must advertise the
+  capability** (`declaredCatalog`, the same judge as `chooseBinding`) — a 400
+  with the noun message, not a silent runtime fall-through. This is stricter
+  than today's existence-only check on `ai_key_id`, deliberately: §2.12's "the
+  board-scoped tagger stayed loose while the global one got strict" closes
+  here. Installed-ness is deliberately NOT checked (defaults not laws — a
+  removed built-in's pin resumes when it returns; external uninstalls already
+  cascade-delete their keys).
+- `provider: name` → must exist, advertise, and be on-device (the floor's own
+  engine included); keyId forced NULL. Provider AND keyId together → 400.
+- `model` → only meaningful beside a keyId; `pinnedModelMustBeAdvertised`
+  capabilities validate it against the declared catalog (the same
+  requeue-forever protection the global bind has), tag/extract stay unchecked
+  (live lists).
+
+Storage plumbing:
+- `updateBoard` gains one generic `boardBindings: { column: value }` map
+  (columns come from the registry via the route — code, not input). No new
+  named params, no future edits.
+- `createBoard` is untouched — its positional signature is pinned by ~40
+  existing test call sites. The create route runs the same loop, passes
+  tag/extract through the existing args, and lands any transcribe/detect pins
+  with one post-INSERT `updateBoard`. (New boards with pins are rare; one
+  extra UPDATE beats a signature migration across the test suite.)
+- `invalidateBoardCache` already fires on the PATCH; the prompt cache only
+  carries tag bindings and transcribe/detect resolve fresh per item, so no new
+  invalidation surface.
+- The board-manager PATCH (`/api/boards/:id`) continues to not accept any of
+  these fields — bindings are admin-only, matching the modal's `canEditAI`
+  gate.
+
+Registry-driven reads that must stop being hand-lists (both fixable by
+iterating `CAPABILITY_DEFS` — db.js already imports it):
+- `BOARD_COLS` + the board JSON's admin block
+  ([server.js:977](../server/server.js#L977)) gain the six columns — the
+  admin block becomes a loop over `boardKeys` columns.
+- `boards_using` ([db.js:1121](../server/db.js#L1121)):
+  `b.ai_key_id = k.id OR b.extract_key_id = k.id` is a hand-list that would
+  miss the new pins — build the OR-chain from `boardKeys.keyId` columns.
+- `countBoardOverrides(db, column)` → takes the `boardKeys` object and counts
+  rows where ANY declared column is non-null — a provider-only Whisper pin is
+  an override too, and today's keyId-only count would say 0.
+
+#### 5.5 The feed and the payload (what the clients learn)
+
+- `scope` is already derived (`boardKeys ? (keys ? "board-or-global" : "board") : "global"`)
+  — transcribe/detect flip to `board-or-global`, extract flips from `board`,
+  zero code.
+- `boardOverrides` already rides on `boardKeys` presence — lights up for
+  transcribe/detect automatically (with the count fix above).
+- NEW `binding.global: !!keys` — "this capability has an app-wide default to
+  bind". The modal's dispatch swaps its `!cap.delegatesTo` skip for this flag,
+  which is what lets extract grow a section (below) and keeps research
+  sectionless, from data.
+- NEW `boardBinding: { provider?, keyId, model }` (column names, on entries
+  with `boardKeys`) — the client's write vocabulary, shipped rather than
+  guessed, so the generic board picker posts the right body fields without
+  ever naming a capability. Admin-only feed already.
+- The modal dispatch also corrects `p.capabilities[cap.id]` →
+  `p.capabilities[cap.declaredBy]` — identical for every current section, and
+  the form extract actually needs.
+
+#### 5.6 UI — the pickers become planned data
+
+**Board modal** (5b): the ~70-line hand-built tagger picker becomes the mount
+of a new pure planner in `capability-present.js`:
+
+```
+planBoardPicker(cap, keys, board) → {
+  label,                       // cap.label
+  rows: [ { value:"", label:"App default — <running provider · model>" },   // inheritance, from cap.running/floor
+          cap.floor.kind==="builtin" ? { value:"builtin", label:"Built-in (<floor.label>)" } : null,
+          ...keys filtered to providers in cap.supportedBy ],               // the picker finally stops offering un-serving keys
+  preselect,                   // from board[cap.boardBinding.*]
+  modelAxis,                   // keyed row selected → provider catalog picker; builtin → none
+  payload(sel)                 // → { [boardBinding.provider]: …, [boardBinding.keyId]: …, [boardBinding.model]: … }
+}
+```
+
+One DOM shell renders every capability in the feed with `boardBinding` —
+except those another surface owns (extract, next paragraph). Node tests pin
+the payload closures the way `planSection`'s are pinned — a wrong body writes
+a wrong pin. The `/api/admin/ai-default` fetch dies (the feed's tag entry IS
+that answer); note the route as a cleanup-slice candidate once nothing else
+calls it. Filtering the key list by `supportedBy` is a deliberate behaviour
+improvement: today's picker offers ANY key (an embed-only Voyage key included)
+and lets resolution fall through at runtime; the new strict write path (§5.4)
+would 400 those, so the picker must stop offering them — advertisement is
+static truth, unlike installed-ness, which keeps its "· not installed" suffix
+and stays pickable.
+
+**Extract's board picker stays in the mapping pane** — it sits beside the AI
+fields it powers, with the board-tagger inheritance note, and moving it buys
+nothing. The board modal's generic loop must therefore skip it: one
+presentation field on the descriptor, `boardPickerHome: "mapping"`, read as
+"another surface owns this picker" (data, not a name check in the client).
+Adopting `planBoardPicker` inside the mapping pane is a candidate later, not
+part of 5.
+
+**Extract's NEW global default** gets its UI for free: `binding.global` makes
+the plugin modal render a `planSection` for extract on every tag-advertising
+provider's card ("Make default extractor" — `agent: "extractor"` already
+exists), and the capabilities page card gains Configure/state like any bound
+capability. `bindCapability("extract", …)` works the moment `binding.keys` is
+non-null (the keyId-only path is tagging's, model deliberately unchecked);
+`POST /api/admin/capabilities/extract/bind` follows without a route edit.
+
+**Presenter honesty fix that falls out**: the extract card's
+"Uses: each board's tagger" line must stop rendering when a global extract
+default is actually bound — gate it on `!c.bound?.keyId` in `presentLines`.
+Presenter-only; the resolver's delegate behaviour is untouched.
+
+#### 5.7 Tests (new file, one shared server, house rules)
+
+`test/board-capabilities.test.js` + presenter cases in
+`capability-present.test.js`:
+
+1. **The core case**: global transcribe = paid provider; board A pins
+   `transcribe_provider: "whisper"` → A resolves the sidecar engine
+   (viaFloor), board B (unpinned) resolves the paid engine. And the mirror
+   (global floor, board pins a key).
+2. Board detect pin resolves through `extractOne`'s existing `board` pass.
+3. Judged-same-rule: a board transcribe pin on an embed-only provider's key —
+   write path 400s it; a stale stored one (seeded directly) resolves to the
+   global rung with the loud log, item still served.
+4. Extract ladder: global extract default beats tag delegation; board extract
+   pin beats the global default; neither → the existing tagger chain,
+   byte-identical behaviour.
+5. Write validation: provider+keyId → 400; non-advertised model on
+   transcribe/detect → 400 (`pinnedModelMustBeAdvertised`); `keyId: null`
+   clears all three columns.
+6. `deleteAiKey` clears `transcribe_model` where the FK pin matched
+   (extends the whole-namespace test's pattern to a new column).
+7. `boards_using` counts a board held only by a `detect_key_id` pin.
+8. `countBoardOverrides` counts a provider-only pin.
+9. Feed: transcribe scope `board-or-global`, `boardBinding` column names
+   shipped, `binding.global` true for the four bindables and false for
+   research; extract entry degraded when its global key row dies.
+10. Board JSON: admin sees the six columns; a non-admin response carries none.
+11. `resolveCapability(db, "embed", { board })` ignores the board (no
+    boardKeys — scope is data, not code).
+12. Presenter: `planBoardPicker` rows/preselect/payload bodies (the App
+    default inheritance label, the builtin row's presence exactly when the
+    floor is builtin, supportedBy filtering); the Uses-line gate.
+13. The modal's extract section: `planSection` output on a tag provider
+    (apply body `{ keyId, model }`, no enable, no probe).
+
+**Expected existing-test edits — enumerated up front** (the first slice where
+behaviour changes make some legitimate; anything beyond this list is a
+regression):
+- `capabilities.test.js` fresh-instance payload: extract's `scope`
+  `"board" → "board-or-global"`; entries gain `binding.global` /
+  `boardBinding` fields if the assert pins exact shapes.
+- `capability-present.test.js` delegation-line case: gains the
+  unbound condition (the line still renders there — the assert's spirit is
+  unchanged).
+- Any test PATCHing a board with a bogus `ai_key_id` provider expecting
+  success now meets the strict validator (audit says none exist — the routes
+  only checked existence, and tests pin real keys — but the sweep must
+  confirm).
+
+#### 5.8 Deliberately not in slice 5
+
+- **Embed stays global.** One search index, one vector space — per-board
+  embedders would mean per-board corpora and cross-board search dying
+  quietly. The registry says so (`boardKeys: null`), and the test above pins
+  that the resolver ignores a board for it.
+- **`detect_threshold` stays capability-level.** It belongs to detection, not
+  to a board; a per-board knob is scope creep with no consumer asking.
+- **No per-board status/probing surface.** The global card gains nothing new;
+  the Overrides line + the board modal's own pickers are the visibility. A
+  per-board "what would serve here" panel is a fine future, not this slice.
+- **Lane-wide transcribe backoff** (§5.3) — documented, kept.
+- **The mapping pane's extract picker keeps its hand-built form** — planner
+  adoption is a refactor candidate once `planBoardPicker` exists.
+- `/api/admin/ai-default` becomes client-dead — deleted in the cleanup slice
+  with the other adapters, not here.
+
+#### 5.9 Split
+
+- **5a — server**: migration 0033, the two registry edits, `boardBinding`
+  rung + delegate forwarding, the route loop + `updateBoard.boardBindings`,
+  worker call sites (transcribe board fetch, extract/tag collapse), the three
+  hand-list fixes (`BOARD_COLS`/admin block, `boards_using`,
+  `countBoardOverrides`), feed additions. Tests 1–11. **SHIPPED** (964/964 ×2).
+- **5b — client**: `planBoardPicker` + board-modal shell swap, modal dispatch
+  on `binding.global`/`declaredBy`, extract's modal section riding
+  `planSection`, the Uses-line gate, `ai-default` fetch removal. Tests 12–13.
+  **SHIPPED** (971/971 ×2).
+
+#### 5.10 Implementation notes — what building it changed
+
+1. **A cleanup gap the tests exposed, closed**: `cleanupPluginConfig` cleared
+   GLOBAL name-pointers on uninstall but would have left BOARD provider pins
+   behind — the board-level twin of the silent-reactivation bug the loop
+   exists for. It now iterates `boardKeys` provider columns too (reversible
+   removal still leaves pins alone, deliberately). Pinned by the uninstall
+   test in board-capabilities.test.js.
+2. **`usableProvider` deleted**: its only consumer was `resolveBoardAi`'s
+   hand-written walk — the export's stated reason to exist WAS the board path,
+   which is now the generic rung. `resolveBoardAi` survives as a two-line
+   adapter (its callers hold `{aiKeyId, aiModel}` cache fragments, not rows).
+3. **One deliberate behaviour change beyond the spec**: a board with a BROKEN
+   extract pin used to fall to the GLOBAL tagger (an artifact of reusing
+   `resolveBoardAi`, which skipped the board tagger); it now falls through the
+   delegate chain to the BOARD's tagger. Only reachable with a broken extract
+   pin AND an own-tagger pin on the same board; the new order is what
+   delegation means.
+4. **Existing-test edits, final tally: two spots**, both in
+   capabilities.test.js (extract's `scope` string; the three `binding`
+   deepEquals gaining `global: true`). The presenter's delegation-line test
+   needed nothing — its fixture carries no `bound`, so the new gate leaves it
+   true as-written.
+5. **Tightened, no client affected**: a PATCH carrying a model with no key in
+   the same body is now ignored (the old route wrote it; both modals always
+   send the pair). Create parity is exact, including the "unknown ai_key_id"
+   error strings.
+6. `createBoard`'s signature is untouched (≈40 test call sites) — create-time
+   pins land as one post-INSERT `updateBoard`, and the route no longer threads
+   tag/extract values through positional args at all.
+7. The picker's built-in row fell out of a GENERAL rule — every installed
+   on-device advertiser in `supportedBy` gets a name row — so the floor is not
+   a special case, and an installed on-device plugin (acme-detect's shape)
+   is pinnable per board with zero extra code.
+8. The board pickers title themselves off `cap.agent` ("AI tagger" verbatim
+   for tag — the old label — "AI transcriber", "AI detector" for the new
+   rows), and filter their key lists by `supportedBy`: the old picker offered
+   ANY key and let resolution fall through silently; the new write path 400s
+   those, so the picker no longer offers them.
+9. `/api/admin/ai-default` is now client-dead (the board modal reads the
+   capabilities feed instead) — delete it in the cleanup slice alongside the
+   legacy ai-config adapter and probe aliases.
+
+#### 5.11 Review pass — what the first cut of slice 5 missed
+
+1. **The mapping pane's extract picker contradicted the strict write path**
+   (the real find): it offered EVERY key, but `boardBindingPatch` now 400s an
+   extract pin whose provider doesn't advertise tagging — a latent save
+   failure reachable via plugin providers. Filtered to `provides.tag`
+   advertisers, and the dead-pin fallback now checks the FILTERED list, so a
+   stored pin that fell out of the offer resets to Board default instead of
+   sending a dead id back on save.
+2. **`updateBoard` was still carrying four dead params** — `aiKeyId`/`aiModel`
+   /`extractKeyId`/`extractModel` had zero callers once the routes moved to
+   `boardBindings` (verified: every test caller uses other fields). Removed;
+   pins have exactly one write path now. `createBoard`'s positional args stay
+   (~40 test call sites, and the route passes nulls).
+3. **The board-settings admin block re-derived `BOARD_BINDING_COLS`** with its
+   own registry flatMap — it now imports the one derivation from db.js, and
+   server.js stopped importing `CAPABILITY_DEFS` entirely.
+4. Two route-level tests the first cut lacked: the pin LIFECYCLE (a keyId
+   clear leaves a name pin alone; the two pin kinds displace each other; the
+   picker's full-clear body empties all three columns) and CREATE rejection
+   (validation runs before the INSERT — a 400 leaves no board behind). Suite
+   973 ×2.
+5. Checked and deliberately left: the legacy slots/ai-config payloads name
+   their four capabilities explicitly, so extract's new global binding does
+   NOT leak into them (they die in the cleanup slice anyway); the lane-wide
+   transcribe backoff stands as specced; the README has no transcription or
+   detection feature bullets at all — a pre-existing docs gap, not this
+   slice's to close.
 
 ### Slice 6 — `kind: "capability"` in `KIND_DEFS`
 A plugin contributes a `CAPABILITY_DEFS` entry. **Gated on a consumer story**

@@ -77,9 +77,22 @@ export const CAPABILITY_DEFS = [
     // distinct capability sharing a wire — which is why `declaredBy` is a field
     // rather than just the id.
     declaredBy: "tag", verb: "tag", models: false,
-    // Board-scoped only: no global default exists today. The keys are declared
-    // so the cleanup loops reach them; resolution stays per-board (slice 5).
-    binding: { keys: null, boardKeys: { keyId: "extract_key_id", model: "extract_model" } },
+    // Both scopes (slice 5): a board's own pick wins, then the app-wide default,
+    // then the delegate floor (the tagger's chain). The global settings reuse
+    // the board columns' names — same strings, two stores, which is already the
+    // arrangement transcribe has in the other direction. No provider setting:
+    // like tagging, the connection row implies the provider, and the model is
+    // deliberately unvalidated (extraction rides the tagging wire and its live
+    // model lists).
+    binding: {
+      keys: { provider: null, keyId: "extract_key_id", model: "extract_model", enabled: null },
+      boardKeys: { keyId: "extract_key_id", model: "extract_model" },
+    },
+    // Presentation, not resolution: the mapping pane owns this capability's
+    // board picker (it sits beside the AI fields it powers), so the board
+    // modal's generic picker loop must skip it. Data, not a name check in the
+    // client.
+    boardPickerHome: "mapping",
     floor: { kind: "delegate", to: "tag" },
   },
   {
@@ -109,7 +122,16 @@ export const CAPABILITY_DEFS = [
     // tagging and embeddings accept any id, because live model lists mean the
     // curated catalog is a recommendation, not the set that exists.
     pinnedModelMustBeAdvertised: true,
-    binding: { keys: { provider: "transcribe_provider", keyId: "transcribe_key_id", model: "transcribe_model", enabled: null }, boardKeys: null },
+    binding: {
+      keys: { provider: "transcribe_provider", keyId: "transcribe_key_id", model: "transcribe_model", enabled: null },
+      // The first boardKeys with a provider column: a board pin of the built-in
+      // ("this board uses Whisper while the app default is paid") names an
+      // engine with no key row, which a key pointer cannot express. provider
+      // XOR keyId — the write path enforces it, and it is what keeps cleanup
+      // coherent (a deleted key FK-NULLs keyId and the loop clears model; a
+      // provider pin has no key to lose).
+      boardKeys: { provider: "transcribe_provider", keyId: "transcribe_key_id", model: "transcribe_model" },
+    },
     // `whisper` is a REGISTERED provider that advertises transcription with no
     // wire — so the old `provider !== "whisper"` sentinel is gone: resolution
     // simply lands on it, and the engine is the sidecar adapter because that
@@ -130,9 +152,11 @@ export const CAPABILITY_DEFS = [
     pinnedModelMustBeAdvertised: true,
     binding: {
       keys: { provider: "detect_provider", keyId: "detect_key_id", model: "detect_model", enabled: null },
-      boardKeys: null,
+      // provider XOR keyId, same as transcribe's — see the comment there.
+      boardKeys: { provider: "detect_provider", keyId: "detect_key_id", model: "detect_model" },
       // Capability-level knobs: settings that belong to the capability rather
-      // than to whichever provider happens to serve it.
+      // than to whichever provider happens to serve it. Deliberately global,
+      // never per-board — the threshold belongs to detection itself.
       config: [{ key: "detect_threshold", default: 0.3 }],
     },
     floor: { kind: "builtin", provider: "localDetector" },

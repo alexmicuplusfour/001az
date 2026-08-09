@@ -108,9 +108,10 @@ test("the status payload on a fresh instance — every default state, in one rea
   assert.ok(caps.tag.supportedBy.find((p) => p.name === "anthropic")?.installed, "the pre-added flagship shows as installable supply");
 
   // Extraction delegates to tagging and follows its state; scopes are derived.
+  // (board-or-global since slice 5 gave extract an app-wide default.)
   assert.equal(caps.extract.delegatesTo, "tag");
   assert.equal(caps.extract.state, "blocked");
-  assert.equal(caps.extract.scope, "board");
+  assert.equal(caps.extract.scope, "board-or-global");
   assert.equal(caps.extract.boardOverrides, 0);
   assert.equal(caps.tag.scope, "board-or-global");
 
@@ -144,9 +145,9 @@ test("the status payload on a fresh instance — every default state, in one rea
   // provides-slice carries the model catalog.
   assert.equal(caps.tag.agent, "tagger");
   assert.equal(caps.extract.declaredBy, "tag");
-  assert.deepEqual(caps.tag.binding, { provider: false, enable: false });
-  assert.deepEqual(caps.embed.binding, { provider: true, enable: true });
-  assert.deepEqual(caps.detect.binding, { provider: true, enable: false });
+  assert.deepEqual(caps.tag.binding, { provider: false, enable: false, global: true });
+  assert.deepEqual(caps.embed.binding, { provider: true, enable: true, global: true });
+  assert.deepEqual(caps.detect.binding, { provider: true, enable: false, global: true });
 });
 
 // --- cleanup: the two shipped bugs ---

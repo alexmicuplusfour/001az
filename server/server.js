@@ -56,6 +56,7 @@ import {
   listBoards,
   getBoard,
   updateBoard,
+  BOARD_BINDING_COLS,
   deleteBoard,
   boardExists,
   boardItemStats,
@@ -129,7 +130,7 @@ import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, s
 import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
 import { MODEL_CAPABILITIES } from "./capabilities.js";
-import { bindCapability, setCapabilityConfig } from "./capability-bind.js";
+import { bindCapability, setCapabilityConfig, boardBindingPatch } from "./capability-bind.js";
 import { capabilityBinding, capabilityConfig } from "./capability-resolve.js";
 import { capabilityStatus } from "./capability-status.js";
 import { probeCapability } from "./capability-probe.js";
@@ -973,12 +974,13 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     has_items: await boardHasItems(db, b.id),
     ingest: b.ingest || null,
     ingest_state: b.ingest_state || null,
-    ...(req.user.is_admin ? {
-      ai_key_id: b.ai_key_id ?? null,
-      ai_model: b.ai_model ?? null,
-      extract_key_id: b.extract_key_id ?? null,
-      extract_model: b.extract_model ?? null,
-    } : {}),
+    // Every capability's board-pin columns (BOARD_BINDING_COLS — the one
+    // registry-derived list) — the modal's pickers preselect off these, and a
+    // new board-scoped capability ships its columns here without a route edit.
+    // Admin-only: pins are admin-written and key ids are nobody else's business.
+    ...(req.user.is_admin
+      ? Object.fromEntries(BOARD_BINDING_COLS.map((col) => [col, b[col] ?? null]))
+      : {}),
   });
 }));
 
@@ -1320,12 +1322,17 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   if (aiVotes > 1 && aiResearch) {
     return res.status(400).json({ error: "agreement passes cannot be combined with web research — searches bill per pass" });
   }
-  let aiKeyId = null;
-  if (req.body && req.body.ai_key_id != null) {
-    aiKeyId = Number(req.body.ai_key_id);
-    if (!(await getAiKey(db, aiKeyId))) return res.status(400).json({ error: "unknown ai_key_id" });
+  // Capability pins (ai_key_id, extract_key_id, transcribe_provider, …) ride
+  // the create under their column names — validated as a set by the registry
+  // loop, stored with ONE post-insert update below. Validated here, before the
+  // INSERT, so a 400 leaves nothing behind.
+  let boardBindings;
+  try {
+    boardBindings = await boardBindingPatch(db, req.body || {});
+  } catch (e) {
+    if (e.status === 400) return res.status(400).json({ error: e.message });
+    throw e;
   }
-  const aiModel = req.body && req.body.ai_model ? String(req.body.ai_model) : null;
   const autoTag = {
     enabled: !req.body || req.body.auto_tag !== false,
     periodic: !!(req.body && req.body.auto_tag_periodic),
@@ -1346,15 +1353,13 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
     if (err) return res.status(400).json({ error: err });
     mapping = req.body.mapping;
   }
-  let extractKeyId = null;
-  if (req.body && req.body.extract_key_id != null) {
-    extractKeyId = Number(req.body.extract_key_id);
-    if (!(await getAiKey(db, extractKeyId))) return res.status(400).json({ error: "unknown extract_key_id" });
-  }
-  const extractModel = extractKeyId && req.body.extract_model ? String(req.body.extract_model) : null;
   const retagOnRefresh = !!(req.body && req.body.retag_on_refresh);
-  const id = await createBoard(db, name, facets, context, aiReasoning, aiKeyId, aiKeyId ? aiModel : null, autoTag, aiResearch,
-    { mapping, extractKeyId, extractModel, retagOnRefresh, aiVotes });
+  // createBoard's signature stays pin-free: the validated pins land as one
+  // update right after the insert (a new board with pins is the rare case, and
+  // one extra UPDATE beats threading six more columns through the INSERT).
+  const id = await createBoard(db, name, facets, context, aiReasoning, null, null, autoTag, aiResearch,
+    { mapping, retagOnRefresh, aiVotes });
+  if (Object.keys(boardBindings).length) await updateBoard(db, id, { boardBindings });
   console.log(`created board "${name}" ${id}`);
   res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch, ai_votes: aiVotes, mapping });
 }));
@@ -1529,32 +1534,17 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const { update, error, sweep, demote } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
 
-  // Admin-only fields, layered on top of the shared content set.
-  if (req.body && req.body.ai_key_id !== undefined) {
-    if (req.body.ai_key_id === null) {
-      update.aiKeyId = null;
-      update.aiModel = null; // model override is meaningless without a key
-    } else {
-      const keyId = Number(req.body.ai_key_id);
-      if (!(await getAiKey(db, keyId))) return res.status(400).json({ error: "unknown ai_key_id" });
-      update.aiKeyId = keyId;
-    }
-  }
-  if (req.body && req.body.ai_model !== undefined && update.aiKeyId !== null) {
-    update.aiModel = req.body.ai_model ? String(req.body.ai_model) : null;
-  }
-  if (req.body && req.body.extract_key_id !== undefined) {
-    if (req.body.extract_key_id === null) {
-      update.extractKeyId = null;
-      update.extractModel = null;
-    } else {
-      const keyId = Number(req.body.extract_key_id);
-      if (!(await getAiKey(db, keyId))) return res.status(400).json({ error: "unknown extract_key_id" });
-      update.extractKeyId = keyId;
-    }
-  }
-  if (req.body && req.body.extract_model !== undefined && update.extractKeyId !== null) {
-    update.extractModel = req.body.extract_model ? String(req.body.extract_model) : null;
+  // Admin-only fields, layered on top of the shared content set. Capability
+  // pins (ai_key_id, extract_key_id, transcribe_provider, …) go through ONE
+  // registry loop — the per-capability blocks that used to sit here are what
+  // slice 5 replaces, and the loop is also stricter: a pinned key's provider
+  // must actually advertise the capability.
+  try {
+    const boardBindings = await boardBindingPatch(db, req.body || {});
+    if (Object.keys(boardBindings).length) update.boardBindings = boardBindings;
+  } catch (e) {
+    if (e.status === 400) return res.status(400).json({ error: e.message });
+    throw e;
   }
   if (req.body && req.body.mapping !== undefined) {
     if (req.body.mapping === null) {

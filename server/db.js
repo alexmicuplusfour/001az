@@ -569,8 +569,15 @@ export async function tagQueueDepth(db) {
 // Boards pinning their own key for a board-scoped capability. `column` comes
 // from CAPABILITY_DEFS binding.boardKeys — module constants, never input (the
 // same rule the deleteAiKey loop follows).
-export async function countBoardOverrides(db, column) {
-  const { rows } = await db.query(`SELECT COUNT(*)::int AS c FROM boards WHERE ${column} IS NOT NULL`);
+// How many boards pin their own choice for a capability — takes the registry's
+// boardKeys object, because a pin can live in EITHER column: a keyed pick sets
+// keyId, a built-in pick sets provider with no key at all, and a keyId-only
+// count would call the Whisper boards unpinned.
+export async function countBoardOverrides(db, boardKeys) {
+  const cols = [boardKeys.provider, boardKeys.keyId].filter(Boolean);
+  const { rows } = await db.query(
+    `SELECT COUNT(*)::int AS c FROM boards WHERE ${cols.map((c) => `${c} IS NOT NULL`).join(" OR ")}`
+  );
   return rows[0].c;
 }
 
@@ -1115,10 +1122,19 @@ export async function deleteFilterConfig(db, userId, id) {
 
 // --- AI keys (multi-provider registry for the tagger) ---
 
+// `boards_using` counts every board pinned to the key through ANY capability's
+// board column — the OR-chain comes from the registry, because the hand-written
+// pair (`ai_key_id OR extract_key_id`) is exactly the list that would have
+// silently missed the transcribe/detect pins.
+const BOARDS_USING_KEY = CAPABILITY_DEFS
+  .flatMap((c) => (c.binding.boardKeys?.keyId ? [c.binding.boardKeys.keyId] : []))
+  .map((col) => `b.${col} = k.id`)
+  .join(" OR ");
+
 export async function listAiKeys(db) {
   const { rows } = await db.query(
     `SELECT k.id, k.name, k.provider, k.api_key, k.base_url, k.created_at,
-      (SELECT COUNT(*) FROM boards b WHERE b.ai_key_id = k.id OR b.extract_key_id = k.id) AS boards_using
+      (SELECT COUNT(*) FROM boards b WHERE ${BOARDS_USING_KEY}) AS boards_using
      FROM ai_keys k ORDER BY k.created_at ASC`
   );
   return rows;
@@ -1184,11 +1200,22 @@ export async function deleteAiKey(db, id) {
 
 // --- boards ---
 
+// Every per-board capability-binding column, from the registry — so a new
+// board-scoped capability's columns ride into BOARD_COLS, the admin board
+// payload, and updateBoard's boardBindings without a hand edit here. Each
+// capability declares its own columns; the Set just guards that invariant.
+export const BOARD_BINDING_COLS = [...new Set(
+  CAPABILITY_DEFS.flatMap((c) => {
+    const bk = c.binding.boardKeys;
+    return bk ? [bk.provider, bk.keyId, bk.model].filter(Boolean) : [];
+  })
+)];
+
 // boards.type still exists in the schema (unread legacy; drop in a later
 // schema pass) but is deliberately not selected anywhere.
 const BOARD_COLS =
-  "id, name, facets, context, ai_reasoning, ai_research, ai_votes, ai_key_id, ai_model, " +
-  "extract_key_id, extract_model, " +
+  "id, name, facets, context, ai_reasoning, ai_research, ai_votes, " +
+  BOARD_BINDING_COLS.join(", ") + ", " +
   "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, " +
   "ingest, ingest_next_run_at, ingest_state, facet_diagnostics, created_at";
 // Hand-written, so a new column is invisible until it is named here — which is
@@ -1225,19 +1252,24 @@ export async function getBoard(db, id) {
   return rows[0] || null;
 }
 
-export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiVotes, aiKeyId, aiModel, extractKeyId, extractModel, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh, ingest, ingestNextRunAt } = {}) {
+export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiVotes, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh, ingest, ingestNextRunAt, boardBindings } = {}) {
   const sets = [];
   const vals = [];
+  // Capability pins as a { column: value } map (boardBindingPatch's output).
+  // Column names come from the registry via the route — code, never input —
+  // and BOARD_BINDING_COLS is the allow-list that keeps that true even for a
+  // future caller that forgets.
+  for (const [col, v] of Object.entries(boardBindings || {})) {
+    if (!BOARD_BINDING_COLS.includes(col)) continue;
+    vals.push(v);
+    sets.push(`${col}=$${vals.length}`);
+  }
   if (name !== undefined) { vals.push(String(name).trim()); sets.push(`name=$${vals.length}`); }
   if (facets !== undefined) { vals.push(JSON.stringify(facets)); sets.push(`facets=$${vals.length}`); }
   if (context !== undefined) { vals.push(String(context)); sets.push(`context=$${vals.length}`); }
   if (aiReasoning !== undefined) { vals.push(!!aiReasoning); sets.push(`ai_reasoning=$${vals.length}`); }
   if (aiResearch !== undefined) { vals.push(!!aiResearch); sets.push(`ai_research=$${vals.length}`); }
   if (aiVotes !== undefined) { vals.push(Number(aiVotes)); sets.push(`ai_votes=$${vals.length}`); }
-  if (aiKeyId !== undefined) { vals.push(aiKeyId); sets.push(`ai_key_id=$${vals.length}`); }
-  if (aiModel !== undefined) { vals.push(aiModel); sets.push(`ai_model=$${vals.length}`); }
-  if (extractKeyId !== undefined) { vals.push(extractKeyId); sets.push(`extract_key_id=$${vals.length}`); }
-  if (extractModel !== undefined) { vals.push(extractModel); sets.push(`extract_model=$${vals.length}`); }
   if (autoTag !== undefined) { vals.push(!!autoTag); sets.push(`auto_tag=$${vals.length}`); }
   if (autoTagPeriodic !== undefined) { vals.push(!!autoTagPeriodic); sets.push(`auto_tag_periodic=$${vals.length}`); }
   if (autoTagEveryMin !== undefined) { vals.push(autoTagEveryMin); sets.push(`auto_tag_every_min=$${vals.length}`); }

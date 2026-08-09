@@ -12,6 +12,10 @@
 //   7. fall to the floor  when any of the above says no
 //   8. return the BINDING, stamped with how it got there
 //
+// Slice 5 adds a rung ahead of these: a BOARD's own pin (boardBinding), read
+// off the board row's columns and judged by the same rules, with a miss falling
+// to the global walk below rather than to the floor.
+//
 // It returns a BINDING (credentials + model), never an engine. That is the
 // genuine common denominator: transcribe and detect have sidecar floors that no
 // wire can reach, so their callers wrap the binding in an engine, while tag and
@@ -97,6 +101,68 @@ async function storedBinding(db, cap) {
   };
 }
 
+// The board rung (slice 5): a board's own pin, read from its row's columns and
+// judged by exactly the same rules as the global rung — board scope changes
+// where the choice is stored, never what makes a provider usable. Shapes:
+//   { binding }  the pin serves
+//   { miss }     something is pinned but cannot serve — the caller falls to the
+//                GLOBAL rung (never straight to the floor), loudly, which is
+//                resolveBoardAi's old contract for every scoped capability
+//   {}           no pin, or the capability has no board scope
+async function boardBinding(db, cap, board) {
+  const bk = cap.binding.boardKeys;
+  if (!bk || !board) return {};
+  const named = bk.provider ? board[bk.provider] : null;
+  const keyId = bk.keyId ? Number(board[bk.keyId]) || 0 : 0;
+  if (!named && !keyId) return {};
+
+  // A deliberate pin of the built-in — the floor binding, chosen rather than
+  // fallen to. Checked before disqualified(): the builtin provider has no wire
+  // by design, and viaFloor:true is what routes the engine to the sidecar.
+  const floorProvider = cap.floor?.kind === "builtin" ? cap.floor.provider : null;
+  if (named && named === floorProvider) return { binding: await floorBinding(db, cap) };
+
+  if (named) {
+    const miss = await disqualified(db, cap, named);
+    if (miss) return { miss };
+    const desc = PROVIDERS[named];
+    // Only an on-device engine can be pinned by name — a keyed provider's pin
+    // is its key row. The write path refuses this; a hand-seeded row still
+    // resolves honestly.
+    if (!desc.onDevice) return { miss: `${desc.label} is keyed — a board pins one of its ${desc.keyless ? "connections" : "keys"}, not its name` };
+    return {
+      binding: {
+        provider: named,
+        apiKey: null,
+        model: (bk.model ? board[bk.model] : null) || declaredCatalog(desc, cap.declaredBy)?.default || null,
+        keyId: null,
+        viaFloor: false,
+      },
+    };
+  }
+
+  const key = await getAiKey(db, keyId);
+  // Near-unreachable (the column is FK ON DELETE SET NULL) but a restored
+  // backup can resurrect the pointer without the key — same note as the
+  // global rung.
+  if (!key) return { miss: "the board's pinned key no longer exists" };
+  const miss = await disqualified(db, cap, key.provider);
+  if (miss) return { miss };
+  const desc = PROVIDERS[key.provider];
+  return {
+    binding: {
+      provider: key.provider,
+      apiKey: key.api_key,
+      // The board's own model, else the provider's declared default — NEVER the
+      // global pinned model, which may belong to a different provider entirely.
+      model: (bk.model ? board[bk.model] : null) || declaredCatalog(desc, cap.declaredBy)?.default || null,
+      base: key.base_url || undefined,
+      keyId: key.id,
+      viaFloor: false,
+    },
+  };
+}
+
 // The env rung (tagging only today): a secret the server holds instead of a
 // stored row. Gated on the provider's plugin being installed, like any other.
 async function envBinding(db, cap) {
@@ -117,10 +183,13 @@ async function envBinding(db, cap) {
 // difference is what the CALLER does — the embed sweep pauses, the tag queue
 // requeues without consuming an attempt); `builtin` hands back the always-on
 // provider so resolution never fails; `delegate` defers to another capability.
-async function floorBinding(db, cap) {
+async function floorBinding(db, cap, board = null) {
   const floor = cap.floor;
   if (!floor) return null;
-  if (floor.kind === "delegate") return resolveCapability(db, floor.to);
+  // Delegation forwards the board: extraction falling to "the tagger" means the
+  // BOARD's tagger when one is pinned, exactly the chain the worker used to
+  // hand-write.
+  if (floor.kind === "delegate") return resolveCapability(db, floor.to, { board });
   if (floor.kind !== "builtin") return null;
   const desc = PROVIDERS[floor.provider];
   return {
@@ -138,16 +207,24 @@ async function floorBinding(db, cap) {
 // `ignoreEnabled` asks the question the enable button needs: "would this resolve
 // if it were on?" — used to refuse turning a capability on when nothing would
 // serve it.
-export async function resolveCapability(db, capId, { ignoreEnabled = false } = {}) {
+//
+// `board` is a board row (or a column-shaped fragment of one); capabilities
+// with no boardKeys ignore it. The ladder: board pin → global → env → floor,
+// with a MISSED pin falling to the global rung — a board pinned to a dead key
+// behaves like an unpinned board, and the item still gets served.
+export async function resolveCapability(db, capId, { ignoreEnabled = false, board = null } = {}) {
   const cap = CAPABILITY[capId];
   if (!cap) return null;
   const keys = cap.binding.keys;
   // An `off` capability is gated before anything else is read: a disabled
   // embedder must not resolve just because a key is still stored.
   if (!ignoreEnabled && keys?.enabled && (await getSetting(db, keys.enabled)) !== "1") return null;
+  const pinned = await boardBinding(db, cap, board);
+  if (pinned.binding) return pinned.binding;
+  if (pinned.miss) console.log(`board's pinned ${cap.noun} provider can't serve (${pinned.miss}) — falling back to the app default`);
   const stored = await storedBinding(db, cap);
   if (stored.binding) return stored.binding;
-  return (await envBinding(db, cap)) || (await floorBinding(db, cap));
+  return (await envBinding(db, cap)) || (await floorBinding(db, cap, board));
 }
 
 // Why is the STORED choice not the thing serving? Null when it serves — or when
@@ -158,13 +235,6 @@ export async function storedBindingMiss(db, capId) {
   const cap = CAPABILITY[capId];
   return cap ? (await storedBinding(db, cap)).miss ?? null : null;
 }
-
-// Can this provider serve this capability right now? Returns its descriptor, or
-// null. Exported for the BOARD-scoped path, which resolves from a board column
-// rather than a setting but has to judge a provider by exactly the same rule —
-// otherwise a board pinned to an embed-only connection resolves as a tagger and
-// throws at the wire, while the global default falls through cleanly.
-export const usableProvider = (db, capId, provider) => usable(db, CAPABILITY[capId], provider);
 
 // What is STORED for a capability, with the floor's provider standing in when
 // nothing is bound. The read-side peer of bindCapability: one place that knows a

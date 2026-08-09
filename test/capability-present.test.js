@@ -4,7 +4,7 @@
 // capabilities.test.js proves the server actually emits.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { presentChip, presentLines, presentSupported, configureTarget, planSection, fmtProgress } from "../public/capability-present.js";
+import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, fmtProgress } from "../public/capability-present.js";
 
 const supported = [
   { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
@@ -191,4 +191,127 @@ test("planSection: guard, probe gating, confirm arming, and the progress line", 
 
   assert.equal(armed.progressLine, fmtProgress({ done: 4, total: 10, failed: 1 }));
   assert.match(armed.progressLine, /4 of 10 items processed/);
+});
+
+// --- slice 5b: extraction's own binding displaces the delegation story ---
+
+test("the Uses line yields once the capability has its own global binding", () => {
+  const bound = presentLines({
+    state: "active", delegatesTo: "tag",
+    bound: { provider: null, keyId: 4, model: "extract-mini" },
+    running: { provider: "openai", model: "extract-mini", keyId: 4 },
+    supportedBy: supported,
+  });
+  assert.ok(!bound.some((l) => l.k === "Uses"), "Running already tells the truth — no contradiction line");
+  // …and the delegating shape (nothing bound) keeps it, as pinned above.
+  const delegating = presentLines({ state: "blocked", delegatesTo: "tag", bound: { provider: null, keyId: null, model: null }, supportedBy: [] });
+  assert.deepEqual(delegating, [{ k: "Uses", v: "each board's tagger" }]);
+});
+
+test("planSection: extract gets a section on its declarer's card — bind by row, tag's model catalog, one button", () => {
+  const extractCap = {
+    id: "extract", label: "Field extraction", noun: "field extraction", agent: "extractor",
+    declaredBy: "tag", blurb: "b", delegatesTo: "tag",
+    binding: { provider: false, enable: false, global: true }, floor: { kind: "delegate" },
+    bound: { provider: null, keyId: null, model: null },
+    running: { provider: "openai", model: "gpt-5-mini", keyId: 3 }, // delegating: the tagger serves
+    supportedBy: [{ name: "openai", label: "OpenAI" }],
+  };
+  const plan = planSection(extractCap, openaiP, [{ id: 3, name: "prod" }]);
+  assert.equal(plan.guard, null);
+  assert.deepEqual(plan.rows, [{ value: "3", label: "prod" }]);
+  assert.equal(plan.model.catalog.models[0].id, "gpt-5-mini", "extraction rides the tagging wire — its models are tag models");
+  assert.equal(plan.buttons.length, 1, "no probe (nothing of its own to probe), no off, no revert");
+  assert.equal(plan.buttons[0].label, "Make default extractor");
+  assert.deepEqual(plan.buttons[0].payload({ key: "3", model: "gpt-5-mini" }), { keyId: 3, model: "gpt-5-mini" },
+    "no provider field (binds by row), no enabled flag");
+});
+
+// --- slice 5b: the board modal's per-board pin picker ---
+
+const boardTranscribe = {
+  id: "transcribe", label: "Transcription", noun: "transcription", agent: "transcriber", declaredBy: "transcribe",
+  binding: { provider: true, enable: false, global: true },
+  floor: { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)" },
+  boardBinding: { provider: "transcribe_provider", keyId: "transcribe_key_id", model: "transcribe_model" },
+  running: { provider: "openai", model: "whisper-1", keyId: 7 },
+  supportedBy: [
+    { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
+    { name: "whisper", label: "Local Transcriber (Whisper)", installed: true, keyCount: 0, onDevice: true, keyless: true },
+    { name: "acme", label: "Acme Audio", installed: false, keyCount: 1, onDevice: false, keyless: false },
+  ],
+};
+const allKeys = [
+  { id: 7, name: "prod", provider: "openai" },
+  { id: 9, name: "acme-k", provider: "acme" },
+  { id: 11, name: "embeds-only", provider: "voyage" }, // advertises no transcription
+];
+const boardCatalog = {
+  openai: { provides: { transcribe: { models: [{ id: "whisper-1", note: "n" }], default: "gpt-4o-transcribe" } } },
+};
+
+test("planBoardPicker: the rows are the App default (named), installed on-device engines, and only keys that could serve", () => {
+  const plan = planBoardPicker(boardTranscribe, allKeys, null, boardCatalog);
+  assert.equal(plan.title, "AI transcriber");
+  assert.deepEqual(plan.rows, [
+    { value: "", label: "App default (OpenAI · whisper-1)" },
+    { value: "whisper", label: "Local Transcriber (Whisper) — built-in" },
+    { value: "7", label: "prod — openai" },
+    { value: "9", label: "acme-k — acme · not installed" },
+  ], "the embeds-only key is not offered — the write path would refuse it");
+  assert.equal(plan.preselect, "", "a new board inherits");
+  // The default's meaning updates with what actually serves.
+  const floorServed = planBoardPicker({ ...boardTranscribe, running: { provider: "whisper", model: "large-v3", keyId: null } }, allKeys, null, boardCatalog);
+  assert.equal(floorServed.rows[0].label, "App default (Local Transcriber (Whisper) · large-v3)");
+});
+
+test("planBoardPicker: preselects come from the board's columns; a vanished pin falls to the default row", () => {
+  const keyed = planBoardPicker(boardTranscribe, allKeys, { transcribe_key_id: 7, transcribe_model: "whisper-1" }, boardCatalog);
+  assert.equal(keyed.preselect, "7");
+  const named = planBoardPicker(boardTranscribe, allKeys, { transcribe_provider: "whisper" }, boardCatalog);
+  assert.equal(named.preselect, "whisper");
+  const dead = planBoardPicker(boardTranscribe, allKeys, { transcribe_key_id: 99 }, boardCatalog);
+  assert.equal(dead.preselect, "", "a dead pointer must not be sent back on save");
+});
+
+test("planBoardPicker: the model axis exists only for keyed rows, speaks the capability's own catalog slice", () => {
+  const plan = planBoardPicker(boardTranscribe, allKeys, { transcribe_key_id: 7, transcribe_model: "whisper-1" }, boardCatalog);
+  assert.equal(plan.modelAxis(""), null, "the default row inherits — no picker");
+  assert.equal(plan.modelAxis("whisper"), null, "an on-device engine's model is baked");
+  const axis = plan.modelAxis("7");
+  assert.equal(axis.kind, "transcribe", "live listings are asked for THIS capability's models");
+  assert.equal(axis.keyId, 7);
+  assert.deepEqual(axis.entry, { defaultModel: "gpt-4o-transcribe", models: [{ id: "whisper-1", note: "n" }] });
+  assert.equal(axis.saved, "whisper-1", "the persisted model belongs to the persisted key");
+  assert.equal(plan.modelAxis("9").saved, null, "…and to no other");
+});
+
+test("planBoardPicker: the payloads write the feed's column names, full-state per capability", () => {
+  const plan = planBoardPicker(boardTranscribe, allKeys, null, boardCatalog);
+  assert.deepEqual(plan.payload("", null),
+    { transcribe_provider: null, transcribe_key_id: null, transcribe_model: null }, "App default = clear the pin");
+  assert.deepEqual(plan.payload("whisper", null),
+    { transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: null }, "a built-in pin is a name, never a key");
+  assert.deepEqual(plan.payload("7", "whisper-1"),
+    { transcribe_provider: null, transcribe_key_id: 7, transcribe_model: "whisper-1" }, "a keyed pin displaces any name pin");
+
+  // The tagger's shape: no provider column exists, so no name rows and no
+  // provider field in any body.
+  const tagPlan = planBoardPicker({
+    id: "tag", label: "Tagging", noun: "tagging", agent: "tagger", declaredBy: "tag",
+    binding: { provider: false, enable: false, global: true }, floor: { kind: "blocked" },
+    boardBinding: { keyId: "ai_key_id", model: "ai_model" },
+    running: { provider: "openai", model: "gpt-5-mini", keyId: 7 },
+    supportedBy: [{ name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false }],
+  }, allKeys, { ai_key_id: 7, ai_model: null }, boardCatalog);
+  assert.ok(!tagPlan.rows.some((r) => r.value && !/^\d+$/.test(r.value)), "no name rows without a provider column");
+  assert.deepEqual(tagPlan.payload("7", "gpt-5-mini"), { ai_key_id: 7, ai_model: "gpt-5-mini" });
+  assert.deepEqual(tagPlan.payload("", null), { ai_key_id: null, ai_model: null });
+});
+
+test("planBoardPicker: chosenLabel narrates the current selection for the mapping pane's inheritance note", () => {
+  const plan = planBoardPicker(boardTranscribe, allKeys, null, boardCatalog);
+  assert.equal(plan.chosenLabel("", null), "OpenAI · whisper-1", "the default row answers with what it inherits");
+  assert.equal(plan.chosenLabel("7", "whisper-1"), "prod — openai · whisper-1");
+  assert.equal(plan.chosenLabel("whisper", null), "Local Transcriber (Whisper) — built-in");
 });

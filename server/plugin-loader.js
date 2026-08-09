@@ -477,6 +477,17 @@ async function cleanupPluginConfig(db, manifest) {
       if (!providerSetting || (await getSetting(db, providerSetting)) !== manifest.id) continue;
       for (const s of bindingSettings(cap)) await setSetting(db, s, null); // → the capability's floor
     }
+    // BOARD pins of the name too (slice 5), for the same reason: a board's
+    // on-device pin has no key row, so no cascade reaches it, and left behind
+    // it re-activates the provider on that board at reinstall. Key-row board
+    // pins need nothing here — deleteAiKey above FK-NULLs the pointer and
+    // clears the pinned model. Reversible removal (the Plugins page's
+    // installed:false) deliberately does NOT reach these: pins survive it,
+    // like every other stored choice.
+    for (const cap of CAPABILITY_DEFS) {
+      const bk = cap.binding.boardKeys;
+      if (bk?.provider) await db.query(`UPDATE boards SET ${bk.provider}=NULL WHERE ${bk.provider}=$1`, [manifest.id]);
+    }
     return;
   }
   // A source's saved connections (source_connections) are admin-managed and, like

@@ -814,17 +814,21 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       extractDefOpt.value = "";
       extractKeySel.appendChild(extractDefOpt);
       setBoardTagger(boardTagger); // fills the option — the host may have pushed before this landed
-      for (const k of keys) {
+      // Only keys whose provider advertises tagging — extraction rides the
+      // tagging wire, and the board routes (slice 5) refuse the rest, so the
+      // picker must not offer what a save would reject.
+      const usableKeys = keys.filter((k) => aiCatalog[k.provider]?.provides?.tag);
+      for (const k of usableKeys) {
         const opt = document.createElement("option");
         opt.value = String(k.id);
         opt.textContent = keyLabel(k);
         extractKeySel.appendChild(opt);
       }
-      if (extractKeyId && keys.find((k) => k.id === extractKeyId)) {
+      if (extractKeyId && usableKeys.find((k) => k.id === extractKeyId)) {
         extractKeySel.value = String(extractKeyId);
       } else if (extractKeyId) {
-        // Stored key no longer exists — treat as board default rather than
-        // sending a dead id back on save.
+        // Stored key no longer exists (or fell out of the offer) — treat as
+        // board default rather than sending a dead id back on save.
         extractKeyId = null;
         extractModel = null;
       }

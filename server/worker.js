@@ -13,7 +13,6 @@ import {
   recoverStuck,
   bumpUsage,
   getBoard,
-  getAiKey,
   dueBoards,
   retagBoard,
   supersedeFacetDiagnostics,
@@ -58,9 +57,9 @@ import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
-import { callTagger, embedTexts, transcribeAudio, detectObjects, declaredCatalog } from "./providers.js";
+import { callTagger, embedTexts, transcribeAudio, detectObjects } from "./providers.js";
 import { pluginState } from "./plugins.js";
-import { resolveCapability, capabilityConfig, usableProvider } from "./capability-resolve.js";
+import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
@@ -116,29 +115,12 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
 }
 
 // A board's effective tagger: its own key (+ model) when set, else the
-// default. A board key whose provider plugin is not installed falls through to
-// the default like a deleted key would — loudly, so the hold is explicable.
-// Exported for tests.
-export async function resolveBoardAi(db, boardEntry) {
-  if (boardEntry.aiKeyId) {
-    const key = await getAiKey(db, boardEntry.aiKeyId);
-    // Judged by the SAME rule as the app default (usableProvider): advertises
-    // tagging, can make the call, plugin installed. Board scope changes where
-    // the choice is stored, never what makes a provider usable.
-    const desc = key ? await usableProvider(db, "tag", key.provider) : null;
-    if (desc) {
-      return {
-        provider: key.provider,
-        apiKey: key.api_key,
-        model: boardEntry.aiModel || declaredCatalog(desc, "tag").default,
-        base: key.base_url || undefined,
-        keyId: key.id,
-      };
-    }
-    if (key) console.log(`board AI provider ${key.provider} can't serve tagging (removed, or it doesn't tag) — falling back to the default tagger`);
-  }
-  return resolveDefaultAi(db);
-}
+// default. Since slice 5 this is just the generic board rung — judged by the
+// same rules as the app default, falling through loudly (the resolver logs the
+// miss) — kept as an adapter because its callers hold cache-snapshot fragments
+// ({ aiKeyId, aiModel }), not board rows. Exported for tests.
+export const resolveBoardAi = (db, boardEntry) =>
+  resolveCapability(db, "tag", { board: { ai_key_id: boardEntry.aiKeyId, ai_model: boardEntry.aiModel } });
 
 // A missing key is a configuration gap, not an item failure: the claim gate
 // normally keeps such items unclaimed, and when its race lets one through,
@@ -1032,11 +1014,13 @@ export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_
 // this only decides which SHAPE the binding wears — the always-on sidecar, or a
 // provider wire. `viaFloor` covers every way the configured choice can fail to
 // resolve: unset, an uninstalled plugin, a no-audio provider, a missing key, or
-// whisper itself (which advertises transcription with no wire). Never fails to
-// resolve: audio must always become taggable. `board` is accepted for a future
-// per-board choice (unused today). Exported for tests + server.
+// whisper itself (which advertises transcription with no wire) — and a board's
+// deliberate pin of the built-in, which resolves as the floor binding by
+// design. Never fails to resolve: audio must always become taggable. `board`
+// is the item's board row (slice 5) — its pin outranks the app default.
+// Exported for tests + server.
 export async function resolveTranscriber(db, board = null) {
-  const b = await resolveCapability(db, "transcribe");
+  const b = await resolveCapability(db, "transcribe", { board });
   if (b.viaFloor) return whisperTranscriber(b);
   const { rpm, burst } = await aiRate(db, b.provider); // per-provider pacing, same bucket as tagging
   return {
@@ -1119,12 +1103,14 @@ function objectDetectorSidecar(binding, threshold) {
 
 // A board's image→boxes engine — the peer of resolveTranscriber, and the same
 // two-shape split over one generic resolution. `viaFloor` covers unset, an
-// uninstalled plugin, a no-detect provider, a missing key, and localDetector
-// itself. Never fails to resolve. `board` is accepted for a future per-board
-// choice (unused today). Threshold is a CAPABILITY-level knob (it belongs to
-// detection, not to whichever provider serves it), closed over from settings.
+// uninstalled plugin, a no-detect provider, a missing key, localDetector
+// itself, and a board's deliberate pin of it. Never fails to resolve. `board`
+// is the item's board row (slice 5) — the call site always had it; the
+// resolver finally reads it. Threshold is a CAPABILITY-level knob (it belongs
+// to detection, not to whichever provider serves it), closed over from
+// settings — deliberately global, never per-board.
 export async function resolveDetector(db, board = null) {
-  const b = await resolveCapability(db, "detect");
+  const b = await resolveCapability(db, "detect", { board });
   const { detect_threshold: threshold } = await capabilityConfig(db, "detect");
   // The always-on on-server object-detector sidecar — no key, resolved directly
   // (wire: null), like the whisper transcriber.
@@ -1993,13 +1979,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
 
     let input = {}, usage = null, ai = null;
     if (needsLLM) {
-      // Extraction uses its own provider override when set; otherwise falls back
-      // to the board's tagging provider. Either way, the input is text-only (via
+      // Extraction's whole ladder in one call: the board's extract pin, the
+      // app-wide extract default (slice 5), then delegation to the tagger —
+      // the BOARD's tagger first, exactly the chain this block used to
+      // hand-write. Either way, the input is text-only (via
       // modelInputForExtract) so extraction works with any provider.
-      const extractAi = board?.extract_key_id
-        ? await resolveBoardAi(db, { aiKeyId: board.extract_key_id, aiModel: board.extract_model })
-        : null;
-      ai = extractAi || await resolveBoardAi(db, { aiKeyId: board?.ai_key_id, aiModel: board?.ai_model });
+      ai = await resolveCapability(db, "extract", { board });
       if (!ai) throw noKeyError();
 
       const { systemText, schema } = buildFieldsPrompt(mapping);
@@ -2451,7 +2436,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
             const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
             try {
               if (!file) throw new Error("no file on the item");
-              const transcriber = await resolveTranscriber(db);
+              // The board's own pin outranks the app default (slice 5). One PK
+              // SELECT ahead of a multi-second sidecar/API call — noise here,
+              // and the job-log stamp below records engine:model per item, so
+              // per-board engines stay visible in job history.
+              const board = row.board_id ? await getBoard(db, row.board_id) : null;
+              const transcriber = await resolveTranscriber(db, board);
               const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
               const text = await transcriber.transcribe(buf, file.name);
               await updateItemPayload(db, row.id, { transcript: text });

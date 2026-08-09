@@ -158,7 +158,9 @@ async function aiEntry(db, cap, catalog) {
     declaredBy: cap.declaredBy,
     // Which levers this capability's binding has — so the section renders an
     // enable toggle or a provider-by-name apply from data, not from its id.
-    binding: { provider: !!keys?.provider, enable: !!keys?.enabled },
+    // `global` = there is an app-wide default to bind at all (extract's is new
+    // in slice 5; research has none) — the modal's dispatch gate.
+    binding: { provider: !!keys?.provider, enable: !!keys?.enabled, global: !!keys },
     state,
     viaFloor,
     reason,
@@ -187,7 +189,22 @@ async function aiEntry(db, cap, catalog) {
     ...(cap.env ? { env: { configured: !!process.env[cap.env.secret], provider: cap.env.provider, var: cap.env.secret } } : {}),
     ...(cap.rebindWarning ? { rebindWarning: cap.rebindWarning } : {}),
     ...(cap.floor?.kind === "delegate" ? { delegatesTo: cap.floor.to } : {}),
-    ...(cap.binding.boardKeys ? { boardOverrides: await countBoardOverrides(db, cap.binding.boardKeys.keyId) } : {}),
+    // Board scope: how many boards pin their own, and the COLUMN names the
+    // board routes speak — shipped rather than guessed, so the board modal's
+    // generic picker posts the right body fields without naming a capability.
+    ...(cap.binding.boardKeys
+      ? {
+          boardOverrides: await countBoardOverrides(db, cap.binding.boardKeys),
+          boardBinding: {
+            ...(cap.binding.boardKeys.provider ? { provider: cap.binding.boardKeys.provider } : {}),
+            keyId: cap.binding.boardKeys.keyId,
+            ...(cap.binding.boardKeys.model ? { model: cap.binding.boardKeys.model } : {}),
+          },
+          // Which surface owns this capability's board picker ("mapping" = the
+          // mapping pane's; absent = the board modal's generic loop renders it).
+          ...(cap.boardPickerHome ? { boardPickerHome: cap.boardPickerHome } : {}),
+        }
+      : {}),
     ...(cfg ? { config: cap.binding.config.map((f) => ({ key: f.key, value: cfg[f.key] })) } : {}),
     ...(modifiers.length ? { modifiers } : {}),
   };

@@ -1,7 +1,8 @@
-// The capabilities page's PRESENTER — pure data-in/data-out, no DOM, no
-// imports, so it is testable from node the way det-geometry is. Takes one
-// entry of GET /api/admin/capabilities and returns what the card should say;
-// admin-capabilities.js only mounts the result.
+// The capabilities PRESENTER — pure data-in/data-out, no DOM, no imports, so
+// it is testable from node the way det-geometry is. Takes entries of
+// GET /api/admin/capabilities and returns what a surface should say; three
+// thin shells mount the results: admin-capabilities.js (the page's cards),
+// plugin-modal.js (planSection), and board-modal.js (planBoardPicker).
 //
 // Nothing in here names a capability. Every line derives from fields the
 // payload declares, which is the page's whole contract: a capability added to
@@ -59,7 +60,10 @@ export function presentLines(c) {
   }
   if (c.reason) lines.push({ k: "Why", v: c.reason });
   if (c.demand?.waiting) lines.push({ k: "Waiting", v: `${c.demand.waiting} item${c.demand.waiting === 1 ? "" : "s"}` });
-  if (c.delegatesTo) lines.push({ k: "Uses", v: `each board's ${c.delegatesTo === "tag" ? "tagger" : c.delegatesTo}` });
+  // Delegation is the story only while nothing of this capability's OWN is
+  // bound — with an app-wide default stored (slice 5), the Running line already
+  // tells the truth and "uses each board's tagger" would contradict it.
+  if (c.delegatesTo && !c.bound?.keyId) lines.push({ k: "Uses", v: `each board's ${c.delegatesTo === "tag" ? "tagger" : c.delegatesTo}` });
   if (c.boardOverrides) lines.push({ k: "Overrides", v: `${c.boardOverrides} board${c.boardOverrides === 1 ? "" : "s"} pin their own` });
   for (const m of c.modifiers || []) {
     lines.push({ k: m.label, v: m.availableNow ? "available with the current provider" : `needs ${m.supportedBy.join(" / ")}` });
@@ -90,6 +94,108 @@ export function presentSupported(p) {
 // Which provider's settings the Configure button should open: what runs, else
 // what is configured, else the floor — the same precedence a reader follows.
 export const configureTarget = (c) => c.running?.provider || c.bound?.provider || c.floor?.provider || null;
+
+// --- the board modal's per-board pin picker planner (slice 5b) ---
+// One picker per capability the feed says boards may pin (`boardBinding`
+// present, and no other surface claiming it via `boardPickerHome`). Pure data:
+// the rows, the preselect, the model axis, and EXACTLY what a selection saves —
+// the payload speaks the column names the feed shipped, so nothing here (or in
+// the shell that mounts this) names a capability.
+//
+//   cap     one entry of GET /api/admin/capabilities
+//   keys    ALL connection rows, [{ id, name, provider }] — filtered here to
+//           providers that advertise the capability, because the write path
+//           refuses the rest and a picker must not offer what a save rejects
+//   board   the board row (column-named fields, admin settings payload), or
+//           null for a new board
+//   catalog provider name → /api/admin/ai-providers entry (model catalogs)
+export function planBoardPicker(cap, keys, board, catalog) {
+  const bb = cap.boardBinding;
+  if (!bb) return null;
+  const roster = cap.supportedBy || [];
+  const advertisers = new Set(roster.map((p) => p.name));
+  const notInstalled = new Set(roster.filter((p) => !p.installed).map((p) => p.name));
+
+  // What "App default" currently means, so the unset row answers the question
+  // instead of raising it.
+  const inherit = cap.running
+    ? labelIn(cap, cap.running.provider) + (cap.running.model ? ` · ${cap.running.model}` : "")
+    : "none configured";
+
+  // Rows: the inherited default, every INSTALLED on-device engine (pinned by
+  // name — the built-in floor arrives via this same rule, no special case),
+  // then every key whose provider advertises. A not-installed provider's key
+  // stays pickable (defaults, not laws) but says so.
+  const rows = [{ value: "", label: `App default (${inherit})` }];
+  for (const p of roster.filter((p) => p.onDevice && p.installed)) {
+    rows.push({ value: p.name, label: `${p.label} — built-in` });
+  }
+  for (const k of keys.filter((k) => advertisers.has(k.provider))) {
+    rows.push({ value: String(k.id), label: `${k.name} — ${k.provider}` + (notInstalled.has(k.provider) ? " · not installed" : "") });
+  }
+
+  // Preselect from the board's stored columns; a pin whose row/engine vanished
+  // from the offer falls to the default row rather than sending a dead value
+  // back on save (the mapping pane's rule).
+  const savedProvider = (bb.provider && board?.[bb.provider]) || null;
+  const savedKey = board?.[bb.keyId] != null ? String(board[bb.keyId]) : null;
+  const stored = savedProvider || savedKey || "";
+  const preselect = rows.some((r) => r.value === stored) ? stored : "";
+
+  const keyFor = (sel) => (/^\d+$/.test(sel || "") ? keys.find((k) => String(k.id) === sel) : null);
+
+  return {
+    // "AI tagger" / "AI transcriber" / … — the registry's agent noun, same
+    // source as the modal's button labels.
+    title: `AI ${cap.agent}`,
+    hint: `(this board's own ${cap.noun} provider; the app default when unset)`,
+    rows,
+    preselect,
+    // The model axis exists only for a keyed selection — an on-device engine's
+    // model is baked, the default row inherits. `kind` addresses the live
+    // per-connection listing; the entry is the provider's declared slice for
+    // THIS capability, not its tagging catalog.
+    modelAxis(sel) {
+      const key = keyFor(sel);
+      if (!key) return null;
+      const slice = catalog?.[key.provider]?.provides?.[cap.declaredBy];
+      return {
+        entry: slice && typeof slice === "object"
+          ? { defaultModel: slice.default ?? null, models: slice.models || [] }
+          : null,
+        keyId: key.id,
+        kind: cap.declaredBy,
+        // The board's persisted model belongs to its persisted key only.
+        saved: savedKey && sel === savedKey && bb.model ? board?.[bb.model] ?? null : null,
+      };
+    },
+    // What the current selection is called mid-sentence — the mapping pane's
+    // "Board default" note reads the tagger's off this.
+    chosenLabel(sel, model) {
+      if (!sel) return inherit;
+      const key = keyFor(sel);
+      if (key) return `${key.name} — ${key.provider}${model ? ` · ${model}` : ""}`;
+      return rows.find((r) => r.value === sel)?.label || sel;
+    },
+    // The save body, in the feed's column names. Full-state per capability:
+    // every column written on every save, so a cleared picker clears the pin.
+    payload(sel, model) {
+      const out = {};
+      if (bb.provider) out[bb.provider] = null;
+      out[bb.keyId] = null;
+      if (bb.model) out[bb.model] = null;
+      const key = keyFor(sel);
+      if (key) {
+        out[bb.keyId] = key.id;
+        if (bb.model) out[bb.model] = model || null;
+      } else if (sel && bb.provider) {
+        // A name row only exists where the capability has a provider column.
+        out[bb.provider] = sel;
+      }
+      return out;
+    },
+  };
+}
 
 // --- the plugin modal's section planner ---
 // One capability section per (capability, provider) pair, planned here as pure

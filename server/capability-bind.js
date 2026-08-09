@@ -10,7 +10,7 @@
 // nothing. Everything is validated before the first setSetting, because a bogus
 // model used to be a 400 that left the provider unset and must stay one.
 import { PROVIDERS, declaredCatalog } from "./providers.js";
-import { CAPABILITY } from "./capabilities.js";
+import { CAPABILITY, CAPABILITY_DEFS } from "./capabilities.js";
 import { setSetting, getAiKey } from "./db.js";
 import { resolveCapability } from "./capability-resolve.js";
 
@@ -99,6 +99,86 @@ export async function bindCapability(db, capId, patch = {}) {
       throw bad(`pick a provider for ${cap.noun} before turning it on`);
     await setSetting(db, keys.enabled, patch.enabled ? "1" : null);
   }
+}
+
+// The BOARD-scoped write (slice 5): validate the board-binding fields of a
+// board create/update body and return { column: value } for updateBoard's
+// boardBindings map. The body speaks in COLUMN names (`ai_key_id`,
+// `transcribe_provider`, …) — the contract the board routes have always had —
+// and this loop replaces the per-capability blocks that used to be hand-copied
+// there. Column names come from the registry, never from input.
+//
+// Stricter than the blocks it replaces, deliberately: the old ones checked only
+// that a key row EXISTED, so a board could pin an embed-only key as its tagger
+// and discover the silent fall-through at runtime. Now the row's provider must
+// advertise the capability — the same judgment chooseBinding applies globally.
+// Installed-ness is still deliberately unchecked (defaults, not laws: a removed
+// built-in's pin resumes when it returns).
+//
+// Rules per capability:
+//   provider + keyId both non-null → 400 (a pin is one or the other)
+//   provider: name → must exist, advertise, and be on-device (the built-in
+//                    floor included); keyId and model forced NULL
+//   provider: null → clears the provider column only — a keyed pin in the same
+//                    body still lands
+//   keyId: n      → row must exist and its provider must advertise; a provider
+//                    column is forced NULL (a keyed pin displaces a name pin);
+//                    model validated where the capability demands it
+//                    (pinnedModelMustBeAdvertised)
+//   keyId: null   → clears keyId and model; an unmentioned provider column is
+//                    left alone (a Whisper pin survives an irrelevant clear)
+//   model         → only meaningful beside a non-null keyId in the same body;
+//                    alone it is ignored (a model with no key is never read)
+export async function boardBindingPatch(db, body = {}) {
+  const cols = {};
+  for (const cap of CAPABILITY_DEFS) {
+    const bk = cap.binding.boardKeys;
+    if (!bk) continue;
+    const provVal = bk.provider ? body[bk.provider] : undefined;
+    const keyVal = body[bk.keyId];
+    const modelVal = bk.model ? body[bk.model] : undefined;
+    if (provVal === undefined && keyVal === undefined && modelVal === undefined) continue;
+
+    if (provVal != null && keyVal != null) {
+      throw bad(`pin ${cap.noun} to an on-device engine by name OR to a key — not both`);
+    }
+
+    if (provVal === null) cols[bk.provider] = null;
+    else if (provVal !== undefined) {
+      const name = String(provVal);
+      const desc = PROVIDERS[name];
+      if (!desc) throw bad(`unknown provider "${name}"`);
+      if (!declaredCatalog(desc, cap.declaredBy)) throw bad(`${desc.label} advertises no ${cap.noun}`);
+      if (!desc.onDevice && cap.floor?.provider !== name) {
+        throw bad(`${desc.label} is keyed — pin one of its ${desc.keyless ? "connections" : "keys"} instead of naming it`);
+      }
+      cols[bk.provider] = name;
+      cols[bk.keyId] = null;
+      if (bk.model) cols[bk.model] = null;
+      continue; // a name pin owns all three columns
+    }
+
+    if (keyVal === null) {
+      cols[bk.keyId] = null;
+      if (bk.model) cols[bk.model] = null;
+    } else if (keyVal !== undefined) {
+      const key = await getAiKey(db, Number(keyVal));
+      if (!key) throw bad(`unknown ${bk.keyId}`);
+      const desc = PROVIDERS[key.provider];
+      if (!declaredCatalog(desc, cap.declaredBy)) {
+        throw bad(`${desc?.label || key.provider} advertises no ${cap.noun} — pick a key from a provider that does`);
+      }
+      const model = modelVal != null && modelVal !== "" ? String(modelVal) : null;
+      if (model && cap.pinnedModelMustBeAdvertised && !declaredCatalog(desc, cap.declaredBy)?.models.some((m) => m.id === model)) {
+        throw bad(`${desc.label} has no ${cap.noun} model "${model}"`);
+      }
+      cols[bk.keyId] = key.id;
+      if (bk.model && modelVal !== undefined) cols[bk.model] = model;
+      if (bk.provider) cols[bk.provider] = null;
+    }
+    // modelVal alone falls through to here: deliberately dropped.
+  }
+  return cols;
 }
 
 // A capability-level knob (detect's threshold): belongs to the capability, not
