@@ -630,6 +630,13 @@ function capabilitySection(cap, p, ctx, reload) {
     span.textContent = `Current default: ${plan.currentDefault.label}${plan.currentDefault.model ? ` · ${plan.currentDefault.model}` : ""}`;
     actions.appendChild(span);
   }
+  // When the row is tight, the NOTE does the shrinking (it wraps onto more
+  // lines) — never the buttons, whose labels would break mid-phrase ("Make
+  // default embedder" on two lines). Flex items shrink by default, so opt the
+  // buttons out.
+  for (const el of actions.children) {
+    if (el.tagName === "BUTTON") { el.style.flexShrink = "0"; el.style.whiteSpace = "nowrap"; }
+  }
   if (actions.children.length) sec.appendChild(actions);
   if (plan.progressLine) sec.appendChild(muted(plan.progressLine));
   return sec;
