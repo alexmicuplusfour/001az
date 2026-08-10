@@ -4,7 +4,7 @@
 // registry (this provider's slice of ai_keys) plus ONE generic section per
 // capability they advertise — planned by capability-present.js from the
 // capabilities payload, so a new capability needs no edit here; media types
-// are informational (core capabilities, nothing to configure). The last
+// are informational (built-ins, nothing to configure). The last
 // recorded health error surfaces at the top. Writes go through the plugins
 // API, the ai-keys routes, and /api/admin/capabilities/:id/{bind,probe} —
 // this file owns no state of its own.
@@ -638,14 +638,14 @@ function capabilitySection(cap, p, ctx, reload) {
 // --- source: saved connections (add / edit / test / remove) ---
 
 function sourceSection(p, ctx, reload) {
-  // The local folder is a core capability — no saved connection, boards pick a
+  // The local folder is built in — no saved connection, boards pick a
   // subfolder in their own ingestion settings.
   if (!p.capabilities.needsConnection) {
     const sec = section("Local folder", null);
     const note = document.createElement("p");
     note.className = "muted";
     note.style.margin = "0";
-    note.textContent = "Core capability — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
+    note.textContent = "Built-in — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
     sec.appendChild(note);
     return sec;
   }
@@ -813,7 +813,7 @@ function mediaSection(p) {
   const note = document.createElement("p");
   note.className = "muted";
   note.style.margin = "0";
-  note.textContent = "Core capability — always installed; it's how the app reads these file types.";
+  note.textContent = "Built-in — always installed; it's how the app reads these file types.";
   sec.appendChild(note);
 
   // Per-type upload limit: the manifest default, overridable here. Shown in MB;

@@ -1880,7 +1880,7 @@ app.patch("/api/admin/plugins/:id", requireAdmin, wrap(async (req, res) => {
 
   if (installed !== undefined) {
     if (typeof installed !== "boolean") return res.status(400).json({ error: "installed must be true or false" });
-    if (def.core && !installed) return res.status(400).json({ error: `${def.label} is a core capability and can't be removed` });
+    if (def.core && !installed) return res.status(400).json({ error: `${def.label} is built in and can't be removed` });
   }
 
   let nextConfig;

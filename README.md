@@ -44,6 +44,15 @@ a live connector.
   tagging and embeddings against your own Ollama server) and
   [`examples/plugins/deepseek`](examples/plugins/deepseek) (keyed and hosted,
   text-only, with a vendor whose quirks diverge from the OpenAI defaults).
+- **Transcription** — audio items are transcribed before tagging, so a
+  recording is tagged and searched by what's spoken. An on-device Whisper
+  sidecar works out of the box; a paid provider (e.g. OpenAI) can take over
+  app-wide or per board — a podcast board on a paid engine while every other
+  board stays on the free one.
+- **Object detection** — a board's *object* fields find what's **in** an image
+  (open-vocabulary, query-driven), so items become searchable by their
+  contents. An on-device LLMDet sidecar is the default; provider-backed
+  detection slots in the same way, app-wide or per board.
 - **Entities & instances** — an entity is a thin row (its identity + structured
   fields) sitting above one or more per-file *instances*, each with their own
   fields and tags. Merge re-parents instances, split breaks them out, and both

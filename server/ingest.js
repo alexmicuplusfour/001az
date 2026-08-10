@@ -46,8 +46,8 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
       throw err;
     }
   }
-  // Pick the handler by extension (media handlers are core capabilities — always
-  // present, never removable, so there's no disabled-type gate here).
+  // Pick the handler by extension (media handlers are always-on built-ins —
+  // never removable, so there's no disabled-type gate here).
   const handler = sources.forUpload(originalName);
   let file;
   try {

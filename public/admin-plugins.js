@@ -1,9 +1,9 @@
 // Plugins tab: the integrations catalog as a flat list of INSTALLED cards —
-// capabilities (the app's own: media handlers, the embedder) and connections
+// built-ins (the app's own: media handlers, the embedder) and connections
 // (AI providers, data providers) side by side, no segment headers. Each card =
 // label + one-line description + a right-aligned role tag; the gear opens the
-// plugin's config modal, Remove takes it off the page (disabled for core
-// capabilities). "Add plugin" browses what's available. Everything renders from
+// plugin's config modal, Remove takes it off the page (disabled for
+// built-ins). "Add plugin" browses what's available. Everything renders from
 // GET /api/admin/plugins; this module holds no catalog knowledge of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
@@ -106,7 +106,7 @@ export async function renderPlugins(prefetched) {
 
   const sec = document.createElement("div");
   sec.className = "section";
-  sec.innerHTML = `<h2>Plugins</h2><p class="sub">Capabilities and connections in one place. Add the services you use; core capabilities are always on. Configure keys and options via the gear.</p>`;
+  sec.innerHTML = `<h2>Plugins</h2><p class="sub">Built-ins and connections in one place. Add the services you use; the built-ins are always on. Configure keys and options via the gear.</p>`;
 
   // refresh repaints BOTH admin surfaces that project this state — the cards
   // here and the Capabilities tab, which would otherwise go stale the moment a
@@ -125,7 +125,7 @@ export async function renderPlugins(prefetched) {
 
   // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
   // marking installed ones "Added" — so they stay visible across reopens, not
-  // just within one session. Core capabilities are never addable.
+  // just within one session. The always-on built-ins are never addable.
   const connections = plugins.filter((p) => !p.core);
   const add = document.createElement("div");
   add.className = "plugin-add";
@@ -283,7 +283,7 @@ function pluginRow(p, ctx) {
     // not a destructive action here — a neutral, disabled control
     remove.className = "ghost sm";
     remove.disabled = true;
-    remove.title = "Core capability — always installed";
+    remove.title = "Built-in — always installed";
   } else {
     remove.className = "danger sm";
     remove.onclick = () => removePlugin(p, ctx);

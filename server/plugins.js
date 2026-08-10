@@ -13,7 +13,7 @@
 // State model: installed = a card on the page, usable (vs available = add it
 // first); slot default = preselected. A plugin's DB row (plugins table) is
 // optional — an absent/NULL-installed row falls to the plugin's tier default
-// (core capabilities + the pre-added flagship = installed, everything else =
+// (built-ins + the pre-added flagship = installed, everything else =
 // available). `configSchema` declares the modal's fields; `plugins.config`
 // stores only those overrides. Secrets never land there: a connector's api_key
 // field writes through to the existing `<domain>_key_<provider>` setting, and
@@ -37,7 +37,7 @@ function aiDefs() {
     label: p.label,
     description: p.description || "",
     // The on-device embedder (local/Xenova) and the on-device transcriber
-    // (whisper sidecar) are core capabilities — no account, always installed.
+    // (whisper sidecar) are always-on built-ins — no account, always installed.
     // Anthropic is the one connection pre-added, since tagging (the product's
     // core value) must work out of the box; it's still removable.
     core: p.name === "local" || p.name === "whisper" || p.name === "localDetector",
@@ -166,7 +166,7 @@ const configDefaults = (def) =>
   Object.fromEntries(def.configSchema.filter((f) => f.default !== undefined).map((f) => [f.key, f.default]));
 
 // Whether a plugin is installed (a card on the page, usable) vs available (add
-// it first). Core capabilities are always installed; an explicit add/remove row
+// it first). Built-ins are always installed; an explicit add/remove row
 // wins; otherwise the per-tier default (the flagship AI provider is pre-added,
 // everything else is available). A NULL `installed` means no explicit choice —
 // a row that exists only for health telemetry must fall to the default, NOT

@@ -46,7 +46,7 @@ export function createSources({ galleryDir, thumbsDir }) {
   return {
     // Picked by extension; everything unmatched goes to the image handler,
     // whose sharp sniff is the real gate (non-images come back null). Media
-    // handlers are core capabilities (always present), so there's no
+    // handlers are always-on built-ins, so there's no
     // disabled-type refusal here.
     forUpload(originalName) {
       return handlers[byExt.get(extOf(originalName)) || "image"];

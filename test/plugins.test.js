@@ -81,7 +81,7 @@ after(() => srv.close());
 
 test("state: install defaults follow the tier; config is schema-default overlaid", async () => {
   // No row yet: connections are available (not installed), the flagship is
-  // pre-added, core capabilities are always installed.
+  // pre-added, built-ins are always installed.
   assert.equal((await pluginState(db, "crypto:coingecko")).installed, false);
   assert.equal((await pluginState(db, "ai:openai")).installed, false);
   assert.equal((await pluginState(db, "ai:anthropic")).installed, true, "flagship pre-added");

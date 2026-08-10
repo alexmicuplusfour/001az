@@ -29,7 +29,10 @@ capabilities feed through four presenter helpers (`servingRoles`/`roleBadge`/
 `removalImpact` is structurally impossible now, `slots` is DELETED outright
 (the payload is `{ plugins }`, absence pinned), and the admin page fetches the
 feed once instead of twice — suite 979 ×2; §7a/§7b/§7c carry what building
-them changed. Slice 6 remains plan-only. The
+them changed. 7d SHIPPED 2026-08-10: "capability" now means the registry entry
+everywhere — the core cards read "built-in" across the subtitle, tooltips,
+notes, and one server error, and README gained the transcription/detection
+bullets. SLICE 7 IS COMPLETE. Slice 6 remains plan-only. The
 proposal: make CAPABILITY a
 first-class registry (`server/capabilities.js`, one `CAPABILITY_DEFS` entry per
 capability) exactly the way `KIND_DEFS` made plugin kinds first-class, then
@@ -1977,15 +1980,21 @@ What building it changed about the spec above:
    updates. `retryInstall` folded onto the exported `busy` (C8). Suite
    975 → 979 ×2.
 
-#### 7d — the copy pass (the final Open-questions bullet, unresolved and now live)
+#### 7d — the copy pass (the final Open-questions bullet, unresolved and now live) — SHIPPED 2026-08-10, suite 979 ×2
 
-A tab named **Capabilities** (admin.html:133) ships beside a Plugins subtitle
-whose "capability" means a `core: true` card
-([admin-plugins.js:113](../public/admin-plugins.js#L113)) — plus four more
-"core capability" strings (admin-plugins.js:128, :277; plugin-modal.js:631,
-:799). Reword to "always-on connections", exactly as the bullet that predicted
-this collision prescribes. Fold in README's missing transcription/detection
-feature bullets (§5.11.5's acknowledged gap) — cheapest here.
+A tab named **Capabilities** (admin.html:133) shipped beside a Plugins subtitle
+whose "capability" meant a `core: true` card — plus more of the same usage
+scattered through tooltips, notes, and comments. As shipped, "capability" means
+the registry entry EVERYWHERE and the core cards are what they are:
+**built-ins**. The sweep found more sites than the spec's five — the user-facing
+set was the subtitle, the disabled-Remove tooltip, the folder and media modal
+notes, and one server 400 (`is a core capability and can't be removed` → `is
+built in and can't be removed`; its test pins only `/can't be removed/`, kept),
+plus eight comment sites across admin-plugins, plugin-modal, plugins.js,
+ingest.js, sources/index.js, and a test comment. Migration 0017's comment
+stays — frozen schema history is never reworded. README gained the
+transcription and object-detection feature bullets (§5.11.5's acknowledged
+gap), each noting the app-wide-or-per-board engine choice slice 5 built.
 
 #### Not in slice 7, recorded so they don't evaporate
 
@@ -2107,4 +2116,4 @@ absorbed the provider chips.
   `core: true` card. When this ships, "capability" means the registry entry and
   those cards become what they are — always-on connections. *(Post-arc review:
   still unresolved, and now live beside a tab literally named Capabilities —
-  slice 7d.)*
+  slice 7d. RESOLVED 2026-08-10: 7d shipped, the cards read "built-in".)*
