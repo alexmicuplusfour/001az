@@ -110,6 +110,7 @@ test("the status payload on a fresh instance — every default state, in one rea
   // Extraction delegates to tagging and follows its state; scopes are derived.
   // (board-or-global since slice 5 gave extract an app-wide default.)
   assert.equal(caps.extract.delegatesTo, "tag");
+  assert.equal(caps.extract.delegatesToAgent, "tagger", "the presenter renders the noun from the feed, not a mapping");
   assert.equal(caps.extract.state, "blocked");
   assert.equal(caps.extract.scope, "board-or-global");
   assert.equal(caps.extract.boardOverrides, 0);

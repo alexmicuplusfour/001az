@@ -14,7 +14,7 @@ import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
 import { syncModelPicker, switchRow } from "/board-modal.js";
 import { fillSelect, isUnset } from "/select.js";
 import { fmtDuration } from "/utils.js";
-import { planSection, fmtProbe } from "/capability-present.js";
+import { planSection, fmtProbe, keyRoles, removalStory } from "/capability-present.js";
 
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
@@ -124,7 +124,7 @@ export function openPluginModal(p, ctx) {
     let state;
     try { state = await ctx.getState(); } catch { return; }
     p = state.plugins.find((x) => x.id === p.id) || p;
-    ctx = { ...ctx, plugins: state.plugins, slots: state.slots, keys: state.keys, connections: state.connections, defaults: state.defaults, capabilities: state.capabilities };
+    ctx = { ...ctx, plugins: state.plugins, keys: state.keys, connections: state.connections, capabilities: state.capabilities };
     render();
     ctx.refresh(state); // repaint the cards behind, reusing the state we just fetched
   }
@@ -189,8 +189,11 @@ export function openPluginModal(p, ctx) {
 // --- connector: schema-driven config + test + domain default ---
 
 function connectorSection(p, ctx, reload) {
-  const d = ctx.slots.domains[p.connector.domain] || {};
-  const isDefault = (d.setting || d.effective) === p.name;
+  // The domain's star state off the capabilities feed — bound is the stored
+  // star, running what actually resolves; same precedence the old slots read
+  // (`setting || effective`) applied.
+  const d = (ctx.capabilities || []).find((c) => c.kind === "domain" && c.id === p.connector.domain);
+  const isDefault = (d?.bound?.provider || d?.running?.provider) === p.name;
   const sec = section(
     "Configuration",
     `${p.connector.domainLabel} data provider.` + (isDefault ? " Currently the default for new adds." : "")
@@ -369,10 +372,16 @@ function keysSection(p, ctx, reload) {
     table.innerHTML = `<thead><tr><th>Name</th>${needsBase ? "<th>Server</th>" : ""}<th>Key</th><th></th></tr></thead>`;
     const tbody = document.createElement("tbody");
     for (const k of mine) {
-      const isDefault = ctx.slots.tagger.keyId === k.id;
+      // Every capability whose stored binding is this row — the old check knew
+      // only tagging's slot, so a key serving as the default embedder (or
+      // transcriber, or detector) carried no badge at all. The badge also
+      // names its role now: "default" alone stopped being an answer the
+      // moment one row could hold several.
+      const roles = keyRoles(ctx.capabilities, k.id);
+      const roleBadges = roles.map((c) => `<span class="badge">default ${c.agent}</span>`).join(" ");
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${k.name} ${isDefault ? '<span class="badge">default</span>' : ""}</td>
+        <td>${k.name} ${roleBadges}</td>
         ${needsBase ? `<td style="${MONO_CSS}color:#9aa0aa"></td>` : ""}
         <td style="${MONO_CSS}color:#9aa0aa">${k.hint}</td>
         <td><div class="row-actions"></div></td>`;
@@ -400,7 +409,11 @@ function keysSection(p, ctx, reload) {
       delBtn.onclick = async () => {
         const uses = Number(k.boards_using) || 0;
         const extra = uses ? ` ${uses} board(s) use it and will fall back to the default.` : "";
-        if (!confirm(`Remove ${noun} "${k.name}"?${extra}${isDefault ? " It is the current default — tagging falls back to the env var (or stops)." : ""}`)) return;
+        // One consequence sentence per capability this row backs, from the
+        // feed — instead of the old copy that claimed tagging's fallback
+        // story for every key.
+        const impact = roles.map((c) => ` It is the default ${c.agent} — ${removalStory(c)}.`).join("");
+        if (!confirm(`Remove ${noun} "${k.name}"?${extra}${impact}`)) return;
         try {
           await api("DELETE", `/api/admin/ai-keys/${k.id}`);
           toast(`${keyless ? "Connection" : "Key"} "${k.name}" removed`);
@@ -416,10 +429,14 @@ function keysSection(p, ctx, reload) {
     const none = document.createElement("p");
     none.className = "muted";
     none.style.margin = "0";
-    none.textContent =
-      p.name === "anthropic" && ctx.slots.tagger.envKey
-        ? "No keys stored — tagging runs on the ANTHROPIC_API_KEY env var."
-        : `No ${noun}s yet.`;
+    // A capability's env rung belongs to a specific provider — when the server
+    // holds that secret and THIS is the provider, an empty key list is not
+    // "unconfigured". All three literals (provider, capability, env var) come
+    // from the feed now.
+    const envCap = (ctx.capabilities || []).find((c) => c.env?.configured && c.env.provider === p.name);
+    none.textContent = envCap
+      ? `No ${noun}s stored — ${envCap.noun} runs on the ${envCap.env.var} env var.`
+      : `No ${noun}s yet.`;
     sec.appendChild(none);
   }
 

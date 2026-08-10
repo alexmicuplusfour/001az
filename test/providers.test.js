@@ -92,9 +92,9 @@ test("providerCatalog exposes the UI-facing shape and leaks no internals", () =>
   const glm = cat.find((p) => p.name === "glm");
   assert.equal(glm.defaultModel, "glm-4.6v");
   assert.ok(glm.models.some((m) => m.id === "glm-5.2" && /text/.test(m.note)));
-  assert.equal(glm.embeds, null); // no embeddings
+  assert.equal(glm.provides.embed, undefined); // no embeddings
   const openai = cat.find((p) => p.name === "openai");
-  assert.equal(openai.embeds.default, "text-embedding-3-small");
+  assert.equal(openai.provides.embed.default, "text-embedding-3-small");
   // no wire functions / compat internals cross the boundary. `base` crosses
   // ONLY as a needsBase provider's suggested default (the connection form's
   // placeholder); every built-in is fixed-endpoint, so it stays null here.

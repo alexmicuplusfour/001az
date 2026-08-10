@@ -53,7 +53,7 @@ export function openAddPluginModal(connections, ctx) {
 
     const tag = document.createElement("span");
     tag.className = "p-tag";
-    tag.textContent = tagFor(p, ctx.defaults);
+    tag.textContent = tagFor(p, ctx.capabilities);
     r.appendChild(tag);
 
     const addBtn = document.createElement("button");

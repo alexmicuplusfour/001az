@@ -62,7 +62,7 @@ test("the whisper sidecar's empty catalog stays truthy — advertising is not th
   assert.equal(w.default, null, "the model is baked into the sidecar image, not declared here");
   assert.deepEqual(w.models, []);
   // …and it survives into the served catalog the same way.
-  assert.ok(providerCatalog().find((p) => p.name === "whisper").transcribes);
+  assert.ok(providerCatalog().find((p) => p.name === "whisper").provides.transcribe);
 });
 
 test("an embed-only on-device provider declares embed and nothing else", () => {
@@ -103,26 +103,34 @@ test("a hybrid descriptor keeps both halves — an explicit provides wins per ca
   assert.ok(p.embed, "the legacy declaration for a DIFFERENT capability survives");
 });
 
-test("a sidecar's live model lands in both shapes — neither can be read stale", async () => {
+test("a sidecar's live model lands in provides — and the legacy triple is gone from the plugins payload", async () => {
   // /api/admin/plugins overrides whisper's and localDetector's catalogs with what
-  // the sidecar's /health reports. The legacy field and `provides` must agree, or
-  // a reader picks up a stale model depending on which one it happens to read.
+  // the sidecar's /health reports. Since 7b that override writes `provides` only
+  // — the one capability shape on the wire, so there is no second copy to read
+  // stale. The absence is pinned so the triple can't quietly come back.
   const srv = await startServer();
   try {
     const admin = await adminSession(srv.db);
     const r = await req(srv.base, "GET", "/api/admin/plugins", { sid: admin.sid });
     const byId = Object.fromEntries(r.json.plugins.map((p) => [p.id, p]));
-    assert.deepEqual(byId["ai:whisper"].ai.provides.transcribe, byId["ai:whisper"].ai.transcribes);
-    assert.deepEqual(byId["ai:localDetector"].ai.provides.detect, byId["ai:localDetector"].ai.detects);
+    assert.ok(byId["ai:whisper"].ai.provides.transcribe, "the sidecar override writes the normal form");
+    assert.ok(byId["ai:localDetector"].ai.provides.detect);
+    for (const p of r.json.plugins.filter((x) => x.kind === "ai")) {
+      for (const legacy of ["embeds", "transcribes", "detects"])
+        assert.ok(!(legacy in p.ai), `${p.id}: legacy "${legacy}" is back in the plugins payload`);
+    }
   } finally {
     await srv.close();
   }
 });
 
-test("providerCatalog exposes provides without leaking the server-side carving data", () => {
+test("providerCatalog ships provides as the one capability shape — the legacy triple is gone", () => {
+  // The descriptor keeps its legacy fields (the wires still read them; backfill
+  // guarantees it) — only the WIRE FORMAT dropped them, in 7b.
+  for (const p of providerCatalog()) {
+    for (const legacy of ["embeds", "transcribes", "detects"])
+      assert.ok(!(legacy in p), `${p.name}: legacy "${legacy}" is back in providerCatalog`);
+  }
   const openai = providerCatalog().find((p) => p.name === "openai");
-  assert.ok(openai.provides.tag.filter, "the descriptor's normal form keeps the filter");
-  // …but the UI-facing per-capability entry is narrower: pickers get models +
-  // default, never the regex used to carve a live list.
-  assert.deepEqual(Object.keys(openai.embeds).sort(), ["default", "models"]);
+  assert.ok(openai.provides.tag.filter, "the normal form keeps the carving filter");
 });

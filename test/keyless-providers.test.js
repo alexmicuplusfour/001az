@@ -115,7 +115,7 @@ test("resolution: the default tagger and a board both resolve a keyless connecti
   const rows = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json;
   const conn = rows.find((k) => k.name === "Homelab");
 
-  const r = await req(srv.base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { defaultKeyId: conn.id } });
+  const r = await req(srv.base, "POST", "/api/admin/capabilities/tag/bind", { sid: admin.sid, body: { keyId: conn.id } });
   assert.equal(r.status, 200);
 
   const def = await resolveDefaultAi(db);
@@ -132,10 +132,12 @@ test("resolution: a keyless connection backs the embedder slot; on-device stays 
   const rows = (await req(srv.base, "GET", "/api/admin/ai-keys", { sid: admin.sid })).json;
   const conn = rows.find((k) => k.name === "Homelab");
 
-  // Key-row path (keyless-networked): picked like any keyed embedder.
-  let r = await req(srv.base, "POST", "/api/admin/ai-config", {
+  // Key-row path (keyless-networked): picked like any keyed embedder. The body
+  // is the modal's documented bind shape — an explicit null provider beside a
+  // key means "use the key path", never "clear".
+  let r = await req(srv.base, "POST", "/api/admin/capabilities/embed/bind", {
     sid: admin.sid,
-    body: { embedProvider: null, embedKeyId: conn.id, embedModel: "acme-embedder", embedEnabled: true },
+    body: { provider: null, keyId: conn.id, model: "acme-embedder", enabled: true },
   });
   assert.equal(r.status, 200);
   let em = await resolveEmbedder(db);
@@ -144,12 +146,12 @@ test("resolution: a keyless connection backs the embedder slot; on-device stays 
   assert.equal(em.model, "acme-embedder");
 
   // Name path: only on-device providers qualify (a keyed name is a 400)…
-  r = await req(srv.base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { embedProvider: "anthropic" } });
+  r = await req(srv.base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { provider: "anthropic" } });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /on-device/);
 
   // …and the local pick still works exactly as before.
-  r = await req(srv.base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { embedProvider: "local", embedEnabled: true } });
+  r = await req(srv.base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { provider: "local", enabled: true } });
   assert.equal(r.status, 200);
   em = await resolveEmbedder(db);
   assert.equal(em.provider, "local");

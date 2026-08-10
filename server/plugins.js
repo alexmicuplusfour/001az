@@ -56,11 +56,11 @@ function aiDefs() {
       { key: "rpm", label: "Requests / minute", type: "number", default: PROVIDERS[p.name].rpm, min: 1, help: "token-bucket pace per API key" },
       { key: "burst", label: "Burst", type: "number", default: PROVIDERS[p.name].burst, min: 1, help: "calls allowed before pacing kicks in" },
     ],
-    // the modal's pickers (models + notes, embed/transcribe catalogs) — same data
-    // the board modal reads from /api/admin/ai-providers
+    // the modal's pickers (models + notes, per-capability catalogs via
+    // `provides`) — same data the board modal reads from /api/admin/ai-providers
     ai: {
-      defaultModel: p.defaultModel, models: p.models, embeds: p.embeds, transcribes: p.transcribes, detects: p.detects,
-      provides: p.provides, // the normal form, alongside the legacy per-capability fields the modal still reads
+      defaultModel: p.defaultModel, models: p.models,
+      provides: p.provides, // the one capability shape on the wire (7b)
       keyless: p.keyless, onDevice: p.onDevice,
       needsBase: !!p.needsBase, base: p.needsBase ? p.base || null : null,
     },

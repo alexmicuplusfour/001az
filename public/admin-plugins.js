@@ -7,9 +7,10 @@
 // GET /api/admin/plugins; this module holds no catalog knowledge of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { openPluginModal } from "/plugin-modal.js";
+import { openPluginModal, busy } from "/plugin-modal.js";
 import { openAddPluginModal } from "/plugin-add-modal.js";
 import { renderCapabilities } from "/admin-capabilities.js";
+import { servingRoles, roleBadge } from "/capability-present.js";
 import { ICONS } from "/utils.js";
 
 // The kind filter above the list: chip labels per card family, in display
@@ -19,39 +20,18 @@ const KIND_FILTERS = [["ai", "AI"], ["connector", "Data"], ["media", "Media"], [
 let activeKind = "all";
 
 
-// Which provider currently backs the tagger / embedder slots (for badges + tag).
-// The tagger falls back to the anthropic env var when no default key is set.
-export function slotProviders(slots, keys) {
-  const keyProvider = (id) => keys.find((k) => k.id === id)?.provider || null;
-  const tagger = slots.tagger.keyId
-    ? keyProvider(slots.tagger.keyId)
-    : slots.tagger.envKey ? "anthropic" : null;
-  const embedder = !slots.embedder.enabled ? null
-    // A set provider name = an on-device embedder picked by name (no key row);
-    // otherwise the key row says which provider backs the slot.
-    : slots.embedder.provider || keyProvider(slots.embedder.keyId);
-  // Transcription always resolves (the whisper sidecar by default); the server
-  // hands us the provider actually in effect.
-  const transcriber = slots.transcriber?.active || "whisper";
-  // Detection always resolves (the on-device LLMDet detector by default); the
-  // server hands us the provider actually in effect.
-  const detector = slots.detector?.active || "localDetector";
-  return { tagger, embedder, transcriber, detector };
-}
-
 // The right-aligned tag: category + the role/qualifier that defines the card.
-// AI shows the slot it's currently the default for (tagger/embedder), else bare
-// "AI"; a data connector shows its domain; media is always core.
-export function tagFor(p, defaults) {
+// AI shows the first capability this provider currently serves — read off the
+// capabilities feed by the same rule as the badges, so no capability can be
+// left out of a hand-list here; a data connector shows its domain; media is
+// always core.
+export function tagFor(p, caps) {
   // An external plugin that failed to load carries only its manifest — no live
   // p.connector/p.ai descriptor — so guard every deref below with `?.`.
   if (p.state?.loadError) return "Plugin · error";
   if (p.kind === "ai") {
-    if (defaults.tagger === p.name) return "AI · tagger";
-    if (defaults.embedder === p.name) return "AI · embedder";
-    if (defaults.transcriber === p.name) return "AI · transcriber";
-    if (defaults.detector === p.name) return "AI · detector";
-    return "AI";
+    const role = servingRoles(caps, p.name)[0];
+    return role ? `AI · ${role.agent}` : "AI";
   }
   if (p.kind === "connector") return `Data · ${p.connector?.domain ?? "external"}`;
   if (p.kind === "source") return p.core ? "Source · local" : "Source · remote";
@@ -91,10 +71,26 @@ export async function loadPluginState() {
     api("GET", "/api/admin/source-connections"),
     api("GET", "/api/admin/capabilities"),
   ]);
-  const { plugins, slots } = data;
-  // `capabilities` feeds the modal's generic per-capability sections (and the
-  // Capabilities tab itself); the legacy slots/defaults stay for the cards.
-  return { plugins, slots, keys, connections, defaults: slotProviders(slots, keys), capabilities: caps.capabilities };
+  // `capabilities` is the one status source: the modal's sections, the
+  // Capabilities tab, and the cards' badges/tags/star states all read it —
+  // the legacy `slots` payload has no reader left (7c).
+  return { plugins: data.plugins, keys, connections, capabilities: caps.capabilities };
+}
+
+// One refresh for the two surfaces that project plugin state, threading the
+// state so neither refetches what the caller just loaded. Actions that changed
+// state without fetching call it bare — both renders then load for themselves.
+export const refreshPluginSurfaces = (state) => { renderPlugins(state); renderCapabilities(state?.capabilities); };
+
+// The admin shell's entry for both surfaces: one gate, ONE state fetch — the
+// capabilities feed is the page's most expensive GET and used to be fetched
+// twice per load, once by each tab's render.
+export async function renderPluginSurfaces() {
+  const me = await fetch("/api/me").then((r) => r.json()).catch(() => null);
+  if (!me || !me.is_admin) return;
+  let state;
+  try { state = await loadPluginState(); } catch { return; }
+  refreshPluginSurfaces(state);
 }
 
 export async function renderPlugins(prefetched) {
@@ -105,7 +101,7 @@ export async function renderPlugins(prefetched) {
   // fetched so we don't hit the network twice for the same render.
   let state = prefetched;
   if (!state) { try { state = await loadPluginState(); } catch { return; } }
-  const { plugins, slots, keys, connections: srcConnections, defaults } = state;
+  const { plugins, keys, connections: srcConnections, capabilities } = state;
   const installed = plugins.filter((p) => p.state.installed);
 
   const sec = document.createElement("div");
@@ -117,9 +113,13 @@ export async function renderPlugins(prefetched) {
   // modal opened from THIS tab rebinds something. (Deliberate module cycle with
   // admin-capabilities; both sides only call each other's functions later, so
   // ESM resolves it fine.)
+  // `capabilities` rides in ctx from the FIRST render — the modal's sections
+  // read it, and before 7c a gear-opened modal only received it after its
+  // first mutation's reload merged fresh state (sections were missing on
+  // first open from this tab).
   const ctx = {
-    plugins, slots, keys, connections: srcConnections, defaults,
-    refresh: (state) => { renderPlugins(state); renderCapabilities(); },
+    plugins, keys, connections: srcConnections, capabilities,
+    refresh: refreshPluginSurfaces,
     getState: loadPluginState,
   };
 
@@ -177,6 +177,12 @@ function filterPill(label, count, active, onClick) {
   return b;
 }
 
+// A connector card's domain entry off the capabilities feed — `bound` is the
+// stored star, `running` what actually resolves (the old slots.domains'
+// setting/effective, same words the feed uses everywhere else).
+const domainCap = (ctx, p) =>
+  (ctx.capabilities || []).find((c) => c.kind === "domain" && c.id === p.connector.domain);
+
 function badge(text, cls = "") {
   const b = document.createElement("span");
   b.className = "badge" + (cls ? ` ${cls}` : "");
@@ -213,23 +219,26 @@ function pluginRow(p, ctx) {
   head.appendChild(label);
 
   // slot default badges — inline with the title, since they name what the row
-  // IS; each links to its capability's card on the Capabilities tab
+  // IS; each links to its capability's card on the Capabilities tab. One rule
+  // over the feed (servingRoles) instead of four hand-written checks — a new
+  // capability badges itself, and none can be forgotten the way the
+  // transcriber was in removalImpact.
   if (p.kind === "ai") {
-    if (ctx.defaults.tagger === p.name)
-      head.appendChild(badgeLink(ctx.slots.tagger.keyId ? "default tagger" : "default tagger · env", "tag"));
-    if (ctx.defaults.embedder === p.name) head.appendChild(badgeLink("default embedder", "embed"));
-    if (ctx.defaults.transcriber === p.name) head.appendChild(badgeLink("default transcriber", "transcribe"));
-    if (ctx.defaults.detector === p.name) head.appendChild(badgeLink("default detector", "detect"));
+    for (const c of servingRoles(ctx.capabilities, p.name)) {
+      const b = roleBadge(c);
+      head.appendChild(badgeLink(b.text, b.capId));
+    }
   }
   if (p.kind === "connector") {
-    const d = ctx.slots.domains[p.connector.domain] || {};
-    // Badge whichever card actually resolves as the domain default (d.effective),
+    const d = domainCap(ctx, p);
+    // Badge whichever card actually resolves as the domain default (running),
     // not the stored star — so removing the starred provider still shows the
     // active fallback as default. Note when the star points elsewhere (e.g. it
     // was removed): the star setting is preserved so re-adding restores it.
-    if (d.effective === p.name) {
+    if (d?.running?.provider === p.name) {
       head.appendChild(badgeLink("default", p.connector.domain));
-      if (d.setting && d.setting !== d.effective) head.appendChild(badgeLink(`was ${d.setting}`, p.connector.domain, "warn"));
+      if (d.bound?.provider && d.bound.provider !== d.running.provider)
+        head.appendChild(badgeLink(`was ${d.bound.provider}`, p.connector.domain, "warn"));
     }
   }
 
@@ -255,7 +264,7 @@ function pluginRow(p, ctx) {
 
   const tag = document.createElement("span");
   tag.className = "p-tag";
-  tag.textContent = tagFor(p, ctx.defaults);
+  tag.textContent = tagFor(p, ctx.capabilities);
   meta.appendChild(tag);
   main.appendChild(meta);
   row.appendChild(main);
@@ -317,7 +326,7 @@ function erroredRow(p, ctx) {
   meta.className = "p-meta";
   const tag = document.createElement("span");
   tag.className = "p-tag";
-  tag.textContent = tagFor(p, ctx.defaults);
+  tag.textContent = tagFor(p, ctx.capabilities);
   meta.appendChild(tag);
   main.appendChild(meta);
   row.appendChild(main);
@@ -328,7 +337,7 @@ function erroredRow(p, ctx) {
   retry.textContent = "Retry";
   retry.disabled = !p.source?.url;
   retry.title = p.source?.url ? "Re-download and load from the stored source" : "No source URL on record";
-  retry.onclick = () => retryInstall(p, ctx, retry);
+  retry.onclick = busy(retry, "Retrying…", () => retryInstall(p, ctx));
   row.appendChild(retry);
 
   const remove = document.createElement("button");
@@ -341,24 +350,22 @@ function erroredRow(p, ctx) {
   return row;
 }
 
-async function retryInstall(p, ctx, btn) {
+async function retryInstall(p, ctx) {
   // Retry re-downloads and re-RUNS code from the stored URL — the same risk the
   // install modal confirms. For a moving ref (a branch / the default) that code
   // may have changed since it was first trusted, so name the risk again here.
+  // (Button state is `busy`'s job — the shared helper the rest of the admin
+  // client uses.)
   if (!confirm(
     `Reinstall ${p.label} from:\n${p.source.url}\n\n` +
     "This re-downloads and runs code from the internet with the server's full " +
     "access — there is no sandbox. Only continue if you trust this source.",
   )) return;
-  btn.disabled = true;
-  btn.textContent = "Retrying…";
   try {
     await api("POST", "/api/admin/plugins/install", { url: p.source.url });
     toast(`${p.label} reinstalled`);
     ctx.refresh();
   } catch (err) {
-    btn.disabled = false;
-    btn.textContent = "Retry";
     toast.error(err.message);
     ctx.refresh(); // a failed retry persisted a fresh reason — re-render so the card shows it
   }
@@ -390,15 +397,15 @@ async function removePlugin(p, ctx) {
 function removalImpact(p, ctx) {
   if (p.state?.loadError) return ""; // errored: never registered, so nothing depends on it
   if (p.kind === "ai") {
-    const roles = [];
-    if (ctx.defaults.tagger === p.name) roles.push("the default tagger");
-    if (ctx.defaults.embedder === p.name) roles.push("the default embedder");
-    if (ctx.defaults.detector === p.name) roles.push("the default detector");
+    // From the feed, by the same rule as the badges — the hand-list this
+    // replaces silently omitted the transcriber, so removing the default
+    // transcription provider warned about nothing.
+    const roles = servingRoles(ctx.capabilities, p.name).map((c) => `the default ${c.agent}`);
     if (roles.length) return `This is ${roles.join(" and ")}.`;
   }
   if (p.kind === "connector") {
-    const d = ctx.slots.domains[p.connector.domain] || {};
-    if ((d.setting || d.effective) === p.name) return `This is the default ${p.connector.domain} provider.`;
+    const d = domainCap(ctx, p);
+    if ((d?.bound?.provider || d?.running?.provider) === p.name) return `This is the default ${p.connector.domain} provider.`;
   }
   if (p.kind === "source") {
     const n = p.state.connectionCount || 0;

@@ -23,7 +23,7 @@
 // result carries apiKey — it must never be spread into this payload. The
 // secrets-scan test seeds a sentinel key and greps the serialized response.
 import { PROVIDERS } from "./providers.js";
-import { CAPABILITY_DEFS } from "./capabilities.js";
+import { CAPABILITY, CAPABILITY_DEFS } from "./capabilities.js";
 import { resolveCapability, capabilityBinding, capabilityConfig, storedBindingMiss } from "./capability-resolve.js";
 import { pluginCatalog } from "./plugins.js";
 import { listConnectors, getConnector } from "./connectors/index.js";
@@ -188,7 +188,11 @@ async function aiEntry(db, cap, catalog) {
     // section knows which provider's card offers the env row.
     ...(cap.env ? { env: { configured: !!process.env[cap.env.secret], provider: cap.env.provider, var: cap.env.secret } } : {}),
     ...(cap.rebindWarning ? { rebindWarning: cap.rebindWarning } : {}),
-    ...(cap.floor?.kind === "delegate" ? { delegatesTo: cap.floor.to } : {}),
+    // The delegate target's id AND its agent noun — the presenter renders
+    // "each board's tagger" from data instead of knowing tag → "tagger".
+    ...(cap.floor?.kind === "delegate"
+      ? { delegatesTo: cap.floor.to, delegatesToAgent: CAPABILITY[cap.floor.to]?.agent || cap.floor.to }
+      : {}),
     // Board scope: how many boards pin their own, and the COLUMN names the
     // board routes speak — shipped rather than guessed, so the board modal's
     // generic picker posts the right body fields without naming a capability.

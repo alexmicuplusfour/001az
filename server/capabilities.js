@@ -210,10 +210,8 @@ export const MODEL_CAPABILITIES = CAPABILITY_DEFS.filter((c) => c.models).map((c
 //
 // NOTE 2: deliberately NOT derived from the `verb` fields above, and narrower
 // than they are. `tag` is absent because it is declared BY wire.tag existing
-// (the check would be circular), `research` because it is a flag on the tagging
-// call rather than a call of its own, and `embed` because the loader has never
-// required wire.embed — test/fixtures/plugins/acme-embed declares `embeds` with
-// wire null, is asserted to load, and would throw at the first embedTexts call.
-// Closing that changes what the loader accepts; it waits for the slice where
-// that is in scope.
-export const WIRE_VERB = { transcribe: "transcribe", detect: "detect" };
+// (the check would be circular), and `research` because it is a flag on the
+// tagging call rather than a call of its own. `embed` joined in slice 7a: the
+// loader historically never required wire.embed, so an embed advertiser with
+// wire null loaded and then threw at the first embedTexts call.
+export const WIRE_VERB = { embed: "embed", transcribe: "transcribe", detect: "detect" };

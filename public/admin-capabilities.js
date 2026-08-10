@@ -12,7 +12,7 @@
 import { api } from "/api.js";
 import { toast } from "/toast.js";
 import { openPluginModal, busy } from "/plugin-modal.js";
-import { renderPlugins, loadPluginState } from "/admin-plugins.js";
+import { refreshPluginSurfaces, loadPluginState } from "/admin-plugins.js";
 import { presentChip, presentLines, presentSupported, configureTarget, fmtProbe } from "/capability-present.js";
 
 const chipEl = ({ cls, text }) => {
@@ -34,7 +34,7 @@ async function openConfigure(c) {
   if (!p) { location.hash = "#plugins"; return; }
   // Mutations inside the modal refresh BOTH surfaces — the Plugins tab it
   // belongs to and this one, which is a projection of the same state.
-  openPluginModal(p, { ...state, refresh: (s) => { renderPlugins(s); renderCapabilities(); }, getState: loadPluginState });
+  openPluginModal(p, { ...state, refresh: refreshPluginSurfaces, getState: loadPluginState });
 }
 
 function capCard(c) {
@@ -165,11 +165,14 @@ function highlightFromHash() {
 }
 addEventListener("hashchange", highlightFromHash);
 
-export async function renderCapabilities() {
+// `prefetched` mirrors renderPlugins': callers that just loaded the state hand
+// the capabilities array over instead of this render refetching the page's
+// most expensive GET (three settings walks per AI entry, server-side).
+export async function renderCapabilities(prefetched) {
   const me = await fetch("/api/me").then((r) => r.json());
   if (!me || !me.is_admin) return;
-  let caps;
-  try { ({ capabilities: caps } = await api("GET", "/api/admin/capabilities")); } catch { return; }
+  let caps = prefetched;
+  if (!caps) { try { ({ capabilities: caps } = await api("GET", "/api/admin/capabilities")); } catch { return; } }
 
   const sec = document.createElement("div");
   sec.className = "section";

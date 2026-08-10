@@ -217,20 +217,17 @@ test("catalog: key presence without key material", async () => {
   assert.ok(!flat.includes("cmc-secret") && !flat.includes("sk-secret"));
 });
 
-test("GET /api/admin/plugins: admin-only; plugins + slots in one payload", async () => {
+test("GET /api/admin/plugins: admin-only; the payload is the plugin list — slots retired in 7c", async () => {
   const anon = await req(base, "GET", "/api/admin/plugins");
   assert.equal(anon.status, 403);
 
   const r = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
   assert.equal(r.status, 200);
   assert.equal(r.json.plugins.length, pluginDefs().length);
-  // slot state reads the same settings the legacy routes use
-  assert.equal(r.json.slots.tagger.keyId, null);
-  assert.equal(r.json.slots.embedder.enabled, false);
-  // Nothing is installed by default in either connector domain, so resolution
-  // has nothing to land on — effective is null until a provider is added.
-  assert.deepEqual(r.json.slots.domains.crypto, { setting: null, effective: null });
-  assert.deepEqual(r.json.slots.domains.stocks, { setting: null, effective: null });
+  // The slot/domain state these lines used to pin lives on the capabilities
+  // feed (fresh-instance states are asserted in capabilities.test.js); the
+  // absence is pinned so the parallel projection can't quietly come back.
+  assert.equal("slots" in r.json, false);
 });
 
 // --- slice 3: writes + enforcement ---
@@ -309,9 +306,11 @@ test("activeProvider: not-installed default falls forward; none-installed throws
 
   await setPluginState(db, "crypto:coinmarketcap", { installed: false });
   await assert.rejects(conn.activeProvider(db), /no crypto provider is installed/);
-  // the catalog route reports effective=null instead of erroring
-  const r = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
-  assert.equal(r.json.slots.domains.crypto.effective, null);
+  // the capabilities feed reports the domain as unavailable instead of erroring
+  const r = await req(base, "GET", "/api/admin/capabilities", { sid: admin.sid });
+  const crypto = r.json.capabilities.find((c) => c.id === "crypto");
+  assert.equal(crypto.running, null);
+  assert.equal(crypto.state, "unavailable");
 
   await setPluginState(db, "crypto:coingecko", { installed: true });
   await setPluginState(db, "crypto:coinmarketcap", { installed: true });
@@ -370,43 +369,9 @@ test("resolvers: a not-installed AI plugin drops out; fallbacks stay graceful", 
   }
 });
 
-// GET /api/admin/ai-default — what the board modal's "App default" rows name.
-// It must walk the SAME ladder as the tagger (a label that disagrees with what
-// tags the items is worse than no label), and never carry the secret.
-test("ai-default: names the key and model the app default resolves to — never the secret", async () => {
-  const savedEnv = process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_API_KEY;
-  try {
-    assert.equal((await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid })).json, null,
-      "nothing configured → null, so the row can say so");
-
-    const keyId = await createAiKey(db, "prod", "openai", "sk-t9"); // named "prod", not "openai" — the label must be the row's own name
-    await setSetting(db, "default_key_id", String(keyId));
-    await setSetting(db, "model", "gpt-5.4-mini");
-    // Not installed yet: the ladder skips it, and so does the label.
-    assert.equal((await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid })).json, null);
-
-    await setPluginState(db, "ai:openai", { installed: true });
-    const r = await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid });
-    assert.deepEqual(r.json, { name: "prod", provider: "openai", model: "gpt-5.4-mini" });
-
-    // The env rung has no row to name, so the route names it.
-    await setSetting(db, "default_key_id", null);
-    await setSetting(db, "model", null);
-    process.env.ANTHROPIC_API_KEY = "sk-env";
-    const env = (await req(base, "GET", "/api/admin/ai-default", { sid: admin.sid })).json;
-    assert.equal(env.name, "environment key");
-    assert.equal(env.provider, "anthropic");
-    assert.ok(env.model);
-    assert.ok(!JSON.stringify(env).includes("sk-env"), "the key itself never leaves the server");
-  } finally {
-    if (savedEnv !== undefined) process.env.ANTHROPIC_API_KEY = savedEnv;
-    else delete process.env.ANTHROPIC_API_KEY;
-    await setPluginState(db, "ai:openai", { installed: false });
-    await setSetting(db, "default_key_id", null);
-    await setSetting(db, "model", null);
-  }
-});
+// (GET /api/admin/ai-default was deleted in 7b — the board modal's "App default"
+// rows read the capabilities feed's `running`, whose ladder and secrets
+// discipline are pinned in capabilities.test.js.)
 
 test("health ledger: connector traffic records failures and heals through the runtime", async () => {
   const original = globalThis.fetch;

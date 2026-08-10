@@ -165,13 +165,13 @@ test("transcribeFailurePolicy: park / park-capped / backoff-item / backoff-lane"
 
 // ── Slice 3: capability-advertised provider transcription ────────────────────
 
-test("providerCatalog advertises transcribes per provider (capability, not a hardcoded list)", () => {
+test("providerCatalog advertises transcription per provider (provides, not a hardcoded list)", () => {
   const cat = Object.fromEntries(providerCatalog().map((p) => [p.name, p]));
-  assert.ok(cat.openai.transcribes, "openai advertises transcription");
-  assert.equal(cat.openai.transcribes.default, "gpt-4o-transcribe");
-  assert.equal(cat.anthropic.transcribes, null, "claude advertises none (no audio modality)");
-  assert.ok(cat.whisper.transcribes, "the on-device whisper sidecar advertises transcription");
-  assert.equal(cat.local.transcribes, null, "Xenova (local) is the embedder, not the transcriber");
+  assert.ok(cat.openai.provides.transcribe, "openai advertises transcription");
+  assert.equal(cat.openai.provides.transcribe.default, "gpt-4o-transcribe");
+  assert.equal(cat.anthropic.provides.transcribe, undefined, "claude advertises none (no audio modality)");
+  assert.ok(cat.whisper.provides.transcribe, "the on-device whisper sidecar advertises transcription");
+  assert.equal(cat.local.provides.transcribe, undefined, "Xenova (local) is the embedder, not the transcriber");
 });
 
 test("transcribeAudio (shared compat wire): multipart POST to /audio/transcriptions; error mapping", async (t) => {
@@ -227,7 +227,7 @@ test("resolveTranscriber: a configured provider with no key falls back to local 
   assert.equal(eng.id, "whisper", "no usable key → the always-on sidecar, not an error");
 });
 
-test("ai-config POST: a transcribe model the provider doesn't advertise is rejected (400, not stored)", async (t) => {
+test("bind: a transcribe model the provider doesn't advertise is rejected (400, not stored)", async (t) => {
   const { base, db, close } = await startServer();
   t.after(close);
   const admin = await adminSession(db);
@@ -236,17 +236,17 @@ test("ai-config POST: a transcribe model the provider doesn't advertise is rejec
   const keyId = created.id ?? created;
 
   // A bogus model → 400, and nothing is persisted (the provider stays unset).
-  const bad = await req(base, "POST", "/api/admin/ai-config", {
+  const bad = await req(base, "POST", "/api/admin/capabilities/transcribe/bind", {
     sid: admin.sid,
-    body: { transcribeProvider: "openai", transcribeKeyId: keyId, transcribeModel: "whisper-9-ultra" },
+    body: { provider: "openai", keyId, model: "whisper-9-ultra" },
   });
   assert.equal(bad.status, 400);
   assert.equal(await getSetting(db, "transcribe_provider"), null, "the bad request stored nothing");
 
   // A real advertised model → 200 and it sticks.
-  const ok = await req(base, "POST", "/api/admin/ai-config", {
+  const ok = await req(base, "POST", "/api/admin/capabilities/transcribe/bind", {
     sid: admin.sid,
-    body: { transcribeProvider: "openai", transcribeKeyId: keyId, transcribeModel: "whisper-1" },
+    body: { provider: "openai", keyId, model: "whisper-1" },
   });
   assert.equal(ok.status, 200);
   assert.equal(await getSetting(db, "transcribe_model"), "whisper-1");

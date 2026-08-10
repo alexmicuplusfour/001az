@@ -72,13 +72,24 @@ test("loadDir: a valid ai-provider registers into PROVIDERS and the served catal
   assert.equal(PROVIDERS["acme.model"], undefined, "unregister removes it");
 });
 
-test("loadDir: an embed-only ai-provider (wire null, embeds set, no defaultModel) is accepted", async () => {
+test("loadDir: an embed-only ai-provider (embeds + wire.embed, no defaultModel) is accepted", async () => {
   const { catalogId, manifest } = await loadDir(FIX("acme-embed"));
   assert.equal(catalogId, "ai:acme.embed");
   assert.equal(PROVIDERS["acme.embed"].embeds.default, "acme-embed-1");
-  assert.ok(providerCatalog().find((p) => p.name === "acme.embed")?.embeds, "embed capability flows through the catalog");
+  assert.ok(providerCatalog().find((p) => p.name === "acme.embed")?.provides?.embed, "embed capability flows through the catalog");
   unregister(manifest);
   assert.equal(PROVIDERS["acme.embed"], undefined, "unregister removes it");
+});
+
+test("loadDir: a provides-only ai-provider loads, with the legacy fields backfilled", async () => {
+  const { catalogId, manifest } = await loadDir(FIX("acme-provides"));
+  assert.equal(catalogId, "ai:acme.provides");
+  // The fixture declares NO legacy fields; install()'s backfill means every
+  // reader that still consumes them sees the declaration anyway.
+  assert.equal(PROVIDERS["acme.provides"].embeds.default, "acme-p-1");
+  assert.ok(providerCatalog().find((p) => p.name === "acme.provides")?.provides?.embed, "flows through the catalog");
+  unregister(manifest);
+  assert.equal(PROVIDERS["acme.provides"], undefined, "unregister removes it");
 });
 
 test("loadDir: a connector-domain registers a whole new domain", async () => {
@@ -107,6 +118,18 @@ test("loadDir: a connector-domain cannot shadow an existing domain", async () =>
 
 test("loadDir: a connector-provider for an unknown domain fails cleanly", async () => {
   await assert.rejects(loadDir(FIX("unknown-domain")), /unknown connector domain/);
+});
+
+test("loadDir: advertising embed without wire.embed is rejected at install, not at first use", async () => {
+  // acme-embed's pre-7a shape: it used to load and then throw at the first
+  // embedTexts call. The install-time error names the fix instead.
+  await assert.rejects(loadDir(FIX("embed-no-wire")), /needs wire\.embed/);
+  assert.equal(PROVIDERS["acme.nowire"], undefined, "register-last: nothing was registered");
+});
+
+test("loadDir: a modifier alone is not a capability — research-only is still rejected", async () => {
+  await assert.rejects(loadDir(FIX("research-only")), /at least one capability/);
+  assert.equal(PROVIDERS["acme.research"], undefined, "register-last: nothing was registered");
 });
 
 // --- integration (server + db) ---

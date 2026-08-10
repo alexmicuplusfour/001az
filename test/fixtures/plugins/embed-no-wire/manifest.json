@@ -1,0 +1,8 @@
+{
+  "id": "acme.nowire",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "No Wire",
+  "description": "advertises embeds with wire null — must be rejected at install (fixture)",
+  "main": "index.js"
+}

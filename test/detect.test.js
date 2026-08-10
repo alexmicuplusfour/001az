@@ -25,13 +25,13 @@ test("descriptor: the on-device detector is catalog-only (wire null) and adverti
   assert.equal(d.detects.default, LOCAL_MODEL);
 });
 
-test("catalog: detects rides through with default + models; a non-detect provider is null", () => {
+test("catalog: detection rides through provides with default + models; a non-detect provider has no entry", () => {
   const c = providerCatalog().find((p) => p.name === "localDetector");
   assert.ok(c);
   assert.equal(c.onDevice, true);
-  assert.equal(c.detects.default, LOCAL_MODEL);
-  assert.ok(Array.isArray(c.detects.models) && c.detects.models.length);
-  assert.equal(providerCatalog().find((p) => p.name === "anthropic").detects, null);
+  assert.equal(c.provides.detect.default, LOCAL_MODEL);
+  assert.ok(Array.isArray(c.provides.detect.models) && c.provides.detect.models.length);
+  assert.equal(providerCatalog().find((p) => p.name === "anthropic").provides.detect, undefined);
 });
 
 test("dispatch: detectObjects routes to a keyed provider's wire.detect (the paid path)", async () => {
@@ -165,22 +165,24 @@ test("resolveDetector is capability-gated: a no-detect provider falls back to lo
   }
 });
 
-test("GET ai-config exposes the detect block; POST gates the provider and stores the threshold", async () => {
-  const cfg = (await req(srv.base, "GET", "/api/admin/ai-config", { sid: admin.sid })).json;
-  assert.equal(cfg.detect.provider, "localDetector");
-  assert.equal(cfg.detect.active, "localDetector");
-  assert.equal(cfg.detect.threshold, 0.3);
+test("the capabilities feed exposes the detect binding; bind gates the provider and stores the threshold", async () => {
+  const detectOf = (r) => r.json.capabilities.find((c) => c.id === "detect");
+  const cfg = detectOf(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));
+  assert.equal(cfg.bound.provider, "localDetector", "an empty binding reads as the floor");
+  assert.equal(cfg.running.provider, "localDetector");
+  assert.deepEqual(cfg.config, [{ key: "detect_threshold", value: 0.3 }]);
 
   // A provider that advertises no detection is refused.
-  const bad = await req(srv.base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { detectProvider: "anthropic" } });
+  const bad = await req(srv.base, "POST", "/api/admin/capabilities/detect/bind", { sid: admin.sid, body: { provider: "anthropic" } });
   assert.equal(bad.status, 400);
   assert.match(bad.json.error, /advertises none|object detection/);
 
   // The on-device detector is picked by name; the threshold knob persists.
-  const ok = await req(srv.base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { detectProvider: "localDetector", detectThreshold: 0.25 } });
+  const ok = await req(srv.base, "POST", "/api/admin/capabilities/detect/bind",
+    { sid: admin.sid, body: { provider: "localDetector", config: { detect_threshold: 0.25 } } });
   assert.equal(ok.status, 200);
-  const next = (await req(srv.base, "GET", "/api/admin/ai-config", { sid: admin.sid })).json;
-  assert.equal(next.detect.provider, "localDetector");
-  assert.equal(next.detect.threshold, 0.25);
+  const next = detectOf(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));
+  assert.equal(next.bound.provider, "localDetector");
+  assert.deepEqual(next.config, [{ key: "detect_threshold", value: 0.25 }]);
   await setSetting(db, "detect_threshold", null); // leave settings as found
 });

@@ -634,8 +634,12 @@ test("plugins catalog: connector shape, default provider, no key echo", async ()
   const cmc = r.json.plugins.find((p) => p.id === "crypto:coinmarketcap");
   assert.equal(cmc.connector.needsKey, true);
   assert.equal(cmc.state.hasKey, false);
-  // default when the setting is unset
-  assert.deepEqual(r.json.slots.domains.crypto, { setting: null, effective: "coingecko" });
+  // default when the setting is unset — the domain's star state lives on the
+  // capabilities feed since 7c
+  const caps = await req(base, "GET", "/api/admin/capabilities", { sid: admin.sid });
+  const crypto = caps.json.capabilities.find((c) => c.id === "crypto");
+  assert.equal(crypto.bound.provider, null);
+  assert.equal(crypto.running.provider, "coingecko");
   assert.ok(!JSON.stringify(r.json).includes("cmc-test-key")); // presence only, never the value
 });
 
@@ -662,7 +666,8 @@ test("starring a domain default validates provider + key; PATCH stores the key",
   assert.equal(r.status, 200);
 
   const g = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
-  assert.equal(g.json.slots.domains.crypto.setting, "coinmarketcap");
+  const starred = await req(base, "GET", "/api/admin/capabilities", { sid: admin.sid });
+  assert.equal(starred.json.capabilities.find((c) => c.id === "crypto").bound.provider, "coinmarketcap");
   assert.equal(g.json.plugins.find((p) => p.id === "crypto:coinmarketcap").state.hasKey, true);
   assert.equal(g.json.plugins.find((p) => p.id === "crypto:coingecko").state.hasKey, false); // per-provider slots don't bleed
 });
@@ -722,7 +727,8 @@ test("CoinGecko takes an optional key; slots stay per-provider", async () => {
   assert.equal(r.status, 200); // keyless provider stars fine, key or not
 
   const g = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
-  assert.equal(g.json.slots.domains.crypto.setting, "coingecko");
+  const caps = await req(base, "GET", "/api/admin/capabilities", { sid: admin.sid });
+  assert.equal(caps.json.capabilities.find((c) => c.id === "crypto").bound.provider, "coingecko");
   assert.equal(g.json.plugins.find((p) => p.id === "crypto:coingecko").state.hasKey, true);
   assert.equal(g.json.plugins.find((p) => p.id === "crypto:coinmarketcap").state.hasKey, true); // CMC key preserved, not clobbered
 });

@@ -1,6 +1,6 @@
 // Capability probes (capabilities-plan.md, slice 2b) — the "does this actually
-// work end to end" button behind /api/admin/capabilities/:id/probe and the four
-// legacy *-test routes that now delegate here.
+// work end to end" button behind /api/admin/capabilities/:id/probe. (The four
+// legacy *-test routes that first delegated here were deleted in 7b.)
 //
 // One entry per capability, holding the ONE thing that genuinely differs: the
 // sample input. Everything around it — resolve, call, report which provider and

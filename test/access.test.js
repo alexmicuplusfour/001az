@@ -230,11 +230,11 @@ test("semantic search respects auth, board access, and the enabled flag", async 
 
 test("enabling semantic search requires an embeddings-capable key", async () => {
   // No embed key configured → refuse to enable.
-  let r = await req(base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { embedEnabled: true } });
+  let r = await req(base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { enabled: true } });
   assert.equal(r.status, 400);
   // An anthropic key is not eligible either.
   const anthKey = await createAiKey(db, "anth", "anthropic", "sk-ant-test");
-  r = await req(base, "POST", "/api/admin/ai-config", { sid: admin.sid, body: { embedKeyId: anthKey, embedEnabled: true } });
+  r = await req(base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { keyId: anthKey, enabled: true } });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /embeddings/);
 });

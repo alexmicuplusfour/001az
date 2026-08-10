@@ -20,7 +20,7 @@ import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import { resolveSource, fetchModule } from "./plugin-fetch.js";
 import { registerProvider, unregisterProvider, invalidateModelListCache, normalizeProvides, WIRES } from "./providers.js";
-import { WIRE_VERB, CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
+import { WIRE_VERB, CAPABILITY, CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
 import {
   getConnector,
   registerConnector, unregisterConnector,
@@ -85,11 +85,18 @@ const KIND_DEFS = {
   "ai-provider": {
     catalogId: (m) => `ai:${m.id}`,
     validateBuilt: (m, built) => {
-      // `wire` is the dispatch object ({ tag?, embed?, transcribe?, testKey }); an
-      // embed-only provider (like the built-in local one) has wire null + embeds
-      // set. Reject only a descriptor that can do none of tag / embed / transcribe.
-      if (!built.wire && !built.embeds && !built.transcribes && !built.detects)
-        throw new Error("ai-provider must return a descriptor with a wire (tagging), embeds, transcribes, or detects config");
+      // Every check below judges the `provides` normal form, so a descriptor may
+      // declare either shape (the legacy fields or `provides`) and is held to
+      // the same rules. normalizeProvides is the loader's only reading of the
+      // legacy fields — one implementation, or the loader and the registry drift.
+      const provides = normalizeProvides(built);
+      // A provider must DO something: at least one capability that is not a mere
+      // modifier of another (`research` alone would qualify a tagger the plugin
+      // doesn't have — rejected before slice 7a by the legacy-field emptiness
+      // check, rejected here on purpose). An id the registry doesn't know counts
+      // as real: a plugin-contributed capability is supply, not a modifier.
+      if (!Object.keys(provides).some((id) => !CAPABILITY[id]?.modifierOf))
+        throw new Error("ai-provider must declare at least one capability — `provides`, or the legacy wire (tagging) / embeds / transcribes / detects fields");
       if (!built.label) throw new Error("ai-provider descriptor needs a label");
       // A capability is only real if its wire method exists: advertising
       // `transcribes` requires wire.transcribe (mirrors how tagging requires
@@ -100,7 +107,6 @@ const KIND_DEFS = {
       // descriptors advertise a capability with `wire: null` — they are
       // sidecar-backed and their HTTP call is assembled in worker.js. Hoisting
       // this into providers.js install() would reject two shipping providers.
-      const provides = normalizeProvides(built);
       for (const cap of Object.keys(provides)) {
         const verb = WIRE_VERB[cap]; // absent for `tag` (declared BY wire.tag) and `research` (a flag on the tagging call)
         if (verb && typeof built.wire?.[verb] !== "function")

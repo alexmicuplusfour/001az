@@ -84,7 +84,6 @@ import {
   createAiKey,
   updateAiKey,
   deleteAiKey,
-  embeddingStats,
   boardEmbeddings,
   listItemPayloads,
   boardItemPayloads,
@@ -125,13 +124,12 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
 import { MODEL_CAPABILITIES } from "./capabilities.js";
 import { bindCapability, setCapabilityConfig, boardBindingPatch } from "./capability-bind.js";
-import { capabilityBinding, capabilityConfig } from "./capability-resolve.js";
 import { capabilityStatus } from "./capability-status.js";
 import { probeCapability } from "./capability-probe.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
@@ -1671,19 +1669,9 @@ app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   res.json({ ok: true, deleted: payloads.length });
 }));
 
-// --- admin: AI tagger config (key registry + app default) ---
-
-// What "App default" actually resolves to, for the UI rows that inherit it
-// (the board modal's tagger and extraction pickers). The worker's own ladder
-// answers — settings key, else the env key, skipping a provider whose plugin
-// isn't installed — so the label can't drift from what tags the items; the
-// secret stays behind. null = nothing configured.
-app.get("/api/admin/ai-default", requireAdmin, wrap(async (_req, res) => {
-  const ai = await resolveDefaultAi(db);
-  if (!ai) return res.json(null);
-  const key = ai.keyId === "env" ? null : await getAiKey(db, ai.keyId);
-  res.json({ name: key?.name || "environment key", provider: ai.provider, model: ai.model });
-}));
+// --- admin: AI tagger config (key registry) ---
+// The "App default" answer the board modal used to fetch from /api/admin/ai-default
+// now rides the capabilities feed (each entry's `running`) — one ladder, one label.
 
 app.get("/api/admin/ai-keys", requireAdmin, wrap(async (_req, res) => {
   const keys = await listAiKeys(db);
@@ -1838,60 +1826,27 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   // (its /health): the model is baked into the image at build, so the app never
   // names it and the card can't drift when the image is rebuilt against a
   // different one. An unreachable sidecar leaves the list empty and the card
-  // notes the fallback. The catalog is written in BOTH shapes from one value —
-  // the legacy per-capability field the modal reads today and the `provides`
-  // normal form — so neither can be read stale.
+  // notes the fallback. Written into `provides` only — the one capability shape
+  // on the wire since 7b, so there is no second copy to read stale.
   // `askModel` is the probe, not its answer: no card, no /health call.
-  const sidecarCatalog = async (id, cap, legacyField, askModel, note) => {
+  const sidecarCatalog = async (id, cap, askModel, note) => {
     const entry = plugins.find((p) => p.id === id);
     if (!entry) return;
     const live = await askModel();
     const catalog = { default: live, models: live ? [{ id: live, note }] : [] };
     // don't mutate: `ai` is shared with the memoized plugin defs
-    entry.ai = { ...entry.ai, [legacyField]: catalog, provides: { ...entry.ai.provides, [cap]: catalog } };
+    entry.ai = { ...entry.ai, provides: { ...entry.ai.provides, [cap]: catalog } };
   };
-  await sidecarCatalog("ai:whisper", "transcribe", "transcribes", transcriberSidecarModel,
+  await sidecarCatalog("ai:whisper", "transcribe", transcriberSidecarModel,
     "runs on-server · no API key · baked at deploy (WHISPER_MODEL)");
-  await sidecarCatalog("ai:localDetector", "detect", "detects", detectorSidecarModel,
+  await sidecarCatalog("ai:localDetector", "detect", detectorSidecarModel,
     "runs in the object-detector sidecar · no API key · baked at deploy (OBJECT_DETECTOR_MODEL)");
-  const embedder = await resolveEmbedder(db);
-  const domains = {};
-  for (const c of listConnectors()) {
-    // setting = the stored star; effective = what resolution lands on (they
-    // diverge when the starred provider isn't installed — the UI shows both).
-    const s = await getConnector(c.name).standing(db);
-    domains[c.name] = { setting: s.setting, effective: s.effective?.name ?? null };
-  }
-  // The stored bindings come from capabilityBinding — one reader of a
-  // capability's settings keys and of its floor default, so this payload and
-  // /api/admin/ai-config can't drift from each other or from the descriptor.
-  // The slot NAMES below are the client's vocabulary, kept until it moves to
-  // /api/admin/capabilities.
-  const [tag, embed, transcribe, detect] =
-    await Promise.all(["tag", "embed", "transcribe", "detect"].map((c) => capabilityBinding(db, c)));
-  res.json({
-    plugins,
-    slots: {
-      // Tagging is spelled out rather than spread: it has no provider setting
-      // (the connection row implies one) and carries the env-rung flag instead.
-      tagger: { keyId: tag.keyId, model: tag.model, envKey: !!process.env.ANTHROPIC_API_KEY },
-      embedder: {
-        ...embed,
-        stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
-      },
-      // Transcription is always on (local sidecar by default); `active` is what
-      // actually resolves — a configured provider that lost its key falls to local.
-      transcriber: { ...transcribe, active: (await resolveTranscriber(db)).id },
-      // Detection resolves like transcription — the on-device LLMDet detector by
-      // default; `active` is what actually resolves.
-      detector: {
-        ...detect,
-        threshold: (await capabilityConfig(db, "detect")).detect_threshold,
-        active: (await resolveDetector(db)).id,
-      },
-      domains,
-    },
-  });
+  // The legacy `slots` block died in 7c: every status read it carried — slot
+  // defaults, domain stars, embed stats, the detect threshold — lives on
+  // GET /api/admin/capabilities, so this payload stopped running three
+  // resolvers, four binding walks, and a stats query per render to restate
+  // what the feed already says.
+  res.json({ plugins });
 }));
 
 // Star a connector domain's default provider. (Registered before the :id
@@ -2179,70 +2134,6 @@ app.post("/api/admin/source-connections/test", requireAdmin, wrap(async (req, re
   }
 }));
 
-app.get("/api/admin/ai-config", requireAdmin, wrap(async (_req, res) => {
-  // Same source as the Plugins payload's `slots` (capabilityBinding): one reader
-  // of a capability's settings keys and its floor default. These two used to be
-  // two hand-written copies of the same ~25 lines, free to disagree.
-  const [tag, embedBinding, transcribeBinding, detectBinding] =
-    await Promise.all(["tag", "embed", "transcribe", "detect"].map((c) => capabilityBinding(db, c)));
-  const defaultKeyId = tag.keyId;
-  const model = tag.model || process.env.MODEL || "claude-haiku-4-5";
-  const embedder = await resolveEmbedder(db);
-  const embed = {
-    ...embedBinding,
-    // Backfill progress against the model actually in effect (settings or
-    // the provider default); zeros when not configured.
-    stats: embedder ? await embeddingStats(db, embedder.model) : { tagged: 0, embedded: 0, failed: 0 },
-  };
-  // Transcription is always on (local sidecar by default); the provider choice
-  // is the toggle, so there's no enabled flag. `active` is what's actually in
-  // effect — a configured provider that lost its key falls back to local.
-  const transcriber = await resolveTranscriber(db);
-  const transcribe = {
-    ...transcribeBinding,
-    active: transcriber.id, // the engine family actually in effect ("whisper" or a provider)
-  };
-  // Object detection: on-device LLMDet by default, a provider override slots in
-  // later. The provider choice is the only toggle — detection is field-triggered
-  // (a board's object field), not a global sweep, so there's no enabled flag.
-  const detector = await resolveDetector(db);
-  const detect = {
-    ...detectBinding,
-    threshold: (await capabilityConfig(db, "detect")).detect_threshold,
-    active: detector.id,
-  };
-  res.json({ defaultKeyId, model, envKey: !!process.env.ANTHROPIC_API_KEY, embed, transcribe, detect });
-}));
-
-// The pre-capability body names this route accepts, per capability. It is an
-// ADAPTER now: every rule lives in bindCapability, which reads the capability
-// descriptor, and this table only says which field carried which value. The
-// client moves to /api/admin/capabilities/:id/bind when the capabilities page
-// lands; until then a new capability needs one row here and nothing else.
-const LEGACY_BIND_FIELDS = {
-  tag: { keyId: "defaultKeyId", model: "model" }, // tagging predates the naming convention
-  embed: { provider: "embedProvider", keyId: "embedKeyId", model: "embedModel", enabled: "embedEnabled" },
-  transcribe: { provider: "transcribeProvider", keyId: "transcribeKeyId", model: "transcribeModel" },
-  detect: { provider: "detectProvider", keyId: "detectKeyId", model: "detectModel" },
-};
-
-app.post("/api/admin/ai-config", requireAdmin, wrap(async (req, res) => {
-  const body = req.body || {};
-  try {
-    for (const [capId, fields] of Object.entries(LEGACY_BIND_FIELDS)) {
-      const patch = {};
-      for (const [field, name] of Object.entries(fields)) if (body[name] !== undefined) patch[field] = body[name];
-      if (Object.keys(patch).length) await bindCapability(db, capId, patch);
-    }
-    // Threshold is a plain scalar knob (LLMDet scores run confident → 0.3 default).
-    await setCapabilityConfig(db, "detect", { detect_threshold: body.detectThreshold });
-  } catch (err) {
-    return res.status(err.status || 400).json({ error: err.message });
-  }
-  console.log(`ai-config updated by admin: ${Object.keys(body).join(", ") || "(nothing)"}`);
-  res.json({ ok: true });
-}));
-
 // The capabilities status feed (capabilities-plan.md slice 3): every capability
 // — AI, connector domain, always-on — with its state, what serves it, why it
 // fell if it fell, who else could serve it, and what the outage costs. The
@@ -2273,20 +2164,6 @@ app.post("/api/admin/capabilities/:id/probe", requireAdmin, wrap(async (req, res
     res.status(err.status || 400).json({ error: err.message });
   }
 }));
-
-// The pre-capability probe URLs. Each is now one line over probeCapability —
-// the sample input, the health-ledger wrapping, and the shape of the answer all
-// live with the capability. Kept because the plugin modal calls them by URL;
-// they retire when it moves to /api/admin/capabilities/:id/probe.
-for (const [path, capId] of Object.entries({ test: "tag", "embed-test": "embed", "transcribe-test": "transcribe", "detect-test": "detect" })) {
-  app.post(`/api/admin/ai-config/${path}`, requireAdmin, wrap(async (_req, res) => {
-    try {
-      res.json(await probeCapability(db, capId));
-    } catch (err) {
-      res.status(err.status || 400).json({ error: err.message });
-    }
-  }));
-}
 
 // Connector admin config lives on the Plugins surface now:
 // GET /api/admin/plugins (catalog + key presence), PATCH /api/admin/plugins/:id

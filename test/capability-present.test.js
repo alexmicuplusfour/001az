@@ -4,7 +4,7 @@
 // capabilities.test.js proves the server actually emits.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, fmtProgress } from "../public/capability-present.js";
+import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory } from "../public/capability-present.js";
 
 const supported = [
   { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
@@ -60,7 +60,7 @@ test("the env rung names itself, blocked counts its queue, delegation and overri
   assert.deepEqual(blocked, [{ k: "Waiting", v: "14 items" }]);
   assert.equal(presentLines({ state: "blocked", demand: { waiting: 1 }, supportedBy: [] })[0].v, "1 item");
 
-  const extract = presentLines({ state: "blocked", delegatesTo: "tag", boardOverrides: 2, supportedBy: [] });
+  const extract = presentLines({ state: "blocked", delegatesTo: "tag", delegatesToAgent: "tagger", boardOverrides: 2, supportedBy: [] });
   assert.deepEqual(extract, [
     { k: "Uses", v: "each board's tagger" },
     { k: "Overrides", v: "2 boards pin their own" },
@@ -204,7 +204,7 @@ test("the Uses line yields once the capability has its own global binding", () =
   });
   assert.ok(!bound.some((l) => l.k === "Uses"), "Running already tells the truth — no contradiction line");
   // …and the delegating shape (nothing bound) keeps it, as pinned above.
-  const delegating = presentLines({ state: "blocked", delegatesTo: "tag", bound: { provider: null, keyId: null, model: null }, supportedBy: [] });
+  const delegating = presentLines({ state: "blocked", delegatesTo: "tag", delegatesToAgent: "tagger", bound: { provider: null, keyId: null, model: null }, supportedBy: [] });
   assert.deepEqual(delegating, [{ k: "Uses", v: "each board's tagger" }]);
 });
 
@@ -314,4 +314,65 @@ test("planBoardPicker: chosenLabel narrates the current selection for the mappin
   assert.equal(plan.chosenLabel("", null), "OpenAI · whisper-1", "the default row answers with what it inherits");
   assert.equal(plan.chosenLabel("7", "whisper-1"), "prod — openai · whisper-1");
   assert.equal(plan.chosenLabel("whisper", null), "Local Transcriber (Whisper) — built-in");
+});
+
+// --- 7c: the Plugins-tab helpers — one source for "who serves what" ---
+// These replace slotProviders/tagFor's hand-lists, whose removal warning
+// forgot the transcriber. The rules worth pinning: effective-vs-stored view,
+// the delegate exclusion, the disabled gate, and the consequence copy.
+
+test("servingRoles: the effective view — delegate-served entries are the target's role, not a second one", () => {
+  const caps = [
+    { kind: "ai", id: "tag", agent: "tagger", running: { provider: "anthropic", model: "m", keyId: "env" }, bound: { provider: null, keyId: null, model: null } },
+    // extract UNBOUND: its running is the tagger's own binding riding the delegate floor — not anthropic's role
+    { kind: "ai", id: "extract", agent: "extractor", delegatesTo: "tag", delegatesToAgent: "tagger",
+      running: { provider: "anthropic", model: "m", keyId: "env" }, bound: { provider: null, keyId: null, model: null } },
+    // embed off: no running at all, so no role — the enable gate needs no special case here
+    { kind: "ai", id: "embed", agent: "embedder", running: null, bound: { provider: null, keyId: 5, model: null, enabled: false } },
+    { kind: "ai", id: "transcribe", agent: "transcriber", running: { provider: "whisper", model: "large-v3", keyId: null }, bound: { provider: "whisper", keyId: null, model: null } },
+    { kind: "domain", id: "crypto", running: { provider: "anthropic" } }, // domains are never AI roles
+  ];
+  assert.deepEqual(servingRoles(caps, "anthropic").map((c) => c.id), ["tag"]);
+  assert.deepEqual(servingRoles(caps, "whisper").map((c) => c.id), ["transcribe"]);
+  // extract WITH its own stored key is a real role of the serving provider
+  const own = [{ kind: "ai", id: "extract", agent: "extractor", delegatesTo: "tag", delegatesToAgent: "tagger",
+    running: { provider: "openai", model: "m", keyId: 3 }, bound: { provider: null, keyId: 3, model: null } }];
+  assert.deepEqual(servingRoles(own, "openai").map((c) => c.id), ["extract"]);
+});
+
+test("roleBadge: names the role, links its card, and keeps the tagger's env qualifier", () => {
+  assert.deepEqual(
+    roleBadge({ id: "tag", agent: "tagger", running: { provider: "anthropic", keyId: "env" } }),
+    { capId: "tag", text: "default tagger · env" });
+  assert.deepEqual(
+    roleBadge({ id: "transcribe", agent: "transcriber", running: { provider: "whisper", keyId: null } }),
+    { capId: "transcribe", text: "default transcriber" });
+});
+
+test("keyRoles: the stored view — every capability bound to the row; a disabled binding stays quiet", () => {
+  const caps = [
+    { kind: "ai", id: "tag", agent: "tagger", bound: { provider: null, keyId: 7, model: null } },
+    { kind: "ai", id: "transcribe", agent: "transcriber", bound: { provider: "openai", keyId: 7, model: "whisper-1" } },
+    { kind: "ai", id: "embed", agent: "embedder", bound: { provider: null, keyId: 7, model: null, enabled: false } },
+    { kind: "ai", id: "detect", agent: "detector", bound: { provider: null, keyId: 2, model: null } },
+  ];
+  assert.deepEqual(keyRoles(caps, 7).map((c) => c.id), ["tag", "transcribe"]);
+  assert.deepEqual(keyRoles(caps, 2).map((c) => c.id), ["detect"]);
+  assert.deepEqual(keyRoles(caps, 9), []);
+});
+
+test("removalStory: the consequence clause per floor shape", () => {
+  assert.equal(
+    removalStory({ noun: "tagging", env: { configured: true, provider: "anthropic", var: "ANTHROPIC_API_KEY" }, floor: { kind: "blocked" } }),
+    "tagging falls back to the ANTHROPIC_API_KEY env var");
+  assert.equal(
+    removalStory({ noun: "tagging", env: { configured: false, provider: "anthropic", var: "ANTHROPIC_API_KEY" }, floor: { kind: "blocked" } }),
+    "tagging stops until another key is bound");
+  assert.equal(
+    removalStory({ noun: "transcription", floor: { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)" } }),
+    "transcription falls back to Local Transcriber (Whisper)");
+  assert.equal(removalStory({ label: "Semantic search", noun: "embeddings", floor: { kind: "off" } }), "Semantic search turns off");
+  assert.equal(
+    removalStory({ noun: "field extraction", floor: { kind: "delegate" }, delegatesTo: "tag", delegatesToAgent: "tagger" }),
+    "field extraction falls back to each board's tagger");
 });

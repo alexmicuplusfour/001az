@@ -1,28 +1,35 @@
 # Capabilities — a definition-driven capability registry (and the page it renders)
 
-**Status: SLICE 1 SHIPPED (commit 013235d). SLICE 2a SHIPPED locally 2026-08-09
-(uncommitted): `CAPABILITY_DEFS` is the registry, `capability-resolve.js` is the
-one resolver behind all four `resolveX`, and both cleanup paths iterate it —
-which fixes THREE dead-pointer bugs (`detect_key_id`, `detect_provider`, and
-tagging's shared `model`, §2.10). SLICE 2b SHIPPED too: `capability-bind.js` +
-`capability-probe.js` replace the four duplicated blocks in
-`/api/admin/ai-config` and the four `*-test` routes, which become adapters over
-them; `server.js` is 240 lines lighter. SLICE 3 SHIPPED 2026-08-10:
-`capability-status.js` + `GET /api/admin/capabilities` — the five-state
-computation (+`viaFloor`), reasons via `storedBindingMiss`, `supportedBy` off
-one `pluginCatalog` call, demand where it is indexed-cheap, domains generated
-from `listConnectors()`, and the secrets-scan test. Suite green at 941, repeated
-runs, still zero edits to existing test files. SLICE 4 SHIPPED 2026-08-10
-(commit fa023ce): the Capabilities admin tab (4a) + the plugin modal's four
-hand-written capability sections collapsed onto the pure `planSection` planner
-(4b) — both surfaces render `capability-present.js` off the one feed; modal
-1169→835 lines; suite 953. SLICE 5 SHIPPED locally 2026-08-10 (uncommitted,
-5a+5b): the board rung in the one resolver (board pin → global → env → floor,
-delegate forwards the board), six board columns via migration 0033, the two
-route blocks collapsed into `boardBindingPatch` (stricter: advertisement
-checked at write), extract's global default, and the board modal's pickers
-generated from the feed via `planBoardPicker`. Suite 971, twice, §5.10 has the
-findings. Slice 6 remains plan-only. The
+**Status: SLICES 1–5 SHIPPED AND COMMITTED — 1 (013235d), 2a+2b (1d7ff74),
+3 (e29c94b), 4a+4b (fa023ce), 5a+5b (ab76b71); suite green at 973 ×2. The arc:
+`CAPABILITY_DEFS` is the registry; `capability-resolve.js` is the one resolver
+behind all four `resolveX` (fixing THREE dead-pointer bugs — `detect_key_id`,
+`detect_provider`, tagging's shared `model`, §2.10); bind + probe collapse the
+four `/api/admin/ai-config` blocks and `*-test` routes into adapters (−240
+lines in server.js); `capability-status.js` + `GET /api/admin/capabilities`
+compute the five states with reasons, demand, and the secrets-scan test; the
+Capabilities tab + `planSection` collapse the modal's four hand-written
+sections (1169→835 lines); the board rung (migration 0033, `boardBindingPatch`,
+`planBoardPicker`) makes scope data. POST-ARC DEEP DIVE 2026-08-10 (three
+independent sweeps: plan-vs-code, hand-list hunt, client surfaces) — findings
+in the Post-arc review section near the bottom. Headline: `removalImpact()` in
+admin-plugins.js hand-lists three of the four agents and omits the transcriber
+— a live, shipped, client-side instance of the exact bug class this plan was
+written to kill; §2.8.6's loader tightenings never landed in slice 2 (the
+deferral comment in capabilities.js was the honest record, this header wasn't)
+— NOW SHIPPED AS 7a, 2026-08-10, suite 976 ×2; and the cleanup slice,
+referenced five times but specified nowhere, is now SLICE 7 with its deletable
+surface measured. 7b SHIPPED 2026-08-10: the four legacy routes
+(`ai-config` GET+POST, the `*-test` aliases, `ai-default`) and the catalog
+triple are gone, the absence is pinned, and server.js is ~104 lines lighter —
+suite 975 ×2. 7c SHIPPED 2026-08-10: the Plugins-tab badges, card tags,
+removal warnings, key-row badges, and connector star states all read the
+capabilities feed through four presenter helpers (`servingRoles`/`roleBadge`/
+`keyRoles`/`removalStory`, node-tested) — the transcriber omission in
+`removalImpact` is structurally impossible now, `slots` is DELETED outright
+(the payload is `{ plugins }`, absence pinned), and the admin page fetches the
+feed once instead of twice — suite 979 ×2; §7a/§7b/§7c carry what building
+them changed. Slice 6 remains plan-only. The
 proposal: make CAPABILITY a
 first-class registry (`server/capabilities.js`, one `CAPABILITY_DEFS` entry per
 capability) exactly the way `KIND_DEFS` made plugin kinds first-class, then
@@ -1781,6 +1788,303 @@ regression):
 A plugin contributes a `CAPABILITY_DEFS` entry. **Gated on a consumer story**
 (below).
 
+### Slice 7 — the cleanup slice (specified 2026-08-10; previously five margin notes)
+
+Referenced by §4.4, §5.6, §5.8, §5.10.9 and §5.11.5 as "a later cleanup slice"
+and never given a section — which is how deletion lists evaporate. Everything
+below is measured against the shipped tree; the evidence is the post-arc
+review (next section). Not gated on slice 6, and ships before it. Four
+sub-slices by risk class, each green-on-`npm test` before the next.
+
+#### 7a — the loader tightenings slice 2 scheduled and never shipped (§2.8.6) — SHIPPED 2026-08-10, suite 976 ×2
+
+The one place the headline promise was still false: `validateBuilt`'s emptiness
+guard was the legacy disjunction `!wire && !embeds && !transcribes && !detects`,
+so a plugin declaring capability #6 via `provides` alone was REJECTED with an
+error naming three capabilities. And `WIRE_VERB` omitted `embed`, so an
+embed-advertising plugin with `wire: null` loaded and threw at the first
+`embedTexts` call — §1.7's hole. As shipped:
+
+- `normalizeProvides` hoisted to the top of
+  [`validateBuilt`](../server/plugin-loader.js#L87); every check now judges the
+  normal form, so either declaration shape is held to the same rules. The
+  emptiness rule requires at least one NON-MODIFIER capability (correction 1
+  below). `WIRE_VERB` gains `embed`; NOTE 2's deferral paragraph went with it.
+- [acme-embed](../test/fixtures/plugins/acme-embed/index.js) carries a real
+  `wire.embed` honoring the engine contract (`{ vectors, usage }`, unit-norm) —
+  its "mirrors the built-in `local`" comment is finally true. Its pre-7a shape
+  moved to the `embed-no-wire` fixture, asserted REJECTED with the message
+  naming `wire.embed`; `acme-provides` (the `provides`-only shape, no legacy
+  fields at all) is asserted to load WITH the legacy fields backfilled — the
+  first end-to-end proof of `backfillLegacy` through the loader path; and
+  `research-only` is asserted still rejected.
+
+What building it changed about the spec above:
+
+1. **The sketched rule was too wide.**
+   `Object.keys(normalizeProvides(built)).length` would have ACCEPTED a
+   research-only descriptor that the legacy disjunction rejected — by accident
+   (research was never in it), but rightly: a provider that can only research
+   qualifies a tagger it doesn't have. Shipped rule:
+   `Object.keys(provides).some((id) => !CAPABILITY[id]?.modifierOf)` — at
+   least one non-modifier capability. An id the registry doesn't know counts
+   as real supply, which is exactly what a slice-6 plugin-contributed
+   capability needs this check to believe.
+2. **The validator had never been tested at all.** No test anywhere exercised
+   any of its three rejections — §1.6's promised loader-parity test
+   ("transcribe without wire.transcribe is rejected") was never written, and
+   the slice-1 commit's what-is-pinned list quietly omits it. The three new
+   tests are this function's first coverage.
+3. **The blast radius was exactly one fixture.** acme-selfhosted also declares
+   `embeds`, but its `wire: ctx.wires.compat` already carries a real `embed`;
+   acme-detect already satisfied `WIRE_VERB.detect`. And the "first deliberate
+   edit to an existing test" turned out to include the test TITLE —
+   dynamic-plugins.test.js:75 literally said "(wire null, embeds set, …) is
+   accepted".
+4. **Behavior inventory, complete.** Newly rejected: an embed advertiser
+   without `wire.embed` (was: loads, crashes at first use). Newly accepted: a
+   provides-only descriptor (was: rejected as "empty"). Unchanged:
+   research-only still rejected; the built-ins never pass through
+   `validateBuilt`; ollama's documented legacy shape still valid (it declares
+   `embeds` with the compat wire, which has `embed`). A published plugin
+   declaring `embeds` without the wire now fails at (re)install with the
+   message naming the fix — it was always broken at runtime; failing at the
+   door is the MCP-style "declaration is a hard contract" the prior-art table
+   argues for.
+
+#### 7b — the client-dead server surface (~125 lines, zero `public/` callers, verified) — SHIPPED 2026-08-10, suite 975 ×2
+
+| what goes | where | held alive only by |
+|---|---|---|
+| `GET /api/admin/ai-config` | [server.js:2182](../server/server.js#L2182), 34 lines | access.test.js:233,237 |
+| `LEGACY_BIND_FIELDS` + `POST /api/admin/ai-config` | server.js:2217–2244 | audio, detect, keyless-providers tests |
+| the four `*-test` aliases | server.js:2277–2289 | audio.test.js:230–247, detect.test.js:168–182 |
+| `GET /api/admin/ai-default` | server.js:1676–1686 | plugins.test.js:373–397 |
+| the `embeds`/`transcribes`/`detects` triple in the PAYLOADS | providers.js:424–426, plugins.js:62, `sidecarCatalog`'s `legacyField` arg (server.js:1845–1856) | providers.test.js's route-vs-catalog deepEqual; provides.test.js's both-shapes assert |
+
+The triple is dead ON THE WIRE — since 4b every client reader takes
+`provides[cap.declaredBy]` (capability-present.js:161,239;
+mapping-modal.js:820). Only the payload emission goes: `backfillLegacy` and
+`RENAMED`'s descriptor-side lift STAY, because the wires and worker still read
+the legacy fields off the descriptor — that seam moves only if the wires ever
+read `provides` directly, which nothing needs.
+
+Expected existing-test edits, enumerated up front (§5.7 rule):
+access.test.js, audio.test.js, detect.test.js, keyless-providers.test.js,
+plugins.test.js, providers.test.js, provides.test.js — those seven and nothing
+else; anything beyond is a regression.
+
+What building it changed about the spec above:
+
+1. **The enumerated seven were actually eight.** dynamic-plugins.test.js reads
+   the in-process catalog (`?.embeds` at :79 and :90 — the second one added by
+   7a the day before), which the sweep missed because it grepped route URLs and
+   payload field names, not catalog reads. Recorded per the §5.7 rule rather
+   than silently absorbed: the enumeration missed a *reader kind*, not a file.
+2. **The absence is pinned, not just produced.** provides.test.js now asserts
+   the triple is absent from every providerCatalog entry AND every plugins-
+   payload `ai` block — the two rewritten tests are the regression guard
+   against the triple quietly coming back. The descriptor-level legacy fields
+   deliberately keep their tests (providers.test.js:70–77, provides.test.js
+   equivalence): the wires still read them, backfill still fills them — only
+   the WIRE FORMAT dropped them.
+3. **The route ports kept the old assertions verbatim.** The `/on-device/` and
+   `/advertises none|object detection/` regexes pass through the native routes
+   unchanged, because the messages live in bindCapability — which is the 2b
+   merge doing exactly what it promised. The one test deleted outright is
+   plugins.test.js's `ai-default` block: its ladder/label/secrets concerns are
+   already pinned on the capabilities feed (capabilities.test.js), which is
+   what the board modal reads now.
+4. **`resolveDefaultAi` left server.js entirely** — the ai-default route was
+   its last consumer there; it dropped out of the worker import. The slots
+   block keeps `capabilityBinding`/`resolveEmbedder`/`resolveTranscriber`/
+   `resolveDetector` until 7c shrinks it to `{ domains }`.
+
+#### 7c — the client consolidation (this is where the shipped bug dies) — SHIPPED 2026-08-10, suite 979 ×2
+
+- **Badges off the capabilities feed.** One helper — "the capabilities this
+  provider currently serves", `caps.filter(c => c.kind === "ai" &&
+  c.running?.provider === p.name)` — replaces `slotProviders()`
+  ([admin-plugins.js:22](../public/admin-plugins.js#L22), which still hardcodes
+  `"whisper"`/`"localDetector"`, the sentinels §2.10.3 retired server-side),
+  `tagFor`'s four branches (:50–53), the four badge literals (:219–222 —
+  `cap.agent` and `running.keyId === "env"` supply every string), and
+  `removalImpact` (:392–398) — **which is the bug: it lists tagger, embedder,
+  detector and omits the transcriber**, so removing the default transcription
+  provider warns about nothing. Registry-driven, the omission is impossible.
+  The feed is already in `loadPluginState`'s `Promise.all` (:92); no new
+  fetch. Net ≈ −30 lines.
+- **`keysSection` reads the feed, not `slots.tagger`.**
+  [plugin-modal.js:372](../public/plugin-modal.js#L372) badges only tagging's
+  default key (a key serving as default *embedder* shows no badge) →
+  `c.bound?.keyId === k.id` across entries, naming which capability; :403's
+  hardcoded tagging-fallback prose and :420's `anthropic` +
+  `ANTHROPIC_API_KEY` literals → `cap.env.{configured,provider,var}` and
+  `cap.floor.kind`, the exact fields `planSection` already consumes
+  (capability-present.js:217,230).
+- **`renderCapabilities(prefetched)`** — mirror `renderPlugins`'
+  (admin-plugins.js:100,107). The feed is the page's dearest GET (three
+  settings walks per AI entry, §3.6a.3) and currently fires TWICE per plain
+  page load (admin.js:41–42) and seven requests per modal mutation — §4.4a.5
+  under-recorded this as "one extra GET on the refresh chain". +3 lines,
+  −2 GETs at load, −1 per mutation.
+- **Then `slots` shrinks to `{ domains }`** — the last reader is
+  plugin-modal.js:192's connectorSection. server.js:1857/:1880/:1884/:1889–1890
+  stop running `resolveEmbedder` + `embeddingStats` + `resolveTranscriber` +
+  `resolveDetector` + the threshold read on every Plugins render to fill
+  fields nothing reads.
+
+##### 7c.1 What building it changed about the spec above
+
+1. **`slots` died entirely — the spec's "shrinks to `{ domains }`" was too
+   timid.** The domain readers (connectorSection's star state, the two domain
+   badges, removalImpact's domain branch) ported by the same find-the-feed-
+   entry pattern as the AI sites, so `GET /api/admin/plugins` now returns
+   `{ plugins }` and plugins.test.js pins the absence. server.js stopped
+   running three resolvers, four binding walks, a `standing()` per domain,
+   and an `embeddingStats` query on every Plugins render.
+2. **A shipped bug surfaced while wiring ctx: the modal's capability sections
+   were MISSING on first open from the Plugins tab.** The gear handed the
+   modal a ctx without `capabilities` — only the post-mutation reload merged
+   it in — so the generic sections rendered empty until the first write.
+   (Opened from the Capabilities tab it worked, which is why 4b's testing
+   missed it.) ctx now carries `capabilities` from the first render.
+3. **The delegate exclusion is the load-bearing rule in `servingRoles`.**
+   Unbound extract's `running` IS the tagger's own binding riding the delegate
+   floor — without `!(c.delegatesTo && !c.bound?.keyId)`, every default
+   tagger's card would read "default extractor". Pinned by its own test.
+4. **Badge semantics unified on EFFECTIVE.** The old `slotProviders` mixed
+   views — tagger/embedder badged the stored binding, transcriber/detector
+   the resolved engine — while the connector badges' own comment argued for
+   effective. All card badges now follow `running`; the key-row badges stay
+   on `bound` deliberately (a row's badge marks the stored choice), name
+   their role ("default embedder", not bare "default"), cover all
+   capabilities instead of tagging only, and stay quiet when the binding is
+   explicitly disabled. The remove-confirm derives its consequence per role
+   (`removalStory`) instead of claiming tagging's env-var story for every key.
+5. **The last client sentinels are gone** — `"whisper"`/`"localDetector"`
+   floor fallbacks and the `"anthropic"`/`ANTHROPIC_API_KEY` literals all
+   came from feed fields (`floor`, `env`, `running.keyId === "env"`). And the
+   feed's own gap closed with it: `delegatesToAgent` shipped (step 1), fixing
+   the presenter's one capability-name violation.
+6. **The load path is one fetch.** `renderPluginSurfaces()` (one gate, one
+   `loadPluginState`) renders both tabs; `refreshPluginSurfaces(state)`
+   threads post-mutation state, so a modal write repaints both surfaces on 4
+   GETs instead of 7 and page load fetches the feed once instead of twice.
+7. Existing-test tally: the six enumerated `slots` asserts ported
+   (connectors.test.js ×3 → feed domain entries; plugins.test.js ×3 → feed +
+   an absence pin), four new presenter tests, and the two step-1 fixture
+   updates. `retryInstall` folded onto the exported `busy` (C8). Suite
+   975 → 979 ×2.
+
+#### 7d — the copy pass (the final Open-questions bullet, unresolved and now live)
+
+A tab named **Capabilities** (admin.html:133) ships beside a Plugins subtitle
+whose "capability" means a `core: true` card
+([admin-plugins.js:113](../public/admin-plugins.js#L113)) — plus four more
+"core capability" strings (admin-plugins.js:128, :277; plugin-modal.js:631,
+:799). Reword to "always-on connections", exactly as the bullet that predicted
+this collision prescribes. Fold in README's missing transcription/detection
+feature bullets (§5.11.5's acknowledged gap) — cheapest here.
+
+#### Not in slice 7, recorded so they don't evaporate
+
+- **The mapping pane adopts `planBoardPicker`** — §5.8's deferred candidate,
+  now measured: ~92 hand-built lines (mapping-modal.js:47–65, :777–845,
+  :971–974) against the generic 29-line shell, re-implementing the advertiser
+  filter, the dead-pin reset, the model axis, and the save body; plus the
+  client's only raw `fetch()` of an admin route (:808 — a second
+  `/api/admin/ai-keys` GET per pane reveal) and live label drift
+  (`planBoardPicker` inlines `${k.name} — ${k.provider}` at
+  capability-present.js:134 while the pane uses `keyLabel`,
+  board-modal.js:434 — two formats in one modal). ≈ −60 lines. Its own small
+  slice: it rewrites a live surface, unlike 7b's deletions.
+- **`ai_research` is a registry gap, not residue**: `research` declares
+  `binding: { keys: null, boardKeys: null }`, so its board column is
+  hand-written at ~10 sites (db.js:1217,1230,1232,1271; server.js:958,1212,
+  1231–1233,1316,1364; board-modal.js:574,761). Wants a descriptor decision —
+  a board-flag field the cleanup loops and `BOARD_BINDING_COLS` can see — not
+  a caller rewrite.
+- **Health wrapping stays split** by §2.8.2's own rule (unify only where it
+  provably doesn't change the ledger); the floor engines stay unwrapped by
+  design (capability-probe.js:56 documents it).
+
+## Post-arc review (2026-08-10) — the deep dive after slices 1–5
+
+Three independent sweeps over the shipped tree: plan-vs-code verification of
+every deferred and claimed item; a hand-list hunt (settings-key literals,
+capability-id lists, kind literals, per-capability branches) across `server/`
+and `public/`; and the client surfaces. Everything below was verified in code,
+not taken from this document.
+
+**Confirmed solid.** Both cleanup loops iterate the registry
+(db.js:1179–1199 including the board-column clear; plugin-loader.js:460–504
+including board provider pins). Board plumbing derives — `BOARD_BINDING_COLS`
+once in db.js:1207, server.js imports it and `CAPABILITY_DEFS` nowhere.
+`standing()` is the one stored-vs-effective reader behind both admin surfaces.
+`running` is built field-by-field and the secrets-scan test holds
+(capabilities.test.js:310–333). worker.js imports neither `getSetting` nor
+`PROVIDERS`. The four null-contracts hold exactly. `public/` sends zero
+requests to any legacy route. admin-capabilities.js contains no capability id
+(one comment hit). The admin-plugins ↔ admin-capabilities module cycle is
+function-scoped as claimed. Suite 973 ×2.
+
+**The misses, ranked** (fixes routed into slice 7 above):
+
+1. **`removalImpact()` omits the transcriber** (admin-plugins.js:392–398) →
+   7c. The third instance of the hand-list-stops-short class (`deleteAiKey`,
+   `cleanupPluginConfig`, now this) — and the first found AFTER the registry
+   existed to prevent it, because the badges never moved onto the feed.
+2. **§2.8.6's loader tightenings never landed** → 7a. The status header
+   recorded them neither shipped nor re-deferred; the deferral comment at
+   capabilities.js:210–218 was the only honest record.
+3. **The naming collision** (final Open-questions bullet) unresolved and now
+   user-visible → 7d.
+4. **`keysSection`'s three tag-specific reads** (plugin-modal.js:372, :403,
+   :420) → 7c. §4.4's "the whole client surface of the legacy routes is these
+   four sections" was true of the WRITES; the legacy-payload READS in
+   keysSection were never in scope and survived.
+5. **The floor-name sentinels survive client-side** in `slotProviders()` → 7c
+   — and [plugins.js:43](../server/plugins.js#L43)'s `core:` flag is a
+   three-name `===` chain (`local`/`whisper`/`localDetector`) that would
+   misclassify a sixth built-in; a `core: true` descriptor flag retires it.
+6. **The feed double-fetch fires on every page load** (admin.js:41–42), not
+   just the modal refresh chain §4.4a.5 recorded → 7c.
+7. **`ai_research`** — registry gap, recorded under slice 7's not-in list.
+8. **Two one-word "no capability knowledge" violations**:
+   capability-present.js:66 renders `delegatesTo === "tag" ? "tagger"` — the
+   presenter's own header forbids naming a capability; ship the delegate's
+   `agent` beside `delegatesTo` in the feed (one field in capability-status.js,
+   one enumerated test edit). *FIXED 2026-08-10 (7c step 1): the feed ships
+   `delegatesToAgent`, the presenter renders it, capabilities.test.js pins it
+   end-to-end. Suite 975 ×2.* And admin-capabilities.js:102 hardcodes
+   "INGEST_ROOT not set" as the only not-ready reason a source can have —
+   `listSources` should ship a reason string the page renders verbatim.
+
+**Doc drift** (fix in place, no slice): §2.12.5 lists `probeable` as deleted —
+it returned in slice 4a (capability-probe.js:78, whose comment says so).
+db.js:569–575 documents a `countBoardOverrides` parameter that no longer
+exists (the generalization comment was appended over the old one, not written
+through it). plugin-loader.js:455 names the deleted `aiPluginInstalled`.
+admin.js:2 says "three tab renders" (there are six). `capabilitySection` is 97
+lines against §4.4's "~40" sizing — variance worth recording, not a defect.
+
+**Small residue** (mechanical; fold into whichever slice touches the file
+next): the `pinnedModelMustBeAdvertised` predicate is written twice
+(capability-bind.js:67 and :172 — §2.12.2's "chances to disagree" shape, one
+`assertModelAdvertised` helper). `RENAMED` (providers.js:64) is a third
+capability-id list — a `legacyField` key on `CAPABILITY_DEFS` would retire it.
+`resolveBoardAi` hand-writes `ai_key_id`/`ai_model` (worker.js:123, :2390),
+the server's last two capability-column literals — read them off
+`CAPABILITY.tag.binding.boardKeys`. `PROBES` (capability-probe.js:39–73) is
+the DEMAND/PROGRESS documented-exception pattern living outside the file that
+documents the exception — one comment saying so. `boardBindingPatch`'s
+`cap.floor?.provider !== name` escape is dead-defensive (both floor providers
+are `onDevice: true`). `retryInstall` re-implements the exported `busy`
+(admin-plugins.js:353–361). `presentSource`/`presentHandler` could absorb
+admin-capabilities.js:91–104's inline roster copy the way `presentSupported`
+absorbed the provider chips.
+
 ## Open questions / what this deliberately does not do
 
 - **A capability with no consumer is dead weight.** `tag` is consumed by the
@@ -1801,4 +2105,6 @@ A plugin contributes a `CAPABILITY_DEFS` entry. **Gated on a consumer story**
 - **Naming collision to resolve.** The Plugins page subtitle currently reads
   *"Capabilities and connections in one place,"* where "capability" means a
   `core: true` card. When this ships, "capability" means the registry entry and
-  those cards become what they are — always-on connections.
+  those cards become what they are — always-on connections. *(Post-arc review:
+  still unresolved, and now live beside a tab literally named Capabilities —
+  slice 7d.)*

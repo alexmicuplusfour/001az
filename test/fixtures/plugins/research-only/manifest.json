@@ -1,0 +1,8 @@
+{
+  "id": "acme.research",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Research Only",
+  "description": "declares only the research modifier — must be rejected (fixture)",
+  "main": "index.js"
+}

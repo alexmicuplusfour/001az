@@ -385,13 +385,6 @@ export async function cachedProviderModels(keyId, { provider, apiKey, base, kind
   return assembleModels(desc, kind, await entry.live);
 }
 
-// …and carved for the UI: deliberately narrower than the descriptor's own object
-// (no `filter` — that's server-side carving data, not a picker's business).
-const catalogEntry = (desc, cap) => {
-  const p = declaredCatalog(desc, cap);
-  return p ? { default: p.default, models: p.models } : null;
-};
-
 // Public catalog for the admin UI — labels, model lists (with notes), defaults,
 // and capability flags. No secrets, safe to serve. The client renders its
 // provider/model pickers from this so the catalog isn't mirrored in two places.
@@ -416,16 +409,9 @@ export function providerCatalog() {
       // placeholder). Fixed-endpoint providers never store one.
       needsBase: !!p.needsBase,
       base: p.needsBase ? p.base || null : null,
-      // The per-capability catalogs, DERIVED from `provides` but still emitted
-      // under their legacy names: this payload is a wire format the plugin modal
-      // and the board modal read (p.ai.embeds.models, …). It can be extended,
-      // not swapped — the client moves to `provides` when the capabilities page
-      // lands, not before.
-      embeds: catalogEntry(p, "embed"),
-      transcribes: catalogEntry(p, "transcribe"),
-      detects: catalogEntry(p, "detect"),
-      // The normal form itself, so a capability-aware consumer can iterate
-      // instead of naming the three fields above.
+      // The one capability shape on the wire (7b): every client reader takes
+      // provides[capability]. The legacy embeds/transcribes/detects triple was
+      // emitted alongside it until slice 4b moved the last reader off it.
       provides: p.provides,
     };
   });

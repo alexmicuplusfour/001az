@@ -5,8 +5,7 @@
 import { ICONS } from "/utils.js";
 import { renderMembers } from "/admin-members.js";
 import { renderBoards } from "/admin-boards.js";
-import { renderCapabilities } from "/admin-capabilities.js";
-import { renderPlugins } from "/admin-plugins.js";
+import { renderPluginSurfaces } from "/admin-plugins.js";
 import { renderBackups } from "/admin-backups.js";
 import { renderLogs, setLogsActive } from "/admin-logs.js";
 
@@ -38,7 +37,6 @@ addEventListener("hashchange", () => { if (TAB_NAMES.includes(tabFromHash())) se
 
 renderMembers().catch(() => (document.getElementById("gate").innerHTML = 'Error loading. <a href="/">Back</a>'));
 renderBoards().catch(() => {});
-renderCapabilities().catch(() => {});
-renderPlugins().catch(() => {});
+renderPluginSurfaces().catch(() => {}); // Capabilities + Plugins: one state fetch, both tabs
 renderBackups().catch(() => {});
 renderLogs().catch(() => {});

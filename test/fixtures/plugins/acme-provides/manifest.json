@@ -1,0 +1,8 @@
+{
+  "id": "acme.provides",
+  "apiVersion": 1,
+  "kind": "ai-provider",
+  "label": "Acme Provides",
+  "description": "declares capabilities via `provides` only — no legacy fields (fixture)",
+  "main": "index.js"
+}

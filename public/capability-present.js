@@ -62,8 +62,10 @@ export function presentLines(c) {
   if (c.demand?.waiting) lines.push({ k: "Waiting", v: `${c.demand.waiting} item${c.demand.waiting === 1 ? "" : "s"}` });
   // Delegation is the story only while nothing of this capability's OWN is
   // bound — with an app-wide default stored (slice 5), the Running line already
-  // tells the truth and "uses each board's tagger" would contradict it.
-  if (c.delegatesTo && !c.bound?.keyId) lines.push({ k: "Uses", v: `each board's ${c.delegatesTo === "tag" ? "tagger" : c.delegatesTo}` });
+  // tells the truth and "uses each board's tagger" would contradict it. The
+  // agent noun comes from the feed (delegatesToAgent) — nothing here names a
+  // capability.
+  if (c.delegatesTo && !c.bound?.keyId) lines.push({ k: "Uses", v: `each board's ${c.delegatesToAgent || c.delegatesTo}` });
   if (c.boardOverrides) lines.push({ k: "Overrides", v: `${c.boardOverrides} board${c.boardOverrides === 1 ? "" : "s"} pin their own` });
   for (const m of c.modifiers || []) {
     lines.push({ k: m.label, v: m.availableNow ? "available with the current provider" : `needs ${m.supportedBy.join(" / ")}` });
@@ -94,6 +96,48 @@ export function presentSupported(p) {
 // Which provider's settings the Configure button should open: what runs, else
 // what is configured, else the floor — the same precedence a reader follows.
 export const configureTarget = (c) => c.running?.provider || c.bound?.provider || c.floor?.provider || null;
+
+// --- who serves what (7c) — the Plugins tab's badges, tags, and warnings ---
+// These used to be four hand-lists over the legacy `slots` payload, and the
+// removal warning's copy forgot the transcriber — the exact omission class the
+// registry exists to kill. Derived from the feed, a capability cannot be
+// skipped.
+
+// The capabilities this provider is CURRENTLY SERVING — the effective view
+// (`running`), the rule the connector badges always followed: badge what
+// resolves, not the stored star. A delegate serving through its target's
+// binding is the TARGET's role, not a second one (unbound extract runs on the
+// tagger's own binding — only its own stored key makes it a role here). An
+// `off` capability never has `running`, so disabled needs no special case.
+export const servingRoles = (caps, providerName) =>
+  (caps || []).filter((c) =>
+    c.kind === "ai" && c.running?.provider === providerName && !(c.delegatesTo && !c.bound?.keyId));
+
+// One serving entry → its card badge: names the role, links to the capability
+// card, and carries the env qualifier the tagger's badge always had.
+export const roleBadge = (c) => ({
+  capId: c.id,
+  text: `default ${c.agent}` + (c.running?.keyId === "env" ? " · env" : ""),
+});
+
+// The capabilities BOUND to this key row — the stored view: a key table's
+// badge marks the admin's choice, whether or not it is what currently serves.
+// An explicitly disabled binding (embed off) stays quiet — the pointer is
+// real, but "default embedder" on a feature that is off reads as a lie.
+export const keyRoles = (caps, keyId) =>
+  (caps || []).filter((c) => c.kind === "ai" && c.bound?.keyId === keyId && c.bound?.enabled !== false);
+
+// What deleting a capability's bound key leaves serving — the remove-confirm's
+// consequence clause, derived from the same fields the card renders. (The
+// server clears the WHOLE binding namespace with the key, so the story is
+// always the next rung's.)
+export function removalStory(c) {
+  if (c.env?.configured) return `${c.noun} falls back to the ${c.env.var} env var`;
+  if (c.floor?.kind === "builtin") return `${c.noun} falls back to ${c.floor.label}`;
+  if (c.floor?.kind === "delegate") return `${c.noun} falls back to each board's ${c.delegatesToAgent || c.delegatesTo}`;
+  if (c.floor?.kind === "off") return `${c.label} turns off`;
+  return `${c.noun} stops until another key is bound`;
+}
 
 // --- the board modal's per-board pin picker planner (slice 5b) ---
 // One picker per capability the feed says boards may pin (`boardBinding`
