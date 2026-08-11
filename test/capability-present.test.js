@@ -252,7 +252,6 @@ const boardCatalog = {
 
 test("planBoardPicker: the rows are the App default (named), installed on-device engines, and only keys that could serve", () => {
   const plan = planBoardPicker(boardTranscribe, allKeys, null, boardCatalog);
-  assert.equal(plan.title, "AI transcriber");
   assert.deepEqual(plan.rows, [
     { value: "", label: "App default (OpenAI · whisper-1)" },
     { value: "whisper", label: "Local Transcriber (Whisper) — built-in" },
@@ -263,6 +262,28 @@ test("planBoardPicker: the rows are the App default (named), installed on-device
   // The default's meaning updates with what actually serves.
   const floorServed = planBoardPicker({ ...boardTranscribe, running: { provider: "whisper", model: "large-v3", keyId: null } }, allKeys, null, boardCatalog);
   assert.equal(floorServed.rows[0].label, "App default (Local Transcriber (Whisper) · large-v3)");
+});
+
+test("planBoardPicker: a delegate capability's unset row says what it follows, never a false app default", () => {
+  const boardExtract = {
+    id: "extract", label: "Field extraction", noun: "field extraction", agent: "extractor", declaredBy: "tag",
+    binding: { provider: false, enable: false, global: true },
+    floor: { kind: "delegate", to: "tag" },
+    boardBinding: { keyId: "extract_key_id", model: "extract_model" },
+    delegatesTo: "tag", delegatesToAgent: "tagger",
+    // Under delegation the resolver still reports what runs (the tagger's
+    // chain) — the row must not present that as extraction's own default.
+    running: { provider: "openai", model: "gpt-5-mini", keyId: 7 },
+    supportedBy: [{ name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false }],
+  };
+  const plan = planBoardPicker(boardExtract, allKeys, null, boardCatalog);
+  assert.equal(plan.rows[0].label, "Same as the tagger");
+  assert.equal(plan.chosenLabel("", null), "Same as the tagger",
+    "the unset delegate answers with its relationship; the shell adds the live model");
+  // With an app-wide default of its OWN bound, the row reads as inherited again.
+  const bound = planBoardPicker({ ...boardExtract, bound: { keyId: 7 } }, allKeys, null, boardCatalog);
+  assert.equal(bound.rows[0].label, "App default (OpenAI · gpt-5-mini)");
+  assert.equal(bound.chosenLabel("", null), "OpenAI · gpt-5-mini");
 });
 
 test("planBoardPicker: preselects come from the board's columns; a vanished pin falls to the default row", () => {

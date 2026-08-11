@@ -141,7 +141,7 @@ export function removalStory(c) {
 
 // --- the board modal's per-board pin picker planner (slice 5b) ---
 // One picker per capability the feed says boards may pin (`boardBinding`
-// present, and no other surface claiming it via `boardPickerHome`). Pure data:
+// present) — all of them rows in the modal's AI-models strip. Pure data:
 // the rows, the preselect, the model axis, and EXACTLY what a selection saves —
 // the payload speaks the column names the feed shipped, so nothing here (or in
 // the shell that mounts this) names a capability.
@@ -161,16 +161,24 @@ export function planBoardPicker(cap, keys, board, catalog) {
   const notInstalled = new Set(roster.filter((p) => !p.installed).map((p) => p.name));
 
   // What "App default" currently means, so the unset row answers the question
-  // instead of raising it.
+  // instead of raising it. A delegate capability with nothing of its OWN bound
+  // app-wide doesn't inherit a provider — it follows another capability — so
+  // its unset row says that ("Same as the tagger") instead of a false default;
+  // what that resolves to live is the shell's to add, since only the shell
+  // sees unsaved edits to the target's picker.
+  const delegated = !!cap.delegatesTo && !cap.bound?.keyId;
   const inherit = cap.running
     ? labelIn(cap, cap.running.provider) + (cap.running.model ? ` · ${cap.running.model}` : "")
     : "none configured";
+  const unsetLabel = delegated
+    ? `Same as the ${cap.delegatesToAgent || cap.delegatesTo}`
+    : `App default (${inherit})`;
 
   // Rows: the inherited default, every INSTALLED on-device engine (pinned by
   // name — the built-in floor arrives via this same rule, no special case),
   // then every key whose provider advertises. A not-installed provider's key
   // stays pickable (defaults, not laws) but says so.
-  const rows = [{ value: "", label: `App default (${inherit})` }];
+  const rows = [{ value: "", label: unsetLabel }];
   for (const p of roster.filter((p) => p.onDevice && p.installed)) {
     rows.push({ value: p.name, label: `${p.label} — built-in` });
   }
@@ -189,10 +197,6 @@ export function planBoardPicker(cap, keys, board, catalog) {
   const keyFor = (sel) => (/^\d+$/.test(sel || "") ? keys.find((k) => String(k.id) === sel) : null);
 
   return {
-    // "AI tagger" / "AI transcriber" / … — the registry's agent noun, same
-    // source as the modal's button labels.
-    title: `AI ${cap.agent}`,
-    hint: `(this board's own ${cap.noun} provider; the app default when unset)`,
     rows,
     preselect,
     // The model axis exists only for a keyed selection — an on-device engine's
@@ -213,10 +217,11 @@ export function planBoardPicker(cap, keys, board, catalog) {
         saved: savedKey && sel === savedKey && bb.model ? board?.[bb.model] ?? null : null,
       };
     },
-    // What the current selection is called mid-sentence — the mapping pane's
-    // "Board default" note reads the tagger's off this.
+    // What the current selection is called mid-sentence — the "Using …" bands
+    // read off this. The unset delegate answers with its relationship, not a
+    // model; shells that need the resolved model follow delegatesTo themselves.
     chosenLabel(sel, model) {
-      if (!sel) return inherit;
+      if (!sel) return delegated ? unsetLabel : inherit;
       const key = keyFor(sel);
       if (key) return `${key.name} — ${key.provider}${model ? ` · ${model}` : ""}`;
       return rows.find((r) => r.value === sel)?.label || sel;

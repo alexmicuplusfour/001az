@@ -1,7 +1,7 @@
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
-import { loadProviders, byName, syncModelPicker, switchRow, keyLabel, withDefaultNote } from './board-modal.js';
+import { switchRow } from './board-modal.js';
 import { sectionHeadingEl } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date", "object"];
@@ -12,16 +12,17 @@ const CADENCES = [[0, "Off"], [1, "1 min"], [5, "5 min"], [15, "15 min"], [60, "
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, collect, setBoardTagger }: the host folds collect()'s
-// payload into its one PATCH/POST, and names the tagger behind "Board default"
-// via setBoardTagger. Fully parameterized (no gallery-state reads), so it works
-// on admin.html and for not-yet-created boards:
-//   isAdmin  — editable pane + extraction row; false = read-only view
+// Returns { isDirty, collect, setExtractionLabel }: the host folds collect()'s
+// payload into its one PATCH/POST, and names the model behind the "Using …"
+// band via setExtractionLabel. Fully parameterized (no gallery-state reads), so
+// it works on admin.html and for not-yet-created boards:
+//   isAdmin  — editable pane; false = read-only view
 //   mapping  — the board's current mapping (null for a new/unmapped board)
 //   hasItems — locks the connector-template picker (templates rewire the whole
 //              mapping, only sane while the board is empty)
-//   extract  — { keyId, model } stored extraction override (admin), or null
-export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, extract = null }) {
+//   onExtractionChange — the band's "Change" action: the host opens its
+//              AI-models strip at the extraction row (admin only)
+export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, onExtractionChange = null }) {
   // Any user edit flips the pane dirty, so a pure-tagging save omits `mapping`
   // and doesn't needlessly re-run the server's reschedule/backfill.
   let dirty = false;
@@ -44,25 +45,35 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   let connectorActiveProvider = null; // the backend currently resolving this connector
   let faceCfg = { ...(mapping?.face || { from: "raw" }) }; // the entity's card visual
 
-  // Extraction provider — the stored override arrives via `extract` (the host
-  // already has it); only the key/catalog registry is fetched here. extractLoaded
-  // gates the save payload: until that fetch lands, the save omits extract
-  // fields so a quick Save can't wipe a stored override.
-  let extractKeyId = extract?.keyId ?? null;
-  let extractModel = extract?.model ?? null;
-  let extractKeySel = null;
-  let extractModelSel = null;
-  let extractLoaded = false;
-  // The "Board default" row names the tagger it falls back to. Only the host
-  // can say — the answer includes tagger edits it hasn't saved yet — so it
-  // pushes on every reveal of this pane, which may be before or after the
-  // option below exists. Whichever lands second does the rendering.
-  let boardTagger = null;
-  let extractDefOpt = null;
-  const setBoardTagger = (label) => {
-    boardTagger = label;
-    if (extractDefOpt) extractDefOpt.textContent = withDefaultNote("Board default", boardTagger);
+  // The provenance band under "AI-extracted fields": which model fills the AI
+  // fields ("Using <model> — Change"). The picker itself lives in the host's
+  // AI-models strip; only the host can name the model — the answer includes
+  // strip edits it hasn't saved yet — so it pushes via setExtractionLabel on
+  // every reveal of this pane and on every pin change. The band element is
+  // re-appended by renderFields (which wipes fieldsList), so the pushed text
+  // lives on the element and survives re-renders.
+  let extractBand = null;
+  let extractBandLabel = null;
+  // Hidden until a label arrives — a band reading "Using nothing" would be
+  // the exact kind of claim the placeholder rules exist to prevent.
+  const setExtractionLabel = (label) => {
+    if (!extractBand) return;
+    extractBand.hidden = !label;
+    if (label) extractBandLabel.textContent = label;
   };
+  if (isAdmin) {
+    extractBand = document.createElement("div");
+    extractBand.className = "prov";
+    extractBand.style.margin = "2px 0 8px";
+    extractBand.hidden = true;
+    extractBandLabel = document.createElement("b");
+    const change = document.createElement("button");
+    change.type = "button";
+    change.className = "linkbtn";
+    change.textContent = "Change";
+    change.addEventListener("click", () => onExtractionChange?.());
+    extractBand.append("Using", extractBandLabel, change);
+  }
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
@@ -739,6 +750,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     // AI fields.
     const aiFields = fields.filter((f) => f.from === "ai");
     fieldsList.appendChild(sectionTitle("AI-extracted fields"));
+    if (extractBand) fieldsList.appendChild(extractBand);
     if (!aiFields.length) {
       const empty = document.createElement("p");
       empty.className = "mm-empty";
@@ -772,76 +784,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       rows[rows.length - 1]?.focus();
     });
     body.appendChild(addBtn);
-  }
-
-  // Extraction provider (admin only) — subordinate to the AI fields section,
-  // rendered as a compact labeled row rather than a peer section.
-  if (isAdmin) {
-    const extractRow = document.createElement("div");
-    extractRow.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:8px;";
-    const extractLabel = document.createElement("span");
-    extractLabel.style.cssText = "font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8a8a92;white-space:nowrap;";
-    extractLabel.textContent = "Extraction provider";
-    extractKeySel = document.createElement("select");
-    extractKeySel.style.cssText = "flex:1;min-width:0;font-size:13px;";
-    extractKeySel.disabled = true;
-    extractModelSel = document.createElement("select");
-    extractModelSel.style.cssText = "flex:1;min-width:0;font-size:13px;";
-    extractModelSel.hidden = true;
-    extractRow.append(extractLabel, extractKeySel, extractModelSel);
-    body.appendChild(extractRow);
-
-    // Load keys + provider catalog, then populate selects.
-    let aiKeys = [];
-    let aiCatalog = {};
-    const syncExtractModel = () => {
-      const key = aiKeys.find((k) => String(k.id) === extractKeySel.value);
-      extractModelSel.hidden = !key;
-      // Null entry/keyId on the Board-default row (guards the hidden select
-      // against a stale in-flight response); `saved` = the mapping's
-      // persisted model.
-      syncModelPicker(extractModelSel, key ? aiCatalog[key.provider] : null, key ? key.id : null, {
-        saved: key && key.id === extractKeyId ? extractModel : null,
-      });
-    };
-    Promise.all([
-      fetch("/api/admin/ai-keys").then((r) => r.json()),
-      loadProviders(),
-    ]).then(([keys, catalog]) => {
-      aiKeys = keys;
-      aiCatalog = byName(catalog);
-      extractDefOpt = document.createElement("option");
-      extractDefOpt.value = "";
-      extractKeySel.appendChild(extractDefOpt);
-      setBoardTagger(boardTagger); // fills the option — the host may have pushed before this landed
-      // Only keys whose provider advertises tagging — extraction rides the
-      // tagging wire, and the board routes (slice 5) refuse the rest, so the
-      // picker must not offer what a save would reject.
-      const usableKeys = keys.filter((k) => aiCatalog[k.provider]?.provides?.tag);
-      for (const k of usableKeys) {
-        const opt = document.createElement("option");
-        opt.value = String(k.id);
-        opt.textContent = keyLabel(k);
-        extractKeySel.appendChild(opt);
-      }
-      if (extractKeyId && usableKeys.find((k) => k.id === extractKeyId)) {
-        extractKeySel.value = String(extractKeyId);
-      } else if (extractKeyId) {
-        // Stored key no longer exists (or fell out of the offer) — treat as
-        // board default rather than sending a dead id back on save.
-        extractKeyId = null;
-        extractModel = null;
-      }
-      extractKeySel.disabled = false;
-      extractKeySel.addEventListener("change", () => {
-        extractKeyId = extractKeySel.value ? Number(extractKeySel.value) : null;
-        extractModel = null;
-        syncExtractModel();
-      });
-      extractModelSel.addEventListener("change", () => { extractModel = extractModelSel.value || null; });
-      syncExtractModel();
-      extractLoaded = true;
-    }).catch(() => {});
   }
 
   // The host modal owns the Save button. Non-admins get a read-only pane, so
@@ -900,8 +842,8 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
 
   // Validate + assemble the mapping payload for the host modal's PATCH. Returns
   // { ok:false } after toasting on invalid input, else { ok:true, payload } —
-  // the payload merges straight into the board PATCH body (extract_* only once
-  // the provider fetch has landed, so a quick Save can't wipe a stored override).
+  // the payload merges straight into the board PATCH body. Extraction's pin
+  // rides the host's capability pickers, not this pane.
   function collect() {
     // Flush any pending key-input blur normalizations.
     const activeKey = document.activeElement;
@@ -964,17 +906,8 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         }
       : null;
 
-    return {
-      ok: true,
-      payload: {
-        mapping,
-        ...(extractLoaded ? {
-          extract_key_id: extractKeyId ?? null,
-          extract_model: extractKeyId ? (extractModel || null) : null,
-        } : {}),
-      },
-    };
+    return { ok: true, payload: { mapping } };
   }
 
-  return { isDirty: () => dirty, collect, setBoardTagger };
+  return { isDirty: () => dirty, collect, setExtractionLabel };
 }

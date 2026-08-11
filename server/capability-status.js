@@ -204,9 +204,10 @@ async function aiEntry(db, cap, catalog) {
             keyId: cap.binding.boardKeys.keyId,
             ...(cap.binding.boardKeys.model ? { model: cap.binding.boardKeys.model } : {}),
           },
-          // Which surface owns this capability's board picker ("mapping" = the
-          // mapping pane's; absent = the board modal's generic loop renders it).
-          ...(cap.boardPickerHome ? { boardPickerHome: cap.boardPickerHome } : {}),
+          // Which capability's provenance the Mapping pane surfaces beside the
+          // AI fields it powers ("Using <model>") — presentation, not
+          // resolution; the picker itself sits in the modal's strip like all.
+          ...(cap.mappingBand ? { mappingBand: true } : {}),
         }
       : {}),
     ...(cfg ? { config: cap.binding.config.map((f) => ({ key: f.key, value: cfg[f.key] })) } : {}),

@@ -115,7 +115,7 @@
 /* A select still on select.js's placeholder is showing a prompt, not an answer,
    and should read like the input placeholders next to it. Keyed on the marker
    rather than on an empty value: "" is a real choice on the pickers that offer
-   an App/Board default. */
+   an "App default" / "Same as the tagger" row. */
 .modal-dialog select:has(option[data-placeholder]:checked) { color: #9a9aa6; }
 /* The open list is painted from the select's own color, so dimming the closed
    control greys every row in the popup with it — an unanswered picker looked
@@ -213,6 +213,162 @@
   background: #fff;
   color: #111;
   box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+
+/* ─── modal strip: a full-bleed collapsible band between a modal's header and
+   its scrolling body. Generic chrome, not tied to any one modal — the board
+   editor's AI-models fold is one user. Flat by design: the strip is chrome,
+   and whatever it holds is hairline-separated, never boxes in boxes. Pair
+   with .modal-body-wrap/.modal-body-scrim to dim the body while open. ─── */
+.modal-strip {
+  flex-shrink: 0;
+  background: #fbfbfc;
+  border-bottom: 1px solid #eee;
+}
+/* the two fold heads share everything but their padding */
+.strip-head,
+.disc-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text, #111);
+  cursor: pointer;
+  text-align: left;
+}
+.strip-head { padding: 9px 20px; }
+/* fold caret — shared by every collapsible head (strip, disclosure). Holds
+   ICONS.chevron (a down caret, 1em, currentColor), so it sizes and colors
+   with the text it accompanies; closed points right, open points down. */
+.chev {
+  flex: none;
+  display: inline-flex;
+  transform: rotate(-90deg);
+  transition: transform 0.12s;
+}
+.modal-strip.open > .strip-head .chev,
+.disclosure.open > .disc-head .chev { transform: rotate(0deg); }
+/* the collapsed head's status text — a fold summarizes, it never hides state */
+.fold-summary {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: #9a9aa6;
+  text-align: right;
+}
+.strip-body {
+  display: none;
+  padding: 0 20px 12px;
+  max-height: 380px;
+  overflow-y: auto;
+}
+.modal-strip.open > .strip-body { display: block; }
+
+/* ─── fold-out rows (.frow): a flat hairline-separated list — each row a
+   summary line (name + description left, value + source right) over a
+   fold-out editor. Generic; the strip's capability pickers are one user. ─── */
+.frow { border-top: 1px solid #eee; }
+.frow:first-child { border-top: none; }
+.frow-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  cursor: pointer;
+}
+/* inside a modal strip, the head's hover bleeds to the strip's full width */
+.modal-strip .frow-head { margin: 0 -20px; padding: 10px 20px; }
+.frow-head:hover { background: #f3f3f6; }
+.frow-name { font-size: 13.5px; font-weight: 550; }
+.frow-desc { font-size: 12px; color: #9a9aa6; margin-top: 1px; }
+.frow-cur { margin-left: auto; text-align: right; flex: none; max-width: 55%; }
+.frow-val { font-size: 12.5px; }
+.frow-src { display: block; font-size: 11px; color: #9a9aa6; margin-top: 1px; }
+.frow-edit { display: none; padding: 0 0 12px; gap: 8px; }
+.frow.open .frow-edit { display: flex; }
+.frow.flash { animation: frow-flash 1.2s ease-out; }
+@keyframes frow-flash {
+  0% { background: #edf2fe; }
+  100% { background: transparent; }
+}
+
+/* the body wrapper + scrim while a strip is open (the host modal wraps its
+   .modal-body so the scrim has a positioned box exactly the body's size) */
+.modal-body-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.modal-body-wrap > .modal-body { flex: 1; }
+.modal-body-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: rgba(17, 17, 17, 0.14);
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.modal-strip.open ~ .modal-body-wrap .modal-body-scrim {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ─── provenance band — "Using <model> Change", centered on a soft ground ─── */
+.prov {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #6b6b72;
+  background: #f7f7fa;
+  border-radius: 8px;
+  padding: 8px 12px;
+  text-align: center;
+}
+.prov b { font-weight: 550; color: var(--text, #111); }
+/* the band starts hidden until its label resolves; `hidden` alone loses to
+   the display:flex above (same rule as every [hidden] override in styles.css) */
+.prov[hidden] { display: none; }
+.linkbtn {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: #2563eb;
+  cursor: pointer;
+}
+.linkbtn:hover { text-decoration: underline; }
+
+/* ─── disclosure: a boxed in-flow fold (the board editor's Advanced section is
+   one user). Chevron rotation and .fold-summary come from the shared fold
+   rules above. ─── */
+.disclosure { border: 1px solid #eee; border-radius: 9px; }
+.disc-head { padding: 10px 12px; }
+.disc-body {
+  display: none;
+  padding: 4px 12px 12px;
+  border-top: 1px solid #eee;
+}
+.disclosure.open .disc-body { display: block; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chev,
+  .modal-body-scrim {
+    transition: none;
+  }
+  .frow.flash { animation: none; }
 }
 
 /* ─── facet editor (admin board modal + any future modal) ─── */

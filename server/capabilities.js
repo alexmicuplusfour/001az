@@ -88,11 +88,12 @@ export const CAPABILITY_DEFS = [
       keys: { provider: null, keyId: "extract_key_id", model: "extract_model", enabled: null },
       boardKeys: { keyId: "extract_key_id", model: "extract_model" },
     },
-    // Presentation, not resolution: the mapping pane owns this capability's
-    // board picker (it sits beside the AI fields it powers), so the board
-    // modal's generic picker loop must skip it. Data, not a name check in the
-    // client.
-    boardPickerHome: "mapping",
+    // Presentation, not resolution: this capability's picker lives in the board
+    // modal's AI-models strip like every other, but the Mapping pane surfaces
+    // its provenance ("Using <model>") beside the AI fields it powers — and the
+    // Tagging pane's band finds the tagger through this capability's
+    // delegatesTo. Data, not a name check in the client.
+    mappingBand: true,
     floor: { kind: "delegate", to: "tag" },
   },
   {

@@ -13,7 +13,7 @@
 // option that names what to pick, carrying `data-placeholder` so modal.css can
 // dim it and `isUnset` can recognise it. The marker, not the empty value, is
 // what identifies it — "" is a legitimate choice elsewhere (the board editor's
-// "App default" key row, the mapping modal's "Board default").
+// "App default" / "Same as the tagger" rows).
 //
 // A placeholder only ever replaces the browser's arbitrary first-option pick,
 // never a real saved value: pass `value` and, when the list still carries it,
