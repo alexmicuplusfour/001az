@@ -25,7 +25,7 @@ import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
 import { fillSelect, isUnset } from "./select.js";
-import { planBoardPicker } from "./capability-present.js";
+import { planBoardPicker, planBoardConfig } from "./capability-present.js";
 
 // Reusable toggle switch: a button that flips .on and reports the new state.
 // opts.small for compact contexts (e.g. facet rows).
@@ -548,6 +548,7 @@ export async function openBoardModal(boardId, opts = {}) {
             <div id="board-modal-reasoning" style="margin:10px 0;font-size:13px"></div>
             <div id="board-modal-votes" style="margin:0 0 10px;font-size:13px"></div>
             <div id="board-modal-research" style="margin:0 0 12px;font-size:13px"></div>
+            <div id="board-modal-capconfig" style="margin:0 0 12px;font-size:13px"></div>
             <div id="board-modal-retag" style="font-size:13px"></div>
           </div>
         </div>
@@ -621,11 +622,47 @@ export async function openBoardModal(boardId, opts = {}) {
   // by default. The collapsed head summarizes what's on, so folding hides
   // controls, never state.
   wireFold(document.getElementById("board-modal-adv"), ".disc-head");
+  // Board-scoped capability knobs (tagging's image detail). NOT admin-gated:
+  // these are cost/quality dials like double-check above, and the manager save
+  // route accepts them — so they ride the board settings payload rather than
+  // the admin capabilities feed, and mount synchronously with the rest of this
+  // fold. (A new board has no settings payload; its knobs mount from the feed
+  // in the canEditAI block below, since creating a board is admin-only.)
+  const capConfigs = []; // { plan, sel }
+  const mountCapConfigs = (fields) => {
+    const wrap = document.getElementById("board-modal-capconfig");
+    for (const plan of planBoardConfig(fields, board)) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;";
+      const lab = document.createElement("span");
+      lab.style.cssText = "font-weight:500;";
+      lab.textContent = plan.label;
+      const sel = document.createElement("select");
+      fillSelect(sel, plan.rows, { value: plan.preselect });
+      const note = document.createElement("span");
+      note.style.cssText = "font-weight:400;color:#9aa0aa;";
+      const syncNote = () => {
+        const hint = plan.hintFor(sel.value);
+        note.textContent = hint ? `— ${hint}` : "";
+      };
+      sel.onchange = () => { syncNote(); syncAdvSummary(); };
+      syncNote();
+      row.append(lab, sel, note);
+      wrap.appendChild(row);
+      capConfigs.push({ plan, sel });
+    }
+    syncAdvSummary();
+  };
   const syncAdvSummary = () => {
     const bits = [];
     if (aiReasoning) bits.push("Explain tags");
     if (dc.on) bits.push(`double-check ×${dc.passes}`);
     if (aiResearch) bits.push("web research");
+    // Only when the board DEVIATES from the app default — an inherited value
+    // is not state the fold is hiding.
+    for (const c of capConfigs) {
+      if (c.sel.value) bits.push(`image: ${c.plan.rows.find((r) => r.value === c.sel.value)?.label || c.sel.value}`);
+    }
     if (at.enabled && at.periodic) bits.push("scheduled retag");
     if (at.enabled && at.retagOnRefresh) bits.push("retag on data change");
     document.getElementById("board-modal-adv-summary").textContent = bits.length ? bits.join(" · ") : "all defaults";
@@ -775,6 +812,10 @@ export async function openBoardModal(boardId, opts = {}) {
   );
   syncAi();
   syncAt();
+  // Mounted here, after the state the fold summary reads exists. An existing
+  // board carries its knobs and their vocabulary in the settings payload, so
+  // this needs no feed and no admin rights.
+  if (!isNew) mountCapConfigs(board.capability_config);
 
   // Per-board capability pins (admin only) — one strip row per capability the
   // capabilities feed says boards may pin, each planned by planBoardPicker
@@ -850,6 +891,11 @@ export async function openBoardModal(boardId, opts = {}) {
         wrap.appendChild(row);
         capPickers.push({ cap, plan, row, valEl, srcEl, keySel, modelSel });
       }
+
+      // A NEW board has no settings payload, so its knobs come off the feed
+      // (creating a board is admin-only, so the feed is always available
+      // here). Same field shape either way — see mountCapConfigs.
+      if (isNew) mountCapConfigs(caps.flatMap((c) => c.config || []));
 
       // Which picker feeds which band comes from data, not names: the
       // capability the Mapping pane surfaces (mappingBand) is the extraction
@@ -946,6 +992,11 @@ export async function openBoardModal(boardId, opts = {}) {
         Object.assign(aiOverride, p.plan.payload(p.keySel.value, p.modelSel.hidden ? null : p.modelSel.value || null));
       }
     }
+    // Board-scoped knobs are NOT admin-gated (the manager route accepts them),
+    // so they ride outside the pin block — same full-state rule: blank clears
+    // the column and the board follows the app default again. The array is
+    // empty until the rows mount, so an early save leaves the columns alone.
+    for (const c of capConfigs) Object.assign(aiOverride, c.plan.payload(c.sel.value));
     const payload = {
       name, context, facets,
       ai_reasoning: aiReasoning,

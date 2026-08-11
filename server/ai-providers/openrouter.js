@@ -13,6 +13,11 @@ export default (wires) => ({
   // gated); free (:free) models are 20 RPM. Not a provider figure for the paid path:
   // a conservative default; raise it freely.
   rpm: 60, burst: 10,
+  // Image input ceiling for the tag rendition (ai-image.js clamp; surveyed
+  // 2026-08-11): pass-through to hundreds of backends, so the generic
+  // conservative ceiling stated explicitly — the backend applies its own
+  // downscaling past whatever its true limit is.
+  images: { maxEdge: 2048, maxBytes: 4e6 },
   defaultModel: "qwen/qwen3-vl-32b-instruct",
   models: [
     { id: "google/gemma-4-31b-it:free", note: "free" },

@@ -18,7 +18,9 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { startServer, adminSession, req, seedBoard } from "./helpers.js";
 import { CAPABILITY_DEFS, CAPABILITY, bindingSettings } from "../server/capabilities.js";
-import { resolveCapability } from "../server/capability-resolve.js";
+import { resolveCapability, capabilityConfig } from "../server/capability-resolve.js";
+import { setCapabilityConfig } from "../server/capability-bind.js";
+import { IMAGE_PRESETS, DEFAULT_PRESET } from "../server/ai-image.js";
 import { resolveTranscriber, resolveDetector, resolveEmbedder, resolveDefaultAi } from "../server/worker.js";
 import { installFromUrl, uninstall } from "../server/plugin-loader.js";
 import { getSetting, setSetting, createAiKey, deleteAiKey, setPluginState } from "../server/db.js";
@@ -42,6 +44,18 @@ test("the registry stays consistent with what providers may declare", () => {
     if (cap.floor?.kind === "delegate")
       assert.ok(CAPABILITY[cap.floor.to], `${cap.id}: a delegate floor names a real capability`);
   }
+});
+
+test("the tag image-preset vocabulary is pinned to IMAGE_PRESETS (ai-image-input-plan.md)", () => {
+  // capabilities.js is pure data (no imports), so the enum options are a
+  // literal there and the render numbers live in ai-image.js — this pin is
+  // what keeps the two vocabularies from drifting.
+  const def = CAPABILITY.tag.binding.config.find((f) => f.key === "tag_image_preset");
+  assert.equal(def.kind, "enum");
+  assert.ok(def.label);
+  assert.deepEqual(def.options.map((o) => o.value), Object.keys(IMAGE_PRESETS));
+  assert.equal(def.default, DEFAULT_PRESET);
+  assert.ok(def.options.every((o) => o.label && o.hint), "every option carries its admin copy");
 });
 
 // --- resolution (pristine state first) ---
@@ -258,6 +272,82 @@ test("bind and probe are addressed by capability id, with the same rules the leg
   await setSetting(db, "transcribe_model", null);
   await setSetting(db, "detect_threshold", null);
   await setSetting(db, "detect_provider", null);
+});
+
+test("tag's image preset: enum projection, validation, and the stores-nothing covenant (Slice 2)", async () => {
+  const admin = await adminSession(db);
+  const bind = (body) => req(srv.base, "POST", "/api/admin/capabilities/tag/bind", { sid: admin.sid, body });
+
+  // Projection: the enum def rides the config row; detect's row keeps its
+  // exact legacy { key, value } shape (its tests deepEqual it).
+  let caps = byId(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));
+  const row = caps.tag.config.find((f) => f.key === "tag_image_preset");
+  assert.equal(row.value, "high", "unset reads as the def's default");
+  assert.equal(row.kind, "enum");
+  assert.ok(row.label);
+  assert.deepEqual(row.options.map((o) => o.value), ["thumb", "standard", "high", "max"]);
+  // The board-scoped write vocabulary ships with the entry, like boardBinding
+  // does for pins — the modal must never hardcode a column name.
+  assert.equal(row.boardColumn, "tag_image_preset");
+  assert.deepEqual(Object.keys(caps.detect.config[0]).sort(), ["key", "value"]);
+
+  // An unknown id is a 400 and stores nothing.
+  let r = await bind({ config: { tag_image_preset: "enormous" } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /options: thumb, standard, high, max/);
+  assert.equal(await getSetting(db, "tag_image_preset"), null);
+
+  // The covenant holds for a COMBINED body: a valid key binding beside a bogus
+  // config stores neither half (config is validated before the binding writes).
+  const created = await createAiKey(db, "img-covenant", "openai", "sk-img");
+  const keyId = created.id ?? created;
+  const keyBefore = await getSetting(db, "default_key_id");
+  r = await bind({ keyId, config: { tag_image_preset: "enormous" } });
+  assert.equal(r.status, 400);
+  assert.equal(await getSetting(db, "default_key_id"), keyBefore, "the binding half stored nothing");
+  assert.equal(await getSetting(db, "tag_image_preset"), null);
+
+  // A numeric field rejects junk through the same walk.
+  r = await req(srv.base, "POST", "/api/admin/capabilities/detect/bind",
+    { sid: admin.sid, body: { config: { detect_threshold: "abc" } } });
+  assert.equal(r.status, 400);
+  assert.equal(await getSetting(db, "detect_threshold"), null);
+
+  // Round-trip: a real id sticks and the feed reflects it.
+  r = await bind({ config: { tag_image_preset: "max" } });
+  assert.equal(r.status, 200);
+  assert.equal(await getSetting(db, "tag_image_preset"), "max");
+  caps = byId(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));
+  assert.equal(caps.tag.config.find((f) => f.key === "tag_image_preset").value, "max");
+
+  // Null clears back to the default.
+  r = await bind({ config: { tag_image_preset: null } });
+  assert.equal(r.status, 200);
+  assert.equal(await getSetting(db, "tag_image_preset"), null);
+
+  await deleteAiKey(db, keyId); // leave the key table as found
+});
+
+test("kind-aware capabilityConfig: numeric 0 is honored, junk and unknown ids fall to defaults", async () => {
+  // The old read was `Number(v) || default`, which folded a stored 0 into the
+  // default — 0 is a real threshold and must survive (deliberate behavior fix).
+  await setSetting(db, "detect_threshold", "0");
+  assert.equal((await capabilityConfig(db, "detect")).detect_threshold, 0);
+  // Junk in the row (hand-edited — the route rejects it) reads as the default.
+  await setSetting(db, "detect_threshold", "abc");
+  assert.equal((await capabilityConfig(db, "detect")).detect_threshold, 0.3);
+  await setSetting(db, "detect_threshold", null);
+  assert.equal((await capabilityConfig(db, "detect")).detect_threshold, 0.3);
+  // An enum row holding a retired id reads as the default, never an error.
+  await setSetting(db, "tag_image_preset", "retired-preset");
+  assert.equal((await capabilityConfig(db, "tag")).tag_image_preset, "high");
+  await setSetting(db, "tag_image_preset", null);
+  // Numerics store CANONICALLY — a value that validated as a number (here
+  // Number(true) === 1) must be stored as one, or it would read back as the
+  // default despite passing validation.
+  await setCapabilityConfig(db, "detect", { detect_threshold: true });
+  assert.equal(await getSetting(db, "detect_threshold"), "1");
+  await setSetting(db, "detect_threshold", null);
 });
 
 test("the modal's bind bodies (4b): env-apply, one-call enable, revert, off", async (t) => {

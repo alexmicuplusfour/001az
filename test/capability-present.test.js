@@ -4,7 +4,7 @@
 // capabilities.test.js proves the server actually emits.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory } from "../public/capability-present.js";
+import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory } from "../public/capability-present.js";
 
 const supported = [
   { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
@@ -335,6 +335,58 @@ test("planBoardPicker: chosenLabel narrates the current selection for the mappin
   assert.equal(plan.chosenLabel("", null), "OpenAI · whisper-1", "the default row answers with what it inherits");
   assert.equal(plan.chosenLabel("7", "whisper-1"), "prod — openai · whisper-1");
   assert.equal(plan.chosenLabel("whisper", null), "Local Transcriber (Whisper) — built-in");
+});
+
+// --- the board modal's capability-CONFIG planner (ai-image-input-plan.md §7) ---
+
+// A tag entry as the feed projects it: the board-scopable image-detail knob.
+const boardTagCfg = [{
+    key: "tag_image_preset", value: "high", kind: "enum", boardColumn: "tag_image_preset",
+    label: "Image detail sent to the model",
+    options: [
+      { value: "thumb", label: "Thumbnail", hint: "cheapest" },
+      { value: "standard", label: "Standard", hint: "≈3×" },
+      { value: "high", label: "High", hint: "≈5×" },
+      { value: "max", label: "Provider max", hint: "varies" },
+    ],
+}];
+
+test("planBoardConfig: the unset row names what the app default resolves to", () => {
+  const [plan] = planBoardConfig(boardTagCfg, null);
+  assert.equal(plan.column, "tag_image_preset", "the write vocabulary comes from the feed, never hardcoded");
+  assert.equal(plan.label, "Image detail sent to the model");
+  assert.deepEqual(plan.rows[0], { value: "", label: "App default (High)", hint: "≈5×" });
+  assert.deepEqual(plan.rows.map((r) => r.value), ["", "thumb", "standard", "high", "max"]);
+  assert.equal(plan.preselect, "", "a board with no pin inherits");
+  // The default row tracks the app-wide value, so it can never mislabel it.
+  const [cheap] = planBoardConfig([{ ...boardTagCfg[0], value: "thumb" }], null);
+  assert.equal(cheap.rows[0].label, "App default (Thumbnail)");
+});
+
+test("planBoardConfig: a pin preselects, and a retired preset falls back instead of being resent", () => {
+  assert.equal(planBoardConfig(boardTagCfg, { tag_image_preset: "max" })[0].preselect, "max");
+  assert.equal(
+    planBoardConfig(boardTagCfg, { tag_image_preset: "ultra-retired" })[0].preselect, "",
+    "a value the app no longer declares must not be sent back on save"
+  );
+});
+
+test("planBoardConfig: payload clears with null, and hints follow the selection", () => {
+  const [plan] = planBoardConfig(boardTagCfg, null);
+  assert.deepEqual(plan.payload(""), { tag_image_preset: null }, "App default = clear the column");
+  assert.deepEqual(plan.payload("max"), { tag_image_preset: "max" });
+  assert.equal(plan.hintFor("standard"), "≈3×");
+  assert.equal(plan.hintFor(""), "≈5×", "the unset row shows what it inherits");
+});
+
+test("planBoardConfig: only board-scopable knobs plan a row", () => {
+  assert.deepEqual(planBoardConfig(undefined, null), [], "no config at all");
+  // detect's threshold is capability-level but deliberately NOT board-scoped:
+  // no boardColumn, so no row.
+  assert.deepEqual(
+    planBoardConfig([{ key: "detect_threshold", value: 0.3 }], null), [],
+    "a global-only knob stays out of the board modal"
+  );
 });
 
 // --- 7c: the Plugins-tab helpers — one source for "who serves what" ---

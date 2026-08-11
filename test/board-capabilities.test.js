@@ -15,12 +15,12 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, seedUser, req } from "./helpers.js";
 import { CAPABILITY_DEFS, CAPABILITY } from "../server/capabilities.js";
 import { resolveCapability } from "../server/capability-resolve.js";
 import { resolveTranscriber, resolveDetector } from "../server/worker.js";
 import { installFromUrl, uninstall } from "../server/plugin-loader.js";
-import { getBoard, createAiKey, deleteAiKey, listAiKeys, countBoardOverrides, setSetting, setPluginState } from "../server/db.js";
+import { getBoard, createAiKey, deleteAiKey, listAiKeys, countBoardOverrides, setSetting, setPluginState, setBoardMembers, BOARD_BINDING_COLS } from "../server/db.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 
@@ -160,6 +160,83 @@ test("a rejected pin on CREATE leaves no board behind — validation runs before
   assert.equal(await count(), before);
 });
 
+// --- board-scoped CONFIG columns: the same write path, none of the pin rules
+// (ai-image-input-plan.md §4) ---
+
+test("a board-scoped config column rides the pin path: derived, written, cleared, validated", async () => {
+  // Derivation, first: the column reaches the SELECT list / updateBoard
+  // allow-list / admin payload off the registry, so a def edit is the whole
+  // wiring. A hand-added column would pass the round-trips below and still be
+  // invisible to a fresh capability — this is the assertion that catches that.
+  assert.ok(BOARD_BINDING_COLS.includes("tag_image_preset"), "config boardColumns join the derived list");
+
+  // On CREATE, beside a pin — one body, both kinds.
+  const keyId = await newKey("cfg-key", "openai");
+  const id = await newBoard("img-preset", { tag_image_preset: "max", ai_key_id: keyId });
+  assert.equal((await getBoard(db, id)).tag_image_preset, "max");
+  assert.equal(Number((await getBoard(db, id)).ai_key_id), keyId, "the pin in the same body landed too");
+
+  // PATCH sets, and clears back to the app default. "" clears like null (the
+  // select's empty option).
+  assert.equal((await patchBoard(id, { tag_image_preset: "standard" })).status, 200);
+  assert.equal((await getBoard(db, id)).tag_image_preset, "standard");
+  assert.equal((await patchBoard(id, { tag_image_preset: null })).status, 200);
+  assert.equal((await getBoard(db, id)).tag_image_preset, null, "null = use the app default");
+  await patchBoard(id, { tag_image_preset: "high" });
+  assert.equal((await patchBoard(id, { tag_image_preset: "" })).status, 200);
+  assert.equal((await getBoard(db, id)).tag_image_preset, null, '"" clears like null');
+
+  // An unknown id is refused with the same message the global knob gives, and
+  // the WHOLE body is discarded — the pins' stores-nothing contract, inherited
+  // because boardBindingPatch throws before updateBoard runs.
+  await patchBoard(id, { tag_image_preset: "high" });
+  const r = await patchBoard(id, { name: "img-preset-renamed", tag_image_preset: "enormous" });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /options: thumb, standard, high, max/);
+  const after = await getBoard(db, id);
+  assert.equal(after.tag_image_preset, "high", "the rejected value never landed");
+  assert.equal(after.name, "img-preset", "and neither did the valid half of the body");
+
+  // …and a non-admin BOARD MANAGER may set it through their own save route.
+  // The authority line: a knob is a cost dial like ai_votes (which managers
+  // already set), not a credential — pins stay admin-only.
+  const mgr = await seedUser(db, "img-mgr@test.local");
+  await setBoardMembers(db, id, [mgr.id], [mgr.id]); // board-admin = manager
+  const asMgr = (body) => req(srv.base, "PATCH", `/api/boards/${id}`, { sid: mgr.sid, body });
+  assert.equal((await asMgr({ tag_image_preset: "standard" })).status, 200);
+  assert.equal((await getBoard(db, id)).tag_image_preset, "standard", "a manager may set the knob");
+  const mgrBad = await asMgr({ tag_image_preset: "enormous" });
+  assert.equal(mgrBad.status, 400, "…judged by the same rule as the admin route");
+  assert.equal((await getBoard(db, id)).tag_image_preset, "standard");
+  // Their settings payload carries the knob AND its vocabulary (they can't
+  // read admin feeds), but never the pins.
+  const mgrView = await req(srv.base, "GET", `/api/boards/${id}/settings`, { sid: mgr.sid });
+  assert.equal(mgrView.status, 200);
+  assert.equal(mgrView.json.tag_image_preset, "standard");
+  assert.equal(mgrView.json.ai_key_id, undefined, "pins stay admin-only");
+  const cat = mgrView.json.capability_config.find((f) => f.boardColumn === "tag_image_preset");
+  assert.equal(cat.value, "high", "the app-wide default the 'App default (…)' row names");
+  assert.deepEqual(cat.options.map((o) => o.value), ["thumb", "standard", "high", "max"]);
+  await patchBoard(id, { tag_image_preset: "high" }); // back to where the rest of the test expects it
+
+  // A rejected config on CREATE leaves no board behind, exactly like a pin.
+  const count = async () => (await db.query("SELECT COUNT(*)::int AS c FROM boards")).rows[0].c;
+  const before = await count();
+  const bad = await req(srv.base, "POST", "/api/admin/boards",
+    { sid: admin.sid, body: { name: "never-born-2", facets: [], tag_image_preset: "enormous" } });
+  assert.equal(bad.status, 400);
+  assert.equal(await count(), before);
+
+  // Untouched by an unrelated edit (the absent-means-untouched rule).
+  assert.equal((await patchBoard(id, { context: "unrelated" })).status, 200);
+  assert.equal((await getBoard(db, id)).tag_image_preset, "high");
+
+  await deleteAiKey(db, keyId);
+  // A deleted key clears the PIN and leaves the config alone — config is not a
+  // pointer, so no cleanup loop touches it.
+  assert.equal((await getBoard(db, id)).tag_image_preset, "high", "config survives key deletion");
+});
+
 // --- the core case: two boards, two answers ---
 
 test("a board pinned to the built-in keeps it while the app default is paid — and the mirror", async () => {
@@ -251,12 +328,10 @@ test("board settings carry every pin column for the modal's pickers", async () =
   const board = (await listBoardsByName(db, "core-paid"))[0];
   const r = await req(srv.base, "GET", `/api/boards/${board.id}/settings`, { sid: admin.sid });
   assert.equal(r.status, 200);
-  for (const cap of CAPABILITY_DEFS) {
-    const bk = cap.binding.boardKeys;
-    if (!bk) continue;
-    for (const col of [bk.provider, bk.keyId, bk.model].filter(Boolean)) {
-      assert.ok(col in r.json, `settings payload carries ${col}`);
-    }
+  // Every board-scoped column the registry declares — pins AND config knobs
+  // (the modal's pickers preselect off these).
+  for (const col of BOARD_BINDING_COLS) {
+    assert.ok(col in r.json, `settings payload carries ${col}`);
   }
   assert.equal(Number(r.json.transcribe_key_id), (await listAiKeys(db)).find((k) => k.name === "t-core").id);
   assert.equal(r.json.transcribe_model, "whisper-1");

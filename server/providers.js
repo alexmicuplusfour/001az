@@ -43,6 +43,22 @@ export function requireRateLimit(name, desc) {
     throw new Error(`AI provider "${name}" must declare positive rpm and burst (rate-limit contract)`);
 }
 
+// The OPTIONAL `images` quirk block — the provider's declared image-input
+// ceiling, read by the tag rendition's clamp (ai-image.js). Absent is fine
+// (the generic conservative defaults apply); present, it must be sane, or a
+// typo'd descriptor would silently clamp every board's images to garbage.
+// Same enforcement point as the rate-limit contract: the one registry write.
+export function requireValidImages(name, desc) {
+  const img = desc.images;
+  if (img === undefined) return;
+  if (!img || typeof img !== "object" || Array.isArray(img))
+    throw new Error(`AI provider "${name}": images must be an object ({ maxEdge, maxBytes })`);
+  for (const k of ["maxEdge", "maxBytes"]) {
+    if (img[k] !== undefined && !(Number.isFinite(img[k]) && img[k] > 0))
+      throw new Error(`AI provider "${name}": images.${k} must be a positive finite number`);
+  }
+}
+
 // --- capability declaration: the `provides` normal form ---
 // A descriptor declares its capabilities three different ways for historical
 // reasons — tagging by the PRESENCE of wire.tag, embed/transcribe/detect by a
@@ -130,6 +146,7 @@ function install(name, desc) {
   desc.provides = normalizeProvides(desc);
   backfillLegacy(desc);
   requireRateLimit(name, desc); // any networked provider declares its rate limit, or it's rejected
+  requireValidImages(name, desc); // a declared image-input ceiling must be sane, or it's rejected
   PROVIDERS[name] = desc;
 }
 

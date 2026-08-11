@@ -49,6 +49,11 @@ export default function (ctx) {
     // Pace to what your box can serve, not an account tier — this mostly guards
     // the GPU against a big backlog sweep. Adjustable on the plugin card.
     rpm: 120, burst: 5,
+    // OPTIONAL: the image-input ceiling for tag renditions (long edge px /
+    // encoded bytes). Omit it and conservative generic defaults apply; declare
+    // it to let the app send what your vision models actually use. Validated
+    // at registration — positive finite numbers or the plugin is rejected.
+    images: { maxEdge: 2048, maxBytes: 4e6 },
     // Ollama ignores unknown OpenAI fields (tool_choice among them, on older
     // versions), so forcing the tool call is safe and helps where supported.
     // keyTest "list" probes /v1/models (the index): Test answers "is the box

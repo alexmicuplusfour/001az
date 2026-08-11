@@ -57,13 +57,15 @@ import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
-import { callTagger, embedTexts, transcribeAudio, detectObjects } from "./providers.js";
+import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
 import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector } from "./connectors/index.js";
 import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields } from "./media/index.js";
+import { sharpGate, MAX_DECODE_PIXELS } from "./sharp-gate.js";
+import { aiImageFor, resolvePreset, GENERIC_IMAGES } from "./ai-image.js";
 
 // Every live tagger call lands in the plugin health ledger (structured error
 // or heal) so the Plugins page dot reflects real traffic — and the future
@@ -647,7 +649,10 @@ async function getBoardPrompt(db, boardId, scope = null) {
   // rather than stamped onto the facet objects, which are board.facets and
   // shared with allFacets.
   const stamps = Object.fromEntries(facets.map((f) => [f.key, facetStamp(f, !!scope?.length)]));
-  const entry = { systemText, schema, allowed, facets, allFacets, stamps, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model };
+  // imagePreset is the board's own PIN only (null = follow the app default) —
+  // the effective value is resolved per job, deliberately uncached: see
+  // effectivePreset in startWorker.
+  const entry = { systemText, schema, allowed, facets, allFacets, stamps, research, votes, aiKeyId: board.ai_key_id, aiModel: board.ai_model, imagePreset: board.tag_image_preset };
   if (byScope) byScope.set(key, entry);
   else boardPromptCache.set(boardId, new Map([[key, entry]]));
   return entry;
@@ -1169,9 +1174,10 @@ export function detectionDemux(objectFields) {
 // The grounding-DINO family resizes to ~this on the long edge internally, so
 // shipping a full-res original only inflates the base64 POST + the sidecar's
 // decode for zero accuracy gain (the sidecar is single-threaded — every wasted
-// megabyte queues behind the next image). 40e6 mirrors the ingest decode cap.
+// megabyte queues behind the next image). The decode cap is the shared
+// MAX_DECODE_PIXELS from sharp-gate.js — one OOM policy with ingest and the
+// AI renditions.
 const DETECT_MAX_EDGE = 1333;
-const DETECT_MAX_INPUT_PIXELS = 40e6;
 
 // Prepare an image for the detector: cap the long edge and re-encode small. The
 // boxes come back normalized 0..1, so a uniform downscale leaves them exact.
@@ -1184,12 +1190,16 @@ const DETECT_MAX_INPUT_PIXELS = 40e6;
 // a truly bad image still reaches the sidecar and 422-parks there (see #detect).
 export async function imageForDetection(buf) {
   try {
-    return await sharp(buf, { pages: 1, limitInputPixels: DETECT_MAX_INPUT_PIXELS })
-      .rotate()
-      .resize({ width: DETECT_MAX_EDGE, height: DETECT_MAX_EDGE, fit: "inside", withoutEnlargement: true })
-      .flatten({ background: "#ffffff" }) // JPEG has no alpha; white beats the default black behind a logo
-      .jpeg({ quality: 90 })
-      .toBuffer();
+    // Through the shared decode gate: this runs at EXTRACT_CONCURRENCY (2) and
+    // used to decode up to 40MP ungated, concurrent with gated ingest decodes.
+    return await sharpGate(() =>
+      sharp(buf, { pages: 1, limitInputPixels: MAX_DECODE_PIXELS })
+        .rotate()
+        .resize({ width: DETECT_MAX_EDGE, height: DETECT_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+        .flatten({ background: "#ffffff" }) // JPEG has no alpha; white beats the default black behind a logo
+        .jpeg({ quality: 90 })
+        .toBuffer()
+    );
   } catch {
     return buf; // let the sidecar decode (and 422-park) a truly undecodable image
   }
@@ -1259,6 +1269,153 @@ export async function documentTextFor(galleryDir, file) {
     return text;
   }
   return "";
+}
+
+// What the model sees for an item: parts built from its files by kind. Module
+// scope + exported so the builder is directly testable (the documentTextFor /
+// imageForDetection convention); startWorker binds its storage dirs.
+//
+// Images: a provider-clamped rendition of the stored ORIGINAL — `preset` (the
+// board's image detail) and `images` (the resolved provider's ceiling), see
+// ai-image-input-plan.md — falling back to the ≤600px card face on any
+// trouble. Documents: their extracted text (documentTextFor), so every
+// provider can tag them; PDFs additionally carry their page-1 card face
+// (deliberately NOT rendition-scaled — §6b: a PDF is text-first material), and
+// fall back to an Anthropic-only document block when the document genuinely
+// has no text layer (extractor DOWNTIME throws instead — the retry queue waits
+// it out rather than paying per-page billing).
+// The image-input ceiling the RESOLVED provider declares (ai-image-input-plan
+// §1) — an absent block means the conservative generic defaults. Pure, so it
+// sits beside the builder rather than in startWorker's closure.
+export const imagesFor = (binding) => PROVIDERS[binding?.provider]?.images ?? GENERIC_IMAGES;
+
+export async function modelInputFor({ galleryDir, thumbsDir }, payload, { entity = null, mode = "tag", preset, images } = {}) {
+  // The closing ask names the tool this leg actually offers: the tag leg
+  // forces record_tags, extraction forces record_fields. On a provider that
+  // can't force the call (GLM's tool_choice is auto-only) the sentence IS
+  // the forcing, so a wrong name here instructs the model to fill in the
+  // wrong form.
+  const ask = (subject, judging = "") => mode === "extract"
+    ? `Extract the requested fields from ${subject} using the record_fields tool${judging}.`
+    : `Tag ${subject} using the record_tags tool${judging}.`;
+  const file = payload.files?.[0];
+  if (!file) {
+    // Instance with no material file (connector tag vehicle): the
+    // bound-fields dossier appended by tagOne is the material; anchor it
+    // with the entity's name. Extraction appends no dossier, so its ask
+    // can't promise "fields below" — the name is all there is.
+    return [{
+      kind: "text",
+      text: `The item is an entity named "${entity?.display_name || entity?.identity || payload.identity}". ${ask("it", mode === "extract" ? "" : ", judging from its extracted fields below")}`,
+    }];
+  }
+  if (file.kind === "pdf") {
+    const text = await documentTextFor(galleryDir, file);
+    if (text.trim()) {
+      // Page-1 preview rides along so visual/style facets keep their signal;
+      // the thumbnail is a fraction of the tokens of per-page PDF billing.
+      const parts = [];
+      const thumb = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp")).catch(() => null);
+      if (thumb) parts.push({ kind: "image", mediaType: "image/webp", b64: thumb.toString("base64") });
+      parts.push({
+        kind: "text",
+        text: `The item is the following document ("${file.original_name}")` +
+          (thumb ? ", shown above as a first-page preview" : "") +
+          `:\n\n${clipText(text)}\n\n${ask("this document")}`,
+      });
+      return parts;
+    }
+    // Extraction succeeded but found no text: a scan with no text layer
+    // (or past the OCR cap). The whole PDF as a document block is the right
+    // fallback — visual reading is exactly what Anthropic models can do
+    // (compat providers reject document parts with a readable error).
+    console.warn(`no text layer in ${file.original_name || file.name} — sending as a document block (Anthropic-only, billed per page)`);
+    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+    return [
+      { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
+      { kind: "text", text: ask("this document") },
+    ];
+  }
+  if (file.kind === "text" || file.kind === "docx") {
+    const text = await documentTextFor(galleryDir, file);
+    return [{
+      kind: "text",
+      text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\n${ask("this document")}`,
+    }];
+  }
+  if (file.kind === "audio") {
+    // The transcript is produced out-of-band by the transcription loop and
+    // stored on the payload, independent of tagging. If it isn't ready yet
+    // (and didn't permanently fail), requeue — status-less — so the first tag
+    // still tags the speech rather than the filename.
+    const transcript = payload.transcript;
+    if (transcript === undefined && !payload.transcript_error) {
+      // A wait, not a failure — don't burn tag attempts while a long clip
+      // transcribes (noCount requeues indefinitely on a short backoff).
+      const e = new Error("awaiting transcription — will retry");
+      e.noCount = true;
+      throw e;
+    }
+    if (transcript && transcript.trim()) {
+      return [{
+        kind: "text",
+        text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${clipText(transcript)}\n\n${ask("this recording")}`,
+      }];
+    }
+    // No discernible speech (music/ambient/silence) or a permanent transcribe
+    // failure → anchor on the filename, like a textless document.
+    return [{
+      kind: "text",
+      text: `The item is an audio recording named "${file.original_name}" with no discernible speech. ${ask("it", ", judging from its name")}`,
+    }];
+  }
+  // The AI rendition, NOT the card face: a 600px q72 thumbnail of a 1775px
+  // screenshot has illegible body text, and every provider accepts far more
+  // (ai-image-input-plan.md). aiImageFor clamps the board's preset to what the
+  // resolved provider declares and never throws — its floor is that same card
+  // face, so the worst case here is the pre-preset behaviour. Not wrapped in
+  // sharpGate: it gates internally, and the gate is not reentrant.
+  const rendered = await aiImageFor({ galleryDir, thumbsDir }, file, { preset, images });
+  // A generated connector face (e.g. a price chart) gets a chart-aware anchor
+  // so the tagger reads the trend, not a generic "image". (Its rendition is
+  // always the face: the chart's galleryDir copy IS the webp thumb.)
+  const anchor = file.generated
+    ? `This is a price chart for "${entity?.display_name || entity?.identity || payload.identity}". ${ask("it", mode === "extract" ? ", judging from the chart" : ", judging from the chart and the extracted fields below")}`
+    : ask("this image");
+  return [
+    // `render` is the diagnostics bag the job log records — both wires map
+    // parts by `kind` and ignore unknown fields, so it rides along invisibly.
+    { kind: "image", mediaType: rendered.mediaType, b64: rendered.b64, render: rendered.render },
+    { kind: "text", text: anchor },
+  ];
+}
+
+// Text-only input for the extraction leg — all doc types go through the
+// same documentTextFor path so extraction works with any provider (document
+// blocks are Anthropic-only) and never pays image tokens. null = no text
+// (image file, or a genuinely textless pdf) — the caller falls back to
+// modelInputFor; extractor downtime throws out of here instead.
+export async function modelInputForExtract(galleryDir, payload) {
+  const file = payload.files?.[0];
+  if (!file) return null; // connector entity with no file — nothing to extract
+  let text;
+  if (file.kind === "audio") {
+    // Audio's "text" is its transcript (produced out-of-band); wait for it the
+    // same way the tag leg does. A speechless clip has nothing to extract.
+    if (payload.transcript === undefined && !payload.transcript_error) {
+      const e = new Error("awaiting transcription — will retry");
+      e.noCount = true; // a wait, not a failure — see modelInputFor
+      throw e;
+    }
+    text = payload.transcript || "";
+  } else {
+    text = await documentTextFor(galleryDir, file);
+  }
+  if (!text.trim()) return null;
+  return [{
+    kind: "text",
+    text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\nExtract the requested fields using the record_fields tool.`,
+  }];
 }
 
 // Resolve one derived identity value to an entity id via find-or-create,
@@ -1335,132 +1492,18 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     if (n) console.log(`job log: ${n} job(s) from the previous run marked interrupted`);
   });
 
-  // What the model sees for an item: parts built from its files by kind.
-  // Images: the thumbnail (cheap) rather than the original. Documents: their
-  // extracted text (documentTextFor), so every provider can tag them; PDFs
-  // additionally carry their page-1 thumbnail so visual/style facets keep
-  // their signal, and fall back to an Anthropic-only document block when the
-  // document genuinely has no text layer (extractor DOWNTIME throws instead —
-  // the retry queue waits it out rather than paying per-page billing).
-  async function modelInputFor(payload, entity = null, mode = "tag") {
-    // The closing ask names the tool this leg actually offers: the tag leg
-    // forces record_tags, extraction forces record_fields. On a provider that
-    // can't force the call (GLM's tool_choice is auto-only) the sentence IS
-    // the forcing, so a wrong name here instructs the model to fill in the
-    // wrong form.
-    const ask = (subject, judging = "") => mode === "extract"
-      ? `Extract the requested fields from ${subject} using the record_fields tool${judging}.`
-      : `Tag ${subject} using the record_tags tool${judging}.`;
-    const file = payload.files?.[0];
-    if (!file) {
-      // Instance with no material file (connector tag vehicle): the
-      // bound-fields dossier appended by tagOne is the material; anchor it
-      // with the entity's name. Extraction appends no dossier, so its ask
-      // can't promise "fields below" — the name is all there is.
-      return [{
-        kind: "text",
-        text: `The item is an entity named "${entity?.display_name || entity?.identity || payload.identity}". ${ask("it", mode === "extract" ? "" : ", judging from its extracted fields below")}`,
-      }];
-    }
-    if (file.kind === "pdf") {
-      const text = await documentTextFor(galleryDir, file);
-      if (text.trim()) {
-        // Page-1 preview rides along so visual/style facets keep their signal;
-        // the thumbnail is a fraction of the tokens of per-page PDF billing.
-        const parts = [];
-        const thumb = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp")).catch(() => null);
-        if (thumb) parts.push({ kind: "image", mediaType: "image/webp", b64: thumb.toString("base64") });
-        parts.push({
-          kind: "text",
-          text: `The item is the following document ("${file.original_name}")` +
-            (thumb ? ", shown above as a first-page preview" : "") +
-            `:\n\n${clipText(text)}\n\n${ask("this document")}`,
-        });
-        return parts;
-      }
-      // Extraction succeeded but found no text: a scan with no text layer
-      // (or past the OCR cap). The whole PDF as a document block is the right
-      // fallback — visual reading is exactly what Anthropic models can do
-      // (compat providers reject document parts with a readable error).
-      console.warn(`no text layer in ${file.original_name || file.name} — sending as a document block (Anthropic-only, billed per page)`);
-      const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-      return [
-        { kind: "document", mediaType: "application/pdf", b64: buf.toString("base64") },
-        { kind: "text", text: ask("this document") },
-      ];
-    }
-    if (file.kind === "text" || file.kind === "docx") {
-      const text = await documentTextFor(galleryDir, file);
-      return [{
-        kind: "text",
-        text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\n${ask("this document")}`,
-      }];
-    }
-    if (file.kind === "audio") {
-      // The transcript is produced out-of-band by the transcription loop and
-      // stored on the payload, independent of tagging. If it isn't ready yet
-      // (and didn't permanently fail), requeue — status-less — so the first tag
-      // still tags the speech rather than the filename.
-      const transcript = payload.transcript;
-      if (transcript === undefined && !payload.transcript_error) {
-        // A wait, not a failure — don't burn tag attempts while a long clip
-        // transcribes (noCount requeues indefinitely on a short backoff).
-        const e = new Error("awaiting transcription — will retry");
-        e.noCount = true;
-        throw e;
-      }
-      if (transcript && transcript.trim()) {
-        return [{
-          kind: "text",
-          text: `The item is an audio recording named "${file.original_name}". Transcript:\n\n${clipText(transcript)}\n\n${ask("this recording")}`,
-        }];
-      }
-      // No discernible speech (music/ambient/silence) or a permanent transcribe
-      // failure → anchor on the filename, like a textless document.
-      return [{
-        kind: "text",
-        text: `The item is an audio recording named "${file.original_name}" with no discernible speech. ${ask("it", ", judging from its name")}`,
-      }];
-    }
-    const buf = await fs.promises.readFile(path.join(thumbsDir, file.name + ".webp"));
-    // A generated connector face (e.g. a price chart) gets a chart-aware anchor
-    // so the tagger reads the trend, not a generic "image".
-    const anchor = file.generated
-      ? `This is a price chart for "${entity?.display_name || entity?.identity || payload.identity}". ${ask("it", mode === "extract" ? ", judging from the chart" : ", judging from the chart and the extracted fields below")}`
-      : ask("this image");
-    return [
-      { kind: "image", mediaType: "image/webp", b64: buf.toString("base64") },
-      { kind: "text", text: anchor },
-    ];
-  }
+  // The parts builders live at module scope (see modelInputFor /
+  // modelInputForExtract above) — bound here to this worker's storage dirs.
+  const DIRS = { galleryDir, thumbsDir };
 
-  // Text-only input for the extraction leg — all doc types go through the
-  // same documentTextFor path so extraction works with any provider (document
-  // blocks are Anthropic-only) and never pays image tokens. null = no text
-  // (image file, or a genuinely textless pdf) — the caller falls back to
-  // modelInputFor; extractor downtime throws out of here instead.
-  async function modelInputForExtract(payload) {
-    const file = payload.files?.[0];
-    if (!file) return null; // connector entity with no file — nothing to extract
-    let text;
-    if (file.kind === "audio") {
-      // Audio's "text" is its transcript (produced out-of-band); wait for it the
-      // same way the tag leg does. A speechless clip has nothing to extract.
-      if (payload.transcript === undefined && !payload.transcript_error) {
-        const e = new Error("awaiting transcription — will retry");
-        e.noCount = true; // a wait, not a failure — see modelInputFor
-        throw e;
-      }
-      text = payload.transcript || "";
-    } else {
-      text = await documentTextFor(galleryDir, file);
-    }
-    if (!text.trim()) return null;
-    return [{
-      kind: "text",
-      text: `The item is the following document ("${file.original_name}"):\n\n${clipText(text)}\n\nExtract the requested fields using the record_fields tool.`,
-    }];
-  }
+  // The image detail in effect for a job: the board's own pin, else the
+  // app-wide default. The global read is skipped entirely when the board pins
+  // one — and deliberately NOT cached beside the board prompt: caching the
+  // effective value would need the capability bind route to invalidate every
+  // board cache, and one single-row SELECT next to a paid call is not worth a
+  // new invalidation edge.
+  const effectivePreset = async (boardPresetId) =>
+    resolvePreset(boardPresetId ?? (await capabilityConfig(db, "tag")).tag_image_preset);
 
   async function tagOne(row) {
     const prompt = await getBoardPrompt(db, row.board_id, row.tag_facets);
@@ -1471,7 +1514,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     if (!ai) throw noKeyError();
 
     const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
-    const parts = await modelInputFor(row.payload, entity);
+    // ONE rendition per item, whatever the vote count: `parts` is built once
+    // and shared across all N calls below.
+    const parts = await modelInputFor(DIRS, row.payload, {
+      entity,
+      preset: await effectivePreset(prompt.imagePreset),
+      images: imagesFor(ai),
+    });
     // Distilled extraction results ride along as a text part so the tagger
     // sees the structured data without re-reading the raw material. Entity
     // fields (connector-bound) come first, the instance's own extractions
@@ -1537,6 +1586,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     return {
       tags, undecided, reasoning, confidence: merged.confidence,
       usages, votes: runs.length, model: ai.model, provider: ai.provider,
+      // What the model was actually shown, for the job log — the only way to
+      // tell a `high` board from one silently riding the thumbnail fallback.
+      image: parts.find((p) => p.kind === "image")?.render ?? null,
     };
   }
 
@@ -1647,7 +1699,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
     for (const row of rows) {
       try {
-        await refreshDueEntity(db, row, Date.now(), { galleryDir, thumbsDir });
+        await refreshDueEntity(db, row, Date.now(), DIRS);
       } catch (err) {
         refreshBackoffUntil = Date.now() + 60000;
         await setEntityRefreshAt(db, row.entity.id, Date.now() + 60000); // retry later, don't wedge the sweep
@@ -1882,7 +1934,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // failure — their routing wins, the result is dropped, the tokens were
     // spent either way so usage still counts.
     try {
-      const { undecided, usages, votes, model } = result;
+      const { undecided, usages, votes, model, image } = result;
       // A scoped pass (items.tag_facets) writes only the facets it was queued
       // for and keeps the rest of the item's answers. `row` is the CLAIM-TIME
       // state and that is safe without a re-read: markTagged is fenced on
@@ -1913,6 +1965,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           ...(scope?.length ? { facets: scope } : {}),
           ...(votes > 1 ? { votes } : {}),
           ...(!scope?.length && undecided ? { undecided: true } : {}),
+          // Image items only — "what did the model actually see".
+          ...(image ? { image } : {}),
         });
         console.log(`tagged #${row.id} ${label} [${model}]${scope?.length ? ` (facets: ${scope.join(", ")})` : ""}${!scope?.length && undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
         await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
@@ -1992,13 +2046,24 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // tokens for PDFs). Fall back to the full modelInputFor path for non-doc
       // files (images, connector entities) where there is no text sidecar — in
       // extract mode, so its anchors ask for record_fields, not record_tags.
-      let parts = await modelInputForExtract(row.payload);
+      let parts = await modelInputForExtract(galleryDir, row.payload);
       if (!parts) {
         // The fallback anchors name the entity (no-file vehicles, chart faces).
         // Identity resolution below re-reads its own copy after the call, so a
         // mid-call rename never acts on this snapshot.
         const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
-        parts = await modelInputFor(row.payload, entity, "extract");
+        // Extraction reuses TAGGING's image detail (one dial for one decision —
+        // it rides tagging's declaration and binding delegation), but clamps to
+        // the EXTRACT binding's provider, which may differ.
+        parts = await modelInputFor(DIRS, row.payload, {
+          entity,
+          mode: "extract",
+          // board?. — the row's board can vanish between the claim and the
+          // read here (the adjacent `board?.mapping` guards the same window);
+          // an absent pin just means "use the app default".
+          preset: await effectivePreset(board?.tag_image_preset),
+          images: imagesFor(ai),
+        });
       }
       ({ input, usage } = await trackedTagger(db, {
         provider: ai.provider,
@@ -2193,7 +2258,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         let face = null;
         // A face render failure isn't fatal — proceed to tag with the tile; the
         // sweep's self-heal retries the first render later.
-        try { face = await generateFace(db, { galleryDir, thumbsDir }, entity, { id: row.id, payload: row.payload }, board, now); }
+        try { face = await generateFace(db, DIRS, entity, { id: row.id, payload: row.payload }, board, now); }
         catch (e) { renderError = e.message; console.warn(`face render failed for #${row.entity_ids?.[0]} ${label}: ${e.message} (tile)`); }
         rendered = !!face;
         await setEntityRefreshAt(db, entity.id, entityRefreshAt(entity.fields, face ? now : entity.face_at, board.mapping, now));

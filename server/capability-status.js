@@ -23,7 +23,7 @@
 // result carries apiKey — it must never be spread into this payload. The
 // secrets-scan test seeds a sentinel key and greps the serialized response.
 import { PROVIDERS } from "./providers.js";
-import { CAPABILITY, CAPABILITY_DEFS } from "./capabilities.js";
+import { CAPABILITY, CAPABILITY_DEFS, configFieldView } from "./capabilities.js";
 import { resolveCapability, capabilityBinding, capabilityConfig, storedBindingMiss } from "./capability-resolve.js";
 import { pluginCatalog } from "./plugins.js";
 import { listConnectors, getConnector } from "./connectors/index.js";
@@ -210,7 +210,14 @@ async function aiEntry(db, cap, catalog) {
           ...(cap.mappingBand ? { mappingBand: true } : {}),
         }
       : {}),
-    ...(cfg ? { config: cap.binding.config.map((f) => ({ key: f.key, value: cfg[f.key] })) } : {}),
+    // Conditional spreads on the new fields, deliberately: detect's tests pin
+    // its config row as exactly { key, value }, and a def that declares no
+    // kind/label/options must keep projecting that exact shape.
+    ...(cfg
+      ? {
+          config: cap.binding.config.map((f) => configFieldView(f, cfg[f.key])),
+        }
+      : {}),
     ...(modifiers.length ? { modifiers } : {}),
   };
 }

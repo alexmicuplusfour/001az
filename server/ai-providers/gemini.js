@@ -9,6 +9,12 @@ export default (wires) => ({
   // Rate limit: Free tier — 10 RPM for flash-class models (Google AI docs, 2026-07).
   // Paid Tier 1 is far higher (~1,000+ RPM) — raise per key once billing is on.
   rpm: 10, burst: 5,
+  // Image input ceiling for the tag rendition (ai-image.js clamp; surveyed
+  // 2026-08-11): Gemini tiles at 768×768 with no hard dimension cap the compat
+  // layer exposes, so this is the generic ceiling stated explicitly — 2048px
+  // is 4–6 tiles, past which more pixels buy little; inline payloads cap
+  // around 20MB so 4MB keeps clear headroom.
+  images: { maxEdge: 2048, maxBytes: 4e6 },
   // Curated set live-verified 2026-07-29: the 2.5 family curated here before
   // was RETIRED for new users (gemini-2.5-flash 404s "no longer available to
   // new users" while still APPEARING in /models — listing presence is not

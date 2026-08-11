@@ -246,6 +246,47 @@ export function planBoardPicker(cap, keys, board, catalog) {
   };
 }
 
+// --- the board modal's capability-CONFIG planner (ai-image-input-plan.md §7) ---
+// A capability knob a board may override (tagging's image detail). Distinct
+// from planBoardPicker above, which plans a BINDING (which key, which model):
+// this plans a value, so there is no roster, no model axis, and nothing to
+// disqualify — just "inherit the app default, or pick one of the declared
+// options".
+//
+// Takes the field descriptors directly — `board.capability_config` from the
+// board settings payload (any manager can read it), or the same shape lifted
+// off the admin capabilities feed when creating a board, which has no settings
+// payload yet. One entry per board-scopable field, so a second such knob
+// renders with no edit here; [] when there are none. Pure — the modal mounts.
+export function planBoardConfig(fields, board) {
+  return (fields || [])
+    .filter((f) => f.boardColumn && f.options?.length)
+    .map((f) => {
+      // What blank MEANS, spelled out — the unset row answers the question
+      // rather than raising it (planBoardPicker's rule). `f.value` is the
+      // app-wide effective value, already defaulted server-side.
+      const appOption = f.options.find((o) => o.value === f.value);
+      const rows = [
+        { value: "", label: `App default (${appOption?.label || f.value})`, hint: appOption?.hint || "" },
+        ...f.options.map((o) => ({ value: o.value, label: o.label || o.value, hint: o.hint || "" })),
+      ];
+      // A stored value that is no longer a declared option (a preset retired
+      // between releases) falls to the default row instead of being sent back
+      // on save — the same rule the pin planner applies to a vanished key.
+      const stored = board?.[f.boardColumn] || "";
+      return {
+        key: f.key,
+        column: f.boardColumn,
+        label: f.label || f.key.replace(/_/g, " "),
+        rows,
+        preselect: rows.some((r) => r.value === stored) ? stored : "",
+        hintFor: (sel) => rows.find((r) => r.value === sel)?.hint || "",
+        // Blank clears the column — the board falls back to the app default.
+        payload: (sel) => ({ [f.boardColumn]: sel || null }),
+      };
+    });
+}
+
 // --- the plugin modal's section planner ---
 // One capability section per (capability, provider) pair, planned here as pure
 // data and mounted by a thin DOM shell in plugin-modal.js. Everything the four

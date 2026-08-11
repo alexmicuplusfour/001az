@@ -1200,16 +1200,31 @@ export async function deleteAiKey(db, id) {
 
 // --- boards ---
 
-// Every per-board capability-binding column, from the registry — so a new
+// Every per-board capability column, from the registry — so a new
 // board-scoped capability's columns ride into BOARD_COLS, the admin board
 // payload, and updateBoard's boardBindings without a hand edit here. Each
 // capability declares its own columns; the Set just guards that invariant.
-export const BOARD_BINDING_COLS = [...new Set(
+//
+// TWO kinds, and the split is an AUTHORITY boundary, not bookkeeping:
+//   PINS    boardKeys — a provider/key/model pointer. Admin-written (they
+//           select credentials and therefore a spend account), and cleared by
+//           the deleted-key and uninstall loops.
+//   CONFIG  binding.config[].boardColumn — a capability-level knob scoped per
+//           board (tagging's image detail). A cost/quality dial like
+//           ai_votes, so any board MANAGER may set it; not a pointer, so
+//           nothing dangles and no cleanup loop touches it.
+// Both are selected and writable through updateBoard; only the pins are gated
+// behind is_admin in the board payload (server.js).
+export const BOARD_PIN_COLS = [...new Set(
   CAPABILITY_DEFS.flatMap((c) => {
     const bk = c.binding.boardKeys;
     return bk ? [bk.provider, bk.keyId, bk.model].filter(Boolean) : [];
   })
 )];
+export const BOARD_CONFIG_COLS = [...new Set(
+  CAPABILITY_DEFS.flatMap((c) => (c.binding.config || []).map((f) => f.boardColumn).filter(Boolean))
+)];
+export const BOARD_BINDING_COLS = [...new Set([...BOARD_PIN_COLS, ...BOARD_CONFIG_COLS])];
 
 // boards.type still exists in the schema (unread legacy; drop in a later
 // schema pass) but is deliberately not selected anywhere.

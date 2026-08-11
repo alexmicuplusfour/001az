@@ -7,11 +7,11 @@ import sharp from "sharp";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { sharpGate, MAX_DECODE_PIXELS } from "../sharp-gate.js";
 import { imageThumb } from "../faces/image-thumb.js";
 import { storeFace } from "../faces/index.js";
 
 const SVG_RASTER_WIDTH = 2000; // SVG uploads are rasterized to WebP at this width
-const MAX_PIXELS = 40e6; // decode cap: a 40MP image is ~160 MB of raw pixels
 const ALLOWED = { jpeg: "jpg", png: "png", webp: "webp", avif: "avif", heif: "avif", gif: "gif" };
 
 // `extensions` is the name-level pre-filter (folder feeds, catalog display) —
@@ -46,36 +46,22 @@ export function imageSource({ galleryDir, thumbsDir }) {
   fs.mkdirSync(galleryDir, { recursive: true });
   fs.mkdirSync(thumbsDir, { recursive: true });
 
-  // The droplet is small (1 vCPU / 458 MB, no swap — node got OOM-killed under
-  // a concurrent bulk upload). Keep libvips lean: no operation cache holding
-  // decoded images, single worker thread.
-  sharp.cache(false);
-  sharp.concurrency(1);
-
-  // All upload image processing goes through this gate: decode strictly one
-  // image at a time process-wide, no matter how many requests are in flight.
-  let processGate = Promise.resolve();
-  function serializeProcessing(fn) {
-    const run = processGate.then(fn);
-    processGate = run.then(
-      () => {},
-      () => {}
-    );
-    return run;
-  }
+  // The decode gate + the droplet-safe sharp globals live in ../sharp-gate.js,
+  // shared with the tag-time AI renditions (ai-image.js) — one "who may decode
+  // right now" answer process-wide.
 
   return {
     // tmpPath -> stored original + thumbnail; returns the payload file entry,
     // or null when the bytes aren't an image type we accept.
     async ingest(tmpPath, originalName) {
-      return serializeProcessing(async () => {
+      return sharpGate(async () => {
         let buf = await fs.promises.readFile(tmpPath);
-        let meta = await sharp(buf, { pages: 1, limitInputPixels: MAX_PIXELS }).metadata();
+        let meta = await sharp(buf, { pages: 1, limitInputPixels: MAX_DECODE_PIXELS }).metadata();
         if (meta.format === "svg") {
           // Rasterize SVGs to WebP: vectors can embed scripts, so the original
           // markup is never stored or served. Render at high density, then cap.
           const density = Math.min(2400, Math.max(72, (72 * SVG_RASTER_WIDTH) / (meta.width || SVG_RASTER_WIDTH)));
-          buf = await sharp(buf, { density, limitInputPixels: MAX_PIXELS })
+          buf = await sharp(buf, { density, limitInputPixels: MAX_DECODE_PIXELS })
             .resize({ width: SVG_RASTER_WIDTH, withoutEnlargement: true })
             .webp({ quality: 90 })
             .toBuffer();
@@ -91,7 +77,7 @@ export function imageSource({ galleryDir, thumbsDir }) {
         // point is its thumbnail, so a render/write failure rejects the upload
         // (behavior-identical to the pre-face-pipeline inline toFile). imageThumb
         // throws rather than returning null, so there's no null-guard branch.
-        const rendered = await imageThumb(buf, { maxPixels: MAX_PIXELS });
+        const rendered = await imageThumb(buf, { maxPixels: MAX_DECODE_PIXELS });
         const { w, h } = await storeFace({ galleryDir, thumbsDir }, filename, rendered);
         await fs.promises.writeFile(path.join(galleryDir, filename), buf);
         return {
@@ -118,7 +104,7 @@ export function imageSource({ galleryDir, thumbsDir }) {
         const p = path.join(galleryDir, entry.name);
         const [stat, m] = await Promise.all([
           fs.promises.stat(p),
-          sharp(p, { pages: 1, limitInputPixels: MAX_PIXELS }).metadata(),
+          sharp(p, { pages: 1, limitInputPixels: MAX_DECODE_PIXELS }).metadata(),
         ]);
         return { size: stat.size, meta: pickImageMeta(m) };
       } catch {

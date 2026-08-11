@@ -61,6 +61,28 @@ export const CAPABILITY_DEFS = [
       // it predates the rest and the env rung below reads it too.
       keys: { provider: null, keyId: "default_key_id", model: "model", enabled: null },
       boardKeys: { keyId: "ai_key_id", model: "ai_model" },
+      // Capability-level knob (ai-image-input-plan.md): the image detail sent
+      // to the tagger — a PRESET id, not pixels. The vocabulary + admin copy
+      // live here (this file is pure data the UI reads; copy-as-data is the
+      // rebindWarning precedent); the numbers each id maps to live in
+      // ai-image.js IMAGE_PRESETS, and a drift-pin test holds the two equal.
+      //
+      // `boardColumn` makes it board-scopable: a NULL column falls to the
+      // `key` setting above. It lives here rather than as a fourth boardKeys
+      // field on purpose — boardKeys' three names carry PIN semantics (the
+      // provider-XOR-keyId rule, countBoardOverrides, and the cleanup loops
+      // that clear a deleted key's pins). Config is exactly what those loops
+      // must never touch, and a preset id has nothing to dangle.
+      config: [{
+        key: "tag_image_preset", boardColumn: "tag_image_preset", default: "high", kind: "enum",
+        label: "Image detail sent to the model",
+        options: [
+          { value: "thumb", label: "Thumbnail", hint: "the card face — cheapest, the pre-preset behavior" },
+          { value: "standard", label: "Standard", hint: "≈3× thumbnail image tokens" },
+          { value: "high", label: "High", hint: "≈5× — text in screenshots stays legible" },
+          { value: "max", label: "Provider max", hint: "whatever the provider accepts — cost varies by model" },
+        ],
+      }],
     },
     // The legacy rung: a key the SERVER holds rather than a stored row. Still
     // gated on the provider's plugin being installed.
@@ -187,6 +209,25 @@ export const CAPABILITY = Object.fromEntries(CAPABILITY_DEFS.map((c) => [c.id, c
 //
 // Lives here, in the data module, because both callers own their own setSetting
 // and neither may import a module that imports db.js.
+// ONE wire shape for a capability-level knob, with its effective value. Two
+// projections need it — the admin capabilities feed (capability-status.js) and
+// the board settings payload (capability-resolve.js boardConfigCatalog), which
+// exists because a board MANAGER may set a knob and cannot read admin feeds.
+// Shared so the two can't drift on field names; the client's planBoardConfig
+// takes either one unchanged.
+//
+// Conditional spreads are load-bearing: a def that declares no kind/label/
+// options/boardColumn must still project as exactly { key, value } (detect's
+// threshold, whose payload shape is pinned by test).
+export const configFieldView = (f, value) => ({
+  key: f.key,
+  value,
+  ...(f.kind ? { kind: f.kind } : {}),
+  ...(f.label ? { label: f.label } : {}),
+  ...(f.options ? { options: f.options } : {}),
+  ...(f.boardColumn ? { boardColumn: f.boardColumn } : {}),
+});
+
 export const bindingSettings = (cap) => {
   const k = cap.binding.keys;
   return k ? [k.provider, k.keyId, k.model, k.enabled].filter(Boolean) : [];

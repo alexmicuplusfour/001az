@@ -16,6 +16,11 @@ export default (wires) => ({
   // ~1-2 in flight, undocumented). Not a provider figure: a conservative choice, low
   // burst to approximate the concurrency cap. Revisit if Z.ai publishes real limits.
   rpm: 60, burst: 2,
+  // Image input ceiling for the tag rendition (ai-image.js clamp): Z.ai
+  // publishes no dimension cap for the V family — the generic conservative
+  // ceiling stated explicitly (2026-08-11), matching this file's
+  // never-guessed policy.
+  images: { maxEdge: 2048, maxBytes: 4e6 },
   defaultModel: "glm-4.6v",
   models: [
     { id: "glm-4.6v-flash", note: "free" },

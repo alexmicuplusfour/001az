@@ -129,6 +129,7 @@ export async function bindCapability(db, capId, patch = {}) {
 //                    left alone (a Whisper pin survives an irrelevant clear)
 //   model         → only meaningful beside a non-null keyId in the same body;
 //                    alone it is ignored (a model with no key is never read)
+//
 export async function boardBindingPatch(db, body = {}) {
   const cols = {};
   for (const cap of CAPABILITY_DEFS) {
@@ -181,11 +182,72 @@ export async function boardBindingPatch(db, body = {}) {
   return cols;
 }
 
-// A capability-level knob (detect's threshold): belongs to the capability, not
-// to whichever provider serves it, so it is stored and cleared with the binding.
-export async function setCapabilityConfig(db, capId, values = {}) {
+// ONE config value against ONE field def. Shared by the global knob
+// (assertValidCapabilityConfig, below) and the per-board column
+// (boardBindingPatch) so the two scopes cannot drift on what they accept —
+// the same reason board pins are judged by the global rules. Kind-aware: an
+// `enum` value must be one of the declared options, a numeric one must be
+// finite. Throws the same 400s the binding walk does.
+function assertValidConfigValue(f, v) {
+  if (f.kind === "enum") {
+    if (!f.options?.some((o) => o.value === String(v)))
+      throw bad(`"${v}" is not a ${f.key.replace(/_/g, " ")} — options: ${f.options.map((o) => o.value).join(", ")}`);
+  } else if (!Number.isFinite(Number(v))) {
+    throw bad(`${f.key.replace(/_/g, " ")} must be a number`);
+  }
+}
+
+// Validate a config patch WITHOUT writing — the route calls this before
+// bindCapability so the stores-nothing covenant holds for a combined body (a
+// valid binding + a bogus config must store neither half). An absent value,
+// or null/"" (a clear back to the default), is always fine.
+export function assertValidCapabilityConfig(capId, values = {}) {
   for (const f of CAPABILITY[capId]?.binding.config || []) {
     const v = values[f.key];
-    if (v !== undefined) await setSetting(db, f.key, v != null ? String(v) : null);
+    if (v === undefined || v === null || v === "") continue;
+    assertValidConfigValue(f, v);
+  }
+}
+
+// The BOARD-scoped half of the config story (ai-image-input-plan.md §7), and
+// deliberately a separate function from boardBindingPatch: a pin is admin
+// authority (it selects credentials), a knob is a cost/quality dial any board
+// MANAGER may set — like ai_votes, which multiplies the same bill 3–5×. So
+// this runs on the manager's save route too (buildBoardContentUpdate), while
+// pins stay on the admin routes.
+//
+// Judged by the same single-field rule the global knob uses:
+//   absent     → column untouched
+//   null / ""  → column cleared (the board falls back to the app default)
+//   a value    → validated against the field def, then stored
+// Pure and synchronous — no db, nothing to look up.
+export function boardConfigPatch(body = {}) {
+  const cols = {};
+  for (const cap of CAPABILITY_DEFS) {
+    for (const f of cap.binding.config || []) {
+      if (!f.boardColumn) continue;
+      const v = body[f.boardColumn];
+      if (v === undefined) continue;
+      if (v === null || v === "") { cols[f.boardColumn] = null; continue; }
+      assertValidConfigValue(f, v);
+      cols[f.boardColumn] = String(v);
+    }
+  }
+  return cols;
+}
+
+// A capability-level knob (detect's threshold, tagging's image preset): belongs
+// to the capability, not to whichever provider serves it, so it is stored and
+// cleared with the binding. Validates before the first write (see above) so a
+// config-only body also stores nothing when rejected.
+export async function setCapabilityConfig(db, capId, values = {}) {
+  assertValidCapabilityConfig(capId, values);
+  for (const f of CAPABILITY[capId]?.binding.config || []) {
+    const v = values[f.key];
+    if (v === undefined) continue;
+    if (v == null || v === "") await setSetting(db, f.key, null);
+    // Numerics store the NUMBER's string form, not the raw input's: a value
+    // that validated as a number (Number(true) === 1) must read back as one.
+    else await setSetting(db, f.key, f.kind === "enum" ? String(v) : String(Number(v)));
   }
 }

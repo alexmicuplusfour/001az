@@ -56,7 +56,8 @@ import {
   listBoards,
   getBoard,
   updateBoard,
-  BOARD_BINDING_COLS,
+  BOARD_PIN_COLS,
+  BOARD_CONFIG_COLS,
   deleteBoard,
   boardExists,
   boardItemStats,
@@ -129,8 +130,9 @@ import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, s
 import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
 import { MODEL_CAPABILITIES } from "./capabilities.js";
-import { bindCapability, setCapabilityConfig, boardBindingPatch } from "./capability-bind.js";
+import { bindCapability, setCapabilityConfig, assertValidCapabilityConfig, boardBindingPatch, boardConfigPatch } from "./capability-bind.js";
 import { capabilityStatus } from "./capability-status.js";
+import { boardConfigCatalog } from "./capability-resolve.js";
 import { probeCapability } from "./capability-probe.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -972,12 +974,17 @@ app.get("/api/boards/:id/settings", requireAuth, requireBoardManager, wrap(async
     has_items: await boardHasItems(db, b.id),
     ingest: b.ingest || null,
     ingest_state: b.ingest_state || null,
-    // Every capability's board-pin columns (BOARD_BINDING_COLS — the one
-    // registry-derived list) — the modal's pickers preselect off these, and a
-    // new board-scoped capability ships its columns here without a route edit.
-    // Admin-only: pins are admin-written and key ids are nobody else's business.
+    // Board-scoped capability KNOBS (tagging's image detail) + the vocabulary
+    // their pickers need. Visible to any board manager: these are cost/quality
+    // dials like ai_votes above, not credentials — and the manager save route
+    // accepts them (buildBoardContentUpdate).
+    ...Object.fromEntries(BOARD_CONFIG_COLS.map((col) => [col, b[col] ?? null])),
+    capability_config: await boardConfigCatalog(db),
+    // Every capability's board-PIN columns (registry-derived) — the strip's
+    // pickers preselect off these. Admin-only: pins select credentials, and
+    // key ids are nobody else's business.
     ...(req.user.is_admin
-      ? Object.fromEntries(BOARD_BINDING_COLS.map((col) => [col, b[col] ?? null]))
+      ? Object.fromEntries(BOARD_PIN_COLS.map((col) => [col, b[col] ?? null]))
       : {}),
   });
 }));
@@ -1242,6 +1249,20 @@ async function buildBoardContentUpdate(body = {}, prev) {
   }
   if (body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!body.auto_tag_skip_weekends;
   if (body.retag_on_refresh !== undefined) update.retagOnRefresh = !!body.retag_on_refresh;
+  // Board-scoped capability knobs (tagging's image detail) — here, not in the
+  // admin-only pin patch, because a manager may set them. The validator throws
+  // (it is shared with the capability bind route, whose contract is a thrown
+  // 400); this function's contract is a RETURNED error, so convert rather than
+  // leaning on the global handler — both PATCH routes already have the
+  // `if (error) return 400` branch.
+  let cfgCols;
+  try {
+    cfgCols = boardConfigPatch(body);
+  } catch (e) {
+    if (e.status === 400) return { error: e.message };
+    throw e;
+  }
+  if (Object.keys(cfgCols).length) update.boardBindings = { ...update.boardBindings, ...cfgCols };
 
   // Automatic ingestion config: null clears it (and disarms the timer);
   // an object is validated against the board's adapter descriptor. Timer
@@ -1326,7 +1347,7 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   // INSERT, so a 400 leaves nothing behind.
   let boardBindings;
   try {
-    boardBindings = await boardBindingPatch(db, req.body || {});
+    boardBindings = { ...(await boardBindingPatch(db, req.body || {})), ...boardConfigPatch(req.body || {}) };
   } catch (e) {
     if (e.status === 400) return res.status(400).json({ error: e.message });
     throw e;
@@ -1539,7 +1560,8 @@ app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   // must actually advertise the capability.
   try {
     const boardBindings = await boardBindingPatch(db, req.body || {});
-    if (Object.keys(boardBindings).length) update.boardBindings = boardBindings;
+    // MERGE: buildBoardContentUpdate may already have put config knobs here.
+    if (Object.keys(boardBindings).length) update.boardBindings = { ...update.boardBindings, ...boardBindings };
   } catch (e) {
     if (e.status === 400) return res.status(400).json({ error: e.message });
     throw e;
@@ -2149,6 +2171,10 @@ app.get("/api/admin/capabilities", requireAdmin, wrap(async (_req, res) => {
 app.post("/api/admin/capabilities/:id/bind", requireAdmin, wrap(async (req, res) => {
   try {
     const { provider, keyId, model, enabled, config } = req.body || {};
+    // Config validated BEFORE the binding writes: the stores-nothing covenant
+    // (capability-bind.js) must hold for a combined body — a valid binding
+    // beside a bogus config stores neither half.
+    if (config) assertValidCapabilityConfig(req.params.id, config);
     await bindCapability(db, req.params.id, { provider, keyId, model, enabled });
     if (config) await setCapabilityConfig(db, req.params.id, config);
   } catch (err) {

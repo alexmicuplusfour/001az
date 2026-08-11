@@ -11,6 +11,12 @@ export default (wires) => ({
   // are 3,000, but this shared per-key bucket holds at the chat floor). Free tier is
   // only 3 RPM; raise per key for your tier.
   rpm: 500, burst: 25,
+  // Image input ceiling for the tag rendition (ai-image.js clamp; surveyed
+  // 2026-08-11): 2048px is the gpt-5 family's dimension cap at `high` detail —
+  // the minis additionally patch-cap at 1,536 32×32 patches, but the backend
+  // trims that itself, so the provider-wide ceiling is the dimension. Payload
+  // headroom is generous (512MB request cap).
+  images: { maxEdge: 2048, maxBytes: 15e6 },
   defaultModel: "gpt-5-mini",
   models: [
     { id: "gpt-5-nano", note: "fast, cheapest" },

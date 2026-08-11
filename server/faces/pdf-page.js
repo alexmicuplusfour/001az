@@ -10,9 +10,9 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { THUMB_WIDTH } from "./image-thumb.js"; // matches the image face by construction
 
 const run = promisify(execFile);
-const THUMB_WIDTH = 600; // matches the image face
 
 export async function pdfPage(pdfPath) {
   const prefix = path.join(os.tmpdir(), "docprev-" + crypto.randomBytes(6).toString("hex"));

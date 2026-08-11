@@ -1,0 +1,14 @@
+-- Per-board image detail for tagging (ai-image-input-plan.md §4): which
+-- rendition of an item's image the tagger is shown — a PRESET id
+-- ("thumb"/"standard"/"high"/"max"), resolved to pixels in ai-image.js.
+-- A logos board and a screenshots board legitimately want different spend,
+-- so this is board-scoped from the start; NULL means "use the app default"
+-- (the tag_image_preset setting), the same unpinned contract every board
+-- binding column has.
+--
+-- Deliberately no FK and no DB-level enum: the id points at code, not at a
+-- deletable row, and the preset vocabulary evolves with the app — an id this
+-- version doesn't know reads as the default rather than erroring (resolvePreset).
+-- Which is also why nothing needs to clean this column up, unlike the key
+-- pointers in 0033.
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS tag_image_preset TEXT;

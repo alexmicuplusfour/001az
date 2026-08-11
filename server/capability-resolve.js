@@ -27,7 +27,7 @@
 // resolve and the floor answered instead. The capabilities page reads it to tell
 // `active` from `degraded` (slice 3); today it tells an engine which shape to be.
 import { PROVIDERS, declaredCatalog } from "./providers.js";
-import { CAPABILITY } from "./capabilities.js";
+import { CAPABILITY, CAPABILITY_DEFS, configFieldView } from "./capabilities.js";
 import { getSetting, getAiKey } from "./db.js";
 import { pluginInstalled } from "./plugins.js";
 
@@ -261,13 +261,41 @@ export async function capabilityBinding(db, capId) {
   return out;
 }
 
-// A capability-level knob (detect's threshold), read from settings with the
-// descriptor's default. Belongs to the capability, not to whoever serves it.
+// Every board-scopable capability knob, with its vocabulary and the app-wide
+// value its "App default" row names (ai-image-input-plan.md §7). This rides
+// the BOARD SETTINGS payload rather than the admin capabilities feed, because
+// a board manager may set these and cannot read admin feeds — same registry,
+// a projection scoped to what the board modal needs.
+export async function boardConfigCatalog(db) {
+  const out = [];
+  for (const cap of CAPABILITY_DEFS) {
+    const fields = (cap.binding.config || []).filter((f) => f.boardColumn);
+    if (!fields.length) continue;
+    const values = await capabilityConfig(db, cap.id);
+    // `value` is the APP-WIDE effective value — what the picker's
+    // "App default (…)" row names.
+    for (const f of fields) out.push(configFieldView(f, values[f.key]));
+  }
+  return out;
+}
+
+// A capability-level knob (detect's threshold, tagging's image preset), read
+// from settings with the descriptor's default. Belongs to the capability, not
+// to whoever serves it. Kind-aware: an `enum` field passes the stored string
+// through when it is one of the def's options (an unknown id — a downgrade, a
+// hand-edited row — reads as the default, never an error); a numeric field
+// reads any finite number — INCLUDING 0, which the old `Number(v) ||` shape
+// silently folded into the default.
 export async function capabilityConfig(db, capId) {
   const out = {};
   for (const f of CAPABILITY[capId]?.binding.config || []) {
     const v = await getSetting(db, f.key);
-    out[f.key] = v != null && v !== "" ? Number(v) || f.default : f.default;
+    if (f.kind === "enum") {
+      out[f.key] = f.options?.some((o) => o.value === v) ? v : f.default;
+    } else {
+      const n = Number(v);
+      out[f.key] = v != null && v !== "" && Number.isFinite(n) ? n : f.default;
+    }
   }
   return out;
 }

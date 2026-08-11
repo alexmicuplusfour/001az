@@ -7,6 +7,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { startServer, seedBoard, seedUser, adminSession, req } from "./helpers.js";
 import {
   addJobLog,
@@ -25,6 +26,7 @@ import {
   setPluginState,
   addFieldSnapshot,
   itemsNeedingEmbedding,
+  setSetting,
 } from "../server/db.js";
 import { startWorker, embedBatch } from "../server/worker.js";
 import { createSources } from "../server/sources/index.js";
@@ -737,6 +739,53 @@ test("DELETE /api/boards/:id/jobs: manager clears settled rows, running survives
   assert.equal(left.length, 1);
   assert.equal(Number(left[0].id), Number(live)); // in-flight work survives the wipe
   await stampJobLog(db, live, { outcome: "ok" }); // settle — don't leak a running row
+});
+
+// --- what the model was actually shown (ai-image-input-plan.md, Slice 4) ---
+
+test("tag leg: the board's image preset beats the app default, and the row records what was sent", async () => {
+  await setPluginState(db, "ai:openai", { installed: true });
+  const keyId = await createAiKey(db, "jobs-img", "openai", "sk-test");
+  const board = await createBoard(db, "jobs-image-preset", FACETS, "", true, keyId);
+  // App default says thumbnails; this board overrides to High. The board wins.
+  await setSetting(db, "tag_image_preset", "thumb");
+  await updateBoard(db, board, { boardBindings: { tag_image_preset: "high" } });
+
+  // A real 2400px upload through the actual ingest path, so the item has both
+  // a stored original and a ≤600px card face on disk.
+  const tmp = path.join(srv.galleryDir, "..", "src-shot.png");
+  fs.writeFileSync(tmp, await sharp({ create: { width: 2400, height: 1400, channels: 3, background: { r: 12, g: 90, b: 200 } } }).png().toBuffer());
+  const entry = await sources.forUpload("shot.png").ingest(tmp, "shot.png");
+  const { iid } = await seedLegItem(board, "shot.png", "pending", { files: [entry] });
+
+  const seen = [];
+  const restore = stubFetch(toolCallResponse({
+    kind: { values: ["a"], reasoning: "fits a" },
+    fit: { verdict: "fits", reasoning: "on-topic" },
+  }, seen));
+  const stop = runWorker();
+  try {
+    await until(async () => (await itemStatus(iid)) === "tagged");
+  } finally {
+    await stop();
+    restore();
+    await setSetting(db, "tag_image_preset", null);
+  }
+
+  // What actually went over the wire: the compat wire sends a data URL.
+  const sentImage = seen[0].messages[1].content.find((p) => p.type === "image_url");
+  const bytes = Buffer.from(sentImage.image_url.url.split(",")[1], "base64");
+  const m = await sharp(bytes).metadata();
+  assert.equal(Math.max(m.width, m.height), 1568, "the board's High preset, not the 600px card face");
+  assert.ok(entry.w <= 600, "…and the card face really is the small one");
+
+  // …and the ledger says so, which is the only way to catch a board silently
+  // riding the thumbnail fallback.
+  const tagRow = (await jobsFor(board)).find((r) => r.kind === "tag");
+  assert.equal(tagRow.outcome, "ok");
+  assert.equal(tagRow.detail.image.source, "original");
+  assert.equal(tagRow.detail.image.edge, 1568);
+  assert.ok(tagRow.detail.image.bytes > 0);
 });
 
 // --- the cardinal rule (keep this test last: it drops the table) ---

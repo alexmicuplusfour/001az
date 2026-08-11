@@ -103,27 +103,47 @@ function capCard(c) {
     return el;
   });
 
-  // Capability-level knobs (e.g. detection's threshold) — the first UI these
-  // have ever had; committed on change through the capability bind route.
+  // Capability-level knobs (detection's threshold, tagging's image preset) —
+  // committed on change through the capability bind route. Kind-aware off the
+  // projected def: an enum field renders a select from its options (hint as
+  // the tooltip) and commits the STRING; anything else keeps the numeric input.
   for (const f of c.config || []) {
     const row = document.createElement("div");
     row.className = "cap-config";
     const lab = document.createElement("span");
     lab.className = "k";
-    lab.textContent = f.key.replace(/_/g, " ");
-    const input = document.createElement("input");
-    input.type = "number";
-    input.step = "any";
-    input.value = f.value ?? "";
-    input.onchange = async () => {
+    lab.textContent = f.label || f.key.replace(/_/g, " ");
+    const commit = async (input, value) => {
       try {
-        await api("POST", `/api/admin/capabilities/${c.id}/bind`, { config: { [f.key]: Number(input.value) } });
+        await api("POST", `/api/admin/capabilities/${c.id}/bind`, { config: { [f.key]: value } });
+        f.value = value; // a later failed edit reverts to the last SAVED value, not the page-load one
         toast("Saved");
       } catch (err) {
         toast.error(err.message);
         input.value = f.value ?? "";
       }
     };
+    let input;
+    if (f.options) {
+      input = document.createElement("select");
+      for (const o of f.options) {
+        const opt = document.createElement("option");
+        opt.value = o.value;
+        opt.textContent = o.label || o.value;
+        if (o.hint) opt.title = o.hint;
+        input.appendChild(opt);
+      }
+      input.value = f.value ?? "";
+      const current = f.options.find((o) => o.value === input.value);
+      if (current?.hint) input.title = current.hint;
+      input.onchange = () => commit(input, input.value);
+    } else {
+      input = document.createElement("input");
+      input.type = "number";
+      input.step = "any";
+      input.value = f.value ?? "";
+      input.onchange = () => commit(input, Number(input.value));
+    }
     row.append(lab, input);
     card.appendChild(row);
   }

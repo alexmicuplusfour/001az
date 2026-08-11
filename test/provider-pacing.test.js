@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { acquire, _resetBuckets } from "../server/provider-pacing.js";
-import { registerProvider, unregisterProvider, callTagger } from "../server/providers.js";
+import { registerProvider, unregisterProvider, callTagger, PROVIDERS } from "../server/providers.js";
 import { getPluginDef } from "../server/plugins.js";
 
 // setTimeout never fires EARLY, so lower-bound gap assertions can't flake low; we
@@ -79,6 +79,35 @@ test("the manifest contract: a networked provider must declare a rate limit", ()
   // that half of the contract is pinned in keyless-providers.test.js.)
   assert.doesNotThrow(() => registerProvider("ondevicetest", { label: "On-Device", onDevice: true, wire: null }));
   unregisterProvider("ondevicetest");
+});
+
+test("the manifest contract: a declared images block must be sane (ai-image-input-plan.md)", () => {
+  const base = { label: "Img Test", rpm: 60, burst: 5, defaultModel: "m-1", wire: { tag: async () => ({}) } };
+  // A typo'd ceiling would silently clamp every board's images to garbage —
+  // rejected at registration instead, like an undeclared rate limit.
+  for (const images of ["2048", [], { maxEdge: -1 }, { maxEdge: 0 }, { maxBytes: NaN }, { maxEdge: Infinity }]) {
+    assert.throws(
+      () => registerProvider("badimages", { ...base, images }),
+      /images/,
+      `rejected: ${JSON.stringify(images)}`
+    );
+  }
+  // Absent → fine (the generic defaults apply at read time); partial and full
+  // valid blocks → fine.
+  for (const images of [undefined, { maxEdge: 2048 }, { maxEdge: 2048, maxBytes: 4e6 }]) {
+    assert.doesNotThrow(() => registerProvider("okimages", { ...base, ...(images ? { images } : {}) }));
+    unregisterProvider("okimages");
+  }
+});
+
+test("the built-ins declare their image ceilings (a fat-finger edit can't ship)", () => {
+  // Values are load-bearing for the rendition clamp — see each descriptor's
+  // dated survey comment.
+  assert.deepEqual(PROVIDERS.anthropic.images, { maxEdge: 1568, maxBytes: 5e6 });
+  assert.deepEqual(PROVIDERS.openai.images, { maxEdge: 2048, maxBytes: 15e6 });
+  for (const name of ["gemini", "glm", "openrouter"]) {
+    assert.deepEqual(PROVIDERS[name].images, { maxEdge: 2048, maxBytes: 4e6 }, name);
+  }
 });
 
 test("an explicit rpm/burst override (the Plugins-page config) beats the descriptor default", async () => {
