@@ -1170,11 +1170,13 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
       return res.status(400).json({ error: "invalid sample window" });
     sample = { offset, limit };
   }
-  // The preview window IS the run window (ENUM_CAP, shared with the sweep's
-  // enumerate) — one bound, so the count can never promise what a run won't see.
+  // The preview window IS the run window — one bound, so the count can never
+  // promise what a run won't see. Connector adapters carry their own
+  // (windowCap: depth is free for a snapshot-served catalog, metered for a
+  // paged one); the file adapter keeps the shared default.
   let enumerated;
   try {
-    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: ENUM_CAP() });
+    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: adapter.windowCap ? adapter.windowCap() : ENUM_CAP() });
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -2452,18 +2454,10 @@ app.get("/api/media-types", wrap(async (_req, res) => {
   res.json(await mediaLimits(db));
 }));
 
-app.get("/api/connectors/:name/search", requireAuth, wrap(async (req, res) => {
-  const connector = getConnector(req.params.name);
-  if (!connector) return res.status(404).json({ error: "unknown connector" });
-  const q = String(req.query.q || "").trim();
-  if (!q) return res.json([]);
-  try {
-    res.json(await connector.search(db, q));
-  } catch (err) {
-    console.error(`connector search error (${req.params.name}):`, err.message);
-    res.status(502).json({ error: err.message });
-  }
-}));
+// (No standalone /api/connectors/:name/search route: the browse modal's
+// /connector-list is the one add surface, and its provider-side query path
+// already folds real catalog search in. Provider `search` stays a contract
+// method — the FMP list() bridge and the plugin-health tracking use it.)
 
 // Create an entity from a connector — no file upload, fields come from the
 // connector's fetchEntity call. Goes straight to pending (tagger runs over
@@ -2544,6 +2538,13 @@ app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => 
     pageSize,
     query: req.query.q ? String(req.query.q) : "",
   };
+  // Narrowing filters, whitelisted by the manifest: only declared keys pass,
+  // and only declared values (the options ARE the provider's vocabulary — a
+  // free-text value would just silently match nothing).
+  for (const f of browse.filters || []) {
+    const v = req.query[f.key];
+    if (v != null && (f.options || []).includes(String(v))) opts[f.key] = String(v);
+  }
   let rows;
   try {
     rows = await connector.list(db, opts);
