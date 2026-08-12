@@ -454,9 +454,11 @@ function wireFold(el, headSel) {
 //                    carries everything the modal needs (incl. mapping and
 //                    has_items for the Mapping pane).
 //   opts.canEditAI — show the AI-models strip (per-board capability pins) and
-//                    the "Using …" bands, allow mapping edits, save via
-//                    /api/admin/boards (admin). false = content-only, saves
-//                    via /api/boards/:id and the Mapping pane is read-only.
+//                    the "Using …" bands, and allow mapping edits. false =
+//                    content-only and the Mapping pane is read-only. A UI
+//                    flag ONLY: every edit saves via PATCH /api/boards/:id,
+//                    and the server layers the admin-only fields off the
+//                    session's own role, not off anything this flag claims.
 //   opts.onSaved   — called with the saved body after a successful save (for
 //                    edits that's the sent payload, incl. `mapping` when the
 //                    pane was touched).
@@ -1017,11 +1019,12 @@ export async function openBoardModal(boardId, opts = {}) {
       auto_tag_skip_weekends: at.skipWeekends,
       retag_on_refresh: at.retagOnRefresh,
     };
-    // Fold a touched mapping into the same save (create POST or admin PATCH).
-    // Only when the admin actually edited it — an untouched pane omits
-    // `mapping` so an edit stays a light tagging update (no server-side
-    // reschedule/backfill). Mapping only ever rides the admin endpoints,
-    // which is exactly the canEditAI gate below.
+    // Fold a touched mapping into the same save. Only when the admin actually
+    // edited it — an untouched pane omits `mapping` so an edit stays a light
+    // tagging update (no server-side reschedule/backfill). The canEditAI gate
+    // mirrors the server's own rule (mapping is an admin-layered field; a
+    // non-admin body carrying one is ignored), so an editable pane and a
+    // saveable mapping are the same population.
     if (mappingPane && canEditAI && mappingPane.isDirty()) {
       const res = mappingPane.collect();
       if (!res.ok) return; // collect() already toasted the reason
@@ -1029,8 +1032,11 @@ export async function openBoardModal(boardId, opts = {}) {
     }
     try {
       let saved = payload;
+      // ONE save endpoint for every edit — the server layers admin fields
+      // (pins, mapping) off the session's own role, so the client never has
+      // to know which identity it holds to pick a URL. Creation stays the
+      // admin route: it's a global-admin power, not a board-scoped one.
       if (isNew) saved = await api("POST", "/api/admin/boards", payload);
-      else if (canEditAI) await api("PATCH", `/api/admin/boards/${board.id}`, payload);
       else await api("PATCH", `/api/boards/${board.id}`, payload);
       close();
       onSaved?.(saved);

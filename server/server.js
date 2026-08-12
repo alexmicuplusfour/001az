@@ -56,6 +56,7 @@ import {
   listBoards,
   getBoard,
   updateBoard,
+  withTx,
   BOARD_PIN_COLS,
   BOARD_CONFIG_COLS,
   deleteBoard,
@@ -1011,24 +1012,68 @@ app.get("/api/boards/:id/facet-stats", requireAuth, requireBoardManager, wrap(as
   });
 }));
 
-app.patch("/api/boards/:id", requireAuth, requireBoardManager, wrap(async (req, res) => {
+// THE board save — both mounts (/api/boards/:id for any manager, the
+// /api/admin/boards/:id alias the admin page has always called) run this one
+// handler. Authority is layered off req.user, never off which URL the client
+// picked: the content trunk (buildBoardContentUpdate) runs for everyone, the
+// admin legs (capability pins, mapping, memberIds) only for a global admin.
+// The two used to be separate routes whose validate → write → side-effect
+// tails were hand-copied and had started to differ in order — the exact drift
+// this merge exists to end.
+//
+// A non-admin body carrying admin-only fields has them IGNORED, not refused
+// (board-manage.test.js pins this): the modal saves full-state, and a
+// manager's hour of taxonomy edits must not 403 over a field their UI never
+// rendered.
+const saveBoardPatch = wrap(async (req, res) => {
   const prev = req.board;
+  const isAdmin = !!req.user.is_admin;
   const { update, error, sweep, demote } = await buildBoardContentUpdate(req.body, prev);
   if (error) return res.status(400).json({ error });
+  let inputSwitched = false;
+  if (isAdmin) {
+    const admin = await buildBoardAdminUpdate(req.body, prev, update);
+    if (admin.error) return res.status(400).json({ error: admin.error });
+    inputSwitched = admin.inputSwitched;
+  }
+
   if (Object.keys(update).length > 0) await updateBoard(db, prev.id, update);
   // A redefined facet's finding quotes wording that no longer exists; its stats
   // are the only baseline for "was 60% unanimous, now 88%". Demote, don't drop.
   await demoteFacetDiagnostics(db, prev.id, demote);
-  // A saved config supersedes any half-drained run of the old one — a stale
-  // drain_left would hand the next run the dead config's budget as its limit.
-  if (update.ingest !== undefined) await clearIngestDrain(db, prev.id);
+  // A saved ingest config supersedes any half-drained run of the old one — a
+  // stale drain_left would hand the next run the dead config's budget as its
+  // limit. An input SWITCH goes further: run state written against the old
+  // adapter means nothing to the new one.
+  if (inputSwitched) await setIngestState(db, prev.id, null);
+  else if (update.ingest !== undefined) await clearIngestDrain(db, prev.id);
+  // A mapping change can turn fields live/idle or move their cadence — recompute
+  // every entity's next refresh (an empty live set clears their schedules), and
+  // re-project deterministic file metadata for existing instances (file boards
+  // only; connector items have no file entry so they'd no-op anyway). Only
+  // reachable when the admin leg accepted a mapping — update.mapping stays
+  // undefined for managers.
+  if (update.mapping !== undefined) {
+    await rescheduleEntityRefreshes(db, prev.id, liveFields(update.mapping), faceCadence(update.mapping));
+    const m = update.mapping;
+    if (m === null || !m.input || m.input === "files") await backfillFileFields(prev.id, m);
+  }
+  // The moment auto-tagging comes back on, sweep the board: queue everything
+  // untagged — held uploads, AI-undecided, failed. Turning it off queues
+  // nothing — uploads pile up as 'held', untagged, until tagging returns.
   if (sweep) {
     const n = await queueUntagged(db, prev.id);
     if (n) console.log(`board ${prev.id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
   }
+  if (isAdmin && req.body && Array.isArray(req.body.memberIds)) {
+    const adminIds = Array.isArray(req.body.adminIds) ? req.body.adminIds.map(Number).filter(Boolean) : [];
+    await setBoardMembers(db, prev.id, req.body.memberIds.map(Number).filter(Boolean), adminIds);
+  }
   invalidateBoardCache(prev.id);
   res.json({ ok: true });
-}));
+});
+
+app.patch("/api/boards/:id", requireAuth, requireBoardManager, saveBoardPatch);
 
 // --- automatic ingestion (config + preview; the worker sweep does the runs) ---
 
@@ -1312,6 +1357,54 @@ async function buildBoardContentUpdate(body = {}, prev) {
   return { update, error: null, sweep: eff.autoTag && !prev.auto_tag, demote };
 }
 
+// The ADMIN half of a board save, layered over the content trunk by all three
+// admin write surfaces (create, and both PATCH mounts when the caller is a
+// global admin): capability pins (boardBindingPatch — the registry loop,
+// stricter than the hand-copied blocks it replaced) and the mapping. Mutates
+// `update` in place and returns { error, inputSwitched } — the trunk's
+// returned-error contract, so every route branches exactly once.
+async function buildBoardAdminUpdate(body = {}, prev, update) {
+  try {
+    const pins = await boardBindingPatch(db, body || {});
+    // MERGE: the trunk may already have put config knobs here.
+    if (Object.keys(pins).length) update.boardBindings = { ...update.boardBindings, ...pins };
+  } catch (e) {
+    if (e.status === 400) return { error: e.message };
+    throw e;
+  }
+  if (body && body.mapping !== undefined) {
+    if (body.mapping === null) {
+      update.mapping = null;
+    } else if (typeof body.mapping !== "object") {
+      return { error: "mapping must be an object or null" };
+    } else {
+      const err = validateMapping(body.mapping);
+      if (err) return { error: err };
+      update.mapping = body.mapping;
+    }
+  }
+  // A mapping edit that switches the board's input (files ↔ connector, or one
+  // connector for another) orphans any saved ingest config: it was written
+  // against the old adapter's descriptor, and run against the new one it
+  // ranges from admitting nothing (unknown filter fields fail closed) to
+  // scanning the whole ingestion root (a feed config's empty source resolves
+  // to INGEST_ROOT itself under the folder adapter) — on the old trigger
+  // cadence. Clear config and timer here; the route clears run state off the
+  // flag. The dedup ledger stays — deletions remain final. Never fires on
+  // create: its synthetic prev holds no ingest config or timer.
+  let inputSwitched = false;
+  if (update.mapping !== undefined) {
+    const prevInput = prev.mapping?.input?.connector ?? null;
+    const nextInput = update.mapping?.input?.connector ?? null;
+    if (prevInput !== nextInput && (prev.ingest || prev.ingest_next_run_at)) {
+      inputSwitched = true;
+      update.ingest = null;
+      update.ingestNextRunAt = null;
+    }
+  }
+  return { error: null, inputSwitched };
+}
+
 // Clamp a requested auto-tag interval to something sane; null when unparsable.
 function parseEveryMin(v) {
   const n = Math.round(Number(v));
@@ -1320,67 +1413,48 @@ function parseEveryMin(v) {
 }
 
 app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
-  const name = (req.body && req.body.name ? String(req.body.name) : "").trim();
+  const body = req.body || {};
+  const name = String(body.name ?? "").trim();
   if (!name) return res.status(400).json({ error: "name required" });
-  let facets = [];
-  if (req.body && req.body.facets !== undefined) {
-    if (!Array.isArray(req.body.facets)) return res.status(400).json({ error: "facets must be an array" });
-    const reserved = facetsReservedKeyError(req.body.facets);
-    if (reserved) return res.status(400).json({ error: reserved });
-    facets = req.body.facets;
-  }
-  const context = req.body && req.body.context ? String(req.body.context) : "";
-  const aiReasoning = !req.body || req.body.ai_reasoning !== false;
-  // off by default: research bills per web search, on top of tokens
-  const aiResearch = !!(req.body && req.body.ai_research);
-  // Agreement passes — 1 keeps today's single-pass behaviour. Odd only (an even
-  // count makes a real tie reachable), and never alongside research, whose
-  // per-search billing would multiply by the pass count.
-  const aiVotes = req.body && req.body.ai_votes !== undefined ? Number(req.body.ai_votes) : 1;
-  if (![1, 3, 5].includes(aiVotes)) return res.status(400).json({ error: "ai_votes must be 1, 3 or 5" });
-  if (aiVotes > 1 && aiResearch) {
-    return res.status(400).json({ error: "agreement passes cannot be combined with web research — searches bill per pass" });
-  }
-  // Capability pins (ai_key_id, extract_key_id, transcribe_provider, …) ride
-  // the create under their column names — validated as a set by the registry
-  // loop, stored with ONE post-insert update below. Validated here, before the
-  // INSERT, so a 400 leaves nothing behind.
-  let boardBindings;
-  try {
-    boardBindings = { ...(await boardBindingPatch(db, req.body || {})), ...boardConfigPatch(req.body || {}) };
-  } catch (e) {
-    if (e.status === 400) return res.status(400).json({ error: e.message });
-    throw e;
-  }
-  const autoTag = {
-    enabled: !req.body || req.body.auto_tag !== false,
-    periodic: !!(req.body && req.body.auto_tag_periodic),
-    everyMin: (req.body && parseEveryMin(req.body.auto_tag_every_min)) || 1440,
-    skipWeekends: !!(req.body && req.body.auto_tag_skip_weekends),
+  // Create runs the SAME trunk + admin legs the PATCH mounts run, against a
+  // synthetic prev: the defaults a new board is born with. One validation
+  // path, on purpose — create used to hand-copy the checks and had already
+  // drifted (an unparsable auto_tag_every_min was a 400 on PATCH and a silent
+  // 1440 here). Mapping + pins ride the create because the modal's Mapping
+  // tab works on new boards too (templates only apply while a board is
+  // empty); no reschedule/backfill side-effects — nothing exists yet.
+  // body.mapping rides prev unvalidated so a create carrying mapping + ingest
+  // together resolves the ingest adapter the mapping selects; the mapping
+  // itself is validated in the admin leg before anything writes.
+  const prev = {
+    facets: [], context: "", ai_reasoning: true, ai_research: false, ai_votes: 1,
+    auto_tag: true, auto_tag_periodic: false, auto_tag_every_min: 1440,
+    auto_tag_skip_weekends: false, auto_tag_next_run_at: null,
+    mapping: body.mapping && typeof body.mapping === "object" ? body.mapping : null,
+    ingest: null, ingest_next_run_at: null,
   };
-  autoTag.nextRunAt = autoTag.enabled && autoTag.periodic
-    ? nextAutoTagRun(Date.now(), autoTag.everyMin, autoTag.skipWeekends)
-    : null;
-  // Mapping + extraction provider can ride the create (the modal's Mapping tab
-  // works on new boards too — templates only apply while a board is empty, so
-  // create-time is the natural moment). No reschedule/backfill side-effects
-  // here: a new board has no entities or items yet.
-  let mapping = null;
-  if (req.body && req.body.mapping !== undefined && req.body.mapping !== null) {
-    if (typeof req.body.mapping !== "object") return res.status(400).json({ error: "mapping must be an object or null" });
-    const err = validateMapping(req.body.mapping);
-    if (err) return res.status(400).json({ error: err });
-    mapping = req.body.mapping;
-  }
-  const retagOnRefresh = !!(req.body && req.body.retag_on_refresh);
-  // createBoard's signature stays pin-free: the validated pins land as one
-  // update right after the insert (a new board with pins is the rare case, and
-  // one extra UPDATE beats threading six more columns through the INSERT).
-  const id = await createBoard(db, name, facets, context, aiReasoning, null, null, autoTag, aiResearch,
-    { mapping, retagOnRefresh, aiVotes });
-  if (Object.keys(boardBindings).length) await updateBoard(db, id, { boardBindings });
+  const { update, error } = await buildBoardContentUpdate(body, prev);
+  if (error) return res.status(400).json({ error });
+  const admin = await buildBoardAdminUpdate(body, prev, update);
+  if (admin.error) return res.status(400).json({ error: admin.error });
+  // Everything validated (a 400 above leaves nothing behind), so write: the
+  // bare insert and the patch that shapes it, ONE transaction — a create can
+  // no longer land a board and then lose its pins between two statements.
+  const id = await withTx(db, async (tx) => {
+    const bid = await createBoard(tx, name);
+    await updateBoard(tx, bid, update);
+    return bid;
+  });
   console.log(`created board "${name}" ${id}`);
-  res.json({ id, name, facets, context, ai_reasoning: aiReasoning, ai_research: aiResearch, ai_votes: aiVotes, mapping });
+  res.json({
+    id, name,
+    facets: update.facets ?? [],
+    context: update.context ?? "",
+    ai_reasoning: update.aiReasoning ?? true,
+    ai_research: update.aiResearch ?? false,
+    ai_votes: update.aiVotes ?? 1,
+    mapping: update.mapping ?? null,
+  });
 }));
 
 const MAPPING_KINDS = new Set(["text", "number", "url", "date", "object"]);
@@ -1546,90 +1620,13 @@ async function backfillFileFields(boardId, mapping) {
   await updateItemPayloads(db, patches);
 }
 
-app.patch("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
-  const id = req.params.id;
-  const prev = await getBoard(db, id);
-  if (!prev) return res.status(404).json({ error: "not found" });
-  const { update, error, sweep, demote } = await buildBoardContentUpdate(req.body, prev);
-  if (error) return res.status(400).json({ error });
-
-  // Admin-only fields, layered on top of the shared content set. Capability
-  // pins (ai_key_id, extract_key_id, transcribe_provider, …) go through ONE
-  // registry loop — the per-capability blocks that used to sit here are what
-  // slice 5 replaces, and the loop is also stricter: a pinned key's provider
-  // must actually advertise the capability.
-  try {
-    const boardBindings = await boardBindingPatch(db, req.body || {});
-    // MERGE: buildBoardContentUpdate may already have put config knobs here.
-    if (Object.keys(boardBindings).length) update.boardBindings = { ...update.boardBindings, ...boardBindings };
-  } catch (e) {
-    if (e.status === 400) return res.status(400).json({ error: e.message });
-    throw e;
-  }
-  if (req.body && req.body.mapping !== undefined) {
-    if (req.body.mapping === null) {
-      update.mapping = null;
-    } else if (typeof req.body.mapping !== "object") {
-      return res.status(400).json({ error: "mapping must be an object or null" });
-    } else {
-      const err = validateMapping(req.body.mapping);
-      if (err) return res.status(400).json({ error: err });
-      update.mapping = req.body.mapping;
-    }
-  }
-
-  // A mapping edit that switches the board's input (files ↔ connector, or one
-  // connector for another) orphans any saved ingest config: it was written
-  // against the old adapter's descriptor, and run against the new one it
-  // ranges from admitting nothing (unknown filter fields fail closed) to
-  // scanning the whole ingestion root (a feed config's empty source resolves
-  // to INGEST_ROOT itself under the folder adapter) — on the old trigger
-  // cadence. Clear config, timer and run state; the modal starts fresh under
-  // the new input. The dedup ledger stays — deletions remain final.
-  let inputSwitched = false;
-  if (update.mapping !== undefined) {
-    const prevInput = prev.mapping?.input?.connector ?? null;
-    const nextInput = update.mapping?.input?.connector ?? null;
-    if (prevInput !== nextInput && (prev.ingest || prev.ingest_next_run_at)) {
-      inputSwitched = true;
-      update.ingest = null;
-      update.ingestNextRunAt = null;
-    }
-  }
-
-  if (Object.keys(update).length > 0) await updateBoard(db, id, update);
-  // See the board-manager PATCH: a redefined facet's finding no longer describes
-  // it, but its stats are the baseline the next measurement is read against.
-  await demoteFacetDiagnostics(db, id, demote);
-  if (inputSwitched) await setIngestState(db, id, null);
-  else if (update.ingest !== undefined) await clearIngestDrain(db, id);
-
-  // A mapping change can turn fields live/idle or move their cadence — recompute
-  // every entity's next refresh (empty live set clears their schedules).
-  if (update.mapping !== undefined) {
-    await rescheduleEntityRefreshes(db, id, liveFields(update.mapping), faceCadence(update.mapping));
-    // File-field set changed → re-project deterministic metadata for existing
-    // instances (add/remove file fields in place; AI fields untouched). Only for
-    // file boards; connector items have no file entry so they'd no-op anyway.
-    const m = update.mapping;
-    if (m === null || !m.input || m.input === "files") await backfillFileFields(id, m);
-  }
-
-  // The moment auto-tagging comes back on, sweep the board: queue everything
-  // untagged — held uploads, AI-undecided, failed. Turning it off queues
-  // nothing — uploads pile up as 'held', untagged, until tagging returns.
-  if (sweep) {
-    const n = await queueUntagged(db, id);
-    if (n) console.log(`board ${id}: auto-tagging on — swept ${n} untagged item(s) into the queue`);
-  }
-
-  if (req.body && Array.isArray(req.body.memberIds)) {
-    const adminIds = Array.isArray(req.body.adminIds) ? req.body.adminIds.map(Number).filter(Boolean) : [];
-    await setBoardMembers(db, id, req.body.memberIds.map(Number).filter(Boolean), adminIds);
-  }
-  invalidateBoardCache(id);
-  res.json({ ok: true });
-}));
+// The admin-page alias of the board save — the SAME handler as PATCH
+// /api/boards/:id (authority comes from req.user, not the path), behind
+// requireAdmin so this route's contract stays what it always was: a
+// board-admin gets a 403 here, not a quieter version of their own save.
+// requireBoardManager after it only 404s a missing board and attaches
+// req.board — a global admin always passes its role check.
+app.patch("/api/admin/boards/:id", requireAdmin, requireBoardManager, saveBoardPatch);
 
 // Facet scope for a retag: absent = the whole board, exactly as before. A typo
 // silently retagging nothing is the worst outcome here, so unknown keys are a

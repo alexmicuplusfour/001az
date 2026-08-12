@@ -111,3 +111,47 @@ test("admin PATCH grants the board-admin role via adminIds", async () => {
   assert.equal((await req(base, "GET", `/api/boards/${board}`, { sid: promoted.sid })).json.manage, true);
   assert.equal((await req(base, "GET", `/api/boards/${board}`, { sid: member.sid })).json.manage, false);
 });
+
+// The save is ROLE-layered, not route-layered: /api/boards/:id and
+// /api/admin/boards/:id run one handler, and what a body may change follows
+// from who sent it. So a global admin's pins and mapping land through the
+// gallery route too — and are judged by the admin rules there, not silently
+// absorbed the way they are for a board-admin (the test above).
+test("an admin's pins and mapping land via /api/boards/:id — same handler as the admin route", async () => {
+  const keyId = await createAiKey(db, "layered", "anthropic", "sk-ant-layered");
+  const r = await req(base, "PATCH", `/api/boards/${board}`, {
+    sid: admin.sid,
+    body: { ai_key_id: keyId, mapping: { input: "files", fields: [] } },
+  });
+  assert.equal(r.status, 200);
+  const row = (await db.query("SELECT ai_key_id, mapping FROM boards WHERE id=$1", [board])).rows[0];
+  assert.equal(Number(row.ai_key_id), Number(keyId));
+  assert.equal(row.mapping.input, "files");
+  const bad = await req(base, "PATCH", `/api/boards/${board}`, { sid: admin.sid, body: { ai_key_id: 999999 } });
+  assert.equal(bad.status, 400, "an admin's bad pin is refused here, never ignored");
+});
+
+// Create runs the same content trunk as the PATCH mounts — it used to
+// hand-copy the checks and had drifted: an unparsable auto_tag_every_min was
+// a 400 on PATCH but silently defaulted to daily on create.
+test("create validates like the PATCH mounts: a bad auto_tag_every_min is refused, a schedule arms the timer", async () => {
+  const bad = await req(base, "POST", "/api/admin/boards", {
+    sid: admin.sid,
+    body: { name: "bad-every", auto_tag_every_min: "soon" },
+  });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error, /auto_tag_every_min/);
+
+  const ok = await req(base, "POST", "/api/admin/boards", {
+    sid: admin.sid,
+    body: { name: "armed-at-birth", auto_tag_periodic: true, auto_tag_every_min: 60 },
+  });
+  assert.equal(ok.status, 200);
+  const row = (await db.query(
+    "SELECT auto_tag_periodic, auto_tag_every_min, auto_tag_next_run_at FROM boards WHERE id=$1",
+    [ok.json.id]
+  )).rows[0];
+  assert.equal(row.auto_tag_periodic, true);
+  assert.equal(Number(row.auto_tag_every_min), 60);
+  assert.ok(row.auto_tag_next_run_at != null, "the schedule set at birth is armed at birth");
+});
