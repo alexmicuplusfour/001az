@@ -20,7 +20,12 @@ const option = () => ({
 });
 
 const select = () => ({
-  tag: "select", children: [], style: {}, dataset: {},
+  tag: "select", children: [], style: {}, dataset: {}, listeners: {},
+  // Enough event surface for the live-listing tests below: a picker that moves
+  // its own selection has to be able to announce it.
+  addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); },
+  removeEventListener() {},
+  dispatchEvent(e) { (this.listeners[e.type] || []).forEach((fn) => fn(e)); return true; },
   replaceChildren() { this.children.length = 0; },
   appendChild(c) { this.children.push(c); return c; },
   insertBefore(c, ref) {
@@ -163,4 +168,57 @@ test("a saved model the catalog dropped is still an answer", () => {
   assert.equal(isUnset(sel), false);
   assert.equal(sel.value, "opus-3");
   assert.equal(sel.children[0].textContent, "opus-3");
+});
+
+// --- when the live listing lands (keyId set) ---
+//
+// The curated render is a guess made before the provider has spoken. When the
+// answer arrives it owns the options, and it is allowed to move the selection —
+// that is the whole point of asking. What it must not do is move it in silence:
+// writing options fires no event, so every surface reading the picker went on
+// describing the answer before this one. In the board editor that is a
+// provenance band naming one model at the point of use while Save reads another
+// off the select; the two have to be the same claim.
+const liveFetch = (models, source = "live") => {
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ models, source }) });
+};
+// syncModelPicker's listing is a promise chain, so let it settle.
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+test("a landing that moves the selection announces it", async () => {
+  liveFetch([{ id: "llama3.2:1b" }, { id: "qwen3:4b" }]);
+  const sel = select();
+  let heard = 0;
+  sel.addEventListener("change", () => heard++);
+  // The board editor's shape: no placeholder, so the recommendation leads.
+  syncModelPicker(sel, entry, 7, {});
+  assert.equal(sel.value, "haiku", "the guess, before the provider answers");
+  await settle();
+  // The guess is disproved, and nothing in the live list was chosen by anyone —
+  // so the value moved on its own.
+  assert.equal(sel.value, "llama3.2:1b");
+  assert.equal(heard, 1, "the move was announced exactly once");
+});
+
+test("a landing that changes nothing stays quiet", async () => {
+  liveFetch([{ id: "haiku" }, { id: "sonnet" }]);
+  const sel = select();
+  let heard = 0;
+  sel.addEventListener("change", () => heard++);
+  syncModelPicker(sel, entry, 7, {});
+  await settle();
+  assert.equal(sel.value, "haiku", "the live list confirms the selection");
+  assert.equal(heard, 0, "no move, no event — this is not a repaint notification");
+});
+
+test("a persisted model kept through the landing is not a move", async () => {
+  liveFetch([{ id: "llama3.2:1b" }]);
+  const sel = select();
+  let heard = 0;
+  sel.addEventListener("change", () => heard++);
+  syncModelPicker(sel, entry, 7, { saved: "opus-3" });
+  await settle();
+  assert.equal(sel.value, "opus-3", "saved config never silently vanishes");
+  assert.equal(sel.children[0].textContent, "opus-3 — not listed by this connection");
+  assert.equal(heard, 0);
 });

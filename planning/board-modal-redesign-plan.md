@@ -68,10 +68,19 @@ labels carry all the explanation.
 exactly "Using <name — provider · model> Change". One at the top of the
 Tagging pane; one directly below the Mapping pane's "AI-extracted fields"
 title. Change opens the strip with the relevant row expanded and flashed.
-Bands re-render on picker change, strip toggle, and pane reveal (the reveal
-push covers a provider's live model list landing, which repaints a select
-without firing `change` — the same staleness policy the old extraction select
-used).
+Bands re-render on picker change and pane reveal. **Corrected 2026-08-12 —
+this paragraph shipped claiming a third trigger, "strip toggle", that was never
+wired, and leaning on the reveal push to cover a provider's live model list
+landing, "which repaints a select without firing `change`".** Both halves were
+wrong in the same direction. The toggle re-render did not exist, and it would
+not have been enough if it had: a landing can MOVE the selection (off a guess
+the provider disproves), and repainting labels on a fold the reader may never
+touch does not stop Save from writing a model no band ever showed. The landing
+now announces itself — `attachLiveModels` dispatches `change` when, and only
+when, the value actually moved — so it arrives through the picker-change path
+every surface already listens on, and the plugin modal's apply button stops
+comparing against a selection that shifted underneath it. The reveal push stays
+for what it was really for: edits made while the Mapping pane was hidden.
 
 **The Tagging pane**, top to bottom: band → "Tag new uploads automatically"
 (the one primary switch) → **Advanced** (a `.disclosure` fold, closed by
@@ -116,13 +125,28 @@ deletable:
 `planBoardPicker` gained one branch: a delegate capability with nothing of its
 own bound app-wide answers its unset row with the relationship ("Same as the
 tagger") instead of a false "App default (none configured)"; the shell follows
-`delegatesTo` through the live pickers so the surface still names the model
-that will actually run, unsaved edits included. Payloads, preselects, and the
+that answer — `plan.delegated`, never the raw `delegatesTo` — through the live
+pickers, so the surface still names the model that will actually run, unsaved
+edits included. Payloads, preselects, and the
 model axis are unchanged. Its `title`/`hint` fields are gone — the strip rows
 read `cap.label`/`cap.blurb` from the feed instead, so the plan lost its last
 presentation strings. Two board-modal exports died with the extraction select
 (`keyLabel`, `withDefaultNote` — nothing imported them anymore), and both fold
 surfaces (strip, Advanced) share one `wireFold` helper.
+
+**Corrected 2026-08-12 (89aca9e) — the shell shipped reading `cap.delegatesTo`
+directly, and this document told it to.** The feed carries that field for any
+delegate-floored capability, which is a fact about its descriptor and not about
+what it is doing; delegation stops being the story the moment an app-wide
+default of the capability's own is stored. `planBoardPicker` had always tested
+both halves. The two copies the shell made — the strip row's source line and
+`resolved()` behind both provenance bands — kept only the first, so on an app
+with an app-wide extract default the row printed extraction's own model above
+the TAGGER's as its source, and the Mapping band told the reader the tagger was
+doing the extracting. The pair is now one exported predicate, `isDelegating`,
+which the planner publishes as `plan.delegated`: the planner decides *whether*
+to follow, the shell only resolves *what that comes to live*. Read the split
+that way and the shell has nothing left to get wrong.
 
 ## CSS: generic components only (house rule)
 

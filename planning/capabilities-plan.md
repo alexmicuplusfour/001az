@@ -1954,8 +1954,12 @@ What building it changed about the spec above:
    missed it.) ctx now carries `capabilities` from the first render.
 3. **The delegate exclusion is the load-bearing rule in `servingRoles`.**
    Unbound extract's `running` IS the tagger's own binding riding the delegate
-   floor — without `!(c.delegatesTo && !c.bound?.keyId)`, every default
-   tagger's card would read "default extractor". Pinned by its own test.
+   floor — without `!isDelegating(c)`, every default tagger's card would read
+   "default extractor". Pinned by its own test. The rule is load-bearing in
+   every reader, not just this one: it was hand-copied at each site until
+   89aca9e made it one predicate, and by then the board modal's two copies had
+   dropped the "nothing of its own bound" half and were naming the tagger as
+   the extractor on boards whose extraction ran on its own app-wide default.
 4. **Badge semantics unified on EFFECTIVE.** The old `slotProviders` mixed
    views — tagger/embedder badged the stored binding, transcriber/detector
    the resolved engine — while the connector badges' own comment argued for

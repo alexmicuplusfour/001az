@@ -407,10 +407,20 @@ function attachLiveModels(sel, keyId, kind, current, placeholder) {
     const keep = alive ? sel.value : (current && sel.value === current ? current : null);
     // Absence is only claimable off a live answer; a fallback list is just
     // the recommendations and proves nothing about the saved id.
+    const before = sel.value;
     fillModelSelect(sel, { models: r.models }, keep, {
       absentNote: r.source === "live" ? "not listed by this connection" : null,
       placeholder,
     });
+    // The answer OWNS the options, so landing can MOVE the selection — off a
+    // guess it disproves, or onto the placeholder. Writing options raises no
+    // event, so until this line nothing downstream ever heard about it: the
+    // board editor's provenance bands went on naming the previous model at the
+    // point of use while Save read the select itself, and the plugin modal's
+    // apply button went on comparing against a selection that had changed
+    // underneath it. A picker that moves on its own has to say so — what you
+    // see and what you save are the same claim.
+    if (sel.value !== before) sel.dispatchEvent(new Event("change"));
   }).catch(() => {});
 }
 
