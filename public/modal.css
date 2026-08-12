@@ -515,18 +515,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   letter-spacing: 0.06em;
   color: var(--text, #111);
 }
-.mm-template-btn {
-  font-size: 12px;
-  padding: 5px 12px;
-  border: 1px solid #d0d0d8;
-  border-radius: 6px;
-  background: #fff;
-  color: #3c3c50;
-  cursor: pointer;
-  font-family: inherit;
-}
-.mm-template-btn:hover { background: #f3f3f8; }
-.mm-template-btn:disabled { opacity: 0.5; cursor: default; }
+/* The picker itself is .dd-trigger + .dd-caret (dropdown.css) — it shows the
+   template the board is on rather than an action, so it reads as a select. */
 
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
 #connector-browse .modal-dialog { width: min(900px, 94vw); }

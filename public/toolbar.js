@@ -260,7 +260,7 @@ export function renderToolbar(resultCount) {
       const nameEl = document.createElement("span");
       nameEl.textContent = state.boardName;
       const chev = document.createElement("span");
-      chev.className = "board-chevron";
+      chev.className = "dd-caret";
       chev.innerHTML = ICONS.chevron;
       boardBtn.append(nameEl, chev);
       boardBtn.addEventListener("click", () => openBoardPop(boardBtn));
@@ -355,7 +355,7 @@ export function renderToolbar(resultCount) {
       });
       plusWrap.appendChild(plusBtn);
       const plusMenu = document.createElement("button");
-      plusMenu.className = "tool-btn plus-caret";
+      plusMenu.className = "tool-btn plus-caret dd-caret";
       plusMenu.title = "Ingestion & alerts";
       plusMenu.setAttribute("aria-label", "Ingestion & alerts");
       plusMenu.innerHTML = ICONS.chevron;
@@ -387,7 +387,7 @@ export function renderToolbar(resultCount) {
     nameSpan.className = "user-menu-name";
     nameSpan.textContent = state.me.name || state.me.email;
     const chev = document.createElement("span");
-    chev.className = "user-menu-chev";
+    chev.className = "dd-caret";
     chev.innerHTML = ICONS.chevron;
     userBtn.append(nameSpan, chev);
     userBtn.addEventListener("click", () => openUserMenu(userBtn));
@@ -410,7 +410,7 @@ export function renderToolbar(resultCount) {
   ));
   if (state.me) {
     const arrow = document.createElement("button");
-    arrow.className = "tool-btn split-arrow" + (ac > 0 ? " active" : "");
+    arrow.className = "tool-btn split-arrow dd-caret" + (ac > 0 ? " active" : "");
     arrow.title = "Saved filters";
     arrow.setAttribute("aria-label", "Saved filters");
     arrow.innerHTML = ICONS.chevron;
@@ -478,7 +478,7 @@ export function renderToolbar(resultCount) {
       else lbl.textContent = "Crates";
       cratesBtn.appendChild(lbl);
       const chev = document.createElement("span");
-      chev.className = "crates-chevron";
+      chev.className = "dd-caret";
       chev.innerHTML = ICONS.chevron;
       cratesBtn.appendChild(chev);
       cratesBtn.addEventListener("click", () => openCratePop(cratesBtn));

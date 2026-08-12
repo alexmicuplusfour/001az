@@ -380,3 +380,59 @@
   background: #f3f3f6;
   color: #111;
 }
+
+/* ─── trigger side: the button that OPENS a menu ───────────────────────────
+   Everything above styles the menu; these two style what you click to get it.
+   They live here rather than in styles.css because that file isn't loaded on
+   admin.html, while this one is loaded everywhere a dropdown exists — which is
+   also why nothing below uses a custom property: --text and friends don't
+   exist on that page. */
+
+/* The caret. Same glyph whether it sits beside a label (a span inside the
+   button) or IS the whole button (icon-only triggers), so both wear this class
+   and only the host's spacing differs. Size and opacity sit on the svg, not on
+   the element: on an icon-only trigger the element is a bordered box, and
+   dimming or rotating THAT would take the border with it. dropdown.js stamps
+   .dd-open on the anchor while the menu is up — the button in both shapes,
+   hence the two selectors — so the flip comes free. */
+.dd-caret {
+  flex: none;
+  display: inline-flex;
+}
+.dd-caret svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.45;
+  transition: transform 0.12s;
+}
+.dd-open .dd-caret svg,
+.dd-caret.dd-open svg {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .dd-caret svg { transition: none; }
+}
+
+/* A trigger that names the current choice instead of an action — a select in
+   everything but markup, for when the menu picks a value the button then has
+   to keep showing. The value carries the text weight and the caret stays dim,
+   so the eye lands on the answer rather than on the affordance. */
+.dd-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 148px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 10px 5px 12px;
+  border: 1px solid #d0d0d8;
+  border-radius: 6px;
+  background: #fff;
+  color: #3c3c50;
+  cursor: pointer;
+}
+.dd-trigger:hover { background: #f3f3f8; }
+.dd-trigger.dd-open { border-color: #a8a8b8; background: #f3f3f8; }
+.dd-trigger:disabled { opacity: 0.5; cursor: default; }
+.dd-trigger-value { font-weight: 500; }

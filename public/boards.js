@@ -69,7 +69,7 @@ function renderToolbar() {
   name.className = "user-menu-name";
   name.textContent = me.name || me.email;
   const chev = document.createElement("span");
-  chev.className = "user-menu-chev";
+  chev.className = "dd-caret";
   chev.innerHTML = ICONS.chevron;
   userBtn.append(name, chev);
   userBtn.addEventListener("click", () => openUserMenu(userBtn));

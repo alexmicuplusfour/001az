@@ -248,9 +248,9 @@ header.header-collapsed #toolbar-fold {
   margin-left: -1px;
   padding: 0 5px;
 }
+/* Sizing is .dd-caret's (dropdown.css). An icon-only trigger carries the caret
+   alone, so it reads brighter than one sitting next to a label. */
 .split-btn .split-arrow svg {
-  width: 12px;
-  height: 12px;
   opacity: 0.65;
 }
 /* keep the seam visible when both halves go dark */
@@ -297,14 +297,11 @@ header.header-collapsed #toolbar-fold {
 .tool-btn.board-diag-btn svg { width: 15px; height: 15px; }
 .tool-btn.board-edit-btn:hover,
 .tool-btn.board-diag-btn:hover { color: var(--text); }
-.board-chevron {
-  display: inline-flex;
+/* The caret itself is .dd-caret (dropdown.css); a labeled trigger only owns
+   how tightly the caret tucks against its label. */
+.board-btn .dd-caret,
+.crates-btn .dd-caret {
   margin-left: -1px;
-  opacity: 0.45;
-}
-.board-chevron svg {
-  width: 12px;
-  height: 12px;
 }
 .result-count {
   font-size: 12px;
@@ -602,8 +599,6 @@ body.bulk-mode .inst-tag-chip {
   padding: 0 5px;
 }
 .tool-btn.plus-caret svg {
-  width: 12px;
-  height: 12px;
   opacity: 0.65;
 }
 /* corner presence dot for any button (attachBtnDot, utils.js): centered on
@@ -1372,14 +1367,10 @@ body.bulk-mode .heart {
 .tool-btn .crate-owner {
   color: var(--text-dim);
 }
-.crates-chevron {
-  display: inline-flex;
-  margin-left: -1px;
+/* Brighter than the shared .45: this pill goes dark when a crate is active,
+   and the caret has to stay readable against it. */
+.crates-btn .dd-caret svg {
   opacity: 0.55;
-}
-.crates-chevron svg {
-  width: 12px;
-  height: 12px;
 }
 .tool-btn.crates-clear {
   margin-left: -4px;
@@ -2025,14 +2016,6 @@ body.bulk-mode .heart {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.user-menu-chev {
-  display: inline-flex;
-  opacity: 0.45;
-}
-.user-menu-chev svg {
-  width: 12px;
-  height: 12px;
-}
 
 /* ─── desktop-only / mobile-only visibility helpers ─── */
 .mobile-only {
@@ -2122,9 +2105,11 @@ body.bulk-mode .heart {
 .filter-drawer-saved:hover {
   background: var(--pill-bg);
 }
-.filter-drawer-saved svg {
-  width: 12px;
-  height: 12px;
+/* Sizing is .dd-caret's (dropdown.css); this only lifts the icon-only caret's
+   opacity. The .dd-caret in the selector is carrying its weight — without it
+   this ties with `.dd-caret svg` and loses on source order, since dropdown.css
+   is linked after this file. */
+.filter-drawer-saved.dd-caret svg {
   opacity: 0.65;
 }
 

@@ -45,6 +45,17 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   let connectorActiveProvider = null; // the backend currently resolving this connector
   let faceCfg = { ...(mapping?.face || { from: "raw" }) }; // the entity's card visual
 
+  // The template picker's trigger (admin only) — it names the template the
+  // board is currently on, so every path that changes that has to re-sync it:
+  // the two switch handlers, and loadCatalog, which is where a bound board
+  // learns its connector's display label ("Crypto", not "crypto").
+  let templateBtn = null;
+  let templateBtnValue = null;
+  function syncTemplateBtn() {
+    if (!templateBtnValue) return;
+    templateBtnValue.textContent = inputConnector ? (connectorLabel || inputConnector) : "Files";
+  }
+
   // The provenance band under "AI-extracted fields": which model fills the AI
   // fields ("Using <model> — Change"). The picker itself lives in the host's
   // AI-models strip; only the host can name the model — the answer includes
@@ -85,29 +96,43 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   const body = container;
 
   // Template row — very top of the body, right-aligned, divider below.
-  // Applying a connector template rewires the whole mapping (input, identity,
-  // fields) in one click — which only makes sense while the board is empty:
-  // existing items were ingested under the current input source, so once the
-  // first item lands the picker locks (no switching to a connector, no
-  // removing one that's already feeding the board).
+  // It reads as a select, not a load action: the board is ALWAYS on a template
+  // ("Files" is the one it starts on), so the control names the current one and
+  // the menu switches between them. A "Load template…" button implied the
+  // opposite — that nothing was loaded yet and the only move was forward.
+  // Switching rewires the whole mapping (input, identity, fields) in one click,
+  // which only makes sense while the board is empty: existing items were
+  // ingested under the current input source, so once the first item lands the
+  // picker locks.
+  // Neither switch toasts. A pick is a pending edit like typing in a field —
+  // nothing is saved until the host's Save — and the pane visibly redrawing
+  // around it is the feedback. A toast here would announce a change that
+  // hasn't happened yet.
   if (isAdmin) {
     const templateRow = document.createElement("div");
     templateRow.className = "mm-template-row";
     const templateLabel = document.createElement("span");
     templateLabel.className = "mm-template-label";
     templateLabel.textContent = "Template";
-    const loadBtn = document.createElement("button");
-    loadBtn.className = "mm-template-btn";
-    loadBtn.textContent = inputConnector ? `Connector: ${inputConnector}` : "Load template…";
+    templateBtn = document.createElement("button");
+    templateBtn.type = "button";
+    templateBtn.className = "dd-trigger";
+    templateBtnValue = document.createElement("span");
+    templateBtnValue.className = "dd-trigger-value";
+    const chev = document.createElement("span");
+    chev.className = "dd-caret";
+    chev.innerHTML = ICONS.chevron;
+    templateBtn.append(templateBtnValue, chev);
+    syncTemplateBtn();
     if (hasItems) {
-      loadBtn.disabled = true;
+      templateBtn.disabled = true;
       const why = inputConnector
         ? "This board already has items, so its connector template can't be changed or removed. Create a new board to use a different template."
         : "This board already has items, so a template can't be applied — its items came from file uploads. Create a new board to start from a template.";
-      loadBtn.title = why;
+      templateBtn.title = why;
       templateRow.title = why;
-    } else loadBtn.addEventListener("click", async () => {
-      loadBtn.disabled = true;
+    } else templateBtn.addEventListener("click", async () => {
+      templateBtn.disabled = true;
       let connectors;
       try {
         connectors = await fetch("/api/connectors").then((r) => r.json());
@@ -115,27 +140,35 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         toast.error("Failed to load connectors");
         return;
       } finally {
-        loadBtn.disabled = false;
+        templateBtn.disabled = false;
       }
-      if (!connectors.length) { toast.info("No connectors available"); return; }
-      openDropdown(loadBtn, {
-        align: "start",
-        minWidth: 180,
+      openDropdown(templateBtn, {
+        align: "end",
+        minWidth: 220,
         build: (menuBody, { close }) => {
+          // "Files" is the no-connector template — the state a board starts in.
+          // Listing it is what makes this a switch rather than a one-way door:
+          // with only connectors on the menu there was nothing to pick to undo
+          // one. It's first because it's where every board begins.
+          menuBody.appendChild(ddRow({
+            label: "Files",
+            sublabel: "No connector — items come from uploads",
+            active: !inputConnector,
+            onClick: () => { clearTemplate(); close(); },
+          }));
+          if (connectors.length) menuBody.appendChild(ddSep());
           for (const c of connectors) {
             menuBody.appendChild(ddRow({
               label: c.label,
-              onClick: () => {
-                applyTemplate(c);
-                loadBtn.textContent = `Connector: ${c.name}`;
-                close();
-              },
+              sublabel: `Live data from ${c.label}`,
+              active: inputConnector === c.name,
+              onClick: () => { applyTemplate(c); close(); },
             }));
           }
         },
       });
     });
-    templateRow.append(templateLabel, loadBtn);
+    templateRow.append(templateLabel, templateBtn);
     body.appendChild(templateRow);
   }
 
@@ -805,6 +838,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         connectorLabel = c.label;
         connectorProviders = c.providers || [];
         connectorActiveProvider = c.activeProvider || null;
+        syncTemplateBtn(); // the trigger was showing the bare connector name
         renderFields();
         renderFaceRow();
       }
@@ -834,10 +868,38 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     connectorActiveProvider = connector.activeProvider || null;
     faceCfg = t.face ? { ...t.face } : { from: "raw" };
     markDirty();
+    syncTemplateBtn();
     renderIdentityRow();
     renderFaceRow();
     renderFields();
-    toast(`${connector.label} template loaded`);
+  }
+
+  // The inverse of applyTemplate: back to the pristine file board. A template
+  // rewires the whole mapping, so unloading one has to undo the whole thing —
+  // the connector fields name a source that's gone, and the identity/face they
+  // set only mean something under that source. That takes the template's AI
+  // fields with it, which is the same wholesale swap applyTemplate already
+  // does in the other direction.
+  function clearTemplate() {
+    if (!inputConnector) return;
+    inputConnector = null;
+    identityFrom = "raw";
+    identityHint = "";
+    candidates = [];
+    classifyOn = false;
+    fields = [];
+    connectorCatalog = null;
+    connectorFaces = [];
+    connectorLabel = null;
+    connectorProviders = [];
+    connectorActiveProvider = null;
+    faceCfg = { from: "raw" };
+    markDirty();
+    syncTemplateBtn();
+    loadFileFields(); // the File fields section needs a catalog it never fetched
+    renderIdentityRow();
+    renderFaceRow();
+    renderFields();
   }
 
   // Validate + assemble the mapping payload for the host modal's PATCH. Returns
