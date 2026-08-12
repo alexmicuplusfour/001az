@@ -144,6 +144,40 @@ test("enumerate: the preview/window cap marks truncation", async () => {
   assert.equal(truncated, true);
 });
 
+test("enumerate: window depth is per-connector — feedWindow beats the default, env beats both", async () => {
+  // 1,250 rows across 5 pages of 250: past the metered default (1000) but
+  // inside a declared feedWindow (the snapshot-served-catalog shape).
+  const pages = Array.from({ length: 5 }, (_, p) =>
+    Array.from({ length: 250 }, (_, i) => row(`w${p * 250 + i}`, `W${p * 250 + i}`)));
+
+  // No declaration → the metered default: 1000 rows, truncated.
+  const plain = feedAdapter(stubConn({ pages }));
+  const d = await plain.enumerate(null, null, {});
+  assert.equal(d.candidates.length, 1000);
+  assert.equal(d.truncated, true);
+  assert.equal(plain.windowCap(), 1000);
+
+  // Declared feedWindow: the whole catalog fits, and the empty sixth page
+  // proves it ended — "all of it", not "N+".
+  const deep = feedAdapter(stubConn({ pages, browse: { ...BROWSE, feedWindow: 5000 } }));
+  const f = await deep.enumerate(null, null, {});
+  assert.equal(f.candidates.length, 1250);
+  assert.equal(f.truncated, false);
+  assert.equal(deep.windowCap(), 5000);
+
+  // The env knob overrides every declaration at once.
+  process.env.INGEST_FEED_CAP = "300";
+  try {
+    const forced = feedAdapter(stubConn({ pages, browse: { ...BROWSE, feedWindow: 5000 } }));
+    const g = await forced.enumerate(null, null, {});
+    assert.equal(g.candidates.length, 300);
+    assert.equal(g.truncated, true);
+    assert.equal(forced.windowCap(), 300);
+  } finally {
+    delete process.env.INGEST_FEED_CAP;
+  }
+});
+
 test("enumerate: a warm window is reused across calls; sort change or TTL expiry refetches", async () => {
   const prev = process.env.INGEST_FEED_CACHE_MS;
   process.env.INGEST_FEED_CACHE_MS = "60000"; // opt this test into caching

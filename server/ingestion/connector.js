@@ -18,16 +18,22 @@ import { recordIngest } from "../db.js";
 const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "number", date: "date" };
 
 // The enumeration window: how deep into the catalog a feed can see; past it
-// `truncated` renders as "N+". The preview route imports this so the count
-// view and a real run can never disagree on depth. Env-tunable for bigger
-// feeds (pair it with the provider's own universe depth — FMP_UNIVERSE_ROWS
-// for stocks; a window can't see past what the provider materializes).
-export const ENUM_CAP = () => Number(process.env.INGEST_FEED_CAP) || 1000;
+// `truncated` renders as "N+". Per-connector, because depth has a price only
+// some providers charge: FMP serves any depth from one cached screener call
+// (its manifest declares feedWindow 5000, covering the whole 4,609-row
+// US-listed universe), while CoinGecko/CMC pay one metered request per 250
+// rows — the 1000 default keeps their cold window fill at ≈4 requests. The
+// env knob overrides every connector at once. The preview route reads the
+// same bound through the adapter's windowCap, so a preview count and a real
+// run can never disagree on depth.
+export const ENUM_CAP = (browse) =>
+  Number(process.env.INGEST_FEED_CAP) || browse?.feedWindow || 1000;
 // Requested page size. Providers may clamp internally, but keep their offset
 // math consistent with their own clamp, so a short-but-nonempty page is
 // normal paging — enumeration stops ONLY on an empty page. Treating a short
 // page as "dry" would silently miss everything past a provider's first
-// clamped page. (FMP's clamp is aligned at 250 — a window fill is 4 slices.)
+// clamped page. (FMP's clamp is aligned at 250 — its full-universe window is
+// 20 cache-served slices, zero HTTP warm.)
 const ENUM_PAGE = 250;
 const MAX_PAGES = 40; // backstop for a provider that never returns empty
 
@@ -86,6 +92,10 @@ export function feedAdapter(conn) {
       triggerModes: ["manual", "interval", "daily"],
     }),
 
+    // The preview route bounds its enumerate with this so its count and a
+    // real run (which calls enumerate unbounded) read the same window.
+    windowCap: () => ENUM_CAP(browse),
+
     // Page the active provider's catalog into candidates, taken in the
     // configured sort order — boundedness makes the provider-side sort
     // load-bearing: "top N by X" must fill the window in X order or rows
@@ -97,7 +107,7 @@ export function feedAdapter(conn) {
       const active = await conn.activeProvider(db);
       if (!active.provider.list)
         throw new Error(`the active ${conn.name} provider can't browse its catalog — switch providers to use feeds`);
-      const cap = Math.min(limit, ENUM_CAP());
+      const cap = Math.min(limit, ENUM_CAP(browse));
       const sortBy = cfg.sort?.by || browse.defaultSort;
       const order = cfg.sort?.order === "asc" ? "asc" : "desc";
 
@@ -129,8 +139,8 @@ export function feedAdapter(conn) {
       }
       // Truncated unless the catalog visibly ended: a window filled to the cap
       // can't know what lies past it (a provider whose universe is exactly the
-      // cap — FMP's 1000-row screener — must still read "N+", not "all of it"),
-      // and a MAX_PAGES exit means pages were still coming.
+      // cap must still read "N+", not "all of it"), and a MAX_PAGES exit means
+      // pages were still coming.
       const result = { candidates, truncated: !dry };
       if (ttl > 0) windowCache.set(ck, { at: Date.now(), ...result });
       return result;
