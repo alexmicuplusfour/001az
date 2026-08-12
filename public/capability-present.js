@@ -61,11 +61,11 @@ export function presentLines(c) {
   if (c.reason) lines.push({ k: "Why", v: c.reason });
   if (c.demand?.waiting) lines.push({ k: "Waiting", v: `${c.demand.waiting} item${c.demand.waiting === 1 ? "" : "s"}` });
   // Delegation is the story only while nothing of this capability's OWN is
-  // bound — with an app-wide default stored (slice 5), the Running line already
-  // tells the truth and "uses each board's tagger" would contradict it. The
-  // agent noun comes from the feed (delegatesToAgent) — nothing here names a
-  // capability.
-  if (c.delegatesTo && !c.bound?.keyId) lines.push({ k: "Uses", v: `each board's ${c.delegatesToAgent || c.delegatesTo}` });
+  // bound (isDelegating) — with an app-wide default stored (slice 5), the
+  // Running line already tells the truth and "uses each board's tagger" would
+  // contradict it. The agent noun comes from the feed (delegatesToAgent) —
+  // nothing here names a capability.
+  if (isDelegating(c)) lines.push({ k: "Uses", v: `each board's ${c.delegatesToAgent || c.delegatesTo}` });
   if (c.boardOverrides) lines.push({ k: "Overrides", v: `${c.boardOverrides} board${c.boardOverrides === 1 ? "" : "s"} pin their own` });
   for (const m of c.modifiers || []) {
     lines.push({ k: m.label, v: m.availableNow ? "available with the current provider" : `needs ${m.supportedBy.join(" / ")}` });
@@ -97,6 +97,20 @@ export function presentSupported(p) {
 // what is configured, else the floor — the same precedence a reader follows.
 export const configureTarget = (c) => c.running?.provider || c.bound?.provider || c.floor?.provider || null;
 
+// Is this capability actually DELEGATING right now? The feed ships
+// `delegatesTo` for anything whose floor is a delegate — unconditionally, since
+// that's a fact about the descriptor. Whether delegation is the STORY is a
+// second question: the moment an app-wide default of the capability's own is
+// stored, it answers for itself and following the target would name the wrong
+// model. Both halves, in one place.
+//
+// Four readers asked this and each kept its own copy of the pair. Three agreed;
+// the board modal's strip and provenance bands — two more copies, a file away —
+// dropped the second half, so a board with an app-wide extract default showed
+// extraction's own model over the TAGGER's as its source, and told the Mapping
+// pane the tagger was doing the extracting. A predicate cannot be half-copied.
+export const isDelegating = (c) => !!c.delegatesTo && !c.bound?.keyId;
+
 // --- who serves what (7c) — the Plugins tab's badges, tags, and warnings ---
 // These used to be four hand-lists over the legacy `slots` payload, and the
 // removal warning's copy forgot the transcriber — the exact omission class the
@@ -111,7 +125,7 @@ export const configureTarget = (c) => c.running?.provider || c.bound?.provider |
 // `off` capability never has `running`, so disabled needs no special case.
 export const servingRoles = (caps, providerName) =>
   (caps || []).filter((c) =>
-    c.kind === "ai" && c.running?.provider === providerName && !(c.delegatesTo && !c.bound?.keyId));
+    c.kind === "ai" && c.running?.provider === providerName && !isDelegating(c));
 
 // One serving entry → its card badge: names the role, links to the capability
 // card, and carries the env qualifier the tagger's badge always had.
@@ -166,7 +180,7 @@ export function planBoardPicker(cap, keys, board, catalog) {
   // its unset row says that ("Same as the tagger") instead of a false default;
   // what that resolves to live is the shell's to add, since only the shell
   // sees unsaved edits to the target's picker.
-  const delegated = !!cap.delegatesTo && !cap.bound?.keyId;
+  const delegated = isDelegating(cap);
   const inherit = cap.running
     ? labelIn(cap, cap.running.provider) + (cap.running.model ? ` · ${cap.running.model}` : "")
     : "none configured";
@@ -199,6 +213,13 @@ export function planBoardPicker(cap, keys, board, catalog) {
   return {
     rows,
     preselect,
+    // Whether the unset row FOLLOWS another capability rather than inheriting an
+    // app default — the planner's answer, published so its shell stops deriving
+    // its own. The shell needs it because the live resolution (what the target's
+    // picker holds right now, unsaved edits included) is the one part of this
+    // that a pure function cannot see; what it must NOT do is re-decide whether
+    // to look.
+    delegated,
     // The model axis exists only for a keyed selection — an on-device engine's
     // model is baked, the default row inherits. `kind` addresses the live
     // per-connection listing; the entry is the provider's declared slice for

@@ -918,8 +918,13 @@ export async function openBoardModal(boardId, opts = {}) {
       const chosen = (p) => p.plan.chosenLabel(p.keySel.value, p.modelSel.hidden ? null : p.modelSel.value || null);
       // Follow delegation while unset, so a "Same as the tagger" surface can
       // still name the model that will actually run — unsaved edits included.
+      // `plan.delegated`, never `cap.delegatesTo`: the feed ships the latter for
+      // any delegate-floored capability, INCLUDING one that has an app-wide
+      // default of its own and therefore isn't following anyone. Reading the
+      // raw field made this walk to the tagger in exactly that case, so the
+      // band named the tagger's model while extraction ran on its own binding.
       const resolved = (p) => {
-        if (!p.keySel.value && p.cap.delegatesTo) {
+        if (!p.keySel.value && p.plan.delegated) {
           const t = capPickers.find((x) => x.cap.id === p.cap.delegatesTo);
           if (t) return chosen(t);
         }
@@ -964,7 +969,7 @@ export async function openBoardModal(boardId, opts = {}) {
           p.valEl.textContent = chosen(p);
           p.srcEl.textContent = p.keySel.value
             ? "chosen for this board"
-            : p.cap.delegatesTo ? resolved(p) : "app default";
+            : p.plan.delegated ? resolved(p) : "app default";
         }
         const n = capPickers.filter((p) => p.keySel.value).length;
         summaryEl.textContent = tagPicker

@@ -4,7 +4,7 @@
 // capabilities.test.js proves the server actually emits.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory } from "../public/capability-present.js";
+import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory, isDelegating } from "../public/capability-present.js";
 
 const supported = [
   { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
@@ -280,10 +280,33 @@ test("planBoardPicker: a delegate capability's unset row says what it follows, n
   assert.equal(plan.rows[0].label, "Same as the tagger");
   assert.equal(plan.chosenLabel("", null), "Same as the tagger",
     "the unset delegate answers with its relationship; the shell adds the live model");
+  // Published for the shell, which must not re-derive it: the answer is what
+  // tells the board modal whether to follow the tagger's picker for this row's
+  // live value, and the raw delegatesTo field would say yes even below.
+  assert.equal(plan.delegated, true);
   // With an app-wide default of its OWN bound, the row reads as inherited again.
   const bound = planBoardPicker({ ...boardExtract, bound: { keyId: 7 } }, allKeys, null, boardCatalog);
   assert.equal(bound.rows[0].label, "App default (OpenAI · gpt-5-mini)");
   assert.equal(bound.chosenLabel("", null), "OpenAI · gpt-5-mini");
+  assert.equal(bound.delegated, false,
+    "a capability answering with its own app-wide default is not following anyone — " +
+    "the shell reads this to decide whether to resolve through the delegate's picker");
+});
+
+// The predicate the row above rests on, alone: the feed ships `delegatesTo` for
+// any delegate-floored capability, so every reader has to pair it with "and
+// nothing of its own is bound". Three readers here did; the board modal's strip
+// and bands each kept a copy that didn't, and named the tagger's model on a
+// board whose extraction ran on its own app-wide binding.
+test("isDelegating: the descriptor says it CAN delegate, a stored default says it isn't", () => {
+  const floored = { delegatesTo: "tag", delegatesToAgent: "tagger" };
+  assert.equal(isDelegating(floored), true, "delegate floor, nothing of its own bound");
+  assert.equal(isDelegating({ ...floored, bound: { keyId: 7 } }), false,
+    "an app-wide default of its own outranks the delegate floor — the resolver says so too");
+  // A binding row with no key is not a choice: config-only or provider-only
+  // bindings leave keyId null, and the delegate floor still carries the work.
+  assert.equal(isDelegating({ ...floored, bound: { keyId: null, model: "x" } }), true);
+  assert.equal(isDelegating({ bound: { keyId: 7 } }), false, "no delegate floor at all");
 });
 
 test("planBoardPicker: preselects come from the board's columns; a vanished pin falls to the default row", () => {
