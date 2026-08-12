@@ -1,6 +1,8 @@
-// Live verification for planning/connector-scale-plan.md — drives the REAL
-// provider module against the REAL FMP API (key via FMP_KEY env; never
-// printed). Read-only: no DB, no board mutations. Deletable after use.
+// Live verification for planning/connector-scale-plan.md and
+// planning/connector-full-catalog.md — drives the REAL provider module
+// against the REAL FMP API (key via FMP_KEY env; never printed). Read-only:
+// no DB, no board mutations. Kept as the standing check that the measured
+// posture (full universe, search bridge, snapshot economics) still holds.
 import * as fmp from "../server/connectors/stocks/financialmodelingprep.js";
 
 const apiKey = process.env.FMP_KEY;
@@ -24,6 +26,26 @@ const timed = async (label, fn) => {
 await timed("cold list() page 1 (universe fill @ default depth)", async () => {
   const rows = await fmp.list({ sort: "market_cap", order: "desc", page: 1, pageSize: 250 }, { apiKey });
   return `${rows.length} rows, top: ${rows[0].symbol} (rank ${rows[0].values.rank})`;
+});
+
+await timed("universe covers the whole US-listed catalog (asc = real micro-caps)", async () => {
+  const rows = await fmp.list({ sort: "market_cap", order: "asc", page: 1, pageSize: 5 }, { apiKey });
+  const caps = rows.map((r) => r.values.market_cap);
+  return `smallest caps: ${caps.join(", ")} (should be far below $1B)`;
+});
+
+await timed("query bridge reaches past the screener (SPY — an ETF the screener never carries)", async () => {
+  const rows = await fmp.list({ query: "SPY" }, { apiKey });
+  const hit = rows.find((r) => r.symbol === "SPY");
+  if (!hit) throw new Error("SPY not returned");
+  if (hit.values.rank != null) throw new Error("SPY has a universe rank — bridge not exercised");
+  return `price=${hit.values.price} mcap=${hit.values.market_cap} exch=${hit.values.exchange} (quote-filled, rank null as expected)`;
+});
+
+await timed("sector filter narrows the universe server-side of the modal", async () => {
+  const rows = await fmp.list({ sector: "Healthcare", pageSize: 250 }, { apiKey });
+  const bad = rows.filter((r) => r.values.sector !== "Healthcare").length;
+  return `${rows.length} healthcare rows, ${bad} mismatched (want 0)`;
 });
 
 await timed("warm list() page 8 (deep slice)", async () => {

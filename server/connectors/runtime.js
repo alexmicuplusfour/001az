@@ -58,9 +58,10 @@ async function withRetry(fn, tries = 3) {
 // Two budget classes, because one number can't serve both: the default
 // (interactive) covers price/search calls that answer in seconds and must
 // fail fast; "bulk" covers a provider's catalog computations (FMP's
-// company-screener holds a flat ~15 s server-side regardless of size —
-// measured, see planning/connector-scale-plan.md), where the generous
-// ceiling binds only on a true hang. The PROVIDER picks the class per call
+// company-screener measured a flat ~15 s in 2026-08 and sub-second when
+// re-measured 2026-08-13 — planning/connector-full-catalog.md; the class
+// stays because the budget is a hang detector, priced for the slow days),
+// where the generous ceiling binds only on a true hang. The PROVIDER picks the class per call
 // site — only it knows which of its HTTP calls is a bulk compute; logical
 // entry points don't map 1:1 to requests. The runtime owns the values.
 export const providerBudgetMs = (kind) =>

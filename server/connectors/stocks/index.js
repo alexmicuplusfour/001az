@@ -80,7 +80,28 @@ export const manifest = {
       { key: "price",      label: "Price" },
       { key: "name",       label: "Name" },
     ],
+    // Narrowing filters for the browse modal. Options double as the route's
+    // whitelist, so they must be exact screener vocabulary — the sector list
+    // is FMP's own `available-sectors` (fetched live 2026-08-13; it's the
+    // standard 11-sector taxonomy and effectively static).
+    filters: [
+      {
+        key: "sector",
+        label: "Sector",
+        options: [
+          "Basic Materials", "Communication Services", "Consumer Cyclical",
+          "Consumer Defensive", "Energy", "Financial Services", "Healthcare",
+          "Industrials", "Real Estate", "Technology", "Utilities",
+        ],
+      },
+      { key: "exchange", label: "Exchange", options: ["NASDAQ", "NYSE", "AMEX"] },
+    ],
     defaultSort: "market_cap",
     pageSize: 50,
+    // Feed window depth: FMP serves any depth from one cached screener call
+    // (zero marginal HTTP), so the window covers the whole US-listed universe
+    // (4,609 rows measured 2026-08-13). Metered catalogs (crypto) omit this
+    // and keep the adapter's cheaper default.
+    feedWindow: 5000,
   },
 };

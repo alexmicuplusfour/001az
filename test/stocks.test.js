@@ -28,12 +28,14 @@ test("stocks manifest: registered finance connector with FMP and a chart face", 
   assert.ok(getConnector("stocks"));
 });
 
-test("FMP search: normalizes symbols and keeps US USD listings", async () => {
+test("FMP search: normalizes symbols and keeps every quotable USD listing (OTC included)", async () => {
   const original = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     seen.push(String(url));
     // Real /stable/search-* rows: symbol, name, currency, exchange (short form).
+    // OTC is quotable on this tier (verified 2026-08-13); non-US venues like
+    // TSX are premium-gated at the quote endpoint, so they stay out.
     return response([
       { symbol: "aapl", name: "Apple Inc.", currency: "USD", exchange: "NASDAQ" },
       { symbol: "SHOP.TO", name: "Shopify", currency: "CAD", exchange: "TSX" },
@@ -41,12 +43,10 @@ test("FMP search: normalizes symbols and keeps US USD listings", async () => {
     ]);
   };
   try {
-    assert.deepEqual(await fmp.search("apple", { apiKey: "test-key" }), [{
-      id: "AAPL",
-      symbol: "AAPL",
-      label: "Apple Inc.",
-      exchange: "NASDAQ",
-    }]);
+    assert.deepEqual(await fmp.search("apple", { apiKey: "test-key" }), [
+      { id: "AAPL", symbol: "AAPL", label: "Apple Inc.", exchange: "NASDAQ" },
+      { id: "ACME", symbol: "ACME", label: "Acme OTC", exchange: "OTC" },
+    ]);
     assert.ok(seen.some((url) => url.includes("/search-symbol?")));
     assert.ok(seen.some((url) => url.includes("/search-name?")));
   } finally {
@@ -100,18 +100,34 @@ test("FMP fetchEntity: combines quote and profile into canonical stock fields", 
   }
 });
 
-test("FMP list: screens US stocks, sorts, paginates, and filters a query against the cached universe", async () => {
+test("FMP list: universe hits carry full columns; the search bridge reaches past the screener", async () => {
+  fmp._resetScreenerCache();
   const original = globalThis.fetch;
   const seen = [];
   globalThis.fetch = async (url) => {
     const u = String(url);
     seen.push(u);
     // Real /stable/company-screener rows: exchangeShortName + a full exchange
-    // name, and no intraday change field.
+    // name, and no intraday change field. MID's volume is 0 — FMP's
+    // outside-session zeroing, which must render as null, never a false 0.
     if (u.includes("/company-screener?")) return response([
       { symbol: "SMALL", companyName: "Small Co.", marketCap: 10, price: 2, volume: 20, sector: "Energy", exchangeShortName: "NYSE", exchange: "New York Stock Exchange" },
       { symbol: "BIG", companyName: "Big Co.", marketCap: 100, price: 20, volume: 200, sector: "Technology", exchangeShortName: "NASDAQ", exchange: "NASDAQ Global Select" },
-      { symbol: "MID", companyName: "Mid Co.", marketCap: 50, price: 10, volume: 100, sector: "Healthcare", exchangeShortName: "NYSE", exchange: "New York Stock Exchange" },
+      { symbol: "MID", companyName: "Mid Co.", marketCap: 50, price: 10, volume: 0, sector: "Healthcare", exchangeShortName: "NYSE", exchange: "New York Stock Exchange" },
+      // An unpriced fringe listing: FMP reports marketCap 0 — missing data,
+      // which must sort LAST ascending, not ahead of every real micro-cap.
+      { symbol: "ZERO", companyName: "Zero Co.", marketCap: 0, price: 1, volume: 0, sector: "Energy", exchangeShortName: "AMEX", exchange: "NYSE American" },
+    ]);
+    // The bridge: search knows BIGO (an OTC listing the screener never
+    // carries); one quote fills its columns. BIG also comes back from search
+    // and must dedupe against the universe row.
+    if (u.includes("/search-symbol?")) return response([
+      { symbol: "BIG", name: "Big Co.", currency: "USD", exchange: "NASDAQ" },
+      { symbol: "BIGO", name: "Big Otc Energy", currency: "USD", exchange: "OTC" },
+    ]);
+    if (u.includes("/search-name?")) return response([]);
+    if (u.includes("/quote?symbol=BIGO")) return response([
+      { symbol: "BIGO", name: "Big Otc Energy", price: 5, marketCap: 7, volume: 0, exchange: "OTC" },
     ]);
     throw new Error(`unexpected URL ${u}`);
   };
@@ -127,18 +143,43 @@ test("FMP list: screens US stocks, sorts, paginates, and filters a query against
     assert.equal(rows[0].values.sector, "Technology");
     assert.equal(rows[0].values.exchange, "NASDAQ"); // short form, not the full name
     assert.equal(rows[0].label, "Big Co."); // company name, never the ticker
+    assert.equal(rows[1].values.volume, null, "session-zeroed volume serves null");
     assert.ok(seen.some((u) => u.includes("country=US") && u.includes("isEtf=false")));
+    assert.ok(seen[0].includes("limit=10000"), "default depth fetches the whole universe");
 
-    // A query filters the same universe (full columns, no per-symbol request) and
-    // reuses the cache — no extra screener call.
-    const before = seen.length;
+    // Ascending market cap starts at the smallest REAL company; the unpriced
+    // row (marketCap 0 → null) trails everything it has no number to beat.
+    const asc = await fmp.list({ sort: "market_cap", order: "asc", page: 1, pageSize: 4 }, { apiKey: "test-key" });
+    assert.deepEqual(asc.map((row) => row.symbol), ["SMALL", "MID", "BIG", "ZERO"]);
+    assert.equal(asc[3].values.market_cap, null);
+
+    // A query: universe matches keep their free full columns AND the bridge
+    // appends what only search knows — BIGO arrives quote-filled, without
+    // rank/sector (the screener is their only source), and BIG doesn't double.
     const hits = await fmp.list({ query: "big" }, { apiKey: "test-key" });
-    assert.deepEqual(hits.map((row) => row.symbol), ["BIG"]);
-    assert.equal(hits[0].label, "Big Co.");
+    assert.deepEqual(hits.map((row) => row.symbol), ["BIG", "BIGO"]);
     assert.equal(hits[0].values.price, 20);
-    assert.equal(seen.length, before, "query reuses the cached universe");
+    assert.equal(hits[1].values.price, 5);
+    assert.equal(hits[1].values.rank, null);
+    assert.equal(hits[1].values.sector, null);
+    assert.equal(hits[1].values.volume, null);
+    assert.equal(hits[1].values.exchange, "OTC");
+    assert.equal(seen.filter((u) => u.includes("/company-screener?")).length, 1, "query reuses the cached universe");
+
+    // Same query again: the bridge result is cached — no new search/quote.
+    const before = seen.length;
+    await fmp.list({ query: "big" }, { apiKey: "test-key" });
+    assert.equal(seen.length, before, "bridge cache serves a repeated query");
+
+    // Filters are exact matches on screener vocabulary; a bridge row has no
+    // sector, so a sector filter honestly excludes it.
+    const tech = await fmp.list({ query: "big", sector: "Technology" }, { apiKey: "test-key" });
+    assert.deepEqual(tech.map((row) => row.symbol), ["BIG"]);
+    const nyse = await fmp.list({ exchange: "NYSE" }, { apiKey: "test-key" });
+    assert.deepEqual(nyse.map((row) => row.symbol).sort(), ["MID", "SMALL"]);
   } finally {
     globalThis.fetch = original;
+    fmp._resetScreenerCache();
   }
 });
 

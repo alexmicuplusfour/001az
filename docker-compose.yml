@@ -95,10 +95,12 @@ services:
       EXTRACT_CONCURRENCY: ${EXTRACT_CONCURRENCY:-}
       FACE_CONCURRENCY: ${FACE_CONCURRENCY:-}
       CONNECTOR_TIMEOUT_MS: ${CONNECTOR_TIMEOUT_MS:-}
-      # bulk class: provider catalog computations (FMP screener ~15s flat)
+      # bulk class: provider catalog computations (a hang detector, not a cost)
       CONNECTOR_BULK_TIMEOUT_MS: ${CONNECTOR_BULK_TIMEOUT_MS:-}
       CONNECTOR_RETRY_CAP_MS: ${CONNECTOR_RETRY_CAP_MS:-}
-      # stocks universe depth + feed window bound (pair for feeds >1000)
+      # stocks universe depth + global feed-window override (per-connector
+      # defaults already cover the whole US-listed universe for stocks;
+      # pair the two for anything deeper)
       FMP_UNIVERSE_ROWS: ${FMP_UNIVERSE_ROWS:-}
       INGEST_FEED_CAP: ${INGEST_FEED_CAP:-}
       AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
