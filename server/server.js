@@ -142,7 +142,7 @@ import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./p
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
-import { liveFields, faceSchedule } from "./connectors/runtime.js";
+import { liveFields, faceSchedule, domainState } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
@@ -2393,25 +2393,43 @@ app.delete("/api/instances/:id", requireAuth, requireItemAccess, wrap(async (req
 
 // --- connector routes ---
 
-app.get("/api/connectors", requireAuth, wrap(async (_req, res) => {
+app.get("/api/connectors", requireAuth, wrap(async (req, res) => {
   // Enrich each connector with its active provider and per-face availability so
   // the mapping modal can warn when a configured face can't be rendered by the
   // current backend (e.g. a chart face while CoinMarketCap — no history — is active).
   const out = [];
   for (const c of listConnectors()) {
     const conn = getConnector(c.name);
-    // activeProvider THROWS when no provider of that domain is installed — a
-    // normal state (a domain nobody added yet), and one that must not take the
-    // whole catalog down with it: this is the fetch behind the template picker,
-    // the field catalog AND the face row, for every connector. Unresolved →
-    // activeProvider null and the manifest's faces UNannotated, so the modal
-    // shows no per-provider availability claim it can't stand behind.
-    let activeProvider = null;
-    try { if (conn.activeProvider) activeProvider = (await conn.activeProvider(db)).name; }
-    catch { /* no provider installed for this domain */ }
+    // standing(), not activeProvider(): the raw resolver THROWS when no provider
+    // of that domain is installed — a normal state (a domain nobody added yet),
+    // and one that must not take the whole catalog down with it, since this is
+    // the fetch behind the template picker, the field catalog AND the face row,
+    // for every connector. Unresolved → activeProvider null and the manifest's
+    // faces UNannotated, so the modal shows no per-provider availability claim
+    // it can't stand behind.
+    const standing = await conn.standing(db);
+    const activeProvider = standing.effective?.name || null;
+    // Whether the domain can serve AT ALL, off the same ladder the capabilities
+    // card reads (connectors/runtime domainState). The template picker lists
+    // every connector — a board's mapping is a shape, not a live connection —
+    // but a template it can't feed has to say so at the point of choosing,
+    // rather than an hour later when the first add fails. Shipped rather than
+    // derived client-side: which rungs can still serve (degraded can; blocked
+    // can't) is the ladder's business, not a rule for callers to re-know.
+    //
+    // The REASON is admin-only, and the split is not fussiness. `available` is
+    // a fact about the board — its data isn't flowing — and every member who
+    // can see the board can see that much already. The reason is a fact about
+    // the deployment: which provider is installed, whether it holds a key,
+    // which one took over for a dead star. That lived behind /api/admin/* and
+    // stays there; this route is requireAuth. The client is written to the
+    // absence, not to a role flag, so the two can't drift.
+    const { reason, available } = domainState(standing, c);
     out.push({
       ...c,
       activeProvider,
+      available,
+      ...(reason && req.user.is_admin ? { reason } : {}),
       faces: activeProvider && conn.renderableFaces ? conn.renderableFaces(activeProvider) : c.faces,
     });
   }

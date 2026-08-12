@@ -102,6 +102,14 @@ export const hasIdentity = (item) => !!(item.display_name || item.identity !== i
 
 export const tag = (facet, value) => `${facet}/${value}`;
 
+// A server-authored reason, capitalized to start a sentence. The registry
+// writes them to follow a label ("Why: no Stocks provider is installed"), which
+// is the right case there and the wrong one wherever the string stands on its
+// own — a menu sublabel, the head of a banner. One transform, shared by the
+// surfaces that stand them alone, so the wire keeps ONE string per reason
+// instead of the registry keeping two cases of it.
+export const sentence = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
+
 // ── Icons ───────────────────────────────────────────────────────────────────
 // Every glyph in this set is the same object: a 24-unit box, unfilled, drawn in
 // one currentColor stroke with round caps and joins. `glyph` is where that

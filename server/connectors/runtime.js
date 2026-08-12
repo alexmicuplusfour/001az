@@ -149,6 +149,32 @@ export async function standing(db, conn) {
   }
 }
 
+// A standing read as ONE answer to "can this domain serve right now, and if
+// not, why". Both surfaces that ask are the same question asked twice: the
+// capabilities feed (the Plugins page card) and /api/connectors (the mapping
+// modal's template picker). A picker offering Stocks as a plain choice while
+// the card beside it says "unavailable" is not two opinions, it's one rule
+// written down twice — so it is written here once.
+//
+// Pure: `standing` is the only db read, and the labels come from the
+// connector's own live provider descriptors (`listConnectors()`'s `providers`),
+// so nothing here needs the admin plugin catalog.
+//
+// `blocked` means the serving provider needs a key it doesn't have —
+// activeProvider resolves regardless of keys, but every call would fail.
+// `degraded` still SERVES (a sibling took over), so it counts as available;
+// the star being dead is the Plugins page's story, not the picker's.
+export function domainState({ setting, effective }, { label, providers = [] }) {
+  const labelOf = (name) => providers.find((p) => p.name === name)?.label || name;
+  const out = (state, reason = null) => ({ state, reason, available: state === "active" || state === "degraded" });
+  if (!effective) return out("unavailable", `no ${label} provider is installed`);
+  if (setting && setting !== effective.name)
+    return out("degraded", `${labelOf(setting)} can't serve — ${labelOf(effective.name)} took over`);
+  if (effective.provider.needsKey && !effective.apiKey)
+    return out("blocked", `${labelOf(effective.name)} needs an API key`);
+  return out("active");
+}
+
 // The per-call context every provider method receives: the key plus the
 // pacing handle (see callProvider — request-pacing providers await it before
 // each raw fetch). Built fresh per logical call; `pace` closes over the

@@ -5,7 +5,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, req, installConnectors, withLegacyEntityId } from "./helpers.js";
-import { createEntity, setSetting, getSetting } from "../server/db.js";
+import { createEntity, setSetting, getSetting, setPluginState } from "../server/db.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -267,6 +267,88 @@ test("GET /api/connectors: returns connector list with manifest", async () => {
 test("GET /api/connectors: requires auth", async () => {
   const r = await req(base, "GET", "/api/connectors");
   assert.equal(r.status, 401);
+});
+
+// The template picker lists every domain, so it needs to know which of them can
+// actually serve — and a domain that can't must not take the catalog down with
+// it, which is exactly what un-added FMP once did (activeProvider throws; the
+// route 500'd; the client toasted "No connectors available" at a Crypto that
+// was fine all along).
+test("GET /api/connectors: an un-added domain reports unavailable without sinking the catalog", async () => {
+  await setPluginState(db, "stocks:financialmodelingprep", { installed: false });
+  try {
+    const r = await req(base, "GET", "/api/connectors", { sid: admin.sid });
+    assert.equal(r.status, 200);
+    const st = r.json.find((c) => c.name === "stocks");
+    assert.equal(st.available, false);
+    assert.equal(st.reason, "no Stocks provider is installed");
+    assert.equal(st.activeProvider, null);
+    assert.ok(st.template, "still listed with its template — a shape you may pick");
+    // The whole point: the sibling domain is untouched.
+    const cg = r.json.find((c) => c.name === "crypto");
+    assert.equal(cg.available, true);
+    assert.equal(cg.reason, undefined); // nothing to explain about a healthy domain
+  } finally {
+    await setPluginState(db, "stocks:financialmodelingprep", { installed: true });
+  }
+});
+
+test("GET /api/connectors: an installed-but-keyless provider is unavailable too", async () => {
+  // FMP resolves as the active provider (activeProvider ignores keys), so
+  // `activeProvider != null` is NOT the availability question — every call
+  // would still fail on the missing key.
+  const r = await req(base, "GET", "/api/connectors", { sid: admin.sid });
+  const st = r.json.find((c) => c.name === "stocks");
+  assert.equal(st.activeProvider, "financialmodelingprep");
+  assert.equal(st.available, false);
+  assert.equal(st.reason, "Financial Modeling Prep needs an API key");
+});
+
+// `available` is a fact about the board (its data isn't flowing); the reason is
+// a fact about the deployment (which provider is installed, whether it holds a
+// key). The second belonged to /api/admin/* before this route learned to answer
+// the first, and it stays there.
+test("GET /api/connectors: the outage REASON is admin-only, the availability isn't", async () => {
+  const member = await seedUser(db, "conn-avail-member@test.local");
+  const r = await req(base, "GET", "/api/connectors", { sid: member.sid });
+  assert.equal(r.status, 200);
+  const st = r.json.find((c) => c.name === "stocks");
+  assert.equal(st.available, false, "a member still learns the board can't fetch");
+  assert.equal(st.reason, undefined, "but not which provider, nor that it wants a key");
+  // Nothing anywhere in the member's payload names the key state.
+  assert.ok(!JSON.stringify(r.json).includes("needs an API key"));
+});
+
+// ── domainState: the shared ladder ───────────────────────────────────────────
+// Pure, so the four rungs are pinned here rather than inferred from two
+// surfaces. Both the capabilities card and /api/connectors read this.
+
+test("domainState: the four rungs, and which of them can still serve", () => {
+  const domain = { label: "Stocks", providers: [{ name: "fmp", label: "FMP" }, { name: "alt", label: "Alt" }] };
+  const eff = (name, needsKey, apiKey) => ({ name, provider: { needsKey }, apiKey });
+
+  assert.deepEqual(runtime.domainState({ setting: null, effective: null }, domain),
+    { state: "unavailable", reason: "no Stocks provider is installed", available: false });
+
+  assert.deepEqual(runtime.domainState({ setting: null, effective: eff("fmp", true, "k") }, domain),
+    { state: "active", reason: null, available: true });
+
+  // The sibling scan took over: still serving, so still a usable template —
+  // the dead star is the Plugins page's story, not the picker's.
+  assert.deepEqual(runtime.domainState({ setting: "fmp", effective: eff("alt", false, null) }, domain),
+    { state: "degraded", reason: "FMP can't serve — Alt took over", available: true });
+
+  assert.deepEqual(runtime.domainState({ setting: "fmp", effective: eff("fmp", true, null) }, domain),
+    { state: "blocked", reason: "FMP needs an API key", available: false });
+});
+
+test("domainState: an unknown provider name falls back to itself as the label", () => {
+  const domain = { label: "Stocks", providers: [] };
+  const { reason } = runtime.domainState(
+    { setting: null, effective: { name: "ghost", provider: { needsKey: true }, apiKey: null } },
+    domain
+  );
+  assert.equal(reason, "ghost needs an API key");
 });
 
 // ── POST /api/boards/:id/entities ────────────────────────────────────────────

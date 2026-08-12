@@ -27,6 +27,7 @@ import { CAPABILITY, CAPABILITY_DEFS, configFieldView } from "./capabilities.js"
 import { resolveCapability, capabilityBinding, capabilityConfig, storedBindingMiss } from "./capability-resolve.js";
 import { pluginCatalog } from "./plugins.js";
 import { listConnectors, getConnector } from "./connectors/index.js";
+import { domainState } from "./connectors/runtime.js";
 import { tagQueueDepth, embeddingStats, countBoardOverrides } from "./db.js";
 import { transcriberSidecarModel, detectorSidecarModel } from "./worker.js";
 import { listSources } from "./ingestion/files.js";
@@ -241,24 +242,11 @@ async function domainEntry(db, c, catalog) {
       hasKey: !!p.state.hasKey,
       health: p.state.health || null,
     }));
-  const labelOf = (name) => roster.find((r) => r.name === name)?.label || name;
-
-  let state;
-  let reason = null;
-  if (!effective) {
-    state = "unavailable";
-    reason = `no ${c.label} provider is installed`;
-  } else if (setting && setting !== effective.name) {
-    // The sibling scan took over — the connector runtime's own degraded state,
-    // surfaced instead of silently absorbed.
-    state = "degraded";
-    reason = `${labelOf(setting)} can't serve — ${labelOf(effective.name)} took over`;
-  } else if (effective.provider.needsKey && !effective.apiKey) {
-    state = "blocked";
-    reason = `${labelOf(effective.name)} needs an API key`;
-  } else {
-    state = "active";
-  }
+  // The ladder itself is connectors/runtime's (domainState) — the sibling-scan
+  // takeover is the runtime's own degraded state, and /api/connectors asks the
+  // same question for the mapping modal's template picker. Shared rather than
+  // mirrored, so the card and the picker cannot disagree about a domain.
+  const { state, reason } = domainState({ setting, effective }, c);
 
   return {
     id: c.name,

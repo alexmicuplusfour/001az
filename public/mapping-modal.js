@@ -1,6 +1,6 @@
 import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
-import { ICONS } from './utils.js';
+import { ICONS, sentence } from './utils.js';
 import { switchRow } from './board-modal.js';
 import { sectionHeadingEl, provBand } from './modal.js';
 
@@ -43,6 +43,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   let connectorLabel = null;
   let connectorProviders = [];   // [{ name, label, needsKey }] — for naming providers in hints
   let connectorActiveProvider = null; // the backend currently resolving this connector
+  // Whether the BOUND domain can serve at all, and why not — straight off
+  // /api/connectors (`available`/`reason`, the capabilities feed's own ladder).
+  // Starts optimistic: until the catalog lands there is nothing to accuse it of,
+  // and a banner that flashes on every open would be its own lie.
+  let connectorAvailable = true;
+  let connectorReason = null;
   let faceCfg = { ...(mapping?.face || { from: "raw" }) }; // the entity's card visual
 
   // The template picker's trigger (admin only) — it names the template the
@@ -124,7 +130,15 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       templateBtn.disabled = true;
       let connectors;
       try {
-        connectors = await fetch("/api/connectors").then((r) => r.json());
+        // Both checks earn their keep: fetch resolves on a 4xx/5xx just as
+        // happily as on a 200, and the body then is `{ error }` — an object
+        // whose `.length` is undefined and which `for…of` refuses. That threw
+        // inside openDropdown's build() and left a half-drawn menu saying
+        // nothing at all, which is how a 500'd catalog used to present.
+        const r = await fetch("/api/connectors");
+        if (!r.ok) throw new Error(String(r.status));
+        connectors = await r.json();
+        if (!Array.isArray(connectors)) throw new Error("not a list");
       } catch {
         toast.error("Failed to load connectors");
         return;
@@ -147,18 +161,63 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
           }));
           if (connectors.length) menuBody.appendChild(ddSep());
           for (const c of connectors) {
-            menuBody.appendChild(ddRow({
+            // A domain with nothing installed behind it is LISTED, dimmed, and
+            // still pickable. Listed, because hiding it answers "where did
+            // Stocks go" with silence — and the deployment that has no Stocks
+            // provider is exactly the one whose admin needs to learn that
+            // Stocks exists. Pickable, because a template is a mapping shape,
+            // not a live connection: setting the board up now and adding the
+            // provider after is a real order to do this in, and the board
+            // stays empty either way until one lands. What isn't optional is
+            // saying so — here at the point of choosing, and again in the pane
+            // for as long as the board is on it.
+            const row = ddRow({
               label: c.label,
-              sublabel: `Live data from ${c.label}`,
+              sublabel: c.available === false ? sentence(c.reason) || "No provider installed" : `Live data from ${c.label}`,
               active: inputConnector === c.name,
               onClick: () => { applyTemplate(c); close(); },
-            }));
+            });
+            if (c.available === false) row.classList.add("dd-row--unavailable");
+            menuBody.appendChild(row);
           }
         },
       });
     });
     templateRow.append(templateLabel, templateBtn);
     body.appendChild(templateRow);
+  }
+
+  // The bound domain's outage, stated for as long as the board is on it.
+  //
+  // The menu row's dim sublabel is only seen by whoever opens the menu, and the
+  // board that most needs this explanation is the one nobody is switching: an
+  // existing board whose provider went away. Its picker is LOCKED by hasItems,
+  // its connector fields render exactly as they always did, and the face row
+  // deliberately makes no availability claim (the server ships faces
+  // unannotated when nothing is resolving, rather than assert a gap it can't
+  // attribute) — so without this line the pane's whole answer to "why has
+  // nothing updated in a week" is a confident silence.
+  //
+  // Not admin-gated: a board-admin reading the pane read-only is owed an answer
+  // too. Amber, borrowing the face row's hint box — the same class of statement
+  // (a thing you configured cannot currently render), one step up in scope.
+  const unavailBanner = document.createElement("div");
+  unavailBanner.className = "mm-face-hint mm-unavail";
+  unavailBanner.hidden = true;
+  body.appendChild(unavailBanner);
+  function syncUnavailable() {
+    const show = !!inputConnector && !connectorAvailable;
+    unavailBanner.hidden = !show;
+    if (!show) return;
+    // The diagnosis names a provider and its key state, so the server ships it
+    // to admins only — and this reads the ABSENCE rather than a role flag, so
+    // there is no second copy of that rule here to fall out of step with it.
+    // Without the reason the banner still has to answer the question that
+    // brought the reader here, so the cause degrades from the diagnosis to the
+    // plain fact, and the remedy from an instruction to who owns it.
+    const cause = sentence(connectorReason) || `${connectorLabel || "This board's data source"} isn't available`;
+    const remedy = connectorReason ? "Fix this in Admin → Plugins." : "Ask an admin to check the Plugins page.";
+    unavailBanner.textContent = `${cause}, so this board can't fetch or refresh its data. ${remedy}`;
   }
 
   // Explanation + identity anchor
@@ -849,7 +908,10 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         connectorLabel = c.label;
         connectorProviders = c.providers || [];
         connectorActiveProvider = c.activeProvider || null;
+        connectorAvailable = c.available !== false;
+        connectorReason = c.reason || null;
         syncTemplateBtn(); // the trigger was showing the bare connector name
+        syncUnavailable();
         renderFields();
         renderFaceRow();
       }
@@ -877,9 +939,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     connectorLabel = connector.label;
     connectorProviders = connector.providers || [];
     connectorActiveProvider = connector.activeProvider || null;
+    connectorAvailable = connector.available !== false;
+    connectorReason = connector.reason || null;
     faceCfg = t.face ? { ...t.face } : { from: "raw" };
     markDirty();
     syncTemplateBtn();
+    syncUnavailable();
     renderIdentityRow();
     renderFaceRow();
     renderFields();
@@ -904,9 +969,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     connectorLabel = null;
     connectorProviders = [];
     connectorActiveProvider = null;
+    connectorAvailable = true;
+    connectorReason = null;
     faceCfg = { from: "raw" };
     markDirty();
     syncTemplateBtn();
+    syncUnavailable();
     loadFileFields(); // the File fields section needs a catalog it never fetched
     renderIdentityRow();
     renderFaceRow();

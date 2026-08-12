@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { toItem } from './utils.js';
+import { toItem, sentence } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
@@ -298,7 +298,23 @@ export function openConnectorBrowse(connectorName) {
       footer.style.display = "none";
       return;
     }
+    // Before the availability gate, not after: the modal opened on the bare
+    // connector NAME (the caller has nothing else), and the refusal below is
+    // still this connector's modal — "Add stocks / No Stocks provider is
+    // installed" spells the same domain two ways in two lines.
     titleEl.textContent = `Add ${descriptor.label}`;
+    // The domain has no provider that can serve. Say it here rather than let
+    // the first page load say it: every control below would work, the request
+    // would go out, and the answer would come back as "Failed: …" under an
+    // otherwise-normal browser — the shape of a transient error, for a state
+    // that is not going to change while this modal is open. Same reason the
+    // mapping pane states it, at the other end of the same board's life.
+    if (descriptor.available === false) {
+      note.textContent = `${sentence(descriptor.reason) || `${descriptor.label} isn't available`} — nothing can be added until that's fixed.`;
+      controls.style.display = "none";
+      footer.style.display = "none";
+      return;
+    }
     opts.sort = descriptor.browse.defaultSort || descriptor.browse.sorts?.[0]?.key || null;
     for (const s of descriptor.browse.sorts || []) {
       const o = document.createElement("option");

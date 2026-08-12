@@ -272,6 +272,24 @@
   color: #6a7080;
 }
 
+/* A choice that is still a choice, but can't do its job yet (a connector
+   template whose domain has no provider installed). Only the main line dims —
+   the sub is the REASON, and a reason dimmed to match its label is a reason
+   nobody reads. Hover and focus are untouched: the row is pickable, and a row
+   that goes dead under the pointer says the opposite. */
+.dd-row--unavailable .dd-label-text {
+  color: #7d8496;
+}
+.dd-row--unavailable .dd-sub {
+  color: #9a7b3e;
+}
+.dropdown--light .dd-row--unavailable .dd-label-text {
+  color: #8a8a92;
+}
+.dropdown--light .dd-row--unavailable .dd-sub {
+  color: #92650a;
+}
+
 /* visibility toggle inside a crate row */
 .dd-vis {
   flex-shrink: 0;

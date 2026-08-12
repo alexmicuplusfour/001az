@@ -517,6 +517,13 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 /* The picker itself is .dd-trigger + .dd-caret (dropdown.css) — it shows the
    template the board is on rather than an action, so it reads as a select. */
+/* The bound domain's outage banner: the face row's hint box, hoisted out of a
+   row and up to the top of the pane. The pane is a gap:12px flex column, so it
+   is already spaced from the template row above it — the hint's own margin-top
+   (which exists to lift it off the row it sits INSIDE) would only double it. */
+.mm-unavail {
+  margin: 0;
+}
 
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
 #connector-browse .modal-dialog { width: min(900px, 94vw); }
