@@ -268,15 +268,28 @@ header.header-collapsed #toolbar-fold {
   text-decoration: none; /* it's an <a> to the boards page in the gallery */
 }
 
+/* The one-board rendering: the same glyph and label as .board-btn, minus the
+   pill and the caret. It's outside .tool-btn, so the icon's box and the gap
+   that holds it off the name are restated here at the values that rule sets. */
 .board-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
   margin-right: 2px;
 }
+.board-name svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
 
+/* Carries the board name, so it steps up from the 12px shared by the rest of
+   the row. The spacing is the shared icon-label-caret gap — this button is that
+   shape now, same as .crates-btn. */
 .tool-btn.board-btn {
-  gap: 4px; /* name + chevron sit tighter than an icon + label */
   font-weight: 600;
   font-size: 13px;
 }

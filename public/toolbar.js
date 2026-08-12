@@ -254,9 +254,16 @@ export function renderToolbar(resultCount) {
       templateChip.title = `Entity mapping template: ${connectorName}`;
     }
 
+    // Both renderings lead with `grid`, this app's word for the boards domain
+    // (the logo's destination, the All-boards row in the dropdown) — the name
+    // of the place you are reads the same whether or not you can leave it.
+    // What the pill adds is the caret, and a member with one board has nothing
+    // to open: same mark, no affordance it can't honour.
     if (state.me && state.boards.length > 1) {
       const boardBtn = document.createElement("button");
       boardBtn.className = "tool-btn board-btn";
+      // Glyph, label, caret — the crates selector's shape.
+      boardBtn.innerHTML = ICONS.grid;
       const nameEl = document.createElement("span");
       nameEl.textContent = state.boardName;
       const chev = document.createElement("span");
@@ -268,7 +275,10 @@ export function renderToolbar(resultCount) {
     } else {
       const name = document.createElement("span");
       name.className = "board-name";
-      name.textContent = state.boardName;
+      name.innerHTML = ICONS.grid;
+      const nameText = document.createElement("span");
+      nameText.textContent = state.boardName;
+      name.appendChild(nameText);
       boardGroup.appendChild(name);
     }
 
