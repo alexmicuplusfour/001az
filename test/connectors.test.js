@@ -553,6 +553,51 @@ test("coingecko.list: a text query bridges /search → /coins/markets?ids", asyn
     assert.ok(seen.some((u) => u.includes("/search?query=")));
     assert.ok(seen.some((u) => u.includes("ids=bitcoin")));
     assert.equal(rows[0].symbol, "BTC");
+
+    // Query results page like the plain browse: page 2 is the NEXT slice of
+    // hits (the modal appends pages — a repeated first slice rendered
+    // duplicate rows), and past the hits it's empty, which ends "Load more".
+    seen.length = 0;
+    await coingecko.list({ query: "bit", page: 2, pageSize: 1 });
+    assert.ok(seen.some((u) => u.includes("ids=bitcoin-cash")), "page 2 fetches the second hit");
+    seen.length = 0;
+    assert.deepEqual(await coingecko.list({ query: "bit", page: 3, pageSize: 1 }), []);
+    assert.ok(!seen.some((u) => u.includes("/coins/markets")), "an empty slice never hits the markets endpoint");
+  } finally { globalThis.fetch = original; }
+});
+
+test("coinmarketcap.list: a text query pages the full map, not a fixed first slice", async () => {
+  const seen = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    seen.push(String(url));
+    if (String(url).includes("/cryptocurrency/map")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ status: { error_code: 0 }, data: [
+        { id: 1, name: "Bitcoin", symbol: "BTC", rank: 1 },
+        { id: 1831, name: "Bitcoin Cash", symbol: "BCH", rank: 20 },
+        { id: 5994, name: "Bitbook", symbol: "BBT", rank: 900 },
+      ] }) };
+    }
+    if (String(url).includes("/quotes/latest")) {
+      const wanted = new URL(String(url)).searchParams.get("id").split(",");
+      const all = {
+        1: { id: 1, name: "Bitcoin", symbol: "BTC", cmc_rank: 1, quote: { USD: { price: 65000 } } },
+        1831: { id: 1831, name: "Bitcoin Cash", symbol: "BCH", cmc_rank: 20, quote: { USD: { price: 400 } } },
+        5994: { id: 5994, name: "Bitbook", symbol: "BBT", cmc_rank: 900, quote: { USD: { price: 0.1 } } },
+      };
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ status: { error_code: 0 }, data: Object.fromEntries(wanted.map((id) => [id, all[id]])) }) };
+    }
+    return original(url, opts);
+  };
+  try {
+    // The map request carries no top-N limit — the whole active listing is
+    // the searchable catalog.
+    const page1 = await coinmarketcap.list({ query: "bit", page: 1, pageSize: 2 }, { apiKey: "k" });
+    assert.ok(seen.some((u) => u.includes("/cryptocurrency/map") && !u.includes("limit=")));
+    assert.deepEqual(page1.map((r) => r.symbol), ["BTC", "BCH"]);
+    const page2 = await coinmarketcap.list({ query: "bit", page: 2, pageSize: 2 }, { apiKey: "k" });
+    assert.deepEqual(page2.map((r) => r.symbol), ["BBT"], "page 2 is the next rank slice");
+    assert.deepEqual(await coinmarketcap.list({ query: "bit", page: 3, pageSize: 2 }, { apiKey: "k" }), []);
   } finally { globalThis.fetch = original; }
 });
 

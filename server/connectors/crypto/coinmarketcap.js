@@ -9,7 +9,6 @@
 import { providerSignal } from "../runtime.js";
 
 const BASE = "https://pro-api.coinmarketcap.com";
-const MAP_LIMIT = 5000;            // top-N by rank; covers anything searchable
 const MAP_TTL = 6 * 60 * 60 * 1000; // the id/symbol map barely changes
 
 export const label = "CoinMarketCap";
@@ -45,8 +44,11 @@ let mapCache = { at: 0, list: null };
 
 async function coinMap(apiKey, pace) {
   if (mapCache.list && Date.now() - mapCache.at < MAP_TTL) return mapCache.list;
+  // No limit param: the map is the whole active listing (~10k rows, one
+  // request, cached 6 h). A top-N cap here silently made every coin past N
+  // unsearchable and unaddable — the catalog's edge belongs to CMC, not us.
   const body = await cmc(
-    `/v1/cryptocurrency/map?listing_status=active&sort=cmc_rank&limit=${MAP_LIMIT}`,
+    `/v1/cryptocurrency/map?listing_status=active&sort=cmc_rank`,
     apiKey, pace
   );
   mapCache = { at: Date.now(), list: body.data || [] };
@@ -128,10 +130,13 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
 
   if (query && query.trim()) {
     const q = query.trim().toLowerCase();
+    // Page the hit list — the modal appends pages, so a fixed first-slice
+    // here would render the same rows again on every "Load more".
+    const pageNo = Math.max(1, Number(page) || 1);
     const ids = (await coinMap(apiKey, pace))
       .filter((c) => (c.symbol || "").toLowerCase().includes(q) || (c.name || "").toLowerCase().includes(q))
       .sort((a, b) => (a.rank || 1e9) - (b.rank || 1e9))
-      .slice(0, pageSize)
+      .slice((pageNo - 1) * pageSize, pageNo * pageSize)
       .map((c) => c.id);
     if (!ids.length) return [];
     const body = await cmc(`/v2/cryptocurrency/quotes/latest?id=${ids.join(",")}&convert=USD`, apiKey, pace);

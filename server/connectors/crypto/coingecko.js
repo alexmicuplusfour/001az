@@ -139,7 +139,14 @@ export async function list({ sort, order, page = 1, pageSize = 50, query } = {},
     await pace?.();
     const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
     if (!sr.ok) throw cgFail(sr, "search");
-    const ids = ((await sr.json()).coins || []).slice(0, pageSize).map((c) => c.id);
+    // Page the hit list like the plain browse pages the catalog — page 2 must
+    // be the NEXT slice, not the first one again (the modal appends pages, so
+    // repeating the slice rendered duplicate rows and a "Load more" that
+    // never ran dry).
+    const pageNo = Math.max(1, Number(page) || 1);
+    const ids = ((await sr.json()).coins || [])
+      .slice((pageNo - 1) * pageSize, pageNo * pageSize)
+      .map((c) => c.id);
     if (!ids.length) return [];
     await pace?.();
     const r = await fetch(`${BASE}/coins/markets?${common}&ids=${ids.map(encodeURIComponent).join(",")}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
