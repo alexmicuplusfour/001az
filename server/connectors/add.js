@@ -4,7 +4,7 @@
 // recoverable cases so callers can map them: `.duplicate` for a 23505
 // (identity already on the board), `.provider` for a fetch/provider error.
 import { createEntity, insertItem, setEntityRefreshAt } from "../db.js";
-import { liveFields, nextRefreshAt } from "./runtime.js";
+import { firstRefreshAt } from "./runtime.js";
 
 export async function addConnectorEntity(db, board, connector, connectorName, entityId) {
   let entity;
@@ -41,9 +41,10 @@ export async function addConnectorEntity(db, board, connector, connectorName, en
   };
   const id = await insertItem(db, board.id, payload, status, eid);
 
-  // Schedule the first liveness refresh when the mapping has live fields.
-  const live = liveFields(board.mapping);
-  if (live.length) await setEntityRefreshAt(db, eid, nextRefreshAt(entity.fields, live));
+  // Schedule the first liveness refresh when the mapping has live fields. The
+  // face needs no schedule here — the face leg above renders it on arrival.
+  const first = firstRefreshAt(entity.fields, board.mapping);
+  if (first !== null) await setEntityRefreshAt(db, eid, first);
 
   console.log(`connector entity created: ${connectorName}/${entityId} → #${eid} (${entity.display_name})`);
   return {

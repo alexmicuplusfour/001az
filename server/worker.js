@@ -61,7 +61,7 @@ import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } fro
 import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector } from "./connectors/index.js";
-import { entityRefreshAt, faceCadence } from "./connectors/runtime.js";
+import { entityRefreshAt, faceSchedule } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields } from "./media/index.js";
 import { sharpGate, MAX_DECODE_PIXELS } from "./sharp-gate.js";
@@ -764,13 +764,16 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
   // old). `dirs` absent → skip (fields-only path).
   let faceAt = entity.face_at;
   let faced = false;
-  const cad = faceCadence(mapping);
+  const sched = faceSchedule(mapping);
   // Regenerate when the cadence is due, OR render the first face when the entity
-  // has a live face but none yet (face_at null) — so turning a face on / raising
-  // its cadence backfills every existing coin instead of only the ones that
-  // happened to render already. A face render error is isolated: log and keep
-  // going, so it never blocks the field refresh or halts the sweep.
-  if (dirs && cad && (faceAt == null || now - faceAt >= cad.every * 60000)) {
+  // has a connector face but none yet (face_at null) — so turning a face on /
+  // raising its cadence backfills every existing coin instead of only the ones
+  // that happened to render already. The first render is owed even to a face
+  // with cadence Off: it's the ONLY way an entity older than its board's face
+  // ever gets one (the face leg runs at add time). A face render error is
+  // isolated: log and keep going, so it never blocks the field refresh or halts
+  // the sweep.
+  if (dirs && sched && (faceAt == null || (sched.every && now - faceAt >= sched.every * 60000))) {
     try {
       const face = await generateFace(db, dirs, entity, inst, board, now);
       // Success → face_at advances to now; an unavailable render returns null

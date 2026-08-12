@@ -27,6 +27,9 @@ export const manifest = {
   template: {
     input: { connector: "stocks" },
     identity: { from: "connector" },
+    // The price chart is the face; the symbol tile is only its fallback. See the
+    // crypto template — same rule, same cadence-off default.
+    face: { from: "connector", producer: "chart", period: "1y" },
     fields: [
       { key: "price",      kind: "number", from: "connector", fn: "price" },
       { key: "change_1d",  kind: "number", from: "connector", fn: "change_1d" },

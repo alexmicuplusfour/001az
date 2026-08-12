@@ -2,6 +2,9 @@ import pg from "pg";
 import crypto from "node:crypto";
 import { runMigrations } from "./migrate.js";
 import { selectFace } from "./faces/select.js";
+// Pure scheduling rules — safe to import here (schedule.js imports nothing),
+// unlike connectors/runtime.js, which imports THIS module.
+import { liveFields, nextRefreshAt, faceSchedule } from "./connectors/schedule.js";
 import { projectEntry } from "./media/index.js";
 import { CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
 
@@ -48,10 +51,9 @@ export async function initDb(db) {
 async function reconcileLiveSchedules(db) {
   const { rows } = await db.query("SELECT id, mapping FROM boards WHERE mapping IS NOT NULL");
   for (const b of rows) {
-    const live = (b.mapping?.fields || []).filter((f) => f.from === "connector" && f.live);
-    const fc = b.mapping?.face;
-    const faceCad = fc && fc.from === "connector" && fc.live ? { every: fc.every } : null;
-    if (live.length || faceCad) await rescheduleEntityRefreshes(db, b.id, live, faceCad);
+    const live = liveFields(b.mapping);
+    const faceSched = faceSchedule(b.mapping);
+    if (live.length || faceSched) await rescheduleEntityRefreshes(db, b.id, live, faceSched);
   }
 }
 
@@ -2447,30 +2449,31 @@ export async function requeueItemForTag(db, id) {
 
 // Recompute refresh_at for every entity on a board after its mapping changes
 // (a field or the face turned live/idle, or a cadence moved). `live` = the
-// mapping's live connector fields [{ key, every }]; `faceCad` = { every } when
-// the face is live, else null. Empty/null both clear that term.
-export async function rescheduleEntityRefreshes(db, boardId, live, faceCad = null, now = Date.now()) {
-  // Nothing live and no live face → every entity's next refresh is null. Clear the
-  // whole board in one statement instead of a write per entity. This is the common
+// mapping's live connector fields [{ key, every }]; `faceSched` = the face's
+// schedule from connectors/schedule.js ({ every } live / { first: true }
+// one-shot / null none). Empty/null both clear that term.
+export async function rescheduleEntityRefreshes(db, boardId, live, faceSched = null, now = Date.now()) {
+  // Nothing live and no face to render → every entity's next refresh is null. Clear
+  // the whole board in one statement instead of a write per entity. This is the common
   // case on a file board, where no field can be live — so the mapping save that
   // used to fan out N no-op writes now does a single targeted one.
-  if (!live.length && !faceCad) {
+  if (!live.length && !faceSched) {
     await db.query("UPDATE entities SET refresh_at=NULL WHERE board_id=$1 AND refresh_at IS NOT NULL", [boardId]);
     return;
   }
   const { rows } = await db.query("SELECT id, fields, face_at FROM entities WHERE board_id=$1", [boardId]);
   const sched = [];
   for (const e of rows) {
-    let next = null;
-    for (const f of live) {
-      const due = (e.fields?.[f.key]?.at ?? now) + f.every * 60000;
-      if (next === null || due < next) next = due;
-    }
-    if (faceCad) {
-      // A never-rendered face (face_at null) is due now, so enabling/adjusting a
-      // live face schedules every entity for its first render on the next sweep.
-      const due = e.face_at != null ? e.face_at + faceCad.every * 60000 : now;
-      if (next === null || due < next) next = due;
+    let next = nextRefreshAt(e.fields, live, now);
+    if (faceSched) {
+      // A never-rendered face (face_at null) is due NOW — this is the urgency
+      // path that backfills every existing entity when a board's face turns on,
+      // live or not. An already-rendered face is due one cadence out, or never
+      // when the face is one-shot (nothing left to do for that entity).
+      const due = e.face_at == null ? now
+        : faceSched.every ? e.face_at + faceSched.every * 60000
+        : null;
+      if (due !== null && (next === null || due < next)) next = due;
     }
     sched.push({ id: e.id, nx: next });
   }

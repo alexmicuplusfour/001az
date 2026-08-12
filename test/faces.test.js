@@ -14,6 +14,7 @@ import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from ".
 import * as runtime from "../server/connectors/runtime.js";
 import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
+import { up as migrate0035 } from "../server/migrations/0035_connector_chart_face.js";
 
 let srv, db, base, admin, galleryDir, thumbsDir;
 before(async () => {
@@ -86,6 +87,39 @@ test("entityRefreshAt: a live face schedules at cadence even before/without a re
   assert.equal(runtime.entityRefreshAt({}, 2000, mapping, 9000), 2000 + 5 * 60000);
   // No live face and no live fields → genuinely nothing to schedule.
   assert.equal(runtime.entityRefreshAt({}, null, { fields: [] }, 1000), null);
+});
+
+test("entityRefreshAt: a cadence-Off face is still owed its FIRST render", () => {
+  // The default finance face: a chart, no liveness. It renders once — but that
+  // once has to happen even for an entity that predates the face (the face leg
+  // only runs at add time), so the schedule can't just drop the term.
+  const mapping = { fields: [], face: { from: "connector", producer: "chart", period: "1y" } };
+  assert.equal(runtime.entityRefreshAt({}, null, mapping, 1000), 1000 + 60 * 60000); // unrendered → retry floor
+  assert.equal(runtime.entityRefreshAt({}, 2000, mapping, 9000), null);              // rendered → off the sweep
+
+  // faceSchedule tells the two apart (and ignores faces that aren't rendered).
+  assert.deepEqual(runtime.faceSchedule(mapping), { first: true });
+  assert.deepEqual(runtime.faceSchedule({ face: { from: "connector", live: true, every: 5 } }), { every: 5 });
+  assert.equal(runtime.faceSchedule({ face: { from: "file", prefer: "image" } }), null);
+  assert.equal(runtime.faceSchedule({ face: { from: "raw" } }), null);
+  assert.equal(runtime.faceSchedule({}), null);
+});
+
+// ── the finance default: chart face, tile only as a fallback ─────────────────
+
+test("the crypto/stocks templates ship the chart face, and the server accepts them verbatim", async () => {
+  const { json: connectors } = await req(base, "GET", "/api/connectors", { sid: admin.sid });
+  for (const name of ["crypto", "stocks"]) {
+    const c = connectors.find((x) => x.name === name);
+    assert.deepEqual(c.template.face, { from: "connector", producer: "chart", period: "1y" },
+      `the ${name} template faces the chart — the symbol tile is a fallback, never a default`);
+    const chart = c.faces.find((f) => f.name === "chart");
+    assert.ok(chart?.periods.includes("1y"), `${name} declares the period its template pins`);
+    // The template is what the modal saves on a fresh board — it must validate.
+    const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: `tmpl-face-${name}` } });
+    const r = await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping: c.template } });
+    assert.equal(r.status, 200, `the ${name} template validates as a mapping`);
+  }
 });
 
 // ── integration: the crypto chart via generateFace (stubbed CoinGecko) ───────
@@ -404,6 +438,41 @@ test("refreshDueEntity renders the first face when a live face has none yet (fac
   } finally { restore(); }
 });
 
+test("turning the face on backfills existing entities with cadence Off — without re-tagging them", async () => {
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-backfill" } });
+  const path_ = `/api/admin/boards/${board.id}`;
+  const tile = { input: { connector: "crypto" }, identity: { from: "connector" }, face: { from: "raw" }, fields: [] };
+  assert.equal((await req(base, "PATCH", path_, { sid: admin.sid, body: { mapping: tile } })).status, 200);
+
+  // A coin added while the board was tile-faced: never entered the face leg.
+  const eid = await createEntity(db, board.id, { identity: "btc", symbol: "BTC", displayName: "Bitcoin" });
+  const instId = await insertItem(db, board.id, { identity: "btc", files: [], fields: {}, mapping: tile, source: { provider: "coingecko", id: "bitcoin" } }, "tagged", eid);
+  assert.equal((await getEntity(db, eid)).refresh_at, null);
+
+  // The face turns on with NO cadence — the case that used to leave this card a
+  // tile forever (the sweep's face term was gated on liveness).
+  const t0 = Date.now();
+  const chart = { ...tile, face: { from: "connector", producer: "chart", period: "24h" } };
+  assert.equal((await req(base, "PATCH", path_, { sid: admin.sid, body: { mapping: chart } })).status, 200);
+  const due = Number((await getEntity(db, eid)).refresh_at);
+  assert.ok(due >= t0 - 1000 && due <= Date.now(), "an unrendered face is due NOW, live or not");
+
+  const restore = stubHistory([[0, 100], [1, 120]]);
+  try {
+    const entity = await getEntity(db, eid);
+    const { rows: [inst] } = await db.query("SELECT id, payload FROM items WHERE id=$1", [instId]);
+    const r = await refreshDueEntity(db, { entity, inst, board: await getBoard(db, board.id) }, Date.now(), { galleryDir, thumbsDir });
+    assert.equal(r.faced, true);
+  } finally { restore(); }
+
+  const e2 = await getEntity(db, eid);
+  assert.ok(e2.face_at != null);
+  assert.equal(e2.refresh_at, null, "one-shot face rendered → the entity leaves the sweep");
+  const { rows: [i2] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [instId]);
+  assert.equal(i2.payload.files[0].generated, true, "the card now shows the chart");
+  assert.equal(i2.status, "tagged", "a visual backfill never re-runs (re-bills) tagging");
+});
+
 test("validateMapping: face slot rules", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
@@ -517,4 +586,48 @@ test("listing: the item face follows mapping.face over a multi-instance entity",
   assert.equal((await list({ identity: { from: "ai", hint: "t" }, face: { from: "file", prefer: "document", pick: "latest" }, fields: [] })).name, "doc.webp");
   // No face config → first (oldest) instance, the legacy default.
   assert.equal((await list({ identity: { from: "ai", hint: "t" }, fields: [] })).name, "scan.webp");
+});
+
+// ── migration 0035: legacy tile-faced finance boards ─────────────────────────
+// Kept last in the file: `up` sweeps every board in this database, so it must
+// run after the tests that assert on their own boards' mappings.
+
+test("0035: tile-faced finance boards get the chart face + a queued first render", async () => {
+  const mk = async (name, mapping) => {
+    const { json: b } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name } });
+    // Written raw: this is historical data, not a shape the API must still take.
+    await db.query("UPDATE boards SET mapping=$1 WHERE id=$2", [JSON.stringify(mapping), b.id]);
+    return b.id;
+  };
+  const conn = (c, face) => ({ input: { connector: c }, identity: { from: "connector" }, ...(face ? { face } : {}), fields: [] });
+
+  const absent = await mk("mig-absent", conn("crypto"));                      // no face key at all
+  const raw = await mk("mig-raw", conn("stocks", { from: "raw" }));           // the explicit tile
+  const already = await mk("mig-set", conn("crypto", { from: "connector", producer: "chart", period: "7d", live: true, every: 30 }));
+  const filesBoard = await mk("mig-files", { identity: { from: "raw" }, face: { from: "file", prefer: "image" }, fields: [] });
+
+  const eAbsent = await createEntity(db, absent, { identity: "btc", symbol: "BTC" });
+  const eRaw = await createEntity(db, raw, { identity: "aapl", symbol: "AAPL" });
+  const eDone = await createEntity(db, already, { identity: "eth", symbol: "ETH" });
+  await db.query("UPDATE entities SET face_at=12345 WHERE id=$1", [eDone]);   // already rendered
+  const itemId = await insertItem(db, absent, { identity: "btc", files: [], fields: {} }, "tagged", eAbsent);
+
+  await migrate0035(db);
+
+  const faceOf = async (id) => (await getBoard(db, id)).mapping.face;
+  const CHART = { from: "connector", producer: "chart", period: "1y" };
+  assert.deepEqual(await faceOf(absent), CHART, "an absent face is the tile by omission → chart");
+  assert.deepEqual(await faceOf(raw), CHART, "an explicit tile → chart");
+  assert.deepEqual(await faceOf(already), { from: "connector", producer: "chart", period: "7d", live: true, every: 30 },
+    "a board that already chose its face keeps every part of it");
+  assert.deepEqual(await faceOf(filesBoard), { from: "file", prefer: "image" }, "file boards never match");
+
+  assert.ok(Number((await getEntity(db, eAbsent)).refresh_at) > 0, "unrendered → queued for its first chart");
+  assert.ok(Number((await getEntity(db, eRaw)).refresh_at) > 0);
+  assert.equal((await getEntity(db, eDone)).refresh_at, null, "already rendered → not re-queued");
+  const { rows: [i] } = await db.query("SELECT status FROM items WHERE id=$1", [itemId]);
+  assert.equal(i.status, "tagged", "items are never re-routed — a visual backfill is not a re-tag");
+
+  await migrate0035(db); // idempotent
+  assert.deepEqual(await faceOf(absent), CHART);
 });

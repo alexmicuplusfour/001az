@@ -142,7 +142,7 @@ import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./p
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
-import { liveFields, faceCadence } from "./connectors/runtime.js";
+import { liveFields, faceSchedule } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
@@ -1048,14 +1048,16 @@ const saveBoardPatch = wrap(async (req, res) => {
   // adapter means nothing to the new one.
   if (inputSwitched) await setIngestState(db, prev.id, null);
   else if (update.ingest !== undefined) await clearIngestDrain(db, prev.id);
-  // A mapping change can turn fields live/idle or move their cadence — recompute
-  // every entity's next refresh (an empty live set clears their schedules), and
+  // A mapping change can turn fields live/idle, move their cadence, or turn the
+  // face on — recompute every entity's next refresh (an empty live set clears
+  // their schedules; a newly-configured face marks unrendered entities due now,
+  // which is what backfills charts onto cards that predate the face), and
   // re-project deterministic file metadata for existing instances (file boards
   // only; connector items have no file entry so they'd no-op anyway). Only
   // reachable when the admin leg accepted a mapping — update.mapping stays
   // undefined for managers.
   if (update.mapping !== undefined) {
-    await rescheduleEntityRefreshes(db, prev.id, liveFields(update.mapping), faceCadence(update.mapping));
+    await rescheduleEntityRefreshes(db, prev.id, liveFields(update.mapping), faceSchedule(update.mapping));
     const m = update.mapping;
     if (m === null || !m.input || m.input === "files") await backfillFileFields(prev.id, m);
   }
@@ -2398,8 +2400,20 @@ app.get("/api/connectors", requireAuth, wrap(async (_req, res) => {
   const out = [];
   for (const c of listConnectors()) {
     const conn = getConnector(c.name);
-    const activeProvider = conn.activeProvider ? (await conn.activeProvider(db)).name : null;
-    out.push({ ...c, activeProvider, faces: conn.renderableFaces ? conn.renderableFaces(activeProvider) : c.faces });
+    // activeProvider THROWS when no provider of that domain is installed — a
+    // normal state (a domain nobody added yet), and one that must not take the
+    // whole catalog down with it: this is the fetch behind the template picker,
+    // the field catalog AND the face row, for every connector. Unresolved →
+    // activeProvider null and the manifest's faces UNannotated, so the modal
+    // shows no per-provider availability claim it can't stand behind.
+    let activeProvider = null;
+    try { if (conn.activeProvider) activeProvider = (await conn.activeProvider(db)).name; }
+    catch { /* no provider installed for this domain */ }
+    out.push({
+      ...c,
+      activeProvider,
+      faces: activeProvider && conn.renderableFaces ? conn.renderableFaces(activeProvider) : c.faces,
+    });
   }
   res.json(out);
 }));

@@ -11,6 +11,7 @@
 import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 import { getFaceProducer } from "../faces/index.js";
 import { acquire } from "../provider-pacing.js";
+import { liveFields, nextRefreshAt } from "./schedule.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
@@ -203,22 +204,11 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
 }
 
 // --- liveness (slice 5c) ---
-
-// A mapping's live connector fields: [{ key, kind, from, fn, live, every }].
-export const liveFields = (mapping) =>
-  (mapping?.fields || []).filter((f) => f.from === "connector" && f.live);
-
-// Soonest time any live field comes due: min(field.at + every*60000), or null
-// when nothing is live. `fields` is the entity's stored field map; a field with
-// no `at` yet is treated as due now.
-export function nextRefreshAt(fields, live, now = Date.now()) {
-  let next = null;
-  for (const f of live) {
-    const due = (fields?.[f.key]?.at ?? now) + f.every * 60000;
-    if (next === null || due < next) next = due;
-  }
-  return next;
-}
+// The scheduling rules themselves are pure and live in ./schedule.js (db.js
+// needs them and can't import this module — it's the other way round). Re-
+// exported here so every caller keeps one connector-runtime import; `refresh`
+// below uses two of them directly, hence the import alongside.
+export { liveFields, nextRefreshAt, faceSchedule, entityRefreshAt, firstRefreshAt } from "./schedule.js";
 
 // Map a symbol back to a provider id under the active provider — provider ids
 // aren't portable (CoinGecko's "bitcoin" ≠ CoinMarketCap's "1"), so a refresh
@@ -299,28 +289,5 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
   return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
 }
 
-// The live face cadence, mirroring liveFields — { every } when the mapping's
-// face is a connector face marked live, else null.
-export const faceCadence = (mapping) => {
-  const f = mapping?.face;
-  return f && f.from === "connector" && f.live ? { every: f.every } : null;
-};
-
-// An entity's next refresh time across BOTH its live fields and its face.
-// `faceAt` is entities.face_at (null until the face is first rendered). This
-// runs right after a render attempt, so a still-null faceAt here means the
-// render was unavailable (e.g. the active provider has no history) — retry one
-// cadence out rather than dropping the term, else a face-only board with no
-// live fields would get refresh_at null and fall off the sweep until the next
-// boot/mapping-save. The retry is a cheap no-op while the provider can't render.
-// (First-render urgency is separate: rescheduleEntityRefreshes/boot reconcile
-// treat a null faceAt as due-now, so enabling a face still backfills at once.)
-export function entityRefreshAt(fields, faceAt, mapping, now = Date.now()) {
-  let next = nextRefreshAt(fields, liveFields(mapping), now);
-  const cad = faceCadence(mapping);
-  if (cad) {
-    const due = (faceAt ?? now) + cad.every * 60000;
-    if (next === null || due < next) next = due;
-  }
-  return next;
-}
+// faceSchedule / entityRefreshAt — the face's half of the scheduling rules —
+// are in ./schedule.js with their field-side siblings, re-exported above.

@@ -34,6 +34,12 @@ export const manifest = {
   template: {
     input: { connector: "crypto" },
     identity: { from: "connector" },
+    // The card face is the chart, always. The symbol tile is what a card falls
+    // back to when the chart can't be rendered (a provider without history(), an
+    // empty series) — a fallback, not a board's choice, so it isn't offered as
+    // one. Cadence off by default: the chart renders once, on the face leg, when
+    // the coin is added; a board that wants a moving chart turns liveness on.
+    face: { from: "connector", producer: "chart", period: "1y" },
     fields: [
       { key: "price",      kind: "number", from: "connector", fn: "price" },
       { key: "market_cap", kind: "number", from: "connector", fn: "market_cap" },

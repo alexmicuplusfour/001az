@@ -314,10 +314,12 @@ test("POST /api/boards/:id/entities: creates connector entity with bound fields"
     assert.equal(ent.fields.price.kind, "number");
     assert.equal(ent.fields.price.v, 50000);
 
-    // One file-less instance is the tag vehicle, queued straight to the tag leg;
-    // it carries the provider handle for a future liveness re-fetch.
+    // One file-less instance is the tag vehicle; it carries the provider handle
+    // for a future liveness re-fetch. It starts at the FACE leg because the
+    // template faces the price chart (the symbol tile is only its fallback), so
+    // the chart is rendered before the tagger ever sees the card.
     const { rows } = await db.query("SELECT payload, status FROM items WHERE id=$1", [r.json.instances[0].id]);
-    assert.equal(rows[0].status, "pending");
+    assert.equal(rows[0].status, "pending_face");
     assert.deepEqual(rows[0].payload.files, []);
     assert.deepEqual(rows[0].payload.fields, {});
     assert.deepEqual(rows[0].payload.source, { provider: "coingecko", id: "bitcoin" });

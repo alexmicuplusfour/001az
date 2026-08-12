@@ -1,5 +1,14 @@
 # Slice 5d — Connector faces (generated charts + sourced images)
 
+**Superseded in part (2026-08-12) by
+[`connector-face-default-plan.md`](connector-face-default-plan.md):** the chart is now the
+finance templates' default face and the modal's face row is a locked chip, not a
+`Symbol tile / Price chart` source select. The tile was never a producer — it's what a card
+draws with no rendered face — so it's the fallback only, and offering it as a peer made it
+most boards' default. The producer/period/cadence machinery below is unchanged; only the
+default and the control are. Read the two sections that describe the source select
+(`mapping-modal.js`, verify step 6) as history.
+
 Self-contained implementation plan. Parent design: `pipeline-boards-plan.md`; continues the connector track from `slice-5c-connector-runtime-plan.md`. Finishes the entity mapping's third slot — **face** — for connector boards.
 
 ## What this ships

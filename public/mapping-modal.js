@@ -316,85 +316,133 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   renderIdentityRow();
   body.appendChild(identityRow);
 
-  // Face row — connector boards only, below identity (the face is ~mandatory).
-  // Source = symbol tile (raw) or a connector face producer (e.g. price chart);
-  // a chart adds a period select and the same cadence widget as fields.
+  // Face row — below identity on every board (the face is ~mandatory). File
+  // boards show "File preview"; connector boards show the connector's own
+  // producer (a price chart) with its range + re-render cadence under it.
   const faceRow = document.createElement("div");
   body.appendChild(faceRow);
+
+  // The face row's three shared pieces, so a file face and a connector face are
+  // built from the same parts (they're deliberately the same shape: a locked
+  // statement of WHAT the face is, then a line that refines it).
+  const faceHead = () => {
+    const head = document.createElement("div");
+    head.className = "fe-head";
+    const key = document.createElement("span");
+    key.className = "mm-key-locked";
+    key.textContent = "face";
+    head.appendChild(key);
+    return head;
+  };
+  const lockedBadge = (text) => {
+    const badge = document.createElement("span");
+    badge.className = "mm-locked-badge";
+    badge.textContent = text;
+    return badge;
+  };
+  // The refinement line under the face: a muted label + its controls.
+  const faceSubRow = (label, ...controls) => {
+    const sub = document.createElement("div");
+    sub.className = "mm-face-prefer";
+    const lbl = document.createElement("span");
+    lbl.className = "mm-face-prefer-label";
+    lbl.textContent = label;
+    sub.append(lbl, ...controls);
+    return sub;
+  };
+  // A select over [value, label] pairs, disabled on the read-only pane.
+  const mkSel = (opts, val, title) => {
+    const sel = document.createElement("select");
+    sel.disabled = !isAdmin;
+    sel.title = title;
+    for (const [v, l] of opts) {
+      const o = document.createElement("option");
+      o.value = v; o.textContent = l;
+      if (v === val) o.selected = true;
+      sel.appendChild(o);
+    }
+    return sel;
+  };
 
   function renderFaceRow() {
     faceRow.replaceChildren();
     // File boards get a face row too (normalized): a read-only "File preview"
     // label that expands to instance-pick controls under derived identity.
     if (!inputConnector) { faceRow.style.display = ""; renderFileFaceRow(); return; }
-    if (!connectorFaces.length) { faceRow.style.display = "none"; return; }
+    renderConnectorFaceRow();
+  }
+
+  // A connector board's face row. The face is the connector's face producer —
+  // the SYMBOL TILE IS NOT A CHOICE HERE. It isn't a producer at all (there's no
+  // tile in server/faces); it's what a card draws when it has no rendered face,
+  // which is exactly what happens when a producer is unavailable or its series
+  // comes back empty. Offering it as a peer of "Price chart" dressed a fallback
+  // up as a decision — and, being the default, made it the one most boards got.
+  // So: one producer (every built-in) renders as a locked chip, mirroring the
+  // file board's "File preview"; a domain declaring several gets a select over
+  // THOSE, with no tile entry. A second line refines the render — chart range +
+  // the same cadence widget the fields use.
+  function renderConnectorFaceRow() {
+    // The producer list arrives with the connector catalog (fetched for an
+    // already-bound board); until then there's nothing truthful to show.
+    if (!connectorCatalog && !connectorFaces.length) { faceRow.style.display = "none"; return; }
     faceRow.style.display = "";
-    const isProducer = faceCfg.from === "connector";
-    faceRow.className = "mm-row" + (isProducer ? " mm-row-connector" : "");
+    faceRow.className = "mm-row" + (connectorFaces.length ? " mm-row-connector" : "");
+    const controls = faceHead();
 
-    const controls = document.createElement("div");
-    controls.className = "fe-head";
-    const key = document.createElement("span");
-    key.className = "mm-key-locked";
-    key.textContent = "face";
-    controls.appendChild(key);
-
-    const srcSel = document.createElement("select");
-    srcSel.disabled = !isAdmin;
-    const tile = document.createElement("option");
-    tile.value = "raw"; tile.textContent = "Symbol tile";
-    srcSel.appendChild(tile);
-    for (const p of connectorFaces) {
-      const opt = document.createElement("option");
-      opt.value = p.name; opt.textContent = p.label;
-      srcSel.appendChild(opt);
+    // A domain with no face producer at all (possible for a connector plugin):
+    // the tile IS the face. Name it, in the one place where it's the whole
+    // answer rather than a fallback, and serialize nothing (collect() writes a
+    // face only for `from: "connector"`).
+    if (!connectorFaces.length) {
+      controls.appendChild(lockedBadge("Symbol tile"));
+      faceRow.appendChild(controls);
+      return;
     }
-    srcSel.value = isProducer ? faceCfg.producer : "raw";
-    srcSel.addEventListener("change", () => {
-      if (srcSel.value === "raw") faceCfg = { from: "raw" };
-      else {
-        const p = connectorFaces.find((x) => x.name === srcSel.value);
-        const period = faceCfg.period && p.periods.includes(faceCfg.period) ? faceCfg.period
-          : p.periods.includes("1y") ? "1y" : p.periods[0];
-        faceCfg = { from: "connector", producer: p.name, period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
-      }
-      renderFaceRow();
-    });
-    controls.appendChild(srcSel);
 
-    if (isProducer) {
-      const producer = connectorFaces.find((x) => x.name === faceCfg.producer);
-      const periodSel = document.createElement("select");
-      periodSel.disabled = !isAdmin;
-      periodSel.title = "Chart range";
-      for (const per of producer?.periods || []) {
-        const opt = document.createElement("option");
-        opt.value = per; opt.textContent = per;
-        periodSel.appendChild(opt);
-      }
-      periodSel.value = faceCfg.period;
-      periodSel.addEventListener("change", () => { faceCfg.period = periodSel.value; });
-      controls.append(periodSel, livenessSelect(faceCfg, true));
+    // Normalize onto a real producer + a period it actually offers. This also
+    // COERCES a legacy `{ from: "raw" }` mapping (a board saved back when the
+    // tile was selectable) onto the chart, so the row never shows a chart the
+    // save wouldn't write. Idempotent — it re-runs on every render.
+    const producer = connectorFaces.find((p) => p.name === faceCfg.producer) || connectorFaces[0];
+    const period = faceCfg.period && producer.periods.includes(faceCfg.period) ? faceCfg.period
+      : producer.periods.includes("1y") ? "1y" : producer.periods[0];
+    faceCfg = { from: "connector", producer: producer.name, period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
+
+    if (connectorFaces.length === 1) {
+      controls.appendChild(lockedBadge(producer.label));
+    } else {
+      const srcSel = mkSel(connectorFaces.map((p) => [p.name, p.label]), producer.name,
+        "How this connector renders the card");
+      srcSel.addEventListener("change", () => {
+        // Drop the period — the normalizer above picks one the new producer offers.
+        faceCfg = { from: "connector", producer: srcSel.value, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
+        renderFaceRow();
+      });
+      controls.appendChild(srcSel);
     }
     faceRow.appendChild(controls);
 
-    // Warn when the chosen face can't be rendered by the connector's active
-    // provider — cards silently fall back to the tile otherwise. Name the
-    // provider and, if any others can render it, point the way to switch.
-    if (isProducer) {
-      const producer = connectorFaces.find((x) => x.name === faceCfg.producer);
-      if (producer && producer.available === false) {
-        const activeLabel = connectorProviders.find((p) => p.name === connectorActiveProvider)?.label || connectorActiveProvider || "The active provider";
-        const capable = (producer.supportedBy || [])
-          .filter((n) => n !== connectorActiveProvider)
-          .map((n) => connectorProviders.find((p) => p.name === n)?.label || n);
-        const hint = document.createElement("div");
-        hint.className = "mm-face-hint";
-        hint.textContent =
-          `${activeLabel} can’t render this face — cards will show the symbol tile instead.` +
-          (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Plugins to enable it.` : "");
-        faceRow.appendChild(hint);
-      }
+    const periodSel = mkSel(producer.periods.map((p) => [p, p]), faceCfg.period,
+      "How much history the chart covers");
+    periodSel.addEventListener("change", () => { faceCfg.period = periodSel.value; });
+    faceRow.appendChild(faceSubRow("Range", periodSel, livenessSelect(faceCfg, true)));
+
+    // Warn when the face can't be rendered by the connector's active provider —
+    // cards silently fall back to the tile otherwise. Name the provider and, if
+    // any others can render it, point the way to switch. This is where the tile
+    // gets disclosed: as the consequence of a provider gap, not as an option.
+    if (producer.available === false) {
+      const activeLabel = connectorProviders.find((p) => p.name === connectorActiveProvider)?.label || connectorActiveProvider || "The active provider";
+      const capable = (producer.supportedBy || [])
+        .filter((n) => n !== connectorActiveProvider)
+        .map((n) => connectorProviders.find((p) => p.name === n)?.label || n);
+      const hint = document.createElement("div");
+      hint.className = "mm-face-hint";
+      hint.textContent =
+        `${activeLabel} can’t render this face — cards will show the symbol tile instead.` +
+        (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Plugins to enable it.` : "");
+      faceRow.appendChild(hint);
     }
   }
 
@@ -405,31 +453,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // default) and, among those, first/latest added.
   function renderFileFaceRow() {
     faceRow.className = "mm-row";
-    const controls = document.createElement("div");
-    controls.className = "fe-head";
-    const key = document.createElement("span");
-    key.className = "mm-key-locked";
-    key.textContent = "face";
-    const label = document.createElement("span");
-    label.className = "mm-locked-badge";
-    label.textContent = "File preview";
-    controls.append(key, label);
+    const controls = faceHead();
+    controls.appendChild(lockedBadge("File preview"));
     faceRow.appendChild(controls);
 
     if (identityFrom !== "ai") return; // one instance per entity — nothing to pick
 
-    const mkSel = (opts, val, title) => {
-      const sel = document.createElement("select");
-      sel.disabled = !isAdmin;
-      sel.title = title;
-      for (const [v, l] of opts) {
-        const o = document.createElement("option");
-        o.value = v; o.textContent = l;
-        if (v === val) o.selected = true;
-        sel.appendChild(o);
-      }
-      return sel;
-    };
     const prefer = faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : "image";
     const preferSel = mkSel(
       [["image", "Image"], ["document", "Document"], ["audio", "Audio"]],
@@ -440,14 +469,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     const sync = () => { faceCfg = { from: "file", prefer: preferSel.value, pick: pickSel.value }; };
     preferSel.addEventListener("change", sync);
     pickSel.addEventListener("change", sync);
-
-    const sub = document.createElement("div");
-    sub.className = "mm-face-prefer";
-    const lbl = document.createElement("span");
-    lbl.className = "mm-face-prefer-label";
-    lbl.textContent = "Prefer (when available)";
-    sub.append(lbl, preferSel, pickSel);
-    faceRow.appendChild(sub);
+    faceRow.appendChild(faceSubRow("Prefer (when available)", preferSel, pickSel));
   }
 
   const fieldsList = document.createElement("div");
