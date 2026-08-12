@@ -1004,7 +1004,12 @@ export async function openBoardModal(boardId, opts = {}) {
     }).catch(() => {});
   }
 
-  document.getElementById("board-modal-name").focus();
+  // Autofocus the name only for a NEW board, where an empty name is the first
+  // thing to fill in. Opening an EXISTING board is not a rename — the reader
+  // came for the settings below — so a caret parked in a filled name field
+  // misnames the modal's purpose and puts a stray keystroke into the board's
+  // name. Esc still closes either way: modal.js listens on the document.
+  if (isNew) document.getElementById("board-modal-name").focus();
 
   document.getElementById("board-modal-cancel").onclick = close;
   document.getElementById("board-modal-save").onclick = async () => {
