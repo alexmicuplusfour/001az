@@ -111,9 +111,14 @@ test("an unreadable source lands in ingest_state with a spaced retry, not a wedg
   const armedAt = Date.now();
   await setIngestNextRun(db, id, armedAt - 1);
 
+  // The sweep writes ingest_state and ingest_next_run_at as TWO statements, so
+  // waiting on the first alone can read the board in between and see the
+  // pre-run arm time — the re-arm assertion below then fails for a reason that
+  // has nothing to do with backoff. Wait for both writes; under an 8-way
+  // parallel run the gap between them is wide enough to land in.
   const board = await until(async () => {
     const b = await getBoard(db, id);
-    return b.ingest_state?.last_error ? b : null;
+    return b.ingest_state?.last_error && Number(b.ingest_next_run_at) > armedAt ? b : null;
   });
   assert.match(board.ingest_state.last_error, /unreadable|not configured/);
   assert.ok(board.ingest_next_run_at > armedAt + 4 * 60000, "5-minute backoff, not the continuous cadence");
@@ -147,9 +152,12 @@ test("continuous trigger reschedules itself on the continuous cadence", async ()
   const t0 = Date.now();
   await setIngestNextRun(db, id, t0 - 1);
 
+  // Both of the sweep's writes, not just the first — see the backoff test
+  // above: last_run_at lands one statement before the re-arm, and reading in
+  // between sees the t0-1 arm this test set itself.
   const board = await until(async () => {
     const b = await getBoard(db, id);
-    return b.ingest_state?.last_run_at ? b : null;
+    return b.ingest_state?.last_run_at && Number(b.ingest_next_run_at) > t0 ? b : null;
   });
   assert.equal(board.ingest_state.last_added, 1);
   assert.ok(board.ingest_next_run_at >= t0 + 5000, "rearmed in the future");

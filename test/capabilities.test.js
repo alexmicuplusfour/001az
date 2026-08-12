@@ -55,7 +55,53 @@ test("the tag image-preset vocabulary is pinned to IMAGE_PRESETS (ai-image-input
   assert.ok(def.label);
   assert.deepEqual(def.options.map((o) => o.value), Object.keys(IMAGE_PRESETS));
   assert.equal(def.default, DEFAULT_PRESET);
-  assert.ok(def.options.every((o) => o.label && o.hint), "every option carries its admin copy");
+  assert.ok(def.options.every((o) => o.label), "every option carries its label");
+});
+
+test("every board-scoped knob is one the board modal can actually render", () => {
+  // Three layers, and without this pin they drift silently. The save path
+  // (boardConfigPatch) and the board settings payload (boardConfigCatalog)
+  // both take ANY field carrying a boardColumn — but planBoardConfig only
+  // builds a row for one that declares `options`. So a NUMERIC board-scoped
+  // knob would validate, store, and serialize correctly while being invisible
+  // in the modal that exists to set it. Nothing throws; the row simply isn't
+  // there, which is the kind of bug that gets hunted in the save path for an
+  // afternoon.
+  //
+  // The fix is deliberately this pin rather than a number row built in
+  // advance: on a select, "use the app default" is a row you pick, and what
+  // that even looks like on a number box is a design question worth answering
+  // with a real knob and real copy in front of you — not guessed at now.
+  for (const cap of CAPABILITY_DEFS) {
+    for (const f of cap.binding.config || []) {
+      if (!f.boardColumn) continue;
+      assert.ok(
+        f.options?.length,
+        `${cap.id}.${f.key} is board-scoped but declares no options. planBoardConfig ` +
+        `(public/capability-present.js) only builds dropdown rows, so this knob would be ` +
+        `invisible in the board modal while still saving through the API. Build the numeric ` +
+        `row there and in board-modal.js's mountCapConfigs before shipping it.`
+      );
+    }
+  }
+});
+
+test("the image-detail copy is ONE line for the field, and claims no measured multiplier", () => {
+  // The hints were once per-option and read "≈3×" / "≈5×". Two problems, and
+  // the pin covers both. A figure like that reads as a measurement and there
+  // is none behind it: providers tokenize images differently (32×32 patches vs
+  // 768px tiles), the ratio moves with the source image, and text tokens
+  // dominate the bill on small-facet boards. And a hint that changes with the
+  // selection has to be re-synced by every surface that shows it — which the
+  // admin page wasn't doing. The option ORDER carries the ladder; the copy
+  // only says which way the bill moves.
+  const def = CAPABILITY.tag.binding.config.find((f) => f.key === "tag_image_preset");
+  assert.ok(def.hint, "the field carries the cost note");
+  assert.ok(def.options.every((o) => !o.hint), "and no option carries its own");
+  assert.ok(!/[0-9]\s*[x×]|≈|~\s*[0-9]/.test(def.hint), `"${def.hint}" puts a number on the cost`);
+  // The slot supplies the leading "— " (the double-check note's convention),
+  // so copy carrying its own dash renders as a run-on.
+  assert.ok(!def.hint.includes("—"), `"${def.hint}" brings its own em-dash`);
 });
 
 // --- resolution (pristine state first) ---

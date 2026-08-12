@@ -784,8 +784,52 @@ test("tag leg: the board's image preset beats the app default, and the row recor
   const tagRow = (await jobsFor(board)).find((r) => r.kind === "tag");
   assert.equal(tagRow.outcome, "ok");
   assert.equal(tagRow.detail.image.source, "original");
+  assert.equal(tagRow.detail.image.preset, "high", "the board's pin, not the app default");
   assert.equal(tagRow.detail.image.edge, 1568);
   assert.ok(tagRow.detail.image.bytes > 0);
+  // What the rendition COST, which is what the deferred rendition cache
+  // (ai-image-input-plan.md §8) is gated on — the ledger is where that
+  // measurement has to survive, not a one-off benchmark.
+  assert.equal(typeof tagRow.detail.image.ms, "number");
+  assert.ok(tagRow.detail.image.ms >= 0);
+});
+
+test("extract leg: an image extraction records its rendition too, not just the tag leg", async () => {
+  // Extraction sends an image whenever the item has no text sidecar, and a
+  // silent fallback there is exactly as invisible as on the tag leg — so the
+  // two legs answer "what did the model see" the same way or the answer has a
+  // hole in it.
+  await setPluginState(db, "ai:openai", { installed: true });
+  const keyId = await createAiKey(db, "jobs-img-x", "openai", "sk-test");
+  const mapping = { fields: [{ key: "role", from: "ai", kind: "text" }] };
+  const board = await createBoard(db, "jobs-extract-image", FACETS, "", true, keyId, null, {}, false, { mapping });
+  await updateBoard(db, board, { boardBindings: { tag_image_preset: "standard" } });
+
+  const tmp = path.join(srv.galleryDir, "..", "src-x.png");
+  fs.writeFileSync(tmp, await sharp({ create: { width: 1900, height: 1200, channels: 3, background: { r: 40, g: 160, b: 90 } } }).png().toBuffer());
+  const entry = await sources.forUpload("x.png").ingest(tmp, "x.png");
+  const { iid } = await seedLegItem(board, "x.png", "pending_extract", { mapping, files: [entry] });
+
+  const restore = stubFetch(toolCallResponse({
+    role: { value: "engineer", why: "badge" },
+    kind: { values: ["a"], reasoning: "fits a" },
+    fit: { verdict: "fits", reasoning: "on-topic" },
+  }));
+  const stop = runWorker();
+  try {
+    await until(async () => (await itemStatus(iid)) === "tagged");
+  } finally {
+    await stop();
+    restore();
+  }
+
+  const ext = (await jobsFor(board)).find((r) => r.kind === "extract");
+  assert.equal(ext.outcome, "ok");
+  // Extraction reuses TAGGING's preset — one dial for one decision — so the
+  // board's `standard` pin governs here too.
+  assert.equal(ext.detail.image.preset, "standard");
+  assert.equal(ext.detail.image.source, "original");
+  assert.equal(ext.detail.image.edge, 1024, "standard's long edge, not the 600px card face");
 });
 
 // --- the cardinal rule (keep this test last: it drops the table) ---

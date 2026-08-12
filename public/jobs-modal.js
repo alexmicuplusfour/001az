@@ -68,8 +68,52 @@ const REFRESH_MS = 5000;
 const QUEUED_SHOWN = 20; // a 300-item retag is one summary line, not 300 rows
 const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
+// ── what the tagger was actually shown ──
+// The AI rendition ladder (ai-image-input-plan.md) is designed to be invisible:
+// on a missing original, a corrupt file, or a payload over the provider's cap
+// it drops back to the ≤600px card face and tags anyway. That is the right
+// behaviour and it is also why a board silently running on the OLD input looks
+// exactly like a working one — the job-log row is the only place that can tell
+// them apart.
+//
+// `source: "thumb"` is not by itself a problem, and this is the whole reason
+// the note keys off `fallback` instead: an image no bigger than the card face
+// has nothing to gain from a render (a fifth of a real gallery), and the
+// `thumb` preset is a deliberate kill switch. Both are normal, and surfacing
+// them as warnings would cry wolf on one row in five until nobody reads the
+// field. Only a fallback spends a row's width.
+const FALLBACK_WHY = {
+  "render-error": "render failed",
+  "byte-cap": "too large to send",
+};
+const why = (f) => FALLBACK_WHY[f] || f;
+const imageNote = (img) => (img?.fallback ? `thumbnail fallback (${why(img.fallback)})` : "");
+
+// The full render facts for the hover: "is this board getting the detail I set
+// it to" is answered by any one of its rows, and ms/waitMs are the measurement
+// the rendition cache (§8) is gated on — a cache hit would skip both the render
+// AND the queue, so the queue is reported when there was one.
+export const imageTitle = (img) => {
+  if (!img) return "";
+  const bits = [];
+  // The preset ASKED for, ahead of what was delivered. Not redundant with the
+  // size: on a provider whose ceiling is 1568px a clamped `max` and a plain
+  // `high` render byte-for-byte alike, so the outcome cannot name the setting
+  // the board is on — which is the question "is this board using what I chose"
+  // actually asks.
+  if (img.preset) bits.push(img.preset);
+  bits.push(
+    img.source === "thumb"
+      ? `thumbnail${img.fallback ? ` (${why(img.fallback)})` : ""}`
+      : `${img.edge}px q${img.quality}`
+  );
+  if (img.bytes != null) bits.push(`${Math.round(img.bytes / 1024)} KB`);
+  if (img.ms != null) bits.push(`${img.ms}ms${img.waitMs ? ` (${img.waitMs}ms queued)` : ""}`);
+  return bits.join(" · ");
+};
+
 // The per-kind one-liner: what this execution amounted to.
-function summaryFor(j) {
+export function summaryFor(j) {
   const d = j.detail || {};
   if (j.outcome === "ok") {
     if (j.kind === "transcribe") return d.chars != null ? `${d.chars.toLocaleString()} chars` : "";
@@ -101,7 +145,10 @@ function summaryFor(j) {
       const shown = moved.slice(0, 3).map(([k, e]) => `${k}: ${e?.v ?? e}`);
       return shown.join(" · ") + (moved.length > 3 ? ` · +${moved.length - 3} more` : "");
     }
-    if (d.tags != null) return `${d.tags} tag${d.tags === 1 ? "" : "s"}`;
+    // A tag row says what it produced, and — only when it deviates — what the
+    // model had to work with. The same "speak up on deviation" rule the ingest
+    // bits above and the board modal's Advanced summary already follow.
+    if (d.tags != null) return [`${d.tags} tag${d.tags === 1 ? "" : "s"}`, imageNote(d.image)].filter(Boolean).join(" · ");
     if (d.fields != null) return `${d.fields} field${d.fields === 1 ? "" : "s"}`;
     return "";
   }
@@ -138,7 +185,10 @@ function jobRow(j, newSince = 0) {
   const summary = document.createElement("span");
   summary.className = "job-summary" + (j.outcome === "ok" ? "" : " job-err");
   summary.textContent = summaryFor(j);
-  if (j.detail?.engine) summary.title = j.detail.engine;
+  // The engine and the rendition share the hover — both answer "what actually
+  // served this row", and the cell has one title slot.
+  const title = [j.detail?.engine, imageTitle(j.detail?.image)].filter(Boolean).join(" · ");
+  if (title) summary.title = title;
 
   const when = document.createElement("span");
   when.className = "job-when";

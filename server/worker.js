@@ -2031,7 +2031,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // null and the tail guards for it).
     const needsLLM = mapping?.identity?.from === "ai" || aiFields.some((f) => f.kind !== "object");
 
-    let input = {}, usage = null, ai = null;
+    // `imageRender` mirrors the tag leg: extraction sends a rendition too
+    // whenever the item has no text sidecar (an image, a connector chart
+    // face), and a fallback there is exactly as invisible as on the tag leg.
+    // NOT named `image` — the object-detection block below binds that name to
+    // a raw file buffer, and two meanings for one word in one function is how
+    // the wrong one gets read.
+    let input = {}, usage = null, ai = null, imageRender = null;
     if (needsLLM) {
       // Extraction's whole ladder in one call: the board's extract pin, the
       // app-wide extract default (slice 5), then delegation to the tagger —
@@ -2064,6 +2070,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           preset: await effectivePreset(board?.tag_image_preset),
           images: imagesFor(ai),
         });
+        imageRender = parts.find((p) => p.kind === "image")?.render ?? null;
       }
       ({ input, usage } = await trackedTagger(db, {
         provider: ai.provider,
@@ -2222,7 +2229,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
 
     if (usage) await bumpUsage(db, row.board_id, usage);
-    return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai?.model ?? "detection" };
+    return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai?.model ?? "detection", image: imageRender };
   }
 
   async function processExtractOne(row) {
@@ -2234,7 +2241,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // an execution). Otherwise one row per attempt; `discarded` when the
       // fence dropped a stale result.
       if (r) await legLog(row, "extract", t0, r.landed ? "ok" : "discarded", null,
-        { fields: r.fields, ...(r.identity ? { identity: r.identity } : {}), model: r.model });
+        { fields: r.fields, ...(r.identity ? { identity: r.identity } : {}), model: r.model,
+          // Image-bearing extractions only — "what did the model actually see",
+          // the same question the tag leg's row answers.
+          ...(r.image ? { image: r.image } : {}) });
     } catch (err) {
       const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_extract");
       if (!err.noCount) await legLog(row, "extract", t0, failed ? "failed" : "requeued", err.message);

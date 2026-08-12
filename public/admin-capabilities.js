@@ -14,6 +14,7 @@ import { toast } from "/toast.js";
 import { openPluginModal, busy } from "/plugin-modal.js";
 import { refreshPluginSurfaces, loadPluginState } from "/admin-plugins.js";
 import { presentChip, presentLines, presentSupported, configureTarget, fmtProbe } from "/capability-present.js";
+import { fillSelect } from "/select.js";
 
 const chipEl = ({ cls, text }) => {
   const s = document.createElement("span");
@@ -126,16 +127,7 @@ function capCard(c) {
     let input;
     if (f.options) {
       input = document.createElement("select");
-      for (const o of f.options) {
-        const opt = document.createElement("option");
-        opt.value = o.value;
-        opt.textContent = o.label || o.value;
-        if (o.hint) opt.title = o.hint;
-        input.appendChild(opt);
-      }
-      input.value = f.value ?? "";
-      const current = f.options.find((o) => o.value === input.value);
-      if (current?.hint) input.title = current.hint;
+      fillSelect(input, f.options, { value: f.value ?? null });
       input.onchange = () => commit(input, input.value);
     } else {
       input = document.createElement("input");
@@ -145,6 +137,18 @@ function capCard(c) {
       input.onchange = () => commit(input, Number(input.value));
     }
     row.append(lab, input);
+    // The field's one fixed hint, on the row rather than behind a hover: this
+    // is a spend dial, and cost belongs where the choice is made. It replaces
+    // a per-option `title` that was set once at mount and re-synced by
+    // nothing — so it described the wrong option after every change and every
+    // failed save. Fixed copy can't do that, and it matches the board modal's
+    // row, which is the other place this same knob is set.
+    if (f.hint) {
+      const note = document.createElement("span");
+      note.className = "hint";
+      note.textContent = `— ${f.hint}`;
+      row.appendChild(note);
+    }
     card.appendChild(row);
   }
 

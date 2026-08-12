@@ -342,20 +342,22 @@ test("planBoardPicker: chosenLabel narrates the current selection for the mappin
 // A tag entry as the feed projects it: the board-scopable image-detail knob.
 const boardTagCfg = [{
     key: "tag_image_preset", value: "high", kind: "enum", boardColumn: "tag_image_preset",
-    label: "Image detail sent to the model",
+    label: "Image size sent to the model",
+    hint: "larger images cost more tokens",
+    chip: "image size",
     options: [
-      { value: "thumb", label: "Thumbnail", hint: "cheapest" },
-      { value: "standard", label: "Standard", hint: "≈3×" },
-      { value: "high", label: "High", hint: "≈5×" },
-      { value: "max", label: "Provider max", hint: "varies" },
+      { value: "thumb", label: "Thumbnail" },
+      { value: "standard", label: "Standard" },
+      { value: "high", label: "High" },
+      { value: "max", label: "Provider max" },
     ],
 }];
 
 test("planBoardConfig: the unset row names what the app default resolves to", () => {
   const [plan] = planBoardConfig(boardTagCfg, null);
   assert.equal(plan.column, "tag_image_preset", "the write vocabulary comes from the feed, never hardcoded");
-  assert.equal(plan.label, "Image detail sent to the model");
-  assert.deepEqual(plan.rows[0], { value: "", label: "App default (High)", hint: "≈5×" });
+  assert.equal(plan.label, "Image size sent to the model");
+  assert.deepEqual(plan.rows[0], { value: "", label: "App default (High)" });
   assert.deepEqual(plan.rows.map((r) => r.value), ["", "thumb", "standard", "high", "max"]);
   assert.equal(plan.preselect, "", "a board with no pin inherits");
   // The default row tracks the app-wide value, so it can never mislabel it.
@@ -371,12 +373,38 @@ test("planBoardConfig: a pin preselects, and a retired preset falls back instead
   );
 });
 
-test("planBoardConfig: payload clears with null, and hints follow the selection", () => {
+test("planBoardConfig: payload clears with null", () => {
   const [plan] = planBoardConfig(boardTagCfg, null);
   assert.deepEqual(plan.payload(""), { tag_image_preset: null }, "App default = clear the column");
   assert.deepEqual(plan.payload("max"), { tag_image_preset: "max" });
-  assert.equal(plan.hintFor("standard"), "≈3×");
-  assert.equal(plan.hintFor(""), "≈5×", "the unset row shows what it inherits");
+});
+
+test("planBoardConfig: the Advanced summary chip names the knob, and only when the board deviates", () => {
+  const [plan] = planBoardConfig(boardTagCfg, null);
+  assert.equal(plan.chipFor(""), "", "an inherited value is not state the fold is hiding");
+  assert.equal(plan.chipFor("standard"), "image size: Standard");
+  // The name is the knob's own copy — the summary loops over N knobs, and the
+  // modal used to hardcode "image:" for all of them, so a second board-scoped
+  // knob would have reported under the first one's name.
+  const [other] = planBoardConfig([{ ...boardTagCfg[0], chip: "detail level" }], null);
+  assert.equal(other.chipFor("max"), "detail level: Provider max");
+  // No `chip` copy → the full label rather than silence: verbose beats wrong,
+  // and beats a fold summary that hides a changed setting.
+  const [bare] = planBoardConfig([{ ...boardTagCfg[0], chip: undefined }], null);
+  assert.equal(bare.chipFor("max"), "Image size sent to the model: Provider max");
+});
+
+test("planBoardConfig: one fixed hint for the field, not one per option", () => {
+  // Per-option hints had to be re-synced on every change and every failed
+  // save — and the admin page's copy of that rule was already missing, so it
+  // described the wrong option. A constant is un-stale-able, and the option
+  // ORDER carries the cheap→expensive ladder without copy repeating it.
+  const [plan] = planBoardConfig(boardTagCfg, null);
+  assert.equal(plan.hint, "larger images cost more tokens");
+  assert.equal(plan.hintFor, undefined, "no per-selection hint to keep in sync");
+  assert.ok(plan.rows.every((r) => !("hint" in r)), "rows carry a label and a value, nothing to sync");
+  // A field that ships no hint plans an empty one rather than "undefined".
+  assert.equal(planBoardConfig([{ ...boardTagCfg[0], hint: undefined }], null)[0].hint, "");
 });
 
 test("planBoardConfig: only board-scopable knobs plan a row", () => {

@@ -1270,10 +1270,14 @@ export async function getBoard(db, id) {
 export async function updateBoard(db, id, { name, facets, context, aiReasoning, aiResearch, aiVotes, autoTag, autoTagPeriodic, autoTagEveryMin, autoTagSkipWeekends, autoTagNextRunAt, mapping, retagOnRefresh, ingest, ingestNextRunAt, boardBindings } = {}) {
   const sets = [];
   const vals = [];
-  // Capability pins as a { column: value } map (boardBindingPatch's output).
-  // Column names come from the registry via the route — code, never input —
-  // and BOARD_BINDING_COLS is the allow-list that keeps that true even for a
-  // future caller that forgets.
+  // Per-board capability columns as a { column: value } map — BOTH kinds (see
+  // BOARD_PIN_COLS / BOARD_CONFIG_COLS above): pins from boardBindingPatch on
+  // the admin routes, knobs from boardConfigPatch on the manager route too.
+  // The authority split is enforced by which route builds the map; by the time
+  // it reaches here the two are written the same way. Column names come from
+  // the registry via the route — code, never input — and BOARD_BINDING_COLS
+  // (the union) is the allow-list that keeps that true even for a future
+  // caller that forgets.
   for (const [col, v] of Object.entries(boardBindings || {})) {
     if (!BOARD_BINDING_COLS.includes(col)) continue;
     vals.push(v);

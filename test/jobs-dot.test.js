@@ -16,21 +16,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, seedBoard, seedUser, adminSession, req } from "./helpers.js";
 import { addJobLog, latestJobFailureAt, LATEST_JOB_FAILURE_SQL } from "../server/db.js";
+// The localStorage/document the client modules want at import time — must be
+// evaluated before the `await import("../public/…")` calls below.
+import { localStore as store } from "./browser-stub.js";
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
-
-// The client modules want a localStorage and (via data.js's module-level
-// listener) a document. Nothing here needs either to do anything real.
-const store = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (store.has(k) ? store.get(k) : null),
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: (k) => store.delete(k),
-};
-globalThis.document ||= {
-  addEventListener() {}, dispatchEvent() { return true; },
-  createElement: () => ({ appendChild() {}, setAttribute() {} }),
-};
 
 const { state } = await import("../public/state.js");
 const { jobsUnseen, markJobsSeen, failureDrawn } = await import("../public/jobs-modal.js");

@@ -260,6 +260,11 @@ export function planBoardPicker(cap, keys, board, catalog) {
 // renders with no edit here; [] when there are none. Pure — the modal mounts.
 export function planBoardConfig(fields, board) {
   return (fields || [])
+    // Dropdown knobs only. The server's write path and board payload take any
+    // field with a boardColumn, so a NUMERIC one would save and serialize but
+    // never get a row here — a capabilities.test.js pin fails the moment the
+    // registry declares one, naming this function and mountCapConfigs as the
+    // two places that need the numeric branch.
     .filter((f) => f.boardColumn && f.options?.length)
     .map((f) => {
       // What blank MEANS, spelled out — the unset row answers the question
@@ -267,8 +272,8 @@ export function planBoardConfig(fields, board) {
       // app-wide effective value, already defaulted server-side.
       const appOption = f.options.find((o) => o.value === f.value);
       const rows = [
-        { value: "", label: `App default (${appOption?.label || f.value})`, hint: appOption?.hint || "" },
-        ...f.options.map((o) => ({ value: o.value, label: o.label || o.value, hint: o.hint || "" })),
+        { value: "", label: `App default (${appOption?.label || f.value})` },
+        ...f.options.map((o) => ({ value: o.value, label: o.label || o.value })),
       ];
       // A stored value that is no longer a declared option (a preset retired
       // between releases) falls to the default row instead of being sent back
@@ -278,9 +283,21 @@ export function planBoardConfig(fields, board) {
         key: f.key,
         column: f.boardColumn,
         label: f.label || f.key.replace(/_/g, " "),
+        // One line for the whole field, fixed — NOT per selection. A note that
+        // tracked the dropdown had to be re-synced on every change and every
+        // failed save, and the admin page's copy of that rule was already
+        // wrong; a constant cannot be.
+        hint: f.hint || "",
         rows,
         preselect: rows.some((r) => r.value === stored) ? stored : "",
-        hintFor: (sel) => rows.find((r) => r.value === sel)?.hint || "",
+        // What the collapsed Advanced summary says about this knob — "" when
+        // the board inherits, since an app default is not state the fold is
+        // hiding. The whole rule lives here rather than in the modal: the
+        // summary loops over N knobs, and a caller assembling the string
+        // itself is a caller that hardcodes the first knob's name for all of
+        // them. `label` is the fallback so a knob shipped without `chip` still
+        // reports honestly, just verbosely.
+        chipFor: (sel) => (sel ? `${f.chip || f.label}: ${rows.find((r) => r.value === sel)?.label || sel}` : ""),
         // Blank clears the column — the board falls back to the app default.
         payload: (sel) => ({ [f.boardColumn]: sel || null }),
       };

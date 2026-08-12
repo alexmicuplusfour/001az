@@ -633,21 +633,29 @@ export async function openBoardModal(boardId, opts = {}) {
     const wrap = document.getElementById("board-modal-capconfig");
     for (const plan of planBoardConfig(fields, board)) {
       const row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;";
-      const lab = document.createElement("span");
-      lab.style.cssText = "font-weight:500;";
+      row.style.cssText = "margin-bottom:6px;";
+      // The label takes its own line: these labels are full sentences, and on
+      // one flex line the note wrapped away from the control it describes,
+      // reading as a caption for the whole fold rather than for this select.
+      const lab = document.createElement("div");
+      lab.style.cssText = "font-weight:500;margin-bottom:4px;";
       lab.textContent = plan.label;
+      // Control + note on one line under it — the double-check sub-row's exact
+      // shape (dcSub above), so the cost note sits beside the thing that sets
+      // the cost.
+      const line = document.createElement("div");
+      line.style.cssText = "display:flex;align-items:center;gap:10px;flex-wrap:wrap;";
       const sel = document.createElement("select");
       fillSelect(sel, plan.rows, { value: plan.preselect });
+      // One fixed line for the field — the options are ordered cheapest-first,
+      // so the note only has to say which way the bill moves. Nothing to
+      // re-sync on change.
       const note = document.createElement("span");
       note.style.cssText = "font-weight:400;color:#9aa0aa;";
-      const syncNote = () => {
-        const hint = plan.hintFor(sel.value);
-        note.textContent = hint ? `— ${hint}` : "";
-      };
-      sel.onchange = () => { syncNote(); syncAdvSummary(); };
-      syncNote();
-      row.append(lab, sel, note);
+      note.textContent = plan.hint ? `— ${plan.hint}` : "";
+      sel.onchange = syncAdvSummary;
+      line.append(sel, note);
+      row.append(lab, line);
       wrap.appendChild(row);
       capConfigs.push({ plan, sel });
     }
@@ -658,11 +666,11 @@ export async function openBoardModal(boardId, opts = {}) {
     if (aiReasoning) bits.push("Explain tags");
     if (dc.on) bits.push(`double-check ×${dc.passes}`);
     if (aiResearch) bits.push("web research");
-    // Only when the board DEVIATES from the app default — an inherited value
-    // is not state the fold is hiding.
-    for (const c of capConfigs) {
-      if (c.sel.value) bits.push(`image: ${c.plan.rows.find((r) => r.value === c.sel.value)?.label || c.sel.value}`);
-    }
+    // One chip per board-scoped knob that DEVIATES from the app default (an
+    // inherited value is not state the fold is hiding). The planner decides
+    // both whether to speak and what to call itself — this loop knows neither
+    // the knob's name nor its vocabulary.
+    bits.push(...capConfigs.map((c) => c.plan.chipFor(c.sel.value)).filter(Boolean));
     if (at.enabled && at.periodic) bits.push("scheduled retag");
     if (at.enabled && at.retagOnRefresh) bits.push("retag on data change");
     document.getElementById("board-modal-adv-summary").textContent = bits.length ? bits.join(" · ") : "all defaults";

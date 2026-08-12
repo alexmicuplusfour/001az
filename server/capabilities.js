@@ -75,12 +75,28 @@ export const CAPABILITY_DEFS = [
       // must never touch, and a preset id has nothing to dangle.
       config: [{
         key: "tag_image_preset", boardColumn: "tag_image_preset", default: "high", kind: "enum",
-        label: "Image detail sent to the model",
+        label: "Image size sent to the model",
+        // ONE hint for the field, not one per option, and deliberately the
+        // whole story: the options are ordered cheapest-first, so the only
+        // thing copy has to add is which way the bill moves. Per-option hints
+        // were worse three ways — they claimed multipliers ("≈5×") nobody has
+        // measured (providers tokenize images differently, and the ratio moves
+        // with the source image), they guessed at what each rung would do to
+        // YOUR material, and a hint that changes with the selection is a hint
+        // that can go stale. A fixed line cannot.
+        hint: "larger images cost more tokens",
+        // The short name for the board modal's collapsed Advanced summary,
+        // which lists what a board has CHANGED ("… · image size: Standard").
+        // Separate copy from `label` because that line carries three or four
+        // of these and a full sentence would swamp it — and it lives here, as
+        // data, so a second board-scoped knob names itself instead of
+        // inheriting whatever the first one hardcoded.
+        chip: "image size",
         options: [
-          { value: "thumb", label: "Thumbnail", hint: "the card face — cheapest, the pre-preset behavior" },
-          { value: "standard", label: "Standard", hint: "≈3× thumbnail image tokens" },
-          { value: "high", label: "High", hint: "≈5× — text in screenshots stays legible" },
-          { value: "max", label: "Provider max", hint: "whatever the provider accepts — cost varies by model" },
+          { value: "thumb", label: "Thumbnail" },
+          { value: "standard", label: "Standard" },
+          { value: "high", label: "High" },
+          { value: "max", label: "Provider max" },
         ],
       }],
     },
@@ -224,6 +240,8 @@ export const configFieldView = (f, value) => ({
   value,
   ...(f.kind ? { kind: f.kind } : {}),
   ...(f.label ? { label: f.label } : {}),
+  ...(f.hint ? { hint: f.hint } : {}),
+  ...(f.chip ? { chip: f.chip } : {}),
   ...(f.options ? { options: f.options } : {}),
   ...(f.boardColumn ? { boardColumn: f.boardColumn } : {}),
 });

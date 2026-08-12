@@ -79,8 +79,10 @@
       .cap-lines .k, .cap-config .k { color: #6b6b72; margin-right: 4px; }
       .cap-roster { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
       .cap-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-      .cap-config { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12.5px; }
+      .cap-config { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12.5px; flex-wrap: wrap; }
       .cap-config input { flex: 0 0 90px; min-width: 90px; }
+      .cap-config select { flex: 0 0 auto; } /* sized by its options, unlike the fixed numeric input */
+      .cap-config .hint { color: #9aa0aa; }
 
       /* logs tab — a dark embedded console (palette ported from logs.html);
          .fullbleed lifts the same element over the whole page */
