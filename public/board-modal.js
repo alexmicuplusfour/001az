@@ -580,7 +580,6 @@ export async function openBoardModal(boardId, opts = {}) {
   body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
   body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
   if (tagBand) {
-    tagBand.el.hidden = true;
     tagBand.el.style.margin = "0 0 14px";
     document.getElementById("board-modal-tagging").prepend(tagBand.el);
   }
@@ -996,11 +995,7 @@ export async function openBoardModal(boardId, opts = {}) {
         summaryEl.textContent = tagPicker
           ? chosen(tagPicker) + (n ? ` · ${n} board choice${n === 1 ? "" : "s"}` : " · all app defaults")
           : "";
-        if (tagBand && tagPicker) {
-          tagBand.el.hidden = false;
-          const { label, empty } = bandState(tagPicker);
-          tagBand.set(label, empty);
-        }
+        tagBand?.set(tagPicker ? bandState(tagPicker) : null);
         mappingPane?.setExtractionBand(extractionBand());
         syncAi(); // research availability follows the tagging selection
       };

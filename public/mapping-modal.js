@@ -69,17 +69,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // out twice — the two hand-built copies disagreed about when to hide and both
   // ended up printing "Using none configured".
   const extractBand = isAdmin ? provBand(() => onExtractionChange?.()) : null;
-  if (extractBand) {
-    extractBand.el.style.margin = "2px 0 8px";
-    extractBand.el.hidden = true;
-  }
-  // `state` is { label, empty } from the host, or null when there is no
-  // extraction picker at all — nothing to be provenance ABOUT, so no band.
-  const setExtractionBand = (state) => {
-    if (!extractBand) return;
-    extractBand.el.hidden = !state;
-    if (state) extractBand.set(state.label, state.empty);
-  };
+  if (extractBand) extractBand.el.style.margin = "2px 0 8px";
+  // Straight through: the host decides what the band says (only it can see the
+  // strip's unsaved edits, and follow delegation), the band decides how to look
+  // — including whether to be there at all, for a null.
+  const setExtractionBand = (state) => extractBand?.set(state);
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,

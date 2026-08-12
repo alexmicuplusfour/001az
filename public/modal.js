@@ -141,6 +141,7 @@ export function sectionHeading(title, sub, style = "") {
 export function provBand(onAction) {
   const el = document.createElement("div");
   el.className = "prov";
+  el.hidden = true; // nothing is known until someone says so
   const lead = document.createTextNode("");
   const what = document.createElement("b");
   const btn = document.createElement("button");
@@ -150,11 +151,20 @@ export function provBand(onAction) {
   el.append(lead, what, btn);
   return {
     el,
-    // `label` names what runs; null/"" means nothing does.
-    set(label, empty = "Nothing configured") {
-      const has = !!label;
-      lead.textContent = has ? "Using" : empty;
-      what.textContent = has ? label : "";
+    // THREE states, and all three belong to the band — the first round of this
+    // component took the copy and the empty case and left visibility with the
+    // callers, which promptly grew two spellings of it again (one asking "is
+    // there a picker", the other "is there a state").
+    //   null            nothing to be provenance ABOUT — no such picker here,
+    //                   or the feed never landed. No band.
+    //   { label }       name it: "Using <label> Change".
+    //   { empty }       nothing runs: say which model is missing, offer the fix.
+    set(state) {
+      el.hidden = !state;
+      if (!state) return;
+      const has = !!state.label;
+      lead.textContent = has ? "Using" : state.empty || "Nothing configured";
+      what.textContent = has ? state.label : "";
       what.hidden = !has;
       btn.textContent = has ? "Change" : "Set one up";
     },
