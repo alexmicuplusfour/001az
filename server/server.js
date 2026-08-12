@@ -53,6 +53,7 @@ import {
   firingMatches,
   markAlertFiringsSeen,
   createBoard,
+  NEW_BOARD_DEFAULTS,
   listBoards,
   getBoard,
   updateBoard,
@@ -1223,8 +1224,8 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
   );
 }));
 
-// The content-editable board fields shared by the admin PATCH and the
-// board-manager PATCH: name, context, facets, the reasoning/research toggles,
+// The content-editable board fields shared by every board save surface —
+// create and both PATCH mounts: name, context, facets, the toggles,
 // `~` prefixes are reserved for system facets (~objects, ~uploaders — the
 // client's filter router shadows them, and alert conditions/saved configs
 // store them durably), so a user facet may not claim one. The only facet-key
@@ -1235,8 +1236,9 @@ function facetsReservedKeyError(facets) {
 }
 
 // and the auto-tag schedule (with the timer bookkeeping). Returns
-// { update, error, sweep } — error is a string when the body is invalid, sweep
-// is true when auto-tagging transitions off→on (caller queues untagged items).
+// { update, error, sweep, demote } — error is a string when the body is
+// invalid, sweep is true when auto-tagging transitions off→on (caller queues
+// untagged items), demote the facets whose definition moved.
 async function buildBoardContentUpdate(body = {}, prev) {
   body = body || {};
   const update = {};
@@ -1249,7 +1251,12 @@ async function buildBoardContentUpdate(body = {}, prev) {
   // `facets` on every save, so that test would demote every finding on the board
   // the first time someone renames it.
   let demote = [];
-  if (body.name !== undefined) update.name = String(body.name).trim();
+  if (body.name !== undefined) {
+    update.name = String(body.name).trim();
+    // The same rule create enforces — a board must keep a name. The modal
+    // guards this client-side; the API refuses it for everyone else.
+    if (!update.name) return { error: "name required" };
+  }
   if (body.facets !== undefined) {
     if (!Array.isArray(body.facets)) return { error: "facets must be an array" };
     const reserved = facetsReservedKeyError(body.facets);
@@ -1257,7 +1264,8 @@ async function buildBoardContentUpdate(body = {}, prev) {
     update.facets = body.facets;
     demote = editedFacets(prev?.facets || [], body.facets);
   }
-  if (body.context !== undefined) update.context = String(body.context);
+  // ?? "" so an explicit null clears the context instead of storing "null".
+  if (body.context !== undefined) update.context = String(body.context ?? "");
   if (body.ai_reasoning !== undefined) update.aiReasoning = !!body.ai_reasoning;
   if (body.ai_research !== undefined) update.aiResearch = !!body.ai_research;
   if (body.ai_votes !== undefined) {
@@ -1427,11 +1435,8 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   // together resolves the ingest adapter the mapping selects; the mapping
   // itself is validated in the admin leg before anything writes.
   const prev = {
-    facets: [], context: "", ai_reasoning: true, ai_research: false, ai_votes: 1,
-    auto_tag: true, auto_tag_periodic: false, auto_tag_every_min: 1440,
-    auto_tag_skip_weekends: false, auto_tag_next_run_at: null,
+    ...NEW_BOARD_DEFAULTS,
     mapping: body.mapping && typeof body.mapping === "object" ? body.mapping : null,
-    ingest: null, ingest_next_run_at: null,
   };
   const { update, error } = await buildBoardContentUpdate(body, prev);
   if (error) return res.status(400).json({ error });

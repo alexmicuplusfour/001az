@@ -1239,6 +1239,21 @@ const BOARD_COLS =
 // worker's own loop selects it explicitly (boardsWithVotes) and does not rely on
 // this list.
 
+// The row a new board is born with — column-named, exactly as getBoard reads
+// it back. createBoard's INSERT below writes these values; the create route
+// (server.js) runs the shared content trunk against this object as its
+// synthetic `prev`, so what the trunk computes for a create (schedule arming,
+// the votes/research exclusion) is judged against the same baseline the
+// INSERT will write. The values live twice — here and in the INSERT's
+// defaults — and a board-manage test pins this object against a freshly
+// inserted row so the pair cannot drift silently.
+export const NEW_BOARD_DEFAULTS = {
+  facets: [], context: "", ai_reasoning: true, ai_research: false, ai_votes: 1,
+  auto_tag: true, auto_tag_periodic: false, auto_tag_every_min: 1440,
+  auto_tag_skip_weekends: false, auto_tag_next_run_at: null,
+  mapping: null, retag_on_refresh: false, ingest: null, ingest_next_run_at: null,
+};
+
 export async function createBoard(db, name, facets = [], context = "", aiReasoning = true, aiKeyId = null, aiModel = null, autoTag = {}, aiResearch = false, extras = {}) {
   const id = crypto.randomUUID();
   await db.query(

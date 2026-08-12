@@ -4,7 +4,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
-import { setBoardMembers, createAiKey } from "../server/db.js";
+import { setBoardMembers, createAiKey, createBoard, getBoard, NEW_BOARD_DEFAULTS } from "../server/db.js";
 
 let srv, db, base;
 let admin, boardAdmin, member, outsider;
@@ -154,4 +154,21 @@ test("create validates like the PATCH mounts: a bad auto_tag_every_min is refuse
   assert.equal(row.auto_tag_periodic, true);
   assert.equal(Number(row.auto_tag_every_min), 60);
   assert.ok(row.auto_tag_next_run_at != null, "the schedule set at birth is armed at birth");
+});
+
+// The create route judges its body against NEW_BOARD_DEFAULTS as a synthetic
+// prev; createBoard's INSERT writes its own defaults. The two live in
+// different files — this is the assertion that keeps them the same row.
+test("NEW_BOARD_DEFAULTS is what createBoard actually writes", async () => {
+  const id = await createBoard(db, "defaults-pin");
+  const row = await getBoard(db, id);
+  for (const [col, v] of Object.entries(NEW_BOARD_DEFAULTS)) {
+    assert.deepEqual(row[col], v, `NEW_BOARD_DEFAULTS.${col} matches the inserted row`);
+  }
+});
+
+test("a board cannot be renamed to nothing — the shared trunk refuses an empty name", async () => {
+  const r = await req(base, "PATCH", `/api/boards/${board}`, { sid: admin.sid, body: { name: "   " } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /name required/);
 });
