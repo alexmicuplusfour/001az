@@ -2,7 +2,7 @@ import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS } from './utils.js';
 import { switchRow } from './board-modal.js';
-import { sectionHeadingEl } from './modal.js';
+import { sectionHeadingEl, provBand } from './modal.js';
 
 const KINDS = ["text", "number", "url", "date", "object"];
 // Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
@@ -12,9 +12,9 @@ const CADENCES = [[0, "Off"], [1, "1 min"], [5, "5 min"], [15, "15 min"], [60, "
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, collect, setExtractionLabel }: the host folds collect()'s
+// Returns { isDirty, collect, setExtractionBand }: the host folds collect()'s
 // payload into its one PATCH/POST, and names the model behind the "Using …"
-// band via setExtractionLabel. Fully parameterized (no gallery-state reads), so
+// band via setExtractionBand. Fully parameterized (no gallery-state reads), so
 // it works on admin.html and for not-yet-created boards:
 //   isAdmin  — editable pane; false = read-only view
 //   mapping  — the board's current mapping (null for a new/unmapped board)
@@ -57,34 +57,29 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   }
 
   // The provenance band under "AI-extracted fields": which model fills the AI
-  // fields ("Using <model> — Change"). The picker itself lives in the host's
-  // AI-models strip; only the host can name the model — the answer includes
-  // strip edits it hasn't saved yet — so it pushes via setExtractionLabel on
-  // every reveal of this pane and on every pin change. The band element is
+  // fields. The picker itself lives in the host's AI-models strip; only the
+  // host can name the model — the answer includes strip edits it hasn't saved
+  // yet, and follows delegation — so it pushes via setExtractionBand on every
+  // reveal of this pane and on every pin change. The band element is
   // re-appended by renderFields (which wipes fieldsList), so the pushed text
   // lives on the element and survives re-renders.
-  let extractBand = null;
-  let extractBandLabel = null;
-  // Hidden until a label arrives — a band reading "Using nothing" would be
-  // the exact kind of claim the placeholder rules exist to prevent.
-  const setExtractionLabel = (label) => {
-    if (!extractBand) return;
-    extractBand.hidden = !label;
-    if (label) extractBandLabel.textContent = label;
-  };
-  if (isAdmin) {
-    extractBand = document.createElement("div");
-    extractBand.className = "prov";
-    extractBand.style.margin = "2px 0 8px";
-    extractBand.hidden = true;
-    extractBandLabel = document.createElement("b");
-    const change = document.createElement("button");
-    change.type = "button";
-    change.className = "linkbtn";
-    change.textContent = "Change";
-    change.addEventListener("click", () => onExtractionChange?.());
-    extractBand.append("Using", extractBandLabel, change);
+  //
+  // The band itself is modal.js's, shared with the Tagging pane's: the copy is
+  // pinned and the empty state is a rule, and neither survives being written
+  // out twice — the two hand-built copies disagreed about when to hide and both
+  // ended up printing "Using none configured".
+  const extractBand = isAdmin ? provBand(() => onExtractionChange?.()) : null;
+  if (extractBand) {
+    extractBand.el.style.margin = "2px 0 8px";
+    extractBand.el.hidden = true;
   }
+  // `state` is { label, empty } from the host, or null when there is no
+  // extraction picker at all — nothing to be provenance ABOUT, so no band.
+  const setExtractionBand = (state) => {
+    if (!extractBand) return;
+    extractBand.el.hidden = !state;
+    if (state) extractBand.set(state.label, state.empty);
+  };
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
@@ -805,7 +800,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     // AI fields.
     const aiFields = fields.filter((f) => f.from === "ai");
     fieldsList.appendChild(sectionTitle("AI-extracted fields"));
-    if (extractBand) fieldsList.appendChild(extractBand);
+    if (extractBand) fieldsList.appendChild(extractBand.el);
     if (!aiFields.length) {
       const empty = document.createElement("p");
       empty.className = "mm-empty";
@@ -993,5 +988,5 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return { ok: true, payload: { mapping } };
   }
 
-  return { isDirty: () => dirty, collect, setExtractionLabel };
+  return { isDirty: () => dirty, collect, setExtractionBand };
 }

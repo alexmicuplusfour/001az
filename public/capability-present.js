@@ -238,6 +238,16 @@ export function planBoardPicker(cap, keys, board, catalog) {
         saved: savedKey && sel === savedKey && bb.model ? board?.[bb.model] ?? null : null,
       };
     },
+    // Is there anything BEHIND a given selection, or would naming it be a
+    // claim about nothing? A pinned key or engine is a choice by definition;
+    // only the app-default row can come up empty, and `chosenLabel` answers
+    // that case with "none configured" — fine in a status list, a lie in a
+    // sentence ("Using none configured"). The bands ask this first. Kept
+    // separate from `chosenLabel` because the ROW must still name the state:
+    // "App default (none configured)" is exactly what that row should read.
+    configured(sel) {
+      return sel ? true : !!cap.running;
+    },
     // What the current selection is called mid-sentence — the "Using …" bands
     // read off this. The unset delegate answers with its relationship, not a
     // model; shells that need the resolved model follow delegatesTo themselves.

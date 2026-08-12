@@ -68,6 +68,22 @@ labels carry all the explanation.
 exactly "Using <name — provider · model> Change". One at the top of the
 Tagging pane; one directly below the Mapping pane's "AI-extracted fields"
 title. Change opens the strip with the relevant row expanded and flashed.
+
+Both are `provBand` (modal.js) as of 2026-08-12; they shipped hand-built in
+their own files, which is how one line of pinned copy became two and how the
+band's one rule ended up with two implementations — the Tagging copy hid on
+"is there a picker", the Mapping copy on "is there a label". Neither did what
+the second one's comment claimed. With nothing bound anywhere both printed
+**"Using none configured"**, since that is a perfectly truthy string: a
+provenance line making a claim about nothing, which is the exact thing it
+exists not to do. The empty state is now the component's, and it is useful
+rather than absent — "No tagger configured — Set one up", naming whichever
+capability actually decides (an unset extractor short of a tagger blames the
+tagger, through `delegatesTo`) and keeping the one link that leads to the fix,
+because the reader who has configured nothing is precisely who needs it. The
+planner answers `configured(sel)` so the shell never has to recognise the copy;
+the picker ROW still reads "App default (none configured)", which is a state
+worth naming where a blank would hide it.
 Bands re-render on picker change and pane reveal. **Corrected 2026-08-12 —
 this paragraph shipped claiming a third trigger, "strip toggle", that was never
 wired, and leaning on the reveal push to cover a provider's live model list
@@ -196,13 +212,18 @@ default)" parenthetical); the scrim was requested, not invented.
   Advanced fold with live summary; both bands; capability loop → `.frow`
   rows; research gating; band/summary resolution through `delegatesTo`.
 - `public/mapping-modal.js` — extraction select deleted; new contract
-  `{ isDirty, collect, setExtractionLabel }` + `onExtractionChange` option;
+  `{ isDirty, collect, setExtractionBand }` + `onExtractionChange` option;
   band re-appended by `renderFields` (which wipes its container).
-- `public/capability-present.js` — delegate-aware unset row.
+- `public/capability-present.js` — delegate-aware unset row; `isDelegating`,
+  `plan.delegated` and `plan.configured(sel)` (the three questions the two
+  shells were each answering for themselves, two of them wrongly).
+- `public/modal.js` — `provBand`, the band both panes mount.
 - `public/modal.css` — the generic components above.
 - `server/capabilities.js`, `server/capability-status.js` —
   `boardPickerHome` → `mappingBand` (the only server change).
-- `test/capability-present.test.js` — +1 test pinning the delegate row.
+- `test/capability-present.test.js` — the delegate row, `isDelegating`,
+  `configured`. `test/prov-band.test.js` — the band's empty state.
+  `test/select-empty.test.js` — a live listing that moves the selection.
 
 Board-admins (`canEditAI: false`) see no strip and no bands — they cannot
 fetch the admin feeds, and the settings GET withholds pin columns from them —

@@ -20,7 +20,7 @@
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
 import { ICONS } from "./utils.js";
-import { createModal, sectionHeading } from "./modal.js";
+import { createModal, sectionHeading, provBand } from "./modal.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
@@ -539,17 +539,17 @@ export async function openBoardModal(boardId, opts = {}) {
       <button type="button" class="pane-toggle-btn active" data-pane="tagging">Tagging</button>
     </div>`;
   // The tagging provenance band: which model tags this board, in one line where
-  // the behavior settings are — the pickers themselves live in the strip.
-  // Hidden until the capability feed lands; admin-only, like the strip.
-  const tagBand = canEditAI
-    ? `<div class="prov" id="board-modal-tag-prov" style="margin:0 0 14px" hidden>Using<b></b><button type="button" class="linkbtn">Change</button></div>`
-    : "";
+  // the behavior settings are — the pickers themselves live in the strip. Built
+  // now, filled when the capability feed lands (hidden until then); its Change
+  // reaches the strip through a closure the feed handler replaces, the same way
+  // the Mapping pane's does. Admin-only, like the strip.
+  let openTagRow = () => {};
+  const tagBand = canEditAI ? provBand(() => openTagRow()) : null;
   body.innerHTML = `
     <label>Board name</label>
     <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
     ${paneToggle}
     <div id="board-modal-tagging">
-      ${tagBand}
       <div class="modal-section" style="border-top:none;margin-top:0;padding-top:0;">
         <div id="board-modal-autotag" style="font-size:13px"></div>
         <div class="disclosure" id="board-modal-adv" style="margin-top:12px;">
@@ -579,6 +579,11 @@ export async function openBoardModal(boardId, opts = {}) {
   body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
   body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
   body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
+  if (tagBand) {
+    tagBand.el.hidden = true;
+    tagBand.el.style.margin = "0 0 14px";
+    document.getElementById("board-modal-tagging").prepend(tagBand.el);
+  }
 
   footer.innerHTML = `<button id="board-modal-save">${isNew ? "Create board" : "Save"}</button><button class="ghost" id="board-modal-cancel">Cancel</button>`;
 
@@ -626,7 +631,7 @@ export async function openBoardModal(boardId, opts = {}) {
       // the pickers moved while Mapping was hidden, including a provider's
       // live model list landing (which repaints a select without firing
       // `change`).
-      if (showMapping) mappingPane?.setExtractionLabel(extractionLabel());
+      if (showMapping) mappingPane?.setExtractionBand(extractionBand());
     });
   }
 
@@ -848,7 +853,7 @@ export async function openBoardModal(boardId, opts = {}) {
   // The bands resolve through delegation (an unset extractor follows the
   // tagger), so they derive from closures set once the feed lands; until then
   // the bands stay hidden and the strip head says nothing.
-  let extractionLabel = () => null;
+  let extractionBand = () => null;
   let openExtractRow = () => {};
   if (canEditAI) {
     const wrap = document.getElementById("board-modal-caps");
@@ -926,21 +931,30 @@ export async function openBoardModal(boardId, opts = {}) {
       const tagPicker = capPickers.find((p) => p.cap.id === bandCap?.delegatesTo) || null;
 
       const chosen = (p) => p.plan.chosenLabel(p.keySel.value, p.modelSel.hidden ? null : p.modelSel.value || null);
-      // Follow delegation while unset, so a "Same as the tagger" surface can
-      // still name the model that will actually run — unsaved edits included.
+      // WHICH picker actually decides a capability's model: itself, unless it is
+      // delegating and unset, in which case its target's — resolved live, so
+      // unsaved edits to that target count.
       // `plan.delegated`, never `cap.delegatesTo`: the feed ships the latter for
       // any delegate-floored capability, INCLUDING one that has an app-wide
       // default of its own and therefore isn't following anyone. Reading the
       // raw field made this walk to the tagger in exactly that case, so the
       // band named the tagger's model while extraction ran on its own binding.
-      const resolved = (p) => {
-        if (!p.keySel.value && p.plan.delegated) {
-          const t = capPickers.find((x) => x.cap.id === p.cap.delegatesTo);
-          if (t) return chosen(t);
-        }
-        return chosen(p);
+      const decider = (p) =>
+        (!p.keySel.value && p.plan.delegated && capPickers.find((x) => x.cap.id === p.cap.delegatesTo)) || p;
+      const resolved = (p) => chosen(decider(p));
+      // What a BAND should say: the model that will run, or null plus the copy
+      // for having none. A band is a sentence, so it asks `configured` first —
+      // "Using none configured" is the claim it exists not to make. The agent
+      // noun comes from whichever capability actually decides, so an unset
+      // extractor short of a tagger names the tagger.
+      const bandState = (p) => {
+        const d = decider(p);
+        return {
+          label: d.plan.configured(d.keySel.value) ? chosen(d) : null,
+          empty: `No ${d.cap.agent} configured`,
+        };
       };
-      extractionLabel = () => (extractPicker ? resolved(extractPicker) : null);
+      extractionBand = () => (extractPicker ? bandState(extractPicker) : null);
 
       const openStripAt = (p) => {
         if (!p) return;
@@ -952,10 +966,7 @@ export async function openBoardModal(boardId, opts = {}) {
         p.row.scrollIntoView({ block: "nearest" });
       };
       openExtractRow = () => openStripAt(extractPicker);
-      const tagProv = document.getElementById("board-modal-tag-prov");
-      if (tagProv && tagPicker) {
-        tagProv.querySelector(".linkbtn").addEventListener("click", () => openStripAt(tagPicker));
-      }
+      openTagRow = () => openStripAt(tagPicker);
 
       // Web research is a modifier of the tagging capability: available only
       // while the tagging provider advertises it. Provider-level truth from
@@ -985,11 +996,12 @@ export async function openBoardModal(boardId, opts = {}) {
         summaryEl.textContent = tagPicker
           ? chosen(tagPicker) + (n ? ` · ${n} board choice${n === 1 ? "" : "s"}` : " · all app defaults")
           : "";
-        if (tagProv && tagPicker) {
-          tagProv.hidden = false;
-          tagProv.querySelector("b").textContent = chosen(tagPicker);
+        if (tagBand && tagPicker) {
+          tagBand.el.hidden = false;
+          const { label, empty } = bandState(tagPicker);
+          tagBand.set(label, empty);
         }
-        mappingPane?.setExtractionLabel(extractionLabel());
+        mappingPane?.setExtractionBand(extractionBand());
         syncAi(); // research availability follows the tagging selection
       };
       updateAiPresentation();

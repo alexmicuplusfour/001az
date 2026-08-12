@@ -309,6 +309,25 @@ test("isDelegating: the descriptor says it CAN delegate, a stored default says i
   assert.equal(isDelegating({ bound: { keyId: 7 } }), false, "no delegate floor at all");
 });
 
+// The row and the sentence want different answers out of the same state. A
+// picker row must NAME the empty case ("App default (none configured)") —
+// that is the state, and a blank row would hide it. A provenance band saying
+// "Using none configured" is instead a claim about nothing, which is the one
+// thing a band exists not to say. Two surfaces, two questions, so `configured`
+// is asked separately rather than smuggled into chosenLabel's return.
+test("planBoardPicker: `configured` separates naming a state from naming a model", () => {
+  const plan = planBoardPicker(boardTranscribe, allKeys, null, boardCatalog);
+  assert.equal(plan.configured(""), true, "the app default resolves to something");
+  assert.equal(plan.configured("7"), true, "a pinned key is a choice by definition");
+  assert.equal(plan.configured("whisper"), true, "so is a built-in engine");
+
+  const bare = planBoardPicker({ ...boardTranscribe, running: null }, allKeys, null, boardCatalog);
+  assert.equal(bare.rows[0].label, "App default (none configured)", "the ROW still names it");
+  assert.equal(bare.chosenLabel("", null), "none configured");
+  assert.equal(bare.configured(""), false, "…and the band is told not to say it");
+  assert.equal(bare.configured("7"), true, "a pin names its key whatever the app default lacks");
+});
+
 test("planBoardPicker: preselects come from the board's columns; a vanished pin falls to the default row", () => {
   const keyed = planBoardPicker(boardTranscribe, allKeys, { transcribe_key_id: 7, transcribe_model: "whisper-1" }, boardCatalog);
   assert.equal(keyed.preselect, "7");

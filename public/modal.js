@@ -123,6 +123,44 @@ export function sectionHeading(title, sub, style = "") {
     sub ? `<p style="margin:0;color:#6b6b72;">${sub}</p>` : ""}</div>`;
 }
 
+// A provenance band (`.prov` in modal.css): one quiet centered line naming the
+// thing that will actually do the work, at the point where that matters, plus
+// the way to change it. "Using <what> Change" — the copy is pinned, which is
+// the argument for building it here instead of twice at the two call sites.
+// `onAction` opens wherever the choice actually lives; the band itself operates
+// nothing, which is the whole idea (transparency without another control).
+//
+// The empty state is the component's REASON, not a trailing case. Both bands
+// used to guard with "hide it if there's no label", and both then printed
+// "Using none configured" on an install with nothing bound — the exact claim a
+// provenance line exists not to make, sailing through the guard because that is
+// a perfectly truthy string. Handed no answer this says so plainly and offers
+// the fix, since the reader who has configured nothing is precisely the one who
+// needs that link. `empty` is the caller's because only it knows which kind of
+// model is missing.
+export function provBand(onAction) {
+  const el = document.createElement("div");
+  el.className = "prov";
+  const lead = document.createTextNode("");
+  const what = document.createElement("b");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "linkbtn";
+  btn.addEventListener("click", onAction);
+  el.append(lead, what, btn);
+  return {
+    el,
+    // `label` names what runs; null/"" means nothing does.
+    set(label, empty = "Nothing configured") {
+      const has = !!label;
+      lead.textContent = has ? "Using" : empty;
+      what.textContent = has ? label : "";
+      what.hidden = !has;
+      btn.textContent = has ? "Change" : "Set one up";
+    },
+  };
+}
+
 // Element-building variant: returns the heading node with the title applied
 // via textContent — use when the title carries user-named text.
 export function sectionHeadingEl(title, sub) {
