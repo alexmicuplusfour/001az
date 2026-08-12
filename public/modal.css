@@ -528,7 +528,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
 #connector-browse .modal-dialog { width: min(900px, 94vw); }
 #connector-browse .modal-body { min-height: 0; } /* let .cb-scroll own the scroll */
-.cb-controls { display: flex; gap: 8px; align-items: center; }
+.cb-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cb-search { min-width: 180px; }
 .cb-search {
   flex: 1;
   font: inherit;

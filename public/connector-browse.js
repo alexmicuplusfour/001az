@@ -14,8 +14,8 @@ import { ensurePolling } from './data.js';
 // shared with the ingest preview so the same value never renders two ways.
 
 export function openConnectorBrowse(connectorName) {
-  let descriptor = null; // { label, browse: { columns, sorts, defaultSort, pageSize } }
-  const opts = { sort: null, order: "desc", page: 1, query: "" };
+  let descriptor = null; // { label, browse: { columns, sorts, filters, defaultSort, pageSize } }
+  const opts = { sort: null, order: "desc", page: 1, query: "", filters: {} };
   let hasMore = false;
   let seq = 0;               // stale-response guard
   let debounceTimer = null;
@@ -76,7 +76,7 @@ export function openConnectorBrowse(connectorName) {
     selTh.className = "cb-col-sel";
     selectAll = document.createElement("input");
     selectAll.type = "checkbox";
-    selectAll.title = "Select all on this page";
+    selectAll.title = "Select all loaded rows";
     selectAll.addEventListener("change", () => {
       for (const c of rowCtx.values()) {
         if (c.data.on_board) continue;
@@ -195,31 +195,44 @@ export function openConnectorBrowse(connectorName) {
     renderAddCell(ctx);
   }
 
+  // The server's bulk route admits at most 100 per request — a larger
+  // selection goes in slices, each chunk's rows flipped as it lands so a long
+  // add shows progress instead of a frozen button. A failed chunk stops the
+  // run (don't hammer a failing endpoint); everything already added stays.
+  const BULK_CHUNK = 100;
   async function addIds(ids, btn) {
     if (!ids.length) return;
     if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
     addSelectedBtn.disabled = true;
+    let addedCount = 0;
+    const skipped = [];
     try {
-      const res = await fetch(`/api/boards/${state.boardId}/entities/bulk`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connector: connectorName, ids }),
-      });
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}));
-        toast.error(b.error || "Failed to add");
-        return;
+      for (let i = 0; i < ids.length; i += BULK_CHUNK) {
+        if (ids.length > BULK_CHUNK)
+          addSelectedBtn.textContent = `Adding ${i + 1}–${Math.min(i + BULK_CHUNK, ids.length)} of ${ids.length}…`;
+        const res = await fetch(`/api/boards/${state.boardId}/entities/bulk`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ connector: connectorName, ids: ids.slice(i, i + BULK_CHUNK) }),
+        });
+        if (!res.ok) {
+          const b = await res.json().catch(() => ({}));
+          toast.error(b.error || "Failed to add");
+          break;
+        }
+        const { added = [], skipped: chunkSkipped = [] } = await res.json();
+        for (const row of added) {
+          state.items.unshift(toItem(row));
+          markAddedRow(row); // flip its browse row to on-board (matched by symbol)
+        }
+        for (const s of chunkSkipped) if (s.reason === "duplicate") markOnBoard(s.id);
+        addedCount += added.length;
+        skipped.push(...chunkSkipped);
+        if (added.length) document.dispatchEvent(new Event('app:render'));
       }
-      const { added = [], skipped = [] } = await res.json();
-      for (const row of added) {
-        state.items.unshift(toItem(row));
-        markAddedRow(row); // flip its browse row to on-board (matched by symbol)
-      }
-      for (const s of skipped) if (s.reason === "duplicate") markOnBoard(s.id);
-      if (added.length) {
-        document.dispatchEvent(new Event('app:render'));
+      if (addedCount) {
         ensurePolling();
-        toast(`${added.length} added`);
+        toast(`${addedCount} added`);
       }
       const errs = skipped.filter((s) => s.reason !== "duplicate");
       if (errs.length) toast.error(`${errs.length} couldn't be added`);
@@ -251,6 +264,7 @@ export function openConnectorBrowse(connectorName) {
     moreBtn.disabled = true;
     const params = new URLSearchParams({ sort: opts.sort, order: opts.order, page: String(opts.page) });
     if (opts.query) params.set("q", opts.query);
+    for (const [key, value] of Object.entries(opts.filters)) params.set(key, value);
     try {
       const r = await fetch(`/api/boards/${state.boardId}/connector-list?${params}`, { cache: "no-store" });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
@@ -322,6 +336,27 @@ export function openConnectorBrowse(connectorName) {
       sortSel.appendChild(o);
     }
     sortSel.value = opts.sort;
+    // Narrowing filters, straight from the manifest — no declaration, no
+    // controls, so connectors without them keep today's three-control row.
+    for (const f of descriptor.browse.filters || []) {
+      const sel = document.createElement("select");
+      sel.className = "cb-sort cb-filter";
+      const all = document.createElement("option");
+      all.value = "";
+      all.textContent = `All ${(f.label || f.key).toLowerCase()}s`;
+      sel.appendChild(all);
+      for (const value of f.options || []) {
+        const o = document.createElement("option");
+        o.value = value; o.textContent = value;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        if (sel.value) opts.filters[f.key] = sel.value;
+        else delete opts.filters[f.key];
+        reset();
+      });
+      controls.insertBefore(sel, sortSel);
+    }
     renderOrder();
     buildHead();
     fetchPage(false);
