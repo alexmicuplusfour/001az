@@ -4,7 +4,8 @@
 // domain's search/fetch contract and returns raw values; the connector
 // (crypto/index.js) derives identity and stamps provenance, so the provider
 // stays agnostic about its own registry name.
-import { providerSignal } from "../runtime.js";
+import { providerSignal, num } from "../runtime.js";
+import { createQuoteCache, pickFields } from "./quote-cache.js";
 
 const BASE = "https://api.coingecko.com/api/v3";
 
@@ -74,8 +75,6 @@ export async function search(query, { apiKey, pace } = {}) {
 // the domain's canonical change fields.
 const CHANGE_WINDOWS = "1h,24h,7d,30d";
 
-const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
-
 // One coin's canonical crypto fields from a /coins/markets row. The row is the
 // cheap shape (the /coins/{id} detail is ~50× the bytes for the same numbers),
 // and with CHANGE_WINDOWS it carries every canonical field: multi-window
@@ -94,17 +93,13 @@ const marketFields = (c) => ({
   url:                { v: `https://www.coingecko.com/en/coins/${c.id}`, kind: "url" },
 });
 
-// Quote cache: markets rows by coin id, filled in batches. The refresh sweep
-// prefetches its whole due set (250 ids per request — the endpoint's own cap),
-// then each entity's fetchFields is a cache hit — a 100-coin board's sweep
-// pays 1 request instead of 100. TTL matches CoinGecko's own server cache for
-// this endpoint (60 s on the public/demo tier), so a shorter one buys nothing.
-const QUOTE_TTL = 60 * 1000;
-const quoteCache = new Map(); // id -> { at, row }
-const freshQuote = (id) => {
-  const hit = quoteCache.get(id);
-  return hit && Date.now() - hit.at < QUOTE_TTL ? hit.row : null;
-};
+// Markets rows by coin id, filled in batches. The refresh sweep prefetches its
+// whole due set (250 ids per request — the endpoint's own cap), then each
+// entity's fetchFields is a cache hit: a 100-coin board's sweep pays 1 request
+// instead of 100. Every path that already buys these rows warms it, so a
+// browse-then-add costs nothing either.
+const quotes = createQuoteCache();
+const warmQuotes = quotes.warm;
 
 // `extra` carries an already-encoded query fragment (the category filter);
 // the browse path is its only caller — refresh/prefetch never narrows.
@@ -121,10 +116,7 @@ async function marketRowsByIds(ids, { apiKey, pace } = {}, extra = "") {
     if (!r.ok) throw cgFail(r, "markets");
     out.push(...(await r.json()));
   }
-  for (const row of out) {
-    quoteCache.set(row.id, { at: Date.now(), row });
-    if (quoteCache.size > 20000) quoteCache.delete(quoteCache.keys().next().value);
-  }
+  warmQuotes(out);
   return out;
 }
 
@@ -132,16 +124,19 @@ async function marketRowsByIds(ids, { apiKey, pace } = {}, extra = "") {
 // prefetch leg). Best-effort by contract: a failure here just means the
 // per-entity path pays retail.
 export async function prefetch(ids, ctx = {}) {
-  const missing = [...new Set(ids)].filter((id) => !freshQuote(id));
+  const missing = quotes.missing(ids);
   if (missing.length) await marketRowsByIds(missing, ctx);
 }
+
+// One coin's market row: the warm one, or the one request that buys it.
+const quoteFor = async (id, ctx) => quotes.fresh(id) || (await marketRowsByIds([id], ctx))[0];
 
 // One coin's canonical crypto fields. Returns the provider id + symbol +
 // display name and per-field { v, kind }; the connector adds identity and the
 // `src` provenance tag. Served from the markets shape — same request class as
 // a one-coin browse page, ~2% of the /coins/{id} payload it used to buy.
 export async function fetchEntity(id, ctx = {}) {
-  const row = freshQuote(id) || (await marketRowsByIds([id], ctx))[0];
+  const row = await quoteFor(id, ctx);
   if (!row) throw new Error(`CoinGecko: no market data for "${id}"`);
   return {
     id: row.id,
@@ -157,16 +152,12 @@ export async function fetchEntity(id, ctx = {}) {
 // `url` is derivable from the id alone — a url-only refresh never spends HTTP.
 export async function fetchFields(id, keys, ctx = {}) {
   const want = [...new Set(keys || [])];
-  const fields = {};
-  if (want.length === 1 && want[0] === "url") {
-    fields.url = { v: `https://www.coingecko.com/en/coins/${id}`, kind: "url" };
-    return { fields };
-  }
-  const row = freshQuote(id) || (await marketRowsByIds([id], ctx))[0];
-  if (!row) return { fields }; // unknown/inactive id → runtime falls back to fetchEntity's error path
-  const all = marketFields(row);
-  for (const k of want) if (all[k]) fields[k] = all[k];
-  return { fields };
+  if (want.length === 1 && want[0] === "url")
+    return { fields: { url: { v: `https://www.coingecko.com/en/coins/${id}`, kind: "url" } } };
+  const row = await quoteFor(id, ctx);
+  // Unknown/inactive id → no keys served, and runtime.refresh falls back to
+  // fetchEntity's error path rather than writing nulls over live values.
+  return { fields: row ? pickFields(marketFields(row), want) : {} };
 }
 
 // Price history for the chart face (slice 5d): the market_chart endpoint, whose
@@ -258,7 +249,16 @@ export async function list({ sort, order, page = 1, pageSize = 50, query, catego
     { headers: cgHeaders(apiKey), signal: providerSignal() }
   );
   if (!r.ok) throw cgFail(r, "list");
-  return (await r.json()).map(marketRow);
+  const rows = await r.json();
+  // These ARE quote rows — same endpoint, same `price_change_percentage`
+  // windows the refresh path asks for — so keep them. Without this, browsing a
+  // page and adding what you see re-bought every row one at a time
+  // (`fetchEntity` → cache miss → a 250-id endpoint used for one id): 100
+  // metered requests for a 100-row bulk add, and 25 per feed drain tick, all
+  // for data already in hand. The query branch warms via marketRowsByIds and
+  // the CMC sibling warms its listings page; this was the one path that didn't.
+  warmQuotes(rows);
+  return rows.map(marketRow);
 }
 
 // Browse filter vocabularies (runtime.browseFilters). CoinGecko's category
@@ -274,12 +274,12 @@ export async function filterOptions({ apiKey, pace } = {}) {
   await pace?.();
   const r = await fetch(`${BASE}/coins/categories/list`, { headers: cgHeaders(apiKey), signal: providerSignal() });
   if (!r.ok) throw cgFail(r, "categories");
+  // Ordering is browseFilters' job; the only thing to do here is name the
+  // options. Some names carry stray whitespace (" DN-404" sorted above
+  // everything until this trim) — a display artifact of their data, not a name.
   const options = (await r.json())
     .filter((c) => c?.category_id)
-    // Some names carry stray whitespace (" DN-404" sorted above everything
-    // until this trim) — that's a display artifact of their data, not a name.
-    .map((c) => ({ value: c.category_id, label: String(c.name || c.category_id).trim() }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .map((c) => ({ value: c.category_id, label: String(c.name || c.category_id).trim() }));
   categoryCache = { at: Date.now(), options };
   return { category: options };
 }
@@ -295,6 +295,6 @@ export async function testConnection({ apiKey, pace } = {}) {
 
 // Test seam only (house convention: provider-pacing's _resetBuckets).
 export function _resetQuoteCache() {
-  quoteCache.clear();
+  quotes.reset();
   categoryCache = { at: 0, options: null };
 }

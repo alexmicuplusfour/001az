@@ -809,11 +809,15 @@ test("browseFilters: static vocabularies stand, provider ones resolve, a dead on
   await installConnectors(db, "filtconn:withOptions");
   await setSetting(db, "filtconn_key_withOptions", "FK");
 
+  // One normalized {value,label} shape whatever the source, and ONE ordering:
+  // the resolver sorts by label, so a provider that forgets to can't ship an
+  // unsorted 857-entry dropdown, and static lists don't order differently from
+  // supplied ones. Both lists below are declared out of order on purpose.
   const filters = await runtime.browseFilters(db, conn);
   assert.deepEqual(filters, [
-    { key: "sector", label: "Sector", options: [{ value: "Tech", label: "Tech" }, { value: "Energy", label: "Energy" }] },
-    { key: "category", label: "Category", options: [{ value: "meme", label: "Meme" }, { value: "l1", label: "Layer 1" }] },
-  ], "one normalized {value,label} shape whatever the source");
+    { key: "sector", label: "Sector", options: [{ value: "Energy", label: "Energy" }, { value: "Tech", label: "Tech" }] },
+    { key: "category", label: "Category", options: [{ value: "l1", label: "Layer 1" }, { value: "meme", label: "Meme" }] },
+  ]);
   assert.deepEqual(calls, ["FK"], "the provider call is threaded the key");
 
   // A provider that can't supply the vocabulary: its control is dropped, the

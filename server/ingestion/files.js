@@ -16,6 +16,7 @@ import { withTx, recordIngest, getSourceConnection, listSourceConnections, withP
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
 import { acceptsName, extOf } from "../sources/index.js";
 import { getSourceBackend, sourceModules } from "./sources/index.js";
+import { SAFETY_CAP, cacheTtl, pruneExpired } from "./window-cache.js";
 import { resolveJailed } from "./sources/folder.js";
 import { pluginInstalled, mediaLimitLookup } from "../plugins.js";
 
@@ -47,28 +48,18 @@ const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 // and caches the result for INGEST_FEED_CACHE_MS, so cost is bounded by
 // FREQUENCY (one listing per cache window, reused by back-to-back drain ticks
 // and preview pages) rather than by size, with no reach limit. Same mechanism
-// as the connector feed. SAFETY_CAP is only an out-of-memory backstop for a
-// pathological source (narrow the base path if you ever hit it). Candidate
-// objects are read-only downstream (applyFilters/applySort copy), so serving a
-// cached array by reference is safe. Entries are pruned on write once past
-// their window (an expired entry is a guaranteed miss anyway), so the map holds
-// only the actively-swept sources — a re-pointed or deleted board's stale key,
-// and its full candidate array, doesn't linger for the worker's lifetime.
-const SAFETY_CAP = 100000;
+// as the connector feed, and now literally the same pieces — SAFETY_CAP, the
+// TTL read and the prune live in ./window-cache.js, because the connector
+// adapter had copied two of the three and was missing the prune. SAFETY_CAP is
+// only an out-of-memory backstop for a pathological source (narrow the base
+// path if you ever hit it). Candidate objects are read-only downstream
+// (applyFilters/applySort copy), so serving a cached array by reference is
+// safe. Entries are pruned on write once past their window (an expired entry
+// is a guaranteed miss anyway), so the map holds only the actively-swept
+// sources — a re-pointed or deleted board's stale key, and its full candidate
+// array, doesn't linger for the worker's lifetime.
 const windowCache = new Map();
-// TTL read per call: 0 = off (the tests use this); empty string counts as unset
-// → the 60s default (compose passes an unset knob through as "", and Number("")
-// is 0, which would silently disable the cache in the container).
-const cacheTtl = () => {
-  const v = process.env.INGEST_FEED_CACHE_MS;
-  return v == null || v === "" ? 60000 : Number(v);
-};
-
-// Evict entries whose window has lapsed. Called on every write, so residency
-// tracks the live set rather than every config ever enumerated.
-function pruneWindowCache(now, ttl) {
-  for (const [k, v] of windowCache) if (now - v.at >= ttl) windowCache.delete(k);
-}
+const pruneWindowCache = (now, ttl) => pruneExpired(windowCache, now, ttl);
 // Test seam: the cache is module-private; tests assert it doesn't accumulate.
 export const _windowCacheSize = () => windowCache.size;
 

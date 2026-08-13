@@ -181,7 +181,7 @@ test("coingecko: the category filter narrows server-side AND composes with a sea
   }
 });
 
-test("coingecko.filterOptions: the category taxonomy is fetched once a day, sorted by name", async () => {
+test("coingecko.filterOptions: the category taxonomy is fetched once a day, named not ordered", async () => {
   coingecko._resetQuoteCache();
   const original = globalThis.fetch;
   let hits = 0;
@@ -196,11 +196,15 @@ test("coingecko.filterOptions: the category taxonomy is fetched once a day, sort
     ]);
   };
   try {
+    // Naming is this layer's job — including trimming their stray whitespace,
+    // which is a display artifact of their data. ORDERING is not: browseFilters
+    // sorts every vocabulary so one provider forgetting can't ship an unsorted
+    // 857-entry dropdown, so these come back in the order the API gave them.
     const { category } = await coingecko.filterOptions({});
     assert.deepEqual(category, [
-      { value: "ai-agents", label: "AI Agents" },
       { value: "meme-token", label: "Meme" },
       { value: "zk", label: "Zero Knowledge (ZK)" },
+      { value: "ai-agents", label: "AI Agents" },
     ]);
     await coingecko.filterOptions({});
     assert.equal(hits, 1, "cached — a dropdown's vocabulary isn't re-bought per open");

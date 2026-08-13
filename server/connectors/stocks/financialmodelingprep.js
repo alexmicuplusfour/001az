@@ -1,21 +1,23 @@
-// Financial Modeling Prep provider for the stocks connector. V1 deliberately
-// targets actively traded US equities in USD. FMP's stable API supplies search,
-// screening, quotes, company profiles, and end-of-day price history.
+// Financial Modeling Prep provider for the stocks connector: US-LISTED
+// securities in USD — companies including foreign issuers' ADRs, ETFs and
+// closed-end funds, i.e. everything this tier can actually quote. FMP's stable
+// API supplies search, screening, quotes, company profiles, and end-of-day
+// price history.
 //
 // Scale posture (planning/connector-scale-plan.md has the 2026-08-03 numbers;
 // re-measured 2026-08-13, planning/connector-full-catalog.md): the
-// `company-screener` is the one bulk fact — a single call now answers in
-// under a second at any depth and carries price/market cap/volume/sector/
-// industry/exchange for the WHOLE US-listed equity universe (4,609 rows
-// measured; the endpoint's page param returns overlapping pages, so depth
-// comes from one big limit, never pagination). Batch-quote endpoints stay
-// premium-gated and comma-list `quote` still silently returns [] — so the
-// screener snapshot, cached and revalidated below, is what makes a
-// 1000-entity board cheap: browse, feeds, and the bulk of the refresh sweep
-// all read from it, and only change_1d costs a per-symbol quote. Symbols the
-// screener doesn't carry (OTC, ETFs) are reachable through the list() search
-// bridge, each served by one quote.
-import { providerSignal, providerBudgetMs } from "../runtime.js";
+// `company-screener` is the one bulk fact — it answers in under a second and
+// carries price/market cap/volume/sector/industry/exchange for the whole
+// universe. It caps a RESPONSE at 10,000 rows however large a limit you send,
+// and its page param returns overlapping pages, so depth comes from asking in
+// disjoint slices (one per venue) and unioning them — never from pagination.
+// Batch-quote endpoints stay premium-gated and comma-list `quote` still
+// silently returns [] — so the screener snapshot, cached and revalidated
+// below, is what makes a 1000-entity board cheap: browse, feeds, and the bulk
+// of the refresh sweep all read from it, and only change_1d costs a per-symbol
+// quote. Symbols outside the venue list are reachable through the list()
+// search bridge, each served by one quote.
+import { providerSignal, providerBudgetMs, num } from "../runtime.js";
 
 const BASE = "https://financialmodelingprep.com/stable";
 const PROFILE_TTL = 6 * 60 * 60 * 1000;
@@ -31,12 +33,13 @@ const SCREENER_MAX_AGE = 60 * 60 * 1000;
 // search surfaces those.
 const QUOTABLE_EXCHANGE = /NASDAQ|NYSE|AMEX|OTC/i;
 
-// How deep the screener universe goes — the ceiling for browse, feeds, and
-// market-cap rank. One request either way (depth is free, and the full
-// US-listed equity universe measured 4,609 rows on 2026-08-13 — the default
-// fetches ALL of it, with headroom for listings growth). The knob trades only
-// memory (~430 KB per 1000 rows) and response size; it exists to shrink
-// those, not to protect the API. Read per call so tests can steer it.
+// The `limit` each screener slice asks for. Depth is free — the universe is
+// one cached fill however deep — so the default is set well above what the
+// catalog holds rather than tuned to it, and the knob exists to SHRINK memory
+// and response size, not to protect the API. It cannot raise the real ceiling:
+// FMP caps any single response at SCREENER_MAX_ROWS whatever this says, which
+// is why the fill is partitioned by venue below. Read per call so tests can
+// steer it.
 const universeRows = () =>
   Math.max(100, Math.min(100000, Number(process.env.FMP_UNIVERSE_ROWS) || 30000));
 
@@ -50,7 +53,8 @@ const universeRows = () =>
 // major venues; set FMP_EXCHANGES to widen. OTC symbols remain addable by
 // search either way — this governs what BROWSE and FEEDS enumerate.
 const universeExchanges = () =>
-  process.env.FMP_EXCHANGES || "NASDAQ,NYSE,AMEX";
+  (process.env.FMP_EXCHANGES || "NASDAQ,NYSE,AMEX")
+    .split(",").map((v) => v.trim()).filter(Boolean);
 
 export const label = "Financial Modeling Prep";
 export const description = "US stock quotes, fundamentals, and price history — needs a key";
@@ -178,14 +182,10 @@ async function ratiosFor(symbol, apiKey, pace) {
   return value;
 }
 
-function number(value) {
-  return value == null || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
-}
-
 // FMP zeroes `volume` outside trading sessions (verified 2026-08-13, even for
 // AAPL) — a 0 here means "no prints reported yet", never a real reading.
 // Serve null so the UI shows "—" instead of a false zero.
-const tradedVolume = (value) => number(value) || null;
+const tradedVolume = (value) => num(value) || null;
 
 export async function fetchEntity(id, { apiKey, pace } = {}) {
   const requested = String(id || "").trim().toUpperCase();
@@ -209,17 +209,17 @@ export async function fetchEntity(id, { apiKey, pace } = {}) {
   const symbol = symbolOf(quote) || symbolOf(profile) || requested;
   const change = quote.changePercentage ?? quote.changesPercentage ?? profile?.changePercentage ?? profile?.changesPercentage;
   const exchange = exchangeOf(quote) || exchangeOf(profile) || null;
-  const dividendYield = number(ratios?.dividendYieldTTM);
+  const dividendYield = num(ratios?.dividendYieldTTM);
   return {
     id: symbol,
     symbol,
     display_name: quote.name || profile?.companyName || symbol,
     fields: {
-      price:      { v: number(quote.price ?? profile?.price), kind: "number" },
-      change_1d:  { v: number(change), kind: "number" },
-      market_cap: { v: number(quote.marketCap ?? profile?.marketCap), kind: "number" },
+      price:      { v: num(quote.price ?? profile?.price), kind: "number" },
+      change_1d:  { v: num(change), kind: "number" },
+      market_cap: { v: num(quote.marketCap ?? profile?.marketCap), kind: "number" },
       volume:     { v: tradedVolume(quote.volume ?? profile?.volume), kind: "number" },
-      pe_ratio:   { v: number(quote.pe ?? ratios?.priceToEarningsRatioTTM), kind: "number" },
+      pe_ratio:   { v: num(quote.pe ?? ratios?.priceToEarningsRatioTTM), kind: "number" },
       dividend_yield: {
         v: dividendYield == null ? null : dividendYield * 100,
         kind: "number",
@@ -247,8 +247,8 @@ function browseRow(row) {
     values: {
       rank: row?.mcapRank ?? null,
       name,
-      price: number(row?.price),
-      market_cap: number(row?.marketCap),
+      price: num(row?.price),
+      market_cap: num(row?.marketCap),
       volume: tradedVolume(row?.volume),
       // Bridge rows (quote-filled, no screener row) have no flags to read, so
       // they carry no type rather than a guessed "Stock".
@@ -274,10 +274,33 @@ function sortRows(rows, sort, order) {
 }
 
 // The screener universe: rows + a symbol index for O(1) refresh lookups +
-// the in-flight fetch shared by every concurrent caller (preview, sweep, and
-// browse race on a cold board — without single-flight each would burn its own
-// ~15 s metered request; with it, one request, one token, one failure wave).
-let screenerCache = { at: 0, rows: null, bySymbol: null, inflight: null };
+// per-order sorted views + the in-flight fetch shared by every concurrent
+// caller (preview, sweep, and browse race on a cold board — without
+// single-flight each would burn its own ~15 s metered request; with it, one
+// request, one token, one failure wave).
+//
+// `sorted` memoizes the ORDERING, not the rows: an unfiltered page is a slice
+// of a sorted array, and the ordering is identical for every page of a given
+// sort until the next fill. Without it each browse page and each of the ~100
+// enumeration slices re-sorted the whole universe — ~11 ms of blocking sort
+// per call at 26k rows, so a single window fill spent well over a second
+// sorting the same array into the same order. Filtered and queried calls still
+// sort their own (smaller) subset.
+let screenerCache = { at: 0, rows: null, bySymbol: null, sorted: new Map(), inflight: null };
+
+// The universe in one order, computed once per fill. `rows` is only ever
+// replaced wholesale (fetchUniverse builds a new cache object), so a memo can
+// never outlive the array it describes.
+function sortedUniverse(rows, sort, order) {
+  if (rows !== screenerCache.rows) return sortRows(rows, sort, order);
+  const key = `${sort || ""}|${order || ""}`;
+  let view = screenerCache.sorted.get(key);
+  if (!view) {
+    view = sortRows(rows, sort, order);
+    screenerCache.sorted.set(key, view);
+  }
+  return view;
+}
 
 // FMP caps a screener RESPONSE at 10,000 rows however big a `limit` you send
 // (measured 2026-08-13: limit=30000 returned exactly 10,000, and the response
@@ -341,34 +364,33 @@ async function venueRows(exchange, apiKey, pace) {
 function fetchUniverse(apiKey, pace) {
   if (!screenerCache.inflight) {
     const p = (async () => {
-      const venues = universeExchanges().split(",").map((v) => v.trim()).filter(Boolean);
-      const perVenue = await Promise.all(venues.map((v) => venueRows(v, apiKey, pace)));
+      const perVenue = await Promise.all(universeExchanges().map((v) => venueRows(v, apiKey, pace)));
       // Partitions are disjoint by construction; dedupe anyway, so a symbol
       // FMP reports under two venues can't become two rows (and two ranks).
-      const unique = new Map();
+      // Keyed by symbol, so this Map IS the refresh index — no second pass to
+      // rebuild the same thing (26k rows and 26k symbolOf calls, per fill).
+      const bySymbol = new Map();
       for (const row of perVenue.flat()) {
         const symbol = symbolOf(row);
-        if (symbol && !unique.has(symbol)) unique.set(symbol, row);
+        if (symbol && !bySymbol.has(symbol)) bySymbol.set(symbol, row);
       }
-      const list = [...unique.values()];
+      const list = [...bySymbol.values()];
       // FMP leaves marketCap 0 on unpriced fringe listings and zeroes volume
       // outside sessions — both are missing data, not measurements. Null them
       // at fill time so ascending sorts show real micro-caps first, not a run
       // of $0 rows (sortRows places nulls last in either direction).
       for (const row of list) {
-        if (!number(row?.marketCap)) row.marketCap = null;
-        if (!number(row?.volume)) row.volume = null;
+        if (!num(row?.marketCap)) row.marketCap = null;
+        if (!num(row?.volume)) row.volume = null;
         row.assetType = typeOf(row);
       }
       // Market-cap rank within the universe, computed here rather than trusted
       // from response order — it makes "top 50 stocks" expressible as a feed
       // filter (rank ≤ 50), mirroring crypto's market_cap_rank.
       [...list]
-        .sort((a, b) => (number(b?.marketCap) ?? 0) - (number(a?.marketCap) ?? 0))
+        .sort((a, b) => (num(b?.marketCap) ?? 0) - (num(a?.marketCap) ?? 0))
         .forEach((row, i) => { row.mcapRank = i + 1; });
-      const bySymbol = new Map();
-      for (const row of list) bySymbol.set(symbolOf(row), row);
-      screenerCache = { at: Date.now(), rows: list, bySymbol, inflight: null };
+      screenerCache = { at: Date.now(), rows: list, bySymbol, sorted: new Map(), inflight: null };
       return list;
     })();
     screenerCache.inflight = p;
@@ -437,7 +459,7 @@ async function searchBridge(q, inUniverse, apiKey, pace) {
           symbol: h.symbol,
           companyName: quote.name || h.label,
           price: quote.price,
-          marketCap: number(quote.marketCap) || null,
+          marketCap: num(quote.marketCap) || null,
           volume: quote.volume,
           exchangeShortName: quote.exchange || h.exchange,
         };
@@ -508,7 +530,10 @@ export async function list(
   // excludes them, exactly as the sector filter already does.
   if (type) base = base.filter((row) => (row?.assetType ?? null) === type);
 
-  const sorted = sortRows(base, sort, order);
+  // `base === universe` on the unfiltered path, which is what browse paging
+  // and the whole feed enumeration take — those share one memoized ordering
+  // instead of re-sorting 26k rows per page. Anything narrowed sorts its own.
+  const sorted = sortedUniverse(base, sort, order);
   const pageRows = sorted.slice((pageNo - 1) * size, pageNo * size);
   return pageRows.map(browseRow);
 }
@@ -535,8 +560,8 @@ export async function fetchFields(id, keys, { apiKey, pace } = {}) {
     const universe = await stockUniverse(apiKey, pace).catch(() => null);
     row = universe ? screenerCache.bySymbol?.get(symbol) || null : null;
     if (row) {
-      if (want.has("price"))      fields.price      = { v: number(row.price), kind: "number" };
-      if (want.has("market_cap")) fields.market_cap = { v: number(row.marketCap), kind: "number" };
+      if (want.has("price"))      fields.price      = { v: num(row.price), kind: "number" };
+      if (want.has("market_cap")) fields.market_cap = { v: num(row.marketCap), kind: "number" };
       if (want.has("volume"))     fields.volume     = { v: tradedVolume(row.volume), kind: "number" };
       if (want.has("sector"))     fields.sector     = { v: row.sector || null, kind: "text" };
       if (want.has("industry"))   fields.industry   = { v: row.industry || null, kind: "text" };
@@ -556,10 +581,10 @@ export async function fetchFields(id, keys, { apiKey, pace } = {}) {
     if (quote) {
       if (want.has("change_1d")) {
         const change = quote.changePercentage ?? quote.changesPercentage;
-        fields.change_1d = { v: number(change), kind: "number" };
+        fields.change_1d = { v: num(change), kind: "number" };
       }
-      if (want.has("price"))      fields.price      = { v: number(quote.price), kind: "number" };
-      if (want.has("market_cap")) fields.market_cap = { v: number(quote.marketCap), kind: "number" };
+      if (want.has("price"))      fields.price      = { v: num(quote.price), kind: "number" };
+      if (want.has("market_cap")) fields.market_cap = { v: num(quote.marketCap), kind: "number" };
       if (want.has("volume"))     fields.volume     = { v: tradedVolume(quote.volume), kind: "number" };
       if (want.has("exchange"))   fields.exchange   = { v: exchangeOf(quote) || null, kind: "text" };
     }
@@ -569,9 +594,9 @@ export async function fetchFields(id, keys, { apiKey, pace } = {}) {
   // ratios call yields null values rather than a dead refresh.
   if (want.has("pe_ratio") || want.has("dividend_yield")) {
     const ratios = await ratiosFor(symbol, apiKey, pace).catch(() => null);
-    if (want.has("pe_ratio")) fields.pe_ratio = { v: number(ratios?.priceToEarningsRatioTTM), kind: "number" };
+    if (want.has("pe_ratio")) fields.pe_ratio = { v: num(ratios?.priceToEarningsRatioTTM), kind: "number" };
     if (want.has("dividend_yield")) {
-      const dy = number(ratios?.dividendYieldTTM);
+      const dy = num(ratios?.dividendYieldTTM);
       fields.dividend_yield = { v: dy == null ? null : dy * 100, kind: "number" };
     }
   }
@@ -602,7 +627,7 @@ export async function history(id, period, { apiKey, pace } = {}) {
   return (Array.isArray(rows) ? rows : [])
     .map((row) => ({
       t: Date.parse(`${row.date}T00:00:00Z`),
-      price: number(row.close),
+      price: num(row.close),
     }))
     .filter((row) => Number.isFinite(row.t) && Number.isFinite(row.price))
     .sort((a, b) => a.t - b.t);
@@ -615,19 +640,35 @@ export async function history(id, period, { apiKey, pace } = {}) {
 const INDUSTRY_TTL = 24 * 60 * 60 * 1000;
 let industryCache = { at: 0, options: null };
 
-export async function filterOptions({ apiKey, pace } = {}) {
+export async function filterOptions(ctx = {}) {
+  // Exchange is the venue list this universe was actually built from, so the
+  // control can never offer a venue browse doesn't carry — or, as when it was
+  // frozen in the manifest, refuse one it does: widening FMP_EXCHANGES used to
+  // widen the universe while the dropdown kept the old three and the route's
+  // whitelist rejected the new one. Derived, not declared, so the knob is
+  // wired end to end.
+  const options = { exchange: universeExchanges() };
+  // Industries cost a request, so one failing endpoint must not also cost the
+  // exchange control (browseFilters drops every provider-supplied filter when
+  // filterOptions throws).
+  try { options.industry = await industries(ctx); }
+  catch (e) { console.warn(`FMP: industry vocabulary unavailable (other filters unaffected): ${e.message}`); }
+  return options;
+}
+
+async function industries({ apiKey, pace } = {}) {
   if (industryCache.options && Date.now() - industryCache.at < INDUSTRY_TTL)
-    return { industry: industryCache.options };
+    return industryCache.options;
   const rows = await fmp("available-industries", {}, apiKey, { pace });
+  // Bare strings: browseFilters normalizes a string into {value,label} and
+  // owns the ordering, so this only has to unwrap FMP's row shape. (The
+  // endpoint answers [{ industry: "Software - Application" }, …]; older
+  // shapes answered bare strings. Take either.)
   const options = (Array.isArray(rows) ? rows : [])
-    // The endpoint answers [{ industry: "Software - Application" }, …]; older
-    // shapes answered bare strings. Take either.
     .map((row) => (typeof row === "string" ? row : row?.industry))
-    .filter(Boolean)
-    .map((industry) => ({ value: industry, label: industry }))
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .filter(Boolean);
   industryCache = { at: Date.now(), options };
-  return { industry: options };
+  return options;
 }
 
 export async function testConnection({ apiKey, pace } = {}) {
@@ -639,7 +680,7 @@ export async function testConnection({ apiKey, pace } = {}) {
 // Test seams only (house convention: provider-pacing's _resetBuckets). Aging
 // lets a test cross the TTL/hard-bar thresholds without waiting them out.
 export function _resetScreenerCache() {
-  screenerCache = { at: 0, rows: null, bySymbol: null, inflight: null };
+  screenerCache = { at: 0, rows: null, bySymbol: null, sorted: new Map(), inflight: null };
   screenerDown = { until: 0, error: null };
   industryCache = { at: 0, options: null };
   bridgeCache.clear();

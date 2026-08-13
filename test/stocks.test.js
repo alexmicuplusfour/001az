@@ -488,11 +488,15 @@ test("FMP: industry is a provider-supplied filter vocabulary, and it narrows the
     throw new Error(`unexpected URL ${u}`);
   };
   try {
-    const { industry } = await fmp.filterOptions({ apiKey: "k" });
-    assert.deepEqual(industry, [
-      { value: "Biotechnology", label: "Biotechnology" },
-      { value: "Software - Application", label: "Software - Application" },
-    ]);
+    // Bare values: shaping and ordering are browseFilters' job, so a provider
+    // only has to say what the vocabulary IS.
+    const { industry, exchange } = await fmp.filterOptions({ apiKey: "k" });
+    assert.deepEqual(industry, ["Software - Application", "Biotechnology"]);
+    // Exchange is derived from the venue list the universe was built from, so
+    // widening FMP_EXCHANGES widens the control with it — frozen in the
+    // manifest, the two used to disagree and the route rejected the new venue.
+    assert.deepEqual(exchange, ["NASDAQ", "NYSE", "AMEX"]);
+
     await fmp.filterOptions({ apiKey: "k" });
     assert.equal(industryHits, 1, "cached a day — not re-bought per modal open");
 

@@ -2571,9 +2571,16 @@ app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => 
   // match nothing. Provider-supplied vocabularies (CoinGecko categories, FMP
   // industries) resolve from that one place, so the control and the guard
   // can't drift.
-  for (const f of await connector.browseFilters(db)) {
-    const v = req.query[f.key];
-    if (v != null && f.options.some((o) => o.value === String(v))) opts[f.key] = String(v);
+  //
+  // Resolved only when the request actually carries a filter. Most browse
+  // pages carry none, and resolving costs a provider lookup plus — on a cold
+  // vocabulary — a metered fetch INSIDE this request, which is exactly the
+  // I/O the sibling filters route exists to keep off the paging path.
+  if ((browse.filters || []).some((f) => req.query[f.key] != null)) {
+    for (const f of await connector.browseFilters(db)) {
+      const v = req.query[f.key];
+      if (v != null && f.options.some((o) => o.value === String(v))) opts[f.key] = String(v);
+    }
   }
   let rows;
   try {

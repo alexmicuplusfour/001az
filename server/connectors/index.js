@@ -75,13 +75,12 @@ export async function prefetchDueRefreshes(db, rows) {
     if (!byConn.has(name)) byConn.set(name, []);
     byConn.get(name).push(row);
   }
-  for (const [name, group] of byConn) {
-    try {
-      await CONNECTORS[name].prefetchRefresh(db, group);
-    } catch (e) {
-      console.warn(`${name} refresh prefetch failed (per-entity fallback): ${e.message}`);
-    }
-  }
+  // Concurrently: the groups are independent by construction — different
+  // domains, different providers, separate token buckets — so serialising them
+  // only added a provider round-trip to the sweep tick.
+  await Promise.all([...byConn].map(([name, group]) =>
+    CONNECTORS[name].prefetchRefresh(db, group).catch((e) =>
+      console.warn(`${name} refresh prefetch failed (per-entity fallback): ${e.message}`))));
 }
 
 // Manifest listing for the client. `providers` is static (descriptors, no key
@@ -95,7 +94,12 @@ export function listConnectors() {
     description: c.manifest.description,
     fields: c.manifest.fields,
     faces: c.manifest.faces || [],
-    browse: c.manifest.browse || null,
+    // `filters` is deliberately withheld: the manifest's copy is the
+    // DECLARATION, and a `from: "provider"` entry carries no options until the
+    // filters route resolves it. Shipping both shapes invites a client to read
+    // the half-built one — the columns/sorts here are the whole of what this
+    // payload can answer for.
+    browse: c.manifest.browse ? { ...c.manifest.browse, filters: undefined } : null,
     template: c.manifest.template,
     providers: c.providerList(),
   }));

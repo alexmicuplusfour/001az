@@ -12,6 +12,7 @@
 import { getConnector } from "../connectors/index.js";
 import { addConnectorEntity } from "../connectors/add.js";
 import { recordIngest } from "../db.js";
+import { SAFETY_CAP, cacheTtl, pruneExpired } from "./window-cache.js";
 
 // Browse column kinds are display vocabulary (usd/percent drive client
 // formatting); the filter engine only knows text/number/date.
@@ -30,11 +31,15 @@ const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "n
 // A metered catalog (CoinGecko/CMC, one request per 250 rows) genuinely costs
 // more to walk in full — an operator who wants that rationed sets
 // INGEST_FEED_CAP, which is a budget guard they chose, not a ceiling the app
-// picked for them. SAFETY_CAP is only an out-of-memory backstop for a
-// pathological catalog, the same role and number it has on the file side.
+// picked for them. SAFETY_CAP is only an out-of-memory backstop, shared with
+// the file adapter so the two can't drift.
 // The preview route reads this same bound through the adapter's windowCap, so
 // a preview count and a real run can never disagree on depth.
-const SAFETY_CAP = 100000;
+//
+// `browse.feedWindow` survives as a per-connector ration with no bundled
+// producer: crypto and stocks both declare none. It stays for plugin domains
+// (registerConnector) whose catalog is metered enough to want one out of the
+// box — an escape hatch, not a default.
 export const ENUM_CAP = (browse) =>
   Number(process.env.INGEST_FEED_CAP) || browse?.feedWindow || SAFETY_CAP;
 // Requested page size. Providers may clamp internally, but keep their offset
@@ -65,11 +70,10 @@ const MAX_PAGES = Math.ceil(SAFETY_CAP / ENUM_PAGE);
 // pages, repeated previews, and filter tweaks in one session all want the SAME
 // window — cache it briefly, keyed by connector + active provider + sort + cap,
 // so only the first call pays. The catalog is a point-in-time snapshot either
-// way, and the sweep tolerates a few seconds of staleness. TTL is read per call
-// (not frozen at import) so tests can disable it; 0 = always fresh.
-// Empty string counts as unset (default 60s), NOT as 0 — compose passes an
-// unset knob through as "" (`${VAR:-}`), and Number("") is 0, which would
-// silently disable the cache in the container. An explicit "0" still disables.
+// way, and the sweep tolerates a few seconds of staleness. Entries are pruned
+// on write (window-cache.js), which matters more here than it looks: one key
+// can now pin a whole catalog, so a stale sort/order combination left behind
+// by a config edit is megabytes, not kilobytes.
 const windowCache = new Map();
 // In-flight fills, keyed like the cache. The cache alone only helps callers
 // who arrive AFTER a walk finishes; concurrent ones (a preview click while
@@ -79,10 +83,40 @@ const windowCache = new Map();
 // reaches all of CoinGecko — so the second walk is the expensive one to not
 // make. Same single-flight the FMP screener uses, for the same reason.
 const windowFlights = new Map();
-const cacheTtl = () => {
-  const v = process.env.INGEST_FEED_CACHE_MS;
-  return v == null || v === "" ? 60000 : Number(v);
-};
+
+// One catalog walk, page by page, into the cache. Split out of `enumerate` so
+// the flight bookkeeping around it stays three readable lines and the body
+// keeps its own scope.
+async function fillWindow(db, conn, { ck, cap, sortBy, order, ttl }) {
+  const seen = new Set();
+  const candidates = [];
+  let dry = false; // saw the catalog actually end (an empty page)
+  for (let page = 1; page <= MAX_PAGES && candidates.length < cap; page++) {
+    const rows = await conn.list(db, { sort: sortBy, order, page, pageSize: ENUM_PAGE });
+    if (!rows.length) { dry = true; break; }
+    for (const r of rows) {
+      if (candidates.length >= cap) break;
+      // Candidate key = the entity identity derivation (lowercase symbol,
+      // falling back to the provider id) so the ledger, on_board flags and
+      // the unique constraint all agree on what "already here" means.
+      const key = (r.symbol || "").toLowerCase() || String(r.id);
+      if (seen.has(key)) continue; // rank drift between pages
+      seen.add(key);
+      candidates.push({ key, id: r.id, label: r.label, values: r.values || {} });
+    }
+  }
+  // Truncated unless the catalog visibly ended: a window filled to the cap
+  // can't know what lies past it (a provider whose universe is exactly the
+  // cap must still read "N+", not "all of it"), and a MAX_PAGES exit means
+  // pages were still coming.
+  const result = { candidates, truncated: !dry };
+  if (ttl > 0) {
+    const now = Date.now();
+    pruneExpired(windowCache, now, ttl);
+    windowCache.set(ck, { at: now, ...result });
+  }
+  return result;
+}
 
 export function forBoard(board) {
   const name = board?.mapping?.input?.connector;
@@ -151,36 +185,12 @@ export function feedAdapter(conn) {
       const flight = windowFlights.get(ck);
       if (flight) return flight;
 
-      const walk = (async () => {
-      const seen = new Set();
-      const candidates = [];
-      let dry = false; // saw the catalog actually end (an empty page)
-      for (let page = 1; page <= MAX_PAGES && candidates.length < cap; page++) {
-        const rows = await conn.list(db, { sort: sortBy, order, page, pageSize: ENUM_PAGE });
-        if (!rows.length) { dry = true; break; }
-        for (const r of rows) {
-          if (candidates.length >= cap) break;
-          // Candidate key = the entity identity derivation (lowercase symbol,
-          // falling back to the provider id) so the ledger, on_board flags and
-          // the unique constraint all agree on what "already here" means.
-          const key = (r.symbol || "").toLowerCase() || String(r.id);
-          if (seen.has(key)) continue; // rank drift between pages
-          seen.add(key);
-          candidates.push({ key, id: r.id, label: r.label, values: r.values || {} });
-        }
-      }
-      // Truncated unless the catalog visibly ended: a window filled to the cap
-      // can't know what lies past it (a provider whose universe is exactly the
-      // cap must still read "N+", not "all of it"), and a MAX_PAGES exit means
-      // pages were still coming.
-      const result = { candidates, truncated: !dry };
-      if (ttl > 0) windowCache.set(ck, { at: Date.now(), ...result });
-      return result;
-      })();
       // Released on settle either way: a failed walk must not wedge the key,
       // and a successful one is served from the cache from here on.
+      const walk = fillWindow(db, conn, { ck, cap, sortBy, order, ttl })
+        .finally(() => windowFlights.delete(ck));
       windowFlights.set(ck, walk);
-      try { return await walk; } finally { windowFlights.delete(ck); }
+      return walk;
     },
 
     // One catalog row → one entity + tag vehicle through the same path as a

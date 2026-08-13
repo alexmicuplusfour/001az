@@ -8,6 +8,7 @@
 import * as files from "./files.js";
 import { forBoard as connectorFeed } from "./connector.js";
 import { OPS_BY_KIND } from "./filter-engine.js";
+import { SAFETY_CAP } from "./window-cache.js";
 
 // The shared enumeration bound (window depth for feeds AND the preview route,
 // so a preview count and a real run can never disagree). Per-connector via
@@ -94,11 +95,13 @@ export function validateIngest(ingest, descriptor, { hasRoot = false } = {}) {
   if (ingest.limit !== undefined && ingest.limit !== null) {
     // A per-run admission count, not a ration: it says how fast a board fills,
     // and the drain machinery spreads a big one across ticks. The only bound
-    // is the enumeration safety cap — past that a limit couldn't be honored
-    // anyway, so a number that large is a typo, not an intent. (null = "all",
-    // which is the default and stays unbounded.)
-    if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > 100000)
-      return "limit must be an integer between 1 and 100000";
+    // is the enumeration safety cap itself — past that a limit couldn't be
+    // honored anyway, so a number that large is a typo, not an intent. Read
+    // from the same constant the adapters enumerate to, so the validator can
+    // never accept a limit they can't serve. (null = "all", the default, stays
+    // unbounded.)
+    if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > SAFETY_CAP)
+      return `limit must be an integer between 1 and ${SAFETY_CAP}`;
   }
 
   // Trigger.

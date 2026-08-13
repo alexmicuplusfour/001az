@@ -3,6 +3,7 @@ import { toItem, sentence, plural } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
+import { fillSelect } from './select.js';
 import { ensurePolling } from './data.js';
 
 // Browse-and-add ingestion modal for connector boards. Completely connector-
@@ -296,16 +297,13 @@ export function openConnectorBrowse(connectorName) {
   function filterSelect(f) {
     const sel = document.createElement("select");
     sel.className = "cb-sort cb-filter";
-    const all = document.createElement("option");
-    all.value = "";
-    all.textContent = `All ${plural((f.label || f.key).toLowerCase())}`;
-    sel.appendChild(all);
-    for (const opt of f.options || []) {
-      const o = document.createElement("option");
-      o.value = opt.value;
-      o.textContent = opt.label ?? opt.value;
-      sel.appendChild(o);
-    }
+    // The "all" row is a real, selectable choice (come back to it to clear the
+    // filter), not select.js's disabled placeholder — hence an option in the
+    // list rather than the `placeholder` argument.
+    fillSelect(sel, [
+      { value: "", label: `All ${plural((f.label || f.key).toLowerCase())}` },
+      ...(f.options || []),
+    ]);
     sel.addEventListener("change", () => {
       if (sel.value) opts.filters[f.key] = sel.value;
       else delete opts.filters[f.key];

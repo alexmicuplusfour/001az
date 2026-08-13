@@ -104,17 +104,19 @@ export const manifest = {
           "Industrials", "Real Estate", "Technology", "Utilities",
         ],
       },
-      { key: "exchange", label: "Exchange", options: ["NASDAQ", "NYSE", "AMEX"] },
-      // Industry is the screener's fine-grained cut (~150 values under the 11
-      // sectors) — too many to freeze here and FMP publishes them, so the
-      // vocabulary comes from the provider (runtime.browseFilters).
+      // Exchange and industry both come from the provider. Industry because
+      // it's the screener's fine cut (~150 values FMP publishes) — too many to
+      // freeze. Exchange because the venue set is an operator knob
+      // (FMP_EXCHANGES): frozen here, widening it produced rows this control
+      // couldn't offer and the route's whitelist then rejected.
+      { key: "exchange", label: "Exchange", from: "provider" },
       { key: "industry", label: "Industry", from: "provider" },
     ],
     defaultSort: "market_cap",
     pageSize: 50,
     // No feedWindow: a feed sees the whole universe. FMP serves any depth from
-    // one cached screener call, so there is nothing to ration — the provider's
-    // own depth (FMP_UNIVERSE_ROWS, default 10000) is the only bound, and it's
-    // the API's shape rather than a number this app picked.
+    // one cached fill, so there is nothing to ration — the only bounds left
+    // are the API's own (its per-response row cap, which the provider works
+    // around by partitioning) and the venue list, not a number this app picked.
   },
 };

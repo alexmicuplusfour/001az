@@ -15,7 +15,8 @@
 // the expensive direction). Per-coin calls are the one shape that wastes the
 // budget — hence the quote cache + prefetch: a whole sweep's coins ride one
 // batched request.
-import { providerSignal } from "../runtime.js";
+import { providerSignal, num } from "../runtime.js";
+import { createQuoteCache, pickFields } from "./quote-cache.js";
 
 const BASE = "https://pro-api.coinmarketcap.com";
 const MAP_TTL = 6 * 60 * 60 * 1000; // the id/symbol map barely changes (and re-reads are free)
@@ -95,8 +96,6 @@ export async function search(query, { apiKey, pace } = {}) {
   }));
 }
 
-const num = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
-
 // One coin's canonical crypto fields from a quotes/listings row (both carry
 // the same {id, cmc_rank, circulating_supply, quote.USD} shape). ATH is the
 // one canonical field CMC's quote payload doesn't publish — served as an
@@ -120,23 +119,12 @@ const quoteFields = (d) => {
   };
 };
 
-// Quote cache: full quote rows by id, warmed by every path that already paid
-// for them (browse listings, query quotes, prefetch) — so bulk-adding coins
-// straight out of the browse modal re-buys nothing, and a refresh sweep's
-// per-entity reads all hit the one batched prefetch call.
-const QUOTE_TTL = 60 * 1000; // CMC's own update cadence for these endpoints
-const quoteCache = new Map(); // id (string) -> { at, row }
-const freshQuote = (id) => {
-  const hit = quoteCache.get(String(id));
-  return hit && Date.now() - hit.at < QUOTE_TTL ? hit.row : null;
-};
-function warmQuotes(rows) {
-  for (const d of rows) {
-    if (d?.id == null) continue;
-    quoteCache.set(String(d.id), { at: Date.now(), row: d });
-    if (quoteCache.size > 20000) quoteCache.delete(quoteCache.keys().next().value);
-  }
-}
+// Full quote rows by id, warmed by every path that already paid for them
+// (browse listings, query quotes, prefetch) — so bulk-adding coins straight
+// out of the browse modal re-buys nothing, and a refresh sweep's per-entity
+// reads all hit the one batched prefetch call.
+const quotes = createQuoteCache();
+const warmQuotes = quotes.warm;
 
 // Batched quote lookup. Chunked at 100 ids — a single credit per chunk under
 // CMC's older accounting AND the 2026 one, so the estimate can't be wrong in
@@ -158,18 +146,17 @@ async function quotesByIds(ids, { apiKey, pace } = {}) {
 // Batch-warm the quote cache for a refresh sweep's due ids (the worker's
 // prefetch leg). Best-effort by contract: a failure means per-entity retail.
 export async function prefetch(ids, ctx = {}) {
-  const missing = [...new Set(ids.map(String))].filter((id) => !freshQuote(id));
+  const missing = quotes.missing(ids);
   if (missing.length) await quotesByIds(missing, ctx);
 }
+
+// One coin's quote row: the warm one, or the one request that buys it.
+const quoteFor = async (id, ctx) => quotes.fresh(id) || (await quotesByIds([String(id)], ctx))[0];
 
 // One coin's canonical crypto fields via the v2 quotes endpoint (data keyed
 // by id). Returns { v, kind }; the connector adds identity + `src`.
 export async function fetchEntity(id, ctx = {}) {
-  let d = freshQuote(id);
-  if (!d) {
-    await quotesByIds([String(id)], ctx);
-    d = freshQuote(id);
-  }
+  const d = await quoteFor(id, ctx);
   if (!d) throw new Error(`CoinMarketCap: no data for id ${id}`);
   return {
     id: String(d.id),
@@ -183,17 +170,10 @@ export async function fetchEntity(id, ctx = {}) {
 // field lives on the cached quote row, so a prefetched sweep serves whole
 // boards from memory and a cold single entity pays one batched-shape request.
 export async function fetchFields(id, keys, ctx = {}) {
-  const want = [...new Set(keys || [])];
-  const fields = {};
-  let d = freshQuote(id);
-  if (!d) {
-    await quotesByIds([String(id)], ctx);
-    d = freshQuote(id);
-  }
-  if (!d) return { fields }; // unknown id → runtime falls back to fetchEntity's error path
-  const all = quoteFields(d);
-  for (const k of want) if (all[k]) fields[k] = all[k];
-  return { fields };
+  const d = await quoteFor(id, ctx);
+  // Unknown id → no keys served, and runtime.refresh falls back to
+  // fetchEntity's error path rather than writing nulls over live values.
+  return { fields: d ? pickFields(quoteFields(d), keys) : {} };
 }
 
 // Price history for the chart face. CMC's Basic tier serves historical quotes
@@ -291,6 +271,6 @@ export async function testConnection({ apiKey, pace } = {}) {
 
 // Test seam only (house convention: provider-pacing's _resetBuckets).
 export function _resetQuoteCache() {
-  quoteCache.clear();
+  quotes.reset();
   mapCache = { at: 0, list: null };
 }

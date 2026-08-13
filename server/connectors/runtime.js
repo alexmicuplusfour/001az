@@ -15,6 +15,13 @@ import { liveFields, nextRefreshAt } from "./schedule.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
+// A finite number, or null. The one rule every provider needs and all three
+// had written for themselves: a market API's "", 0-for-missing and garbage are
+// ABSENCE, not measurements, and a field that reads 0 when it means "no
+// reading" is the kind of wrong that looks right on a card.
+export const num = (v) =>
+  v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+
 // Plugin-registry state for one provider: install flag + config overrides
 // (rpm/burst). Read straight off the plugins row. Connectors are never core or
 // pre-installed (only the flagship AI provider is), so an absent/NULL row means
@@ -130,17 +137,27 @@ export async function activeProvider(db, conn) {
     }
     if (!name) throw new Error(`no ${conn.name} provider is installed (add one on the Plugins page)`);
   }
-  const raw = conn.providers[name];
   const apiKey = (await providerKey(db, conn, name)) || null;
-  // A provider whose tiers pace differently declares keylessRpm; without a
-  // stored key that's the honest ceiling (CoinGecko's keyless pool is a
-  // fraction of its keyed one, and it counts FAILED requests against the
-  // limit — overpacing doesn't just 429, it burns quota). A Plugins-page
-  // rpm override still beats both.
-  const tierRpm = apiKey ? raw.rpm : raw.keylessRpm ?? raw.rpm;
-  const provider = { ...raw, rpm: st.config.rpm ?? tierRpm, burst: st.config.burst ?? raw.burst };
-  return { name, provider, apiKey };
+  return { name, provider: paced(conn.providers[name], st.config, apiKey), apiKey };
 }
+
+// The provider descriptor every call site actually uses: the module's own
+// declarations with the effective pacing merged in. Two rules, in precedence
+// order, and they live here rather than at each call site because both
+// activeProvider and testConnection resolve them and the second used to say
+// "same tier rule as activeProvider" over a copy of it.
+//
+//  1. TIER — a provider whose tiers pace differently declares `keylessRpm`;
+//     without a stored key that's the honest ceiling (CoinGecko's keyless
+//     pool is a fraction of its keyed one, and it counts FAILED requests
+//     against the limit, so overpacing doesn't just 429, it burns quota).
+//  2. OVERRIDE — the Plugins page beats both tiers: an operator who knows
+//     their plan outranks the descriptor's guess.
+const paced = (raw, config = {}, apiKey = null) => ({
+  ...raw,
+  rpm: config.rpm ?? (apiKey ? raw.rpm : raw.keylessRpm ?? raw.rpm),
+  burst: config.burst ?? raw.burst,
+});
 
 // The domain's stored-vs-effective pair — the two admin surfaces that expose
 // domain state (the Plugins payload's `slots.domains`, the capabilities feed)
@@ -223,9 +240,17 @@ export async function list(db, conn, opts) {
 export async function browseFilters(db, conn) {
   const declared = conn.manifest?.browse?.filters || [];
   if (!declared.length) return [];
+  // One shape and one ordering for every vocabulary, whatever supplied it: a
+  // bare string is its own label, and the list comes back sorted. Sorting HERE
+  // rather than in each provider is what stops an 857-entry dropdown arriving
+  // unsorted because a provider forgot — the resolver's guarantee, not a rule
+  // restated per backend.
   const normalize = (options) =>
-    (options || []).map((o) => (typeof o === "string" ? { value: o, label: o } : o))
-      .filter((o) => o && o.value != null);
+    (options || [])
+      .map((o) => (typeof o === "string" ? { value: o, label: o } : o))
+      .filter((o) => o && o.value != null)
+      .map((o) => ({ value: o.value, label: String(o.label ?? o.value) }))
+      .sort((a, b) => a.label.localeCompare(b.label));
 
   let supplied = {};
   if (declared.some((f) => f.from === "provider")) {
@@ -272,10 +297,8 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
   // Deliberately no enabled gate on the explicit-override path: the admin
   // tests a provider BEFORE enabling it. Config pacing still applies.
   const st = await pluginRowState(db, conn, name);
-  const raw = conn.providers[name];
   const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, conn, name);
-  const tierRpm = apiKey ? raw.rpm : raw.keylessRpm ?? raw.rpm; // same tier rule as activeProvider
-  const provider = { ...raw, rpm: st.config.rpm ?? tierRpm, burst: st.config.burst ?? raw.burst };
+  const provider = paced(conn.providers[name], st.config, apiKey);
   if (!provider.testConnection) throw new Error("provider has no connection test");
   await tracked(db, conn, name, provider, () => provider.testConnection(ctxFor(name, provider, apiKey)));
   return { provider: name };
