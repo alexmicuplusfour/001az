@@ -20,7 +20,7 @@
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
 import { ICONS } from "./utils.js";
-import { createModal, sectionHeading, provBand } from "./modal.js";
+import { createModal, sectionHeading, provBand, keepPlace } from "./modal.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
@@ -104,28 +104,11 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
   }
 
   // Every edit that changes the shape of the list — remove a value, remove a
-  // facet, paste JSON — rebuilds the whole editor. Emptying `root` momentarily
-  // collapses the scroll container's content, and the browser clamps its
-  // scrollTop to the (now zero) maximum; refilling it restores the height but
-  // not the position, so deleting one value near the bottom threw the user back
-  // to the top of the taxonomy. Capture the position before the rebuild and put
-  // it back after. The content is at most one row shorter, so the restored
-  // offset still lands on the facet being edited.
-  //
-  // Deliberately the nearest ancestor that actually scrolls rather than a
-  // hardcoded `.modal-body`: the editor is only mounted in the board modal
-  // today, but the fix shouldn't quietly stop working if it moves into a pane.
-  function scrollHost() {
-    for (let el = root.parentElement; el; el = el.parentElement) {
-      const oy = getComputedStyle(el).overflowY;
-      if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) return el;
-    }
-    return null;
-  }
-
-  function render() {
-    const host = scrollHost();
-    const savedTop = host?.scrollTop || 0;
+  // facet, paste JSON — rebuilds the whole editor, which would otherwise drop
+  // the reader at the top of the taxonomy. keepPlace (modal.js) holds the
+  // scroll offset across the rebuild; the content is at most one row shorter,
+  // so the restored offset still lands on the facet being edited.
+  const render = keepPlace(root, () => {
     root.replaceChildren();
     facets.forEach((f, fi) => {
       const facetEl = document.createElement("div");
@@ -245,13 +228,7 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
       root.querySelectorAll(".fe-label").item(facets.length - 1)?.focus();
     };
     root.appendChild(addFacet);
-
-    // After the content is back, so the assignment isn't clamped again. The
-    // callers that focus a newly added input do so after render() returns —
-    // their scroll-into-view still wins, which is what you want when the thing
-    // you just created is off-screen.
-    if (host) host.scrollTop = savedTop;
-  }
+  });
 
   render();
   sync();

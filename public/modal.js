@@ -115,6 +115,70 @@ export function createModal({ title = "", id, bodyStyle = "", onClose } = {}) {
   return { overlay, dialog, header, titleEl, body, footer, closeBtn, close };
 }
 
+// ─── Keeping the reader's place across a rebuild ────────────────────────────
+// The editors in these modals rebuild their whole list on every structural edit
+// — remove a value, tick a field, apply a template — because one render that is
+// always right is far easier to keep honest than a set of surgical patches. The
+// cost is that a rebuild throws away two pieces of state the browser was
+// holding on the user's behalf:
+//
+//   scroll — emptying the list collapses the scroll container's content, and
+//            the browser clamps its scrollTop to the (now zero) maximum.
+//            Refilling restores the height but not the position, so un-ticking
+//            one field near the bottom threw the reader back to the top with no
+//            indication of what had happened.
+//   focus  — the control that was just operated is one of the nodes destroyed,
+//            so focus falls back to <body>. Ticking a checkbox with the
+//            keyboard therefore cost you the keyboard.
+//
+// `keepPlace(node, render)` wraps a render function so both survive it:
+//
+//   const renderFields = keepPlace(fieldsList, () => { ... });
+//
+// Give a control a stable `data-place` and focus returns to whatever is rebuilt
+// under that name. A control that is GONE afterwards — a row the edit removed —
+// simply isn't restored, which is the right answer; there is nowhere to put it.
+//
+// The scroll host is resolved by walking ancestors for a computed overflow-y of
+// auto/scroll rather than by naming `.modal-body`. These editors mount in one
+// modal today; a hardcoded selector is the kind that stops matching without
+// failing.
+function scrollHost(node) {
+  for (let el = node.parentElement; el; el = el.parentElement) {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) return el;
+  }
+  return null;
+}
+
+export function keepPlace(node, render) {
+  return () => {
+    const host = scrollHost(node);
+    const savedTop = host ? host.scrollTop : 0;
+    const active = document.activeElement;
+    const place = active && node.contains(active) ? active.dataset?.place : null;
+
+    render();
+
+    // After the content is back, so the assignment isn't clamped again.
+    if (host) host.scrollTop = savedTop;
+    if (place) {
+      for (const el of node.querySelectorAll("[data-place]")) {
+        if (el.dataset.place !== place) continue;
+        // preventScroll: the offset restored a line above IS the answer to
+        // where the reader was. focus() scrolling to its own idea of "in view"
+        // would overrule it — and the control is on screen anyway, since the
+        // user just operated it.
+        el.focus({ preventScroll: true });
+        break;
+      }
+    }
+    // Callers that focus a NEWLY added row do so after render() returns, so
+    // their scroll-into-view still wins — which is what you want when the thing
+    // you just created is off-screen.
+  };
+}
+
 // Bold section heading for modal bodies (plugins modal, board editor). Returns
 // an HTML string: 16px title plus an optional gray sub line. `style` adds css
 // to the wrapper — e.g. a bottom margin when no flex gap provides the spacing.

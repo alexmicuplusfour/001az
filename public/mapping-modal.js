@@ -2,7 +2,8 @@ import { toast } from './toast.js';
 import { openDropdown, ddRow, ddSep } from './dropdown.js';
 import { ICONS, sentence } from './utils.js';
 import { switchRow } from './board-modal.js';
-import { sectionHeadingEl, provBand } from './modal.js';
+import { sectionHeadingEl, provBand, keepPlace } from './modal.js';
+import { fillSelect } from './select.js';
 
 const KINDS = ["text", "number", "url", "date", "object"];
 // Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
@@ -228,41 +229,77 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     "data source; AI fields are extracted from the item's content.</p>";
   body.appendChild(intro);
 
+  // ── The parts every row in this pane is built from ─────────────────────────
+  // identity, face and the field rows all say the same three things in the same
+  // three chips: what the slot is CALLED, where its value COMES FROM, and what
+  // it IS. Each chip was being hand-built at four or five call sites, which is
+  // how the field rows ended up with a redundant inline `font-family:monospace`
+  // that .mm-key-locked was already applying and identity/face were already
+  // relying on. Declared up here because renderIdentityRow — the first thing
+  // that runs — needs them.
+  const keyChip = (text) => {
+    const el = document.createElement("span");
+    el.className = "mm-key-locked";
+    el.textContent = text;
+    return el;
+  };
+  // Where the value comes from: `stocks:price`, `file:created`, `crypto:id`.
+  const srcChip = (text) => {
+    const el = document.createElement("span");
+    el.className = "mm-connector-badge";
+    el.textContent = text;
+    return el;
+  };
+  // What it is, and can't be argued with: a kind, or the one face a board gets.
+  const kindChip = (text) => {
+    const el = document.createElement("span");
+    el.className = "mm-locked-badge";
+    el.textContent = text;
+    return el;
+  };
+  // A select over [value, label] pairs, disabled on the read-only pane. The
+  // title is optional — assigning an absent one writes the string "undefined"
+  // into the tooltip, which is exactly the kind of thing a shared builder is
+  // supposed to stop happening. The options themselves go through select.js's
+  // fillSelect, the same filler the board editor and plugin modal use; pairs
+  // are the terser shape for the short literal lists this pane declares, so the
+  // conversion happens here rather than at seven call sites. No placeholder:
+  // every list here is closed and always has a current value to sit on.
+  const mkSel = (opts, val, title) => {
+    const sel = document.createElement("select");
+    sel.disabled = !isAdmin;
+    if (title) sel.title = title;
+    fillSelect(sel, opts.map(([value, label]) => ({ value, label })), { value: val });
+    return sel;
+  };
+
   // Identity row — always present. Raw/AI are hand-switchable; connector-bound
   // identity renders locked with a badge, matching the connector field rows.
   const identityRow = document.createElement("div");
 
-  function renderIdentityRow() {
+  // Every render function in this pane rebuilds its subtree wholesale, so every
+  // one of them is wrapped in keepPlace (modal.js) — the pane lives in a
+  // scrolling modal body, and without it any structural edit dropped the reader
+  // at the top. See the note there for what a rebuild costs and what is held.
+  const renderIdentityRow = keepPlace(identityRow, () => {
     const isConnectorId = identityFrom === "connector";
     identityRow.className = "mm-row" + (isConnectorId ? " mm-row-connector" : "");
     identityRow.replaceChildren();
 
     const idControls = document.createElement("div");
     idControls.className = "fe-head";
-
-    const idKey = document.createElement("span");
-    idKey.className = "mm-key-locked";
-    idKey.textContent = "identity";
-    idControls.appendChild(idKey);
+    idControls.appendChild(keyChip("identity"));
 
     if (isConnectorId) {
       // Locked, badge-styled — same pattern as the connector field rows below.
-      const badge = document.createElement("span");
-      badge.className = "mm-connector-badge";
-      badge.textContent = `${inputConnector}:id`;
-      idControls.appendChild(badge);
+      idControls.appendChild(srcChip(`${inputConnector}:id`));
       identityRow.appendChild(idControls);
       return;
     }
 
-    const idSrcSel = document.createElement("select");
-    idSrcSel.disabled = !isAdmin;
-    [["raw", "filename (raw)"], ["ai", "AI instruction"]].forEach(([val, label]) => {
-      const opt = document.createElement("option");
-      opt.value = val; opt.textContent = label;
-      if (val === identityFrom) opt.selected = true;
-      idSrcSel.appendChild(opt);
-    });
+    const idSrcSel = mkSel(
+      [["raw", "filename (raw)"], ["ai", "AI instruction"]],
+      identityFrom, "What gives each item its title");
     idControls.appendChild(idSrcSel);
 
     const idHintWrap = document.createElement("div");
@@ -286,7 +323,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     candidatesBox.className = "fe-root";
     candidatesBox.style.cssText = "margin-top:6px;display:" + (classifyOn ? "block" : "none") + ";";
 
-    function renderCandidates() {
+    const renderCandidates = keepPlace(candidatesBox, () => {
       candidatesBox.replaceChildren();
       candidates.forEach((c, i) => {
         const rowEl = document.createElement("div");
@@ -328,7 +365,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         });
         candidatesBox.appendChild(add);
       }
-    }
+    });
     renderCandidates();
 
     const classifyToggle = switchRow(
@@ -359,7 +396,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     });
 
     identityRow.append(idControls, idHintWrap, classifyWrap);
-  }
+  });
 
   renderIdentityRow();
   body.appendChild(identityRow);
@@ -370,23 +407,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   const faceRow = document.createElement("div");
   body.appendChild(faceRow);
 
-  // The face row's three shared pieces, so a file face and a connector face are
-  // built from the same parts (they're deliberately the same shape: a locked
-  // statement of WHAT the face is, then a line that refines it).
+  // The face row's own two pieces, so a file face and a connector face are built
+  // from the same parts (they're deliberately the same shape as a field row: a
+  // locked statement of WHAT the face is, then a line that refines it).
   const faceHead = () => {
     const head = document.createElement("div");
     head.className = "fe-head";
-    const key = document.createElement("span");
-    key.className = "mm-key-locked";
-    key.textContent = "face";
-    head.appendChild(key);
+    head.appendChild(keyChip("face"));
     return head;
-  };
-  const lockedBadge = (text) => {
-    const badge = document.createElement("span");
-    badge.className = "mm-locked-badge";
-    badge.textContent = text;
-    return badge;
   };
   // The refinement line under the face: a muted label + its controls.
   const faceSubRow = (label, ...controls) => {
@@ -398,27 +426,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     sub.append(lbl, ...controls);
     return sub;
   };
-  // A select over [value, label] pairs, disabled on the read-only pane.
-  const mkSel = (opts, val, title) => {
-    const sel = document.createElement("select");
-    sel.disabled = !isAdmin;
-    sel.title = title;
-    for (const [v, l] of opts) {
-      const o = document.createElement("option");
-      o.value = v; o.textContent = l;
-      if (v === val) o.selected = true;
-      sel.appendChild(o);
-    }
-    return sel;
-  };
 
-  function renderFaceRow() {
+  const renderFaceRow = keepPlace(faceRow, () => {
     faceRow.replaceChildren();
     // File boards get a face row too (normalized): a read-only "File preview"
     // label that expands to instance-pick controls under derived identity.
     if (!inputConnector) { faceRow.style.display = ""; renderFileFaceRow(); return; }
     renderConnectorFaceRow();
-  }
+  });
 
   // A connector board's face row. The face is the connector's face producer —
   // the SYMBOL TILE IS NOT A CHOICE HERE. It isn't a producer at all (there's no
@@ -443,7 +458,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     // answer rather than a fallback, and serialize nothing (collect() writes a
     // face only for `from: "connector"`).
     if (!connectorFaces.length) {
-      controls.appendChild(lockedBadge("Symbol tile"));
+      controls.appendChild(kindChip("Symbol tile"));
       faceRow.appendChild(controls);
       return;
     }
@@ -458,7 +473,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     faceCfg = { from: "connector", producer: producer.name, period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
 
     if (connectorFaces.length === 1) {
-      controls.appendChild(lockedBadge(producer.label));
+      controls.appendChild(kindChip(producer.label));
     } else {
       const srcSel = mkSel(connectorFaces.map((p) => [p.name, p.label]), producer.name,
         "How this connector renders the card");
@@ -502,7 +517,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   function renderFileFaceRow() {
     faceRow.className = "mm-row";
     const controls = faceHead();
-    controls.appendChild(lockedBadge("File preview"));
+    controls.appendChild(kindChip("File preview"));
     faceRow.appendChild(controls);
 
     if (identityFrom !== "ai") return; // one instance per entity — nothing to pick
@@ -536,17 +551,25 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     icon.className = "mm-live-icon";
     icon.innerHTML = ICONS.redo;
 
-    const sel = document.createElement("select");
-    sel.className = "mm-live";
-    sel.disabled = !isAdmin || !enabled;
-    if (sel.disabled) wrap.classList.add("disabled");
-    for (const [min, label] of CADENCES) {
-      const opt = document.createElement("option");
-      opt.value = String(min);
-      opt.textContent = label;
-      sel.appendChild(opt);
+    // Off (0) is the selected option for a field with no cadence, and for the
+    // un-included field the row is offering — the select is disabled there, so
+    // what it shows is a statement rather than a default anyone can act on.
+    const current = String(f?.live ? f.every : 0);
+    const opts = CADENCES.map(([min, label]) => [String(min), label]);
+    // CADENCES is what this pane OFFERS; the server accepts any 1–43200 minutes
+    // (server.js), so a mapping written by the API — or by a build whose list
+    // included a value this one dropped — can hold a cadence with no option to
+    // sit on. Name it rather than let the select answer for it: it used to
+    // render blank, and a list of options with none selected reads as Off,
+    // which is a live field claiming it never refreshes.
+    if (!opts.some(([v]) => v === current)) {
+      const at = opts.findIndex(([v]) => Number(v) > Number(current));
+      opts.splice(at < 0 ? opts.length : at, 0, [current, `${f.every} min`]);
     }
-    sel.value = String(f?.live ? f.every : 0);
+    const sel = mkSel(opts, current);
+    sel.className = "mm-live";
+    if (!enabled) sel.disabled = true; // on top of mkSel's read-only rule
+    if (sel.disabled) wrap.classList.add("disabled");
     sel.addEventListener("change", () => {
       if (!f) return;
       const every = Number(sel.value);
@@ -557,99 +580,66 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return wrap;
   }
 
-  // One catalog field: include checkbox + locked identity (key/badge/kind) +
-  // liveness. The catalog is connector-global; whether a field is included and
-  // its cadence is this board's choice (mapping.fields).
-  function makeCatalogRow(cat) {
-    const inc = fields.find((f) => f.from === "connector" && f.key === cat.key);
+  // ── One row shape for every locked field ──────────────────────────────────
+  // A connector-catalog row, a file-field row and the saved-connector fallback
+  // used to be three hand-written copies of the same six elements, and they had
+  // already drifted apart in ways nobody chose: only one of them could carry a
+  // note, and the fallback silently dropped the include checkbox. They are ONE
+  // row — a locked statement of what the field IS (its key, where it comes
+  // from, its kind), optionally preceded by whether this board takes it and
+  // followed by how often it refreshes.
+  //
+  //   include — { checked, title, place, onToggle }. Omit for a row that can't
+  //             be un-included: the fallback has no catalog behind it, so an
+  //             un-tick there would be a one-way door. `place` is the focus key
+  //             keepPlace restores through (see modal.js) — the field's own
+  //             identity, so the checkbox you clicked is the one you get back.
+  //             It rides in HERE rather than beside `key` because the checkbox
+  //             is the only thing in the row that can hold focus; a place on a
+  //             checkbox-less row would be a key nothing answers to.
+  //   live    — { field, enabled }. Omit for a source with no cadence — files
+  //             are immutable, so a file field is fetched once and never again.
+  //   note    — a caveat the catalog carries (e.g. `created` is null for
+  //             browser uploads).
+  function lockedRow({ key, badge, kind, include, live, note }) {
     const row = document.createElement("div");
     row.className = "mm-row mm-row-connector";
     const controls = document.createElement("div");
     controls.className = "fe-head";
 
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !!inc;
-    cb.disabled = !isAdmin;
-    cb.title = "Include this field";
-    cb.addEventListener("change", () => {
-      if (cb.checked) {
-        if (!inc) fields.push({ key: cat.key, kind: cat.kind, from: "connector", fn: cat.fn });
-      } else {
-        const idx = fields.findIndex((f) => f.from === "connector" && f.key === cat.key);
-        if (idx >= 0) fields.splice(idx, 1);
-      }
-      renderFields();
-    });
+    if (include) {
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = include.checked;
+      cb.disabled = !isAdmin;
+      cb.title = include.title;
+      cb.dataset.place = include.place;
+      cb.addEventListener("change", () => include.onToggle(cb.checked));
+      controls.appendChild(cb);
+    }
 
-    const keyLabel = document.createElement("span");
-    keyLabel.className = "mm-key-locked";
-    keyLabel.style.fontFamily = "monospace";
-    keyLabel.textContent = cat.key;
-
-    const badge = document.createElement("span");
-    badge.className = "mm-connector-badge";
-    badge.textContent = `${inputConnector}:${cat.fn}`;
-
-    const kindLabel = document.createElement("span");
-    kindLabel.className = "mm-locked-badge";
-    kindLabel.textContent = cat.kind;
-
-    controls.append(cb, keyLabel, badge, kindLabel, livenessSelect(inc, !!inc));
+    controls.append(keyChip(key), srcChip(badge), kindChip(kind));
+    if (live) controls.appendChild(livenessSelect(live.field, live.enabled));
     row.appendChild(controls);
+
+    if (note) {
+      const noteEl = document.createElement("div");
+      noteEl.className = "mm-face-hint";
+      noteEl.textContent = note;
+      row.appendChild(noteEl);
+    }
     return row;
   }
 
-  // One INCLUDED file-metadata field (server/media): a locked row matching the
-  // connector rows — checkbox (checked; uncheck removes) + key + file:<fn> chip
-  // + kind. No liveness (files are immutable). Un-included fields aren't listed
-  // here; they're added from the "+ Add file field" menu, so the catalog isn't
-  // a wall of rows by default.
-  function makeFileCatalogRow(cat) {
-    const inc = fields.find((f) => f.from === "file" && f.key === cat.key);
-    const row = document.createElement("div");
-    row.className = "mm-row mm-row-connector";
-    const controls = document.createElement("div");
-    controls.className = "fe-head";
-
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !!inc;
-    cb.disabled = !isAdmin;
-    cb.title = "Remove this field";
-    cb.addEventListener("change", () => {
-      if (cb.checked) {
-        if (!inc) fields.push({ key: cat.key, kind: cat.kind, from: "file", fn: cat.fn });
-      } else {
-        const idx = fields.findIndex((f) => f.from === "file" && f.key === cat.key);
-        if (idx >= 0) fields.splice(idx, 1);
-      }
-      renderFields();
-    });
-
-    const keyLabel = document.createElement("span");
-    keyLabel.className = "mm-key-locked";
-    keyLabel.style.fontFamily = "monospace";
-    keyLabel.textContent = cat.key;
-
-    const badge = document.createElement("span");
-    badge.className = "mm-connector-badge";
-    badge.textContent = `file:${cat.fn}`;
-
-    const kindLabel = document.createElement("span");
-    kindLabel.className = "mm-locked-badge";
-    kindLabel.textContent = cat.kind;
-
-    controls.append(cb, keyLabel, badge, kindLabel);
-    row.appendChild(controls);
-    // A caveat some fields carry (e.g. `created` is null for browser uploads).
-    if (cat.note) {
-      const note = document.createElement("div");
-      note.className = "mm-face-hint";
-      note.textContent = cat.note;
-      row.appendChild(note);
-    }
-    return row;
+  // Include or drop one catalog field on this board. The catalog is global to
+  // the source; `fields` is this board's pick from it, which is the only thing
+  // a tick changes.
+  function toggleField(from, cat, on) {
+    const idx = fields.findIndex((f) => f.from === from && f.key === cat.key);
+    if (on) {
+      if (idx < 0) fields.push({ key: cat.key, kind: cat.kind, from, fn: cat.fn });
+    } else if (idx >= 0) fields.splice(idx, 1);
+    renderFields();
   }
 
   // "+ Add file field" — opens a menu of the not-yet-included catalog fields,
@@ -659,13 +649,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     const wrap = document.createElement("span");
     wrap.className = "dd-label";
     wrap.style.cssText = "display:flex;align-items:center;gap:8px;";
+    // NOT keyChip: this is the one place a field name is drawn outside the pane,
+    // and openDropdown's default surface is dark. .mm-key-locked pins a near-
+    // black color for the pane's white ground, which on a #15171c menu is an
+    // invisible label. The kind pill has its own ground, so it travels.
     const key = document.createElement("span");
     key.style.fontFamily = "monospace";
     key.textContent = cat.key;
-    const kind = document.createElement("span");
-    kind.className = "mm-locked-badge";
-    kind.textContent = cat.kind;
-    wrap.append(key, kind);
+    wrap.append(key, kindChip(cat.kind));
     return wrap;
   }
 
@@ -708,8 +699,28 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   function makeAddFileFieldBtn() {
     const btn = document.createElement("button");
     btn.className = "fe-add-facet";
+    btn.type = "button";
     btn.textContent = "+ Add file field";
     btn.addEventListener("click", () => openAddFileFieldMenu(btn));
+    return btn;
+  }
+
+  function makeAddAiFieldBtn() {
+    const btn = document.createElement("button");
+    btn.className = "fe-add-facet";
+    btn.type = "button";
+    btn.textContent = "+ Add AI field";
+    btn.addEventListener("click", () => {
+      if (fields.filter((f) => f.from === "ai").length >= 12) { toast.info("Maximum 12 AI fields"); return; }
+      fields.push({ key: "", kind: "text", from: "ai", hint: "" });
+      markDirty();
+      renderFields();
+      // After the render, so the focus lands on the row that now exists — and
+      // after keepPlace has restored the offset, so this scroll-into-view wins.
+      // Right: the field you just asked for should be brought to you.
+      const rows = fieldsList.querySelectorAll(".mm-key");
+      rows[rows.length - 1]?.focus();
+    });
     return btn;
   }
 
@@ -727,20 +738,27 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     keyInput.placeholder = "field_key";
     keyInput.value = f.key || "";
     keyInput.disabled = !isAdmin;
+    // The key is written to the model on EVERY keystroke, like the hint below,
+    // and merely re-displayed on blur. It used to be written only on blur, and
+    // a rebuild is how you lost a key you had typed: a render replaces this
+    // input, and removing a focused element does not reliably fire `blur` in
+    // any browser — so the typed text went with the node. Reachable without
+    // trying: type a key, delete a different field, watch yours empty itself.
+    // (The catalog fetches landing behind you did it too.)
+    //
+    // Normalizing on input rather than storing raw keeps `f.key` the same value
+    // blur would have produced, so collect()'s validation still sees exactly
+    // what the row is claiming. The DISPLAY is left alone until blur — rewriting
+    // under a live caret is its own kind of rude.
+    const normalizeKey = (v) =>
+      v.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "").replace(/^[^a-z]+/, "") || "";
+    keyInput.addEventListener("input", () => { f.key = normalizeKey(keyInput.value); });
     keyInput.addEventListener("blur", () => {
-      f.key = keyInput.value.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "").replace(/^[^a-z]+/, "") || "";
+      f.key = normalizeKey(keyInput.value);
       keyInput.value = f.key;
     });
 
-    const kindSel = document.createElement("select");
-    kindSel.disabled = !isAdmin;
-    for (const k of KINDS) {
-      const opt = document.createElement("option");
-      opt.value = k;
-      opt.textContent = k;
-      if (k === (f.kind || "text")) opt.selected = true;
-      kindSel.appendChild(opt);
-    }
+    const kindSel = mkSel(KINDS.map((k) => [k, k]), f.kind || "text", "What kind of value this field holds");
     kindSel.addEventListener("change", () => { f.kind = kindSel.value; });
     if (!f.kind) f.kind = "text";
 
@@ -787,82 +805,113 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return el;
   }
 
-  function renderFields() {
-    fieldsList.replaceChildren();
-
-    // Connector fields (catalog) — only for connector-bound boards.
-    if (inputConnector) {
-      fieldsList.appendChild(sectionTitle(connectorLabel ? `Connector fields · ${connectorLabel}` : "Connector fields"));
-      if (connectorCatalog) {
-        for (const cat of connectorCatalog) fieldsList.appendChild(makeCatalogRow(cat));
-      } else {
-        // Catalog not loaded yet (or fetch failed): show the saved connector
-        // fields as locked rows so the modal isn't empty; cadence still editable.
-        const conn = fields.filter((f) => f.from === "connector");
-        if (conn.length) {
-          for (const f of conn) {
-            const row = document.createElement("div");
-            row.className = "mm-row mm-row-connector";
-            const controls = document.createElement("div");
-            controls.className = "fe-head";
-            const keyLabel = document.createElement("span");
-            keyLabel.className = "mm-key-locked"; keyLabel.style.fontFamily = "monospace";
-            keyLabel.textContent = f.key;
-            const badge = document.createElement("span");
-            badge.className = "mm-connector-badge"; badge.textContent = `${inputConnector}:${f.fn}`;
-            const kindLabel = document.createElement("span");
-            kindLabel.className = "mm-locked-badge"; kindLabel.textContent = f.kind;
-            controls.append(keyLabel, badge, kindLabel, livenessSelect(f, true));
-            row.appendChild(controls);
-            fieldsList.appendChild(row);
-          }
-        } else {
-          const p = document.createElement("p");
-          p.className = "mm-empty"; p.textContent = "Loading connector fields…";
-          fieldsList.appendChild(p);
-        }
-      }
+  // ── The pane's field sections ─────────────────────────────────────────────
+  // A board draws exactly two of them: the fields its INPUT supplies (connector
+  // or file — never both, since the input is one or the other) and the
+  // AI-extracted ones. All three sources are the same shape — a heading, an
+  // optional band under it, the rows, the line that stands in when there are
+  // none, and an optional footer control — so each one describes what fills
+  // those slots and drawSection owns the drawing. They used to be three inlined
+  // blocks that each decided for itself when a "nothing here" line was
+  // warranted; the file one grew a third case the other two never got.
+  function drawSection({ title, band, rows, empty, footer }) {
+    fieldsList.appendChild(sectionTitle(title));
+    if (band) fieldsList.appendChild(band);
+    for (const row of rows) fieldsList.appendChild(row);
+    if (!rows.length && empty) {
+      const p = document.createElement("p");
+      p.className = "mm-empty";
+      p.textContent = empty;
+      fieldsList.appendChild(p);
     }
-
-    // File fields — file boards only. Only the INCLUDED fields render as rows
-    // (with a file:<fn> chip, matching the connector rows); "+ Add file field"
-    // reveals the rest, so the ~15-field catalog isn't a wall of rows.
-    if (!inputConnector) {
-      fieldsList.appendChild(sectionTitle("File fields"));
-      const includedFile = fields.filter((f) => f.from === "file");
-      for (const f of includedFile) {
-        const cat = (fileFieldCatalog || []).find((c) => c.fn === f.fn) || { key: f.key, fn: f.fn, kind: f.kind };
-        fieldsList.appendChild(makeFileCatalogRow(cat));
-      }
-      if (!fileFieldCatalog) {
-        // Catalog still loading: show a line only when there's nothing to list.
-        if (!includedFile.length) {
-          const p = document.createElement("p");
-          p.className = "mm-empty"; p.textContent = "Loading file fields…";
-          fieldsList.appendChild(p);
-        }
-      } else if (isAdmin) {
-        fieldsList.appendChild(makeAddFileFieldBtn());
-      } else if (!includedFile.length) {
-        const p = document.createElement("p");
-        p.className = "mm-empty"; p.textContent = "No file fields.";
-        fieldsList.appendChild(p);
-      }
-    }
-
-    // AI fields.
-    const aiFields = fields.filter((f) => f.from === "ai");
-    fieldsList.appendChild(sectionTitle("AI-extracted fields"));
-    if (extractBand) fieldsList.appendChild(extractBand.el);
-    if (!aiFields.length) {
-      const empty = document.createElement("p");
-      empty.className = "mm-empty";
-      empty.textContent = isAdmin ? "No AI fields — add one below." : "No AI fields defined.";
-      fieldsList.appendChild(empty);
-    } else {
-      aiFields.forEach((f) => fieldsList.appendChild(makeAiRow(f)));
-    }
+    if (footer) fieldsList.appendChild(footer);
   }
+
+  // Connector fields: the connector's WHOLE catalog, one row each, ticked for
+  // the ones this board takes. Until the catalog lands (or if its fetch failed)
+  // the board's saved connector fields stand in, so the pane is never blank
+  // about fields it is actually collecting — without checkboxes, since there's
+  // no catalog to re-add from, but with their cadence still editable.
+  function connectorSection() {
+    const rows = connectorCatalog
+      ? connectorCatalog.map((cat) => {
+          const inc = fields.find((f) => f.from === "connector" && f.key === cat.key);
+          return lockedRow({
+            key: cat.key,
+            badge: `${inputConnector}:${cat.fn}`,
+            kind: cat.kind,
+            include: {
+              checked: !!inc,
+              title: "Include this field",
+              place: `connector:${cat.key}`,
+              onToggle: (on) => toggleField("connector", cat, on),
+            },
+            live: { field: inc, enabled: !!inc },
+          });
+        })
+      : fields.filter((f) => f.from === "connector").map((f) => lockedRow({
+          key: f.key,
+          badge: `${inputConnector}:${f.fn}`,
+          kind: f.kind,
+          live: { field: f, enabled: true },
+        }));
+    return {
+      title: connectorLabel ? `Connector fields · ${connectorLabel}` : "Connector fields",
+      rows,
+      empty: connectorCatalog ? "No connector fields." : "Loading connector fields…",
+    };
+  }
+
+  // File fields (server/media). Only the INCLUDED ones render as rows;
+  // "+ Add file field" reveals the rest, so the ~15-field catalog isn't a wall
+  // of rows by default. The un-tick therefore REMOVES rather than un-includes,
+  // which is what its title says.
+  function fileSection() {
+    const rows = fields.filter((f) => f.from === "file").map((f) => {
+      // The catalog is what carries the kind and the note; a field saved under
+      // a catalog entry that has since gone (or one that hasn't loaded yet)
+      // falls back to what the mapping itself remembers.
+      const cat = (fileFieldCatalog || []).find((c) => c.fn === f.fn) || { key: f.key, fn: f.fn, kind: f.kind };
+      return lockedRow({
+        key: cat.key,
+        badge: `file:${cat.fn}`,
+        kind: cat.kind,
+        note: cat.note,
+        include: {
+          checked: true,
+          title: "Remove this field",
+          place: `file:${cat.key}`,
+          onToggle: (on) => toggleField("file", cat, on),
+        },
+      });
+    });
+    return {
+      title: "File fields",
+      rows,
+      // An admin gets the add button as the empty state: it says what to do
+      // about the emptiness, which "No file fields." doesn't.
+      empty: !fileFieldCatalog ? "Loading file fields…" : isAdmin ? null : "No file fields.",
+      footer: fileFieldCatalog && isAdmin ? makeAddFileFieldBtn() : null,
+    };
+  }
+
+  // AI fields: the only editable rows in the pane, and the only section with a
+  // provenance band — the model that fills them is a thing worth naming here.
+  function aiSection() {
+    return {
+      title: "AI-extracted fields",
+      band: extractBand?.el,
+      rows: fields.filter((f) => f.from === "ai").map(makeAiRow),
+      empty: isAdmin ? "No AI fields — add one below." : "No AI fields defined.",
+      footer: isAdmin ? makeAddAiFieldBtn() : null,
+    };
+  }
+
+  const renderFields = keepPlace(fieldsList, () => {
+    fieldsList.replaceChildren();
+    drawSection(inputConnector ? connectorSection() : fileSection());
+    drawSection(aiSection());
+  });
 
   renderFaceRow();
   renderFields();
@@ -873,21 +922,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // File boards: fetch the media field catalog so the "File fields" section can
   // offer every addable field (already-included ones render checked).
   if (!inputConnector) loadFileFields();
-
-  if (isAdmin) {
-    const addBtn = document.createElement("button");
-    addBtn.className = "fe-add-facet";
-    addBtn.textContent = "+ Add AI field";
-    addBtn.addEventListener("click", () => {
-      if (fields.filter((f) => f.from === "ai").length >= 12) { toast.info("Maximum 12 AI fields"); return; }
-      fields.push({ key: "", kind: "text", from: "ai", hint: "" });
-      markDirty();
-      renderFields();
-      const rows = fieldsList.querySelectorAll(".mm-key");
-      rows[rows.length - 1]?.focus();
-    });
-    body.appendChild(addBtn);
-  }
 
   // The host modal owns the Save button. Non-admins get a read-only pane, so
   // say why inline (the host's Save persists tagging only for them).
@@ -986,7 +1020,10 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // the payload merges straight into the board PATCH body. Extraction's pin
   // rides the host's capability pickers, not this pane.
   function collect() {
-    // Flush any pending key-input blur normalizations.
+    // Blur whatever is being edited so the key input re-displays its normalized
+    // value. The MODEL is already current — every control in the pane writes on
+    // input/change — so this is about what the reader sees: the messages below
+    // name keys, and they have to name what's on screen.
     const activeKey = document.activeElement;
     if (activeKey && fieldsList.contains(activeKey)) activeKey.blur();
 
