@@ -198,6 +198,12 @@ function connectorSection(p, ctx, reload) {
     "Configuration",
     `${p.connector.domainLabel} data provider.` + (isDefault ? " Currently the default for new adds." : "")
   );
+  // Held by reference because there is nothing to query it back by: section()
+  // renders the subtitle from sectionHeading's inline-styled markup, which
+  // carries no class. A `.sub` lookup here borrowed the page's OTHER subtitle
+  // convention (`<p class="sub">`, the tab headings in admin-plugins) and so
+  // found null inside the modal — see the star below for what that cost.
+  const subLine = sec.firstElementChild.querySelector("p"); // sectionHeading's wrapper: h2 + sub
 
   // One input per schema field; the plugin declares them, we just render.
   // Every field autosaves itself (the PATCH merges per key) — no Save button.
@@ -288,13 +294,20 @@ function connectorSection(p, ctx, reload) {
     star.className = "ghost";
     star.style.alignSelf = "flex-start";
     star.textContent = `Make default for ${p.connector.domainLabel}`;
+    // The repaint goes FIRST, ahead of the cosmetic in-modal updates. It used
+    // to go last, behind a subtitle write that threw on a null lookup — so
+    // every promote failed after the POST had already landed: the new default
+    // was stored, an error toast claimed otherwise, and both cards' badges kept
+    // naming the old provider until a page reload. Nothing that only redresses
+    // this modal should be able to strand the page on a state the server no
+    // longer holds.
     star.onclick = busy(star, "Saving…", async () => {
       try {
         await api("POST", `/api/admin/plugins/slots/${p.connector.domain}`, { provider: p.name });
+        ctx.refresh(); // repaint the default badge on every card behind the modal
         toast(`${p.label} is now the ${p.connector.domainLabel} default`);
         star.remove();
-        sec.querySelector(".sub").textContent = `${p.connector.domainLabel} data provider. Currently the default for new adds.`;
-        ctx.refresh(); // repaint the card's default badge behind the modal
+        subLine.textContent = `${p.connector.domainLabel} data provider. Currently the default for new adds.`;
       } catch (err) { toast.error(err.message); }
     });
     sec.appendChild(star);
