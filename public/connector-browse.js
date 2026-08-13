@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { toItem, sentence } from './utils.js';
+import { toItem, sentence, plural } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
@@ -290,6 +290,30 @@ export function openConnectorBrowse(connectorName) {
     fetchPage(false);
   }
 
+  // One narrowing filter as a select: an "all" escape at the top, then the
+  // provider's vocabulary ({value,label} — the label is what a category id
+  // like "meme-token" is called).
+  function filterSelect(f) {
+    const sel = document.createElement("select");
+    sel.className = "cb-sort cb-filter";
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = `All ${plural((f.label || f.key).toLowerCase())}`;
+    sel.appendChild(all);
+    for (const opt of f.options || []) {
+      const o = document.createElement("option");
+      o.value = opt.value;
+      o.textContent = opt.label ?? opt.value;
+      sel.appendChild(o);
+    }
+    sel.addEventListener("change", () => {
+      if (sel.value) opts.filters[f.key] = sel.value;
+      else delete opts.filters[f.key];
+      reset();
+    });
+    return sel;
+  }
+
   // Wire controls.
   searchInput.addEventListener("input", () => {
     clearTimeout(debounceTimer);
@@ -329,6 +353,21 @@ export function openConnectorBrowse(connectorName) {
       footer.style.display = "none";
       return;
     }
+    // Provider credit — a license term for some backends (CoinGecko's demo
+    // ToS requires visible attribution), rendered for whichever provider is
+    // actually filling the rows.
+    const active = (descriptor.providers || []).find((p) => p.name === descriptor.activeProvider);
+    if (active?.attribution?.text) {
+      const credit = document.createElement("a");
+      credit.className = "cb-attribution";
+      credit.textContent = active.attribution.text;
+      if (active.attribution.url) {
+        credit.href = active.attribution.url;
+        credit.target = "_blank";
+        credit.rel = "noopener";
+      }
+      footer.insertBefore(credit, addSelectedBtn);
+    }
     opts.sort = descriptor.browse.defaultSort || descriptor.browse.sorts?.[0]?.key || null;
     for (const s of descriptor.browse.sorts || []) {
       const o = document.createElement("option");
@@ -336,30 +375,19 @@ export function openConnectorBrowse(connectorName) {
       sortSel.appendChild(o);
     }
     sortSel.value = opts.sort;
-    // Narrowing filters, straight from the manifest — no declaration, no
-    // controls, so connectors without them keep today's three-control row.
-    for (const f of descriptor.browse.filters || []) {
-      const sel = document.createElement("select");
-      sel.className = "cb-sort cb-filter";
-      const all = document.createElement("option");
-      all.value = "";
-      all.textContent = `All ${(f.label || f.key).toLowerCase()}s`;
-      sel.appendChild(all);
-      for (const value of f.options || []) {
-        const o = document.createElement("option");
-        o.value = value; o.textContent = value;
-        sel.appendChild(o);
-      }
-      sel.addEventListener("change", () => {
-        if (sel.value) opts.filters[f.key] = sel.value;
-        else delete opts.filters[f.key];
-        reset();
-      });
-      controls.insertBefore(sel, sortSel);
-    }
     renderOrder();
     buildHead();
     fetchPage(false);
+    // Narrowing filters come from their own route, because their vocabularies
+    // are the active provider's to supply (CoinGecko's categories, FMP's
+    // industries) — no declaration or a provider that can't serve one means no
+    // control, so connectors without them keep today's three-control row.
+    // Loaded alongside the first page rather than before it: rows are what the
+    // modal is for, and a slow (or dead) vocabulary must not hold them up.
+    try {
+      const { filters } = await fetch(`/api/boards/${state.boardId}/connector-filters`).then((r) => r.json());
+      for (const f of filters || []) controls.insertBefore(filterSelect(f), sortSel);
+    } catch { /* no controls; browsing is unaffected */ }
   })();
 
   return { close };

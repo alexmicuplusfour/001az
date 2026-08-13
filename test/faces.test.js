@@ -1,7 +1,7 @@
 // Connector faces (slice 5d): the chart renderer, the provider-gated face
-// production (CoinGecko has history, CMC doesn't → fall back), the face leg that
-// stores the chart before tagging, and face-slot validation. Provider fetch is
-// stubbed. Own throwaway DB per file, so crypto settings start clean.
+// production (a provider without history() falls back to the tile), the face
+// leg that stores the chart before tagging, and face-slot validation. Provider
+// fetch is stubbed. Own throwaway DB per file, so crypto settings start clean.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -173,19 +173,29 @@ test("generateFace: renders the chart, stores it, stamps face_at, points the ins
   assert.equal(i2.payload.files[0].generated, true);                   // vehicle points at the chart
 });
 
-test("generateFace: no history (CMC active) leaves the tile", async () => {
-  await setSetting(db, "crypto_provider", "coinmarketcap");
-  const board = await faceBoard("face-cmc");
-  const eid = await createEntity(db, board.id, { identity: "eth", symbol: "ETH", displayName: "Ethereum" });
-  const boardRow = await getBoard(db, board.id);
-  const instId = await insertItem(db, board.id, { identity: "eth", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coinmarketcap", id: "1027" } }, "pending_face", eid);
-  const entity = await getEntity(db, eid);
-  const { rows: [inst] } = await db.query("SELECT id, payload FROM items WHERE id=$1", [instId]);
-  const face = await generateFace(db, { galleryDir, thumbsDir }, entity, inst, boardRow);
-  assert.equal(face, null);                                            // CMC has no history() → tile stays
-  const { rows: [i2] } = await db.query("SELECT payload FROM items WHERE id=$1", [instId]);
-  assert.deepEqual(i2.payload.files, []);
-  await setSetting(db, "crypto_provider", null);
+test("generateFace: a provider without history() leaves the tile", async () => {
+  // Both bundled providers render charts now (CMC's Basic tier gained
+  // historical quotes in 2026) — a history-less stub keeps the fallback
+  // contract itself under test, the case plugin providers can still hit.
+  const { registerConnectorProvider, unregisterConnectorProvider } = await import("../server/connectors/index.js");
+  registerConnectorProvider("crypto", "nohist", { label: "No Hist", async search() { return []; }, async fetchEntity() { return {}; } });
+  await installConnectors(db, "crypto:nohist");
+  await setSetting(db, "crypto_provider", "nohist");
+  try {
+    const board = await faceBoard("face-nohist");
+    const eid = await createEntity(db, board.id, { identity: "eth", symbol: "ETH", displayName: "Ethereum" });
+    const boardRow = await getBoard(db, board.id);
+    const instId = await insertItem(db, board.id, { identity: "eth", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "nohist", id: "1027" } }, "pending_face", eid);
+    const entity = await getEntity(db, eid);
+    const { rows: [inst] } = await db.query("SELECT id, payload FROM items WHERE id=$1", [instId]);
+    const face = await generateFace(db, { galleryDir, thumbsDir }, entity, inst, boardRow);
+    assert.equal(face, null);                                          // no history() → tile stays
+    const { rows: [i2] } = await db.query("SELECT payload FROM items WHERE id=$1", [instId]);
+    assert.deepEqual(i2.payload.files, []);
+  } finally {
+    unregisterConnectorProvider("crypto", "nohist");
+    await setSetting(db, "crypto_provider", null);
+  }
 });
 
 test("a face render error does not block the field refresh (prices keep flowing)", async () => {
@@ -201,11 +211,12 @@ test("a face render error does not block the field refresh (prices keep flowing)
   await db.query("UPDATE entities SET face_at=0 WHERE id=$1", [eid]); // face due
   const instId = await insertItem(db, board.id, { identity: "btc", files: [], fields: {}, mapping: boardRow.mapping, source: { provider: "coingecko", id: "bitcoin" } }, "tagged", eid);
 
+  coingecko._resetQuoteCache();
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     if (String(url).includes("market_chart")) return { ok: false, status: 500, text: async () => "", json: async () => ({}) };       // face fails
-    if (String(url).includes("coingecko.com") && String(url).includes("/coins/"))                                                    // price ok
-      return { ok: true, status: 200, text: async () => "", json: async () => ({ id: "bitcoin", name: "Bitcoin", symbol: "btc", market_data: { current_price: { usd: 130 }, market_cap: { usd: 1e12 }, price_change_percentage_24h: 1 } }) };
+    if (String(url).includes("/coins/markets"))                                                                                      // price ok
+      return { ok: true, status: 200, text: async () => "", json: async () => ([{ id: "bitcoin", name: "Bitcoin", symbol: "btc", current_price: 130, market_cap: 1e12, price_change_percentage_24h: 1 }]) };
     return original(url, opts);
   };
   let r;
@@ -221,7 +232,10 @@ test("a face render error does not block the field refresh (prices keep flowing)
 });
 
 test("refreshDueEntity: a face-only board stays scheduled when the render is unavailable (CMC)", async () => {
-  await setSetting(db, "crypto_provider", "coinmarketcap"); // no history() → face can't render
+  // CMC serves history now, but without a key every call throws before any
+  // HTTP — same user-visible outcome this test guards: render unavailable,
+  // face_at stays null, and the retry keeps the entity on the sweep.
+  await setSetting(db, "crypto_provider", "coinmarketcap");
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-only-cmc" } });
   const mapping = {
     input: { connector: "crypto" }, identity: { from: "connector" },
@@ -301,10 +315,11 @@ test("connector fetches carry an outbound deadline", async () => {
 
 test("POST entities on a chart-face board → the vehicle starts at pending_face", async () => {
   const board = await faceBoard("face-route");
+  coingecko._resetQuoteCache();
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
-    if (String(url).includes("coingecko.com") && String(url).includes("/coins/")) {
-      return { ok: true, status: 200, text: async () => "", json: async () => ({ id: "bitcoin", name: "Bitcoin", symbol: "btc", market_data: { current_price: { usd: 50000 }, market_cap: { usd: 1e12 }, price_change_percentage_24h: -1 } }) };
+    if (String(url).includes("/coins/markets")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ([{ id: "bitcoin", name: "Bitcoin", symbol: "btc", current_price: 50000, market_cap: 1e12, price_change_percentage_24h: -1 }]) };
     }
     return original(url, opts);
   };
@@ -321,10 +336,11 @@ test("POST entities with auto-tag off → face leg anyway, parked", async () => 
   // is off; `park` makes the face leg park the item in held afterwards.
   const board = await faceBoard("face-route-off");
   await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { auto_tag: false } });
+  coingecko._resetQuoteCache();
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
-    if (String(url).includes("coingecko.com") && String(url).includes("/coins/")) {
-      return { ok: true, status: 200, text: async () => "", json: async () => ({ id: "ethereum", name: "Ethereum", symbol: "eth", market_data: { current_price: { usd: 3000 }, market_cap: { usd: 1e11 }, price_change_percentage_24h: 1 } }) };
+    if (String(url).includes("/coins/markets")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ([{ id: "ethereum", name: "Ethereum", symbol: "eth", current_price: 3000, market_cap: 1e11, price_change_percentage_24h: 1 }]) };
     }
     return original(url, opts);
   };

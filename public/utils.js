@@ -110,6 +110,20 @@ export const tag = (facet, value) => `${facet}/${value}`;
 // instead of the registry keeping two cases of it.
 export const sentence = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : "");
 
+// Plural of an English noun, for labels built from a name the client didn't
+// write ("All {filter}s"). Bare +"s" reads fine until the noun ends in y or a
+// sibilant — "All categorys", "All industrys" — and the two rules below are
+// the whole of what these labels ever hit. Not a general inflector: an
+// irregular noun (people, indices) would need its own plural declared beside
+// the label, which is the day this stops being one line.
+export const plural = (word) => {
+  const s = String(word || "");
+  if (!s) return ""; // no word, no ending — never a bare "s"
+  if (/[^aeiou]y$/i.test(s)) return `${s.slice(0, -1)}ies`;
+  if (/(s|x|z|ch|sh)$/i.test(s)) return `${s}es`;
+  return `${s}s`;
+};
+
 // ── Icons ───────────────────────────────────────────────────────────────────
 // Every glyph in this set is the same object: a 24-unit box, unfilled, drawn in
 // one currentColor stroke with round caps and joins. `glyph` is where that

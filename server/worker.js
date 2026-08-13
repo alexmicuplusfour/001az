@@ -60,7 +60,7 @@ import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.j
 import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
 import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
-import { getConnector } from "./connectors/index.js";
+import { getConnector, prefetchDueRefreshes } from "./connectors/index.js";
 import { entityRefreshAt, faceSchedule } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields } from "./media/index.js";
@@ -1700,6 +1700,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   async function refreshDue() {
     if (Date.now() < refreshBackoffUntil) return false;
     const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
+    // Warm provider quote caches for the whole batch first (one metered call
+    // per provider instead of one per entity — see prefetchDueRefreshes);
+    // the per-entity loop below is unchanged and pays retail on a cache miss.
+    if (rows.length > 1) await prefetchDueRefreshes(db, rows);
     for (const row of rows) {
       try {
         await refreshDueEntity(db, row, Date.now(), DIRS);

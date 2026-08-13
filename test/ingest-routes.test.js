@@ -60,7 +60,11 @@ test("PATCH validation: every rejection names its rule", async () => {
     [{ ...GOOD, trigger: { mode: "interval", every: 0 } }, /trigger\.every/],
     [{ ...GOOD, trigger: { mode: "interval", every: 50000 } }, /trigger\.every/],
     [{ ...GOOD, limit: 0 }, /limit/],
-    [{ ...GOOD, limit: 5001 }, /limit/],
+    // The only ceiling left is the enumeration safety backstop — a limit past
+    // it couldn't be honored, so it's a typo rather than an intent. A "top
+    // 5000" run, which the old bound rejected, is now perfectly ordinary.
+    [{ ...GOOD, limit: 100001 }, /limit/],
+    [{ ...GOOD, limit: 1.5 }, /limit/],
     [{ ...GOOD, source: { folder: "../escape" } }, /escapes/],
     [{ ...GOOD, source: { recursive: "yes" } }, /recursive/],
     [{ ...GOOD, trigger: { mode: "hourly" } }, /trigger mode/],

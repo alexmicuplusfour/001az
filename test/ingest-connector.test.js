@@ -144,28 +144,30 @@ test("enumerate: the preview/window cap marks truncation", async () => {
   assert.equal(truncated, true);
 });
 
-test("enumerate: window depth is per-connector — feedWindow beats the default, env beats both", async () => {
-  // 1,250 rows across 5 pages of 250: past the metered default (1000) but
-  // inside a declared feedWindow (the snapshot-served-catalog shape).
+test("enumerate: a feed reaches the WHOLE catalog — no app-side ration, only an operator's", async () => {
+  // 1,250 rows across 5 pages of 250 — past every ration this adapter used to
+  // apply by default (1000 for metered catalogs, 5000 declared for stocks).
   const pages = Array.from({ length: 5 }, (_, p) =>
     Array.from({ length: 250 }, (_, i) => row(`w${p * 250 + i}`, `W${p * 250 + i}`)));
 
-  // No declaration → the metered default: 1000 rows, truncated.
+  // No declaration, no env: the walk ends where the CATALOG ends, and the
+  // empty sixth page proves it — "all of it", never "N+". A capped window
+  // would clog (the ledger dedups downstream, so ingested rows keep filling
+  // it and everything past the cap is permanently unreachable).
   const plain = feedAdapter(stubConn({ pages }));
   const d = await plain.enumerate(null, null, {});
-  assert.equal(d.candidates.length, 1000);
-  assert.equal(d.truncated, true);
-  assert.equal(plain.windowCap(), 1000);
+  assert.equal(d.candidates.length, 1250);
+  assert.equal(d.truncated, false);
+  assert.equal(plain.windowCap(), 100000, "only an out-of-memory backstop, not a product ceiling");
 
-  // Declared feedWindow: the whole catalog fits, and the empty sixth page
-  // proves it ended — "all of it", not "N+".
-  const deep = feedAdapter(stubConn({ pages, browse: { ...BROWSE, feedWindow: 5000 } }));
-  const f = await deep.enumerate(null, null, {});
-  assert.equal(f.candidates.length, 1250);
-  assert.equal(f.truncated, false);
-  assert.equal(deep.windowCap(), 5000);
+  // A connector may still declare a window — it's a cost guard, not the norm.
+  const guarded = feedAdapter(stubConn({ pages, browse: { ...BROWSE, feedWindow: 500 } }));
+  const f = await guarded.enumerate(null, null, {});
+  assert.equal(f.candidates.length, 500);
+  assert.equal(f.truncated, true);
 
-  // The env knob overrides every declaration at once.
+  // The env knob is the operator's own ration, and it overrides every
+  // declaration at once.
   process.env.INGEST_FEED_CAP = "300";
   try {
     const forced = feedAdapter(stubConn({ pages, browse: { ...BROWSE, feedWindow: 5000 } }));
@@ -176,6 +178,20 @@ test("enumerate: window depth is per-connector — feedWindow beats the default,
   } finally {
     delete process.env.INGEST_FEED_CAP;
   }
+});
+
+test("enumerate: the page backstop can't become the real ceiling", async () => {
+  // MAX_PAGES exists for a provider that never returns an empty page. It is
+  // derived from the safety cap, so it can never bind FIRST — a 40-page
+  // backstop against a 100k-row cap would have quietly capped every feed at
+  // 10,000 rows while claiming there was no limit.
+  const conn = stubConn({
+    pages: Array.from({ length: 60 }, (_, p) =>
+      Array.from({ length: 250 }, (_, i) => row(`p${p}-${i}`, `P${p}-${i}`))),
+  });
+  const { candidates, truncated } = await feedAdapter(conn).enumerate(null, null, {});
+  assert.equal(candidates.length, 15000, "60 full pages, none refused — the old 40-page backstop stopped at 10,000");
+  assert.equal(truncated, false, "page 61 came back empty, so the catalog genuinely ended");
 });
 
 test("enumerate: a warm window is reused across calls; sort change or TTL expiry refetches", async () => {
@@ -366,7 +382,8 @@ test("sweep e2e: a crypto feed admits its filter-defined bucket, once", async ()
     body: { source: {}, filters: [], sort: { by: "market_cap", order: "desc" }, trigger: { mode: "manual" } },
   });
   assert.equal(prev.status, 200);
-  assert.deepEqual(prev.json, { count: 3, new: 1, capped: false }, "filterless preview sees the full universe; only doge is unledgered");
+  assert.deepEqual(prev.json, { count: 3, new: 1, capped: false, scanned: 3 },
+    "filterless preview sees the full universe; only doge is unledgered");
 
   const page = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
     sid: admin.sid,

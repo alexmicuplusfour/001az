@@ -690,9 +690,16 @@ export function openIngestModal() {
         resultOffset += (data.sample || []).length;
         moreBtn.style.display = data.hasMore ? "" : "none";
         if (!data.hasMore) {
+          // The scanned depth is whatever the walk actually reached, not a
+          // constant — the server ships the number it enumerated to. Only a
+          // safety backstop or an operator's INGEST_FEED_CAP stops it short,
+          // so this line is now rare rather than routine.
+          const scanned = Number(data.scanned) || 0;
           note.textContent = !tbody.children.length
             ? "Nothing matches."
-            : data.capped ? "Showing the first 1000 scanned — narrow the filters for an exact view." : "";
+            : data.capped
+              ? `Showing the first ${scanned ? `${scanned.toLocaleString()} ` : ""}scanned — narrow the filters for an exact view.`
+              : "";
           note.style.display = note.textContent ? "" : "none";
         }
       } catch {

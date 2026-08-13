@@ -38,11 +38,25 @@ const QUOTABLE_EXCHANGE = /NASDAQ|NYSE|AMEX|OTC/i;
 // memory (~430 KB per 1000 rows) and response size; it exists to shrink
 // those, not to protect the API. Read per call so tests can steer it.
 const universeRows = () =>
-  Math.max(100, Math.min(25000, Number(process.env.FMP_UNIVERSE_ROWS) || 10000));
+  Math.max(100, Math.min(100000, Number(process.env.FMP_UNIVERSE_ROWS) || 30000));
+
+// The venues the universe covers. This IS a real boundary — a non-US venue
+// symbol (SAP.DE) is premium-gated at the quote endpoint, so listing one in
+// browse would only produce rows that fail on add. It's a knob rather than a
+// constant because OTC is the judgement call: this tier quotes OTC (verified
+// 2026-08-13, SAPX), so adding it is supported — it's just thousands more
+// rows on every screener fill, which is bandwidth an operator's plan meters
+// (FMP caps trailing-30-day bandwidth per tier). Default stays the three
+// major venues; set FMP_EXCHANGES to widen. OTC symbols remain addable by
+// search either way — this governs what BROWSE and FEEDS enumerate.
+const universeExchanges = () =>
+  process.env.FMP_EXCHANGES || "NASDAQ,NYSE,AMEX";
 
 export const label = "Financial Modeling Prep";
 export const description = "US stock quotes, fundamentals, and price history — needs a key";
 export const needsKey = true;
+// FMP's terms ask for a visible credit + backlink on redistributed data.
+export const attribution = { text: "Data by Financial Modeling Prep", url: "https://financialmodelingprep.com" };
 // Truthful request pacing: this provider awaits ctx.pace() before every raw
 // HTTP request (pacesRequests — see runtime.callProvider), so rpm meters what
 // FMP actually meters. 240 sustained + burst 20 stays under the 300/min
@@ -98,6 +112,11 @@ async function fmp(endpoint, params, apiKey, { bulk = false, pace } = {}) {
 
 const symbolOf = (row) => String(row?.symbol || "").trim().toUpperCase();
 const exchangeOf = (row) => row?.exchangeShortName || row?.exchange || row?.stockExchange || "";
+// What kind of listing a screener row is. The screener carries isEtf/isFund
+// flags; they used to be exclusion criteria and are now just a column and a
+// filter, so an ETF is something a user can narrow to (or away from) instead
+// of something the app decided they couldn't see.
+const typeOf = (row) => (row?.isEtf ? "ETF" : row?.isFund ? "Fund" : "Stock");
 const isQuotableListing = (row) =>
   (!row?.currency || String(row.currency).toUpperCase() === "USD") &&
   QUOTABLE_EXCHANGE.test(exchangeOf(row));
@@ -224,6 +243,9 @@ function browseRow(row) {
       price: number(row?.price),
       market_cap: number(row?.marketCap),
       volume: tradedVolume(row?.volume),
+      // Bridge rows (quote-filled, no screener row) have no flags to read, so
+      // they carry no type rather than a guessed "Stock".
+      type: row?.assetType ?? null,
       sector: row?.sector || null,
       exchange: exchangeOf(row) || null,
     },
@@ -250,18 +272,66 @@ function sortRows(rows, sort, order) {
 // ~15 s metered request; with it, one request, one token, one failure wave).
 let screenerCache = { at: 0, rows: null, bySymbol: null, inflight: null };
 
+// FMP caps a screener RESPONSE at 10,000 rows however big a `limit` you send
+// (measured 2026-08-13: limit=30000 returned exactly 10,000, and the response
+// ended there rather than being paged short). Their `page` param overlaps
+// between pages, so paging isn't a way past it either.
+//
+// A cap on one response is not a cap on the catalog, though: ask in DISJOINT
+// pieces and union them. Venue is the natural partition — a listing has
+// exactly one exchange — and if a single venue is itself at the cap, split it
+// again by listing type, which is also disjoint and also complete (every row
+// is an ETF, a fund, or neither). So the ceiling stays the API's shape rather
+// than a number the app quietly accepted.
+const SCREENER_MAX_ROWS = 10000;
+
+// One screener request. The ONLY narrowing here is what the tier itself
+// enforces — venues it can quote, listings that still trade — plus whatever
+// partition key the caller is slicing on. What this used to add on top was
+// the app deciding what a user may browse: `country=US` excluded every ADR
+// (BABA, TSM, ASML all trade on NYSE/NASDAQ and quote fine here — it filtered
+// company DOMICILE, which is neither a tier gate nor a venue), and
+// isEtf/isFund=false excluded ~6.3k ETFs and the closed-end funds. Those are
+// a `type` filter now: the user narrows, not the manifest.
+async function screenerRows(params, apiKey, pace) {
+  const rows = await fmp("company-screener", {
+    isActivelyTrading: true,
+    limit: universeRows(),
+    ...params,
+  }, apiKey, { bulk: true, pace });
+  return Array.isArray(rows) ? rows : [];
+}
+
+// One venue's listings, re-partitioned if the venue alone saturates the cap.
+async function venueRows(exchange, apiKey, pace) {
+  const rows = await screenerRows({ exchange }, apiKey, pace);
+  if (rows.length < SCREENER_MAX_ROWS) return rows;
+  const parts = await Promise.all([
+    screenerRows({ exchange, isEtf: true }, apiKey, pace),
+    screenerRows({ exchange, isFund: true }, apiKey, pace),
+    screenerRows({ exchange, isEtf: false, isFund: false }, apiKey, pace),
+  ]);
+  // Saying so beats silently serving a truncated universe: at this point the
+  // venue has more of ONE type than a response can carry, and the next split
+  // (market-cap bands) would need care about rows FMP prices at 0.
+  if (parts.some((part) => part.length >= SCREENER_MAX_ROWS))
+    console.warn(`FMP screener: ${exchange} saturates ${SCREENER_MAX_ROWS} rows even split by type — some listings are out of reach`);
+  return parts.flat();
+}
+
 function fetchUniverse(apiKey, pace) {
   if (!screenerCache.inflight) {
     const p = (async () => {
-      const rows = await fmp("company-screener", {
-        country: "US",
-        exchange: "NASDAQ,NYSE,AMEX",
-        isEtf: false,
-        isFund: false,
-        isActivelyTrading: true,
-        limit: universeRows(),
-      }, apiKey, { bulk: true, pace });
-      const list = Array.isArray(rows) ? rows : [];
+      const venues = universeExchanges().split(",").map((v) => v.trim()).filter(Boolean);
+      const perVenue = await Promise.all(venues.map((v) => venueRows(v, apiKey, pace)));
+      // Partitions are disjoint by construction; dedupe anyway, so a symbol
+      // FMP reports under two venues can't become two rows (and two ranks).
+      const unique = new Map();
+      for (const row of perVenue.flat()) {
+        const symbol = symbolOf(row);
+        if (symbol && !unique.has(symbol)) unique.set(symbol, row);
+      }
+      const list = [...unique.values()];
       // FMP leaves marketCap 0 on unpriced fringe listings and zeroes volume
       // outside sessions — both are missing data, not measurements. Null them
       // at fill time so ascending sorts show real micro-caps first, not a run
@@ -269,6 +339,7 @@ function fetchUniverse(apiKey, pace) {
       for (const row of list) {
         if (!number(row?.marketCap)) row.marketCap = null;
         if (!number(row?.volume)) row.volume = null;
+        row.assetType = typeOf(row);
       }
       // Market-cap rank within the universe, computed here rather than trusted
       // from response order — it makes "top 50 stocks" expressible as a feed
@@ -289,6 +360,13 @@ function fetchUniverse(apiKey, pace) {
   return screenerCache.inflight;
 }
 
+// Negative cache for the cold path: a failed fill (plan-gated screener on the
+// free tier, an outage) is not re-bought for a minute — FMP counts every
+// request against the plan budget (the free tier's is 250/DAY), so each
+// retried failure is quota spent on a known answer. SWR refreshes bypass this
+// (they already have rows to serve and log their own failures).
+let screenerDown = { until: 0, error: null };
+
 async function stockUniverse(apiKey, pace) {
   const age = Date.now() - screenerCache.at;
   if (screenerCache.rows) {
@@ -303,7 +381,13 @@ async function stockUniverse(apiKey, pace) {
       return screenerCache.rows;
     }
   }
-  return fetchUniverse(apiKey, pace);
+  if (Date.now() < screenerDown.until) throw screenerDown.error;
+  try {
+    return await fetchUniverse(apiKey, pace);
+  } catch (e) {
+    screenerDown = { until: Date.now() + 60000, error: e };
+    throw e;
+  }
 }
 
 // Search bridge: what the catalog can find that the screener can't carry.
@@ -347,7 +431,7 @@ async function searchBridge(q, inUniverse, apiKey, pace) {
 }
 
 export async function list(
-  { sort, order, page = 1, pageSize = 50, query, sector, exchange } = {},
+  { sort, order, page = 1, pageSize = 50, query, sector, exchange, industry, type } = {},
   { apiKey, pace } = {}
 ) {
   // The clamp bounds one logical page of the LOCALLY cached universe — it is
@@ -356,7 +440,18 @@ export async function list(
   // cache-served slices pace zero requests).
   const size = Math.max(1, Math.min(250, Number(pageSize) || 50));
   const pageNo = Math.max(1, Number(page) || 1);
-  const universe = await stockUniverse(apiKey, pace);
+  // The screener is plan-gated (FMP's free tier doesn't include it at all —
+  // plan matrix checked 2026-08-13). A plain browse IS the universe, so its
+  // absence propagates; a QUERY can still serve through the search bridge
+  // (search + per-symbol quote are free-tier endpoints), so a gated screener
+  // degrades search to bridge-only instead of a dead modal.
+  let universe;
+  try {
+    universe = await stockUniverse(apiKey, pace);
+  } catch (e) {
+    if (!query || !String(query).trim()) throw e;
+    universe = [];
+  }
 
   // A query filters the screened universe first — those rows carry the full
   // column set for free — then the search bridge appends anything the catalog
@@ -371,13 +466,23 @@ export async function list(
           String(row?.companyName || "").toLowerCase().includes(q)
       )
     : universe;
-  if (q) base = [...base, ...(await searchBridge(q, screenerCache.bySymbol, apiKey, pace))];
+  if (q) {
+    // Re-check bridge rows against the universe SERVED this call, not just the
+    // one the bridge saw at fill time: a cached bridge row outlives a universe
+    // refill (both TTLs are 5 min but they don't tick together), and a symbol
+    // that newly entered the screener would otherwise render twice.
+    const served = new Set(universe.map(symbolOf));
+    const bridge = await searchBridge(q, screenerCache.bySymbol, apiKey, pace);
+    base = [...base, ...bridge.filter((row) => !served.has(symbolOf(row)))];
+  }
 
   // Filters are exact matches on screener vocabulary (manifest browse.filters
   // whitelists the values upstream). Bridge rows carry no sector, so a sector
   // filter honestly excludes them; exchange applies to both.
   if (sector) base = base.filter((row) => row?.sector === sector);
+  if (industry) base = base.filter((row) => row?.industry === industry);
   if (exchange) base = base.filter((row) => exchangeOf(row) === exchange);
+  if (type) base = base.filter((row) => (row?.assetType ?? typeOf(row)) === type);
 
   const sorted = sortRows(base, sort, order);
   const pageRows = sorted.slice((pageNo - 1) * size, pageNo * size);
@@ -479,6 +584,28 @@ export async function history(id, period, { apiKey, pace } = {}) {
     .sort((a, b) => a.t - b.t);
 }
 
+// Browse filter vocabularies (runtime.browseFilters). Sector and exchange are
+// frozen in the manifest — 11 sectors and 3 venues that don't move. Industry
+// is the fine cut under them (~150 values), which FMP publishes, so it's
+// fetched rather than transcribed. One request a day.
+const INDUSTRY_TTL = 24 * 60 * 60 * 1000;
+let industryCache = { at: 0, options: null };
+
+export async function filterOptions({ apiKey, pace } = {}) {
+  if (industryCache.options && Date.now() - industryCache.at < INDUSTRY_TTL)
+    return { industry: industryCache.options };
+  const rows = await fmp("available-industries", {}, apiKey, { pace });
+  const options = (Array.isArray(rows) ? rows : [])
+    // The endpoint answers [{ industry: "Software - Application" }, …]; older
+    // shapes answered bare strings. Take either.
+    .map((row) => (typeof row === "string" ? row : row?.industry))
+    .filter(Boolean)
+    .map((industry) => ({ value: industry, label: industry }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  industryCache = { at: Date.now(), options };
+  return { industry: options };
+}
+
 export async function testConnection({ apiKey, pace } = {}) {
   const rows = await fmp("search-symbol", { query: "AAPL", limit: 1 }, apiKey, { pace });
   if (!Array.isArray(rows)) throw fail("unexpected search response");
@@ -489,6 +616,8 @@ export async function testConnection({ apiKey, pace } = {}) {
 // lets a test cross the TTL/hard-bar thresholds without waiting them out.
 export function _resetScreenerCache() {
   screenerCache = { at: 0, rows: null, bySymbol: null, inflight: null };
+  screenerDown = { until: 0, error: null };
+  industryCache = { at: 0, options: null };
   bridgeCache.clear();
 }
 export function _ageScreenerCache(ms) {

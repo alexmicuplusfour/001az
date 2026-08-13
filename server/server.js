@@ -1174,9 +1174,10 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   // promise what a run won't see. Connector adapters carry their own
   // (windowCap: depth is free for a snapshot-served catalog, metered for a
   // paged one); the file adapter keeps the shared default.
+  const windowCap = adapter.windowCap ? adapter.windowCap() : ENUM_CAP();
   let enumerated;
   try {
-    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: adapter.windowCap ? adapter.windowCap() : ENUM_CAP() });
+    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: windowCap });
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -1188,6 +1189,11 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
     return res.json({
       count: matched.length,
       capped: !!enumerated.truncated,
+      // How deep this actually went. Shipped because the client has to NAME
+      // it ("showing the first N scanned") and it was never a constant it
+      // could hardcode — it's the safety backstop, or whatever an operator
+      // set INGEST_FEED_CAP to.
+      scanned: enumerated.candidates.length,
       sample: rows.map((c) => ({ ...c, ingested: known.has(c.key) })),
       hasMore: sample.offset + sample.limit < matched.length,
     });
@@ -1197,6 +1203,7 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
     count: matched.length,
     new: matched.filter((c) => !known.has(c.key)).length,
     capped: !!enumerated.truncated,
+    scanned: enumerated.candidates.length,
   });
 }));
 
@@ -2516,6 +2523,26 @@ app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => 
   res.json({ added, skipped });
 }));
 
+// The narrowing filters this board's browse modal can offer right now, with
+// their vocabularies resolved — static ones from the manifest, provider-
+// supplied ones (CoinGecko's ~857 categories, FMP's industries) from the
+// active backend, both normalized to {value,label}.
+//
+// Its own route rather than a field on /api/connectors: that route is the
+// template picker's and the mapping modal's, called on every open, and it
+// must stay free of metered provider I/O. This one is the browse modal's, the
+// single surface that needs the vocabulary, and a provider that can't supply
+// one degrades to the static filters (or none) instead of an error.
+app.get("/api/boards/:id/connector-filters", requireAuth, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board || !(await canAccessBoard(db, board.id, req.user)))
+    return res.status(404).json({ error: "not found" });
+  const connectorName = board.mapping?.input?.connector;
+  const connector = connectorName ? getConnector(connectorName) : null;
+  if (!connector) return res.status(400).json({ error: "this board has no connector input" });
+  res.json({ filters: await connector.browseFilters(db) });
+}));
+
 // Browse a connector board's catalog for the ingestion modal: a sorted,
 // paginated page of rows carrying the domain's columns, each flagged on_board
 // when its identity is already here. The connector is derived from the board's
@@ -2538,12 +2565,15 @@ app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => 
     pageSize,
     query: req.query.q ? String(req.query.q) : "",
   };
-  // Narrowing filters, whitelisted by the manifest: only declared keys pass,
-  // and only declared values (the options ARE the provider's vocabulary — a
-  // free-text value would just silently match nothing).
-  for (const f of browse.filters || []) {
+  // Narrowing filters, whitelisted against the SAME resolved vocabulary the
+  // filters route renders (connectors/runtime browseFilters): only declared
+  // keys pass, and only real values — a free-text value would just silently
+  // match nothing. Provider-supplied vocabularies (CoinGecko categories, FMP
+  // industries) resolve from that one place, so the control and the guard
+  // can't drift.
+  for (const f of await connector.browseFilters(db)) {
     const v = req.query[f.key];
-    if (v != null && (f.options || []).includes(String(v))) opts[f.key] = String(v);
+    if (v != null && f.options.some((o) => o.value === String(v))) opts[f.key] = String(v);
   }
   let rows;
   try {

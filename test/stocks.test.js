@@ -144,8 +144,23 @@ test("FMP list: universe hits carry full columns; the search bridge reaches past
     assert.equal(rows[0].values.exchange, "NASDAQ"); // short form, not the full name
     assert.equal(rows[0].label, "Big Co."); // company name, never the ticker
     assert.equal(rows[1].values.volume, null, "session-zeroed volume serves null");
-    assert.ok(seen.some((u) => u.includes("country=US") && u.includes("isEtf=false")));
-    assert.ok(seen[0].includes("limit=10000"), "default depth fetches the whole universe");
+    // The screener asks for what the TIER can serve and nothing narrower:
+    // still-trading listings on the quotable venues, at full depth, one
+    // request per venue (FMP caps a single response at 10k rows, so the
+    // universe is assembled from disjoint slices). No country filter (it
+    // excluded every ADR) and no isEtf/isFund exclusion (they're a `type`
+    // filter now, the user's choice rather than the manifest's).
+    const screeners = seen.filter((u) => u.includes("/company-screener?"));
+    assert.deepEqual(
+      screeners.map((u) => new URL(u).searchParams.get("exchange")),
+      ["NASDAQ", "NYSE", "AMEX"],
+      "one disjoint slice per venue"
+    );
+    assert.ok(screeners.every((u) => u.includes("isActivelyTrading=true")));
+    assert.ok(screeners.every((u) => !u.includes("country=")), "domicile is not a tier gate");
+    assert.ok(screeners.every((u) => !u.includes("isEtf=")), "ETFs are browsable, then filterable");
+    assert.ok(screeners.every((u) => !u.includes("isFund=")));
+    assert.ok(screeners.every((u) => u.includes("limit=30000")), "default depth asks for the whole universe");
 
     // Ascending market cap starts at the smallest REAL company; the unpriced
     // row (marketCap 0 → null) trails everything it has no number to beat.
@@ -164,7 +179,7 @@ test("FMP list: universe hits carry full columns; the search bridge reaches past
     assert.equal(hits[1].values.sector, null);
     assert.equal(hits[1].values.volume, null);
     assert.equal(hits[1].values.exchange, "OTC");
-    assert.equal(seen.filter((u) => u.includes("/company-screener?")).length, 1, "query reuses the cached universe");
+    assert.equal(seen.filter((u) => u.includes("/company-screener?")).length, VENUES, "query reuses the cached universe — no second fill");
 
     // Same query again: the bridge result is cached — no new search/quote.
     const before = seen.length;
@@ -177,6 +192,238 @@ test("FMP list: universe hits carry full columns; the search bridge reaches past
     assert.deepEqual(tech.map((row) => row.symbol), ["BIG"]);
     const nyse = await fmp.list({ exchange: "NYSE" }, { apiKey: "test-key" });
     assert.deepEqual(nyse.map((row) => row.symbol).sort(), ["MID", "SMALL"]);
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP list: a bridge row that JOINS the universe stops doubling on the next fill", async () => {
+  // The bridge cache (5 min) and the universe (5 min) don't tick together, so
+  // a cached bridge row outlives the fill it was deduped against. When the
+  // symbol later enters the screener, the row must not render twice.
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  let screenerRequests = 0;
+  const OLDCO = { symbol: "OLDCO", companyName: "Old Co", marketCap: 100, price: 5, volume: 10, exchangeShortName: "NYSE" };
+  const NEWCO = { symbol: "NEWCO", companyName: "New Co", marketCap: 50, price: 3, volume: 5, exchangeShortName: "NASDAQ" };
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/company-screener?")) {
+      screenerRequests++;
+      // Every venue slice returns the same rows here (the union dedupes);
+      // past the first fill's worth of slices, NEWCO has listed.
+      return response(screenerRequests <= VENUES ? [OLDCO] : [OLDCO, NEWCO]);
+    }
+    if (u.includes("/search-symbol?")) return response([{ symbol: "NEWCO", name: "New Co", currency: "USD", exchange: "NASDAQ" }]);
+    if (u.includes("/search-name?")) return response([]);
+    if (u.includes("/quote?symbol=NEWCO")) return response([{ symbol: "NEWCO", name: "New Co", price: 3, marketCap: 50, volume: 5, exchange: "NASDAQ" }]);
+    throw new Error(`unexpected URL ${u}`);
+  };
+  try {
+    const first = await fmp.list({ query: "co" }, { apiKey: "k" });
+    assert.deepEqual(first.map((r) => r.symbol), ["OLDCO", "NEWCO"]); // NEWCO via the bridge
+
+    // Cross the universe TTL: the next call blocks on a fresh fill that now
+    // carries NEWCO, while the bridge cache still holds its quote-filled row.
+    fmp._ageScreenerCache(61 * 60 * 1000);
+    const second = await fmp.list({ query: "co" }, { apiKey: "k" });
+    assert.equal(screenerRequests, 2 * VENUES, "exactly two fills");
+    assert.deepEqual(second.map((r) => r.symbol), ["OLDCO", "NEWCO"], "no double row");
+    assert.equal(second.find((r) => r.symbol === "NEWCO").values.rank, 2, "served from the universe, with its rank");
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP list: a plan-gated screener still serves search; a plain browse says so once", async () => {
+  // The screener isn't in FMP's free tier at all. A query can still be served
+  // (search + quote ARE free-tier endpoints), so search degrades to
+  // bridge-only rather than dying — and the failed fill isn't re-bought on
+  // every keystroke (the free tier's budget is 250 requests A DAY).
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    seen.push(u);
+    if (u.includes("/company-screener?")) return response({ "Error Message": "Exclusive Endpoint: This endpoint is not available under your current subscription" }, 402);
+    if (u.includes("/search-symbol?")) return response([{ symbol: "AAPL", name: "Apple Inc.", currency: "USD", exchange: "NASDAQ" }]);
+    if (u.includes("/search-name?")) return response([]);
+    if (u.includes("/quote?symbol=AAPL")) return response([{ symbol: "AAPL", name: "Apple Inc.", price: 210, marketCap: 3e12, volume: 4e7, exchange: "NASDAQ" }]);
+    throw new Error(`unexpected URL ${u}`);
+  };
+  try {
+    const rows = await fmp.list({ query: "apple" }, { apiKey: "k" });
+    assert.deepEqual(rows.map((r) => r.symbol), ["AAPL"]);
+    assert.equal(rows[0].values.price, 210);
+    assert.equal(rows[0].values.rank, null, "no universe → no rank, honestly");
+
+    // A plain browse IS the universe, so its absence propagates as the real
+    // provider error (the modal shows it; the plugin health row records it).
+    await assert.rejects(fmp.list({}, { apiKey: "k" }), /Exclusive Endpoint/);
+
+    // The gated screener was attempted for ONE fill, not once per call.
+    assert.equal(seen.filter((u) => u.includes("/company-screener?")).length, VENUES);
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP universe: ADRs, ETFs and funds are IN it, and `type` is how a user narrows", async () => {
+  // The three exclusions this universe used to carry, each represented: a
+  // foreign-domiciled ADR (excluded by country=US), an ETF and a closed-end
+  // fund (excluded by isEtf/isFund=false). All three quote on this tier, and
+  // a feed — which can't fall back to search — could never reach them.
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (!u.includes("/company-screener?")) throw new Error(`unexpected URL ${u}`);
+    return response([
+      { symbol: "AAPL", companyName: "Apple Inc.", marketCap: 3e12, price: 210, volume: 5e7, sector: "Technology", country: "US", exchangeShortName: "NASDAQ" },
+      { symbol: "TSM", companyName: "Taiwan Semiconductor", marketCap: 8e11, price: 180, volume: 1e7, sector: "Technology", country: "TW", exchangeShortName: "NYSE" },
+      { symbol: "SPY", companyName: "SPDR S&P 500 ETF Trust", marketCap: 5e11, price: 550, volume: 8e7, exchangeShortName: "AMEX", isEtf: true },
+      { symbol: "PDI", companyName: "PIMCO Dynamic Income Fund", marketCap: 5e9, price: 19, volume: 1e6, exchangeShortName: "NYSE", isFund: true },
+    ]);
+  };
+  try {
+    const all = await fmp.list({ sort: "market_cap", order: "desc", pageSize: 50 }, { apiKey: "k" });
+    assert.deepEqual(all.map((r) => r.symbol), ["AAPL", "TSM", "SPY", "PDI"]);
+    assert.deepEqual(all.map((r) => r.values.type), ["Stock", "Stock", "ETF", "Fund"]);
+    assert.equal(all[1].values.rank, 2, "an ADR ranks in the universe like any listing");
+
+    // Each type narrows to itself — the choice the exclusions used to make.
+    for (const [type, symbols] of [
+      ["Stock", ["AAPL", "TSM"]], ["ETF", ["SPY"]], ["Fund", ["PDI"]],
+    ]) {
+      const rows = await fmp.list({ type, sort: "market_cap", order: "desc" }, { apiKey: "k" });
+      assert.deepEqual(rows.map((r) => r.symbol), symbols);
+    }
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP universe: disjoint venue slices carry it past FMP's 10k-per-response cap", async () => {
+  // FMP caps a screener RESPONSE at 10,000 rows however large a `limit` you
+  // send, and its page param overlaps — so one call can never see more than
+  // 10k. The universe is bigger than that, and asking per venue is how it
+  // gets served whole: three responses at the cap = 30k distinct listings.
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  const CAP = 10000;
+  const venueRows = (venue) =>
+    Array.from({ length: CAP }, (_, i) => ({
+      symbol: `${venue}${i}`, companyName: `${venue} ${i}`,
+      marketCap: CAP - i, price: 1, volume: 1, exchangeShortName: venue,
+    }));
+  globalThis.fetch = async (url) => {
+    const params = new URL(String(url)).searchParams;
+    // A venue that is itself at the cap gets split by listing type; this stub
+    // has no ETFs or funds, so those sub-slices come back empty.
+    if (params.get("isEtf") === "true" || params.get("isFund") === "true") return response([]);
+    return response(venueRows(params.get("exchange")));
+  };
+  try {
+    const page = await fmp.list({ sort: "market_cap", order: "desc", pageSize: 250 }, { apiKey: "k" });
+    assert.equal(page.length, 250);
+    // Ranks span the UNION, so the universe really is 3 × the response cap.
+    const deep = await fmp.list({ sort: "market_cap", order: "desc", page: 120, pageSize: 250 }, { apiKey: "k" });
+    assert.equal(deep[deep.length - 1].values.rank, 30000, "the 30,000th listing is reachable");
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP universe: a venue at the cap is re-split by listing type, and dedupes", async () => {
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  const CAP = 10000;
+  const seen = [];
+  globalThis.fetch = async (url) => {
+    const params = new URL(String(url)).searchParams;
+    seen.push({ exchange: params.get("exchange"), isEtf: params.get("isEtf"), isFund: params.get("isFund") });
+    if (params.get("exchange") !== "NASDAQ") return response([]);
+    // NASDAQ alone saturates → the sub-split serves the real breakdown. The
+    // unsplit response and the ETF slice overlap on SHARED, which must not
+    // become two rows (and two ranks).
+    if (params.get("isEtf") === "true") return response([{ symbol: "SHARED", companyName: "Shared", marketCap: 9, price: 1, volume: 1, exchangeShortName: "NASDAQ", isEtf: true }]);
+    if (params.get("isFund") === "true") return response([{ symbol: "FUNDX", companyName: "Fund X", marketCap: 8, price: 1, volume: 1, exchangeShortName: "NASDAQ", isFund: true }]);
+    if (params.get("isEtf") === "false") return response([{ symbol: "PLAINCO", companyName: "Plain Co", marketCap: 7, price: 1, volume: 1, exchangeShortName: "NASDAQ" }]);
+    return response(Array.from({ length: CAP }, (_, i) =>
+      ({ symbol: i === 0 ? "SHARED" : `N${i}`, companyName: `N ${i}`, marketCap: 100, price: 1, volume: 1, exchangeShortName: "NASDAQ" })));
+  };
+  try {
+    const rows = await fmp.list({ sort: "market_cap", order: "desc", pageSize: 50 }, { apiKey: "k" });
+    assert.deepEqual(rows.map((r) => r.symbol), ["SHARED", "FUNDX", "PLAINCO"]);
+    assert.deepEqual(rows.map((r) => r.values.type), ["ETF", "Fund", "Stock"]);
+    assert.equal(rows.filter((r) => r.symbol === "SHARED").length, 1, "the overlap collapses to one row");
+
+    // Only the saturated venue paid for the extra slices.
+    const splits = seen.filter((s) => s.isEtf != null || s.isFund != null);
+    assert.equal(splits.length, 3);
+    assert.ok(splits.every((s) => s.exchange === "NASDAQ"));
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP universe: the venue list is the tier's boundary, and it's tunable", async () => {
+  // Non-US venues are premium-gated at the quote endpoint, so browse would
+  // only list rows that fail on add — that boundary is real and stays. OTC is
+  // quotable here, so widening to it is supported without a code change.
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url) => { seen.push(String(url)); return response([]); };
+  process.env.FMP_EXCHANGES = "NASDAQ,NYSE,AMEX,OTC";
+  try {
+    await fmp.list({}, { apiKey: "k" });
+    assert.deepEqual(
+      seen.map((u) => new URL(u).searchParams.get("exchange")),
+      ["NASDAQ", "NYSE", "AMEX", "OTC"],
+      "a widened venue list is one more disjoint slice, not a longer single query"
+    );
+  } finally {
+    delete process.env.FMP_EXCHANGES;
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP: industry is a provider-supplied filter vocabulary, and it narrows the universe", async () => {
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  let industryHits = 0;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/available-industries")) {
+      industryHits++;
+      return response([{ industry: "Software - Application" }, { industry: "Biotechnology" }]);
+    }
+    if (u.includes("/company-screener?")) return response([
+      { symbol: "SOFT", companyName: "Soft Co", marketCap: 100, price: 10, volume: 5, sector: "Technology", industry: "Software - Application", exchangeShortName: "NASDAQ" },
+      { symbol: "BIO", companyName: "Bio Co", marketCap: 50, price: 5, volume: 3, sector: "Healthcare", industry: "Biotechnology", exchangeShortName: "NASDAQ" },
+    ]);
+    throw new Error(`unexpected URL ${u}`);
+  };
+  try {
+    const { industry } = await fmp.filterOptions({ apiKey: "k" });
+    assert.deepEqual(industry, [
+      { value: "Biotechnology", label: "Biotechnology" },
+      { value: "Software - Application", label: "Software - Application" },
+    ]);
+    await fmp.filterOptions({ apiKey: "k" });
+    assert.equal(industryHits, 1, "cached a day — not re-bought per modal open");
+
+    const rows = await fmp.list({ industry: "Biotechnology" }, { apiKey: "k" });
+    assert.deepEqual(rows.map((r) => r.symbol), ["BIO"]);
   } finally {
     globalThis.fetch = original;
     fmp._resetScreenerCache();
@@ -230,6 +477,12 @@ test("FMP errors never expose the API key", async () => {
 // ─── scale posture (see planning/connector-scale-plan.md) ────────────────────
 // Each test below resets the module-level screener cache at its start and end
 // — never mid-test (the list test above RELIES on intra-test persistence).
+//
+// One universe FILL is one screener request per venue: FMP caps a single
+// response at 10,000 rows, so the universe is assembled from disjoint venue
+// slices and unioned. The counts below are therefore per-fill, not per-request
+// — what single-flight and the caches promise is one FILL, not one HTTP call.
+const VENUES = 3; // the default FMP_EXCHANGES list: NASDAQ, NYSE, AMEX
 
 test("FMP pace truthfulness: every raw request pays a token, cache hits pay none", async () => {
   fmp._resetScreenerCache();
@@ -259,7 +512,7 @@ test("FMP pace truthfulness: every raw request pays a token, cache hits pay none
 
     paced.length = 0;
     await fmp.list({ pageSize: 50 }, { apiKey: "k", pace });
-    assert.equal(paced.length, 1); // cold universe fill
+    assert.equal(paced.length, VENUES); // cold universe fill: one slice per venue
     paced.length = 0;
     await fmp.list({ pageSize: 50, page: 2 }, { apiKey: "k", pace });
     assert.equal(paced.length, 0); // warm slice: zero requests, zero tokens
@@ -289,7 +542,7 @@ test("FMP universe: concurrent cold callers share one screener request (single-f
     const p1 = fmp.list({}, { apiKey: "k" });
     const p2 = fmp.list({}, { apiKey: "k" });
     await new Promise((r) => setTimeout(r, 20)); // both reach the flight
-    assert.equal(screenerHits, 1);
+    assert.equal(screenerHits, VENUES, "ONE fill's worth of slices, not two callers' worth");
     release();
     const [r1, r2] = await Promise.all([p1, p2]);
     assert.equal(r1[0].symbol, "AAA");
@@ -303,18 +556,21 @@ test("FMP universe: concurrent cold callers share one screener request (single-f
 test("FMP universe: stale-while-revalidate serves old rows now, refreshes behind", async () => {
   fmp._resetScreenerCache();
   const original = globalThis.fetch;
-  let fills = 0;
+  let requests = 0;
+  // Every venue slice of the FIRST fill serves OLD; the refill's slices serve
+  // NEW. (Each venue returns the same one row here — the union dedupes it.)
   globalThis.fetch = async () => {
-    fills++;
-    return response([{ symbol: fills === 1 ? "OLD" : "NEW", companyName: "X", marketCap: 1, price: 1, volume: 1, exchangeShortName: "NYSE" }]);
+    requests++;
+    const symbol = requests <= VENUES ? "OLD" : "NEW";
+    return response([{ symbol, companyName: "X", marketCap: 1, price: 1, volume: 1, exchangeShortName: "NYSE" }]);
   };
   try {
     assert.equal((await fmp.list({}, { apiKey: "k" }))[0].symbol, "OLD");
     fmp._ageScreenerCache(6 * 60 * 1000); // past BROWSE_TTL, inside the hard bar
     const stale = await fmp.list({}, { apiKey: "k" });
     assert.equal(stale[0].symbol, "OLD"); // no caller ever waits on the refill
-    for (let i = 0; i < 100 && fills < 2; i++) await new Promise((r) => setTimeout(r, 5));
-    assert.equal(fills, 2, "exactly one background refresh fired");
+    for (let i = 0; i < 100 && requests < 2 * VENUES; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(requests, 2 * VENUES, "exactly one background refresh fired");
     // The refill lands a few microtasks after the fetch starts — poll for the swap.
     let latest = stale;
     for (let i = 0; i < 100 && latest[0].symbol !== "NEW"; i++) {
@@ -331,12 +587,14 @@ test("FMP universe: stale-while-revalidate serves old rows now, refreshes behind
 test("FMP universe: past the hard bar callers block on a fresh fetch", async () => {
   fmp._resetScreenerCache();
   const original = globalThis.fetch;
-  let fills = 0;
+  let requests = 0;
   let release;
   const gate = new Promise((r) => { release = r; });
   globalThis.fetch = async () => {
-    fills++;
-    if (fills === 1) return response([{ symbol: "OLD", companyName: "X", marketCap: 1, price: 1, volume: 1, exchangeShortName: "NYSE" }]);
+    requests++;
+    // The first fill's slices answer at once; every slice of the second waits
+    // on the gate, so the whole refill is still in flight when we check.
+    if (requests <= VENUES) return response([{ symbol: "OLD", companyName: "X", marketCap: 1, price: 1, volume: 1, exchangeShortName: "NYSE" }]);
     await gate;
     return response([{ symbol: "NEW", companyName: "Y", marketCap: 1, price: 1, volume: 1, exchangeShortName: "NYSE" }]);
   };
@@ -376,7 +634,7 @@ test("FMP universe depth knob reaches the screener; local page clamp is 250", as
     const page2 = await fmp.list({ sort: "market_cap", order: "desc", page: 2, pageSize: 250 }, { apiKey: "k" });
     assert.equal(page2.length, 50);
     assert.equal(page2[0].values.rank, 251); // offset math consistent with the clamp
-    assert.equal(seen.length, 1, "both slices served from one fill");
+    assert.equal(seen.length, VENUES, "both page slices served from one fill");
   } finally {
     delete process.env.FMP_UNIVERSE_ROWS;
     globalThis.fetch = original;

@@ -17,17 +17,26 @@ import { recordIngest } from "../db.js";
 // formatting); the filter engine only knows text/number/date.
 const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "number", date: "date" };
 
-// The enumeration window: how deep into the catalog a feed can see; past it
-// `truncated` renders as "N+". Per-connector, because depth has a price only
-// some providers charge: FMP serves any depth from one cached screener call
-// (its manifest declares feedWindow 5000, covering the whole 4,609-row
-// US-listed universe), while CoinGecko/CMC pay one metered request per 250
-// rows — the 1000 default keeps their cold window fill at ≈4 requests. The
-// env knob overrides every connector at once. The preview route reads the
-// same bound through the adapter's windowCap, so a preview count and a real
-// run can never disagree on depth.
+// How deep into the catalog a feed can see: ALL of it. There is no app-side
+// reach limit, for the reason files.js already spells out — a capped window
+// CLOGS. The ledger dedups downstream, not during the walk, so once the first
+// N are ingested they still fill the window and everything past N becomes
+// permanently invisible. A "top 5000" ration doesn't mean "the first 5000 are
+// enough", it means the 5001st never arrives, ever.
+//
+// Depth is priced by FREQUENCY, not size: the window cache below means one
+// fill per TTL is reused by back-to-back preview pages and drain ticks, and
+// FMP serves any depth from one cached screener call (zero marginal HTTP).
+// A metered catalog (CoinGecko/CMC, one request per 250 rows) genuinely costs
+// more to walk in full — an operator who wants that rationed sets
+// INGEST_FEED_CAP, which is a budget guard they chose, not a ceiling the app
+// picked for them. SAFETY_CAP is only an out-of-memory backstop for a
+// pathological catalog, the same role and number it has on the file side.
+// The preview route reads this same bound through the adapter's windowCap, so
+// a preview count and a real run can never disagree on depth.
+const SAFETY_CAP = 100000;
 export const ENUM_CAP = (browse) =>
-  Number(process.env.INGEST_FEED_CAP) || browse?.feedWindow || 1000;
+  Number(process.env.INGEST_FEED_CAP) || browse?.feedWindow || SAFETY_CAP;
 // Requested page size. Providers may clamp internally, but keep their offset
 // math consistent with their own clamp, so a short-but-nonempty page is
 // normal paging — enumeration stops ONLY on an empty page. Treating a short
@@ -35,7 +44,11 @@ export const ENUM_CAP = (browse) =>
 // clamped page. (FMP's clamp is aligned at 250 — its full-universe window is
 // 20 cache-served slices, zero HTTP warm.)
 const ENUM_PAGE = 250;
-const MAX_PAGES = 40; // backstop for a provider that never returns empty
+// Backstop for a provider that never returns an empty page. Derived from the
+// safety cap so the two can't disagree — a page budget smaller than the row
+// budget would silently become the real ceiling, which is the bug this whole
+// block exists to not have.
+const MAX_PAGES = Math.ceil(SAFETY_CAP / ENUM_PAGE);
 
 // Enumerated-window cache. Filling the window is the expensive part — up to
 // ENUM_CAP/ENUM_PAGE metered provider calls (≈4 CoinGecko fetches, ~9s cold),

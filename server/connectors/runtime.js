@@ -131,8 +131,15 @@ export async function activeProvider(db, conn) {
     if (!name) throw new Error(`no ${conn.name} provider is installed (add one on the Plugins page)`);
   }
   const raw = conn.providers[name];
-  const provider = { ...raw, rpm: st.config.rpm ?? raw.rpm, burst: st.config.burst ?? raw.burst };
-  return { name, provider, apiKey: (await providerKey(db, conn, name)) || null };
+  const apiKey = (await providerKey(db, conn, name)) || null;
+  // A provider whose tiers pace differently declares keylessRpm; without a
+  // stored key that's the honest ceiling (CoinGecko's keyless pool is a
+  // fraction of its keyed one, and it counts FAILED requests against the
+  // limit — overpacing doesn't just 429, it burns quota). A Plugins-page
+  // rpm override still beats both.
+  const tierRpm = apiKey ? raw.rpm : raw.keylessRpm ?? raw.rpm;
+  const provider = { ...raw, rpm: st.config.rpm ?? tierRpm, burst: st.config.burst ?? raw.burst };
+  return { name, provider, apiKey };
 }
 
 // The domain's stored-vs-effective pair — the two admin surfaces that expose
@@ -197,6 +204,49 @@ export async function list(db, conn, opts) {
   return tracked(db, conn, name, provider, () => provider.list(opts, ctxFor(name, provider, apiKey)));
 }
 
+// The browse filters a user can actually apply RIGHT NOW: the manifest's
+// declarations with their vocabularies resolved, normalized to {value,label}.
+//
+// Two kinds of vocabulary. A static filter carries its own `options` (FMP's
+// 11-sector taxonomy is effectively frozen, so writing it down beats buying
+// it). A filter declared `from: "provider"` gets its options from the active
+// provider's filterOptions() — CoinGecko's ~857 categories are the provider's
+// to know, not ours to freeze, and a provider that can't supply them (CMC has
+// no equivalent) simply renders no control, the same declarative rule the
+// face `requires` gate uses.
+//
+// This is the ONE resolver: the filters route renders from it and the browse
+// route whitelists against it, so what the client can offer and what the
+// server will accept are the same list by construction. Provider failure
+// degrades to the static filters — a dead categories endpoint costs the
+// category control, never the whole modal.
+export async function browseFilters(db, conn) {
+  const declared = conn.manifest?.browse?.filters || [];
+  if (!declared.length) return [];
+  const normalize = (options) =>
+    (options || []).map((o) => (typeof o === "string" ? { value: o, label: o } : o))
+      .filter((o) => o && o.value != null);
+
+  let supplied = {};
+  if (declared.some((f) => f.from === "provider")) {
+    try {
+      const { name, provider, apiKey } = await activeProvider(db, conn);
+      if (provider.filterOptions)
+        supplied = await tracked(db, conn, name, provider, () =>
+          provider.filterOptions(ctxFor(name, provider, apiKey))) || {};
+    } catch (e) {
+      console.warn(`${conn.name}: filter options unavailable (static filters only): ${e.message}`);
+    }
+  }
+  const out = [];
+  for (const f of declared) {
+    const options = normalize(f.from === "provider" ? supplied[f.key] : f.options);
+    if (!options.length) continue; // no vocabulary → no control, rather than an empty one
+    out.push({ key: f.key, label: f.label || f.key, options });
+  }
+  return out;
+}
+
 // Assemble the connector entity from the active provider's raw values:
 //  - identity = lowercase symbol (portable across providers; dedupes the same
 //    asset added under two backends), falling back to the provider id;
@@ -223,9 +273,10 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
   // tests a provider BEFORE enabling it. Config pacing still applies.
   const st = await pluginRowState(db, conn, name);
   const raw = conn.providers[name];
-  const provider = { ...raw, rpm: st.config.rpm ?? raw.rpm, burst: st.config.burst ?? raw.burst };
-  if (!provider.testConnection) throw new Error("provider has no connection test");
   const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, conn, name);
+  const tierRpm = apiKey ? raw.rpm : raw.keylessRpm ?? raw.rpm; // same tier rule as activeProvider
+  const provider = { ...raw, rpm: st.config.rpm ?? tierRpm, burst: st.config.burst ?? raw.burst };
+  if (!provider.testConnection) throw new Error("provider has no connection test");
   await tracked(db, conn, name, provider, () => provider.testConnection(ctxFor(name, provider, apiKey)));
   return { provider: name };
 }
@@ -246,6 +297,29 @@ export async function resolveBySymbol(db, conn, symbol) {
   const hits = await search(db, conn, symbol);
   const hit = hits.find((h) => (h.symbol || "").toLowerCase() === want) || hits[0];
   return hit ? hit.id : null;
+}
+
+// Batch-warm the active provider's quote cache ahead of a refresh sweep.
+// `rows` are the sweep's due entries ({ entity, inst, … }); the ids that
+// belong to the ACTIVE provider go out as one batched request (a provider
+// declares the capability by exporting prefetch(ids, ctx)). Purely an
+// economics move: per-entity refreshes then hit the warm cache, so a
+// 100-coin board pays one metered call instead of 100. Best-effort by
+// design — any failure just means the per-entity path pays retail, and a
+// provider-switched entity (source names another backend) is skipped here
+// and re-resolved by its own refresh as usual.
+export async function prefetchRefresh(db, conn, rows) {
+  const active = await activeProvider(db, conn).catch(() => null);
+  if (!active?.provider.prefetch) return;
+  const ids = [...new Set(
+    rows
+      .map((r) => r?.inst?.payload?.source)
+      .filter((s) => s && s.provider === active.name && s.id != null)
+      .map((s) => String(s.id))
+  )];
+  if (ids.length < 2) return; // nothing a batch would save
+  await callProvider(active.name, active.provider, () =>
+    active.provider.prefetch(ids, ctxFor(active.name, active.provider, active.apiKey)));
 }
 
 // Re-fetch one entity and return the fields to write back — only those live

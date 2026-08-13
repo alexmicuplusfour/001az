@@ -1,5 +1,7 @@
-// Stocks connector — US-listed equities in USD. The domain defines stable
-// fields and presentation while provider modules normalize their own APIs.
+// Stocks connector — US-listed securities in USD: companies (including ADRs
+// of foreign issuers), ETFs and closed-end funds, i.e. everything the
+// provider's tier can actually quote. The domain defines stable fields and
+// presentation while provider modules normalize their own APIs.
 import * as financialmodelingprep from "./financialmodelingprep.js";
 
 export const providers = { financialmodelingprep };
@@ -10,7 +12,7 @@ export const faces = { chart: "price-chart" };
 export const manifest = {
   label: "Stocks",
   category: "finance",
-  description: "US equity quotes, company data, and price history",
+  description: "US-listed stocks, ADRs and ETFs — quotes, company data, price history",
   fields: [
     { key: "price",      kind: "number", fn: "price",      label: "Price (USD)" },
     { key: "change_1d",  kind: "number", fn: "change_1d",  label: "Daily change (%)" },
@@ -71,6 +73,10 @@ export const manifest = {
       { key: "price",      label: "Price",   kind: "usd", preview: true },
       { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true },
       { key: "volume",     label: "Volume",  kind: "number", preview: true },
+      // The universe carries ETFs and funds alongside companies, so a row has
+      // to say which it is — an ETF's blank Sector reads as missing data
+      // otherwise, when it's simply not a thing an ETF has.
+      { key: "type",       label: "Type",    kind: "text" },
       { key: "sector",     label: "Sector",  kind: "text" },
       { key: "exchange",   label: "Exchange", kind: "text" },
     ],
@@ -85,6 +91,10 @@ export const manifest = {
     // is FMP's own `available-sectors` (fetched live 2026-08-13; it's the
     // standard 11-sector taxonomy and effectively static).
     filters: [
+      // Listing type. The universe is everything this tier can quote —
+      // companies, ETFs, closed-end funds — so narrowing to one is the user's
+      // choice here rather than a screener parameter they never see.
+      { key: "type", label: "Type", options: ["Stock", "ETF", "Fund"] },
       {
         key: "sector",
         label: "Sector",
@@ -95,13 +105,16 @@ export const manifest = {
         ],
       },
       { key: "exchange", label: "Exchange", options: ["NASDAQ", "NYSE", "AMEX"] },
+      // Industry is the screener's fine-grained cut (~150 values under the 11
+      // sectors) — too many to freeze here and FMP publishes them, so the
+      // vocabulary comes from the provider (runtime.browseFilters).
+      { key: "industry", label: "Industry", from: "provider" },
     ],
     defaultSort: "market_cap",
     pageSize: 50,
-    // Feed window depth: FMP serves any depth from one cached screener call
-    // (zero marginal HTTP), so the window covers the whole US-listed universe
-    // (4,609 rows measured 2026-08-13). Metered catalogs (crypto) omit this
-    // and keep the adapter's cheaper default.
-    feedWindow: 5000,
+    // No feedWindow: a feed sees the whole universe. FMP serves any depth from
+    // one cached screener call, so there is nothing to ration — the provider's
+    // own depth (FMP_UNIVERSE_ROWS, default 10000) is the only bound, and it's
+    // the API's shape rather than a number this app picked.
   },
 };

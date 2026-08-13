@@ -13,6 +13,10 @@ import * as runtime from "./runtime.js";
 const providerDescriptors = (providers) =>
   Object.entries(providers).map(([name, p]) => ({
     name, label: p.label, description: p.description || "", needsKey: !!p.needsKey,
+    // Some data licenses require visible credit (CoinGecko's demo ToS does);
+    // a provider declares it and the browse modal renders it for whichever
+    // provider actually filled the rows.
+    ...(p.attribution ? { attribution: p.attribution } : {}),
   }));
 
 // Compose a data-only connector module with the runtime dispatch. The returned
@@ -28,11 +32,13 @@ function bind(name, mod) {
     providerList: () => providerDescriptors(conn.providers), // live descriptors (single source)
     search: (db, q) => runtime.search(db, conn, q),
     list: (db, opts) => runtime.list(db, conn, opts),
+    browseFilters: (db) => runtime.browseFilters(db, conn),
     fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
     testConnection: (db, opts) => runtime.testConnection(db, conn, opts),
     activeProvider: (db) => runtime.activeProvider(db, conn),
     standing: (db) => runtime.standing(db, conn),
     refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
+    prefetchRefresh: (db, rows) => runtime.prefetchRefresh(db, conn, rows),
     produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
     // Annotate the declared face producers for a given provider: `available`
     // = that provider can render it (exports the method named by `requires`),
@@ -54,6 +60,28 @@ const CONNECTORS = {
 
 export function getConnector(name) {
   return CONNECTORS[name] || null;
+}
+
+// Batch-warm provider quote caches for a refresh sweep's due rows, grouped by
+// connector — the worker calls this once per sweep batch, before the
+// per-entity loop, so a whole board's refreshes collapse into one metered
+// request per provider (see runtime.prefetchRefresh). Never throws: prefetch
+// is an economics move, and a failure only means per-entity retail.
+export async function prefetchDueRefreshes(db, rows) {
+  const byConn = new Map();
+  for (const row of rows) {
+    const name = row?.board?.mapping?.input?.connector;
+    if (!name || !CONNECTORS[name]) continue;
+    if (!byConn.has(name)) byConn.set(name, []);
+    byConn.get(name).push(row);
+  }
+  for (const [name, group] of byConn) {
+    try {
+      await CONNECTORS[name].prefetchRefresh(db, group);
+    } catch (e) {
+      console.warn(`${name} refresh prefetch failed (per-entity fallback): ${e.message}`);
+    }
+  }
 }
 
 // Manifest listing for the client. `providers` is static (descriptors, no key

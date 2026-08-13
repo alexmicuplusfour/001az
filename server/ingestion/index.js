@@ -92,11 +92,13 @@ export function validateIngest(ingest, descriptor, { hasRoot = false } = {}) {
     if (ingest.sort.order !== undefined && !["asc", "desc"].includes(ingest.sort.order)) return "sort order must be asc or desc";
   }
   if (ingest.limit !== undefined && ingest.limit !== null) {
-    // Bound matches the deepest default enumeration window (stocks'
-    // feedWindow 5000, itself sized to the whole US-listed universe) — a
-    // "top 1500" run must be expressible; the drain machinery spreads it
-    // across ticks.
-    if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > 5000) return "limit must be an integer between 1 and 5000";
+    // A per-run admission count, not a ration: it says how fast a board fills,
+    // and the drain machinery spreads a big one across ticks. The only bound
+    // is the enumeration safety cap — past that a limit couldn't be honored
+    // anyway, so a number that large is a typo, not an intent. (null = "all",
+    // which is the default and stays unbounded.)
+    if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > 100000)
+      return "limit must be an integer between 1 and 100000";
   }
 
   // Trigger.

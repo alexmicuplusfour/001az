@@ -13,6 +13,7 @@ import {
 } from "../server/db.js";
 import { up as stampFieldAt } from "../server/migrations/0008_stamp_field_at.js";
 import * as runtime from "../server/connectors/runtime.js";
+import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { refreshDueEntity } from "../server/worker.js";
 
 let srv, db, base, admin;
@@ -135,12 +136,16 @@ function liveMapping() {
 }
 
 function stubCoingecko(price) {
+  // Reset the provider's quote cache so THIS stub's price is what a refresh
+  // sees — a test that stubs 130 then 150 means two distinct market states,
+  // not one cache window.
+  coingecko._resetQuoteCache();
   const original = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     if (String(url).includes("coingecko.com")) {
       return { ok: true, status: 200, text: async () => "",
-        json: async () => ({ id: "bitcoin", name: "Bitcoin", symbol: "btc",
-          market_data: { current_price: { usd: price }, market_cap: { usd: 1e12 }, price_change_percentage_24h: -1 } }) };
+        json: async () => ([{ id: "bitcoin", name: "Bitcoin", symbol: "btc",
+          current_price: price, market_cap: 1e12, price_change_percentage_24h: -1 }]) };
     }
     return original(url, opts);
   };

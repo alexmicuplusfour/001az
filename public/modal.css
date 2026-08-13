@@ -601,6 +601,10 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-add:hover { background: #111; color: #fff; border-color: #111; }
 .cb-add:disabled { opacity: .55; cursor: default; }
 .cb-on-board { font-size: 11px; color: #9a9aa6; }
+/* Provider credit (some data licenses require it) — left side of the footer,
+   pushing the bulk-add action right. */
+.cb-attribution { margin-right: auto; font-size: 11px; color: #9a9aa6; text-decoration: none; }
+.cb-attribution:hover { text-decoration: underline; color: #6b6b72; }
 
 .cb-note { padding: 12px 8px; color: #8a8a96; font-size: 13px; text-align: center; }
 .cb-more {
