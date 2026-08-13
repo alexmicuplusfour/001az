@@ -39,6 +39,7 @@ function bind(name, mod) {
     standing: (db) => runtime.standing(db, conn),
     refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
     prefetchRefresh: (db, rows) => runtime.prefetchRefresh(db, conn, rows),
+    prefetchIds: (db, ids) => runtime.prefetchIds(db, conn, ids),
     produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
     // Annotate the declared face producers for a given provider: `available`
     // = that provider can render it (exports the method named by `requires`),

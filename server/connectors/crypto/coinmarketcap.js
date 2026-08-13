@@ -126,6 +126,15 @@ const quoteFields = (d) => {
 const quotes = createQuoteCache();
 const warmQuotes = quotes.warm;
 
+// Biggest page listings/latest will serve (its documented `limit` ceiling), and
+// the size the feed adapter walks the catalog in. The default 250 is
+// CoinGecko's per_page cap, not a universal one — inherited here it made a
+// ~2-request walk cost ~32. Safe under either CMC accounting: per-CALL, it is
+// 16× cheaper; per-DATA-POINT (1 credit / 200 points), 25 × 5000-row calls is
+// 50 credits against 64 for 32 × 250-row ones, because big pages waste less on
+// the round-up. `start = (page-1)*pageSize+1` below pages correctly at any size.
+export const maxPageSize = 5000;
+
 // Batched quote lookup. Chunked at 100 ids — a single credit per chunk under
 // CMC's older accounting AND the 2026 one, so the estimate can't be wrong in
 // the expensive direction.
@@ -214,6 +223,14 @@ export async function history(id, period, { apiKey, pace } = {}) {
 // cached id/symbol map locally, then /quotes/latest fills the columns for those
 // ids — same row shape either way. Row = { id, symbol, label, values }.
 const SORT_FIELD = { market_cap: "market_cap", volume: "volume_24h", price: "price", name: "name" };
+
+// Sort keys ordered EXACTLY server-side — all four, since listings/latest takes
+// each one natively (unlike CoinGecko, which has no price order and approximates
+// name by coin id). The feed adapter needs this before it will trust the
+// ordering enough to stop a walk at a filter threshold. Only the numeric keys
+// can actually trigger that today; `name` is here because it is true, not
+// because anything uses it.
+export const honorsSorts = Object.keys(SORT_FIELD);
 
 function quoteRow(d) {
   const usd = d.quote?.USD || {};

@@ -5,6 +5,17 @@
 // adapter (folder/ftp/s3 via pluggable source backends) and connector.js for
 // the catalog-feed adapter. The sweep, routes, modal, filter engine and ledger
 // are all adapter-blind.
+//
+// Four optional pieces an adapter may add, each a no-op when absent, and each
+// there because the two adapters have genuinely different cost shapes:
+//   validateSource(db, source, opts)  reject a bad source at save time
+//   windowCap()                       enumeration depth (preview and run share it)
+//   prewarm(db, board, batch)         batch-warm a provider before admitting;
+//                                     a file adapter has nothing to warm
+//   descriptor().runCap               admissions per tick — per-ITEM cost (files,
+//                                     25) vs per-TICK cost (feeds, 250)
+// enumerate also takes an options bag: { limit } bounds the window (the preview
+// route), { extend } marks a drain tick continuing a run already in flight.
 import * as files from "./files.js";
 import { forBoard as connectorFeed } from "./connector.js";
 import { OPS_BY_KIND } from "./filter-engine.js";
@@ -15,6 +26,19 @@ import { SAFETY_CAP } from "./window-cache.js";
 // the adapter's windowCap — a snapshot-served catalog affords more depth than
 // a metered one; the bare call is the file adapter's preview bound.
 export { ENUM_CAP } from "./connector.js";
+
+// Admissions per ingest tick, resolved like ENUM_CAP above and living beside it
+// for the same reason: the operator's env knob first, then the adapter's own
+// declaration, then the shared default. The adapters differ in COST SHAPE — a
+// file admission decodes an image (per-ITEM, so 25 is a tick-latency budget);
+// a feed tick pays one catalog walk and one batched provider warm however many
+// it admits (per-TICK, and connector.js declares 250) — so a single number
+// could only ever be right for one of them. A non-positive env value is a typo,
+// not an intent: 0 admissions would wedge every drain.
+export const RUN_CAP = (declared) => {
+  const env = Number(process.env.INGEST_RUN_CAP);
+  return env > 0 ? env : Math.max(1, Number(declared) || 25);
+};
 
 // null input.connector = a file board → the shared file adapter (its source
 // backend is picked per-board by ingest.source.type, default folder). Connector

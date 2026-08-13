@@ -285,6 +285,12 @@ Reviewed and left alone (known-benign, by design or too narrow):
   reuses it too and tolerates the staleness. Drain ticks within a run therefore
   don't re-page either. (FMP additionally caches its screener for 5 min under
   the window cache.)
+  **Superseded 2026-08-13** — the last sentence is no longer true for metered
+  catalogs. It held while the window was rationed to 1,000 rows (walk ≈ 4
+  requests, ≈5 s, well inside the 60 s TTL). At full catalog depth the walk is
+  ~74 requests and the 25 admissions between ticks are metered too, so the
+  window has always lapsed by the next drain tick and every tick re-walks.
+  See [ingest-drain-rewalk.md](ingest-drain-rewalk.md).
 - CoinGecko can't honor a `price` sort provider-side and FMP's whole
   universe is top-1000-by-mcap — bounded windows are approximate for
   off-default sorts, documented in the adapter header.

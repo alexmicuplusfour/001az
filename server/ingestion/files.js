@@ -16,7 +16,7 @@ import { withTx, recordIngest, getSourceConnection, listSourceConnections, withP
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
 import { acceptsName, extOf } from "../sources/index.js";
 import { getSourceBackend, sourceModules } from "./sources/index.js";
-import { SAFETY_CAP, cacheTtl, pruneExpired } from "./window-cache.js";
+import { SAFETY_CAP, cacheTtl, readWindow, writeWindow } from "./window-cache.js";
 import { resolveJailed } from "./sources/folder.js";
 import { pluginInstalled, mediaLimitLookup } from "../plugins.js";
 
@@ -49,8 +49,10 @@ const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 // FREQUENCY (one listing per cache window, reused by back-to-back drain ticks
 // and preview pages) rather than by size, with no reach limit. Same mechanism
 // as the connector feed, and now literally the same pieces — SAFETY_CAP, the
-// TTL read and the prune live in ./window-cache.js, because the connector
-// adapter had copied two of the three and was missing the prune. SAFETY_CAP is
+// TTL read, the prune, and reading/writing an entry all live in
+// ./window-cache.js, because the connector adapter had copied two of the first
+// three and was missing the prune, then grew a second timestamp on its private
+// copy of the entry and left `at` meaning two different things. SAFETY_CAP is
 // only an out-of-memory backstop for a pathological source (narrow the base
 // path if you ever hit it). Candidate objects are read-only downstream
 // (applyFilters/applySort copy), so serving a cached array by reference is
@@ -59,7 +61,6 @@ const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 // sources — a re-pointed or deleted board's stale key, and its full candidate
 // array, doesn't linger for the worker's lifetime.
 const windowCache = new Map();
-const pruneWindowCache = (now, ttl) => pruneExpired(windowCache, now, ttl);
 // Test seam: the cache is module-private; tests assert it doesn't accumulate.
 export const _windowCacheSize = () => windowCache.size;
 
@@ -156,8 +157,14 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
   if (remote) {
     const key = `${type}|${cfg.source?.connectionId ?? ""}|${srcPath}|${recursive}`;
     const ttl = cacheTtl();
-    const hit = windowCache.get(key);
-    if (hit && ttl > 0 && Date.now() - hit.at < ttl) return { candidates: hit.candidates, truncated: hit.truncated };
+    // No `hold`: a file drain re-lists on the clock like every other caller.
+    // The connector adapter holds its window across a drain because re-walking
+    // a METERED catalog per tick is the cost it can't pay; an S3 LIST fan-out
+    // isn't that, and nobody has asked for the snapshot consistency a hold
+    // would also buy here. One parameter away if that changes.
+    const hit = readWindow(windowCache, key, { ttl });
+    if (hit) return hit;
+    const startedAt = Date.now();
     const be = await resolveBackend(db, cfg.source);
     // The remote listing is the source's reachability probe — the sweep's
     // equivalent of the admin Test button. Ledger its outcome on the source
@@ -170,13 +177,7 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
     // "is this source working" signal, exactly what Test checks.
     const { entries, truncated } = await withPluginHealth(db, `source:${type}`, () =>
       be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytesFor: limitFor }));
-    const result = { candidates: toCandidates(entries), truncated };
-    if (ttl > 0) {
-      const now = Date.now();
-      pruneWindowCache(now, ttl);
-      windowCache.set(key, { at: now, ...result });
-    }
-    return result;
+    return writeWindow(windowCache, key, ttl, { candidates: toCandidates(entries), truncated }, startedAt);
   }
 
   // Local folder: walk fresh each call (cheap, always current), honoring limit.

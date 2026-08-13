@@ -7,9 +7,11 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req, installConnectors } from "./helpers.js";
+import { registerConnector, unregisterConnector } from "../server/connectors/index.js";
 import { getBoard, updateBoard, setIngestNextRun, deleteEntity } from "../server/db.js";
-import { feedAdapter } from "../server/ingestion/connector.js";
+import { feedAdapter, _resetWindowCache, _ageWindowCache } from "../server/ingestion/connector.js";
 import { resolveIngestAdapter } from "../server/ingestion/index.js";
+import * as files from "../server/ingestion/files.js";
 import { manifest as cryptoManifest } from "../server/connectors/crypto/index.js";
 import { manifest as stocksManifest } from "../server/connectors/stocks/index.js";
 import { startWorker } from "../server/worker.js";
@@ -288,7 +290,290 @@ test("enumerate: an active provider without list() throws a readable error", asy
   await assert.rejects(() => a.enumerate(null, null, {}), /can't browse its catalog/);
 });
 
+// ─── the drain hold: a run's window outlives the clock, nobody else's does ────
+
+test("enumerate: a drain tick holds its window past the TTL; a preview never does", async () => {
+  const prev = process.env.INGEST_FEED_CACHE_MS;
+  process.env.INGEST_FEED_CACHE_MS = "60000";
+  try {
+    _resetWindowCache();
+    const conn = stubConn({ pages: [[row("a", "A"), row("b", "B")], []] });
+    const a = feedAdapter(conn);
+    const sort = { by: "rank", order: "desc" };
+    await a.enumerate(null, null, { sort });
+    const walked = conn.listCalls.length;
+
+    // Past the clock TTL, an ordinary caller re-walks — the preview route's
+    // behaviour is deliberately unchanged.
+    _ageWindowCache(90_000);
+    await a.enumerate(null, null, { sort });
+    assert.equal(conn.listCalls.length, walked * 2, "a lapsed window re-pages for a non-drain caller");
+
+    // A drain tick is the same logical run coming back for its next batch. It
+    // reads the window it is draining instead of re-walking a metered catalog
+    // ~200 times per run.
+    _ageWindowCache(90_000);
+    const held = await a.enumerate(null, null, { sort }, { drain: true });
+    assert.equal(conn.listCalls.length, walked * 2, "a drain tick held the window past the TTL");
+    assert.deepEqual(held.candidates.map((c) => c.key), ["a", "b"], "and got the same snapshot");
+
+    // The hold is bounded from the FILL, not from the last touch — otherwise a
+    // long drain slides a stale catalog along forever.
+    _ageWindowCache(7 * 60 * 60 * 1000);
+    await a.enumerate(null, null, { sort }, { drain: true });
+    assert.ok(conn.listCalls.length > walked * 2, "past WINDOW_MAX_MS even a drain re-walks");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = prev;
+    _resetWindowCache();
+  }
+});
+
+test("enumerate: TTL 0 disables the cache for a drain too, not just for everyone else", async () => {
+  const prev = process.env.INGEST_FEED_CACHE_MS;
+  try {
+    _resetWindowCache();
+    process.env.INGEST_FEED_CACHE_MS = "60000";
+    const conn = stubConn({ pages: [[row("a", "A")], []] });
+    const a = feedAdapter(conn);
+    const sort = { by: "rank", order: "desc" };
+    await a.enumerate(null, null, { sort });
+    const walked = conn.listCalls.length;
+    // Turning the cache off mid-run must not leave a drain reading the entry it
+    // left behind: nothing writes while the cache is off, so nothing prunes it
+    // either, and the hold would outlive the switch that was meant to end it.
+    process.env.INGEST_FEED_CACHE_MS = "0";
+    await a.enumerate(null, null, { sort }, { drain: true });
+    assert.ok(conn.listCalls.length > walked, "a disabled cache is disabled for the drain as well");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = prev;
+    _resetWindowCache();
+  }
+});
+
+test("enumerate: extending keeps a live drain's window off the prune path", async () => {
+  const prev = process.env.INGEST_FEED_CACHE_MS;
+  process.env.INGEST_FEED_CACHE_MS = "60000";
+  try {
+    _resetWindowCache();
+    const conn = stubConn({ pages: [[row("a", "A")], []] });
+    const a = feedAdapter(conn);
+    const sort = { by: "rank", order: "desc" };
+    await a.enumerate(null, null, { sort });
+    const walked = conn.listCalls.length;
+    // Age past the TTL, then let a drain tick touch it. pruneExpired runs on
+    // every window WRITE, so a second board filling its own window would drop
+    // an entry whose `at` is stale — the touch is what stops that.
+    _ageWindowCache(90_000);
+    await a.enumerate(null, null, { sort }, { drain: true });
+    const other = stubConn({ pages: [[row("z", "Z")], []] });
+    await feedAdapter(other).enumerate(null, null, { sort }); // writes → prunes
+    await a.enumerate(null, null, { sort }, { drain: true });
+    assert.equal(conn.listCalls.length, walked, "the touched entry survived another window's prune");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = prev;
+    _resetWindowCache();
+  }
+});
+
+// ─── stopping early when it's a proof, not a preference ──────────────────────
+
+// A provider that orders `rank` exactly, server-side, and hands back rows in
+// that order — the shape the threshold exit is allowed to reason about.
+function rankedConn(rows, { honorsSorts = ["rank"] } = {}) {
+  const conn = stubConn();
+  conn.activeProvider = async () => ({ name: "acme", provider: { list: () => {}, honorsSorts } });
+  conn.list = async (_db, opts) => {
+    conn.listCalls.push(opts);
+    return rows.slice((opts.page - 1) * opts.pageSize, opts.page * opts.pageSize)
+      .map((v) => row(`r${v}`, `R${v}`, { rank: v }));
+  };
+  return conn;
+}
+// 1000 rows descending by rank, 250/page → 4 pages plus the empty one.
+const DESC = Array.from({ length: 1000 }, (_, i) => 1000 - i);
+
+test("enumerate: a filter on the sort key stops the walk — and the result is complete, not capped", async () => {
+  // rank >= 900, walking rank descending: the first row under 900 proves every
+  // later row is under it. That lands on page 1, so pages 2-4 are never bought.
+  const conn = rankedConn(DESC);
+  const cfg = { sort: { by: "rank", order: "desc" }, filters: [{ fn: "rank", op: "gte", value: 900 }] };
+  const { candidates, truncated } = await feedAdapter(conn).enumerate(null, null, cfg);
+  assert.deepEqual(conn.listCalls.map((c) => c.page), [1], "stopped on the page that proved it");
+  assert.equal(truncated, false, "the MATCHING set ended — 'capped' would be a lie");
+  // Everything at or above the bound is present; the engine drops the rest.
+  const kept = candidates.filter((c) => c.values.rank >= 900);
+  assert.equal(kept.length, 101, "ranks 1000..900 all survived the early stop");
+});
+
+test("enumerate: ascending stops on the mirror-image bound", async () => {
+  const conn = rankedConn([...DESC].reverse());
+  const cfg = { sort: { by: "rank", order: "asc" }, filters: [{ fn: "rank", op: "lte", value: 100 }] };
+  const { truncated } = await feedAdapter(conn).enumerate(null, null, cfg);
+  assert.deepEqual(conn.listCalls.map((c) => c.page), [1]);
+  assert.equal(truncated, false);
+});
+
+test("enumerate: the stop needs the sort's OWN key, its own direction, and a provider that means it", async () => {
+  const full = [1, 2, 3, 4, 5]; // pages walked when nothing may stop the walk
+  const cases = [
+    ["a filter on another column proves nothing about rank order",
+      ["rank"], { sort: { by: "rank", order: "desc" }, filters: [{ fn: "price", op: "gte", value: 900 }] }],
+    ["the wrong direction — `lte` while descending is a floor the walk hasn't reached",
+      ["rank"], { sort: { by: "rank", order: "desc" }, filters: [{ fn: "rank", op: "lte", value: 900 }] }],
+    ["a sort the provider only APPROXIMATES (CoinGecko's price → market_cap order)",
+      [], { sort: { by: "rank", order: "desc" }, filters: [{ fn: "rank", op: "gte", value: 900 }] }],
+  ];
+  for (const [why, honorsSorts, cfg] of cases) {
+    const conn = rankedConn(DESC, { honorsSorts });
+    const { truncated } = await feedAdapter(conn).enumerate(null, null, cfg);
+    assert.deepEqual(conn.listCalls.map((c) => c.page), full, why);
+    assert.equal(truncated, false, "the catalog's own end, reached the long way");
+  }
+});
+
+test("enumerate: a null in the sort column never stops the walk", async () => {
+  // Nulls prove nothing about the ordering. The engine fails them downstream
+  // (a filter never admits blind), but the walk must carry on past them.
+  const conn = rankedConn(DESC);
+  const listed = conn.list;
+  conn.list = async (db, opts) => {
+    const rows = await listed(db, opts);
+    if (opts.page === 1) rows[5].values.rank = null;
+    return rows;
+  };
+  const cfg = { sort: { by: "rank", order: "desc" }, filters: [{ fn: "rank", op: "gte", value: 990 }] };
+  const { candidates } = await feedAdapter(conn).enumerate(null, null, cfg);
+  assert.ok(candidates.length > 6, "the null didn't read as 'below the bound'");
+});
+
+test("enumerate: the stop bound is part of the cache key — a partial window can't serve a wider one", async () => {
+  const prev = process.env.INGEST_FEED_CACHE_MS;
+  process.env.INGEST_FEED_CACHE_MS = "60000";
+  try {
+    _resetWindowCache();
+    const conn = rankedConn(DESC);
+    const a = feedAdapter(conn);
+    const at = (bound) => ({ sort: { by: "rank", order: "desc" }, filters: [{ fn: "rank", op: "gte", value: bound }] });
+    await a.enumerate(null, null, at(900));
+    const tight = conn.listCalls.length;
+    await a.enumerate(null, null, at(900));
+    assert.equal(conn.listCalls.length, tight, "same bound → same window, still reused");
+    // The window for `>= 900` stops mid-catalog. Handing it to `>= 100` would
+    // silently drop every row between them — the filter key is normally left
+    // OUT of the cache key so a filter edit reuses the window, and this is the
+    // one filter that changes what the window CONTAINS.
+    const wide = await a.enumerate(null, null, at(100));
+    assert.ok(conn.listCalls.length > tight, "a lower bound re-walks instead of reusing a shorter window");
+    assert.ok(wide.candidates.some((c) => c.values.rank < 900), "and it reaches the rows the first walk never saw");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = prev;
+    _resetWindowCache();
+  }
+});
+
+// ─── page size: 250 was CoinGecko's ceiling, not everyone's ───────────────────
+
+test("enumerate: page size defaults to 250, and a provider may declare a bigger one", async () => {
+  const conn = stubConn({ pages: [[row("a", "A")], []] });
+  await feedAdapter(conn).enumerate(null, null, {});
+  assert.equal(conn.listCalls[0].pageSize, 250, "the default is CoinGecko's per_page cap");
+
+  // CMC's listings/latest takes limit up to 5000; asking it for 250 turned a
+  // ~2-request walk into ~32.
+  const bulk = stubConn({ pages: [[row("a", "A")], []] });
+  bulk.activeProvider = async () => ({ name: "acme", provider: { list: () => {}, maxPageSize: 5000 } });
+  await feedAdapter(bulk).enumerate(null, null, {});
+  assert.equal(bulk.listCalls[0].pageSize, 5000, "a declared maxPageSize reaches the provider");
+});
+
+test("enumerate: a declared page size is clamped, and the page budget follows it", async () => {
+  // Two rules at once. A plugin domain can declare maxPageSize, so it is
+  // clamped (50k → the 10k ceiling) before anything uses it; and the
+  // never-empty-page backstop derives from SAFETY_CAP (100k) over the size
+  // ACTUALLY in use, so it lands at 10 pages. Left at the old module-wide
+  // 250-row derivation it would have been 400 — a page budget and a row budget
+  // disagreeing, which is the bug the derivation exists to prevent.
+  const conn = stubConn();
+  conn.list = async (_db, opts) => { conn.listCalls.push(opts); return [row(`p${opts.page}`, `P${opts.page}`)]; };
+  conn.activeProvider = async () => ({ name: "acme", provider: { list: () => {}, maxPageSize: 50000 } });
+  const { candidates, truncated } = await feedAdapter(conn).enumerate(null, null, {});
+  assert.equal(conn.listCalls[0].pageSize, 10000, "the declared size is clamped to the ceiling");
+  assert.equal(conn.listCalls.length, 10, "ceil(100000 / 10000) pages, then the backstop");
+  assert.equal(candidates.length, 10);
+  assert.equal(truncated, true, "a page-budget exit is truncated — pages were still coming");
+});
+
+// ─── prewarm: one request for a batch, not one per admission ──────────────────
+
+test("prewarm: the admission batch's ids go out as one call; failure is survivable", async () => {
+  const calls = [];
+  const conn = stubConn();
+  conn.prefetchIds = async (_db, ids) => { calls.push(ids); };
+  const a = feedAdapter(conn);
+  await a.prewarm(null, null, [{ id: "bitcoin" }, { id: "ethereum" }, { id: "dogecoin" }]);
+  assert.deepEqual(calls, [["bitcoin", "ethereum", "dogecoin"]], "one batched warm, ids in batch order");
+
+  // Best-effort by contract (the prefetchDueRefreshes rule): a failed warm just
+  // means the per-item path pays retail, which is the pre-prewarm behaviour.
+  conn.prefetchIds = async () => { throw new Error("provider down"); };
+  await a.prewarm(null, null, [{ id: "bitcoin" }, { id: "ethereum" }]);
+
+  // A connector binding without the capability is a no-op all the way down.
+  const bare = stubConn();
+  await feedAdapter(bare).prewarm(null, null, [{ id: "x" }, { id: "y" }]);
+});
+
+test("descriptor: a feed names its own per-tick cap; the file adapter keeps the shared 25", () => {
+  assert.equal(feedAdapter(stubConn()).descriptor().runCap, 250,
+    "feeds pay per TICK (one walk, one prewarm), not per item");
+  assert.equal(files.descriptor().runCap, undefined,
+    "the file adapter declares none and falls back to the tick-latency default");
+});
+
 // ─── integration ─────────────────────────────────────────────────────────────
+
+// A countable provider for the drain-economics test: every outbound call the
+// feed can make (catalog page, batched warm, per-item fetch) lands in `calls`,
+// so a run's cost is an assertion rather than a story.
+const WIDGET_ROWS = ["w1", "w2", "w3", "w4", "w5"];
+const calls = { list: [], prefetch: [], fetchEntity: [] };
+const acme = {
+  label: "Acme",
+  description: "countable",
+  needsKey: false,
+  rpm: 100000, // pacing isn't what this test measures
+  burst: 100,
+  async list({ page = 1, pageSize = 250 } = {}) {
+    calls.list.push({ page, pageSize });
+    const slice = WIDGET_ROWS.slice((page - 1) * pageSize, page * pageSize);
+    return slice.map((id) => ({ id, symbol: id, label: id, values: { name: id, rank: WIDGET_ROWS.indexOf(id) } }));
+  },
+  async prefetch(ids) { calls.prefetch.push(ids); },
+  async fetchEntity(id) {
+    calls.fetchEntity.push(id);
+    return { id, symbol: id.toUpperCase(), display_name: id, fields: { rank: { v: 1, kind: "number" } } };
+  },
+};
+const WIDGETS = {
+  providers: { acme },
+  defaultProvider: "acme",
+  manifest: {
+    label: "Widgets",
+    fields: [{ key: "rank", kind: "number", fn: "rank", label: "Rank" }],
+    providers: [{ name: "acme", label: "Acme", description: "", needsKey: false }],
+    template: {
+      input: { connector: "widgets" },
+      identity: { from: "connector" },
+      fields: [{ key: "rank", kind: "number", from: "connector", fn: "rank" }],
+    },
+    browse: {
+      columns: [{ key: "name", label: "Name", kind: "text", primary: true }, { key: "rank", label: "#", kind: "number" }],
+      sorts: [{ key: "rank", label: "Rank" }],
+      defaultSort: "rank",
+      pageSize: 50,
+    },
+  },
+};
 
 let srv, db, base, admin, sources, stopWorker;
 
@@ -306,8 +591,17 @@ before(async () => {
   ({ db, base } = srv);
   admin = await adminSession(db);
   await installConnectors(db, "crypto:coingecko"); // the sweep e2e drives the real crypto connector
+  // A stub DOMAIN registered through the real registry, so the drain-economics
+  // test below runs the actual worker → runtime → bind → adapter path with a
+  // provider whose every call is countable. The crypto mock can't answer that
+  // question: its walk completes in microseconds, so its quote cache is still
+  // warm at admission time and the retail cost the prewarm removes never
+  // appears. The bug is a race between a minutes-long walk and a 60s TTL.
+  registerConnector("widgets", WIDGETS);
+  await installConnectors(db, "widgets:acme");
   sources = createSources({ galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir });
   process.env.POLL_MS = "50";
+  process.env.INGEST_RUN_CAP = "2"; // force multi-tick drains
   originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts) => {
     const u = String(url);
@@ -336,6 +630,8 @@ before(async () => {
 after(async () => {
   await stopWorker();
   globalThis.fetch = originalFetch;
+  unregisterConnector("widgets");
+  delete process.env.INGEST_RUN_CAP;
   delete process.env.POLL_MS;
   sources.close?.();
   await srv.close();
@@ -442,6 +738,55 @@ test("sweep e2e: a crypto feed admits its filter-defined bucket, once", async ()
   });
   assert.equal(page.status, 200);
   assert.deepEqual(page.json.sample.map((c) => [c.key, c.ingested]), [["btc", true], ["eth", true], ["doge", false]]);
+});
+
+test("drain economics: one catalog walk per RUN, one batched warm per tick", async () => {
+  // The shape this whole change is about. A run bigger than the per-tick cap
+  // drains across back-to-back ticks, and each tick used to re-walk the whole
+  // catalog and then re-buy every row it admitted one at a time: for a metered
+  // catalog that was ~74 requests of setup plus ~25 retail admissions per 25
+  // items admitted, ~200 times over for a 5,000-row run.
+  //
+  // A 1ms window TTL is the minutes-long walk in miniature: the clock has
+  // always lapsed by the next tick, so anything that re-walks here would
+  // re-walk in production too. Only a DRAIN tick holds the window.
+  const prevTtl = process.env.INGEST_FEED_CACHE_MS;
+  process.env.INGEST_FEED_CACHE_MS = "1";
+  try {
+    calls.list.length = calls.prefetch.length = calls.fetchEntity.length = 0;
+    const boardId = await seedBoard(db, "widget-drain");
+    await updateBoard(db, boardId, { mapping: WIDGETS.manifest.template });
+    await updateBoard(db, boardId, {
+      ingest: {
+        enabled: true, source: {}, filters: [],
+        sort: { by: "rank", order: "asc" }, trigger: { mode: "manual" },
+      },
+    });
+    await setIngestNextRun(db, boardId, Date.now() - 1);
+
+    const b = await until(async () => {
+      const row = await getBoard(db, boardId);
+      return row.ingest_state?.last_run_at && row.ingest_next_run_at === null ? row : null;
+    });
+    assert.equal(b.ingest_state.last_error, null);
+    assert.equal((await entityIdentities(boardId)).length, 5, "all five admitted across the drain");
+
+    // 5 rows at a cap of 2 = three ticks. One walk for the run: page 1 (250
+    // wide, so the whole catalog) plus the empty page that ends it.
+    assert.deepEqual(calls.list.map((c) => c.page), [1, 2],
+      "one walk for the whole run — three ticks would have paid for three");
+    assert.equal(calls.list[0].pageSize, 250);
+
+    // Two full batches warm in one call each; the last tick's single item is
+    // below the batch threshold and pays retail, which is correct — a batch of
+    // one is just a fetch with extra steps.
+    assert.deepEqual(calls.prefetch, [["w1", "w2"], ["w3", "w4"]],
+      "one batched warm per full tick, ids in admission order");
+    assert.deepEqual(calls.fetchEntity, WIDGET_ROWS,
+      "admissions still fetch per item — the warm is what makes that free");
+  } finally {
+    process.env.INGEST_FEED_CACHE_MS = prevTtl;
+  }
 });
 
 test("switching a board's mapping input orphans and clears its ingest config", async () => {

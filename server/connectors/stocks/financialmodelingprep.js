@@ -476,9 +476,11 @@ export async function list(
   { apiKey, pace } = {}
 ) {
   // The clamp bounds one logical page of the LOCALLY cached universe — it is
-  // not a remote API limit. 250 matches the feed adapter's ENUM_PAGE so a
-  // window fill is 4 slices, not 10 (each logical call is otherwise free:
-  // cache-served slices pace zero requests).
+  // not a remote API limit. 250 matches the feed adapter's default page size
+  // (ENUM_PAGE_DEFAULT) so a window fill is 4 slices, not 10 (each logical call
+  // is otherwise free: cache-served slices pace zero requests). This provider
+  // deliberately declares no `maxPageSize`: bigger slices would save nothing
+  // when every slice is already served from memory.
   const size = Math.max(1, Math.min(250, Number(pageSize) || 50));
   const pageNo = Math.max(1, Number(page) || 1);
   // The screener is plan-gated (FMP's free tier doesn't include it at all —

@@ -15,23 +15,41 @@ export const needsKey = false;
 // The demo tier's ToS requires visible attribution (brand.coingecko.com);
 // surfaced by the browse modal next to the rows this provider filled.
 export const attribution = { text: "Data by CoinGecko", url: "https://www.coingecko.com" };
-// Calls/min the runtime paces to. The two tiers are genuinely different
-// numbers: keyless rides a 5–15/min pool shared per source IP, while a demo
-// key is documented at 100/min today — but it was 30 within recent memory and
-// the docs have said both, so 30 is the number that's correct under either.
-// The gap doesn't cost throughput: the caches below, not rpm, are what make a
-// board cheap. Pacing over the real allowance is worse than slow — CoinGecko
-// counts FAILED requests against the limit, so a 429 storm burns the quota it
-// was denied by. The runtime picks keylessRpm when no key is stored
-// (activeProvider); the 429/401 backoff covers the residual, and the
-// Plugins-page rpm override beats both when an operator knows their tier. The
-// burst covers one cold feed-window fill (4 pages) without a short-window
-// spike. The MONTHLY meter (10k credits on demo) is guarded by the caches and
-// by refresh cadence, not by rpm. Truthful request pacing: each raw fetch
-// awaits ctx.pace() (pacesRequests — see runtime.callProvider), so the
-// query-path list() honestly pays 2 and nothing pays for cache hits.
+// Calls/min the runtime paces to. The two tiers are genuinely different:
+// keyless rides a 5–15/min pool shared per source IP, while a demo key is
+// documented at 100/min (re-checked 2026-08-13, and measured against a live
+// demo key the same day — a full catalog walk ran clean at 100).
+//
+// This was 30 for a while, on the reasoning that the docs had said both 30 and
+// 100 so 30 was correct under either, and that "the gap doesn't cost
+// throughput — the caches, not rpm, are what make a board cheap." That second
+// half stopped being true when the feed window lost its 1,000-row ration. A
+// cold catalog walk went from 4 requests to 75, which makes rpm the wall: 134 s
+// at 30, 40 s at 100, for the same work. Paying a 3× latency tax to hedge
+// against a number CoinGecko itself no longer publishes is the wrong side of
+// that trade, and it is paid on the interactive path (an ingest preview) where
+// it is most visible.
+//
+// The hedge still has a real point, so keep it in view: CoinGecko counts FAILED
+// requests against the limit, so pacing over the true allowance doesn't just
+// 429, it burns the monthly meter it was denied by. Two things bound that
+// today — this number only applies to KEYED accounts (activeProvider picks
+// keylessRpm when no key is stored, and the keyless pool is unknowable per-IP,
+// so it stays conservative), and the Plugins-page rpm override beats the
+// descriptor for an operator whose plan says otherwise. What is missing is a
+// limiter that LEARNS the tier: withRetry (runtime.js) retries a 429 but never
+// slows the bucket, so a wrong guess here stays wrong for the process's life.
+// Until that exists, this number is a claim about CoinGecko's published tier
+// and nothing more.
+//
+// The burst is a cold-start smoother, not a walk budget — it used to be sized
+// to "one cold feed-window fill (4 pages)", which a 75-page walk retired. The
+// MONTHLY meter (10k credits on demo) is guarded by the caches and by refresh
+// cadence, not by rpm. Truthful request pacing: each raw fetch awaits
+// ctx.pace() (pacesRequests — see runtime.callProvider), so the query-path
+// list() honestly pays 2 and nothing pays for cache hits.
 export const pacesRequests = true;
-export const rpm = 30;
+export const rpm = 100;
 export const keylessRpm = 10;
 export const burst = 8;
 
@@ -68,6 +86,12 @@ export async function search(query, { apiKey, pace } = {}) {
     rank: c.market_cap_rank || null,
   }));
 }
+
+// Biggest page /coins/markets will serve — its documented per_page ceiling, and
+// the size the feed adapter walks the catalog in (~74 requests for the full
+// ~18.4k coins). Stated here rather than assumed by the adapter: it is this
+// API's limit, not a number the ingestion layer gets to pick.
+export const maxPageSize = 250;
 
 // The multi-window change parameter: one param, no extra request, and the
 // SAME markets row then feeds browse columns, fetchFields and the prefetch
@@ -194,6 +218,16 @@ const SORT_ORDER = {
   name:       (desc) => (desc ? "id_desc" : "id_asc"), // no name sort; id ≈ alphabetical
   // `price` isn't a /coins/markets order → falls through to the default below.
 };
+
+// Sort keys this provider orders EXACTLY, server-side. Narrower than
+// SORT_ORDER on purpose: `price` isn't an order at all here (it silently
+// serves market_cap order), and `name` is approximated by coin id, which is
+// alphabetical-ish and nothing stronger. The feed adapter reads this before it
+// will treat the ordering as a proof and stop a catalog walk at a filter
+// threshold — on a key we only approximate, that would drop real matches.
+// Everything downstream re-sorts anyway, so being conservative here costs
+// nothing but a longer walk.
+export const honorsSorts = ["market_cap", "volume"];
 
 function marketRow(c) {
   return {

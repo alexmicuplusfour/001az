@@ -10,7 +10,7 @@
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
 import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 import { getFaceProducer } from "../faces/index.js";
-import { acquire } from "../provider-pacing.js";
+import { acquire, throttled } from "../provider-pacing.js";
 import { liveFields, nextRefreshAt } from "./schedule.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
@@ -46,13 +46,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 429 and — for tiers like CoinGecko's demo key — 401 both signal "slow down"
 // (the key is valid; it's rate). Retry either, honoring Retry-After up to the
 // cap (env-tunable so tests don't wait it out).
+//
+// The retry is only half the answer, and used to be the whole of it: re-sending
+// at the same pace means the NEXT call is refused too, and a provider that
+// counts failed requests against its quota (CoinGecko) charges for every one.
+// So tell the bucket as well — `throttled` halves that key's effective rate,
+// which is what turns a descriptor's rpm from a guess we're stuck with into a
+// starting point. `key` is the bucket key (the provider name), so it lands on
+// the same bucket paceFor spends from.
 const RATE_STATUS = new Set([429, 401]);
-async function withRetry(fn, tries = 3) {
+async function withRetry(fn, key, tries = 3) {
   const cap = Number(process.env.CONNECTOR_RETRY_CAP_MS) || 30000;
   for (let i = 0; ; i++) {
     try { return await fn(); }
     catch (e) {
-      if (!RATE_STATUS.has(e?.status) || i >= tries) throw e;
+      if (!RATE_STATUS.has(e?.status)) throw e;
+      // Retry both, but only let a 429 move the bucket. 401 is retried here
+      // because CoinGecko's demo tier has answered rate limits with it — it is
+      // far more often just a bad key, and throttling a whole provider for that
+      // punishes every board for a problem no amount of slowing down fixes
+      // (and a permanently-bad key would pin the penalty at its floor).
+      if (e.status === 429) throttled(key); // even on the attempt we're giving up on
+      if (i >= tries) throw e;
       const ra = e.retryAfter != null ? Number(e.retryAfter) : null;
       await sleep(Math.min(Number.isFinite(ra) ? ra * 1000 : 500 * 2 ** i, cap));
     }
@@ -105,7 +120,7 @@ const paceFor = (name, provider) => {
 // with more context (FMP names the endpoint); this is the floor.
 export function callProvider(name, provider, fn) {
   const pre = provider.pacesRequests ? Promise.resolve() : paceFor(name, provider)();
-  return pre.then(() => withRetry(fn)).catch((e) => {
+  return pre.then(() => withRetry(fn, name)).catch((e) => {
     if (e?.name === "TimeoutError") throw new Error(`${name}: request timed out`);
     throw e;
   });
@@ -322,27 +337,39 @@ export async function resolveBySymbol(db, conn, symbol) {
   return hit ? hit.id : null;
 }
 
-// Batch-warm the active provider's quote cache ahead of a refresh sweep.
-// `rows` are the sweep's due entries ({ entity, inst, … }); the ids that
-// belong to the ACTIVE provider go out as one batched request (a provider
-// declares the capability by exporting prefetch(ids, ctx)). Purely an
-// economics move: per-entity refreshes then hit the warm cache, so a
-// 100-coin board pays one metered call instead of 100. Best-effort by
-// design — any failure just means the per-entity path pays retail, and a
-// provider-switched entity (source names another backend) is skipped here
-// and re-resolved by its own refresh as usual.
+// Batch-warm the active provider's quote cache for a set of provider ids (a
+// provider declares the capability by exporting prefetch(ids, ctx)). Purely an
+// economics move: whatever reads those ids next hits the warm cache, so a
+// 100-coin batch pays one metered call instead of 100. Best-effort by design —
+// any failure just means the per-entity path pays retail.
+//
+// Two callers with two shapes, one warm: the refresh sweep arrives with due
+// ROWS (below), the ingestion sweep with an admission batch's ids straight off
+// the enumerated candidates. This is the seam they share; writing it twice is
+// how the quote-cache economics drifted the first time.
+async function warmIds(active, ids) {
+  const want = [...new Set((ids || []).filter((v) => v != null).map(String))];
+  if (want.length < 2) return; // nothing a batch would save
+  await callProvider(active.name, active.provider, () =>
+    active.provider.prefetch(want, ctxFor(active.name, active.provider, active.apiKey)));
+}
+
+export async function prefetchIds(db, conn, ids) {
+  const active = await activeProvider(db, conn).catch(() => null);
+  if (!active?.provider.prefetch) return;
+  await warmIds(active, ids);
+}
+
+// The refresh sweep's shape: `rows` are its due entries ({ entity, inst, … }).
+// A provider-switched entity (source names another backend) is skipped here and
+// re-resolved by its own refresh as usual.
 export async function prefetchRefresh(db, conn, rows) {
   const active = await activeProvider(db, conn).catch(() => null);
   if (!active?.provider.prefetch) return;
-  const ids = [...new Set(
-    rows
-      .map((r) => r?.inst?.payload?.source)
-      .filter((s) => s && s.provider === active.name && s.id != null)
-      .map((s) => String(s.id))
-  )];
-  if (ids.length < 2) return; // nothing a batch would save
-  await callProvider(active.name, active.provider, () =>
-    active.provider.prefetch(ids, ctxFor(active.name, active.provider, active.apiKey)));
+  await warmIds(active, rows
+    .map((r) => r?.inst?.payload?.source)
+    .filter((s) => s && s.provider === active.name && s.id != null)
+    .map((s) => s.id));
 }
 
 // Re-fetch one entity and return the fields to write back — only those live

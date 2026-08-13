@@ -12,6 +12,7 @@ import { selectFace } from "../server/faces/select.js";
 import { renderChart } from "../server/faces/price-chart.js";
 import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from "../server/faces/index.js";
 import * as runtime from "../server/connectors/runtime.js";
+import * as pacing from "../server/provider-pacing.js";
 import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
 import { up as migrate0035 } from "../server/migrations/0035_connector_chart_face.js";
@@ -275,6 +276,87 @@ test("callProvider retries a 429 (honoring Retry-After) and surfaces other error
     runtime.callProvider("rl-other", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
     /boom/
   ); // non-429 propagates immediately
+});
+
+test("a 429 slows the bucket down, not just the one call", async () => {
+  // The retry alone re-sends at the same pace, so the next call is refused too
+  // — and CoinGecko charges for refused requests. The descriptor's rpm is a
+  // CLAIM about someone else's tier; this is what makes a wrong claim
+  // self-correcting instead of permanent.
+  const fast = { rpm: 100000, burst: 100 };
+  assert.equal(pacing._penaltyOf("rl-learn"), 1, "no penalty until a provider objects");
+
+  await runtime.callProvider("rl-learn", fast, async function once() {
+    if (!once.done) { once.done = true; const e = new Error("slow down"); e.status = 429; e.retryAfter = "0"; throw e; }
+    return "ok";
+  });
+  assert.equal(pacing._penaltyOf("rl-learn"), 2, "one 429 halves the effective rate");
+
+  // A tier that is badly wrong keeps halving, and the last refusal counts even
+  // though we stopped retrying it.
+  process.env.CONNECTOR_RETRY_CAP_MS = "1";
+  try {
+    await assert.rejects(runtime.callProvider("rl-learn", fast, async () => {
+      const e = new Error("slow down"); e.status = 429; throw e;
+    }), /slow down/);
+  } finally { delete process.env.CONNECTOR_RETRY_CAP_MS; }
+  assert.ok(pacing._penaltyOf("rl-learn") >= 8, "sustained refusals keep backing off");
+
+  // A provider that never objects is never slowed — the penalty is measured,
+  // not assumed.
+  await runtime.callProvider("rl-clean", fast, async () => "ok");
+  assert.equal(pacing._penaltyOf("rl-clean"), 1);
+
+});
+
+test("a 429 actually costs the banked tokens, even after an idle gap", async () => {
+  // Zeroing the tokens is not enough on its own: acquire refills from `last`,
+  // so a bucket that had been sitting idle would regenerate a full burst on the
+  // very next call and the refusal would cost nothing at all. 10 tokens/sec,
+  // burst 3, idled 300ms — enough to refill past a full burst if the refill
+  // clock didn't restart with the spend.
+  await pacing.acquire("rl-spend", 600, 3);
+  await new Promise((r) => setTimeout(r, 300));
+  pacing.throttled("rl-spend"); // → 5 tokens/sec, nothing banked
+
+  const t0 = Date.now();
+  await pacing.acquire("rl-spend", 600, 3);
+  assert.ok(Date.now() - t0 > 100, "the next call waited for a token instead of riding a refilled burst");
+});
+
+test("a changed rpm clears the learned penalty; the same rpm keeps it", async () => {
+  // Driven against the pacing module directly: the test harness pins
+  // CONNECTOR_RPM to keep stubbed calls unthrottled, so a provider descriptor's
+  // rpm never reaches acquire() through callProvider.
+  const fast = 600000; // ~0.1ms per token — pacing isn't what this measures
+  await pacing.acquire("reset-me", fast, 5);
+  pacing.throttled("reset-me");
+  assert.equal(pacing._penaltyOf("reset-me"), 2);
+
+  await pacing.acquire("reset-me", fast, 5);
+  assert.equal(pacing._penaltyOf("reset-me"), 2, "an unchanged declaration is not new information");
+
+  // An operator editing rpm (or a stored key flipping keyless→keyed) IS new
+  // information about the tier, and outranks an old refusal. Also the only way
+  // to clear a penalty by hand — everything else waits it out.
+  await pacing.acquire("reset-me", fast * 2, 5);
+  assert.equal(pacing._penaltyOf("reset-me"), 1, "a new rpm clears what was learned against the old one");
+});
+
+test("a 401 is retried but never throttles — it is usually a bad key, not a fast one", async () => {
+  // Slowing down fixes nothing about a wrong key, and doing it anyway would
+  // punish every board on that provider (and pin the penalty while the key
+  // stays wrong). CoinGecko's demo tier has answered rate limits with 401,
+  // which is why it is still RETRIED here.
+  const fast = { rpm: 100000, burst: 100 };
+  let calls = 0;
+  const res = await runtime.callProvider("rl-401", fast, async () => {
+    if (++calls === 1) { const e = new Error("unauthorized"); e.status = 401; e.retryAfter = "0"; throw e; }
+    return "ok";
+  });
+  assert.equal(res, "ok");
+  assert.equal(calls, 2, "still retried");
+  assert.equal(pacing._penaltyOf("rl-401"), 1, "but the bucket is untouched");
 });
 
 test("withRetry caps a huge Retry-After instead of honoring it verbatim", async () => {

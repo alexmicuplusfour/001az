@@ -708,7 +708,7 @@ test("FMP universe depth knob reaches the screener; local page clamp is 250", as
   try {
     const page1 = await fmp.list({ sort: "market_cap", order: "desc", page: 1, pageSize: 250 }, { apiKey: "k" });
     assert.ok(seen[0].includes("limit=1234"), "depth knob steers the screener request");
-    assert.equal(page1.length, 250); // the feed adapter's ENUM_PAGE fits in one slice
+    assert.equal(page1.length, 250); // the feed adapter's default page size fits in one slice
     const page2 = await fmp.list({ sort: "market_cap", order: "desc", page: 2, pageSize: 250 }, { apiKey: "k" });
     assert.equal(page2.length, 50);
     assert.equal(page2[0].values.rank, 251); // offset math consistent with the clamp

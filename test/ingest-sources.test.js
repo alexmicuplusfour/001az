@@ -13,6 +13,7 @@ import { FtpSrv } from "ftp-srv";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
 import { backend as ftpBackend } from "../server/ingestion/sources/ftp.js";
 import * as files from "../server/ingestion/files.js";
+import { readWindow, pruneExpired } from "../server/ingestion/window-cache.js";
 import {
   getBoard, updateBoard, ingestedKeys, setPluginState, recordIngest,
   createSourceConnection, getSourceConnection, getPluginRow,
@@ -429,6 +430,31 @@ test("remote enumeration is briefly cached (reused within TTL, re-walked on a ke
   } finally {
     process.env.INGEST_FEED_CACHE_MS = "0"; // restore the test default (cache off)
   }
+});
+
+test("an expensive window outlives the clock; a cheap one doesn't", async () => {
+  // A flat TTL assumes every fill costs the same. It doesn't: a metered catalog
+  // walk is ~75 paced requests, which took LONGER than the 60s TTL — so the
+  // entry expired before the next click could reach it and every preview paid
+  // the whole walk again. An entry now lives in proportion to what it cost.
+  const now = Date.now();
+  const cheap = new Map([["k", { at: now - 5000, first: now - 5000, cost: 20, candidates: [1], truncated: false }]]);
+  const dear = new Map([["k", { at: now - 5000, first: now - 5000, cost: 40000, candidates: [1], truncated: false }]]);
+  const ttl = 1000;
+
+  assert.equal(readWindow(cheap, "k", { ttl }), null, "a 20ms fill expires on the operator's clock");
+  assert.ok(readWindow(dear, "k", { ttl }), "a 40s walk is still worth serving 5s later");
+
+  // The prune has to read the same lifetime, or a cheap fill evicts the
+  // expensive entry it was meant to protect.
+  pruneExpired(cheap, Date.now(), ttl);
+  pruneExpired(dear, Date.now(), ttl);
+  assert.equal(cheap.size, 0);
+  assert.equal(dear.size, 1);
+
+  // Expensive must not mean immortal — a stale catalog is still a wrong answer.
+  const ancient = new Map([["k", { at: now - 3600_000, first: now - 3600_000, cost: 40000, candidates: [1] }]]);
+  assert.equal(readWindow(ancient, "k", { ttl }), null, "past the cap it lapses like anything else");
 });
 
 test("remote enumeration cache evicts lapsed windows (no unbounded growth)", async () => {

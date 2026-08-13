@@ -53,7 +53,7 @@ import {
   withTx,
   reapEmptyEntities,
 } from "./db.js";
-import { resolveIngestAdapter, nextIngestRunAt } from "./ingestion/index.js";
+import { resolveIngestAdapter, nextIngestRunAt, RUN_CAP } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
@@ -1717,7 +1717,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     return rows.length === REFRESH_BATCH; // full batch → more may be due, drain fast
   }
 
-  // Ingestion sweep: run due boards' feeds (the worker tick is the cron — a
+  // Ingestion sweep: run due boards' feeds (the ingest loop's pass is the cron — a
   // "continuous" folder watch is just a 30s rescan). Per board: enumerate the
   // source, drop everything ever ledgered (ingest_log — deletion in the app is
   // a user judgment the feed must not overturn), then filter/sort/limit with
@@ -1726,7 +1726,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // resuming from drain_left so the run's `limit` stays exact. Per-board
   // failures land in ingest_state with a 5-minute backoff — never the loop.
   const INGEST_CONTINUOUS_MS = Math.max(5000, Number(process.env.INGEST_CONTINUOUS_MS) || 30000);
-  const INGEST_RUN_CAP = Math.max(1, Number(process.env.INGEST_RUN_CAP) || 25);
 
   // Fold a repeating non-event into its prior row: attempts up, error and
   // detail refreshed, this attempt's fresh row retracted. Without the fold a
@@ -1745,6 +1744,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   };
 
   async function ingestDue() {
+    let draining = false; // any board mid-run → the loop polls short instead of idling
     for (const b of await dueIngestBoards(db, Date.now())) {
       const cfg = b.ingest;
       const now = Date.now();
@@ -1761,16 +1761,25 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         const adapter = resolveIngestAdapter(b);
         if (!adapter) throw new Error("ingestion is not available for this board");
         if (!sources) throw new Error("ingestion is not available (worker started without sources)");
-        const catalog = adapter.descriptor().filters;
-        const { candidates } = await adapter.enumerate(db, b, cfg);
-        const known = await ingestedKeys(db, b.id);
-        const fresh = candidates.filter((c) => !known.has(c.key));
+        const descriptor = adapter.descriptor();
+        const catalog = descriptor.filters;
         // Budget: a drain tick resumes what's left of the current logical run
         // instead of re-slicing a fresh limit (keeps "top-N" semantics exact).
+        // Read before enumerating: mid-drain is also what lets an adapter hold
+        // the window it is draining instead of re-walking a metered catalog per
+        // tick (`drain` — see connector.js).
         const drainLeft = Number(b.ingest_state?.drain_left) || 0;
+        const { candidates } = await adapter.enumerate(db, b, cfg, { drain: drainLeft > 0 });
+        const known = await ingestedKeys(db, b.id);
+        const fresh = candidates.filter((c) => !known.has(c.key));
         const budget = drainLeft > 0 ? drainLeft : (Number(cfg.limit) || Infinity);
         const picked = applyLimit(applySort(applyFilters(fresh, cfg.filters, catalog), cfg.sort, catalog), budget);
-        const batch = picked.slice(0, INGEST_RUN_CAP);
+        const batch = picked.slice(0, RUN_CAP(descriptor.runCap));
+        // One batched warm ahead of the per-item admissions; the economics and
+        // the best-effort contract live with it, in connector.js `prewarm`.
+        // Whether a batch is big enough to be worth batching is the runtime's
+        // call (runtime.warmIds), not this loop's.
+        if (adapter.prewarm && batch.length) await adapter.prewarm(db, b, batch);
         let added = 0;
         let dups = 0;
         const errors = [];
@@ -1791,6 +1800,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           }
         }
         const remaining = picked.length - batch.length;
+        if (remaining > 0) draining = true;
         await setIngestState(db, b.id, {
           last_run_at: now,
           last_added: added,
@@ -1874,6 +1884,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         console.warn(`ingest error board "${b.name}" (${manual ? "manual — not retried" : "retrying in 5m"}): ${err.message}`);
       }
     }
+    // A failed board is backed off, not draining — only a live remainder earns
+    // the short poll, so a dead source can't spin the loop at 200ms.
+    return draining;
   }
 
   // One completed job-log row per pipeline-leg attempt (tag/extract/face).
@@ -2325,6 +2338,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   let maintainWake = () => {};
   let embedWake = () => {};
   let refreshWake = () => {};
+  let ingestWake = () => {};
   let transcribeWake = () => {};
   let alertsWake = () => {};
   let diagnoseWake = () => {};
@@ -2372,11 +2386,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   })();
 
-  // Maintenance: recovery + the LIGHT coordination sweeps (retag scheduling, ingestion,
+  // Maintenance: recovery + the LIGHT coordination sweeps (retag scheduling,
   // prune) on a cadence, off the dispatcher's path so a slow sweep can't stall claims.
-  // The heavy throughput sweeps (embedding, liveness refresh) moved to their own loops
-  // below (Stage 3), so a big embed backlog or a slow connector can't delay recovery or
-  // ingestion. Nudges the dispatcher after, since retag/ingest may have created work.
+  // The heavy throughput sweeps (embedding, liveness refresh, ingestion) moved to their
+  // own loops below, so a big embed backlog or a slow connector can't delay recovery.
+  // Nudges the dispatcher after, since retag may have created work.
   const maintainLoop = (async () => {
     while (running) {
       try {
@@ -2384,7 +2398,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
         hasDefault = !!(await resolveDefaultAi(db));
         await retagDue();
-        await ingestDue();
         await pruneSnapshots();
         await reapGhostEntities();
         // Scheduled DB-only backup (server/backup.js) — it no-ops unless due
@@ -2433,6 +2446,28 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       await new Promise((r) => {
         const t = setTimeout(r, more ? 200 : POLL_MS);
         refreshWake = () => { clearTimeout(t); r(); };
+      });
+    }
+  })();
+
+  // Ingestion on its own loop, for the embedLoop/refreshLoop reason and then some:
+  // a feed run is not a light sweep any more. Enumerating a metered catalog is
+  // minutes of paced HTTP (a full CoinGecko pass is ~74 requests at 10 rpm), and a
+  // big run drains across back-to-back ticks — so on the maintenance tick a single
+  // draining board held recovery, retag scheduling and the backup check hostage for
+  // as long as the drain lasted, which is hours. Same shape as refreshLoop: drain
+  // fast while a run has more to give, idle at POLL_MS, and nudge the dispatcher
+  // after each pass because admissions land claimable items (pending/pending_face).
+  const ingestLoop = (async () => {
+    while (running) {
+      let more = false;
+      try { more = await ingestDue(); }
+      catch (e) { console.error("worker ingest error:", e.message); }
+      if (!running) break;
+      wake();
+      await new Promise((r) => {
+        const t = setTimeout(r, more ? 200 : POLL_MS);
+        ingestWake = () => { clearTimeout(t); r(); };
       });
     }
   })();
@@ -2596,6 +2631,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     maintainWake();
     embedWake();
     refreshWake();
+    ingestWake();
     transcribeWake();
     alertsWake();
     diagnoseWake();
@@ -2603,7 +2639,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // in-flight pipelines (captured after the loops settle, so a final fill's launches
     // are included). server.js caps the total wait.
     return (async () => {
-      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, transcribeLoop, alertsLoop, diagnoseLoop]);
+      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, ingestLoop, transcribeLoop, alertsLoop, diagnoseLoop]);
       await Promise.all([...pipelines]);
     })();
   };
