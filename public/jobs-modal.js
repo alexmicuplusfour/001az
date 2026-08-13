@@ -12,7 +12,7 @@ import { state } from './state.js';
 import { createModal, sectionHeadingEl } from './modal.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { fmtDuration, pill } from './utils.js';
-import { unseen, markSeen, seenAt, noteServerNow } from './seen-mark.js';
+import { unseen, markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
 
 // ── the chip's attention dot ──
 // "A job failed while you weren't looking." The count on the chip already says
@@ -22,8 +22,9 @@ import { unseen, markSeen, seenAt, noteServerNow } from './seen-mark.js';
 //
 // state.jobsFailedAt is the newest failure's stamp (server: latestJobFailureAt,
 // which is where the choice of what counts as a failure is argued), against a
-// local watermark — the Tagging-consistency dot's arrangement exactly.
-const SEEN = "jobErrSeen";
+// local watermark — the Tagging-consistency dot's arrangement exactly. The scope
+// string itself lives in seen-mark.js, which owns the keyspace, because the
+// boards index compares against this same mark.
 export const jobsUnseen = () => unseen(SEEN, state.boardId, state.jobsFailedAt);
 export const markJobsSeen = () => markSeen(SEEN, state.boardId, state.jobsFailedAt);
 

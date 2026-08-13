@@ -9,10 +9,22 @@
 // rebuilt here from the same shared parts (dropdown.js, utils.js ICONS) and
 // the same classes, so styles.css dresses them identically.
 //
-import { api } from "/api.js";
-import { openDropdown, ddRow, ddSep } from "/dropdown.js";
-import { ICONS, fmtDuration } from "/utils.js";
-import { openBoardModal } from "/board-modal.js";
+// Relative specifiers, not the root-absolute `/x.js` form the admin pages still
+// use. An ES module specifier resolves against the URL of the module doing the
+// importing, never the document's, so `./api.js` inside `/boards.js` is
+// `/api.js` whether the page was reached as `/boards` or `/boards.html` — the
+// root-absolute form guards a hazard modules do not have. It belongs on
+// `<script src>`, which IS document-relative, and boards.html keeps it there.
+//
+// It also costs: root-absolute specifiers resolve to the filesystem root under
+// Node, so this file could not be imported by a test at all. That is the same
+// change and the same argument board-modal.js was given for announce.test.js.
+import { api } from "./api.js";
+import { openDropdown, ddRow, ddSep } from "./dropdown.js";
+import { ICONS, fmtDuration } from "./utils.js";
+import { openBoardModal } from "./board-modal.js";
+import { applyBoardDot } from "./board-signal.js";
+import { createTicker } from "./ticker.js";
 
 const LOGIN = "/login.html?next=%2Fboards";
 
@@ -32,7 +44,11 @@ if (!me) {
   document.querySelector("header").hidden = false;
   document.getElementById("boards-grid").hidden = false;
   renderToolbar();
-  render();
+  // In parallel, and deliberately not awaited together: the grid renders on the
+  // overview and the dots attach when signals land. The gallery's own precedent
+  // — "the button is drawn immediately either way, and only the dot waits."
+  render().then(() => { if (wraps().length) signalsTicker.start(); });
+  refreshSignals();
 }
 
 // --- toolbar: row 1 only, logo left, user menu right ---
@@ -117,6 +133,81 @@ async function render() {
   grid.replaceChildren(...boards.map(cardFor));
 }
 
+// ── the attention dots (planning/boards-signals-plan.md) ─────────────────────
+//
+// One map and one rule. `signals` is the last response from
+// /api/boards/signals and is the ONLY source a dot is ever computed from; the
+// rendered cards are their own index, each carrying its board id in a data
+// attribute, so there is nothing to keep in step with them.
+//
+// The rule is that a full render and a paint must produce the same DOM, and it
+// is load-bearing rather than tidy. render() runs on a path that has nothing to
+// do with signals — the manage pencil passes it as `onSaved` — so it rebuilds
+// every card the moment anyone edits a board's settings. Dots attached once when
+// the fetch landed would vanish there, silently, until the next tick. Both paths
+// therefore go through applyDot, and cardFor calls it while building.
+const signals = new Map();
+
+// The cards on screen. Also the answer to "is there anything to poll for" —
+// which is why nothing tracks that separately: a second structure saying how
+// many boards exist is a second thing to clear on every exit from render().
+const wraps = () => document.querySelectorAll("#boards-grid .bc-wrap");
+
+// 60 s, not the gallery's 20 s, and the same ticker so the two pages cannot
+// disagree about what a hidden tab does. This page is a lobby rather than a
+// dashboard — its own plan shipped it with no poll at all — and the freshness
+// argument these dots rest on is almost entirely about RETURNING to a tab, which
+// the ticker's visibilitychange catch-up covers outright. One request a minute
+// against the gallery's six or seven.
+const SIGNAL_MS = 60000;
+const signalsTicker = createTicker({
+  tickMs: SIGNAL_MS,
+  signals: [{ name: "boardSignals", every: SIGNAL_MS, run: refreshSignals }],
+  // Nothing on screen, nothing to fetch for: a member with no boards gets the
+  // empty state, and polling for signals about nothing is the purest form of the
+  // background cost this cadence is already spending carefully. Same shape as
+  // signals.js's `if (!state.boardId) return`, one altitude up.
+  ready: () => wraps().length > 0,
+});
+
+async function refreshSignals() {
+  let rows;
+  try {
+    rows = await api("GET", "/api/boards/signals");
+  } catch {
+    // Keep the last known signals — the rule refreshAlerts already states as
+    // "keep the last known counts". Nothing here goes dark because a request
+    // failed; a dot that vanishes on a network blip is the failing direction
+    // this feature has consistently refused. On the FIRST load there is nothing
+    // to keep, and the page is simply the page, dotless.
+    return;
+  }
+  // Validated BEFORE the clear, not after. The clear is the destructive step,
+  // and a response that is 200 but not a list would otherwise empty the map and
+  // dark every dot on the page — the one failure direction this feature refuses
+  // — with the throw swallowed by the ticker's own backstop, so nothing would
+  // say why. `Array.isArray` is the house guard; app.js applies it to every list
+  // it boots from.
+  if (!Array.isArray(rows)) return;
+  signals.clear();
+  for (const r of rows) signals.set(r.board_id, r);
+  paintDots();
+}
+
+// In place, over the cards already on screen — NOT a re-render. Rebuilding every
+// card once a minute would churn the whole <img> set, re-running lazy loading,
+// re-triggering the thumbnail slot handover and re-animating the fan, to move a
+// red circle.
+function paintDots() {
+  for (const wrap of wraps()) applyDot(wrap);
+}
+
+// A card the signals response doesn't mention gets `undefined` and goes dark,
+// which is how the two fetches being a moment apart resolves itself: a board
+// created or deleted between them needs no reconciliation step, in either
+// direction.
+const applyDot = (wrap) => applyBoardDot(wrap, signals.get(wrap.dataset.board));
+
 // A whole-card link: middle-click and cmd-click work without any JS, and it
 // lands on the same URL the toolbar's board switcher uses. A manager's pencil
 // rides alongside it in the wrapper — see .bc-wrap in boards.css for why it
@@ -147,8 +238,10 @@ function cardFor(b) {
 
   const wrap = document.createElement("div");
   wrap.className = "bc-wrap";
+  wrap.dataset.board = b.id; // what lets paintDots find its way back to the row
   wrap.appendChild(card);
   if (b.manage) wrap.appendChild(editBtn(b));
+  applyDot(wrap);
   return wrap;
 }
 

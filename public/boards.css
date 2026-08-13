@@ -64,6 +64,42 @@ main#boards-grid {
   transform: translateY(-2px);
 }
 
+/* The attention dot (planning/boards-signals-plan.md). styles.css supplies the
+   circle itself — same 8px red, same white ring, same half-in/half-out corner as
+   all three header dots, because it means the same thing.
+
+   Moved to the LEFT corner: the right one belongs to the manage pencil, and the
+   two must not collide or trade places on hover. The pencil is hover-revealed
+   and the dot is permanent, so the dot is the one that cannot move.
+
+   Overridden in CSS rather than parameterised on attachBtnDot, and the reason is
+   the z-index below rather than the corner. That number is derived from THIS
+   page's stacking context — preview tiles at 1–4, pencil at 5 — so it has to
+   live here whatever the JS does. A corner argument would therefore split one
+   placement decision across two mechanisms, half in JS and half in the rule that
+   already owns the card's stacking. */
+.bc-wrap > .btn-dot {
+  right: auto;
+  left: 0;
+  transform: translate(-50%, -50%);
+  /* Above the pencil (5) and the preview tiles (1–4), which are the reason this
+     is needed at all: .btn-dot ships with no z-index, and a positioned element
+     at `auto` paints BELOW any positioned sibling with a positive one. The tiles
+     are clipped to .bc-face, but the dot's inner half overhangs into exactly
+     that box, so a rotated tile reaching the top-left corner would cover the
+     half of the dot that is on the card. */
+  z-index: 6;
+}
+
+/* .bc-signal-note — what the dot says, for a reader who cannot see it. It sits
+   INSIDE the card link and so becomes part of its accessible NAME ("People 247
+   items a job failed"), rather than an aria-label on the link, which would have
+   REPLACED everything the card already says instead of adding to it.
+
+   It needs no rules of its own: the span carries the shared .vis-hidden utility
+   from styles.css for the hiding, and this class only exists so board-signal.js
+   has something precise to find it by. */
+
 .board-card {
   flex: 1;
   min-width: 0;

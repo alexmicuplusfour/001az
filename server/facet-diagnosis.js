@@ -227,6 +227,72 @@ const VERDICTS = ["overlapping-values", "unclear-definition", "genuinely-ambiguo
 // over wording to paste into the description.
 const ACTIONABLE = new Set(["overlapping-values", "unclear-definition"]);
 
+// The boards index's answer to "does this board have a finding worth a dot"
+// (boards-signals-plan.md), read from the stored column alone.
+//
+// The gallery asks the same question through diagnosisState over facetRollup —
+// two aggregate queries per board, on the endpoint that has been a performance
+// problem before. Once per board on a background tick would make the index's
+// cheap route the expensive one, which is the mistake defect 5 in
+// header-signals-loose-ends.md records against latestJobFailureAt. So the index
+// reads what listBoards already selected and accepts a coarser answer.
+//
+// Exact here: ACTIONABLE is precisely the pair that reaches the `finding` state
+// — `no-problem-found` is not news, and `genuinely-ambiguous-items` is
+// information rather than a task, which is why the gallery's dot excludes it
+// too. `explanation` is the same `renderable` test. `stale` is authoritative,
+// written by supersedeFacetDiagnostics the moment a retag is armed, and it
+// covers the main way a stored finding stops describing what is measured now.
+//
+// Inexact in both directions, and the OVER-light half has THREE causes rather
+// than the one the plan named — because after the item minimum diagnosisState
+// gates a finding on `row.current !== false && rate >= minRate`, and all three
+// of those operands are the live segment:
+//
+//   - items below the minimum → the gallery says `awaiting`, or `measuring`
+//     with a pass draining. The cause the plan named.
+//   - the live contested rate has fallen below the floor → the gallery says
+//     nothing at all. Probably the commonest of the three: hand curation fixes
+//     contested items without touching the definition, so there is no
+//     `previous` to make it `improved` and the sample need not have shrunk at
+//     all. (setItemTags DELETES a corrected facet's confidence entry rather
+//     than re-stamping it, which facet-diagnosis-loose-ends.md §10 names as
+//     sampling bias; below the minimum it lands in the first case instead.)
+//   - `current === false` → rateHeld, the SERVER's own "the evidence has moved"
+//     answer, computed from that same segment.
+//
+// All three fail the same way — a dot on a board that has a stored finding in
+// it, a coarser truth rather than a lie — and none of them is visible from the
+// stored entry, which is the whole reason this read is cheap.
+//
+// The UNDER-light is one thing: the `improved` state, whose verdict a demotion
+// deliberately does not carry forward.
+//
+// The two directions want different fixes, and it is worth writing down which,
+// because "denormalize it at write time" sounds like it answers both and does
+// not. The UNDER-light is a write-time fact, so a flag the loop stamps would
+// close it. Every OVER-light is caused by the live segment moving AFTER the
+// write, so no stamp can see any of them: they would need an invalidation
+// EVENT, the way `stale` works because supersedeFacetDiagnostics has a retag to
+// hang on. Nothing fires when curation quietly moves a facet's sample or its
+// rate, so that event would have to be invented first. Which is a design
+// question, not a denormalization.
+export function storedFindingAt(board) {
+  const found = board?.facet_diagnostics || {};
+  // Only facets the board still DECLARES, which is facetRollup's rule ("a stored
+  // key whose facet has left the board has to not appear at all") and not an
+  // optional nicety here: a deleted facet's finding is invisible in the gallery,
+  // so a dot lit by one could never be acknowledged from anywhere.
+  const live = new Set((board?.facets || []).map((f) => f?.key));
+  let at = 0;
+  for (const [key, e] of Object.entries(found)) {
+    if (!live.has(key) || e?.stale) continue;
+    if (!ACTIONABLE.has(e?.verdict) || !e?.explanation) continue;
+    at = Math.max(at, Number(e.at) || 0);
+  }
+  return at || null;
+}
+
 // Bumped whenever the QUESTION changes, and it rides in the freshness key: a
 // stored finding answers one specific question, and an answer to a different
 // question is not current however unchanged the measurements are. Bumping

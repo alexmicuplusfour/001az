@@ -44,6 +44,7 @@ import {
   saveFilterConfig,
   deleteFilterConfig,
   listAlerts,
+  boardAlertUnseen,
   getAlertOwned,
   createAlert,
   updateAlert,
@@ -103,6 +104,7 @@ import {
   listJobLog,
   listRunningJobs,
   latestJobFailureAt,
+  boardLatestFailures,
   clearJobLog,
   listRefreshHistory,
   boardHasRefreshHistory,
@@ -131,7 +133,7 @@ import {
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
-import { facetRollup, editedFacets, GATES } from "./facet-diagnosis.js";
+import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
 import { MODEL_CAPABILITIES } from "./capabilities.js";
 import { bindCapability, setCapabilityConfig, assertValidCapabilityConfig, boardBindingPatch, boardConfigPatch } from "./capability-bind.js";
@@ -788,11 +790,24 @@ app.patch("/api/admin/users/:id/boards", requireAdmin, wrap(async (req, res) => 
 }));
 
 // --- boards ---
-app.get("/api/boards", requireAuth, wrap(async (req, res) => {
+
+// Every board this user may see, in listBoards order. The check goes through the
+// shared per-board helper rather than one batched board_members read: a second
+// authorization path is exactly the thing that drifts when the role rules move.
+// It is only fanned out so the lookups overlap instead of serializing (a global
+// admin short-circuits without querying at all).
+//
+// Extracted because three routes want it — /api/boards, /overview and /signals —
+// and the polled one arriving made a third hand-written copy of the same four
+// lines, which is where a policy starts to differ by accident.
+async function accessibleBoards(user) {
   const all = await listBoards(db);
-  const accessible = [];
-  for (const b of all) if (await canAccessBoard(db, b.id, req.user)) accessible.push(b);
-  res.json(accessible.map((b) => ({ id: b.id, name: b.name })));
+  const ok = await Promise.all(all.map((b) => canAccessBoard(db, b.id, user)));
+  return all.filter((_, i) => ok[i]);
+}
+
+app.get("/api/boards", requireAuth, wrap(async (req, res) => {
+  res.json((await accessibleBoards(req.user)).map((b) => ({ id: b.id, name: b.name })));
 }));
 
 // The boards page (planning/boards-page-plan.md): every accessible board with
@@ -801,13 +816,7 @@ app.get("/api/boards", requireAuth, wrap(async (req, res) => {
 // page. Registered before /:id so the literal path isn't captured as an id.
 // Ingest fields mirror the /:id guard: next-run only rides an enabled config.
 app.get("/api/boards/overview", requireAuth, wrap(async (req, res) => {
-  const all = await listBoards(db);
-  // Both checks go through the shared helpers rather than one batched
-  // board_members read: a second authorization path is exactly the thing that
-  // drifts. They're only fanned out so the per-board lookups overlap instead of
-  // serializing (a global admin short-circuits without querying at all).
-  const access = await Promise.all(all.map((b) => canAccessBoard(db, b.id, req.user)));
-  const boards = all.filter((_, i) => access[i]);
+  const boards = await accessibleBoards(req.user);
   const [counts, previews, manage] = await Promise.all([
     boardEntityCounts(db),
     boardPreviewFaces(db, boards.map((b) => b.id), 8),
@@ -834,6 +843,63 @@ app.get("/api/boards/overview", requireAuth, wrap(async (req, res) => {
       preview: previews[b.id] || [],
     };
   }));
+}));
+
+// The boards index's attention dots (planning/boards-signals-plan.md): for every
+// accessible board, the three stamps the gallery's header dots are built from,
+// which the client holds against the SAME localStorage watermarks the gallery
+// writes. That sharing is the whole design — acknowledge a board's job log in
+// its gallery and this route's answer stops mattering for it, with no second
+// ledger to keep in step.
+//
+// Its own route rather than fields on /overview, which is the /jobs/errors and
+// /tokens precedent: this is re-read on a background tick, and the overview
+// answers a page — entity counts and a LATERAL preview stack that nobody wants
+// re-fetched, or re-rendered, once a minute.
+//
+// No `now`, deliberately, and it is the one field a reader of /jobs/errors would
+// expect to find here. That route carries the server clock because markSeen
+// FLOORS the watermark on it; the index never marks. It only compares, which is
+// one stored number against one server stamp with no clock of the reader's in it
+// anywhere. A `now` here would be a field with no reader.
+//
+// Registered before /:id so the literal path isn't captured as an id.
+app.get("/api/boards/signals", requireAuth, wrap(async (req, res) => {
+  const boards = await accessibleBoards(req.user);
+  // The diagnostics gate has a cheap half and an expensive half, and the cheap
+  // half is already in memory: vote mode and the stored findings both ride in on
+  // the read above. Resolving it FIRST means canManageBoard is asked only where
+  // its answer can still change the output — which on a typical instance is no
+  // boards at all, since ai_votes defaults to 1. That matters here and not on
+  // /overview, because this route runs on a tick: the discarded lookups would
+  // have been one per board per minute per open tab, forever.
+  //
+  // Not a cache and not a second authorization path — the same helper, the same
+  // rule, asked in fewer places.
+  const finding = boards.map((b) => (Number(b.ai_votes) > 1 ? storedFindingAt(b) : null));
+  const [failures, alertsUnseen, manage] = await Promise.all([
+    boardLatestFailures(db, boards.map((b) => b.id)),
+    // Skipped outright for a reader with no boards, who would otherwise pay for
+    // an aggregate over their alerts to be told about nothing.
+    boards.length ? boardAlertUnseen(db, req.user.id) : {},
+    Promise.all(boards.map((b, i) => (finding[i] ? canManageBoard(db, b.id, req.user) : false))),
+  ]);
+  // One entry per accessible board, nulls included, rather than only the boards
+  // with news: absence would then mean both "nothing here" and "not in this
+  // response", and this feature has already paid for that conflation twice
+  // (signals.js's `landed`, state.facetStats). An entry is an answer.
+  res.json(boards.map((b, i) => ({
+    board_id: b.id,
+    failed_at: failures[b.id] ?? null,
+    alerts_unseen: alertsUnseen[b.id] || 0,
+    // Gated HERE and not on the client. /facet-stats is requireBoardManager, and
+    // "there is a finding on this board" is the substance of what that gate
+    // protects — emitting it to a plain member through the index would widen an
+    // access boundary by way of a dot. canSeeDiagnostics' two operands, on the
+    // side of the wire where they decide disclosure rather than whether a button
+    // is drawn.
+    diagnostic_at: manage[i] ? finding[i] : null,
+  })));
 }));
 
 app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {

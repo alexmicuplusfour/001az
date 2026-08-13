@@ -14,6 +14,20 @@
 // and changing it silently re-lights every dot once.
 const key = (scope, boardId) => `${scope}:${boardId}`;
 
+// The two scopes, named HERE rather than at the surfaces that write them.
+// They used to be a private const in jobs-modal.js and another in
+// facet-diagnostics.js, which was fine while each had exactly one writer. The
+// boards index reads both (boards-signals-plan.md) — deliberately, since sharing
+// the mark is what makes the index dot and the gallery dot the same dot — so
+// each string now has two readers in different files, and a redeclared copy
+// would drift the first time one moved. Silently, too: a changed scope re-lights
+// every dot once, which is indistinguishable from news.
+export const JOBS_SEEN = "jobErrSeen";
+// Predates the shared module and is left exactly as it was found, which is the
+// same decision the plan made when it declined to rename it into here: a new
+// format costs every existing reader one false alarm.
+export const DIAG_SEEN = "facetDiagSeen";
+
 // Every stamp compared here was written by the SERVER — a job's started_at, a
 // finding's `at` — while Date.now() below is the reader's own clock, and the
 // two are not the same clock. A browser running a few minutes fast floors its

@@ -2427,6 +2427,31 @@ export async function latestJobFailureAt(db, boardId) {
   return rows[0]?.started_at ?? null;
 }
 
+// The same question across a set of boards, for the index's dots
+// (boards-signals-plan.md). LATERAL over unnest rather than
+// `board_id = ANY(...) GROUP BY board_id`: the aggregate form has to reach every
+// failed row of every board to take a MAX, while this walks each board's slice
+// of idx_job_log_failed and stops at the first — the shape boardPreviewFaces
+// already uses one table over, and the reason 0032's partial index exists.
+//
+// CROSS JOIN, so a board with no failures returns no row at all and the caller's
+// default stands. That is also what keeps the payload proportional to the news
+// rather than to the board count.
+export const BOARD_FAILURES_SQL =
+  `SELECT b.id AS board_id, t.started_at
+   FROM unnest($1::text[]) AS b(id)
+   CROSS JOIN LATERAL (
+     SELECT j.started_at FROM job_log j
+     WHERE j.board_id = b.id AND j.outcome='failed'
+     ORDER BY j.started_at DESC LIMIT 1
+   ) t`;
+
+export async function boardLatestFailures(db, boardIds) {
+  if (!boardIds.length) return {};
+  const { rows } = await db.query(BOARD_FAILURES_SQL, [boardIds]);
+  return Object.fromEntries(rows.map((r) => [r.board_id, r.started_at]));
+}
+
 // The modal's Clear button: drop the board's settled history in one go.
 // Running rows survive — they're live work whose stamp is still coming (and
 // the worker's fold lookups tolerate a vanished prior row: the next attempt
@@ -3182,6 +3207,30 @@ export async function listAlerts(db, userId, boardId) {
     [userId, boardId]
   );
   return rows;
+}
+
+// listAlerts' unseen subquery, asked once for every board at a time — the
+// index's alert dot (boards-signals-plan.md). Same number in the same
+// vocabulary: new-match ENTITIES across unseen firings, not the firing count.
+//
+// The user filter is the whole security of this route's alert half. An alert is
+// per-user by construction, so a GROUP BY that lost `a.user_id=$1` would hand
+// one member another's counts on boards they legitimately share — which is why
+// the test for it seeds two users on one board rather than one.
+//
+// An inner join, so a board whose alerts have nothing unseen produces no row and
+// reads as 0 from the caller's default; there is no state where the two differ.
+// Exported so the plan test pins the query the app actually runs. A copy in the
+// test would keep passing while this moved, and the regression is invisible from
+// outside — a sequential scan returns the right sum, slowly (0037).
+export const BOARD_ALERT_UNSEEN_SQL =
+  `SELECT a.board_id, SUM(f.entity_count)::int AS unseen
+   FROM alerts a JOIN alert_firings f ON f.alert_id = a.id AND NOT f.seen
+   WHERE a.user_id=$1 GROUP BY a.board_id`;
+
+export async function boardAlertUnseen(db, userId) {
+  const { rows } = await db.query(BOARD_ALERT_UNSEEN_SQL, [userId]);
+  return Object.fromEntries(rows.map((r) => [r.board_id, r.unseen]));
 }
 
 export async function getAlertOwned(db, userId, id) {

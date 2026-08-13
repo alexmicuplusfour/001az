@@ -15,7 +15,7 @@ import { state } from './state.js';
 import { api } from './api.js';
 import { createModal } from './modal.js';
 import { ICONS, fmtDuration } from './utils.js';
-import { unseen, markSeen } from './seen-mark.js';
+import { unseen, markSeen, DIAG_SEEN as SEEN } from './seen-mark.js';
 
 // Which of the five states a facet is in, from one roll-up row (server shape:
 // { key, label, items, unanimous, d, scoped, stale, diagnostic }).
@@ -220,8 +220,9 @@ export function ensureFacetStats() {
 // The dot's memory (seen-mark.js — the jobs chip's dot keeps its in the same
 // place, for the same reasons). Keyed on the newest `at` the board carries, so
 // a finding written after the user last looked re-lights it. The scope string
-// is the storage prefix and predates the shared module: leave it alone.
-const SEEN = "facetDiagSeen";
+// is the storage prefix and predates the shared module: leave it alone. It lives
+// in seen-mark.js, which owns the keyspace, because the boards index compares
+// against this same mark.
 
 const newestAt = (facets = []) =>
   facets.reduce((n, f) => Math.max(n, Number(f.diagnostic?.at) || 0), 0);

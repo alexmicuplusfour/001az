@@ -253,7 +253,10 @@ stamp the background tick last refreshed up to 20 s ago — and it is what makes
   silenceable at all. Opening the surface is the only acknowledgement, which is
   what keeps the rule statable in one sentence.
 - **No cross-board signals.** Everything is scoped to the open board. The boards
-  overview shows nothing.
+  overview shows nothing. **Reversed 2026-08-13** — see
+  [boards-signals-plan.md](boards-signals-plan.md), which hoists one rolled-up
+  dot per card onto `/boards` by reusing these watermarks rather than by adding
+  a second answer to "have you seen this". The rest of this section stands.
 - **No push/Notification API.** The tab has to be open. Webhooks are already the
   answer for reaching someone who isn't here (`alerts-plan.md`).
 

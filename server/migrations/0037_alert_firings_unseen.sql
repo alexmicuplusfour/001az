@@ -1,0 +1,41 @@
+-- The boards index asks "how many new matches are waiting on each of my
+-- boards?" on a background tick, per open tab (boardAlertUnseen in db.js;
+-- planning/boards-signals-plan.md). It is the same shape of question 0032 cut an
+-- index for one table over, and it arrives with the same problem: the predicate
+-- that makes it cheap — NOT seen — had no index at all.
+--
+-- 0023's idx_alert_firings_alert (alert_id, fired_at DESC) does not serve it.
+-- That index is ordered for the history list; this read wants the unseen rows
+-- for a set of alerts and does not care when they fired. Measured over 24k
+-- firings with a quarter of them unseen:
+--
+--   HashAggregate  (actual time=1.594..1.595 rows=6 loops=1)
+--     Buffers: shared hit=227
+--     ->  Hash Join  (Hash Cond: (f.alert_id = a.id))
+--           ->  Seq Scan on alert_firings f  (actual rows=6000 loops=1)
+--
+-- 1.66 ms and 694 buffer hits to answer a question about six numbers, and the
+-- scan is over every user's firings, so one reader's dot costs the whole
+-- instance's alert history.
+--
+-- The reason this is worth an index rather than a shrug is the DIRECTION it
+-- fails in. The planner picks the sequential scan when a large fraction of
+-- firings are unseen — which is precisely the state of a user with a lot of
+-- unread news, i.e. the reader the dot exists for. The query gets slower the
+-- more it has to say. On a healthy instance (4% unseen, 60k firings) the
+-- planner already finds a nested loop over the alerts index and takes 0.374 ms;
+-- with this index that becomes 0.177 ms and 143 buffer hits, and the pathological
+-- case stops existing.
+--
+-- Partial, and on alert_id alone: the predicate IS the selectivity, and the sum
+-- reads entity_count off the heap either way, so carrying more columns would buy
+-- a bigger index and no early termination. It stays small by construction —
+-- 40 kB against a 4.5 MB table in the measurement above — because an unseen
+-- firing is the transient row, and it shrinks every time somebody opens a
+-- history. Same argument as 0032, where the rare row is a failure.
+--
+-- Plain CREATE INDEX, like 0014, 0028 and 0032: the migration runner wraps each
+-- file in a transaction, and CONCURRENTLY cannot run inside one.
+CREATE INDEX IF NOT EXISTS idx_alert_firings_unseen
+  ON alert_firings (alert_id)
+  WHERE NOT seen;

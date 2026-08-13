@@ -24,6 +24,7 @@
 // each signal names its own interval, and a signal whose surface isn't on
 // screen is never fetched at all.
 import { state } from './state.js';
+import { createTicker } from './ticker.js';
 import { ensurePolling } from './data.js';
 import { refreshFacetStats, canSeeDiagnostics } from './facet-diagnostics.js';
 import { jobsModalOpen } from './jobs-modal.js';
@@ -126,37 +127,16 @@ const SIGNALS = [
   { name: "facetStats", every: 60000, when: () => canSeeDiagnostics(state), run: refreshFacetStats },
 ];
 
-let timer = null;
-const lastAt = new Map();
+// The loop itself lives in ticker.js — it is a policy about WHEN, and the
+// boards page needs the same one for its per-board dots (boards-signals-plan.md).
+// What stays here is the table, which is the part that is genuinely the
+// gallery's: three board-scoped fetches that only mean anything with a board
+// open and a reader signed in.
+const ticker = createTicker({
+  tickMs: TICK_MS,
+  signals: SIGNALS,
+  ready: () => !!state.boardId && !!state.me,
+  onBatch: () => document.dispatchEvent(new Event('app:render')),
+});
 
-async function tick() {
-  // `document.hidden` and not `!document.hasFocus()`: a second window beside
-  // the editor is still being watched.
-  if (document.hidden || !state.boardId || !state.me) return;
-  const now = Date.now();
-  const due = SIGNALS.filter((s) => (!s.when || s.when()) && now - (lastAt.get(s.name) || 0) >= s.every);
-  if (!due.length) return;
-  for (const s of due) lastAt.set(s.name, now);
-  // Each signal already swallows its own network failures; this is the backstop
-  // for anything they don't, because a rejection here happens inside a
-  // setInterval callback where nothing is waiting to catch it — an unhandled
-  // rejection, and one signal's bad day silently taking the other two's render
-  // with it.
-  await Promise.all(due.map((s) => s.run().catch(() => {})));
-  // One render for the batch. Every signal feeds a dot in the same toolbar, so
-  // three renders would repaint it three times to the same pixels.
-  document.dispatchEvent(new Event('app:render'));
-}
-
-// Called once, after boot has filled the signals for the first time — hence the
-// stamps: the first tick is a REFRESH, not a duplicate of what boot just did.
-export function startSignals() {
-  if (timer) return;
-  const now = Date.now();
-  for (const s of SIGNALS) lastAt.set(s.name, now);
-  timer = setInterval(tick, TICK_MS);
-  // Coming back to a tab that sat in the background is the moment a stale dot
-  // is most obviously wrong — catch up immediately rather than up to TICK_MS
-  // later. Everything due fires at once because nothing ticked while away.
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
-}
+export const startSignals = ticker.start;

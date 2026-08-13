@@ -633,6 +633,28 @@ body.bulk-mode .inst-tag-chip {
   pointer-events: none;
 }
 
+/* Present to a screen reader, absent to the eye — for text that EXPLAINS a
+   purely visual mark. It lives beside .btn-dot because that is what keeps
+   needing it: a dot is a fact with no text, so whatever says what it means has
+   to be readable by someone who cannot see it.
+
+   The standard clip pair: `clip` for older engines, `clip-path` for current
+   ones. Deliberately NOT `display: none` or `visibility: hidden`, which remove
+   the element from the accessibility tree along with the layout — which is the
+   whole thing it is here to avoid. */
+.vis-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+}
+
 .card.loading {
   cursor: default;
 }
