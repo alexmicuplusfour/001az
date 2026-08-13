@@ -6,7 +6,7 @@
 
 import { state } from './state.js';
 import { ICONS } from './utils.js';
-import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
+import { openDropdown, ddRow, ddSep, ddInput, ddEmpty } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
 
@@ -73,12 +73,9 @@ export function openFilterConfigPop(anchorEl) {
     minWidth: 190,
     build: (body, { close }) => {
       if (!state.filterConfigs.length) {
-        const empty = document.createElement("div");
-        empty.className = "dd-empty";
-        empty.textContent = activeCount() > 0
+        body.appendChild(ddEmpty(activeCount() > 0
           ? "No saved filters yet — name the current ones below."
-          : "Pick some filters, then save them here for reuse.";
-        body.appendChild(empty);
+          : "Pick some filters, then save them here for reuse."));
         return;
       }
       for (const cfg of state.filterConfigs) {

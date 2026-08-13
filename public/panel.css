@@ -89,7 +89,10 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid #eee; font-size: 13px; }
 th { color: #6b6b72; font-weight: 600; }
 td .email { color: #6b6b72; font-size: 12px; }
-.badge { font-size: 11px; background: #eef; color: #224; padding: 1px 6px; border-radius: 999px; }
+/* flex: none because every use of this sits in a flex row, and a pill that
+   shrinks to fit stops being a pill — the two surfaces that hit that were each
+   re-stating it in their own scoped rule. */
+.badge { font-size: 11px; background: #eef; color: #224; padding: 1px 6px; border-radius: 999px; flex: none; }
 .name-cell { display: flex; align-items: center; gap: 10px; }
 /* The leading glyph in a table row's name cell. Was a .row-icon class the two
    render sites had to remember to put on their hand-written <svg>; the cell is

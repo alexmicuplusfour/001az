@@ -886,12 +886,35 @@ export async function setUserName(db, userId, name) {
 export async function listUsers(db) {
   // No invite token here: it's a bearer credential and only its hash is stored
   // now anyway. The admin mints a fresh link on demand (POST /users/:id/link).
-  const { rows } = await db.query(
-    `SELECT u.id, u.email, u.name, u.is_admin, u.last_login_at,
-      (SELECT COUNT(*) FROM favorites f WHERE f.user_id = u.id) AS hearts_given
-     FROM users u ORDER BY u.is_admin DESC, u.created_at ASC`
-  );
-  return rows;
+  //
+  // Board access rides along as a second query — one join for everyone, grouped
+  // below, rather than the query-per-row shape /api/admin/boards still has. The
+  // two don't depend on each other, so they overlap. Board order matches
+  // listBoards, so a member's boards read in the same sequence as the Boards
+  // tab lists them.
+  //
+  // A global admin gets nothing from that join, on purpose: canAccessBoard
+  // reaches every board from is_admin alone, WITHOUT a board_members row, so
+  // synthesising rows for them would put a second copy of that rule in a
+  // display path. Callers read is_admin and say "all" — the same answer the
+  // board access picker gives when it checks their box and disables it.
+  const [{ rows }, { rows: memberships }] = await Promise.all([
+    db.query(
+      `SELECT u.id, u.email, u.name, u.is_admin, u.last_login_at
+       FROM users u ORDER BY u.is_admin DESC, u.created_at ASC`
+    ),
+    db.query(
+      `SELECT bm.user_id, bm.board_id, bm.role, b.name
+         FROM board_members bm JOIN boards b ON b.id = bm.board_id
+        ORDER BY b.created_at ASC`
+    ),
+  ]);
+  const byUser = new Map();
+  for (const m of memberships) {
+    if (!byUser.has(m.user_id)) byUser.set(m.user_id, []);
+    byUser.get(m.user_id).push({ id: m.board_id, name: m.name, role: m.role });
+  }
+  return rows.map((u) => ({ ...u, boards: byUser.get(u.id) || [] }));
 }
 
 export async function deleteUser(db, id) {
@@ -1717,6 +1740,13 @@ export async function getBoardAdminIds(db, boardId) {
   return rows.map((r) => r.user_id);
 }
 
+// The row shape both membership editors write. Kept in one place so a column
+// added here can't reach one writer and miss the other — the two functions
+// below stay separate (their DELETE scopes are the point), but they insert the
+// same row.
+const ADD_BOARD_MEMBER =
+  "INSERT INTO board_members (board_id, user_id, role, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING";
+
 // Replace a board's membership. adminIds get role='admin' (only if also members);
 // everyone else is a plain 'member'. adminIds defaults to none.
 export async function setBoardMembers(db, boardId, userIds, adminIds = []) {
@@ -1724,12 +1754,40 @@ export async function setBoardMembers(db, boardId, userIds, adminIds = []) {
   await withTx(db, async (client) => {
     await client.query("DELETE FROM board_members WHERE board_id=$1", [boardId]);
     for (const uid of userIds) {
-      await client.query(
-        "INSERT INTO board_members (board_id, user_id, role, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-        [boardId, uid, admins.has(Number(uid)) ? "admin" : "member", Date.now()]
-      );
+      await client.query(ADD_BOARD_MEMBER, [
+        boardId, uid, admins.has(Number(uid)) ? "admin" : "member", Date.now(),
+      ]);
     }
   });
+}
+
+// The same table as setBoardMembers, pivoted: replace ONE user's access across
+// every board. The DELETE is scoped to that user, so a save here can't disturb
+// anyone else's membership on the boards it touches — the two editors write
+// disjoint sets of rows and can't clobber each other's people.
+//
+// adminBoardIds take role='admin', and only where the user is also a member:
+// the loop walks boardIds, so an admin grant on a board they can't see is
+// dropped rather than stored as a manage right with no access behind it.
+export async function setUserBoards(db, userId, boardIds, adminBoardIds = []) {
+  const admins = new Set(adminBoardIds.map(String)); // board ids are TEXT
+  await withTx(db, async (client) => {
+    await client.query("DELETE FROM board_members WHERE user_id=$1", [userId]);
+    for (const bid of boardIds) {
+      await client.query(ADD_BOARD_MEMBER, [
+        String(bid), userId, admins.has(String(bid)) ? "admin" : "member", Date.now(),
+      ]);
+    }
+  });
+}
+
+// Which of these board ids actually exist. The membership writers take ids from
+// a client, and an id that has since been deleted has to be dropped before it
+// reaches the foreign key, which would answer it with a 500.
+export async function existingBoardIds(db, ids) {
+  if (!ids.length) return new Set();
+  const { rows } = await db.query("SELECT id FROM boards WHERE id = ANY($1::text[])", [ids]);
+  return new Set(rows.map((r) => r.id));
 }
 
 export async function canAccessBoard(db, boardId, user) {

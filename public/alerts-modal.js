@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { ICONS, fmtDuration } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl } from './modal.js';
-import { ddRow, ddSep } from './dropdown.js';
+import { ddRow, ddSep, ddEmpty } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { switchRow } from './board-modal.js';
 import { openAlertEvent, clearAlertEvent, resetListFilters } from './alert-event.js';
@@ -24,13 +24,10 @@ const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 export function appendAlertMenu(body, close) {
   body.appendChild(ddSep());
   if (!state.alerts.length) {
-    const empty = document.createElement("div");
-    empty.className = "dd-empty";
     // The saved-filters teaching trick: the empty state explains the flow.
-    empty.textContent = Object.keys(selectedAsConfig()).length
+    body.appendChild(ddEmpty(Object.keys(selectedAsConfig()).length
       ? "No alerts yet — watch the current filter below."
-      : "Pick some filters, then create an alert here.";
-    body.appendChild(empty);
+      : "Pick some filters, then create an alert here."));
     return;
   }
   for (const a of state.alerts) {

@@ -63,7 +63,12 @@ export function openDropdown(anchor, {
   if (current) {
     if (hover && current.anchor === anchor) return null; // already open; hover-hold keeps it alive
     if (hover && !current.hover) return null;            // a hover pop never steals a click-opened menu
-    const toggled = !hover && current.anchor === anchor;
+    // The inverse of the rule above: a click-open REPLACES a hover pop on the
+    // same anchor, rather than being eaten as a toggle. Toggling shut is for
+    // re-clicking a pop the CLICK itself opened — otherwise a chip that
+    // previews on hover and edits on click can never reach its editor, since
+    // the pointer that arrives to click has already opened the preview.
+    const toggled = !hover && !current.hover && current.anchor === anchor;
     current.close("toggle");
     if (toggled) return null;
   }
@@ -154,8 +159,10 @@ export function openDropdown(anchor, {
       return;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      // footer actions are part of the same walk — they're the last stops
-      const rows = [...el.querySelectorAll(".dd-row, .dd-action")];
+      // footer actions are part of the same walk — they're the last stops;
+      // static rows are not, since focusing one would land the walk on
+      // something that does nothing when you press Enter
+      const rows = [...el.querySelectorAll(".dd-row:not(.dd-row--static), .dd-action")];
       if (!rows.length) return;
       e.preventDefault();
       const i = rows.indexOf(document.activeElement);
@@ -235,9 +242,18 @@ export function openDropdown(anchor, {
 // key). The main text keeps its ellipsis; the sub gets its own.
 export function ddRow({ label, labelEl, sublabel, active = false, href, leading, trailing, onClick } = {}) {
   const row = document.createElement(href ? "a" : "div");
-  row.className = "dd-row" + (active ? " active" : "") + (sublabel ? " has-sub" : "");
-  row.setAttribute("role", "menuitem");
-  row.tabIndex = -1;
+  // A row with nowhere to go is a line in a list, not a menu item: it keeps the
+  // metrics and loses the affordance — no pointer, no hover lift, and no place
+  // in the arrow-key walk or the Enter/Space handler, both of which select on
+  // .dd-row. Derived from what the caller passed rather than a flag, so a
+  // read-only list can't forget to say so.
+  const interactive = !!(onClick || href);
+  row.className = "dd-row" + (interactive ? "" : " dd-row--static")
+    + (active ? " active" : "") + (sublabel ? " has-sub" : "");
+  if (interactive) {
+    row.setAttribute("role", "menuitem");
+    row.tabIndex = -1;
+  }
   if (href) row.href = href;
   if (leading) row.appendChild(leading);
   let lbl = labelEl;
@@ -265,13 +281,17 @@ export function ddRow({ label, labelEl, sublabel, active = false, href, leading,
 // as a real <a> (middle-click opens a tab); one that acts is a <button>. They
 // are only ever built here, so the two render as the same box — callers pick
 // the element by passing href or onClick, not by hand-rolling the markup.
-export function ddAction({ label, icon, href, onClick } = {}) {
+export function ddAction({ label, icon, href, onClick, disabled = false } = {}) {
   const el = document.createElement(href ? "a" : "button");
   // An action with an icon is a row and reads left-to-right from its glyph. One
   // without is a button, and a button's label belongs in the middle of it.
   el.className = "dd-action" + (icon ? "" : " dd-action--plain");
   if (href) el.href = href;
   else el.type = "button";
+  // `disabled` is here because a pop that fills from a fetch has to open with
+  // its Save inert — a footer action that acts on rows the body hasn't got yet
+  // acts on nothing, and "nothing" is a destructive answer for a picker.
+  if (disabled) el.disabled = true;
   if (icon) {
     const wrap = document.createElement("span");
     wrap.className = "dd-icon";
@@ -299,6 +319,30 @@ export function ddCheckRow({ label, checked, disabled, variant = "dark", child =
   cb.el.setAttribute("role", "menuitemcheckbox");
   cb.el.tabIndex = -1; // joins the arrow-key walk; Enter/Space clicks the label
   return cb;
+}
+
+// A checkbox row that BELONGS to the one above it: indented, and live only
+// while its parent is checked — unchecking the parent clears it too.
+//
+// Both halves of that rule used to sit at the call site, and `child: true`
+// exists for nothing else, so the two access pickers (admin-boards.js by board,
+// admin-members.js by member) each stated it and each had to keep stating it
+// the same way. The relationship is the component's to enforce.
+export function ddChildCheckRow(parent, { label, checked, variant = "dark", title } = {}) {
+  const child = ddCheckRow({ variant, child: true, label, checked, disabled: !parent.checked });
+  if (title) child.el.title = title;
+  parent.addEventListener("change", () => {
+    child.disabled = !parent.checked;
+    if (!parent.checked) child.checked = false;
+  });
+  return child;
+}
+
+// The "nothing here" line. A shared class since dropdown.css was written, but
+// the only dd-* part without a factory — so five call sites hand-built the same
+// four lines.
+export function ddEmpty(text) {
+  return Object.assign(document.createElement("div"), { className: "dd-empty", textContent: text });
 }
 
 export function ddSep() {

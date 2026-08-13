@@ -15,6 +15,21 @@
     <style>
       .row-actions-wrap { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
 
+      /* members tab — the boards cell: a count that expands to the list on
+         hover and opens the access editor on click. It WEARS .p-note (see the
+         plugins block below) rather than restating it, so the two admin tables'
+         pills stay one object; only the parts .p-note has no opinion about live
+         here. The cursor is on the button alone — a global admin's cell is the
+         same pill stating a fact, and isn't a control. */
+      .boards-chip { border: 1px solid transparent; }
+      button.boards-chip { cursor: pointer; }
+      button.boards-chip:hover, .boards-chip.dd-open { background: #e6e6ea; color: #111; }
+      /* Nothing granted yet — a dashed "add zone", the same affordance the
+         plugins tab's add button uses, so the click is visibly the point of the
+         cell rather than a dead "0". */
+      .boards-chip.empty { background: none; border-color: #cfcfd6; border-style: dashed; color: #9aa0aa; }
+      button.boards-chip.empty:hover { background: none; border-color: #111; color: #111; }
+
 
       /* plugins tab — the plugin row and the add-modal row share the .p-* parts */
       .plugin-list { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
@@ -26,13 +41,12 @@
       .p-desc { color: #9aa0aa; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       /* meta line under the description: key/connection state + category badges */
       .p-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
-      .p-note { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+      .p-note, .boards-chip { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
       /* the key glyph in the badge — sized here now that it comes from the
          shared set instead of carrying its own width/height */
-      .p-note svg { width: 12px; height: 12px; flex: none; }
+      .p-note svg, .boards-chip svg { width: 12px; height: 12px; flex: none; }
       .p-note.warn { color: #8a5a12; background: #fdf3e3; }
       .p-tag { flex: none; font-size: 11px; color: #6b6b72; background: #f3f3f5; border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
-      .plugin-row .badge { flex: none; }
       .plugin-row .badge.warn { background: #fdf3e3; color: #8a5a12; }
       .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
       .gear svg { width: 15px; height: 15px; }

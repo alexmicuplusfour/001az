@@ -75,6 +75,8 @@ import {
   getBoardMemberIds,
   getBoardAdminIds,
   setBoardMembers,
+  setUserBoards,
+  existingBoardIds,
   canAccessBoard,
   canManageBoard,
   getItemBoard,
@@ -760,6 +762,28 @@ app.post("/api/admin/users/:id/link", requireAdmin, wrap(async (req, res) => {
 
 app.delete("/api/admin/users/:id", requireAdmin, wrap(async (req, res) => {
   await deleteUser(db, Number(req.params.id));
+  res.json({ ok: true });
+}));
+
+// Board access for one member — the inverse of the Boards tab's access picker
+// (PATCH /api/admin/boards/:id with memberIds/adminIds). Both write
+// board_members; this one only ever rewrites THIS user's rows, so the two
+// surfaces can't delete each other's people.
+app.patch("/api/admin/users/:id/boards", requireAdmin, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  const user = Number.isInteger(id) ? await getUserById(db, id) : null;
+  if (!user) return res.status(404).json({ error: "not found" });
+  // A global admin already reaches every board without a board_members row
+  // (canAccessBoard short-circuits on is_admin). Writing rows for them would
+  // put a weaker, revocable copy of that access in the table — one a later
+  // save could take away while is_admin still says otherwise.
+  if (user.is_admin) return res.status(409).json({ error: "global admins already reach every board" });
+  const asIds = (v) => (Array.isArray(v) ? v : []).map(String);
+  const wanted = asIds(req.body?.boardIds);
+  const admins = asIds(req.body?.adminBoardIds);
+  const known = await existingBoardIds(db, [...new Set([...wanted, ...admins])]);
+  const live = (list) => list.filter((bid) => known.has(bid));
+  await setUserBoards(db, user.id, live(wanted), live(admins));
   res.json({ ok: true });
 }));
 

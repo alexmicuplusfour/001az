@@ -5,7 +5,7 @@
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openBoardModal } from "/board-modal.js";
-import { openDropdown, ddRow, ddCheckRow, ddSep, ddAction } from "/dropdown.js";
+import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddSep, ddAction, ddEmpty } from "/dropdown.js";
 import { ICONS } from "/utils.js";
 
 const boardsContent = document.getElementById("boards-content");
@@ -273,6 +273,7 @@ function openRetagPop(facets, anchorEl, run) {
 // placeholder, fill the body when the list lands, then re-measure.
 function openAccessPop(board, anchorEl) {
   let live = true; // the fetch can outlive the popover — closing it wins
+  let saveBtn;    // assigned by the footer builder, which runs inside the call
   const ctx = openDropdown(anchorEl, {
     variant: "light",
     align: "end",
@@ -281,14 +282,13 @@ function openAccessPop(board, anchorEl) {
     // this is roughly six people before the list starts scrolling
     maxItems: 12,
     onClose: () => { live = false; },
-    build: (body) => {
-      const hint = document.createElement("div");
-      hint.className = "dd-empty";
-      hint.textContent = "Loading…";
-      body.appendChild(hint);
-    },
+    build: (body) => body.appendChild(ddEmpty("Loading…")),
+    // Dead until the user list lands. `rows` is empty until then and an empty
+    // save clears the board's whole membership, so a slow fetch would otherwise
+    // leave "remove everyone" sitting exactly where the user expects "Save".
     footer: (foot) => {
-      foot.appendChild(ddAction({ label: "Save", onClick: () => save() }));
+      saveBtn = ddAction({ label: "Save", disabled: true, onClick: () => save() });
+      foot.appendChild(saveBtn);
     },
   });
   if (!ctx) return; // second click on the same button: toggled closed
@@ -325,20 +325,14 @@ function openAccessPop(board, anchorEl) {
 
       // Board-admin lets a member edit this board's settings from the gallery.
       // Global admins already can, so they get no toggle; everyone else's is a
-      // child of their membership — live only while they are a member.
+      // child of their membership, which ddChildCheckRow keeps it tied to.
       let admin = null;
       if (!u.is_admin) {
-        admin = ddCheckRow({
+        admin = ddChildCheckRow(member, {
           variant: ctx.variant,
-          child: true,
           checked: adminSet.has(u.id),
-          disabled: !member.checked,
           label: "board admin",
-        });
-        admin.el.title = "Can edit this board's settings from the gallery";
-        member.addEventListener("change", () => {
-          admin.disabled = !member.checked;
-          if (!member.checked) admin.checked = false;
+          title: "Can edit this board's settings from the gallery",
         });
         list.appendChild(admin.el);
       }
@@ -346,6 +340,7 @@ function openAccessPop(board, anchorEl) {
       return { id: u.id, member, admin };
     });
     ctx.body.replaceChildren(list);
+    saveBtn.disabled = false;
     ctx.reposition(); // the body just changed height
   }).catch(() => { if (live) ctx.close(); });
 }

@@ -119,8 +119,15 @@
   box-sizing: border-box;
 }
 /* a dead row shouldn't light up under the pointer as if it would do something */
-.dd-row.dd-check.is-disabled:hover {
+.dd-row.dd-check.is-disabled:hover,
+.dd-row--static:hover {
   background: none;
+}
+/* ...and the same for a row that never had anywhere to go: ddRow stamps this
+   when it was given neither onClick nor href, so a read-only list keeps the
+   row metrics without borrowing the affordance. */
+.dd-row--static {
+  cursor: default;
 }
 /* A row that belongs to the one above it, indented to where the parent's text
    starts (8px padding + a 16px box + an 8px gap), and a size down — the
