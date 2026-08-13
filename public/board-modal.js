@@ -45,11 +45,18 @@ export function makeSwitch(checked, onChange, opts = {}) {
   return btn;
 }
 
-// Labeled switch row — clicking anywhere on the row toggles.
+// Labeled switch row — clicking anywhere on the row toggles. The row carries a
+// `setSwitch(on)` for callers that need to move the knob from code (a mode
+// change forcing the value, a mutual exclusion): it updates the visual state
+// WITHOUT firing onChange, since the caller is already setting the model.
 export function switchRow(label, hint, checked, onChange, opts = {}) {
   const row = document.createElement("div");
   row.className = "switch-row";
   const sw = makeSwitch(checked, onChange, opts);
+  row.setSwitch = (on) => {
+    sw.classList.toggle("on", on);
+    sw.setAttribute("aria-checked", String(on));
+  };
   const text = document.createElement("span");
   text.append(label);
   if (hint) {
@@ -727,14 +734,9 @@ export async function openBoardModal(boardId, opts = {}) {
 
   // A disabled <button class="switch"> ignores .click(), which also kills
   // switchRow's row-wide click handler — so disabling the button is enough.
+  // (Moving a knob from code is switchRow's own setSwitch; this is only for
+  // the disabled attribute, which no row-level API covers.)
   const swOf = (row) => row.querySelector("button.switch");
-  // Flip a switch's visual state without firing its onChange — for the
-  // exclusion, where the model state is set by the caller.
-  const setSw = (row, on) => {
-    const b = swOf(row);
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-checked", String(on));
-  };
 
   const dcRow = switchRow(
     "Double-check tags",
@@ -742,7 +744,7 @@ export async function openBoardModal(boardId, opts = {}) {
     dc.on,
     (on) => {
       dc.on = on;
-      if (on && aiResearch) { aiResearch = false; setSw(researchRow, false); }
+      if (on && aiResearch) { aiResearch = false; researchRow.setSwitch(false); }
       syncAi();
     }
   );
@@ -752,7 +754,7 @@ export async function openBoardModal(boardId, opts = {}) {
     aiResearch,
     (on) => {
       aiResearch = on;
-      if (on && dc.on) { dc.on = false; setSw(dcRow, false); }
+      if (on && dc.on) { dc.on = false; dcRow.setSwitch(false); }
       syncAi();
     }
   );
@@ -766,7 +768,7 @@ export async function openBoardModal(boardId, opts = {}) {
     dcSub.style.display = dc.on ? "flex" : "none";
     dcCost.textContent = `— roughly ${dc.passes}× the tagging cost`;
     const ok = researchAvailable();
-    if (!ok && aiResearch) { aiResearch = false; setSw(researchRow, false); }
+    if (!ok && aiResearch) { aiResearch = false; researchRow.setSwitch(false); }
     swOf(researchRow)?.toggleAttribute("disabled", !ok);
     researchRow.style.opacity = ok ? "" : "0.5";
     researchNote.textContent = ok || !researchNeeds ? "" : `needs a tagging model from ${researchNeeds} — pick one under AI models`;

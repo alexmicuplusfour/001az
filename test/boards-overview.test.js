@@ -98,14 +98,19 @@ test("capability flags reflect board config", async () => {
   assert.equal(a.facet_count, 1); // the seed's single "kind" facet
   assert.equal(a.has_mapping, false);
   assert.equal(a.mapping_connector, null);
-  // Ingest config present but disabled — the flag and the stamp both stay off.
-  assert.equal(a.has_ingest, false);
+  // Ingest config present but held. The chip still shows — this row is an
+  // inventory of what the board HAS — and it names the pause instead of
+  // vanishing, which used to read as "no ingestion configured here".
+  assert.equal(a.ingest_mode, "paused");
   assert.equal(a.ingest_next_run_at, null);
 
   const b = find(r, boardB);
   assert.equal(b.facet_count, 0);
-  assert.equal(b.has_ingest, true);
+  assert.equal(b.ingest_mode, "scheduled");
   assert.equal(b.ingest_next_run_at, NEXT_RUN);
+
+  // No ingest config at all is the only no-chip case.
+  assert.equal(find(r, boardC).ingest_mode, null);
 
   const c = find(r, boardC);
   assert.equal(c.has_mapping, true);

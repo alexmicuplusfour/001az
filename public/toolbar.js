@@ -46,12 +46,21 @@ function ingestChip() {
   chip.append(icon, eta);
   chip.addEventListener("click", () => openIngestModal());
 
+  // A pending run outranks the mode: a hand-fired run on a paused board should
+  // read as the run it is, not as the pause it will fall back to when it lands.
   const render = () => {
     const at = state.boardIngestNextRun;
     if (!at) {
-      eta.textContent = "manual";
+      // A manual board's chip is on its way out here — the run it was showing
+      // just landed and the next toolbar render drops it — so leave its last
+      // text alone rather than flashing "paused" at something that isn't.
+      if (state.boardIngestMode !== "paused") return false;
+      chip.classList.add("paused");
+      eta.textContent = "paused";
+      chip.title = "Automatic ingestion is paused — the schedule is held. Click to configure.";
       return false;
     }
+    chip.classList.remove("paused");
     const left = at - Date.now();
     eta.textContent = left <= 0 ? "now" : fmtDuration(left);
     return left <= 0;
@@ -348,9 +357,13 @@ export function renderToolbar(resultCount) {
       // board-group beside the edit pencil.
       const connectorName = state.boardMapping?.input?.connector;
 
-      // Ingestion chip: a live countdown to the next automatic run. Clicking
-      // opens the ingestion modal.
-      if (state.boardIngest) {
+      // Ingestion chip: a live countdown to the next run, or "paused" for a
+      // held schedule. Shown for any configured board EXCEPT an idle manual
+      // one — nothing to count down to and nothing being held, so a permanent
+      // badge would just be noise. A hand-fired run pending on that manual
+      // board is a run, so it gets the chip back. Clicking opens the modal.
+      const mode = state.boardIngestMode;
+      if (mode && !(mode === "manual" && state.boardIngestNextRun == null)) {
         auth.appendChild(ingestChip());
       }
 

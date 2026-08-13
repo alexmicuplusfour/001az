@@ -629,6 +629,10 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* results view: wide browse-style list; the inner .cb-scroll owns the scroll */
 #ingest-modal .modal-dialog.results { width: min(900px, 94vw); }
 #ingest-modal .modal-dialog.results .modal-body { overflow: hidden; }
+/* Source is the first thing in the modal now, so .modal-section's divider and
+   its 32px of lead-in would draw against nothing — an empty band under the
+   header. The rule earns its keep between sections, not above the first one. */
+.im-settings > .modal-section:first-child { border-top: none; margin-top: 0; padding-top: 0; }
 .im-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .im-row > label { font-size: 12px; color: #6b6b72; margin: 0; }
 .im-row select { max-width: 260px; }

@@ -1433,7 +1433,7 @@ body.bulk-mode .heart {
   white-space: nowrap;
 }
 /* ingestion chip — the mapping chip's clickable sibling: a refresh glyph +
-   countdown to the next automatic run; opens the ingestion modal */
+   countdown to the next run; opens the ingestion modal */
 .ingest-chip {
   gap: 5px;
   border: none;
@@ -1444,6 +1444,11 @@ body.bulk-mode .heart {
 .ingest-chip:hover { background: var(--pill-bg-hover); }
 .ingest-chip-icon { display: inline-flex; }
 .ingest-chip-icon svg { width: 12px; height: 12px; }
+/* held schedule: still a live control (it's how you resume), just visibly not
+   counting down — dimmed rather than greyed, and the glyph stops implying motion */
+.ingest-chip.paused { opacity: 0.6; }
+.ingest-chip.paused:hover { opacity: 1; }
+.ingest-chip.paused .ingest-chip-icon { opacity: 0.7; }
 /* token usage chip in the board-group — coin icon + formatted count */
 .token-chip {
   display: inline-flex;

@@ -1,5 +1,5 @@
-// The automatic-ingestion modal: per-board source + filters + sort/limit +
-// trigger, with an on-demand results preview. Fully descriptor-driven — the
+// The ingestion modal: per-board source + filters + sort/limit + trigger, with
+// an on-demand results preview. Fully descriptor-driven — the
 // server's /api/boards/:id/ingest payload declares the source schema, filter
 // catalog (with kinds that pick the operator set and input type), sorts and
 // trigger modes, so this file knows nothing about folders vs future feed
@@ -17,7 +17,7 @@ import { createModal, sectionHeadingEl } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { openSourceBrowse } from './source-browse-modal.js';
-import { refreshBoardIngest, ensurePolling } from './data.js';
+import { stampBoardIngest, ensurePolling } from './data.js';
 
 const OP_LABELS = {
   contains: "contains", equals: "equals", starts_with: "starts with",
@@ -30,7 +30,10 @@ const OPS_BY_KIND = {
   date: ["within_days", "before", "after"],
 };
 const TRIGGER_LABELS = {
-  manual: "Manual only",
+  // "Off" rather than "Manual only": in a modal about AUTOMATIC ingestion the
+  // trigger is the automatic part, so no trigger is the feature switched off —
+  // the board still ingests, but only when Run now says so.
+  manual: "Off",
   continuous: "Continuous (watch)",
   interval: "Every N minutes",
   daily: "Daily at a set time",
@@ -86,9 +89,11 @@ export function openIngestModal() {
     // Buffered config — edits stay local until Save.
     const saved = info.config;
     const cfg = {
-      // Opt-in: a board with no saved config opens with ingestion OFF, so
-      // configuring a source and hitting Save can't silently arm the sweep.
-      // An existing config keeps its saved state (only an explicit false = off).
+      // Opt-in: a board with no saved config opens PAUSED, so configuring a
+      // source and hitting Save can't silently arm the sweep — Run now is there
+      // to try it once first. An existing config keeps its saved state (only an
+      // explicit false = paused), and picking a manual trigger forces this true,
+      // since a board with no timer has nothing to hold (see syncTriggerInputs).
       enabled: saved ? saved.enabled !== false : false,
       source: { ...(saved?.source || {}) },
       filters: (saved?.filters || []).map((f) => ({ ...f })),
@@ -109,6 +114,7 @@ export function openIngestModal() {
     // paged preview list). Swapping views detaches nothing — all edit state
     // lives on in the settings DOM while results are shown.
     const settingsView = document.createElement("div");
+    settingsView.className = "im-settings";
     settingsView.style.cssText = "display:flex;flex-direction:column;gap:4px;";
     const resultsView = document.createElement("div");
     resultsView.style.cssText = "display:none;flex-direction:column;gap:12px;min-height:0;flex:1;";
@@ -124,11 +130,6 @@ export function openIngestModal() {
       if (!canEdit) row.style.pointerEvents = "none";
       return row;
     };
-
-    // ── Enable ──
-    settingsView.appendChild(inertUnlessEditable(switchRow("Enable automatic ingestion", null, cfg.enabled, (on) => {
-      cfg.enabled = on;
-    })));
 
     // ── Source ──
     // File boards get a source picker (local folder / FTP / S3, whichever are
@@ -451,11 +452,11 @@ export function openIngestModal() {
     settingsView.appendChild(sortSection);
 
     // ── Trigger ──
-    const trigSection = section("Trigger");
+    const trigSection = section("Trigger schedule");
     const trigRow = document.createElement("div");
     trigRow.className = "im-row";
     const modeSel = document.createElement("select");
-    modeSel.setAttribute("aria-label", "Trigger");
+    modeSel.setAttribute("aria-label", "Trigger schedule");
     const everyInput = document.createElement("input");
     everyInput.type = "number";
     everyInput.min = "1";
@@ -472,9 +473,26 @@ export function openIngestModal() {
     trigHint.className = "im-hint";
     const currentSource = () => (info.sources || []).find((x) => x.type === (cfg.source.type || "folder"));
 
+    // A pause on the SCHEDULE — the one thing `enabled` decides is whether the
+    // timer re-arms itself, so the control rides on the same line as the
+    // schedule it holds, pushed right. Inverted against `enabled`: the switch
+    // reads as the hold, not as the running. Trigger "Off" has no timer to
+    // hold, so the control drops out there entirely.
+    const pauseRow = inertUnlessEditable(switchRow("Paused", null, !cfg.enabled, (on) => {
+      cfg.enabled = !on;
+    }, { small: true }));
+    pauseRow.style.marginLeft = "auto";
+
     function syncTriggerInputs() {
       everyInput.style.display = cfg.trigger.mode === "interval" ? "" : "none";
       atInput.style.display = cfg.trigger.mode === "daily" ? "" : "none";
+      // "Off" has no timer, so the flag has nothing to hold. The server
+      // normalizes it to enabled on save; mirror that here so the hidden knob
+      // can't drift from what will be stored — otherwise coming back to a
+      // schedule shows a pause the save is about to discard.
+      const off = cfg.trigger.mode === "manual";
+      if (off) { cfg.enabled = true; pauseRow.setSwitch(false); }
+      pauseRow.style.display = off ? "none" : "";
       if (cfg.trigger.mode !== "continuous") { trigHint.style.display = "none"; return; }
       trigHint.style.display = "";
       trigHint.textContent = currentSource()?.needsConnection
@@ -501,9 +519,8 @@ export function openIngestModal() {
     everyInput.addEventListener("input", () => { cfg.trigger.every = Number(everyInput.value); });
     atInput.addEventListener("input", () => { cfg.trigger.at = atInput.value; });
     renderTriggerModes();
-    trigRow.append(modeSel, everyInput, atInput);
-    trigSection.appendChild(trigRow);
-    trigSection.appendChild(trigHint);
+    trigRow.append(modeSel, everyInput, atInput, pauseRow);
+    trigSection.append(trigRow, trigHint);
     settingsView.appendChild(trigSection);
 
     // ── Preview: a button fetches the count; the count opens the results view ──
@@ -764,18 +781,20 @@ export function openIngestModal() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ingest: payload }),
           });
+          const data = await r.json().catch(() => ({}));
           if (!r.ok) {
-            const data = await r.json().catch(() => ({}));
             toast.error(data.error || "Save failed");
             return;
           }
-          // The PATCH that just succeeded is the truth about enabled-ness —
-          // stamp it locally first, so a dropped refetch can't leave the poll
-          // cadence and chip behind the save.
-          state.boardIngest = !!payload.enabled;
+          // The PATCH answers with the mode and next-run stamp it landed on —
+          // including the arming this save just did, and any normalization it
+          // applied — so the chip and the poll cadence follow exactly what was
+          // stored, with no second derivation here and no confirming refetch.
+          // Only stamp if the pair actually arrived: a 200 whose body didn't
+          // survive the trip would otherwise blank a chip the save just kept.
+          if (data.ingest_mode !== undefined) stampBoardIngest(data);
           ensurePolling();
           document.dispatchEvent(new Event("app:render"));
-          refreshBoardIngest(); // refines the next-run stamp
           toast("Ingestion saved");
           close();
         } catch {

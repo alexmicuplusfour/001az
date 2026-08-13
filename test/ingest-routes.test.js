@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
-import { getBoard, updateBoard, recordIngest } from "../server/db.js";
+import { getBoard, updateBoard, recordIngest, setIngestNextRun } from "../server/db.js";
 
 let srv, db, base, admin, member, boardId, root;
 const OLD = Date.now() - 120000;
@@ -107,20 +107,66 @@ test("PATCH bookkeeping: arming, rearming on trigger change, disarming", async (
   b = await getBoard(db, boardId);
   assert.equal(b.ingest_next_run_at, null);
 
+  // A hand-fired run survives a later save. Nothing here is on a schedule
+  // either side of the PATCH, so the stamp can only be "Run now"'s — cancelling
+  // it would contradict the "run queued" the user was just shown.
+  await setIngestNextRun(db, boardId, Date.now());
+  assert.equal((await patchIngest({ ...GOOD, trigger: { mode: "manual" }, filters: [] })).status, 200);
+  b = await getBoard(db, boardId);
+  assert.ok(b.ingest_next_run_at > 0, "an unrelated save doesn't cancel a queued run");
+  // Same for a paused board — the newly reachable case, since Run now no
+  // longer needs `enabled`.
+  assert.equal((await patchIngest({ ...GOOD, enabled: false })).status, 200);
+  b = await getBoard(db, boardId);
+  assert.ok(b.ingest_next_run_at > 0, "pausing an already-queued run leaves the run queued");
+  // But a live schedule being switched off IS a disarm — that stamp was the
+  // schedule's, not a hand-fired run's.
+  assert.equal((await patchIngest(GOOD)).status, 200);
+  assert.equal((await patchIngest({ ...GOOD, enabled: false })).status, 200);
+  b = await getBoard(db, boardId);
+  assert.equal(b.ingest_next_run_at, null, "pausing a running schedule disarms it");
+
+  // A manual board has no timer for `enabled` to hold, so it is normalized to
+  // true on the way in rather than stored as inert state the UI has to paper
+  // over. The save also answers with the pair it landed on, so the client never
+  // re-derives the mode.
+  const norm = await patchIngest({ ...GOOD, enabled: false, trigger: { mode: "manual" } });
+  assert.equal(norm.status, 200);
+  assert.deepEqual(norm.json, { ok: true, ingest_mode: "manual", ingest_next_run_at: null });
+  b = await getBoard(db, boardId);
+  assert.equal(b.ingest.enabled, true, "manual + enabled:false is normalized, not stored");
+
+  const armed = await patchIngest(GOOD);
+  assert.equal(armed.json.ingest_mode, "scheduled");
+  assert.ok(armed.json.ingest_next_run_at > 0, "the save hands back the stamp it just armed");
+  assert.equal((await patchIngest({ ...GOOD, enabled: false })).json.ingest_mode, "paused");
+
   // ingest: null clears everything.
   assert.equal((await patchIngest(null)).status, 200);
   b = await getBoard(db, boardId);
   assert.equal(b.ingest, null);
 });
 
-test("board payload: ingest_enabled flag follows the saved config", async () => {
+test("board payload: ingest_mode follows the saved config", async () => {
   let r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
-  assert.equal(r.json.ingest_enabled, false);
+  assert.equal(r.json.ingest_mode, null, "no config at all");
   assert.equal(r.json.ingest_next_run_at, null);
   await patchIngest(GOOD);
   r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
-  assert.equal(r.json.ingest_enabled, true);
+  assert.equal(r.json.ingest_mode, "scheduled");
   assert.ok(r.json.ingest_next_run_at > 0, "the chip's countdown stamp rides the payload");
+
+  // The two no-next-run states are distinguishable — the chip shows one and
+  // hides for the other, so the payload can't collapse them into a boolean.
+  await patchIngest({ ...GOOD, enabled: false });
+  r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
+  assert.equal(r.json.ingest_mode, "paused");
+  assert.equal(r.json.ingest_next_run_at, null, "a held schedule disarms the timer");
+  await patchIngest({ ...GOOD, trigger: { mode: "manual" } });
+  r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
+  assert.equal(r.json.ingest_mode, "manual");
+  await patchIngest(GOOD);
+  r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
   // Settings payload carries the full config for the modal.
   const s = await req(base, "GET", `/api/boards/${boardId}/settings`, { sid: admin.sid });
   assert.deepEqual(s.json.ingest.source, GOOD.source);
@@ -186,7 +232,7 @@ test("preview: dry-runs the request body without saving it; count by default, pa
   assert.equal(bad.status, 400);
 });
 
-test("run-now: auth matrix and the enabled gate", async () => {
+test("run-now: auth matrix, and a paused feed still runs once", async () => {
   assert.equal((await patchIngest({ ...GOOD, trigger: { mode: "manual" } })).status, 200);
   let b = await getBoard(db, boardId);
   assert.equal(b.ingest_next_run_at, null);
@@ -202,9 +248,21 @@ test("run-now: auth matrix and the enabled gate", async () => {
   assert.ok(b.ingest_next_run_at <= Date.now(), "armed for the next tick");
   await updateBoard(db, boardId, { ingestNextRunAt: null });
 
+  // Pausing holds the schedule; it doesn't confiscate the button. The sweep
+  // disarms the board again after the run, so this buys exactly one run.
   await patchIngest({ ...GOOD, enabled: false });
-  const off = await req(base, "POST", `/api/boards/${boardId}/ingest/run`, { sid: admin.sid });
-  assert.equal(off.status, 409, "no running a disabled feed");
+  b = await getBoard(db, boardId);
+  assert.equal(b.ingest_next_run_at, null, "pausing disarms the timer");
+  const paused = await req(base, "POST", `/api/boards/${boardId}/ingest/run`, { sid: admin.sid });
+  assert.equal(paused.status, 200, "a paused feed still runs on demand");
+  b = await getBoard(db, boardId);
+  assert.ok(b.ingest_next_run_at <= Date.now(), "armed for the next tick");
+  await updateBoard(db, boardId, { ingestNextRunAt: null });
+
+  // Nothing configured at all is still a 409 — there's no config to run.
+  await patchIngest(null);
+  const none = await req(base, "POST", `/api/boards/${boardId}/ingest/run`, { sid: admin.sid });
+  assert.equal(none.status, 409, "no config, nothing to run");
 });
 
 test("folder picker: bounded listing under the root", async () => {

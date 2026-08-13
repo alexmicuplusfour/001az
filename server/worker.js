@@ -53,7 +53,7 @@ import {
   withTx,
   reapEmptyEntities,
 } from "./db.js";
-import { resolveIngestAdapter, nextIngestRunAt, RUN_CAP } from "./ingestion/index.js";
+import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
@@ -1748,7 +1748,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     for (const b of await dueIngestBoards(db, Date.now())) {
       const cfg = b.ingest;
       const now = Date.now();
-      const manual = cfg?.trigger?.mode === "manual";
+      // Not the schedule's run: a manual board, or a paused one that only got
+      // here because "Run now" armed it. Either way it's one run — nothing
+      // re-arms afterwards, nothing retries, and the row it leaves in the job
+      // log always stands (somebody asked, so "0 admitted" is the answer).
+      const oneShot = ingestMode(cfg) !== "scheduled";
       // One run = one job-log row, `running` while the feed is enumerated and
       // admitted — ingest has no other in-flight representation. ingest_state
       // keeps only the LAST run; these rows are where the history lives.
@@ -1807,8 +1811,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           last_error: errors[0] ?? null,
           ...(remaining > 0 ? { drain_left: remaining } : {}),
         });
+        // A drain continues regardless of how the run started — it's already in
+        // flight and somebody asked for all of it. Otherwise only a live
+        // schedule re-arms (nextScheduledIngestRun owns that rule).
         await setIngestNextRun(db, b.id,
-          remaining > 0 ? Date.now() : nextIngestRunAt(cfg.trigger, Date.now(), { continuousMs: INGEST_CONTINUOUS_MS }));
+          remaining > 0
+            ? Date.now()
+            : nextScheduledIngestRun(cfg, Date.now(), { continuousMs: INGEST_CONTINUOUS_MS }));
         // A completed run is `ok` even with per-item errors (they're the run's
         // findings, carried in error/skipped) — `failed` means the run itself
         // died (the catch below). But an idle SCHEDULED scan (admitted
@@ -1820,14 +1829,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // both ledger the file out of every future scan permanently, and the
         // row naming it is the only trace that ever happened.
         const eventful = added > 0 || errors.length > 0 || remaining > 0 || skips.length > 0 || dups > 0;
-        if (!eventful && !manual && jobId != null) {
+        if (!eventful && !oneShot && jobId != null) {
           await jobLogWrite(() => deleteJobLog(db, jobId));
         } else {
           // A scan whose ONLY news is the same per-item error as the prior
           // row's is a flat tick too (a wedged file on a continuous watch
           // ≈ 2,880 rows/day) — fold it instead of stamping a fresh row.
           const errorOnly = errors.length > 0 && !added && !skips.length && !dups && remaining === 0;
-          const prior = errorOnly && !manual && jobId != null
+          const prior = errorOnly && !oneShot && jobId != null
             ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
             : null;
           // Compare the STORED form — addJobLog caps error at 500 chars.
@@ -1853,14 +1862,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         }
         if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
       } catch (err) {
-        // Scheduled triggers back off 5 minutes and retry; a manual run was
-        // asked for ONCE — its outcome is this error (visible in the modal
-        // status line), not a silent retry loop that runs forever until the
-        // source heals. "Run now" re-arms it whenever the user wants.
+        // Live schedules back off 5 minutes and retry; a one-shot run was asked
+        // for ONCE — its outcome is this error (visible in the modal status
+        // line), not a silent retry loop that runs forever until the source
+        // heals. "Run now" re-arms it whenever the user wants.
         // Settle the schedule BEFORE publishing the error: last_error is what
         // observers poll for, so everything it implies (disarmed/backed off)
         // must already be true when it lands.
-        await setIngestNextRun(db, b.id, manual ? null : Date.now() + 5 * 60000).catch(() => {});
+        await setIngestNextRun(db, b.id, oneShot ? null : Date.now() + 5 * 60000).catch(() => {});
         // Preserve a mid-drain budget across the failure — wiping it would
         // hand the retry a fresh `limit` and over-admit the logical run.
         const drainLeft = Number(b.ingest_state?.drain_left) || 0;
@@ -1871,9 +1880,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
         }).catch(() => {});
         // The same failure repeating on the retry cadence (a dead source =
-        // one row per 5-minute backoff) folds into its prior row; a manual
+        // one row per 5-minute backoff) folds into its prior row; a hand-fired
         // run was asked for, so its row always stands alone.
-        const prior = !manual && jobId != null
+        const prior = !oneShot && jobId != null
           ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
           : null;
         if (prior?.outcome === "failed" && prior.error === String(err.message).slice(0, 500)) {
@@ -1881,7 +1890,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         } else {
           await stamp({ outcome: "failed", error: err.message });
         }
-        console.warn(`ingest error board "${b.name}" (${manual ? "manual — not retried" : "retrying in 5m"}): ${err.message}`);
+        console.warn(`ingest error board "${b.name}" (${oneShot ? "not retried" : "retrying in 5m"}): ${err.message}`);
       }
     }
     // A failed board is backed off, not draining — only a live remainder earns

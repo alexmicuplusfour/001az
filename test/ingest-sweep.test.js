@@ -50,7 +50,7 @@ async function until(fn, ms = 8000) {
   }
 }
 
-test("dueIngestBoards: enabled + armed + due only", async () => {
+test("dueIngestBoards: armed + due only — the stamp decides, not `enabled`", async () => {
   // Timestamps live an hour out so the RUNNING worker's own dueIngestBoards
   // (which queries Date.now()) never claims these rows mid-test.
   const T = Date.now() + 3600_000;
@@ -64,12 +64,41 @@ test("dueIngestBoards: enabled + armed + due only", async () => {
   const due = await mk("due", cfg, T - 1000);
   await mk("future", cfg, T + 60000);
   await mk("disarmed", cfg); // next_run_at null
-  await mk("disabled", { ...cfg, enabled: false }, T - 1000);
   await mk("unconfigured", undefined, T - 1000);
+  // A paused board is normally disarmed (the save path nulls the stamp), so it
+  // reaches the sweep only when "Run now" armed it — and then it SHOULD run.
+  // The pause lives in the re-arm after the run, not in a gate before it.
+  const pausedRunNow = await mk("paused-run-now", { ...cfg, enabled: false }, T - 1000);
 
   const rows = await dueIngestBoards(db, T);
-  assert.deepEqual(rows.map((r) => r.id), [due]);
+  assert.deepEqual(rows.map((r) => r.id).sort(), [due, pausedRunNow].sort());
   await setIngestNextRun(db, due, null);
+  await setIngestNextRun(db, pausedRunNow, null);
+});
+
+test("a paused schedule that was hand-fired runs once, then disarms itself", async () => {
+  put("paused/a.txt", "one");
+  const id = await seedBoard(db, "paused-sched");
+  await updateBoard(db, id, {
+    ingest: {
+      enabled: false, // held
+      source: { folder: "paused", recursive: false },
+      filters: [],
+      sort: { by: "name", order: "asc" },
+      trigger: { mode: "continuous" },
+    },
+  });
+  // What "Run now" does: arm the stamp for the next tick.
+  await setIngestNextRun(db, id, Date.now() - 1);
+
+  const board = await until(async () => {
+    const b = await getBoard(db, id);
+    return b.ingest_state ? b : null;
+  });
+  assert.equal(board.ingest_state.last_error, null);
+  assert.equal(board.ingest_state.last_added, 1, "the hand-fired run admitted the file");
+  assert.equal(board.ingest_next_run_at, null,
+    "one run, not a resumed watch — an unpaused continuous board would have re-armed at +30s");
 });
 
 test("a capped run drains across ticks and honors the logical limit exactly", async () => {

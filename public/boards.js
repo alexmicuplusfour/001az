@@ -177,13 +177,14 @@ function chipsFor(b) {
   const chips = document.createElement("div");
   chips.className = "bc-chips";
 
-  if (b.has_ingest) {
-    const at = b.ingest_next_run_at;
-    const when = !at
-      ? "" // enabled but unscheduled: the sweep arms the stamp on its next pass
-      : at - Date.now() <= 0
-        ? " — next run due"
-        : ` — next run in ${fmtDuration(at - Date.now())}`;
+  if (b.ingest_mode) {
+    // A pending stamp outranks the mode: a hand-fired run on a manual or paused
+    // board is a run, and saying "on demand" while one is queued would be a lie.
+    // No stamp on a "scheduled" board just means the sweep hasn't armed it yet.
+    const left = b.ingest_next_run_at ? b.ingest_next_run_at - Date.now() : null;
+    const when = left != null
+      ? (left <= 0 ? " — next run due" : ` — next run in ${fmtDuration(left)}`)
+      : { manual: " — off", paused: " — paused" }[b.ingest_mode] ?? "";
     chips.appendChild(chip(ICONS.redo, "", `Automatic ingestion${when}`));
   }
   if (b.has_mapping) {

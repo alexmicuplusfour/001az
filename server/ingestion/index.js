@@ -71,6 +71,38 @@ export function nextIngestRunAt(trigger, from = Date.now(), { continuousMs = 300
   }
 }
 
+// What a board's ingestion is doing, for the toolbar chip and the poll cadence.
+// "manual" and "paused" both sit at no-next-run, but they mean opposite things:
+// manual is armed-on-demand (nothing to count down to, so no chip), paused is a
+// schedule deliberately held (a chip that says so). Manual wins over `enabled`
+// — a manual board has no timer to pause, so the flag is moot there. Carries no
+// folder paths, which is why plain members can have it.
+export function ingestMode(ingest) {
+  if (!ingest) return null;
+  if (ingest.trigger?.mode === "manual") return "manual";
+  return ingest.enabled === false ? "paused" : "scheduled";
+}
+
+// When the SCHEDULE next fires — i.e. nextIngestRunAt with the one rule that
+// isn't trigger math: only a live schedule re-arms itself. A manual board never
+// did, and a paused one must not, or "Run now" on it would silently resume the
+// watch it was holding. Kept here rather than in the sweep so the whole "will
+// this fire again" rule reads in one place; nextIngestRunAt stays pure trigger
+// math, which is what alerts.js models its own cadence on.
+export function nextScheduledIngestRun(cfg, from = Date.now(), opts = {}) {
+  return ingestMode(cfg) === "scheduled" ? nextIngestRunAt(cfg.trigger, from, opts) : null;
+}
+
+// The ingestion pair every board payload ships: what it's doing, and when the
+// next run lands. They travel together — a stamp means nothing without the mode
+// to read it against — so they're derived together in exactly one place.
+export function ingestStatus(board) {
+  return {
+    ingest_mode: ingestMode(board.ingest),
+    ingest_next_run_at: board.ingest ? board.ingest_next_run_at ?? null : null,
+  };
+}
+
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 

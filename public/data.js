@@ -209,15 +209,18 @@ function liveBoard() {
     (m.face?.from === "connector" && !!m.face.live);
 }
 
-// Exported for tests: the cadence decision in one place. Ingestion-enabled
-// boards keep the slow poll too — the sweep admits items server-side, so a
-// quiet tab would otherwise never see them arrive. Alerts hold it for the same
-// reason and NOT for their dot: an alert is a standing statement that arrivals
-// on this board matter, and the arrivals themselves are items. (The dot is
-// signals.js's, on its own timer — it lights whether this poll runs or not.)
+// Exported for tests: the cadence decision in one place. Boards with a run
+// COMING keep the slow poll too — the sweep admits items server-side, so a
+// quiet tab would otherwise never see them arrive. The armed stamp, not the
+// enabled flag, is the right test: a paused schedule and an idle manual board
+// have nothing on the way, while a hand-fired run on either one arms the stamp
+// and polls until it lands. Alerts hold it for the same reason and NOT for
+// their dot: an alert is a standing statement that arrivals on this board
+// matter, and the arrivals themselves are items. (The dot is signals.js's, on
+// its own timer — it lights whether this poll runs or not.)
 export function pollDelay() {
   if (needsPoll()) return 4000;
-  if (liveBoard() || state.boardIngest || state.alerts.length) return 30000;
+  if (liveBoard() || state.boardIngestNextRun != null || state.alerts.length) return 30000;
   return 0;
 }
 
@@ -281,7 +284,7 @@ export function ensurePolling() {
 // place — the boot path, the ingest modal and the toolbar chip all funnel
 // through here so they can't drift on what "refreshed" means.
 export function stampBoardIngest(b) {
-  state.boardIngest = !!b.ingest_enabled;
+  state.boardIngestMode = b.ingest_mode ?? null;
   state.boardIngestNextRun = b.ingest_next_run_at ?? null;
 }
 

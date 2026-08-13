@@ -274,7 +274,7 @@ test("discovering an alert starts the item poll it entitles", async () => {
     state.boardId = "b-poll";
     state.items = [];
     state.uploading = [];
-    state.boardIngest = false;
+    state.boardIngestNextRun = null;
     state.boardMapping = null; // the other two things that would hold the poll
     state.alerts = [];
 

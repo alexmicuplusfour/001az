@@ -40,8 +40,8 @@ export const state = {
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,
-  boardIngest: false,   // automatic ingestion enabled — keeps a slow delta poll alive
-  boardIngestNextRun: null, // ms timestamp of the next ingestion run (toolbar chip countdown)
+  boardIngestMode: null, // null | "manual" | "paused" | "scheduled" — drives the toolbar chip
+  boardIngestNextRun: null, // ms timestamp of the next ingestion run (chip countdown; also what keeps the slow delta poll alive)
   boardTokens: null,
   searchAvailable: false,
   searchDraft: "",

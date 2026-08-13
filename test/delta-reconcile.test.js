@@ -116,9 +116,12 @@ test("poll cadence: fast while work is in flight, slow on a live board, off othe
   // Automatic ingestion admits items server-side on quiet boards — same
   // stale-tab problem as live faces, same slow-poll cure.
   state.boardMapping = null;
-  state.boardIngest = true;
-  assert.equal(pollDelay(), 30000, "ingestion-enabled board: slow poll");
-  state.boardIngest = false;
+  state.boardIngestNextRun = Date.now() + 60000;
+  assert.equal(pollDelay(), 30000, "a run on the way: slow poll");
+  state.boardIngestNextRun = null;
+  state.boardIngestMode = "paused";
+  assert.equal(pollDelay(), 0, "a held schedule has nothing coming: no poll");
+  state.boardIngestMode = null;
 
   // An alert is a standing statement that arrivals on this board matter, and
   // arrivals are items — a tab holding one keeps listening for them. (Its DOT

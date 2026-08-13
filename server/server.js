@@ -147,7 +147,7 @@ import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js
 import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
-import { resolveIngestAdapter, validateIngest, ENUM_CAP } from "./ingestion/index.js";
+import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, ENUM_CAP } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
 import { invalidateSourceCache } from "./ingestion/files.js";
@@ -790,7 +790,6 @@ app.get("/api/boards/overview", requireAuth, wrap(async (req, res) => {
     Promise.all(boards.map((b) => canManageBoard(db, b.id, req.user))),
   ]);
   res.json(boards.map((b, i) => {
-    const ingestOn = !!(b.ingest && b.ingest.enabled !== false);
     return {
       id: b.id,
       name: b.name,
@@ -801,8 +800,12 @@ app.get("/api/boards/overview", requireAuth, wrap(async (req, res) => {
       facet_count: Array.isArray(b.facets) ? b.facets.length : 0,
       has_mapping: !!b.mapping,
       mapping_connector: b.mapping?.input?.connector || null,
-      has_ingest: ingestOn,
-      ingest_next_run_at: ingestOn ? b.ingest_next_run_at ?? null : null,
+      // These chips are an inventory of what a board HAS, so unlike the gallery
+      // toolbar this one shows for every configured board — a paused or manual
+      // feed is still a feed, and hiding it would read as "no ingestion here".
+      // The mode is what lets the chip say which, instead of a bare icon that
+      // used to promise a run the sweep was never going to arm.
+      ...ingestStatus(b),
       manage: manage[i],
       preview: previews[b.id] || [],
     };
@@ -834,12 +837,13 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     search: embeddingOk,
     manage: canManage,
     token_total: tokenTotal,
-    // Presence flag + next-run stamp — the client keeps a slow delta poll
-    // alive on ingest boards, and the toolbar chip counts down to the run.
-    ingest_enabled: !!(board.ingest && board.ingest.enabled !== false),
-    ingest_next_run_at: board.ingest && board.ingest.enabled !== false
-      ? board.ingest_next_run_at ?? null
-      : null,
+    // What ingestion is doing + the next-run stamp: the toolbar chip counts
+    // down to the run, and the client keeps a slow delta poll alive whenever a
+    // run is actually coming. The mode is what separates the two no-next-run
+    // cases — an on-demand board from a held schedule. The stamp is NOT blanked
+    // for a held schedule: "Run now" on a paused or manual board arms it, and
+    // that pending run is exactly what the chip should show.
+    ...ingestStatus(board),
   });
 }));
 
@@ -910,10 +914,13 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
     nextCursor: history.nextCursor,
     has_refresh: hasRefresh,
     failed_at: failedAt,
-    // Upcoming automatic work — the modal's "scheduled" strip. Null = that
-    // family isn't scheduled on this board.
+    // Upcoming work — the modal's "scheduled" strip. Null = nothing of that
+    // family is coming on this board. For ingestion the armed stamp is the
+    // whole answer: it covers a live schedule AND a "Run now" queued against a
+    // paused or manual board, which is work that is genuinely about to happen
+    // and which an `enabled` test would have hidden from this strip.
     scheduled: {
-      ingest_next_run_at: board.ingest && board.ingest.enabled !== false ? board.ingest_next_run_at ?? null : null,
+      ingest_next_run_at: ingestStatus(board).ingest_next_run_at,
       retag_next_run_at: board.auto_tag !== false && board.auto_tag_periodic ? board.auto_tag_next_run_at ?? null : null,
       refresh_next_at: nextRefreshAt,
     },
@@ -1073,7 +1080,16 @@ const saveBoardPatch = wrap(async (req, res) => {
     await setBoardMembers(db, prev.id, req.body.memberIds.map(Number).filter(Boolean), adminIds);
   }
   invalidateBoardCache(prev.id);
-  res.json({ ok: true });
+  // Hand back the ingestion pair this save landed on, so the modal can stamp it
+  // straight into client state instead of re-deriving the mode in JS (a second
+  // copy of ingestMode's rules) or paying a refetch to learn what we just wrote.
+  res.json({
+    ok: true,
+    ...ingestStatus({
+      ingest: update.ingest !== undefined ? update.ingest : prev.ingest,
+      ingest_next_run_at: update.ingestNextRunAt !== undefined ? update.ingestNextRunAt : prev.ingest_next_run_at,
+    }),
+  });
 });
 
 app.patch("/api/boards/:id", requireAuth, requireBoardManager, saveBoardPatch);
@@ -1207,11 +1223,13 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   });
 }));
 
-// "Run now": arm the timer for the next tick. Also the only way to fire a
-// manual-trigger board.
+// "Run now": arm the timer for the next tick. The only way to fire a manual
+// board, and deliberately NOT gated on `enabled` — pausing a schedule stops the
+// timer, it doesn't confiscate the button. The sweep disarms a paused board
+// again after the run, so this buys exactly one run.
 app.post("/api/boards/:id/ingest/run", requireAuth, requireBoardManager, wrap(async (req, res) => {
-  if (!req.board.ingest || req.board.ingest.enabled === false)
-    return res.status(409).json({ error: "ingestion is not enabled on this board" });
+  if (!req.board.ingest)
+    return res.status(409).json({ error: "ingestion is not configured on this board" });
   await setIngestNextRun(db, req.board.id, Date.now());
   res.json({ ok: true });
 }));
@@ -1347,12 +1365,28 @@ async function buildBoardContentUpdate(body = {}, prev) {
         const srcErr = await adapter.validateSource(db, body.ingest.source || {}, { hasRoot });
         if (srcErr) return { error: srcErr };
       }
-      update.ingest = body.ingest;
+      // `enabled` is a pause on the SCHEDULE, so a manual board has nothing for
+      // it to hold — stored false there it would be inert state that ambushes
+      // the user later, when switching back to a schedule starts it held for a
+      // pause nobody asked for. Normalize here rather than in the modal: it is
+      // the config's invariant, not a rendering detail, and ingestMode already
+      // reads manual as winning.
+      update.ingest = body.ingest.trigger.mode === "manual"
+        ? { ...body.ingest, enabled: true }
+        : body.ingest;
       const wasArmed = !!(prev.ingest && prev.ingest.enabled !== false && prev.ingest.trigger?.mode !== "manual");
-      const isArmed = body.ingest.enabled && body.ingest.trigger.mode !== "manual";
+      const isArmed = ingestMode(update.ingest) === "scheduled";
       const trigChanged = JSON.stringify(prev.ingest?.trigger ?? null) !== JSON.stringify(body.ingest.trigger);
+      // Disarm the SCHEDULE — but a board that was on no schedule either side
+      // of this save can only hold a stamp because "Run now" put one there, and
+      // nulling that would silently cancel the run we just told the user was
+      // queued. The two buttons sit side by side in the modal, so "fire it,
+      // then save the config" is an ordinary thing to do. (A stamp alone can't
+      // tell the two apart: an armed schedule's first run also sits at `now`.
+      // Being unarmed on both sides is what makes it hand-fired.)
+      const handFired = !wasArmed && !isArmed && prev.ingest_next_run_at != null;
       if (isArmed && (!wasArmed || trigChanged)) update.ingestNextRunAt = Date.now();
-      else if (!isArmed) update.ingestNextRunAt = null;
+      else if (!isArmed && !handFired) update.ingestNextRunAt = null;
     }
   }
 

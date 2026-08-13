@@ -1565,6 +1565,12 @@ export async function queueUntagged(db, boardId) {
 }
 
 // Periodic boards whose scheduled run time has arrived.
+//
+// Still flag-gated, where dueIngestBoards below is now stamp-only. That's not
+// drift: nothing ever arms auto_tag_next_run_at by hand — the admin retag route
+// queues items directly and never touches the stamp — so the flags here can't
+// hide a requested run the way ingest's `enabled` could. Give auto-tag a
+// hand-fire path and this predicate has to go the same way, for the same reason.
 export async function dueBoards(db, now) {
   const { rows } = await db.query(
     `SELECT id, name, auto_tag_every_min, auto_tag_skip_weekends FROM boards
@@ -1582,10 +1588,15 @@ export async function setBoardNextRun(db, boardId, ts) {
 
 // Boards whose ingestion run time has arrived. Full rows: the sweep needs the
 // mapping (adapter resolution) and the ingest config/state (budget, trigger).
+//
+// ingest_next_run_at is the whole truth about "will this fire": the save path
+// nulls it for a paused or manual board, and the sweep only re-arms it when the
+// schedule is live. `enabled` is deliberately NOT a predicate here — that is
+// what lets "Run now" fire a paused feed once without resuming its watch.
 export async function dueIngestBoards(db, now) {
   const { rows } = await db.query(
     `SELECT ${BOARD_COLS} FROM boards
-     WHERE ingest IS NOT NULL AND COALESCE((ingest->>'enabled')::boolean, false)
+     WHERE ingest IS NOT NULL
        AND ingest_next_run_at IS NOT NULL AND ingest_next_run_at <= $1`,
     [now]
   );
