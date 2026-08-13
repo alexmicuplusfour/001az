@@ -345,29 +345,103 @@ test("FMP universe: a venue at the cap is re-split by listing type, and dedupes"
   const original = globalThis.fetch;
   const CAP = 10000;
   const seen = [];
+  // Real screener rows always carry isEtf/isFund, whichever slice they came
+  // from — so a row's type doesn't depend on which slice won the dedupe.
+  const SHARED = { symbol: "SHARED", companyName: "Shared ETF", marketCap: 9, price: 1, volume: 1, exchangeShortName: "NASDAQ", isEtf: true, isFund: false };
+  const FUNDX = { symbol: "FUNDX", companyName: "Fund X", marketCap: 8, price: 1, volume: 1, exchangeShortName: "NASDAQ", isEtf: false, isFund: true };
+  const PLAINCO = { symbol: "PLAINCO", companyName: "Plain Co", marketCap: 7, price: 1, volume: 1, exchangeShortName: "NASDAQ", isEtf: false, isFund: false };
   globalThis.fetch = async (url) => {
     const params = new URL(String(url)).searchParams;
     seen.push({ exchange: params.get("exchange"), isEtf: params.get("isEtf"), isFund: params.get("isFund") });
     if (params.get("exchange") !== "NASDAQ") return response([]);
-    // NASDAQ alone saturates → the sub-split serves the real breakdown. The
-    // unsplit response and the ETF slice overlap on SHARED, which must not
-    // become two rows (and two ranks).
-    if (params.get("isEtf") === "true") return response([{ symbol: "SHARED", companyName: "Shared", marketCap: 9, price: 1, volume: 1, exchangeShortName: "NASDAQ", isEtf: true }]);
-    if (params.get("isFund") === "true") return response([{ symbol: "FUNDX", companyName: "Fund X", marketCap: 8, price: 1, volume: 1, exchangeShortName: "NASDAQ", isFund: true }]);
-    if (params.get("isEtf") === "false") return response([{ symbol: "PLAINCO", companyName: "Plain Co", marketCap: 7, price: 1, volume: 1, exchangeShortName: "NASDAQ" }]);
-    return response(Array.from({ length: CAP }, (_, i) =>
-      ({ symbol: i === 0 ? "SHARED" : `N${i}`, companyName: `N ${i}`, marketCap: 100, price: 1, volume: 1, exchangeShortName: "NASDAQ" })));
+    // NASDAQ alone saturates → the sub-split adds what the capped response
+    // couldn't carry. SHARED is in BOTH the capped response and the ETF
+    // slice, and must not become two rows (and two ranks).
+    if (params.get("isEtf") === "true") return response([SHARED]);
+    if (params.get("isFund") === "true") return response([FUNDX]);
+    if (params.get("isEtf") === "false") return response([PLAINCO]);
+    return response([SHARED, ...Array.from({ length: CAP - 1 }, (_, i) =>
+      ({ symbol: `N${i}`, companyName: `N ${i}`, marketCap: 100, price: 1, volume: 1, exchangeShortName: "NASDAQ", isEtf: false, isFund: false }))]);
   };
   try {
-    const rows = await fmp.list({ sort: "market_cap", order: "desc", pageSize: 50 }, { apiKey: "k" });
-    assert.deepEqual(rows.map((r) => r.symbol), ["SHARED", "FUNDX", "PLAINCO"]);
-    assert.deepEqual(rows.map((r) => r.values.type), ["ETF", "Fund", "Stock"]);
-    assert.equal(rows.filter((r) => r.symbol === "SHARED").length, 1, "the overlap collapses to one row");
+    // Ascending market cap surfaces exactly the three small rows, in order —
+    // two of which ONLY the sub-slices could reach.
+    const rows = await fmp.list({ sort: "market_cap", order: "asc", pageSize: 3 }, { apiKey: "k" });
+    assert.deepEqual(rows.map((r) => r.symbol), ["PLAINCO", "FUNDX", "SHARED"]);
+    assert.deepEqual(rows.map((r) => r.values.type), ["Stock", "Fund", "ETF"]);
+
+    // The capped response is kept too, so its rows are still there.
+    const top = await fmp.list({ sort: "market_cap", order: "desc", pageSize: 2 }, { apiKey: "k" });
+    assert.ok(top.every((r) => r.symbol.startsWith("N")), "the 10k already bought is still served");
+
+    // And the overlap collapsed: one SHARED, one rank.
+    const shared = await fmp.list({ query: "shared", pageSize: 50 }, { apiKey: "k" });
+    assert.equal(shared.filter((r) => r.symbol === "SHARED").length, 1, "the overlap collapses to one row");
 
     // Only the saturated venue paid for the extra slices.
     const splits = seen.filter((s) => s.isEtf != null || s.isFund != null);
     assert.equal(splits.length, 3);
     assert.ok(splits.every((s) => s.exchange === "NASDAQ"));
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP universe: a saturated venue's split is ADDITIVE, and survives a refused slice", async () => {
+  // The saturated response is 10,000 real listings already bought. Replacing
+  // it with the sub-slices would mean a refused slice costs the venue — and
+  // Promise.all would have failed the whole universe over one of them.
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  const CAP = 10000;
+  globalThis.fetch = async (url) => {
+    const params = new URL(String(url)).searchParams;
+    if (params.get("exchange") !== "NASDAQ") return response([]);
+    if (params.get("isEtf") === "true") throw new Error("slice refused");           // rejects
+    if (params.get("isFund") === "true") return response([{ symbol: "FUNDX", companyName: "Fund X", marketCap: 8, price: 1, volume: 1, exchangeShortName: "NASDAQ", isFund: true }]);
+    if (params.get("isEtf") === "false") return response([]);                        // narrows to nothing
+    return response(Array.from({ length: CAP }, (_, i) =>
+      ({ symbol: `N${i}`, companyName: `N ${i}`, marketCap: CAP - i, price: 1, volume: 1, exchangeShortName: "NASDAQ" })));
+  };
+  try {
+    const rows = await fmp.list({ sort: "market_cap", order: "desc", pageSize: 5 }, { apiKey: "k" });
+    assert.equal(rows[0].symbol, "N0", "the saturated response is still served");
+    // The one slice that answered adds to it; the refusal costs nothing.
+    const fund = await fmp.list({ query: "fund x", pageSize: 5 }, { apiKey: "k" });
+    assert.ok(fund.some((r) => r.symbol === "FUNDX"), "the slice that answered still contributes");
+  } finally {
+    globalThis.fetch = original;
+    fmp._resetScreenerCache();
+  }
+});
+
+test("FMP list: a type filter excludes bridge rows rather than guessing them", async () => {
+  // A bridge row is quote-filled and carries no isEtf/isFund flags, so it has
+  // no type to show. It must not be assumed to be a Stock — SPY reached by
+  // search is precisely the row that assumption gets wrong.
+  fmp._resetScreenerCache();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/company-screener?")) return response([
+      { symbol: "REALCO", companyName: "Real Co", marketCap: 100, price: 5, volume: 10, exchangeShortName: "NYSE" },
+    ]);
+    if (u.includes("/search-symbol?")) return response([{ symbol: "SPY", name: "SPDR S&P 500 ETF Trust", currency: "USD", exchange: "AMEX" }]);
+    if (u.includes("/search-name?")) return response([]);
+    if (u.includes("/quote?symbol=SPY")) return response([{ symbol: "SPY", name: "SPDR S&P 500 ETF Trust", price: 550, marketCap: 5e11, volume: 8e7, exchange: "AMEX" }]);
+    throw new Error(`unexpected URL ${u}`);
+  };
+  try {
+    const unfiltered = await fmp.list({ query: "sp" }, { apiKey: "k" });
+    const spy = unfiltered.find((r) => r.symbol === "SPY");
+    assert.ok(spy, "the bridge still reaches it");
+    assert.equal(spy.values.type, null, "no flags to read → no type claimed");
+
+    const asStock = await fmp.list({ query: "sp", type: "Stock" }, { apiKey: "k" });
+    assert.ok(!asStock.some((r) => r.symbol === "SPY"), "an ETF must not pass a Stock filter");
+    const asEtf = await fmp.list({ query: "sp", type: "ETF" }, { apiKey: "k" });
+    assert.ok(!asEtf.some((r) => r.symbol === "SPY"), "nor claim a type it can't verify");
   } finally {
     globalThis.fetch = original;
     fmp._resetScreenerCache();

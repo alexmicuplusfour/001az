@@ -180,6 +180,57 @@ test("enumerate: a feed reaches the WHOLE catalog — no app-side ration, only a
   }
 });
 
+test("enumerate: concurrent callers share ONE catalog walk (single-flight)", async () => {
+  // The cache only helps callers arriving after a walk finishes. A preview
+  // click landing while the sweep is mid-run is the common case, and without
+  // single-flight both walk the whole catalog — ~74 metered requests apiece
+  // against CoinGecko now that the window reaches all of it.
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const listCalls = [];
+  const conn = {
+    name: "widgets",
+    manifest: { browse: BROWSE },
+    listCalls,
+    activeProvider: async () => ({ name: "acme", provider: { list: () => {} } }),
+    list: async (_db, opts) => {
+      listCalls.push(opts);
+      await gate;
+      return opts.page === 1 ? [row("a", "A"), row("b", "B")] : [];
+    },
+  };
+  const adapter = feedAdapter(conn);
+
+  const p1 = adapter.enumerate(null, null, {});
+  const p2 = adapter.enumerate(null, null, {});
+  await new Promise((r) => setTimeout(r, 20)); // both have reached the flight
+  assert.equal(listCalls.length, 1, "one walk in progress, not two");
+  release();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.deepEqual(r1.candidates.map((c) => c.key), ["a", "b"]);
+  assert.deepEqual(r2.candidates.map((c) => c.key), ["a", "b"]);
+  assert.equal(listCalls.filter((c) => c.page === 1).length, 1, "page 1 was fetched once for both");
+});
+
+test("enumerate: a failed walk releases the flight instead of wedging the key", async () => {
+  let attempt = 0;
+  const conn = {
+    name: "widgets",
+    manifest: { browse: BROWSE },
+    activeProvider: async () => ({ name: "acme", provider: { list: () => {} } }),
+    list: async (_db, opts) => {
+      attempt++;
+      if (attempt === 1) throw new Error("provider down");
+      return opts.page === 1 ? [row("a", "A")] : [];
+    },
+  };
+  const adapter = feedAdapter(conn);
+  await assert.rejects(adapter.enumerate(null, null, {}), /provider down/);
+  // The next caller retries rather than joining a dead flight.
+  const { candidates } = await adapter.enumerate(null, null, {});
+  assert.deepEqual(candidates.map((c) => c.key), ["a"]);
+});
+
 test("enumerate: the page backstop can't become the real ceiling", async () => {
   // MAX_PAGES exists for a provider that never returns an empty page. It is
   // derived from the safety cap, so it can never bind FIRST — a 40-page

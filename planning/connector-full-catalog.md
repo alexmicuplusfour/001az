@@ -172,6 +172,33 @@ probably-still-truncated.
 The search bridge still matters — it reaches symbols outside the venue list —
 but it is no longer load-bearing for whole asset classes.
 
+### Fourth pass — reviewing the third
+
+Fresh-eyes read of the work above, which found four things:
+
+- **A saturated venue threw away the rows it had just bought.** The type
+  re-split returned only its sub-slices, so a sub-slice that FMP refused took
+  the venue's 10,000 valid listings down with it (`Promise.all`), and a param
+  FMP chose not to honour would have silently *lost* rows. The split is now
+  additive — the capped response is unioned with the slices, `allSettled` so
+  one refusal costs only itself — which makes it strictly more coverage than
+  not splitting, never less.
+- **The `type` filter guessed.** A bridge row carries no `isEtf`/`isFund`
+  flags, so `typeOf` read it as "Stock" — meaning SPY reached by search
+  displayed "—" and still passed a `type=Stock` filter. It now reads the same
+  value the row renders, so a type filter excludes bridge rows honestly, the
+  rule the sector filter already followed.
+- **The feed window had no single-flight.** The cache only helps callers
+  arriving *after* a walk; a preview click landing mid-sweep started a second
+  full walk. That was 4 duplicated requests under the old ration and is ~74
+  now — the removal of the cap is exactly what made it worth fixing. Same
+  mechanism the FMP screener already used.
+- **Two comments had gone stale**: the window-cache note still priced a fill at
+  "≈4 CoinGecko fetches", and the FMP `attribution` asserted a ToS clause that
+  can't be verified (their site refuses automated fetches; what is readable
+  suggests displaying their data may need a data-display agreement, which is a
+  bigger question than a credit line and the operator's to settle).
+
 ### What now binds, and it isn't the app
 
 Batching moved the crypto meter off entity count and onto **cadence**, which is

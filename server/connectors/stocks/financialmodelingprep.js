@@ -55,7 +55,14 @@ const universeExchanges = () =>
 export const label = "Financial Modeling Prep";
 export const description = "US stock quotes, fundamentals, and price history — needs a key";
 export const needsKey = true;
-// FMP's terms ask for a visible credit + backlink on redistributed data.
+// Credit shown wherever this provider's rows are. Unlike CoinGecko's — whose
+// demo ToS explicitly requires visible attribution — FMP's display terms
+// could NOT be verified from here (their site refuses automated fetches, and
+// what is readable suggests displaying or redistributing their data may need
+// a separate data-display agreement rather than a credit line). Crediting
+// them is the conservative default; whether this deployment's use needs a
+// licence is the operator's question to settle with FMP, not one this
+// constant answers.
 export const attribution = { text: "Data by Financial Modeling Prep", url: "https://financialmodelingprep.com" };
 // Truthful request pacing: this provider awaits ctx.pace() before every raw
 // HTTP request (pacesRequests — see runtime.callProvider), so rpm meters what
@@ -303,20 +310,32 @@ async function screenerRows(params, apiKey, pace) {
 }
 
 // One venue's listings, re-partitioned if the venue alone saturates the cap.
+// The saturated response is KEPT and unioned with the sub-slices rather than
+// replaced by them: it is 10,000 real listings already paid for, and the
+// caller dedupes, so including it can only add coverage. That also makes the
+// split strictly additive — a sub-slice that fails, or that FMP answers in a
+// way these params don't actually narrow, costs nothing instead of costing
+// the venue. allSettled for the same reason: one refused slice must not throw
+// away a venue we could otherwise serve.
 async function venueRows(exchange, apiKey, pace) {
   const rows = await screenerRows({ exchange }, apiKey, pace);
   if (rows.length < SCREENER_MAX_ROWS) return rows;
-  const parts = await Promise.all([
+  const settled = await Promise.allSettled([
     screenerRows({ exchange, isEtf: true }, apiKey, pace),
     screenerRows({ exchange, isFund: true }, apiKey, pace),
     screenerRows({ exchange, isEtf: false, isFund: false }, apiKey, pace),
   ]);
+  const parts = settled.filter((s) => s.status === "fulfilled").map((s) => s.value);
+  for (const s of settled) {
+    if (s.status === "rejected")
+      console.warn(`FMP screener: a ${exchange} sub-slice failed (serving the rest): ${s.reason?.message || s.reason}`);
+  }
   // Saying so beats silently serving a truncated universe: at this point the
   // venue has more of ONE type than a response can carry, and the next split
   // (market-cap bands) would need care about rows FMP prices at 0.
   if (parts.some((part) => part.length >= SCREENER_MAX_ROWS))
     console.warn(`FMP screener: ${exchange} saturates ${SCREENER_MAX_ROWS} rows even split by type — some listings are out of reach`);
-  return parts.flat();
+  return [rows, ...parts].flat();
 }
 
 function fetchUniverse(apiKey, pace) {
@@ -482,7 +501,12 @@ export async function list(
   if (sector) base = base.filter((row) => row?.sector === sector);
   if (industry) base = base.filter((row) => row?.industry === industry);
   if (exchange) base = base.filter((row) => exchangeOf(row) === exchange);
-  if (type) base = base.filter((row) => (row?.assetType ?? typeOf(row)) === type);
+  // Read the SAME value the row renders. `typeOf` as a fallback here would
+  // read a bridge row — which carries no isEtf/isFund flags to read — as
+  // "Stock", so an ETF found by search would show "—" and still pass a
+  // type=Stock filter. Bridge rows have no type, so a type filter honestly
+  // excludes them, exactly as the sector filter already does.
+  if (type) base = base.filter((row) => (row?.assetType ?? null) === type);
 
   const sorted = sortRows(base, sort, order);
   const pageRows = sorted.slice((pageNo - 1) * size, pageNo * size);

@@ -41,8 +41,9 @@ export const ENUM_CAP = (browse) =>
 // math consistent with their own clamp, so a short-but-nonempty page is
 // normal paging — enumeration stops ONLY on an empty page. Treating a short
 // page as "dry" would silently miss everything past a provider's first
-// clamped page. (FMP's clamp is aligned at 250 — its full-universe window is
-// 20 cache-served slices, zero HTTP warm.)
+// clamped page. 250 is also the ceiling the catalogs themselves impose on a
+// page (CoinGecko's per_page maxes there), and FMP's local clamp is aligned
+// to it, so its whole universe is cache-served slices at zero HTTP warm.
 const ENUM_PAGE = 250;
 // Backstop for a provider that never returns an empty page. Derived from the
 // safety cap so the two can't disagree — a page budget smaller than the row
@@ -50,10 +51,16 @@ const ENUM_PAGE = 250;
 // block exists to not have.
 const MAX_PAGES = Math.ceil(SAFETY_CAP / ENUM_PAGE);
 
-// Enumerated-window cache. Filling the window is the expensive part — up to
-// ENUM_CAP/ENUM_PAGE metered provider calls (≈4 CoinGecko fetches, ~9s cold),
-// serialized through the per-provider rate limiter and competing with the live
-// refresh sweep. But filters and the per-run limit are applied DOWNSTREAM by the
+// Enumerated-window cache. Filling the window is the expensive part, and it
+// got more expensive when the window stopped being rationed: one metered
+// request per 250 rows, so a full CoinGecko pass is ~74 of them (minutes,
+// serialized through the per-provider rate limiter and competing with the
+// live refresh sweep), where the old 1000-row ration made it 4. FMP is the
+// other extreme — its whole universe is served from one cached screener fill,
+// so the walk costs nothing. That spread is why the cache and the flight
+// below matter more than the page count does, and why an operator who wants
+// the metered case rationed sets INGEST_FEED_CAP rather than the app guessing
+// a number for them. But filters and the per-run limit are applied DOWNSTREAM by the
 // shared engine; only the sort reaches the provider. So a count, its result
 // pages, repeated previews, and filter tweaks in one session all want the SAME
 // window — cache it briefly, keyed by connector + active provider + sort + cap,
@@ -64,6 +71,14 @@ const MAX_PAGES = Math.ceil(SAFETY_CAP / ENUM_PAGE);
 // unset knob through as "" (`${VAR:-}`), and Number("") is 0, which would
 // silently disable the cache in the container. An explicit "0" still disables.
 const windowCache = new Map();
+// In-flight fills, keyed like the cache. The cache alone only helps callers
+// who arrive AFTER a walk finishes; concurrent ones (a preview click while
+// the sweep is mid-run, two people on the same board) each used to walk the
+// whole catalog and then race to write the same key. That was 4 requests
+// apiece when the window was rationed to 1000 rows and is ~74 now that it
+// reaches all of CoinGecko — so the second walk is the expensive one to not
+// make. Same single-flight the FMP screener uses, for the same reason.
+const windowFlights = new Map();
 const cacheTtl = () => {
   const v = process.env.INGEST_FEED_CACHE_MS;
   return v == null || v === "" ? 60000 : Number(v);
@@ -132,7 +147,11 @@ export function feedAdapter(conn) {
       const hit = windowCache.get(ck);
       if (hit && ttl > 0 && Date.now() - hit.at < ttl)
         return { candidates: hit.candidates, truncated: hit.truncated };
+      // Join a walk already in progress rather than starting a second one.
+      const flight = windowFlights.get(ck);
+      if (flight) return flight;
 
+      const walk = (async () => {
       const seen = new Set();
       const candidates = [];
       let dry = false; // saw the catalog actually end (an empty page)
@@ -157,6 +176,11 @@ export function feedAdapter(conn) {
       const result = { candidates, truncated: !dry };
       if (ttl > 0) windowCache.set(ck, { at: Date.now(), ...result });
       return result;
+      })();
+      // Released on settle either way: a failed walk must not wedge the key,
+      // and a successful one is served from the cache from here on.
+      windowFlights.set(ck, walk);
+      try { return await walk; } finally { windowFlights.delete(ck); }
     },
 
     // One catalog row → one entity + tag vehicle through the same path as a
