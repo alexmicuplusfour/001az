@@ -14,6 +14,7 @@
 //
 // Also home to the ONE refusal signal the runtime's learned-availability model
 // reads, so no provider invents its own spelling of it.
+import nodeCrypto from "node:crypto";
 
 // An "unsupported" refusal: this (range, kind) isn't servable through this
 // backend/key — a plan gate the provider RECOGNIZED, or a mapping it doesn't
@@ -104,6 +105,15 @@ export const CHART_TTL_LIVE = 60 * 1000;
 export const CHART_TTL_SETTLED = 5 * 60 * 1000;
 export const CHART_LEARN_TTL = 6 * 60 * 60 * 1000;
 
+// A short non-reversible stamp of an API key, for keying learned state — the
+// runtime's pair buckets AND the providers' ladder-rung memories. Learned
+// facts are facts about a (provider, key) pair, and keys change: an admin who
+// pastes a paid key must land in a fresh bucket instantly, not wait out a TTL.
+// Lives here for the same reason the freshness policy does: both halves of
+// the learned state must key the same way or the key-swap heal only half works.
+export const keyFingerprint = (apiKey) =>
+  apiKey ? nodeCrypto.createHash("sha256").update(String(apiKey)).digest("hex").slice(0, 8) : "nokey";
+
 // A bounded TTL cache — the one shape every provider's chart cache, the rung
 // memories, and the runtime's learned pairs turned out to share, extracted
 // after each had written its own. FIFO eviction like FMP's bridgeCache; an
@@ -140,7 +150,11 @@ export async function walkLadder(rungs, memory, key, isGate, tryRung) {
   for (let i = start; i < rungs.length; i++) {
     try {
       const value = await tryRung(rungs[i]);
-      memory.put(key, i, CHART_LEARN_TTL);
+      // Written only when the winner CHANGES. Re-stamping on every reuse would
+      // keep an actively-viewed chart's memory alive forever — and the plan-
+      // upgrade re-probe (the shared-TTL note above) only happens if an
+      // unchanged rung is allowed to age out on schedule.
+      if (i !== remembered) memory.put(key, i, CHART_LEARN_TTL);
       return { value, rung: rungs[i] };
     } catch (e) {
       if (!isGate(e)) throw e; // transient (or a bad key) — never "learned"

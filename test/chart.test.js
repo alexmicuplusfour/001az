@@ -8,7 +8,7 @@ import { startServer, adminSession, seedUser, seedBoard, seedItem, req, installC
 import { createBoard, createEntity, insertItem, getPluginRow, setSetting } from "../server/db.js";
 import { registerConnector, unregisterConnector } from "../server/connectors/index.js";
 import * as runtime from "../server/connectors/runtime.js";
-import { unsupported, dedupeAscending, utcDate, strideArea, aggregateCandles } from "../server/connectors/chart-series.js";
+import { unsupported, dedupeAscending, utcDate, strideArea, aggregateCandles, CHART_TTL_SETTLED } from "../server/connectors/chart-series.js";
 import { manifest as stocksManifest } from "../server/connectors/stocks/index.js";
 import { manifest as cryptoManifest } from "../server/connectors/crypto/index.js";
 import * as fmp from "../server/connectors/stocks/financialmodelingprep.js";
@@ -179,6 +179,43 @@ test("FMP intraday ladder: a 402/403 steps down and the rung is remembered; 401 
   }
 });
 
+test("FMP ladder memory: reuse never re-stamps the TTL, and a swapped key probes the finest rung again", async () => {
+  fmp._resetChartCache();
+  const original = globalThis.fetch;
+  let seen = [];
+  globalThis.fetch = async (url) => {
+    seen.push(String(url));
+    if (String(url).includes("/historical-chart/5min?")) return response({ "Error Message": "Exclusive Endpoint" }, 403);
+    if (String(url).includes("/historical-chart/30min?")) return response(FMP_BARS);
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const rungsOf = () => seen.map((u) => u.match(/historical-chart\/(\w+)\?/)[1]);
+  try {
+    await fmp.chart("AAA", { range: "1d", kind: "area" }, { apiKey: "k" });
+    assert.deepEqual(rungsOf(), ["5min", "30min"], "the gate is discovered once");
+
+    // The plan-upgrade re-probe story: the memory must age from when the gate
+    // was LEARNED, not from its last reuse. Age 4 h, reuse (which must not
+    // re-stamp), age 3 h more — 7 h since learning, 3 h since reuse — and the
+    // finest rung has to be probed again.
+    fmp._ageChartCache(4 * 60 * 60 * 1000);
+    seen = [];
+    await fmp.chart("BBB", { range: "1d", kind: "area" }, { apiKey: "k" });
+    assert.deepEqual(rungsOf(), ["30min"], "inside the TTL the remembered rung is reused");
+    fmp._ageChartCache(3 * 60 * 60 * 1000);
+    seen = [];
+    await fmp.chart("CCC", { range: "1d", kind: "area" }, { apiKey: "k" });
+    assert.deepEqual(rungsOf(), ["5min", "30min"], "past the TTL the finest rung is re-probed");
+
+    // A swapped key is a fresh plan: the dead rung is not inherited.
+    seen = [];
+    await fmp.chart("DDD", { range: "1d", kind: "area" }, { apiKey: "paid" });
+    assert.deepEqual(rungsOf(), ["5min", "30min"], "a new key's ladder starts at the finest rung");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("FMP intraday fully gated → unsupported; gated EOD → unsupported; unmapped range refuses", async () => {
   fmp._resetChartCache();
   const original = globalThis.fetch;
@@ -315,6 +352,9 @@ test("CoinGecko: area and candles cache separately per (id, range, kind)", async
     await coingecko.chart("bitcoin", { range: "1m", kind: "area" }, {});
     await coingecko.chart("bitcoin", { range: "1m", kind: "candles" }, {});
     assert.equal(calls, 2, "one metered fetch per kind, repeats served from cache");
+    coingecko._ageChartCache(CHART_TTL_SETTLED + 1);
+    await coingecko.chart("bitcoin", { range: "1m", kind: "area" }, {});
+    assert.equal(calls, 3, "an expired entry is re-bought, not served stale");
   } finally {
     globalThis.fetch = original;
   }
@@ -556,6 +596,42 @@ test("chartSeries: learned state is per key — a swapped key gets a fresh bucke
   const out = await runtime.chartSeries(db, conn, ENTITY, SOURCE, { range: "1d", kind: "area" });
   assert.equal(out.kind, "area", "fresh bucket probed the pair again, instantly");
   await setSetting(db, "gauges_key_meter", "");
+});
+
+test("chartSeries: learned pairs are per provider — a sibling probes fresh, the original stays learned", async () => {
+  runtime._resetChartLearned();
+  await installConnectors(db, "gauges:meter2");
+  const calls = { meter: [], meter2: [] };
+  const provider = (name, gated) => ({
+    label: name,
+    async search(q) { return [{ id: `${name}-id`, symbol: String(q).toUpperCase() }]; },
+    async fetchEntity() { return {}; },
+    async chart(id, { range, kind }) {
+      calls[name].push(`${range}|${kind}`);
+      if (gated && range === "1d" && kind === "area") throw unsupported(`${name}: gated`);
+      return SERVED;
+    },
+  });
+  const conn = {
+    name: "gauges",
+    providers: { meter: provider("meter", true), meter2: provider("meter2", false) },
+    defaultProvider: "meter",
+    manifest: { chart: VOCAB },
+  };
+  const first = await runtime.chartSeries(db, conn, ENTITY, SOURCE, { range: "1d", kind: "area" });
+  assert.equal(first.kind, "candles", "meter's gate is learned");
+
+  await setSetting(db, "gauges_provider", "meter2");
+  const sibling = await runtime.chartSeries(db, conn, ENTITY, SOURCE, { range: "1d", kind: "area" });
+  assert.equal(sibling.kind, "area", "the sibling's bucket is untouched — the pair probes fresh");
+  assert.deepEqual(sibling.kinds, ["area", "candles"]);
+
+  await setSetting(db, "gauges_provider", "meter");
+  calls.meter.length = 0;
+  const back = await runtime.chartSeries(db, conn, ENTITY, SOURCE, { range: "1d", kind: "area" });
+  assert.equal(back.kind, "candles");
+  assert.deepEqual(calls.meter, ["1d|candles"], "meter's own pair survived the detour — no re-probe");
+  await setSetting(db, "gauges_provider", "");
 });
 
 test("chartSeries: an unsupported outcome heals the plugin ledger; a transient one marks it", async () => {

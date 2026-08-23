@@ -8,11 +8,10 @@
 // Settings are namespaced by the connector's own name, so domains never collide:
 //   <name>_provider           active provider (unset/unknown → defaultProvider)
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
-import nodeCrypto from "node:crypto";
 import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 import { getFaceProducer } from "../faces/index.js";
 import { acquire, throttled } from "../provider-pacing.js";
-import { createTtlCache, CHART_LEARN_TTL } from "./chart-series.js";
+import { createTtlCache, keyFingerprint, CHART_LEARN_TTL } from "./chart-series.js";
 import { liveFields, nextRefreshAt } from "./schedule.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
@@ -467,9 +466,6 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
 // ladder-rung memories) covers the rarer same-key plan upgrade. In-memory on
 // purpose: it self-heals on restart, and there is no setting to go stale.
 const chartLearned = createTtlCache(1000);
-
-const keyFingerprint = (apiKey) =>
-  apiKey ? nodeCrypto.createHash("sha256").update(String(apiKey)).digest("hex").slice(0, 8) : "nokey";
 
 const isLearned = (bucket, range, kind) => chartLearned.get(`${bucket}|${range}|${kind}`) != null;
 const learn = (bucket, range, kind) => chartLearned.put(`${bucket}|${range}|${kind}`, true, CHART_LEARN_TTL);

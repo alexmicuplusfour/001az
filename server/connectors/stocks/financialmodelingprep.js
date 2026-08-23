@@ -20,7 +20,7 @@
 import { providerSignal, providerBudgetMs, num } from "../runtime.js";
 import {
   unsupported, dedupeAscending, strideArea, aggregateCandles, utcDate,
-  createTtlCache, walkLadder, encodeArea, encodeCandles,
+  createTtlCache, walkLadder, keyFingerprint, encodeArea, encodeCandles,
   CHART_TTL_LIVE, CHART_TTL_SETTLED,
 } from "../chart-series.js";
 
@@ -650,7 +650,8 @@ export async function history(id, period, { apiKey, pace } = {}) {
 // 401 is a bad key — both stay transient and must NOT read as capability).
 // Intraday rides a ladder — finest interval first, coarser on a gate — and
 // only a fully gated ladder refuses the range as `unsupported`; the rung that
-// answered is remembered (~6 h) so later opens skip the dead probes.
+// answered is remembered (~6 h, per key — a swapped key is a fresh plan and
+// probes the finest rung again) so later opens skip the dead probes.
 // `sessions`: how many distinct trading dates the range means — the fetch spans
 // a generous calendar window (weekends, holidays) and keeps the LAST N dates.
 const CHART_INTRADAY = {
@@ -663,7 +664,7 @@ const CHART_INTRADAY = {
 const CHART_EOD_DAYS = { "1m": 31, "6m": 183, "1y": 366, "5y": 1827 };
 
 const chartCache = createTtlCache(); // `${symbol}|${range}` -> { bars, encoded }
-const chartRung = createTtlCache(8); // range -> the ladder's winning rung index
+const chartRung = createTtlCache(8); // `${keyFingerprint}|${range}` -> the ladder's winning rung index
 
 const isPlanGate = (e) => e?.status === 402 || e?.status === 403;
 
@@ -678,7 +679,7 @@ async function intradayBars(symbol, range, apiKey, pace) {
     from: utcDate(Date.now() - windowDays * 86400000),
     to: utcDate(Date.now()),
   };
-  const won = await walkLadder(ladder, chartRung, range, isPlanGate, (interval) =>
+  const won = await walkLadder(ladder, chartRung, `${keyFingerprint(apiKey)}|${range}`, isPlanGate, (interval) =>
     fmp(`historical-chart/${interval}`, params, apiKey, { pace }));
   if (!won) throw unsupported("Financial Modeling Prep: intraday charts aren't included in this plan");
   const rows = won.value;

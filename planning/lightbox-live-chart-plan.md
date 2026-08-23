@@ -771,6 +771,44 @@ Skipped, with reasons: hoisting `keyFingerprint` to share with the AI stack's `a
 color token instead); reusing the card's `.connector-face` for the bare tile (would need
 size overrides amounting to new CSS anyway — fixed the overclaiming comment instead).
 
+**Post-ship review pass 2026-08-23** — an independent re-read of the shipped code against
+this plan and the project's conventions. The architecture held everywhere it was probed;
+three real gaps surfaced, all in the learned-state corners, all fixed (suite green at 1210 —
+28 chart tests):
+
+- **The ladder memory never expired under use.** `walkLadder` re-stamped the winning rung's
+  TTL on every successful reuse, so an actively-viewed chart kept its gate-coarsened interval
+  forever — the plan-upgrade re-probe that the shared-TTL note in chart-series.js explicitly
+  promises ("only works if both expire together") could never fire, because the runtime's
+  pairs are written only on refusal while the rung memory rewrote itself on every win. The
+  memory is now written only when the winner CHANGES; an unchanged rung ages out on schedule
+  and the finest rung is probed again (~1 metered request per 6 h). Pinned by a mutation-
+  verified test (age 4 h → reuse → age 3 h → the finest rung must be re-probed).
+- **The ladder memory ignored key swaps.** The runtime buckets learned pairs per key
+  fingerprint precisely because "learned facts are facts about a (provider, key) pair" — but
+  both providers' rung memories were keyed by range alone, so a pasted paid key re-probed the
+  pairs instantly yet kept serving 1d at the old key's coarse interval. `keyFingerprint`
+  moved into chart-series.js (the same shared-home argument as the freshness policy: both
+  halves of the learned state must key the same way) and both ladder call sites now compose
+  it into the memory key. Test-pinned alongside the TTL case.
+- **A failed range flip left a dead pill.** The pill guard compares against the REQUESTED
+  range, which a transient failure leaves pointing at the flip that failed while the controls
+  still highlight what's on screen — clicking the same range again did nothing, against Part
+  C's "any range click retries". The renderer now keeps the last successful echo (`served`)
+  and reverts `range`/`kind` to it on failure, so internal state always mirrors the
+  highlighted controls and the failed pill retries. (Client untested per repo convention.)
+- Coverage the Tests section enumerated but the file lacked, added: the `_ageChartCache`
+  seam (an expired data-cache entry is re-bought, not served stale) and per-provider learned
+  isolation (a sibling provider probes a gated pair fresh; the original's learned pair
+  survives a switch away and back).
+
+Left as-is, judged fine on the closer look: the data caches stay un-fingerprinted (up to one
+short TTL of old-key data after a swap — data is data); bare mode frames the face in the
+media box rather than free-floating ("exactly today's view" was mildly overstated, cosmetic);
+`dedupeAscending`'s keep-last assumes append-order sources, which holds for every current
+provider; CoinGecko's `ytd` refuses on Dec 31 of a leap year (366 > 365) and clamps to the
+materially identical 1y.
+
 Remaining for the operator: the visual sweep (Verify steps 1–7) in a browser — the stack at
 `localhost:8001` now runs all three phases with both review passes' fixes.
 

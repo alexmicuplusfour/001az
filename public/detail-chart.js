@@ -146,6 +146,11 @@ export const chartDetail = {
     let token = 0;
     let aborter = null;
     let unmounted = false;
+    // The last SUCCESSFUL echo. A failed flip leaves `range`/`kind` pointing
+    // at the request that failed while the controls still highlight what's on
+    // screen — reverting to this keeps state mirroring the pills, so clicking
+    // the failed range again passes the not-already-current guard and retries.
+    let served = null;
     // The current response's time shape + prebuilt display formatters + money
     // style — mount-scoped so the crosshair and tick closures (created once, at
     // chart creation) always read the LATEST render's rules. Both stay unset
@@ -363,16 +368,19 @@ export const chartDetail = {
         if (my !== token || unmounted) return;
         if (!r.ok || !body) {
           setNote(body?.error || "Chart data is unavailable right now.");
+          if (served) ({ range, kind } = served); // back to what's on screen
           return; // static face stays; any range click retries
         }
         range = body.range; // follow the echo — the server may have clamped
         kind = body.kind;
+        served = { range, kind };
         try { localStorage.setItem("lbChartRange", range); localStorage.setItem("lbChartKind", kind); } catch { /* private mode */ }
         renderControls(body);
         render(body);
       } catch (e) {
         if (e?.name === "AbortError" || my !== token || unmounted) return;
         setNote("Chart data is unavailable right now.");
+        if (served) ({ range, kind } = served); // back to what's on screen
       } finally {
         if (my === token) {
           root.classList.remove("loading");

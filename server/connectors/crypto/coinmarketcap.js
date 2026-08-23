@@ -17,7 +17,7 @@
 // batched request.
 import { providerSignal, num } from "../runtime.js";
 import {
-  unsupported, createTtlCache, ytdDays, walkLadder, encodeArea, encodeCandles,
+  unsupported, createTtlCache, ytdDays, walkLadder, keyFingerprint, encodeArea, encodeCandles,
   CHART_TTL_LIVE, CHART_TTL_SETTLED,
 } from "../chart-series.js";
 import { createQuoteCache, pickFields } from "./quote-cache.js";
@@ -241,7 +241,7 @@ export async function history(id, period, { apiKey, pace } = {}) {
 // capability; anything else stays transient (rate is 429, a bad key 401/403
 // without the plan wording).
 const chartCache = createTtlCache(); // `${id}|${range}|${kind}` -> encoded series
-const chartRung = createTtlCache(16); // range -> the area ladder's winning index
+const chartRung = createTtlCache(16); // `${keyFingerprint}|${range}` -> the area ladder's winning index
 
 // Day-scale window per range (ytd computed per call); 1d/5d are the hourly-or-
 // finer cases the builders below hand-write. `max` asks for the documented
@@ -305,7 +305,7 @@ export async function chart(id, { range, kind } = {}, { apiKey, pace } = {}) {
   } else {
     const rungs = chartAreaRungs(range);
     if (!rungs) throw unsupported(`CoinMarketCap: no ${range} chart mapping`);
-    const won = await walkLadder(rungs, chartRung, range, isPlanGate, ({ interval, count }) =>
+    const won = await walkLadder(rungs, chartRung, `${keyFingerprint(apiKey)}|${range}`, isPlanGate, ({ interval, count }) =>
       quoteHistoryPoints(id, interval, count, apiKey, pace));
     if (!won) throw unsupported("CoinMarketCap: price history isn't included in this plan");
     data = encodeArea(won.value, { daily: won.rung.interval === "1d", tz: "local" });
