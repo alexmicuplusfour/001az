@@ -16,6 +16,10 @@
 // budget — hence the quote cache + prefetch: a whole sweep's coins ride one
 // batched request.
 import { providerSignal, num } from "../runtime.js";
+import {
+  unsupported, createTtlCache, ytdDays, walkLadder, encodeArea, encodeCandles,
+  CHART_TTL_LIVE, CHART_TTL_SETTLED,
+} from "../chart-series.js";
 import { createQuoteCache, pickFields } from "./quote-cache.js";
 
 const BASE = "https://pro-api.coinmarketcap.com";
@@ -200,21 +204,115 @@ const HIST = {
 };
 export const periods = Object.keys(HIST);
 
-export async function history(id, period, { apiKey, pace } = {}) {
-  const { interval, count } = HIST[period] || HIST["1y"];
+// v2 shapes historical payloads two ways: a bare { data: { quotes } } for a
+// single id, keyed by id when several were asked. Unwrap both.
+const quoteRows = (body, id) => body.data?.quotes || body.data?.[String(id)]?.quotes || [];
+
+// One quotes/historical fetch → clean [{ t, p }] points. history() (the face)
+// and chart()'s area flavour differ only in field naming and the gate wrap.
+async function quoteHistoryPoints(id, interval, count, apiKey, pace) {
   const body = await cmc(
     `/v2/cryptocurrency/quotes/historical?id=${encodeURIComponent(id)}&interval=${interval}&count=${count}&convert=USD`,
     apiKey, pace
   );
-  // v2 shapes the payload two ways: { data: { quotes: [...] } } for a single
-  // id, { data: { <id>: { quotes: [...] } } } when the request listed several.
-  const quotes = body.data?.quotes || body.data?.[String(id)]?.quotes || [];
-  return quotes
+  return quoteRows(body, id)
     .map((q) => ({
       t: Date.parse(q?.timestamp || q?.quote?.USD?.timestamp || ""),
-      price: num(q?.quote?.USD?.price),
+      p: num(q?.quote?.USD?.price),
     }))
-    .filter((p) => Number.isFinite(p.t) && p.price != null);
+    .filter((x) => Number.isFinite(x.t) && x.p != null);
+}
+
+export async function history(id, period, { apiKey, pace } = {}) {
+  const { interval, count } = HIST[period] || HIST["1y"];
+  return (await quoteHistoryPoints(id, interval, count, apiKey, pace))
+    .map(({ t, p }) => ({ t, price: p }));
+}
+
+// --- live chart (the lightbox detail view; planning/lightbox-live-chart-plan.md) ---
+// Both kinds, no pre-judgment about what this key's plan includes: area from
+// quotes/historical (an interval ladder per range — finest first, coarser on a
+// plan gate), candles from ohlcv/historical (hourly is the finest historical
+// OHLCV CMC offers). Whatever the plan refuses degrades through the standard
+// `unsupported` signal and the runtime's learned model prunes the offer.
+//
+// Gate dialect: CMC speaks plan refusals as HTTP 400/402/403 with an
+// error_message naming the plan/subscription — only that combination reads as
+// capability; anything else stays transient (rate is 429, a bad key 401/403
+// without the plan wording).
+const chartCache = createTtlCache(); // `${id}|${range}|${kind}` -> encoded series
+const chartRung = createTtlCache(16); // range -> the area ladder's winning index
+
+// Day-scale window per range (ytd computed per call); 1d/5d are the hourly-or-
+// finer cases the builders below hand-write. `max` asks for the documented
+// count ceiling and serves whatever depth the plan returns — "all available",
+// the same semantic every finance chart gives MAX. An unmapped range yields
+// null and refuses — the provider contract's "mapping it doesn't have".
+const CHART_DAILY_COUNT = { "1m": 31, "6m": 183, "1y": 365, "5y": 1827, "max": 10000 };
+const chartDailyCount = (range) => (range === "ytd" ? ytdDays() : CHART_DAILY_COUNT[range]);
+
+// Area rungs, finest first (walkLadder steps down on a plan gate). Intraday
+// history is plan-windowed tighter than daily (the HIST note above), so the
+// month range ladders from hourly down to daily rather than assuming either.
+function chartAreaRungs(range) {
+  if (range === "1d") return [{ interval: "5m", count: 288 }, { interval: "1h", count: 24 }];
+  if (range === "5d") return [{ interval: "1h", count: 120 }];
+  const daily = chartDailyCount(range);
+  if (daily == null) return null;
+  if (range === "1m") return [{ interval: "1h", count: 720 }, { interval: "1d", count: daily }];
+  return [{ interval: "1d", count: daily }];
+}
+// Candles: hourly OHLCV is the finest historical flavour CMC offers.
+function chartOhlcvCfg(range) {
+  if (range === "1d") return { time_period: "hourly", interval: "1h", count: 24 };
+  if (range === "5d") return { time_period: "hourly", interval: "1h", count: 120 };
+  const daily = chartDailyCount(range);
+  return daily == null ? null : { time_period: "daily", interval: "1d", count: daily };
+}
+
+const isPlanGate = (e) =>
+  (e?.status === 400 || e?.status === 402 || e?.status === 403) &&
+  /plan|subscription/i.test(String(e?.message || ""));
+
+export async function chart(id, { range, kind } = {}, { apiKey, pace } = {}) {
+  const key = `${id}|${range}|${kind}`;
+  const cached = chartCache.get(key);
+  if (cached) return cached;
+
+  let data;
+  if (kind === "candles") {
+    const cfg = chartOhlcvCfg(range);
+    if (!cfg) throw unsupported(`CoinMarketCap: no ${range} chart mapping`);
+    let body;
+    try {
+      body = await cmc(
+        `/v2/cryptocurrency/ohlcv/historical?id=${encodeURIComponent(id)}` +
+          `&time_period=${cfg.time_period}&interval=${cfg.interval}&count=${cfg.count}&convert=USD`,
+        apiKey, pace
+      );
+    } catch (e) {
+      if (isPlanGate(e)) throw unsupported("CoinMarketCap: OHLCV history isn't included in this plan");
+      throw e;
+    }
+    const bars = quoteRows(body, id)
+      .map((q) => ({
+        t: Date.parse(q?.time_open || ""),
+        o: num(q?.quote?.USD?.open), h: num(q?.quote?.USD?.high),
+        l: num(q?.quote?.USD?.low), c: num(q?.quote?.USD?.close),
+      }))
+      .filter((b) => Number.isFinite(b.t) && b.o != null && b.h != null && b.l != null && b.c != null);
+    data = encodeCandles(bars, { daily: cfg.time_period === "daily", tz: "local" });
+  } else {
+    const rungs = chartAreaRungs(range);
+    if (!rungs) throw unsupported(`CoinMarketCap: no ${range} chart mapping`);
+    const won = await walkLadder(rungs, chartRung, range, isPlanGate, ({ interval, count }) =>
+      quoteHistoryPoints(id, interval, count, apiKey, pace));
+    if (!won) throw unsupported("CoinMarketCap: price history isn't included in this plan");
+    data = encodeArea(won.value, { daily: won.rung.interval === "1d", tz: "local" });
+  }
+
+  chartCache.put(key, data, range === "1d" ? CHART_TTL_LIVE : CHART_TTL_SETTLED);
+  return data;
 }
 
 // Browse-and-add (the ingestion modal): the same canonical columns as CoinGecko,
@@ -286,8 +384,16 @@ export async function testConnection({ apiKey, pace } = {}) {
   return true;
 }
 
-// Test seam only (house convention: provider-pacing's _resetBuckets).
+// Test seams only (house convention: provider-pacing's _resetBuckets).
 export function _resetQuoteCache() {
   quotes.reset();
   mapCache = { at: 0, list: null };
+}
+export function _resetChartCache() {
+  chartCache.reset();
+  chartRung.reset();
+}
+export function _ageChartCache(ms) {
+  chartCache.age(ms);
+  chartRung.age(ms);
 }

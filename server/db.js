@@ -2162,6 +2162,21 @@ export async function entityInstanceCount(db, entityId) {
   return Number(rows[0].c);
 }
 
+// The connector vehicle's payload for one entity — the instance carrying the
+// provider `source` handle (the dueLiveEntities marker; NOT file-count, since
+// a generated face gives the vehicle a file). Oldest-first for determinism,
+// like entityForAlerts' first-file rule. Null for file entities: the chart
+// route treats that as "resolve by symbol", same as a provider switch.
+export async function entityVehiclePayload(db, entityId) {
+  const { rows } = await db.query(
+    `SELECT payload FROM items
+      WHERE entity_ids @> ARRAY[$1]::bigint[] AND payload ? 'source'
+      ORDER BY created_at ASC, id ASC LIMIT 1`,
+    [entityId]
+  );
+  return rows[0]?.payload || null;
+}
+
 // Drop an entity that lost its last instance (post membership change).
 // Returns true when it was actually deleted.
 export async function deleteEntityIfEmpty(db, entityId) {

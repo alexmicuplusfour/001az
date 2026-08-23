@@ -41,6 +41,7 @@ function bind(name, mod) {
     prefetchRefresh: (db, rows) => runtime.prefetchRefresh(db, conn, rows),
     prefetchIds: (db, ids) => runtime.prefetchIds(db, conn, ids),
     produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
+    chartSeries: (db, entity, source, opts) => runtime.chartSeries(db, conn, entity, source, opts),
     // Annotate the declared face producers for a given provider: `available`
     // = that provider can render it (exports the method named by `requires`),
     // `supportedBy` = every provider that can. A producer with no `requires`

@@ -4,11 +4,12 @@ import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
-import { fullUrl, thumbUrl, kindFor } from './kinds.js';
+import { fullUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
 import { sectionHeading } from './modal.js';
 
 import { selectFace } from './face-select.js';
+import { mountDetail } from './detail-view.js';
 import { contentRect, detColor } from './det-geometry.js';
 
 // Format numeric field values readably based on key conventions.
@@ -51,8 +52,7 @@ function formatFieldNumber(key, v) {
 }
 
 const elLightbox = document.getElementById("lightbox");
-const elLightboxImg = document.getElementById("lightbox-img");
-const elLightboxDoc = document.getElementById("lightbox-doc");
+const elLightboxStage = document.getElementById("lightbox-stage");
 const elLightboxFav = document.getElementById("lightbox-fav");
 const elLightboxCrate = document.getElementById("lightbox-crate");
 const elLightboxPrev = document.getElementById("lightbox-prev");
@@ -62,16 +62,13 @@ const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
 const elLightboxDownload = document.getElementById("lightbox-download");
-const elLightboxAudio = document.getElementById("lightbox-audio");
-const elLightboxAudioEl = document.getElementById("lightbox-audio-el");
-const elLightboxAudioWave = document.getElementById("lightbox-audio-wave");
-const elLightboxAudioText = document.getElementById("lightbox-audio-transcript");
 
 let lightboxImg = null;
 let lightboxList = [];
 let lightboxIndex = -1;
 let panelOpen = false;
 let elDetOverlay = null; // object-detection box layer over the lightbox image
+let currentHandle = null; // the mounted detail renderer's handle (detail-view.js)
 let reasoningReq = 0; // stale-response guard for the reasoning fetch
 let currentInstIndex = 0; // which instance is shown in the main view (multi-instance entities)
 
@@ -149,14 +146,18 @@ function objectFieldsOf(fields) {
   return out;
 }
 // Size + place the overlay over the current displayed image; hidden when there's
-// nothing to show or the image isn't ready (repositioned on load/resize/toggle).
+// nothing to show or the stage isn't showing a ready image (repositioned on
+// load/resize/toggle). The image element belongs to whichever detail renderer is
+// mounted — an image-bearing renderer exposes it as handle.imgEl; any other
+// renderer (doc, audio) has none and the overlay stays hidden.
 function positionDetOverlay() {
   if (!elDetOverlay) return;
-  if (!elDetOverlay.childElementCount || elLightboxImg.hidden || !elLightboxImg.naturalWidth) {
+  const img = currentHandle?.imgEl;
+  if (!elDetOverlay.childElementCount || !img?.isConnected || !img.naturalWidth) {
     elDetOverlay.hidden = true;
     return;
   }
-  const r = displayedContentRect(elLightboxImg);
+  const r = displayedContentRect(img);
   const host = elLightbox.getBoundingClientRect();
   elDetOverlay.style.left = (r.x - host.left) + "px";
   elDetOverlay.style.top = (r.y - host.top) + "px";
@@ -672,96 +673,18 @@ function preloadFull(i) {
   }
 }
 
-// Detach the audio player: pause, drop its source, reset — so it stops playing
-// and buffering when you navigate away or close. Safe to call when already hidden.
-function hideAudio() {
-  if (elLightboxAudio.hidden) return;
-  elLightboxAudioEl.pause();
-  elLightboxAudioEl.removeAttribute("src");
-  elLightboxAudioEl.load();
-  elLightboxAudioWave.removeAttribute("src");
-  elLightboxAudioText.hidden = true;
-  elLightboxAudioText.textContent = "";
-  elLightboxAudio.hidden = true;
-}
-
-// The transcript replaces the waveform in the audio view when there's speech.
-// Fetched per open (independent of the side panel); the waveform stays as the
-// fallback while a fresh upload is still transcribing (null) or for a clip with
-// no discernible speech (""). Tokened so fast navigation can't paint a stale one.
-let audioTextReq = 0;
-async function showAudioText(f) {
-  const token = ++audioTextReq;
-  const showWave = () => {
-    elLightboxAudioText.hidden = true;
-    if (f.w && f.h) { elLightboxAudioWave.src = thumbUrl(f.name); elLightboxAudioWave.hidden = false; }
-    else { elLightboxAudioWave.removeAttribute("src"); elLightboxAudioWave.hidden = true; }
-  };
-  showWave(); // immediate fallback while the transcript loads
-  try {
-    const r = await fetch(`/api/instances/${f.id}/transcript`);
-    if (token !== audioTextReq) return; // superseded by a newer open
-    const { transcript } = r.ok ? await r.json() : {};
-    if (transcript && transcript.trim()) {
-      elLightboxAudioWave.hidden = true;
-      elLightboxAudioWave.removeAttribute("src");
-      elLightboxAudioText.textContent = transcript;
-      elLightboxAudioText.hidden = false;
-    }
-  } catch { /* keep the waveform fallback */ }
-}
-
 // Render a file-carrying thing (an instance, or the entity's face fields as
-// a fallback) into the main lightbox view. Documents render inline in a
-// same-origin frame; the frame paints progressively, so no loading spinner.
-// docx can't render in a frame; its formatted-HTML sidecar can.
+// a fallback) into the main lightbox view, by mounting whichever detail
+// renderer claims it (detail-view.js) into the stage. The previous renderer's
+// unmount releases its resources first — playback, listeners, its nodes — so
+// navigating away from an audio clip stops it, exactly as before the registry.
 function showMedia(f) {
   clearDetOverlay(); // any prior instance's boxes; redrawn by renderPanel for images
-  // Audio: the waveform face (when it rendered) above a native <audio> player;
-  // no waveform → just the player (the card badge covered the visual).
-  if (f.kind === "audio") {
-    elLightboxImg.onload = null;
-    elLightboxImg.removeAttribute("src");
-    elLightboxImg.hidden = true;
-    if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
-    elLightbox.classList.remove("loading");
-    const url = fullUrl(f.name);
-    if (elLightboxAudioEl.getAttribute("src") !== url) elLightboxAudioEl.src = url;
-    elLightboxAudio.hidden = false;
-    // Transcript replaces the waveform when there's speech; the waveform is the
-    // fallback while still transcribing or when the clip has no speech.
-    showAudioText(f);
-    // Keep keyboard nav (arrows/Escape) on the lightbox, not the player.
-    elLightbox.focus({ preventScroll: true });
-    return;
-  }
-  hideAudio();
-  const isDoc = f.kind && f.kind !== "image";
-  if (isDoc) {
-    elLightboxImg.onload = null;
-    elLightboxImg.removeAttribute("src");
-    elLightboxImg.hidden = true;
-    elLightbox.classList.remove("loading");
-    const url = fullUrl(f.kind === "docx" ? f.name + ".html" : f.name);
-    if (elLightboxDoc.getAttribute("src") !== url) elLightboxDoc.src = url;
-    elLightboxDoc.hidden = false;
-    // The embedded viewer grabs keyboard focus; keep it on the lightbox so
-    // arrows/Escape work. Clicking into the document refocuses the viewer —
-    // fine, that's how you scroll it.
-    elLightbox.focus({ preventScroll: true });
-  } else {
-    if (!elLightboxDoc.hidden) { elLightboxDoc.hidden = true; elLightboxDoc.removeAttribute("src"); }
-    elLightboxImg.hidden = false;
-    elLightboxImg.style.opacity = "0";
-    elLightbox.classList.add("loading");
-    elLightboxImg.onload = () => { elLightbox.classList.remove("loading"); elLightboxImg.style.opacity = "1"; positionDetOverlay(); };
-    elLightboxImg.src = fullUrl(f.name);
-    if (elLightboxImg.complete && elLightboxImg.naturalWidth > 0) {
-      elLightbox.classList.remove("loading");
-      elLightboxImg.style.opacity = "1";
-    }
-    elLightboxImg.alt = f.tags?.length ? f.tags.join(", ") : f.name;
-  }
+  currentHandle?.unmount?.();
+  currentHandle = mountDetail(elLightboxStage, f, lightboxImg, {
+    root: elLightbox,
+    onImageLayout: positionDetOverlay,
+  });
 }
 
 // Switch the main lightbox view to another instance of the current entity
@@ -835,13 +758,9 @@ export function closeLightbox() {
   elLightbox.hidden = true;
   document.body.style.overflow = "";
   elLightbox.classList.remove("loading");
-  elLightboxImg.onload = null;
-  elLightboxImg.src = "";
-  elLightboxImg.alt = "";
-  elLightboxImg.hidden = false;
-  elLightboxDoc.hidden = true;
-  elLightboxDoc.removeAttribute("src");
-  hideAudio();
+  currentHandle?.unmount?.();
+  currentHandle = null;
+  elLightboxStage.replaceChildren();
   lightboxImg = null;
   lightboxList = [];
   lightboxIndex = -1;
@@ -893,8 +812,6 @@ export function initLightbox() {
     setPanel(!panelOpen);
   });
   elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
-  // Player clicks (play/scrub/volume) must not bubble to the lightbox close.
-  elLightboxAudio.addEventListener("click", (e) => e.stopPropagation());
   elLightboxDownload.innerHTML = ICONS.download;
   document.getElementById("lightbox-panel-close").addEventListener("click", () => setPanel(false));
 
@@ -903,12 +820,6 @@ export function initLightbox() {
     if (e.key === "Escape") panelOpen ? setPanel(false) : closeLightbox();
     else if (e.key === "ArrowLeft") navLightbox(-1);
     else if (e.key === "ArrowRight") navLightbox(1);
-  });
-
-  // The document viewer steals focus as it loads; take it back so keyboard
-  // nav keeps working right after opening.
-  elLightboxDoc.addEventListener("load", () => {
-    if (!elLightbox.hidden && !elLightboxDoc.hidden) elLightbox.focus({ preventScroll: true });
   });
 
   // Crates module dispatches this when a crate membership changes while the lightbox is open.

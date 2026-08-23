@@ -5,6 +5,10 @@
 // (crypto/index.js) derives identity and stamps provenance, so the provider
 // stays agnostic about its own registry name.
 import { providerSignal, num } from "../runtime.js";
+import {
+  unsupported, createTtlCache, ytdDays, encodeArea, encodeCandles,
+  CHART_TTL_LIVE, CHART_TTL_SETTLED,
+} from "../chart-series.js";
 import { createQuoteCache, pickFields } from "./quote-cache.js";
 
 const BASE = "https://api.coingecko.com/api/v3";
@@ -187,24 +191,86 @@ export async function fetchFields(id, keys, ctx = {}) {
 // Price history for the chart face (slice 5d): the market_chart endpoint, whose
 // granularity CoinGecko picks from the day span (≤1d = 5-min, ≤90d = hourly,
 // else daily). Returns [{ t, price }]; the crypto connector's chart producer
-// downsamples + renders. CoinMarketCap has no free equivalent, so it omits this
-// export and the face falls back to the tile while CMC is active.
+// downsamples + renders. (CoinMarketCap serves history too these days — its
+// Basic tier gained historical quotes — so the face renders under either
+// backend; the `requires` gate matters for plugin providers.)
 // The free/demo tier caps historical range at 365 days (366+ → 401), so only
 // these periods are offered and the day count is clamped defensively.
 const DEMO_MAX_DAYS = 365;
 const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 };
 export const periods = Object.keys(PERIOD_DAYS);
 
-export async function history(id, period, { apiKey, pace } = {}) {
-  const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
+// One market_chart fetch, the raw [t, price] pairs — history() (the face) and
+// chart()'s area flavour differ only in the shape they map these into.
+async function marketChartPrices(id, days, { apiKey, pace } = {}) {
   await pace?.();
   const r = await fetch(
     `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
     { headers: cgHeaders(apiKey), signal: providerSignal() }
   );
   if (!r.ok) throw cgFail(r, "history");
-  const d = await r.json();
-  return (d.prices || []).map(([t, price]) => ({ t, price }));
+  return (await r.json()).prices || [];
+}
+
+export async function history(id, period, ctx = {}) {
+  const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
+  return (await marketChartPrices(id, days, ctx)).map(([t, price]) => ({ t, price }));
+}
+
+// --- live chart (the lightbox detail view; planning/lightbox-live-chart-plan.md) ---
+// The domain manifest declares the (range, kind) surface; this maps it onto two
+// endpoints: area → market_chart (exact day counts, fine granularity), candles
+// → /ohlc, whose `days` is an ENUM {1,7,14,30,90,180,365} (verified 2026-08-23;
+// non-enum values 400). The enum never shrinks the offer: a non-enum window
+// fetches the smallest covering enum and TRIMS to the window, so every ≤365d
+// range serves both kinds. Past the host's 365-day cap this refuses
+// synchronously — zero HTTP — which also means this module needs no HTTP gate
+// recognition at all: every request it makes is legal by construction. (That
+// matters: the >365d gate manifests as a 401, and withRetry retries 401s.)
+//
+// Granularity → encoding (the series invariants in ../chart-series.js):
+// market_chart serves 5-min at 1 day, hourly through 90, daily above — daily
+// series END WITH A LIVE TAIL point whose UTC date duplicates today's midnight
+// point (verified 2026-08-23), which dedupeAscending's keep-last collapses.
+// /ohlc serves 30-min candles at 1 day, 4-hour through 30, 4-day above.
+const CHART_ENUM_DAYS = [1, 7, 14, 30, 90, 180, 365];
+const CHART_RANGE_DAYS = { "1d": 1, "5d": 5, "1m": 30, "6m": 180, "1y": 365 };
+const chartCache = createTtlCache(); // `${id}|${range}|${kind}` -> encoded series
+
+export async function chart(id, { range, kind } = {}, { apiKey, pace } = {}) {
+  const wanted = CHART_RANGE_DAYS[range] ?? (range === "ytd" ? ytdDays() : null);
+  if (wanted == null || wanted > DEMO_MAX_DAYS)
+    throw unsupported("CoinGecko: history past 365 days isn't available on this API tier");
+
+  const key = `${id}|${range}|${kind}`;
+  const cached = chartCache.get(key);
+  if (cached) return cached;
+
+  let data;
+  if (kind === "candles") {
+    // The guard above holds wanted ≤ 365, so a covering enum entry always exists.
+    const days = CHART_ENUM_DAYS.find((d) => d >= wanted);
+    await pace?.();
+    const r = await fetch(
+      `${BASE}/coins/${encodeURIComponent(id)}/ohlc?vs_currency=usd&days=${days}`,
+      { headers: cgHeaders(apiKey), signal: providerSignal() }
+    );
+    if (!r.ok) throw cgFail(r, "ohlc");
+    const cutoff = Date.now() - wanted * 86400000; // covering enum → trim to the asked window
+    const bars = ((await r.json()) || [])
+      .map(([t, o, h, l, c]) => ({ t, o: num(o), h: num(h), l: num(l), c: num(c) }))
+      .filter((b) => Number.isFinite(b.t) && b.t >= cutoff &&
+        b.o != null && b.h != null && b.l != null && b.c != null);
+    data = encodeCandles(bars, { daily: days > 30, tz: "local" }); // 4-day candles above 30
+  } else {
+    const prices = (await marketChartPrices(id, wanted, { apiKey, pace }))
+      .map(([t, p]) => ({ t, p: num(p) }))
+      .filter((x) => Number.isFinite(x.t) && x.p != null);
+    data = encodeArea(prices, { daily: wanted > 90, tz: "local" }); // daily granularity above 90
+  }
+
+  chartCache.put(key, data, range === "1d" ? CHART_TTL_LIVE : CHART_TTL_SETTLED);
+  return data;
 }
 
 // Browse-and-add (the ingestion modal): a sorted, paginated page of coins with
@@ -327,8 +393,14 @@ export async function testConnection({ apiKey, pace } = {}) {
   return true;
 }
 
-// Test seam only (house convention: provider-pacing's _resetBuckets).
+// Test seams only (house convention: provider-pacing's _resetBuckets).
 export function _resetQuoteCache() {
   quotes.reset();
   categoryCache = { at: 0, options: null };
+}
+export function _resetChartCache() {
+  chartCache.reset();
+}
+export function _ageChartCache(ms) {
+  chartCache.age(ms);
 }

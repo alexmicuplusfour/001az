@@ -57,6 +57,8 @@ import {
   NEW_BOARD_DEFAULTS,
   listBoards,
   getBoard,
+  getEntity,
+  entityVehiclePayload,
   updateBoard,
   withTx,
   BOARD_PIN_COLS,
@@ -2695,6 +2697,51 @@ app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => 
     }
   }
   res.json({ added, skipped });
+}));
+
+// The lightbox detail view's live chart: one entity's price series from the
+// active provider, shaped per the domain's chart vocabulary (manifest.chart).
+// Range/kind are CLAMPED, never rejected — the client's stored pref may be
+// another domain's — and the response's ranges/kinds are the deployment's
+// PROVEN offer (the runtime's learned-availability model), which is exactly
+// what the client renders as controls: a learned refusal reshapes the UI on
+// the next fetch instead of stranding a button that errors forever.
+//
+// 404 = nothing can serve (not a connector board, provider without chart(),
+// empty offer, unresolvable id) → the client keeps the static face. 502 =
+// transient provider failure, message verbatim (the connector-list pattern).
+// Empty-but-served series pass through as 200: absence of data is data, and
+// teaches the learned model nothing. No route-level rate limiter: provider
+// pacing + the providers' short-TTL caches are the guard, per connector-list.
+app.get("/api/items/:id/chart", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  // Independent reads, and this path runs on every lightbox open and every
+  // range flip — one round-trip of latency, not three.
+  const [board, entity, payload] = await Promise.all([
+    getBoard(db, req.entityBoardId),
+    getEntity(db, req.entityId),
+    entityVehiclePayload(db, req.entityId),
+  ]);
+  const connectorName = board?.mapping?.input?.connector;
+  const connector = connectorName ? getConnector(connectorName) : null;
+  if (!connector) return res.status(404).json({ error: "not a connector item" });
+  if (!entity) return res.status(404).json({ error: "not found" });
+
+  let series;
+  try {
+    series = await connector.chartSeries(db, entity, payload?.source || null, {
+      range: String(req.query.range || ""),
+      kind: String(req.query.kind || ""),
+    });
+  } catch (err) {
+    console.error(`chart series error (${connectorName}/#${req.entityId}):`, err.message);
+    return res.status(502).json({ error: err.message });
+  }
+  if (!series) return res.status(404).json({ error: "no live chart for this item" });
+  res.json({
+    symbol: entity.symbol || null,
+    name: entity.display_name || entity.symbol || entity.identity,
+    ...series,
+  });
 }));
 
 // The narrowing filters this board's browse modal can offer right now, with

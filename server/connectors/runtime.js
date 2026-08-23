@@ -8,9 +8,11 @@
 // Settings are namespaced by the connector's own name, so domains never collide:
 //   <name>_provider           active provider (unset/unknown → defaultProvider)
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
+import nodeCrypto from "node:crypto";
 import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
 import { getFaceProducer } from "../faces/index.js";
 import { acquire, throttled } from "../provider-pacing.js";
+import { createTtlCache, CHART_LEARN_TTL } from "./chart-series.js";
 import { liveFields, nextRefreshAt } from "./schedule.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
@@ -337,6 +339,13 @@ export async function resolveBySymbol(db, conn, symbol) {
   return hit ? hit.id : null;
 }
 
+// The provider handle an entity should be fetched under RIGHT NOW: the stamped
+// source id when it names the active backend, else re-resolved by ticker.
+// Null when the symbol can't be found either. Refresh, faces and charts all
+// make this same call — one spelling for the three of them.
+const resolveProviderId = (db, conn, activeName, source, symbol) =>
+  activeName === source?.provider ? source.id : resolveBySymbol(db, conn, symbol);
+
 // Batch-warm the active provider's quote cache for a set of provider ids (a
 // provider declares the capability by exporting prefetch(ids, ctx)). Purely an
 // economics move: whatever reads those ids next hits the warm cache, so a
@@ -393,9 +402,8 @@ export async function refresh(db, conn, entity, inst, mapping, now = Date.now())
   const due = live.filter((f) => now - (entity.fields?.[f.key]?.at ?? 0) >= f.every * 60000);
   if (!due.length) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
 
-  const src = inst.payload?.source;
   const active = await activeProvider(db, conn);
-  const id = active.name === src?.provider ? src.id : await resolveBySymbol(db, conn, entity.symbol);
+  const id = await resolveProviderId(db, conn, active.name, inst.payload?.source, entity.symbol);
   if (id == null) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
 
   const dueKeys = due.map((f) => f.key);
@@ -433,7 +441,7 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
   if (!producer) return null;
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.history) return null; // provider can't supply history → fall back
-  const id = name === source?.provider ? source.id : await resolveBySymbol(db, conn, entity.symbol);
+  const id = await resolveProviderId(db, conn, name, source, entity.symbol);
   if (id == null) return null;
   const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, ctxFor(name, provider, apiKey)));
   if (!series || !series.length) return null;
@@ -442,3 +450,103 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
 
 // faceSchedule / entityRefreshAt — the face's half of the scheduling rules —
 // are in ./schedule.js with their field-side siblings, re-exported above.
+
+// --- live chart (the lightbox detail view; planning/lightbox-live-chart-plan.md) ---
+//
+// The domain manifest declares the FULL (range, kind) surface; a provider
+// serves a pair or refuses it (`e.unsupported` — a plan gate its API answered,
+// or a mapping it doesn't have). What a deployment's key turned out not to
+// serve is LEARNED here, per pair, so the offer converges to the truth with no
+// tier knowledge anywhere: the response's ranges/kinds are the controls the
+// client renders, identical for every user.
+//
+// The learned entries are keyed `domain:provider:keyFingerprint|range|kind` —
+// a key swap lands in a fresh bucket instantly (an admin pasting a paid key
+// must not wait out a TTL), the domain prefix keeps same-named plugin
+// providers apart, and the TTL (CHART_LEARN_TTL, shared with the providers'
+// ladder-rung memories) covers the rarer same-key plan upgrade. In-memory on
+// purpose: it self-heals on restart, and there is no setting to go stale.
+const chartLearned = createTtlCache(1000);
+
+const keyFingerprint = (apiKey) =>
+  apiKey ? nodeCrypto.createHash("sha256").update(String(apiKey)).digest("hex").slice(0, 8) : "nokey";
+
+const isLearned = (bucket, range, kind) => chartLearned.get(`${bucket}|${range}|${kind}`) != null;
+const learn = (bucket, range, kind) => chartLearned.put(`${bucket}|${range}|${kind}`, true, CHART_LEARN_TTL);
+
+// Sentinel the marker dance below returns in place of an unsupported throw.
+const REFUSED = Symbol("chart pair refused");
+
+// One entity's chart series under the active provider, clamped — never
+// rejected — to what the deployment has proven servable. Returns null when
+// nothing can serve (no capability, no vocabulary, empty offer, unresolvable
+// id): the route answers 404 and the client keeps the static face.
+export async function chartSeries(db, conn, entity, source, { range, kind } = {}) {
+  const { name, provider, apiKey } = await activeProvider(db, conn);
+  const decl = conn.manifest?.chart;
+  if (!provider.chart || !decl?.ranges?.length || !decl?.kinds?.length) return null;
+
+  const bucket = `${conn.name}:${name}:${keyFingerprint(apiKey)}`;
+  const alive = (r, k) => !isLearned(bucket, r, k);
+  const kindsFor = (r) => decl.kinds.filter((k) => alive(r, k));
+
+  // Resolved once — a switched-provider entity must not pay a metered
+  // resolveBySymbol search per discovery attempt.
+  const id = await resolveProviderId(db, conn, name, source, entity.symbol);
+  if (id == null) return null;
+
+  // The discovery loop. A refusal is an ANSWER, not an error: learn the exact
+  // pair asked, then go around — the clamps route the same request past what
+  // was just learned (a dead pair falls to the range's other kind, or to the
+  // default range). Bounded so a fully dead provider costs a bounded probe on
+  // one request and finishes discovery lazily on later clicks; exhaustion →
+  // null → 404 → the static face. `unavailable` keeps the FIRST refused pair,
+  // so the client can say "1d isn't available" even when the fallback also
+  // degraded a step.
+  //
+  // Range and kind are re-derived from the ORIGINAL request each iteration,
+  // never carried over mutated: a probe that had to borrow the range's other
+  // kind (5y area dead → try 5y candles) must not strand the user's kind on
+  // the final answer — once the range falls back to one that serves the asked
+  // kind, the asked kind wins again (live-caught: "5y area" served 1y CANDLES).
+  const wantRange = range;
+  const wantKind = kind;
+  let unavailable = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ranges = decl.ranges.filter((r) => kindsFor(r).length);
+    if (!ranges.length) return null;
+    range = ranges.includes(wantRange) ? wantRange
+      : ranges.includes(decl.defaultRange) ? decl.defaultRange
+      : ranges[ranges.length - 1];
+    const kinds = kindsFor(range);
+    kind = kinds.includes(wantKind) ? wantKind : kinds[0];
+
+    // The marker dance: an unsupported refusal is converted to a RETURN inside
+    // the tracked callback — the provider answered coherently, and that IS a
+    // healthy outcome, so the plugin ledger records a heal, never an error —
+    // then unwrapped here. Transient throws pass through untouched: ledgered
+    // as failures, surfaced by the route as a readable 502. Promise.resolve()
+    // first, so even a plugin provider that throws SYNCHRONOUSLY lands in the
+    // catch instead of skipping the dance.
+    const out = await tracked(db, conn, name, provider, () =>
+      Promise.resolve()
+        .then(() => provider.chart(id, { range, kind }, ctxFor(name, provider, apiKey)))
+        .catch((e) => { if (e?.unsupported) return REFUSED; throw e; }));
+    if (out !== REFUSED) {
+      return out && { ...out, range, ranges, kind, kinds, provider: name,
+                      attribution: provider.attribution || null,
+                      ...(unavailable ? { unavailable } : {}) };
+    }
+    learn(bucket, range, kind);
+    unavailable ??= { range, kind };
+  }
+  return null;
+}
+
+// Test seams only (house convention: provider-pacing's _resetBuckets).
+export function _resetChartLearned() {
+  chartLearned.reset();
+}
+export function _ageChartLearned(ms) {
+  chartLearned.age(ms);
+}

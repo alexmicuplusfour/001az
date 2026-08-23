@@ -46,6 +46,16 @@ export const manifest = {
   // The identity slot in this domain's own words — the mapping pane's locked
   // identity row reads it, so users meet "Coin", never "connector".
   identity: { label: "Coin", blurb: "each coin is its own card" },
+  // The lightbox live chart's control surface (planning/lightbox-live-chart-
+  // plan.md) — the same full row stocks declares, on purpose: what a backend
+  // or key can't serve (CoinGecko's demo host caps history at 365 days, so
+  // 5y/max refuse there) is discovered from the provider's refusal at request
+  // time and pruned by the runtime's learned model, never declared away here.
+  chart: {
+    ranges: ["1d", "5d", "1m", "6m", "ytd", "1y", "5y", "max"],
+    kinds: ["area", "candles"],
+    defaultRange: "1y", // matches the face default period — visual continuity
+  },
   template: {
     input: { connector: "crypto" },
     identity: { source: "connector" },

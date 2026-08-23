@@ -28,6 +28,16 @@ export const manifest = {
   ],
   // The identity slot in this domain's own words (see crypto's note).
   identity: { label: "Ticker", blurb: "each stock is its own card" },
+  // The lightbox live chart's control surface (planning/lightbox-live-chart-
+  // plan.md): the full Google-parity row, deliberately NOT shrunk to any
+  // provider's tier. What a deployment's key can't serve is discovered from
+  // the provider's own refusal at request time (runtime.chartSeries' learned
+  // model) and drops out of the offer — never declared away here.
+  chart: {
+    ranges: ["1d", "5d", "1m", "6m", "ytd", "1y", "5y", "max"],
+    kinds: ["area", "candles"],
+    defaultRange: "1y", // matches the face default period — visual continuity
+  },
   template: {
     input: { connector: "stocks" },
     identity: { source: "connector" },

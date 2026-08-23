@@ -71,6 +71,13 @@ a live connector.
   field-value snapshots, an "updated *N*m ago" stamp, and generated card
   *faces* (e.g. price-history charts). The runtime is domain-agnostic — a new
   domain is a single directory under `server/connectors/`, no runtime edits.
+- **Live charts** — opening a chart-faced entity shows an interactive price
+  chart (TradingView lightweight-charts, vendored): area ↔ candles, a
+  `1D…MAX` range row, crosshair readout. Provider- and tier-agnostic by
+  construction — what a backend or API plan can't serve is *discovered from
+  its own refusal*, degrades gracefully (coarser interval → nearest range →
+  the static face), and drops out of the controls for every user until the
+  plan changes; nothing is configured and the client hardcodes no provider.
 - **Semantic search** — embedding-backed search across the collection,
   alongside plain text search.
 - **Faceted filtering** — within-facet OR, across-facet AND, with live counts

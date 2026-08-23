@@ -18,6 +18,11 @@
 // quote. Symbols outside the venue list are reachable through the list()
 // search bridge, each served by one quote.
 import { providerSignal, providerBudgetMs, num } from "../runtime.js";
+import {
+  unsupported, dedupeAscending, strideArea, aggregateCandles, utcDate,
+  createTtlCache, walkLadder, encodeArea, encodeCandles,
+  CHART_TTL_LIVE, CHART_TTL_SETTLED,
+} from "../chart-series.js";
 
 const BASE = "https://financialmodelingprep.com/stable";
 const PROFILE_TTL = 6 * 60 * 60 * 1000;
@@ -635,6 +640,126 @@ export async function history(id, period, { apiKey, pace } = {}) {
     .sort((a, b) => a.t - b.t);
 }
 
+// --- live chart (the lightbox detail view; planning/lightbox-live-chart-plan.md) ---
+// The domain manifest declares the (range, kind) surface; this maps each range
+// onto FMP's endpoints. Both intraday bars and EOD rows carry OHLC — the
+// history() above throws everything but close away — so ONE cached fetch
+// serves both kinds per range and a kind flip is zero HTTP.
+//
+// Plan gates: FMP answers "not on your plan" as HTTP 402/403 (429 is rate,
+// 401 is a bad key — both stay transient and must NOT read as capability).
+// Intraday rides a ladder — finest interval first, coarser on a gate — and
+// only a fully gated ladder refuses the range as `unsupported`; the rung that
+// answered is remembered (~6 h) so later opens skip the dead probes.
+// `sessions`: how many distinct trading dates the range means — the fetch spans
+// a generous calendar window (weekends, holidays) and keeps the LAST N dates.
+const CHART_INTRADAY = {
+  "1d": { sessions: 1, windowDays: 7, ladder: ["5min", "30min", "1hour"] },
+  "5d": { sessions: 5, windowDays: 14, ladder: ["30min", "1hour"] },
+};
+// Days back per EOD range; ytd/max are computed per call. An unmapped range
+// REFUSES below rather than serving some other window under its label — the
+// provider contract's "mapping it doesn't have", same as the siblings.
+const CHART_EOD_DAYS = { "1m": 31, "6m": 183, "1y": 366, "5y": 1827 };
+
+const chartCache = createTtlCache(); // `${symbol}|${range}` -> { bars, encoded }
+const chartRung = createTtlCache(8); // range -> the ladder's winning rung index
+
+const isPlanGate = (e) => e?.status === 402 || e?.status === 403;
+
+// Intraday bars for the last N sessions, ascending, exchange-local wall clock
+// encoded AS IF UTC (the bars arrive as "YYYY-MM-DD HH:mm:ss" US/Eastern with
+// no offset; parsing them with a Z suffix means UTC formatting downstream
+// displays exchange time — what finance charts show).
+async function intradayBars(symbol, range, apiKey, pace) {
+  const { sessions, windowDays, ladder } = CHART_INTRADAY[range];
+  const params = {
+    symbol,
+    from: utcDate(Date.now() - windowDays * 86400000),
+    to: utcDate(Date.now()),
+  };
+  const won = await walkLadder(ladder, chartRung, range, isPlanGate, (interval) =>
+    fmp(`historical-chart/${interval}`, params, apiKey, { pace }));
+  if (!won) throw unsupported("Financial Modeling Prep: intraday charts aren't included in this plan");
+  const rows = won.value;
+  const bars = dedupeAscending(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => ({
+        t: Date.parse(`${String(row.date).replace(" ", "T")}Z`),
+        o: num(row.open), h: num(row.high), l: num(row.low), c: num(row.close),
+        day: String(row.date).slice(0, 10),
+      }))
+      .filter((b) => Number.isFinite(b.t) && b.o != null && b.h != null && b.l != null && b.c != null),
+    "t"
+  );
+  const days = [...new Set(bars.map((b) => b.day))].sort().slice(-sessions);
+  const keep = new Set(days);
+  return bars.filter((b) => keep.has(b.day));
+}
+
+// Daily OHLC rows since `from`, ascending by date string.
+async function eodBars(symbol, from, apiKey, pace) {
+  let rows;
+  try {
+    rows = await fmp("historical-price-eod/full", { symbol, from, to: utcDate(Date.now()) }, apiKey, { pace });
+  } catch (e) {
+    if (isPlanGate(e)) throw unsupported("Financial Modeling Prep: historical prices aren't included in this plan");
+    throw e;
+  }
+  return dedupeAscending(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => ({ d: String(row.date), o: num(row.open), h: num(row.high), l: num(row.low), c: num(row.close) }))
+      .filter((b) => /^\d{4}-\d{2}-\d{2}$/.test(b.d) && b.o != null && b.h != null && b.l != null && b.c != null),
+    "d"
+  );
+}
+
+export async function chart(id, { range, kind } = {}, { apiKey, pace } = {}) {
+  const symbol = String(id || "").trim().toUpperCase();
+  if (!symbol) throw fail("symbol is required");
+
+  const intraday = !!CHART_INTRADAY[range];
+  const key = `${symbol}|${range}`;
+  let entry = chartCache.get(key);
+  if (!entry) {
+    let bars;
+    if (intraday) {
+      bars = await intradayBars(symbol, range, apiKey, pace);
+    } else {
+      const days = CHART_EOD_DAYS[range];
+      const from =
+        range === "ytd" ? `${new Date().getUTCFullYear()}-01-01`
+        : range === "max" ? "1900-01-01"
+        : days != null ? utcDate(Date.now() - days * 86400000)
+        : null;
+      if (from == null) throw unsupported(`Financial Modeling Prep: no ${range} chart mapping`);
+      bars = await eodBars(symbol, from, apiKey, pace);
+    }
+    // The raw bars serve BOTH kinds from the one fetch; each kind's encode is
+    // memoized on the entry so a cache hit is a lookup, not a re-shape (the
+    // `max` range is ~10k rows to re-aggregate otherwise).
+    entry = { bars, encoded: {} };
+    chartCache.put(key, entry, intraday ? CHART_TTL_LIVE : CHART_TTL_SETTLED);
+  }
+
+  const flavor = kind === "candles" ? "candles" : "area";
+  return (entry.encoded[flavor] ??= intraday
+    // Exchange clock encoded as UTC — format with UTC methods downstream.
+    ? (flavor === "candles"
+        ? encodeCandles(entry.bars, { daily: false, tz: "utc" })
+        : encodeArea(entry.bars.map(({ t, c }) => ({ t, p: c })), { daily: false, tz: "utc" }))
+    // EOD rows are date-native (no epochs), so this is the one caller that
+    // applies the bounded-size invariants directly instead of via the encoders.
+    : {
+        time: "daily",
+        tz: "utc",
+        points:
+          flavor === "candles"
+            ? aggregateCandles(entry.bars)
+            : strideArea(entry.bars.map(({ d, c }) => ({ d, p: c }))),
+      });
+}
+
 // Browse filter vocabularies (runtime.browseFilters). Sector and exchange are
 // frozen in the manifest — 11 sectors and 3 venues that don't move. Industry
 // is the fine cut under them (~150 values), which FMP publishes, so it's
@@ -689,4 +814,12 @@ export function _resetScreenerCache() {
 }
 export function _ageScreenerCache(ms) {
   screenerCache.at -= ms;
+}
+export function _resetChartCache() {
+  chartCache.reset();
+  chartRung.reset();
+}
+export function _ageChartCache(ms) {
+  chartCache.age(ms);
+  chartRung.age(ms);
 }
