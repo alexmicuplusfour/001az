@@ -406,7 +406,7 @@ test("migration 0018: carries in-use connectors over on upgrade", async () => {
   // A crypto board (its default is in use) + a stored FMP key (adopted).
   const boardId = await seedBoard(db, "carry-crypto");
   await updateBoard(db, boardId, {
-    mapping: { input: { connector: "crypto" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "crypto" }, identity: { source: "connector" }, fields: [] },
   });
   await setSetting(db, "stocks_key_financialmodelingprep", "fmp-carry");
   // Reset to the post-0017 "available" posture so 0018's restore is observable.

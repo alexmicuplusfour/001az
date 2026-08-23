@@ -80,7 +80,7 @@ test("produceFace: gated on the provider having history and a known producer", a
 // ── pure: entityRefreshAt keeps a face-only board on the sweep ───────────────
 
 test("entityRefreshAt: a live face schedules at cadence even before/without a render", () => {
-  const mapping = { fields: [], face: { from: "connector", producer: "chart", live: true, every: 5 } };
+  const mapping = { fields: [], face: { source: "connector", producer: "chart", refresh: { every: 5 } } };
   // faceAt null (render unavailable / not yet done) → retry one cadence out,
   // NOT null — otherwise a face-only board falls off the sweep entirely.
   assert.equal(runtime.entityRefreshAt({}, null, mapping, 1000), 1000 + 5 * 60000);
@@ -94,15 +94,15 @@ test("entityRefreshAt: a cadence-Off face is still owed its FIRST render", () =>
   // The default finance face: a chart, no liveness. It renders once — but that
   // once has to happen even for an entity that predates the face (the face leg
   // only runs at add time), so the schedule can't just drop the term.
-  const mapping = { fields: [], face: { from: "connector", producer: "chart", period: "1y" } };
+  const mapping = { fields: [], face: { source: "connector", producer: "chart", period: "1y" } };
   assert.equal(runtime.entityRefreshAt({}, null, mapping, 1000), 1000 + 60 * 60000); // unrendered → retry floor
   assert.equal(runtime.entityRefreshAt({}, 2000, mapping, 9000), null);              // rendered → off the sweep
 
   // faceSchedule tells the two apart (and ignores faces that aren't rendered).
   assert.deepEqual(runtime.faceSchedule(mapping), { first: true });
-  assert.deepEqual(runtime.faceSchedule({ face: { from: "connector", live: true, every: 5 } }), { every: 5 });
-  assert.equal(runtime.faceSchedule({ face: { from: "file", prefer: "image" } }), null);
-  assert.equal(runtime.faceSchedule({ face: { from: "raw" } }), null);
+  assert.deepEqual(runtime.faceSchedule({ face: { source: "connector", refresh: { every: 5 } } }), { every: 5 });
+  assert.equal(runtime.faceSchedule({ face: { source: "file", prefer: "image" } }), null);
+  assert.equal(runtime.faceSchedule({ face: null }), null);
   assert.equal(runtime.faceSchedule({}), null);
 });
 
@@ -112,7 +112,7 @@ test("the crypto/stocks templates ship the chart face, and the server accepts th
   const { json: connectors } = await req(base, "GET", "/api/connectors", { sid: admin.sid });
   for (const name of ["crypto", "stocks"]) {
     const c = connectors.find((x) => x.name === name);
-    assert.deepEqual(c.template.face, { from: "connector", producer: "chart", period: "1y" },
+    assert.deepEqual(c.template.face, { source: "connector", producer: "chart", period: "1y" },
       `the ${name} template faces the chart — the symbol tile is a fallback, never a default`);
     const chart = c.faces.find((f) => f.name === "chart");
     assert.ok(chart?.periods.includes("1y"), `${name} declares the period its template pins`);
@@ -140,9 +140,9 @@ async function faceBoard(name) {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name } });
   const mapping = {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
-    face: { from: "connector", producer: "chart", period: "1y" },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }],
+    identity: { source: "connector" },
+    face: { source: "connector", producer: "chart", period: "1y" },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
   };
   const r = await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
   assert.equal(r.status, 200);
@@ -202,9 +202,9 @@ test("generateFace: a provider without history() leaves the tile", async () => {
 test("a face render error does not block the field refresh (prices keep flowing)", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-isolate" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { from: "connector" },
-    face: { from: "connector", producer: "chart", period: "1y", live: true, every: 1 },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price", live: true, every: 1 }],
+    input: { connector: "crypto" }, identity: { source: "connector" },
+    face: { source: "connector", producer: "chart", period: "1y", refresh: { every: 1 } },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 1 } }],
   };
   assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
   const boardRow = await getBoard(db, board.id);
@@ -239,9 +239,9 @@ test("refreshDueEntity: a face-only board stays scheduled when the render is una
   await setSetting(db, "crypto_provider", "coinmarketcap");
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-only-cmc" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { from: "connector" },
-    face: { from: "connector", producer: "chart", period: "1y", live: true, every: 1 },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }], // NOT live → face is the only live term
+    input: { connector: "crypto" }, identity: { source: "connector" },
+    face: { source: "connector", producer: "chart", period: "1y", refresh: { every: 1 } },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // NOT live → face is the only live term
   };
   assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
   const boardRow = await getBoard(db, board.id);
@@ -481,9 +481,9 @@ test("advanceFaced: parked item returns to held; unparked flows to tagging", asy
 test("refreshDueEntity regenerates a due face (new filename) and folds it into refresh_at", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-regen" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { from: "connector" },
-    face: { from: "connector", producer: "chart", period: "24h", live: true, every: 1 },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }], // price NOT live → no /coins/ fetch
+    input: { connector: "crypto" }, identity: { source: "connector" },
+    face: { source: "connector", producer: "chart", period: "24h", refresh: { every: 1 } },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // price NOT live → no /coins/ fetch
   };
   assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
   const boardRow = await getBoard(db, board.id);
@@ -514,9 +514,9 @@ test("refreshDueEntity regenerates a due face (new filename) and folds it into r
 test("refreshDueEntity renders the first face when a live face has none yet (face_at null)", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-firstrender" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { from: "connector" },
-    face: { from: "connector", producer: "chart", period: "24h", live: true, every: 5 },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }], // not live
+    input: { connector: "crypto" }, identity: { source: "connector" },
+    face: { source: "connector", producer: "chart", period: "24h", refresh: { every: 5 } },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // not live
   };
   assert.equal((await req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } })).status, 200);
   const boardRow = await getBoard(db, board.id);
@@ -539,7 +539,7 @@ test("refreshDueEntity renders the first face when a live face has none yet (fac
 test("turning the face on backfills existing entities with cadence Off — without re-tagging them", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-backfill" } });
   const path_ = `/api/admin/boards/${board.id}`;
-  const tile = { input: { connector: "crypto" }, identity: { from: "connector" }, face: { from: "raw" }, fields: [] };
+  const tile = { input: { connector: "crypto" }, identity: { source: "connector" }, fields: [] }; // no face key — the null slot
   assert.equal((await req(base, "PATCH", path_, { sid: admin.sid, body: { mapping: tile } })).status, 200);
 
   // A coin added while the board was tile-faced: never entered the face leg.
@@ -550,7 +550,7 @@ test("turning the face on backfills existing entities with cadence Off — witho
   // The face turns on with NO cadence — the case that used to leave this card a
   // tile forever (the sweep's face term was gated on liveness).
   const t0 = Date.now();
-  const chart = { ...tile, face: { from: "connector", producer: "chart", period: "24h" } };
+  const chart = { ...tile, face: { source: "connector", producer: "chart", period: "24h" } };
   assert.equal((await req(base, "PATCH", path_, { sid: admin.sid, body: { mapping: chart } })).status, 200);
   const due = Number((await getEntity(db, eid)).refresh_at);
   assert.ok(due >= t0 - 1000 && due <= Date.now(), "an unrendered face is due NOW, live or not");
@@ -574,19 +574,19 @@ test("turning the face on backfills existing entities with cadence Off — witho
 test("validateMapping: face slot rules", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
-  const crypto = (face) => ({ input: { connector: "crypto" }, identity: { from: "connector" }, face, fields: [] });
+  const crypto = (face) => ({ input: { connector: "crypto" }, identity: { source: "connector" }, face, fields: [] });
 
-  assert.equal((await patch(crypto({ from: "connector", producer: "chart", period: "1y", live: true, every: 60 }))).status, 200);
-  assert.equal((await patch(crypto({ from: "raw" }))).status, 200);
+  assert.equal((await patch(crypto({ source: "connector", producer: "chart", period: "1y", refresh: { every: 60 } }))).status, 200);
+  assert.equal((await patch(crypto(null))).status, 200); // the null slot (was the explicit tile)
 
-  let r = await patch(crypto({ from: "connector", producer: "nope", period: "1y" }));
+  let r = await patch(crypto({ source: "connector", producer: "nope", period: "1y" }));
   assert.equal(r.status, 400); assert.match(r.json.error, /face producer/);
 
-  r = await patch(crypto({ from: "connector", producer: "chart", period: "3h" }));
+  r = await patch(crypto({ source: "connector", producer: "chart", period: "3h" }));
   assert.equal(r.status, 400); assert.match(r.json.error, /period/);
 
   // face on a non-connector board → rejected (no connector input).
-  r = await patch({ identity: { from: "raw" }, face: { from: "connector", producer: "chart", period: "1y" }, fields: [] });
+  r = await patch({ face: { source: "connector", producer: "chart", period: "1y" }, fields: [] });
   assert.equal(r.status, 400); assert.match(r.json.error, /connector/);
 });
 
@@ -601,27 +601,27 @@ test("selectFace: prefer + pick over an entity's instances", () => {
   ];
   const face = (cfg) => selectFace(insts, cfg)?.name;
 
-  // Default (absent / raw / connector cfg) → first (oldest).
+  // Default (absent / null slot / connector cfg) → first (oldest).
   assert.equal(face(undefined), "a");
-  assert.equal(face({ from: "file" }), "a");
-  assert.equal(face({ from: "raw" }), "a");
-  assert.equal(face({ from: "connector" }), "a");
+  assert.equal(face({ source: "file" }), "a");
+  assert.equal(face(null), "a");
+  assert.equal(face({ source: "connector" }), "a");
 
   // pick.
-  assert.equal(face({ from: "file", pick: "latest" }), "c");
-  assert.equal(face({ from: "file", pick: "first" }), "a");
+  assert.equal(face({ source: "file", pick: "latest" }), "c");
+  assert.equal(face({ source: "file", pick: "first" }), "a");
 
   // prefer maps granular kinds → families; picks within the matched pool.
-  assert.equal(face({ from: "file", prefer: "image" }), "b");
-  assert.equal(face({ from: "file", prefer: "document" }), "a"); // pdf ∈ document
-  assert.equal(face({ from: "file", prefer: "audio", pick: "latest" }), "c");
+  assert.equal(face({ source: "file", prefer: "image" }), "b");
+  assert.equal(face({ source: "file", prefer: "document" }), "a"); // pdf ∈ document
+  assert.equal(face({ source: "file", prefer: "audio", pick: "latest" }), "c");
 
   // prefer is a preference, not a filter — no match falls back to the full pool.
-  assert.equal(selectFace([{ name: "x", kind: "image" }], { from: "file", prefer: "audio" })?.name, "x");
+  assert.equal(selectFace([{ name: "x", kind: "image" }], { source: "file", prefer: "audio" })?.name, "x");
 
   // empty / missing.
-  assert.equal(selectFace([], { from: "file" }), null);
-  assert.equal(selectFace(null, { from: "file" }), null);
+  assert.equal(selectFace([], { source: "file" }), null);
+  assert.equal(selectFace(null, { source: "file" }), null);
 });
 
 test("selectFace: the client mirror is byte-identical to the server", () => {
@@ -642,30 +642,30 @@ test("selectFace: the client mirror is byte-identical to the server", () => {
 test("validateMapping: file-face slot rules", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "file-face-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
-  const files = (face) => ({ identity: { from: "ai", hint: "the title" }, face, fields: [] });
+  const files = (face) => ({ identity: { source: "extract", instruction: "the title" }, face, fields: [] });
 
-  assert.equal((await patch(files({ from: "file" }))).status, 200);
-  assert.equal((await patch(files({ from: "file", prefer: "image", pick: "latest" }))).status, 200);
+  assert.equal((await patch(files({ source: "file" }))).status, 200);
+  assert.equal((await patch(files({ source: "file", prefer: "image", pick: "latest" }))).status, 200);
 
-  let r = await patch(files({ from: "file", prefer: "movie" }));
+  let r = await patch(files({ source: "file", prefer: "movie" }));
   assert.equal(r.status, 400); assert.match(r.json.error, /prefer/);
 
-  r = await patch(files({ from: "file", pick: "random" }));
+  r = await patch(files({ source: "file", pick: "random" }));
   assert.equal(r.status, 400); assert.match(r.json.error, /pick/);
 
   // A static file face has no producer/period/cadence.
-  r = await patch(files({ from: "file", period: "1y" }));
+  r = await patch(files({ source: "file", period: "1y" }));
   assert.equal(r.status, 400); assert.match(r.json.error, /file face/);
 
   // A file face on a connector board → rejected.
-  r = await patch({ input: { connector: "crypto" }, identity: { from: "connector" }, face: { from: "file" }, fields: [] });
+  r = await patch({ input: { connector: "crypto" }, identity: { source: "connector" }, face: { source: "file" }, fields: [] });
   assert.equal(r.status, 400); assert.match(r.json.error, /files board/);
 });
 
 test("listing: the item face follows mapping.face over a multi-instance entity", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "file-face-listing" } });
   await req(base, "PATCH", `/api/admin/boards/${board.id}`, {
-    sid: admin.sid, body: { mapping: { identity: { from: "ai", hint: "the title" }, face: { from: "file", prefer: "image", pick: "latest" }, fields: [] } },
+    sid: admin.sid, body: { mapping: { identity: { source: "extract", instruction: "the title" }, face: { source: "file", prefer: "image", pick: "latest" }, fields: [] } },
   });
   const eid = await createEntity(db, board.id, { identity: "invoice-7", displayName: "Invoice 7" });
   // Two instances, oldest→newest: an image (older) then a pdf (newer).
@@ -681,9 +681,9 @@ test("listing: the item face follows mapping.face over a multi-instance entity",
   // prefer:image → the webp scan wins even though it's the older instance.
   assert.equal((await list()).name, "scan.webp");
   // prefer:document,pick:latest → the newer pdf.
-  assert.equal((await list({ identity: { from: "ai", hint: "t" }, face: { from: "file", prefer: "document", pick: "latest" }, fields: [] })).name, "doc.webp");
+  assert.equal((await list({ identity: { source: "extract", instruction: "t" }, face: { source: "file", prefer: "document", pick: "latest" }, fields: [] })).name, "doc.webp");
   // No face config → first (oldest) instance, the legacy default.
-  assert.equal((await list({ identity: { from: "ai", hint: "t" }, fields: [] })).name, "scan.webp");
+  assert.equal((await list({ identity: { source: "extract", instruction: "t" }, fields: [] })).name, "scan.webp");
 });
 
 // ── migration 0035: legacy tile-faced finance boards ─────────────────────────

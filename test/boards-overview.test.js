@@ -44,7 +44,7 @@ before(async () => {
   // (no files) plus one chart-faced instance on BTC — the preview mixes the
   // file entry with symbol fill.
   boardC = await createBoard(db, "C", [], "", true, null, null, {}, false, {
-    mapping: { input: { connector: "crypto" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "crypto" }, identity: { source: "connector" }, fields: [] },
   });
   await setBoardMembers(db, boardC, [member.id], [member.id]);
   const btc = await createEntity(db, boardC, { identity: "bitcoin", displayName: "Bitcoin", symbol: "BTC" });

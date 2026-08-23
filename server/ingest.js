@@ -10,6 +10,7 @@ import { getBoard, canAccessBoard, createEntity, insertItem } from "./db.js";
 import { evaluateItemAlerts } from "./alerts.js";
 import { requireAuth } from "./auth.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
+import { aiWork } from "./field-sources.js";
 import { mediaLimitLookup } from "./plugins.js";
 import { UPLOAD_HARD_CEILING } from "./upload-limits.js";
 
@@ -74,12 +75,11 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   // its own copy so automatic replay (error retries) re-runs the mapping
   // it was built with; user-initiated reprocess/re-extract re-stamp from
   // the current board mapping.
-  // Only trigger extraction when the board has AI-sourced fields or
-  // AI-derived identity. Connector fields are populated at entity creation,
-  // not by the extract leg.
-  const hasMapping =
-    board.mapping?.identity?.from === "ai" ||
-    (Array.isArray(board.mapping?.fields) && board.mapping.fields.some((f) => f.from === "ai"));
+  // Only trigger extraction when the mapping involves a model (extract/detect
+  // fields or derived identity — aiWork asks the source table, so a future
+  // inferred source is covered by its table row). Connector fields are
+  // populated at entity creation, not by the extract leg.
+  const hasMapping = aiWork(board.mapping);
   // Extraction defines the item (identity, fields), so a mapped board
   // always enters the extract leg; auto_tag gates only tagging. With
   // auto-tag off the item carries `park` — the extract leg finishes the

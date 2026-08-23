@@ -10,8 +10,8 @@
 //
 // Callers describe content with `build(body, ctx)` (the scrollable area) and an
 // optional `footer(foot, ctx)` (pinned below the scroll area), composing rows
-// from the ddRow / ddCheckRow / ddAction / ddSep / ddInput helpers plus any
-// custom elements.
+// from the ddRow / ddCheckRow / ddAction / ddChips / ddHead / ddSep / ddInput
+// helpers plus any custom elements.
 
 import { createCheckbox } from "./checkbox.js";
 
@@ -56,6 +56,14 @@ export function openDropdown(anchor, {
   hover = false,   // hover popover: closes when the pointer leaves anchor + pop
   minWidth,
   maxWidth,
+  // A fixed width in px, or "anchor" to track the opener's own width. Default
+  // (undefined) is the shell's shrink-to-fit sizing, which is right for a menu
+  // that pops BESIDE its trigger. "anchor" is for the other kind: a menu that
+  // reads as its trigger opened out — a full-width picker under a full-width
+  // button, where a narrow pop would look like it belongs to something else.
+  // It also buys horizontal room, which is what lets a long catalog lay out as
+  // chips (ddChips) instead of a column that buries whatever follows it.
+  width,
   maxItems = 10,   // body rows shown before scrolling kicks in (0 = no cap)
   focus,           // selector focused after open, e.g. ".dd-input"
   onClose,
@@ -80,6 +88,10 @@ export function openDropdown(anchor, {
   el.setAttribute("role", "menu");
   if (minWidth != null) el.style.minWidth = minWidth + "px";
   if (maxWidth != null) el.style.maxWidth = maxWidth + "px";
+  // An explicit width is the caller saying how wide this goes, so it also lifts
+  // the shell's 320px cap — otherwise a wide anchor would silently get a narrow
+  // menu and the sizing would look broken rather than declined.
+  else if (width != null) el.style.maxWidth = "none";
   // measure from a known spot so shrink-to-fit sizing isn't viewport-clipped
   el.style.left = "0px";
   el.style.top = "0px";
@@ -134,7 +146,16 @@ export function openDropdown(anchor, {
     else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
   }
 
+  // Width first, and on every reposition: an anchor-width menu has to survive
+  // the anchor changing size (a resize, a pane relayout), and everything below
+  // measures wrapped heights that depend on it.
+  function applyWidth() {
+    if (width == null) return;
+    el.style.width = (width === "anchor" ? anchor.getBoundingClientRect().width : width) + "px";
+  }
+
   function reposition() {
+    applyWidth();
     capBodyHeight();
     const { left, top } = placePop({
       anchor: anchor.getBoundingClientRect(),
@@ -343,6 +364,41 @@ export function ddChildCheckRow(parent, { label, checked, variant = "dark", titl
 // four lines.
 export function ddEmpty(text) {
   return Object.assign(document.createElement("div"), { className: "dd-empty", textContent: text });
+}
+
+// A wrapped row of CHIPS — many small, closely-related choices that read better
+// side by side than as a column of one-liners. A ~15-entry catalog is a wall as
+// rows and a glance as chips, and what follows it stays on screen, which is
+// usually the point. Wants the horizontal room of `width: "anchor"`.
+//
+// Each item: { label, title?, active?, disabled?, mono?, onClick }. `mono` is
+// for a machine name (a field key, a code) — the label is the literal string
+// the system uses, so it's set in the face that says so.
+//
+// Chips are buttons rather than .dd-row on purpose: they stay out of the
+// arrow-key walk, which steps a vertical list and would read a wrapped grid
+// wrongly. Tab reaches them, in reading order.
+export function ddChips(items = []) {
+  const wrap = document.createElement("div");
+  wrap.className = "dd-chips";
+  for (const it of items) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "dd-chip" + (it.mono ? " dd-chip--mono" : "") + (it.active ? " active" : "");
+    chip.textContent = it.label;
+    if (it.title) chip.title = it.title;
+    if (it.disabled) chip.disabled = true;
+    else if (it.onClick) chip.addEventListener("click", it.onClick);
+    wrap.appendChild(chip);
+  }
+  return wrap;
+}
+
+// A non-interactive section header inside a menu. The class has existed since
+// dropdown.css was written; the factory hasn't, so every caller hand-built the
+// same three lines (cf. ddEmpty).
+export function ddHead(text) {
+  return Object.assign(document.createElement("div"), { className: "dd-head", textContent: text });
 }
 
 export function ddSep() {

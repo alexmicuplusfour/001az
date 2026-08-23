@@ -276,7 +276,7 @@ test("folder picker: bounded listing under the root", async () => {
 test("connector boards: the feed adapter serves a browse-derived descriptor", async () => {
   const cid = await seedBoard(db, "connector-board");
   await updateBoard(db, cid, {
-    mapping: { input: { connector: "crypto" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "crypto" }, identity: { source: "connector" }, fields: [] },
   });
   const info = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
   assert.equal(info.json.available, true);
@@ -316,7 +316,7 @@ test("connector boards: the feed adapter serves a browse-derived descriptor", as
   // A connector the registry doesn't know keeps answering "not available".
   await updateBoard(db, cid, { ingest: null, ingestNextRunAt: null });
   await updateBoard(db, cid, {
-    mapping: { input: { connector: "nope" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "nope" }, identity: { source: "connector" }, fields: [] },
   });
   const gone = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
   assert.equal(gone.json.available, false);

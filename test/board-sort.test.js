@@ -115,7 +115,7 @@ test("listItems: media follows the face instance, not the first one", async () =
   const file = (n, size) => ({ identity: n, files: [{ name: n, original_name: n, kind: "image", size, w: 10, h: 10 }], fields: {} });
   await insertItem(db, boardId, file("old.png", 111), "tagged", id);
   await insertItem(db, boardId, file("new.png", 222), "tagged", id);
-  await db.query("UPDATE boards SET mapping=$1 WHERE id=$2", [{ identity: { from: "ai" }, face: { from: "file", pick: "latest" } }, boardId]);
+  await db.query("UPDATE boards SET mapping=$1 WHERE id=$2", [{ identity: { source: "extract" }, face: { source: "file", pick: "latest" } }, boardId]);
   const { items } = await listItems(db, admin.id, boardId);
   assert.equal(items[0].name, "new.png");
   assert.equal(items[0].media.file_size, 222, "the projected bag is the face file's");
@@ -173,7 +173,7 @@ test("applyBoardSort: text compares locale-aware, ISO date strings sort chronolo
 // ─── sortCatalog per identity mode ──────────────────────────────────────────
 
 test("catalog: derived board offers universal only, plus Files", async () => {
-  state.boardMapping = { identity: { from: "ai" } };
+  state.boardMapping = { identity: { source: "extract" } };
   state.items = [];
   const sections = await sortCatalog();
   assert.equal(sections.length, 1);
@@ -183,11 +183,11 @@ test("catalog: derived board offers universal only, plus Files", async () => {
 test("catalog: connector board offers bound fields minus url, labels from the manifest", async () => {
   state.boardMapping = {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
+    identity: { source: "connector" },
     fields: [
-      { key: "price", kind: "number", from: "connector", fn: "price" },
-      { key: "market_cap", kind: "number", from: "connector", fn: "market_cap" },
-      { key: "url", kind: "url", from: "connector", fn: "url" },
+      { key: "price", kind: "number", source: "connector", fn: "price" },
+      { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" },
+      { key: "url", kind: "url", source: "connector", fn: "url" },
     ],
   };
   const sections = await sortCatalog();
@@ -226,7 +226,7 @@ test("catalog: single-kind board carries no coverage counts", async () => {
 
 test("restoreSort: a stored sort that no longer fits the identity mode is dropped", () => {
   state.boardId = "b-restore";
-  state.boardMapping = { identity: { from: "ai" } };
+  state.boardMapping = { identity: { source: "extract" } };
   localStorage.setItem("boardSort:b-restore", JSON.stringify({ by: "media:duration", dir: "desc", label: "Duration" }));
   restoreSort();
   assert.equal(state.sort, null);
@@ -244,8 +244,8 @@ test("restoreSort: unbound connector field is dropped, bound one survives", () =
   state.boardId = "b-conn";
   state.boardMapping = {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }],
+    identity: { source: "connector" },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
   };
   localStorage.setItem("boardSort:b-conn", JSON.stringify({ by: "field:market_cap", dir: "desc", label: "Market cap" }));
   restoreSort();
@@ -260,8 +260,8 @@ test("restoreSort: a fresh connector board seeds from browse defaultSort when bo
   state.boardId = "b-seed";
   state.boardMapping = {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
-    fields: [{ key: "market_cap", kind: "number", from: "connector", fn: "market_cap" }],
+    identity: { source: "connector" },
+    fields: [{ key: "market_cap", kind: "number", source: "connector", fn: "market_cap" }],
   };
   localStorage.removeItem("boardSort:b-seed");
   restoreSort();

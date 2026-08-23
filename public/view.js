@@ -76,7 +76,7 @@ export function toggleView() {
 // explicit rows choice must always have a way back.
 export function rowsRelevant() {
   return (
-    state.boardMapping?.identity?.from === "ai" ||
+    state.boardMapping?.identity?.source === "extract" ||
     state.items.some((i) => (i.instances?.length || 0) > 1) ||
     effectiveView() === "rows"
   );

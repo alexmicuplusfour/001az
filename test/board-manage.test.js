@@ -121,12 +121,12 @@ test("an admin's pins and mapping land via /api/boards/:id — same handler as t
   const keyId = await createAiKey(db, "layered", "anthropic", "sk-ant-layered");
   const r = await req(base, "PATCH", `/api/boards/${board}`, {
     sid: admin.sid,
-    body: { ai_key_id: keyId, mapping: { input: "files", fields: [] } },
+    body: { ai_key_id: keyId, mapping: { fields: [] } },
   });
   assert.equal(r.status, 200);
   const row = (await db.query("SELECT ai_key_id, mapping FROM boards WHERE id=$1", [board])).rows[0];
   assert.equal(Number(row.ai_key_id), Number(keyId));
-  assert.equal(row.mapping.input, "files");
+  assert.deepEqual(row.mapping, { fields: [] });
   const bad = await req(base, "PATCH", `/api/boards/${board}`, { sid: admin.sid, body: { ai_key_id: 999999 } });
   assert.equal(bad.status, 400, "an admin's bad pin is refused here, never ignored");
 });

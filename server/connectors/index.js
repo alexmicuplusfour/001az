@@ -102,6 +102,11 @@ export function listConnectors() {
     // payload can answer for.
     browse: c.manifest.browse ? { ...c.manifest.browse, filters: undefined } : null,
     template: c.manifest.template,
+    // The domain's own words for its identity slot ("Coin", "each coin is its
+    // own card") — the mapping pane's locked identity row reads this, so users
+    // never meet the word "connector". Label falls back for a plugin domain
+    // that doesn't declare it.
+    identity: c.manifest.identity || { label: c.manifest.label, blurb: `each entry is its own card` },
     providers: c.providerList(),
   }));
 }

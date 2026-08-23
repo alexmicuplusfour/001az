@@ -148,6 +148,7 @@ import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity } from "./connectors/add.js";
 import { liveFields, faceSchedule, domainState } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
+import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
 import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
@@ -1156,7 +1157,7 @@ const saveBoardPatch = wrap(async (req, res) => {
   if (update.mapping !== undefined) {
     await rescheduleEntityRefreshes(db, prev.id, liveFields(update.mapping), faceSchedule(update.mapping));
     const m = update.mapping;
-    if (m === null || !m.input || m.input === "files") await backfillFileFields(prev.id, m);
+    if (m === null || !m.input) await backfillFileFields(prev.id, m);
   }
   // The moment auto-tagging comes back on, sweep the board: queue everything
   // untagged — held uploads, AI-undecided, failed. Turning it off queues
@@ -1597,51 +1598,82 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
   });
 }));
 
-const MAPPING_KINDS = new Set(["text", "number", "url", "date", "object"]);
-// Returns an error string when mapping is invalid, null when valid.
+// The kinds a scalar field can hold, for the sources that don't narrow it
+// further with their own `kinds`. Detect fields carry NO kind — their output is
+// located hits, not a scalar (field-sources.js `output`).
+const MAPPING_KINDS = ["text", "number", "url", "date"];
+
+// Shared by fields and the face slot: a `refresh: { every }` cadence in
+// minutes. Returns an error string or null.
+function validateRefresh(refresh, what) {
+  if (!refresh || typeof refresh !== "object" || !Number.isInteger(refresh.every) ||
+      refresh.every < 1 || refresh.every > 43200)
+    return `${what} needs an integer refresh.every in minutes (1–43200)`;
+  return null;
+}
+
+// Which sources may bind a slot, for the refusal message — derived from the
+// defs so the message can't drift from the rule.
+const slotSources = (slot) =>
+  FIELD_SOURCE_DEFS.filter((d) => (d.slots || []).includes(slot))
+    .map((d) => `"${d.id}"`).join(" or ");
+
+// Returns an error string when mapping is invalid, null when valid. Field AND
+// slot rules are read off FIELD_SOURCE_DEFS — which sources a slot takes
+// (`slots`), on which board type (`filesOnly`/`connectorOnly`), instruction and
+// refresh rules — so a new source is validated by its table row, not by another
+// branch here. Only a source's own config vocabulary is checked by name below
+// (extract's options list; the connector face's producer/period; the file
+// face's prefer/pick).
 function validateMapping(mapping) {
-  // Optional input slot: "files" | { connector: name }
-  if (mapping.input !== undefined && mapping.input !== "files") {
+  // Optional input slot: absent = files. (The literal string "files" died with
+  // `from:"raw"` — two spellings of the same absence; migration 0038 normalizes.)
+  if (mapping.input !== undefined) {
     if (!mapping.input || typeof mapping.input !== "object" || typeof mapping.input.connector !== "string")
-      return `mapping.input must be "files" or { connector: name }`;
+      return `mapping.input must be { connector: name } — omit it for a files board`;
     if (!getConnector(mapping.input.connector))
       return `unknown connector: "${mapping.input.connector}"`;
   }
-  // Optional identity slot.
-  if (mapping.identity !== undefined) {
+  const filesBoard = !mapping.input;
+
+  // Identity slot: null/absent = the filename (the slot's default, owned by
+  // the renderer — no pseudo-source in the mapping).
+  if (mapping.identity !== undefined && mapping.identity !== null) {
     const id = mapping.identity;
-    if (!id || typeof id !== "object") return "mapping.identity must be an object";
-    if (id.from !== "raw" && id.from !== "ai" && id.from !== "connector")
-      return `mapping.identity.from must be "raw", "ai", or "connector"`;
-    if (id.from === "ai" && (!id.hint || typeof id.hint !== "string" || !id.hint.trim()))
-      return `mapping.identity.hint is required when from is "ai"`;
-    if (id.hint !== undefined && (typeof id.hint !== "string" || id.hint.length > 500))
-      return `mapping.identity.hint must be a string ≤500 chars`;
-    // Classify mode: a declared candidate list constrains the AI's answer to a
-    // closed set (vs open extraction). Config only — never seeds entities.
-    if (id.candidates !== undefined) {
-      if (id.from !== "ai") return `mapping.identity.candidates requires from "ai"`;
-      if (!Array.isArray(id.candidates)) return `mapping.identity.candidates must be an array`;
-      if (id.candidates.length > 200) return `mapping.identity may have at most 200 candidates`;
+    if (typeof id !== "object") return "mapping.identity must be an object or null";
+    const def = FIELD_SOURCE[id.source];
+    if (!def || !(def.slots || []).includes("identity"))
+      return `mapping.identity.source must be ${slotSources("identity")} (or the slot null)`;
+    if (def.connectorOnly && filesBoard)
+      return `a ${def.id} identity requires a connector input`;
+    if (def.takesInstruction) {
+      if (!id.instruction || typeof id.instruction !== "string" || !id.instruction.trim())
+        return `mapping.identity.instruction is required for a ${def.id} identity`;
+      if (id.instruction.length > 500) return `mapping.identity.instruction must be ≤500 chars`;
+    }
+    // Match-to-a-list mode: a declared options list constrains the AI's answer
+    // to a closed set (vs open extraction). Config only — never seeds entities.
+    if (id.options !== undefined) {
+      if (!def.takesInstruction)
+        return `mapping.identity.options needs an instruction-taking source`;
+      if (!Array.isArray(id.options)) return `mapping.identity.options must be an array`;
+      if (id.options.length > 200) return `mapping.identity may have at most 200 options`;
       const seenKeys = new Set();
-      for (const c of id.candidates) {
+      for (const c of id.options) {
         if (!c || typeof c !== "object" || typeof c.value !== "string" || !c.value.trim())
-          return `each identity candidate needs a non-empty "value"`;
+          return `each identity option needs a non-empty "value"`;
         if (c.hint !== undefined && (typeof c.hint !== "string" || c.hint.length > 500))
-          return `identity candidate hint must be a string ≤500 chars`;
+          return `identity option hint must be a string ≤500 chars`;
         const k = normaliseIdentity(c.value); // same key the runtime dedups on
-        if (seenKeys.has(k)) return `duplicate identity candidate: "${c.value}"`;
+        if (seenKeys.has(k)) return `duplicate identity option: "${c.value}"`;
         seenKeys.add(k);
       }
     }
   }
+
   if (!Array.isArray(mapping.fields)) return "mapping.fields must be an array";
-  // The cap is on AI fields only — they generate the extraction schema. Connector
-  // and file fields are deterministic (bounded by their catalogs) and excluded
-  // from the record_fields tool, so they don't count against it.
-  if (mapping.fields.filter((f) => f.from === "ai").length > 12)
-    return "mapping may have at most 12 AI fields";
   const seen = new Set();
+  const perSource = {};
   for (const f of mapping.fields) {
     if (!f.key || typeof f.key !== "string" || !/^[a-z][a-z0-9_]*$/.test(f.key))
       return `invalid field key: ${JSON.stringify(f.key)}`;
@@ -1650,60 +1682,78 @@ function validateMapping(mapping) {
     // field with the same name would silently overwrite it there.
     if (f.key === "identity") return `field key "identity" is reserved for the identity slot`;
     seen.add(f.key);
-    if (!MAPPING_KINDS.has(f.kind)) return `invalid kind "${f.kind}" for field "${f.key}"`;
-    if (f.from !== "ai" && f.from !== "connector" && f.from !== "file")
-      return `unsupported source "${f.from}" for field "${f.key}"`;
-    if (f.from === "ai" && f.hint !== undefined && (typeof f.hint !== "string" || f.hint.length > 500))
-      return `hint for field "${f.key}" must be a string ≤500 chars`;
-    if (f.from === "connector" && (!f.fn || typeof f.fn !== "string"))
-      return `connector field "${f.key}" requires a fn string`;
-    // File fields (from:"file"): a deterministic media-metadata projection.
-    // Only on file boards (no connector input), fn must be a known media field,
-    // and its kind must match the catalog descriptor.
-    if (f.from === "file") {
-      if (mapping.input && mapping.input !== "files")
-        return `file field "${f.key}" is only valid on a files board`;
-      const desc = f.fn ? getMediaField(f.fn) : null;
+
+    const def = FIELD_SOURCE[f.source];
+    if (!def) return `unsupported source "${f.source}" for field "${f.key}"`;
+    perSource[def.id] = (perSource[def.id] || 0) + 1;
+
+    // Kind: detect fields carry none (occurrences, not a scalar); everyone
+    // else holds one of the scalar kinds, narrowed to the source's own list
+    // where it declares one (def.kinds — what a user may pick for extract).
+    if (def.output === "occurrences") {
+      if (f.kind !== undefined) return `${def.id} field "${f.key}" carries no kind`;
+    } else if (!(def.kinds || MAPPING_KINDS).includes(f.kind)) {
+      return `invalid kind "${f.kind}" for field "${f.key}"`;
+    }
+
+    if (def.needsFn && (!f.fn || typeof f.fn !== "string"))
+      return `${def.id} field "${f.key}" requires a fn string`;
+    if (def.filesOnly && !filesBoard)
+      return `file field "${f.key}" is only valid on a files board`;
+    if (def.connectorOnly && filesBoard)
+      return `${def.id} field "${f.key}" requires a connector input`;
+    // Media-catalog fields: fn must exist and the kind is the catalog's.
+    if (def.catalog === "media") {
+      const desc = getMediaField(f.fn);
       if (!desc) return `unknown file field fn "${f.fn}" for "${f.key}"`;
       if (f.kind !== desc.kind) return `file field "${f.key}" must have kind "${desc.kind}"`;
     }
-    // Per-field liveness (slice 5c): connector fields only; `every` is minutes.
-    if (f.live !== undefined) {
-      if (typeof f.live !== "boolean") return `"live" for field "${f.key}" must be a boolean`;
-      if (f.live && f.from !== "connector") return `only connector fields can be live ("${f.key}")`;
-      if (f.live && (!Number.isInteger(f.every) || f.every < 1 || f.every > 43200))
-        return `live field "${f.key}" needs an integer "every" in minutes (1–43200)`;
+    if (f.instruction !== undefined) {
+      if (!def.takesInstruction) return `${def.id} field "${f.key}" takes no instruction`;
+      if (typeof f.instruction !== "string" || f.instruction.length > 500)
+        return `instruction for field "${f.key}" must be a string ≤500 chars`;
+    }
+    if (f.refresh !== undefined) {
+      if (!def.refreshable) return `${def.id} field "${f.key}" cannot refresh`;
+      const err = validateRefresh(f.refresh, `field "${f.key}"`);
+      if (err) return err;
     }
   }
-  // Optional face slot (slice 5d): the entity's card visual.
-  if (mapping.face !== undefined) {
+  for (const def of FIELD_SOURCE_DEFS) {
+    if (def.cap && (perSource[def.id] || 0) > def.cap)
+      return `mapping may have at most ${def.cap} ${def.id} fields`;
+  }
+
+  // Face slot: null/absent = the renderer's default (file preview on a files
+  // board, symbol tile on a connector board — see faces/select.js).
+  if (mapping.face !== undefined && mapping.face !== null) {
     const fc = mapping.face;
-    if (!fc || typeof fc !== "object") return "mapping.face must be an object";
-    if (fc.from !== "raw" && fc.from !== "connector" && fc.from !== "file")
-      return `mapping.face.from must be "raw", "connector", or "file"`;
-    if (fc.from === "connector") {
-      const conn = getConnector(mapping.input?.connector);
-      if (!conn) return "a connector face requires a connector input";
+    if (typeof fc !== "object") return "mapping.face must be an object or null";
+    const def = FIELD_SOURCE[fc.source];
+    if (!def || !(def.slots || []).includes("face"))
+      return `mapping.face.source must be ${slotSources("face")} (or the slot null)`;
+    if (def.filesOnly && !filesBoard) return "a file face is only valid on a files board";
+    if (def.connectorOnly && filesBoard) return "a connector face requires a connector input";
+    if (fc.refresh !== undefined) {
+      if (!def.refreshable) return `a ${def.id} face has no "refresh"`;
+      const err = validateRefresh(fc.refresh, "face");
+      if (err) return err;
+    }
+    // Each source's own config vocabulary:
+    if (fc.source === "connector") {
+      // connectorOnly above guarantees the input exists and was resolved.
+      const conn = getConnector(mapping.input.connector);
       const producer = (conn.manifest.faces || []).find((p) => p.name === fc.producer);
       if (!producer) return `unknown face producer "${fc.producer}"`;
       if (fc.period !== undefined && !producer.periods.includes(fc.period))
         return `invalid period "${fc.period}" for face "${fc.producer}"`;
-      if (fc.live !== undefined) {
-        if (typeof fc.live !== "boolean") return `face "live" must be a boolean`;
-        if (fc.live && (!Number.isInteger(fc.every) || fc.every < 1 || fc.every > 43200))
-          return `live face needs an integer "every" in minutes (1–43200)`;
-      }
-    }
-    // A file face selects which instance backs the card (server/faces/select.js).
-    // Files boards only; a static file has nothing to refresh, so it carries no
-    // producer/period/cadence.
-    if (fc.from === "file") {
-      if (mapping.input && mapping.input !== "files") return "a file face is only valid on a files board";
+    } else if (fc.source === "file") {
+      // Selects which instance backs the card (server/faces/select.js).
       if (fc.prefer !== undefined && !["any", "image", "document", "audio"].includes(fc.prefer))
         return `invalid face prefer "${fc.prefer}"`;
       if (fc.pick !== undefined && !["first", "latest"].includes(fc.pick))
         return `invalid face pick "${fc.pick}"`;
-      for (const k of ["producer", "period", "live", "every"])
+      for (const k of ["producer", "period"])
         if (fc[k] !== undefined) return `a file face has no "${k}"`;
     }
   }
@@ -1716,7 +1766,7 @@ function validateMapping(mapping) {
 // each stored payload entry — no file is re-opened. Writes only on a real change.
 async function backfillFileFields(boardId, mapping) {
   const mappingFields = (mapping && mapping.fields) || [];
-  const wantsFileFields = mappingFields.some((f) => f.from === "file");
+  const wantsFileFields = mappingFields.some((f) => f.source === "file");
   const items = await boardItemPayloads(db, boardId);
 
   // Legacy entries (uploaded before file fields) carry no size/meta; re-derive it

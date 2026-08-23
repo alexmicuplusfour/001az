@@ -29,10 +29,10 @@ after(() => srv.close());
 
 test("liveFields selects live connector fields; nextRefreshAt = soonest due", () => {
   const mapping = { fields: [
-    { key: "price", from: "connector", fn: "price", live: true, every: 1 },
-    { key: "cap",   from: "connector", fn: "market_cap", live: true, every: 60 },
-    { key: "url",   from: "connector", fn: "url" },                 // not live
-    { key: "note",  from: "ai", live: true, every: 5 },             // not connector → excluded
+    { key: "price", source: "connector", fn: "price", refresh: { every: 1 } },
+    { key: "cap",   source: "connector", fn: "market_cap", refresh: { every: 60 } },
+    { key: "url",   source: "connector", fn: "url" },               // not live
+    { key: "note",  source: "extract", refresh: { every: 5 } },     // not connector → excluded
   ]};
   const live = runtime.liveFields(mapping);
   assert.deepEqual(live.map((f) => f.key), ["price", "cap"]);
@@ -57,8 +57,8 @@ test("runtime.refresh: rewrites only due fields, advances at, reports moved", as
   const conn = { name: "livetest", providers: { p1 }, defaultProvider: "p1", manifest: {} };
   await installConnectors(db, "livetest:p1");
   const mapping = { fields: [
-    { key: "price", from: "connector", fn: "price", live: true, every: 1 },
-    { key: "cap",   from: "connector", fn: "cap",   live: true, every: 60 },
+    { key: "price", source: "connector", fn: "price", refresh: { every: 1 } },
+    { key: "cap",   source: "connector", fn: "cap",   refresh: { every: 60 } },
   ]};
   const fields0 = { price: { v: 100, kind: "number", src: "p1", at: 0 }, cap: { v: 5, kind: "number", src: "p1", at: 0 } };
   const inst = { id: 1, payload: { source: { provider: "p1", id: "x" }, mapping } };
@@ -91,7 +91,7 @@ test("runtime.refresh: re-resolves the id by symbol after a provider switch", as
   await installConnectors(db, "switchtest:p1", "switchtest:p2");
   await setSetting(db, "switchtest_provider", "p2"); // active != the source provider
 
-  const mapping = { fields: [{ key: "price", from: "connector", fn: "price", live: true, every: 1 }] };
+  const mapping = { fields: [{ key: "price", source: "connector", fn: "price", refresh: { every: 1 } }] };
   const inst = { id: 1, payload: { source: { provider: "p1", id: "p1-id" }, mapping } };
   const r = await runtime.refresh(db, conn, { symbol: "ZZZ", fields: { price: { v: 9, at: 0 } } }, inst, mapping, 120000);
 
@@ -114,8 +114,8 @@ test("runtime.refresh: liveness comes from the board mapping, not the stamped on
   };
   const conn = { name: "boardmap", providers: { p1 }, defaultProvider: "p1", manifest: {} };
   await installConnectors(db, "boardmap:p1");
-  const stamped = { fields: [{ key: "price", from: "connector", fn: "price" }] };                       // no live
-  const boardMapping = { fields: [{ key: "price", from: "connector", fn: "price", live: true, every: 1 }] };
+  const stamped = { fields: [{ key: "price", source: "connector", fn: "price" }] };                     // no refresh
+  const boardMapping = { fields: [{ key: "price", source: "connector", fn: "price", refresh: { every: 1 } }] };
   const inst = { id: 1, payload: { source: { provider: "p1", id: "x" }, mapping: stamped } };
   const r = await runtime.refresh(db, conn, { symbol: "XYZ", fields: { price: { v: 100, at: 0 } } }, inst, boardMapping, 120000);
   assert.deepEqual(Object.keys(r.moved), ["price"]); // board mapping drives it
@@ -127,10 +127,10 @@ test("runtime.refresh: liveness comes from the board mapping, not the stamped on
 function liveMapping() {
   return {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
+    identity: { source: "connector" },
     fields: [
-      { key: "price",      kind: "number", from: "connector", fn: "price", live: true, every: 1 },
-      { key: "market_cap", kind: "number", from: "connector", fn: "market_cap" }, // not live
+      { key: "price",      kind: "number", source: "connector", fn: "price", refresh: { every: 1 } },
+      { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" }, // not live
     ],
   };
 }
@@ -254,17 +254,17 @@ test("validateMapping: live only on connector fields, with a valid cadence", asy
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "live-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
 
-  let r = await patch({ input: { connector: "crypto" }, identity: { from: "connector" },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price", live: true, every: 5 }] });
+  let r = await patch({ input: { connector: "crypto" }, identity: { source: "connector" },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 5 } }] });
   assert.equal(r.status, 200);
 
-  r = await patch({ identity: { from: "raw" },
-    fields: [{ key: "name", kind: "text", from: "ai", live: true, every: 5 }] });
+  r = await patch({
+    fields: [{ key: "name", kind: "text", source: "extract", refresh: { every: 5 } }] });
   assert.equal(r.status, 400);
-  assert.match(r.json.error, /only connector fields can be live/);
+  assert.match(r.json.error, /cannot refresh/);
 
-  r = await patch({ input: { connector: "crypto" }, identity: { from: "connector" },
-    fields: [{ key: "price", kind: "number", from: "connector", fn: "price", live: true, every: 0 }] });
+  r = await patch({ input: { connector: "crypto" }, identity: { source: "connector" },
+    fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 0 } }] });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /every/);
 });

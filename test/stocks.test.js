@@ -18,7 +18,7 @@ test("stocks manifest: registered finance connector with FMP and a chart face", 
   assert.ok(stocks);
   assert.equal(stocks.category, "finance");
   assert.equal(manifest.template.input.connector, "stocks");
-  assert.equal(manifest.template.identity.from, "connector");
+  assert.equal(manifest.template.identity.source, "connector");
   assert.ok(manifest.fields.some((field) => field.key === "price"));
   assert.ok(manifest.fields.some((field) => field.key === "sector"));
   assert.ok(manifest.providers.some((provider) =>

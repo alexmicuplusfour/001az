@@ -8,9 +8,13 @@
 // the first time one changed. This module is the single copy; runtime.js
 // re-exports it, so its importers (add.js, server.js, worker.js) are unchanged.
 
-// A mapping's live connector fields: [{ key, kind, from, fn, live, every }].
+// A mapping's live connector fields. The stored shape carries the cadence as
+// `refresh: { every }`; this is the ONE place it's decoded — consumers get
+// `every` flattened onto the field, so none of them learn the wire shape.
 export const liveFields = (mapping) =>
-  (mapping?.fields || []).filter((f) => f.from === "connector" && f.live);
+  (mapping?.fields || [])
+    .filter((f) => f.source === "connector" && f.refresh)
+    .map((f) => ({ ...f, every: f.refresh.every }));
 
 // Soonest time any live field comes due: min(field.at + every*60000), or null
 // when nothing is live. `fields` is the entity's stored field map; a field with
@@ -34,8 +38,8 @@ export function nextRefreshAt(fields, live, now = Date.now()) {
 // it, turning the face on with cadence Off leaves every existing card tile-faced.
 export const faceSchedule = (mapping) => {
   const f = mapping?.face;
-  if (!f || f.from !== "connector") return null;
-  return f.live ? { every: f.every } : { first: true };
+  if (!f || f.source !== "connector") return null;
+  return f.refresh ? { every: f.refresh.every } : { first: true };
 };
 
 // How long to wait before re-attempting a face that has never rendered, when the

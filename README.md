@@ -67,7 +67,7 @@ a live connector.
 - **Data connectors** — map a board's fields to a live source and they refresh
   on their own. Domains include **crypto** (CoinGecko / CoinMarketCap) and
   **US stocks** (Financial Modeling Prep):
-  per-field liveness (`live` + interval) with a scheduled refresh sweep,
+  per-field refresh cadence (`refresh: { every }`) with a scheduled sweep,
   field-value snapshots, an "updated *N*m ago" stamp, and generated card
   *faces* (e.g. price-history charts). The runtime is domain-agnostic — a new
   domain is a single directory under `server/connectors/`, no runtime edits.

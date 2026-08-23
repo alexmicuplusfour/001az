@@ -90,11 +90,14 @@ export function instanceTagCounts(item) {
 }
 
 // Does the board's mapping give the extract leg AI work to do? Mirrors the
-// worker's aiWork gate (extractOne) — the reextract route answers 409 without
-// a stamped mapping, so the per-instance Re-extract button shows only here.
+// server's aiWork gate (server/field-sources.js — the client can't import it;
+// keep the two in step) — the reextract route answers 409 without a stamped
+// mapping, so the per-instance Re-extract button shows only here. extract and
+// detect are the model-backed sources; connector/file are deterministic.
 export const mappingHasAiWork = (mapping) =>
-  mapping?.identity?.from === "ai" ||
-  (Array.isArray(mapping?.fields) && mapping.fields.some((f) => f.from === "ai"));
+  mapping?.identity?.source === "extract" ||
+  (Array.isArray(mapping?.fields) &&
+    mapping.fields.some((f) => f.source === "extract" || f.source === "detect"));
 
 // An item has a mapped identity when extraction (or a connector) gave it an
 // entity key distinct from its stored filename — mirrors displayLabel priority.
@@ -159,6 +162,22 @@ export const ICONS = {
   tag: glyph('<path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2 2 0 0 0 2.8 0l6.6-6.6a2 2 0 0 0 0-2.8z"/><circle cx="7" cy="7" r="1.3" fill="currentColor"/>'),
   trash: glyph('<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6"/>'),
   redo: glyph('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>'),
+  // Field-source glyphs (mapping pane) — one per FIELD_SOURCE_DEFS row, plus
+  // `srcDot` for an unbound slot. Grey ink = deterministic, violet = a model
+  // produces it; the COLOR is the pane's, the shapes live here with the set.
+  //
+  // srcPerson and srcWave have NO source row yet and no consumer — they are the
+  // face- and voice-matching sources the model was designed to accept (one
+  // FIELD_SOURCE_DEFS row + one CAPABILITY_DEFS entry each). Drawn now, with
+  // the rest of the set, because that is the only way they end up on the same
+  // grid and stroke as their neighbours. They are not dead code to sweep.
+  srcFile: glyph('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
+  srcGlobe: glyph('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5a13 13 0 0 1 0 17a13 13 0 0 1 0-17z"/>'),
+  srcSparkle: glyph('<path d="M12 3.5l1.85 5.15L19 10.5l-5.15 1.85L12 17.5l-1.85-5.15L5 10.5l5.15-1.85z"/>'),
+  srcFrame: glyph('<path d="M4 8.5V5.5a1.5 1.5 0 0 1 1.5-1.5h3M15.5 4h3A1.5 1.5 0 0 1 20 5.5v3M20 15.5v3a1.5 1.5 0 0 1-1.5 1.5h-3M8.5 20h-3A1.5 1.5 0 0 1 4 18.5v-3"/><circle cx="12" cy="12" r="2.6"/>'),
+  srcPerson: glyph('<circle cx="12" cy="9.5" r="3.3"/><path d="M5.5 20.5a6.5 6.5 0 0 1 13 0"/>'),
+  srcWave: glyph('<path d="M4 10.5v3M8 7.5v9M12 4.5v15M16 7.5v9M20 10.5v3"/>'),
+  srcDot: glyph('<circle cx="12" cy="12" r="3.4"/>'),
   // Fills on the favourite state — the surfaces that do it say `fill:
   // currentColor` in CSS, since each one was already tinting the outline the
   // same colour it wanted inside.

@@ -14,10 +14,10 @@ import { anthropicRequest } from "../server/ai-providers/wires/anthropic.js";
 test("buildFieldsPrompt: why-before-value, nullable value, kind→JSON type", () => {
   const mapping = {
     fields: [
-      { key: "name",  kind: "text",   from: "ai", hint: "the author's full name" },
-      { key: "score", kind: "number", from: "ai" },
-      { key: "link",  kind: "url",    from: "ai" },
-      { key: "born",  kind: "date",   from: "ai" },
+      { key: "name",  kind: "text",   source: "extract", instruction: "the author's full name" },
+      { key: "score", kind: "number", source: "extract" },
+      { key: "link",  kind: "url",    source: "extract" },
+      { key: "born",  kind: "date",   source: "extract" },
     ],
   };
   const { schema, systemText } = buildFieldsPrompt(mapping);
@@ -34,7 +34,7 @@ test("buildFieldsPrompt: why-before-value, nullable value, kind→JSON type", ()
   assert.equal(Object.keys(name.properties)[0], "why");
   assert.equal(name.additionalProperties, false);
 
-  // hint becomes the field description
+  // instruction becomes the field description
   assert.equal(name.description, "the author's full name");
 
   // nullable value types per kind
@@ -47,8 +47,8 @@ test("buildFieldsPrompt: why-before-value, nullable value, kind→JSON type", ()
   assert.match(systemText, /record_fields/);
 });
 
-test("buildFieldsPrompt: field without hint uses key as description", () => {
-  const { schema } = buildFieldsPrompt({ fields: [{ key: "year", kind: "number", from: "ai" }] });
+test("buildFieldsPrompt: field without instruction uses key as description", () => {
+  const { schema } = buildFieldsPrompt({ fields: [{ key: "year", kind: "number", source: "extract" }] });
   assert.equal(schema.properties.year.description, "year");
 });
 
@@ -59,21 +59,21 @@ test("buildFieldsPrompt: empty mapping produces empty-but-valid schema", () => {
   assert.equal(schema.additionalProperties, false);
 });
 
-test("buildFieldsPrompt: object fields are excluded from the schema + system text (detector pass owns them)", () => {
+test("buildFieldsPrompt: detect fields are excluded from the schema + system text (detector pass owns them)", () => {
   const { schema, systemText } = buildFieldsPrompt({
     fields: [
-      { key: "name",  kind: "text",   from: "ai", hint: "the author's full name" },
-      { key: "logos", kind: "object", from: "ai", hint: "every visible logo" },
+      { key: "name",  kind: "text", source: "extract", instruction: "the author's full name" },
+      { key: "logos", source: "detect", instruction: "every visible logo" },
     ],
   });
-  assert.ok(!("logos" in schema.properties), "object field absent from the record_fields schema");
+  assert.ok(!("logos" in schema.properties), "detect field absent from the record_fields schema");
   assert.deepEqual(schema.required, ["name"]);
   assert.ok(schema.properties.name, "scalar field still present");
-  assert.doesNotMatch(systemText, /logos/, "object field not listed in the prompt");
+  assert.doesNotMatch(systemText, /logos/, "detect field not listed in the prompt");
 });
 
-test("buildFieldsPrompt: an object-only mapping yields an empty schema (extractOne skips the LLM)", () => {
-  const { schema, systemText } = buildFieldsPrompt({ fields: [{ key: "logos", kind: "object", from: "ai" }] });
+test("buildFieldsPrompt: a detect-only mapping yields an empty schema (extractOne skips the LLM)", () => {
+  const { schema, systemText } = buildFieldsPrompt({ fields: [{ key: "logos", source: "detect" }] });
   assert.deepEqual(schema.properties, {});
   assert.deepEqual(schema.required, []);
   assert.doesNotMatch(systemText, /Fields to extract/); // nothing for the model to do
@@ -82,7 +82,7 @@ test("buildFieldsPrompt: an object-only mapping yields an empty schema (extractO
 // ─── pure: anthropicRequest tool parameterisation ────────────────────────────
 
 test("anthropicRequest: custom tool name emits in tools[] and tool_choice", () => {
-  const { schema } = buildFieldsPrompt({ fields: [{ key: "x", kind: "text", from: "ai" }] });
+  const { schema } = buildFieldsPrompt({ fields: [{ key: "x", kind: "text", source: "extract" }] });
   const r = anthropicRequest({
     model: "claude-haiku-4-5",
     systemText: "extract",
@@ -123,8 +123,8 @@ test("anthropicRequest: tagging samples at temperature 0, research included", ()
 
 const MAPPING = {
   fields: [
-    { key: "author", kind: "text",   from: "ai", hint: "the document author" },
-    { key: "year",   kind: "number", from: "ai", hint: "year of publication"  },
+    { key: "author", kind: "text",   source: "extract", instruction: "the document author" },
+    { key: "year",   kind: "number", source: "extract", instruction: "year of publication"  },
   ],
 };
 
@@ -185,15 +185,15 @@ test("mapping PATCH: null clears the mapping", async () => {
 test("mapping PATCH: bad kind → 400", async () => {
   const { json: board } = await createBoard("map-badkind");
   const r = await patchBoard(board.id, {
-    mapping: { fields: [{ key: "x", kind: "emoji", from: "ai" }] },
+    mapping: { fields: [{ key: "x", kind: "emoji", source: "extract" }] },
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /invalid kind/);
 });
 
-test("mapping PATCH: object kind is accepted (detection field) and round-trips", async () => {
+test("mapping PATCH: a detect field (kindless) is accepted and round-trips", async () => {
   const { json: board } = await createBoard("map-object");
-  const mapping = { fields: [{ key: "car", kind: "object", from: "ai", hint: "car" }] };
+  const mapping = { fields: [{ key: "car", source: "detect", instruction: "car" }] };
   const r = await patchBoard(board.id, { mapping });
   assert.equal(r.status, 200);
   const { json: got } = await getPublicBoard(board.id);
@@ -204,8 +204,8 @@ test("mapping PATCH: duplicate key → 400", async () => {
   const { json: board } = await createBoard("map-dupkey");
   const r = await patchBoard(board.id, {
     mapping: { fields: [
-      { key: "dup", kind: "text",   from: "ai" },
-      { key: "dup", kind: "number", from: "ai" },
+      { key: "dup", kind: "text",   source: "extract" },
+      { key: "dup", kind: "number", source: "extract" },
     ] },
   });
   assert.equal(r.status, 400);
@@ -214,7 +214,7 @@ test("mapping PATCH: duplicate key → 400", async () => {
 
 test("mapping PATCH: >12 fields → 400", async () => {
   const { json: board } = await createBoard("map-oversize");
-  const fields = Array.from({ length: 13 }, (_, i) => ({ key: `f${i}`, kind: "text", from: "ai" }));
+  const fields = Array.from({ length: 13 }, (_, i) => ({ key: `f${i}`, kind: "text", source: "extract" }));
   const r = await patchBoard(board.id, { mapping: { fields } });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /12/);
@@ -223,7 +223,7 @@ test("mapping PATCH: >12 fields → 400", async () => {
 test("mapping PATCH: field key 'identity' → 400 (reserved for the identity slot)", async () => {
   const { json: board } = await createBoard("map-reserved");
   const r = await patchBoard(board.id, {
-    mapping: { fields: [{ key: "identity", kind: "text", from: "ai" }] },
+    mapping: { fields: [{ key: "identity", kind: "text", source: "extract" }] },
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /reserved/);
@@ -247,7 +247,7 @@ test("create: mapping rides POST /api/admin/boards and lands in GET + settings",
 
 test("create: invalid mapping → 400, board not created", async () => {
   const r = await createBoard("map-on-create-bad", {
-    mapping: { fields: [{ key: "x", kind: "emoji", from: "ai" }] },
+    mapping: { fields: [{ key: "x", kind: "emoji", source: "extract" }] },
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /invalid kind/);
@@ -414,7 +414,7 @@ test("reextract: re-stamps the current board mapping over a stale stamp", async 
   const { uploaded: [item] } = await uploadTxt(board.id); // stamped with MAPPING
   const instId = item.instances[0].id;
 
-  const edited = { identity: { from: "ai", hint: "the invoice month, as Month - YYYY" }, fields: [] };
+  const edited = { identity: { source: "extract", instruction: "the invoice month, as Month - YYYY" }, fields: [] };
   await patchBoard(board.id, { mapping: edited });
   await req(base, "POST", `/api/instances/${instId}/reextract`, { sid: admin.sid });
 
@@ -491,8 +491,8 @@ test("retag: leaves in-pipeline items alone, routes settled items to the right l
   await patchBoard(board.id, { mapping: MAPPING });
   const FACE_MAPPING = {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
-    face: { from: "connector", producer: "chart", period: "1y" },
+    identity: { source: "connector" },
+    face: { source: "connector", producer: "chart", period: "1y" },
     fields: [],
   };
   const insert = async (status, payload) => {

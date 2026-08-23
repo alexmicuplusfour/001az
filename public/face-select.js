@@ -9,7 +9,7 @@ export const FACE_FAMILY = { image: "image", pdf: "document", docx: "document", 
 // instances are pre-ordered oldest→newest (created_at ASC).
 export function selectFace(instances, faceCfg) {
   if (!instances || !instances.length) return null;
-  const isFile = faceCfg?.from === "file";
+  const isFile = faceCfg?.source === "file";
   const prefer = isFile ? faceCfg.prefer || "any" : "any";
   const pick = isFile ? faceCfg.pick || "first" : "first";
   let pool = instances;

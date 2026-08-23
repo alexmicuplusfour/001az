@@ -184,6 +184,10 @@ export const CAPABILITY_DEFS = [
     label: "Object detection",
     blurb: "finds objects in an image so items can be searched by what is in them",
     declaredBy: "detect", verb: "detect", models: true,
+    // The Mapping pane surfaces this capability's provenance beside the detect
+    // fields it powers — same flag, same consumer as extract's band. Data, not
+    // a name check in the client (field-sources.js `capability` is the join).
+    mappingBand: true,
     // A pinned model must be one the provider advertises: otherwise every call
     // throws at the wire and the item requeues for ever. Only these two check —
     // tagging and embeddings accept any id, because live model lists mean the

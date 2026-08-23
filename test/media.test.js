@@ -1,4 +1,4 @@
-// File-metadata fields (from:"file") — the media registry projection, its
+// File-metadata fields (source:"file") — the media registry projection, its
 // mapping validation, the catalog endpoint, and ingest writing file fields onto
 // payload.fields. Pure projection (no file re-open), so most of this is unit
 // tests over synthetic entries; a couple of integration cases drive real uploads.
@@ -9,7 +9,7 @@ import { mediaCatalog, getMediaField, extractFileFields } from "../server/media/
 import { buildFieldsPrompt } from "../server/worker.js";
 
 const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
-const ff = (fn, kind) => ({ key: fn, fn, from: "file", kind });
+const ff = (fn, kind) => ({ key: fn, fn, source: "file", kind });
 
 // ─── pure: catalog shape ─────────────────────────────────────────────────────
 
@@ -82,16 +82,16 @@ test("extractFileFields: aspect ratio degrades to decimal for odd crops", () => 
 });
 
 test("extractFileFields: no file fields requested → empty object", () => {
-  assert.deepEqual(extractFileFields({ kind: "image" }, [{ key: "x", from: "ai" }]), {});
+  assert.deepEqual(extractFileFields({ kind: "image" }, [{ key: "x", source: "extract" }]), {});
 });
 
 // ─── pure: file fields stay out of the AI extraction schema ───────────────────
 
-test("buildFieldsPrompt: only AI fields enter the schema, file fields are skipped", () => {
+test("buildFieldsPrompt: only extract fields enter the schema, file fields are skipped", () => {
   const { schema } = buildFieldsPrompt({
     fields: [
-      { key: "author", kind: "text", from: "ai", hint: "the author" },
-      { key: "file_size", kind: "number", from: "file", fn: "file_size" },
+      { key: "author", kind: "text", source: "extract", instruction: "the author" },
+      { key: "file_size", kind: "number", source: "file", fn: "file_size" },
     ],
   });
   assert.deepEqual(Object.keys(schema.properties), ["author"]);
@@ -131,11 +131,11 @@ async function itemPayload(instanceId) {
 
 const FILE_MAPPING = {
   fields: [
-    { key: "file_size", kind: "number", from: "file", fn: "file_size" },
-    { key: "extension", kind: "text", from: "file", fn: "extension" },
-    { key: "word_count", kind: "number", from: "file", fn: "word_count" },
-    { key: "line_count", kind: "number", from: "file", fn: "line_count" },
-    { key: "modified", kind: "date", from: "file", fn: "modified" },
+    { key: "file_size", kind: "number", source: "file", fn: "file_size" },
+    { key: "extension", kind: "text", source: "file", fn: "extension" },
+    { key: "word_count", kind: "number", source: "file", fn: "word_count" },
+    { key: "line_count", kind: "number", source: "file", fn: "line_count" },
+    { key: "modified", kind: "date", source: "file", fn: "modified" },
   ],
 };
 
@@ -151,43 +151,43 @@ test("validateMapping: accepts a file field, rejects unknown fn / kind mismatch 
   assert.equal((await patchBoard(board.id, { mapping: FILE_MAPPING })).status, 200);
 
   const bad = await patchBoard(board.id, {
-    mapping: { fields: [{ key: "x", kind: "number", from: "file", fn: "nope" }] },
+    mapping: { fields: [{ key: "x", kind: "number", source: "file", fn: "nope" }] },
   });
   assert.equal(bad.status, 400);
   assert.match(bad.json.error, /unknown file field/);
 
   const mism = await patchBoard(board.id, {
-    mapping: { fields: [{ key: "file_size", kind: "text", from: "file", fn: "file_size" }] },
+    mapping: { fields: [{ key: "file_size", kind: "text", source: "file", fn: "file_size" }] },
   });
   assert.equal(mism.status, 400);
   assert.match(mism.json.error, /must have kind/);
 
   const onConn = await patchBoard(board.id, {
     mapping: {
-      input: { connector: "crypto" }, identity: { from: "connector" },
-      fields: [{ key: "file_size", kind: "number", from: "file", fn: "file_size" }],
+      input: { connector: "crypto" }, identity: { source: "connector" },
+      fields: [{ key: "file_size", kind: "number", source: "file", fn: "file_size" }],
     },
   });
   assert.equal(onConn.status, 400);
   assert.match(onConn.json.error, /files board/);
 });
 
-test("validateMapping: file fields don't count against the 12 AI-field cap", async () => {
+test("validateMapping: file fields don't count against the 12 extract-field cap", async () => {
   const { json: board } = await createBoard("file-cap");
   const fileFields = [
     ["file_size", "number"], ["extension", "text"], ["file_type", "text"], ["added", "date"],
     ["modified", "date"], ["width", "number"], ["height", "number"], ["pages", "number"],
-  ].map(([fn, kind]) => ({ key: fn, kind, from: "file", fn }));
-  const aiFields = Array.from({ length: 12 }, (_, i) => ({ key: `a${i}`, kind: "text", from: "ai" }));
-  // 8 file + 12 AI = 20 total, but only 12 are AI → accepted.
+  ].map(([fn, kind]) => ({ key: fn, kind, source: "file", fn }));
+  const aiFields = Array.from({ length: 12 }, (_, i) => ({ key: `a${i}`, kind: "text", source: "extract" }));
+  // 8 file + 12 extract = 20 total, but only 12 are extract → accepted.
   const ok = await patchBoard(board.id, { mapping: { fields: [...fileFields, ...aiFields] } });
   assert.equal(ok.status, 200);
-  // A 13th AI field is still rejected.
+  // A 13th extract field is still rejected.
   const bad = await patchBoard(board.id, {
-    mapping: { fields: [...aiFields, { key: "a12", kind: "text", from: "ai" }] },
+    mapping: { fields: [...aiFields, { key: "a12", kind: "text", source: "extract" }] },
   });
   assert.equal(bad.status, 400);
-  assert.match(bad.json.error, /12 AI/);
+  assert.match(bad.json.error, /12 extract/);
 });
 
 test("ingest: file fields land on payload.fields at upload, no AI needed", async () => {
@@ -221,10 +221,10 @@ test("backfill: legacy entries (no stored meta) are re-derived from the file on 
     [JSON.stringify({ files: [legacyEntry], fields: {} }), instId]);
 
   await patchBoard(board.id, { mapping: { fields: [
-    { key: "file_size", kind: "number", from: "file", fn: "file_size" },
-    { key: "word_count", kind: "number", from: "file", fn: "word_count" },
-    { key: "extension", kind: "text", from: "file", fn: "extension" },
-    { key: "added", kind: "date", from: "file", fn: "added" },
+    { key: "file_size", kind: "number", source: "file", fn: "file_size" },
+    { key: "word_count", kind: "number", source: "file", fn: "word_count" },
+    { key: "extension", kind: "text", source: "file", fn: "extension" },
+    { key: "added", kind: "date", source: "file", fn: "added" },
   ] } });
 
   const payload = await itemPayload(instId);
@@ -240,7 +240,7 @@ test("backfill: legacy entries (no stored meta) are re-derived from the file on 
 test("backfill: adding a file field to a board recomputes existing instances", async () => {
   const { json: board } = await createBoard("file-backfill");
   // Start with just file_size, then upload.
-  await patchBoard(board.id, { mapping: { fields: [{ key: "file_size", kind: "number", from: "file", fn: "file_size" }] } });
+  await patchBoard(board.id, { mapping: { fields: [{ key: "file_size", kind: "number", source: "file", fn: "file_size" }] } });
   const { uploaded } = await uploadTxt(board.id, "alpha beta gamma", "b.txt");
   const instId = uploaded[0].instances[0].id;
   let payload = await itemPayload(instId);
@@ -249,8 +249,8 @@ test("backfill: adding a file field to a board recomputes existing instances", a
   // Add word_count → the existing instance is backfilled in place.
   await patchBoard(board.id, {
     mapping: { fields: [
-      { key: "file_size", kind: "number", from: "file", fn: "file_size" },
-      { key: "word_count", kind: "number", from: "file", fn: "word_count" },
+      { key: "file_size", kind: "number", source: "file", fn: "file_size" },
+      { key: "word_count", kind: "number", source: "file", fn: "word_count" },
     ] },
   });
   payload = await itemPayload(instId);

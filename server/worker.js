@@ -64,6 +64,7 @@ import { getConnector, prefetchDueRefreshes } from "./connectors/index.js";
 import { entityRefreshAt, faceSchedule } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields } from "./media/index.js";
+import { aiWork } from "./field-sources.js";
 import { sharpGate, MAX_DECODE_PIXELS } from "./sharp-gate.js";
 import { aiImageFor, resolvePreset, GENERIC_IMAGES } from "./ai-image.js";
 
@@ -498,20 +499,20 @@ export const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowe
 // Pure function — no cache needed (extraction runs once per item; mappings
 // vary per item so a board-level cache wouldn't help).
 export function buildFieldsPrompt(mapping) {
-  // Only AI fields are extracted here; file fields (from:"file") are projected
-  // deterministically from the stored entry, connector fields come from the source.
-  // Object-detection fields never reach the model — they're produced by a
-  // separate detector pass in extractOne — so they're excluded from both the
-  // system-text field list and the record_fields schema here.
-  const fields = ((mapping && mapping.fields) || []).filter((f) => f.from === "ai" && f.kind !== "object");
-  const hasDerivedIdentity = mapping?.identity?.from === "ai";
-  const identityHint = hasDerivedIdentity ? (mapping.identity.hint || "").trim() : "";
-  // Classify mode: the identity answer is constrained to a user-declared list
-  // (each { value, hint? }). Absent/empty → open extraction, exactly as before.
-  const candidates = hasDerivedIdentity && Array.isArray(mapping.identity.candidates)
-    ? mapping.identity.candidates : [];
+  // Only extract-sourced fields reach the model; file fields are projected
+  // deterministically from the stored entry, connector fields come from the
+  // source, and detect fields ride the detector pass in extractOne — this
+  // builder IS the extract source's engine, so naming its own source id here
+  // is legitimate (field-sources.js).
+  const fields = ((mapping && mapping.fields) || []).filter((f) => f.source === "extract");
+  const hasDerivedIdentity = mapping?.identity?.source === "extract";
+  const identityHint = hasDerivedIdentity ? (mapping.identity.instruction || "").trim() : "";
+  // Match-to-a-list mode: the identity answer is constrained to a user-declared
+  // list (each { value, hint? }). Absent/empty → open extraction, as before.
+  const candidates = hasDerivedIdentity && Array.isArray(mapping.identity.options)
+    ? mapping.identity.options : [];
   const classify = candidates.length > 0;
-  const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.hint || f.key}`);
+  const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.instruction || f.key}`);
 
   // Identity is just another extraction field to the model: its hint rides in
   // the system-text field list like everyone else's, first (mirroring schema
@@ -583,7 +584,7 @@ export function buildFieldsPrompt(mapping) {
     const jt = kindType[f.kind] || "string";
     properties[f.key] = {
       type: "object",
-      description: f.hint || f.key,
+      description: f.instruction || f.key,
       properties: {
         why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
         value: { type: [jt, "null"] },
@@ -814,7 +815,7 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
 export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, board, now = Date.now()) {
   const conn = getConnector(board.mapping?.input?.connector);
   const faceCfg = board.mapping?.face;
-  if (!conn?.produceFace || faceCfg?.from !== "connector") return null;
+  if (!conn?.produceFace || faceCfg?.source !== "connector") return null;
   const rendered = await conn.produceFace(db, entity, inst.payload?.source, faceCfg);
   if (!rendered) { await setEntityFaceAt(db, entity.id, null); return null; } // no history → keep the tile
   const name = crypto.randomBytes(16).toString("hex");
@@ -1152,7 +1153,7 @@ export function detectionDemux(objectFields) {
   const queries = []; // original strings passed to the detector (deduped)
   const seen = new Set();
   for (const f of objectFields) {
-    const raw = (f.hint || deSnake(f.key)).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+    const raw = (f.instruction || deSnake(f.key)).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
     for (const q of (raw.length ? raw : [deSnake(f.key)])) {
       const nq = norm(q);
       if (!queryToField.has(nq)) queryToField.set(nq, f.key);
@@ -2040,10 +2041,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // not an execution worth a history row).
   async function extractOne(row) {
     const mapping = row.payload.mapping;
-    const aiWork =
-      mapping?.identity?.from === "ai" ||
-      (Array.isArray(mapping?.fields) && mapping.fields.some((f) => f.from === "ai"));
-    if (!aiWork) {
+    if (!aiWork(mapping)) {
       // Nothing for the model to do — the mapping is empty or all its fields
       // are connector/file-sourced (a connector vehicle's stamp lands here on
       // release). Advance without an AI call, keeping the fields the payload
@@ -2052,13 +2050,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       return null;
     }
     const board = await getBoard(db, row.board_id);
-    const aiFields = (mapping.fields || []).filter((f) => f.from === "ai");
-    const objectFields = aiFields.filter((f) => f.kind === "object");
-    // Object fields ride a separate detector pass below, not the LLM — so the
-    // model is only called when there's derived identity or a non-object field
-    // to extract. An object-only board skips the LLM entirely (ai/usage stay
-    // null and the tail guards for it).
-    const needsLLM = mapping?.identity?.from === "ai" || aiFields.some((f) => f.kind !== "object");
+    const extractFields = (mapping.fields || []).filter((f) => f.source === "extract");
+    const objectFields = (mapping.fields || []).filter((f) => f.source === "detect");
+    // Detect fields ride a separate detector pass below, not the LLM — so the
+    // model is only called when there's derived identity or an extract field.
+    // A detect-only board skips the LLM entirely (ai/usage stay null and the
+    // tail guards for it).
+    const needsLLM = mapping?.identity?.source === "extract" || extractFields.length > 0;
 
     // `imageRender` mirrors the tag leg: extraction sends a rendition too
     // whenever the item has no text sidecar (an image, a connector chart
@@ -2119,10 +2117,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // a file-field edit during the pending window still lands; the stamped mapping
     // only governs AI replay. Keys are unique, so AI fields never collide.
     const fields = extractFileFields(row.payload.files?.[0], board?.mapping?.fields || mapping.fields);
-    // Lenient-validate each scalar AI field: wrong type → null (keep the why
-    // sentence). Object fields are populated by the detector pass below, not here.
-    for (const f of aiFields) {
-      if (f.kind === "object") continue;
+    // Lenient-validate each extracted scalar: wrong type → null (keep the why
+    // sentence). Detect fields are populated by the detector pass below, not here.
+    for (const f of extractFields) {
       const entry = input[f.key];
       if (!entry) continue;
       const why = typeof entry.why === "string" ? entry.why.trim() : "";
@@ -2135,10 +2132,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       fields[f.key] = { v, why };
     }
 
-    // Object-detection pass: a separate leg, not an LLM call. One field = one
-    // object type; its queries are the hint (comma/newline-split synonyms for the
-    // SAME thing), or the de-snaked field key when there's no hint (so a field
-    // `license_plate` detects "license plate"). Every object field's queries run
+    // Object-detection pass: a separate leg, not an LLM call. One detect field =
+    // one object type; its queries are the instruction (comma/newline-split
+    // synonyms for the SAME thing), or the de-snaked field key when there's none
+    // (a field `license_plate` detects "license plate"). Every detect field's queries run
     // in ONE detector pass (LLMDet takes all the queries at once), then each box is
     // routed back to its field by the matched query. A non-image item has nothing
     // to detect (empty, not an error); a detector failure throws → the extract leg
@@ -2175,8 +2172,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // job-log summary; `landed` reports whether the stamp beat the fence.
     let landed = false;
     let disposition = null;
-    if (mapping.identity?.from === "ai") {
-      const classify = Array.isArray(mapping.identity.candidates) && mapping.identity.candidates.length > 0;
+    if (mapping.identity?.source === "extract") {
+      const classify = Array.isArray(mapping.identity.options) && mapping.identity.options.length > 0;
       // Classify: an allowed set keyed by normalised value → the candidate's
       // canonical spelling. The schema enum already forbids off-list answers on
       // strict providers, but a best-effort provider can still return one, so we
@@ -2184,7 +2181,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // bounded set is the whole point. Display is the candidate's spelling, not
       // the model's echo, so the entity's name matches the list the user declared.
       const allowedByKey = classify
-        ? new Map(mapping.identity.candidates.map((c) => [normaliseIdentity(c.value), c.value.trim()]))
+        ? new Map(mapping.identity.options.map((c) => [normaliseIdentity(c.value), c.value.trim()]))
         : null;
       const raw = classify
         ? (Array.isArray(input.identity?.values) ? input.identity.values : [])

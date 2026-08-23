@@ -244,3 +244,149 @@ export function sectionHeadingEl(title, sub) {
   el.querySelector("h2").textContent = title;
   return el;
 }
+
+// ─── Bottom drawer — an editing surface inside a modal ──────────────────────
+// A full-width sheet that rises from the bottom of `hostEl` (a modal body)
+// over a scrim, holds one editing task, and ends it with ONE primary action.
+// The mapping pane's field/slot editors are the first consumer; the component
+// is generic on purpose — any modal whose editors currently inline-expand
+// inside a scrolling body has this exact problem.
+//
+// The contract is the interaction shape, nothing more:
+//   - one primary button (the caller's commit — the caller applies its draft
+//     and calls close(); the component never touches caller state);
+//   - dismissal paths that never half-apply: Cancel, scrim click, Esc — each
+//     runs onDismiss and closes, and none of them is the primary action.
+// Draft/commit semantics therefore stay entirely caller-side: hand `build` a
+// COPY of your state and write it back only in primary.onClick.
+//
+//   const drawer = createDrawer(bodyEl);            // once per modal body
+//   drawer.open({ head, build, primary: { label, onClick }, onDismiss });
+//   drawer.refresh();                               // re-run build in place
+//
+// Esc is registered on document in CAPTURE phase and stops propagation while
+// the drawer is open — mountModal's own Escape handler lives on document too
+// (bubble), and without the capture+stop, one keypress would fall through the
+// drawer and dismiss the whole modal under it.
+export function createDrawer(hostEl) {
+  if (getComputedStyle(hostEl).position === "static") hostEl.style.position = "relative";
+
+  const scrim = document.createElement("div");
+  scrim.className = "drawer-scrim";
+  const sheet = document.createElement("div");
+  sheet.className = "drawer";
+  sheet.setAttribute("role", "dialog");
+  sheet.setAttribute("aria-modal", "true");
+  const head = document.createElement("div");
+  head.className = "drawer-head";
+  const body = document.createElement("div");
+  body.className = "drawer-body";
+  const foot = document.createElement("div");
+  foot.className = "drawer-foot";
+  sheet.append(head, body, foot);
+  hostEl.append(scrim, sheet);
+
+  let current = null; // { build, onDismiss } while open
+  let opener = null;  // the element to hand focus back to
+
+  function onKey(e) {
+    if (!current) return;
+    if (e.key === "Escape") {
+      e.stopPropagation(); // the host modal must NOT also close on this press
+      dismiss();
+      return;
+    }
+    // Focus trap: the scrim blocks pointers but not Tab — without this, focus
+    // walks into live controls behind the sheet (tile × buttons, the modal's
+    // own Save) and Enter operates them mid-draft. Wrap at the sheet's edges;
+    // a focus that has already escaped is pulled back in.
+    if (e.key === "Tab") {
+      const focusables = [...sheet.querySelectorAll("input, textarea, select, button")]
+        .filter((n) => !n.disabled && n.offsetParent !== null);
+      if (!focusables.length) { e.preventDefault(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const inside = sheet.contains(document.activeElement);
+      if (e.shiftKey && (!inside || document.activeElement === first)) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && (!inside || document.activeElement === last)) {
+        e.preventDefault(); first.focus();
+      }
+    }
+  }
+
+  function setOpen(on) {
+    scrim.classList.toggle("open", on);
+    sheet.classList.toggle("open", on);
+  }
+
+  function close() {
+    if (!current) return;
+    current = null;
+    document.removeEventListener("keydown", onKey, true);
+    setOpen(false);
+    // Return focus to whatever opened the drawer — it's still on screen, the
+    // sheet merely covered it.
+    opener?.focus?.({ preventScroll: true });
+    opener = null;
+  }
+
+  function dismiss() {
+    const cb = current?.onDismiss;
+    close();
+    cb?.();
+  }
+  scrim.addEventListener("click", dismiss);
+
+  function open({ head: headNodes, build, primary, onDismiss } = {}) {
+    opener = document.activeElement;
+    current = { build, onDismiss };
+
+    head.replaceChildren(...[].concat(headNodes || []));
+    body.replaceChildren();
+    build?.(body);
+
+    foot.replaceChildren();
+    // The dialog's own footer convention: unclassed is the primary, `.ghost` is
+    // the secondary. Same two buttons, so the same two classes.
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "ghost";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", dismiss);
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.textContent = primary?.label || "Done";
+    ok.addEventListener("click", () => primary?.onClick?.());
+    foot.append(cancel, ok);
+
+    document.addEventListener("keydown", onKey, true);
+    // Resolve the CLOSED style before flipping to open. On the first open the
+    // sheet was appended in this same task (createDrawer is called lazily, by
+    // the click that opens it), so the browser had no computed "from" state to
+    // transition out of and jumped straight to the end — the first drawer of a
+    // session appeared with no animation and every one after it animated.
+    // Reading a layout property forces that recalc; it costs one reflow, once
+    // per open, on a click that is already rebuilding the sheet's contents.
+    void sheet.offsetHeight;
+    setOpen(true);
+    // First focusable in the TASK, so keyboard users land in the form rather
+    // than on its Cancel — scoped to the body rather than excluding the footer
+    // by class, which is both simpler and one less thing the footer's markup
+    // can break. A task with nothing to focus falls back to its own commit, so
+    // focus is always inside the sheet for the trap to keep.
+    (body.querySelector("input, textarea, select, button") || ok)
+      .focus?.({ preventScroll: true });
+  }
+
+  // Re-run build in place — for editors whose structure changes mid-edit
+  // (option rows added/removed). The caller's build closes over its draft, so
+  // a refresh redraws the same task, not a new one.
+  function refresh() {
+    if (!current?.build) return;
+    body.replaceChildren();
+    current.build(body);
+  }
+
+  return { open, refresh, close, isOpen: () => !!current };
+}

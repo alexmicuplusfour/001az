@@ -80,24 +80,24 @@ test("sidecar client: failure taxonomy — unreachable transient, 422 permanent,
 
 // --- pure: the demux (query build + label routing) ---
 
-test("demux: queries come from the hint's synonyms, else the de-snaked key", () => {
+test("demux: queries come from the instruction's synonyms, else the de-snaked key", () => {
   const d = detectionDemux([
-    { key: "car", hint: "car, automobile" },
-    { key: "license_plate", hint: "" }, // no hint → de-snaked key
+    { key: "car", instruction: "car, automobile" },
+    { key: "license_plate", instruction: "" }, // no instruction → de-snaked key
   ]);
   assert.deepEqual(d.queries, ["car", "automobile", "license plate"]);
 });
 
-test("demux: a trailing period in a hint still matches the sidecar's period-stripped label", () => {
-  // Regression: the sidecar feeds "car." and echoes label "car"; a hint typed
+test("demux: a trailing period in an instruction still matches the sidecar's period-stripped label", () => {
+  // Regression: the sidecar feeds "car." and echoes label "car"; an instruction typed
   // "car." must normalize to "car" or the box is silently dropped.
-  const d = detectionDemux([{ key: "car", hint: "car." }]);
+  const d = detectionDemux([{ key: "car", instruction: "car." }]);
   const byField = d.route([{ label: "car", box: [0, 0, 0.5, 0.5], score: 0.9 }]);
   assert.equal(byField.get("car").length, 1);
 });
 
 test("demux: boxes route to their field by label; an unasked label is dropped", () => {
-  const d = detectionDemux([{ key: "car", hint: "car" }, { key: "wheel", hint: "wheel" }]);
+  const d = detectionDemux([{ key: "car", instruction: "car" }, { key: "wheel", instruction: "wheel" }]);
   const byField = d.route([
     { label: "car", box: [0, 0, 1, 1], score: 0.8 },
     { label: "Wheel", box: [0, 0, 1, 1], score: 0.7 }, // case-insensitive
@@ -109,7 +109,7 @@ test("demux: boxes route to their field by label; an unasked label is dropped", 
 });
 
 test("demux: a query shared by two fields is deduped once, first field wins the label", () => {
-  const d = detectionDemux([{ key: "a", hint: "car" }, { key: "b", hint: "car" }]);
+  const d = detectionDemux([{ key: "a", instruction: "car" }, { key: "b", instruction: "car" }]);
   assert.deepEqual(d.queries, ["car"]); // sent to the detector once
   const byField = d.route([{ label: "car", box: [0, 0, 1, 1], score: 0.9 }]);
   assert.equal(byField.get("a").length, 1);

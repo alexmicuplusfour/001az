@@ -30,10 +30,10 @@ test("crypto manifest: has required fields and a valid template", () => {
   // Template is a valid mapping shape bound to the domain, not the provider.
   const t = manifest.template;
   assert.equal(t.input?.connector, "crypto");
-  assert.equal(t.identity?.from, "connector");
+  assert.equal(t.identity?.source, "connector");
   assert.ok(Array.isArray(t.fields));
   for (const f of t.fields) {
-    assert.equal(f.from, "connector");
+    assert.equal(f.source, "connector");
     assert.ok(f.fn);
   }
 });
@@ -185,7 +185,7 @@ test("refresh: fetchFields serves the due keys; partial coverage falls back whol
   };
   const inst = { payload: { source: { provider: "meter", id: "gg" } } };
   const live = (keys) => ({
-    fields: keys.map((key) => ({ key, from: "connector", fn: key, live: true, every: 1 })),
+    fields: keys.map((key) => ({ key, source: "connector", fn: key, refresh: { every: 1 } })),
   });
   const now = 120000; // both fields due (at=0, every=1min)
 
@@ -311,8 +311,8 @@ test("mapping PATCH: input { connector: crypto } is valid", async () => {
   const r = await patchBoard(board.id, {
     mapping: {
       input: { connector: "crypto" },
-      identity: { from: "connector" },
-      fields: [{ key: "price", kind: "number", from: "connector", fn: "price" }],
+      identity: { source: "connector" },
+      fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
     },
   });
   assert.equal(r.status, 200);
@@ -321,7 +321,7 @@ test("mapping PATCH: input { connector: crypto } is valid", async () => {
 test("mapping PATCH: unknown connector → 400", async () => {
   const { json: board } = await createBoard("conn-unknown");
   const r = await patchBoard(board.id, {
-    mapping: { input: { connector: "fakecoin" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "fakecoin" }, identity: { source: "connector" }, fields: [] },
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /unknown connector/);
@@ -332,8 +332,8 @@ test("mapping PATCH: connector field without fn → 400", async () => {
   const r = await patchBoard(board.id, {
     mapping: {
       input: { connector: "crypto" },
-      identity: { from: "connector" },
-      fields: [{ key: "price", kind: "number", from: "connector" }], // no fn
+      identity: { source: "connector" },
+      fields: [{ key: "price", kind: "number", source: "connector" }], // no fn
     },
   });
   assert.equal(r.status, 400);
@@ -347,7 +347,7 @@ test("mapping PATCH: full crypto template shape saves successfully", async () =>
 
   const got = await req(base, "GET", `/api/boards/${board.id}`, { sid: admin.sid });
   assert.equal(got.json.mapping?.input?.connector, "crypto");
-  assert.equal(got.json.mapping?.identity?.from, "connector");
+  assert.equal(got.json.mapping?.identity?.source, "connector");
 });
 
 // ── GET /api/connectors ───────────────────────────────────────────────────────

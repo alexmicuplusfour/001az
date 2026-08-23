@@ -563,8 +563,8 @@ const WIDGETS = {
     providers: [{ name: "acme", label: "Acme", description: "", needsKey: false }],
     template: {
       input: { connector: "widgets" },
-      identity: { from: "connector" },
-      fields: [{ key: "rank", kind: "number", from: "connector", fn: "rank" }],
+      identity: { source: "connector" },
+      fields: [{ key: "rank", kind: "number", source: "connector", fn: "rank" }],
     },
     browse: {
       columns: [{ key: "name", label: "Name", kind: "text", primary: true }, { key: "rank", label: "#", kind: "number" }],
@@ -655,7 +655,7 @@ const entityIdentities = async (boardId) => {
 test("admit: entity + tag vehicle + ledger row; a duplicate identity propagates tagged", async () => {
   const boardId = await seedBoard(db, "feed-admit");
   await updateBoard(db, boardId, {
-    mapping: { input: { connector: "widgets" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "widgets" }, identity: { source: "connector" }, fields: [] },
   });
   const board = await getBoard(db, boardId);
   const a = feedAdapter(stubConn());
@@ -844,7 +844,7 @@ test("a failed MANUAL feed run disarms instead of retrying forever", async () =>
   // "ingestion is not available". Written directly (validateIngest would
   // refuse to save against a null descriptor), armed for an immediate run.
   await updateBoard(db, boardId, {
-    mapping: { input: { connector: "ghost" }, identity: { from: "connector" }, fields: [] },
+    mapping: { input: { connector: "ghost" }, identity: { source: "connector" }, fields: [] },
     ingest: { enabled: true, source: {}, filters: [], trigger: { mode: "manual" } },
   });
   await setIngestNextRun(db, boardId, Date.now() - 1);

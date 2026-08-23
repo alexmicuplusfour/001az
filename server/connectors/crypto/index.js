@@ -43,29 +43,32 @@ export const manifest = {
     { key: "circulating_supply", kind: "number", fn: "circulating_supply", label: "Circulating supply" },
     { key: "url",        kind: "url",    fn: "url",        label: "Market page" },
   ],
+  // The identity slot in this domain's own words — the mapping pane's locked
+  // identity row reads it, so users meet "Coin", never "connector".
+  identity: { label: "Coin", blurb: "each coin is its own card" },
   template: {
     input: { connector: "crypto" },
-    identity: { from: "connector" },
+    identity: { source: "connector" },
     // The card face is the chart, always. The symbol tile is what a card falls
     // back to when the chart can't be rendered (a provider without history(), an
     // empty series) — a fallback, not a board's choice, so it isn't offered as
-    // one. Cadence off by default: the chart renders once, on the face leg, when
-    // the coin is added; a board that wants a moving chart turns liveness on.
-    face: { from: "connector", producer: "chart", period: "1y" },
+    // one. No refresh by default: the chart renders once, on the face leg, when
+    // the coin is added; a board that wants a moving chart turns the cadence on.
+    face: { source: "connector", producer: "chart", period: "1y" },
     // The template binds the whole catalog, like stocks — the mapping modal is
     // where a board trims to taste.
     fields: [
-      { key: "price",      kind: "number", from: "connector", fn: "price" },
-      { key: "market_cap", kind: "number", from: "connector", fn: "market_cap" },
-      { key: "change_1h",  kind: "number", from: "connector", fn: "change_1h" },
-      { key: "change_24h", kind: "number", from: "connector", fn: "change_24h" },
-      { key: "change_7d",  kind: "number", from: "connector", fn: "change_7d" },
-      { key: "change_30d", kind: "number", from: "connector", fn: "change_30d" },
-      { key: "volume",     kind: "number", from: "connector", fn: "volume" },
-      { key: "rank",       kind: "number", from: "connector", fn: "rank" },
-      { key: "ath",        kind: "number", from: "connector", fn: "ath" },
-      { key: "circulating_supply", kind: "number", from: "connector", fn: "circulating_supply" },
-      { key: "url",        kind: "url",    from: "connector", fn: "url" },
+      { key: "price",      kind: "number", source: "connector", fn: "price" },
+      { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" },
+      { key: "change_1h",  kind: "number", source: "connector", fn: "change_1h" },
+      { key: "change_24h", kind: "number", source: "connector", fn: "change_24h" },
+      { key: "change_7d",  kind: "number", source: "connector", fn: "change_7d" },
+      { key: "change_30d", kind: "number", source: "connector", fn: "change_30d" },
+      { key: "volume",     kind: "number", source: "connector", fn: "volume" },
+      { key: "rank",       kind: "number", source: "connector", fn: "rank" },
+      { key: "ath",        kind: "number", source: "connector", fn: "ath" },
+      { key: "circulating_supply", kind: "number", source: "connector", fn: "circulating_supply" },
+      { key: "url",        kind: "url",    source: "connector", fn: "url" },
     ],
   },
   // Static provider descriptors (no db); the active choice is resolved per call

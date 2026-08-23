@@ -43,7 +43,7 @@ test("payload shape and identity", async (t) => {
       { name: "two.pdf", original_name: "resume_v2.pdf", kind: "pdf" },
       { name: "three.png", original_name: "photo.png", kind: "image", w: 5, h: 5 },
     ];
-    const mapping = { identity: { from: "ai", hint: "the person" }, fields: [] };
+    const mapping = { identity: { source: "extract", instruction: "the person" }, fields: [] };
     const { rows } = await db.query(
       `INSERT INTO items (board_id, status, payload, created_at, updated_at)
        VALUES ($1, 'tagged', $2, 1, 1) RETURNING id`,

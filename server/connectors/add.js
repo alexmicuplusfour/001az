@@ -19,7 +19,7 @@ export async function addConnectorEntity(db, board, connector, connectorName, en
   // (`park` makes the face leg park the item in held afterwards instead of
   // flowing into tagging). Face-less connector items are definition-complete
   // at birth: auto-tag off holds them as before.
-  const wantsFace = board.mapping?.face?.from === "connector";
+  const wantsFace = board.mapping?.face?.source === "connector";
   const status = wantsFace ? "pending_face" : board.auto_tag ? "pending" : "held";
   let eid;
   try {

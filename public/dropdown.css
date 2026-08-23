@@ -330,6 +330,48 @@
   user-select: none;
 }
 
+/* A wrapped set of compact choices (see ddChips). Shares the horizontal inset
+   of .dd-row and .dd-head, so a header sitting above a set reads as its label
+   and the whole menu keeps one left edge. */
+.dd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 3px 8px 6px;
+}
+.dd-chip {
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 7px;
+  border: 1px solid #2a2e38;
+  border-radius: 6px;
+  background: #1b1e25;
+  color: #cdd2da;
+  cursor: pointer;
+  outline: none;
+}
+.dd-chip--mono {
+  font-family: monospace;
+}
+.dd-chip:hover:not(:disabled),
+.dd-chip:focus-visible:not(:disabled) {
+  background: #262b34;
+  border-color: #3a3f4a;
+  color: #fff;
+}
+.dd-chip.active {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: #4a5060;
+  color: #fff;
+}
+/* Already taken — still shown, because a catalog that hides what you've used
+   can't answer "is that one available"; just not pickable again. */
+.dd-chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ─── light surface (cards, forms, admin) ───────────────────────────────────
    The shell above is drawn for a dark popover over the gallery. A surface that
    is already white asks for the inverse, and the component takes it the way
@@ -373,6 +415,22 @@
 }
 .dropdown--light .dd-sep {
   background: #ececef;
+}
+.dropdown--light .dd-chip {
+  background: #f7f7f9;
+  border-color: #dcdce2;
+  color: #111;
+}
+.dropdown--light .dd-chip:hover:not(:disabled),
+.dropdown--light .dd-chip:focus-visible:not(:disabled) {
+  background: #ececef;
+  border-color: #c9c9d0;
+  color: #111;
+}
+.dropdown--light .dd-chip.active {
+  background: #ececef;
+  border-color: #b9b9c4;
+  color: #111;
 }
 
 .dropdown--light .dd-action {

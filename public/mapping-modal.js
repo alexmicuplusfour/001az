@@ -1,122 +1,326 @@
-import { toast } from './toast.js';
-import { openDropdown, ddRow, ddSep } from './dropdown.js';
-import { ICONS, sentence } from './utils.js';
-import { switchRow } from './board-modal.js';
-import { sectionHeadingEl, provBand, keepPlace } from './modal.js';
-import { fillSelect } from './select.js';
+// The entity-mapping pane, rebuilt around the field-sources model
+// (planning/field-sources-plan.md): every mapped value names its SOURCE —
+// connector, file, extract, detect — and the pane draws all of them the same
+// way. Identity and face are definition rows (glyph, small mono label, plain
+// value line); fields are uniform tiles; everything is edited in a bottom
+// drawer (modal.js createDrawer) that buffers a draft and commits on its one
+// primary button. Adding a field goes through a dark source menu: catalog
+// sources (connector, file) list their fields right in the menu and add on
+// click; open sources (extract, detect) proceed to the drawer. Violet glyphs
+// and tints mark the sources a model produces; grey is deterministic.
+//
+// Imports are relative on purpose: an ES module specifier resolves against the
+// URL of the module doing the importing, never against the page's — so
+// `./toast.js` is `/toast.js` whether the document is `/`, `/boards` or
+// `/admin.html` (see board-modal.js for what the root-absolute form cost).
+import { toast } from "./toast.js";
+import { openDropdown, ddRow, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
+import { ICONS, sentence } from "./utils.js";
+import { switchRow } from "./board-modal.js";
+import { sectionHeadingEl, provBand, keepPlace, createDrawer } from "./modal.js";
+import { fillSelect } from "./select.js";
 
-const KINDS = ["text", "number", "url", "date", "object"];
-// Liveness cadence choices (minutes). 0 = Off (the field is fetched once at add
-// and never refreshed). "How often the field updates in the app" — the sweep
-// re-fetches the whole entity but only rewrites fields whose cadence elapsed.
-const CADENCES = [[0, "Off"], [1, "1 min"], [5, "5 min"], [15, "15 min"], [60, "1 hour"], [360, "6 hours"], [1440, "1 day"]];
+// Refresh cadence choices (minutes) this pane OFFERS. 0 = once: the field is
+// fetched when the entity is added and never re-pulled. The words are the
+// pane's summary vocabulary too — a tile reads "Crypto · number · every 15 min"
+// and the face row "a 1y price chart, once", so the labels have to survive
+// being read mid-sentence.
+const CADENCES = [
+  [0, "once"], [1, "every minute"], [5, "every 5 min"], [15, "every 15 min"],
+  [60, "hourly"], [360, "every 6 hours"], [1440, "daily"],
+];
+// The server accepts any 1–43200 minutes; a value this list doesn't carry
+// still needs a name (see cadenceSelect for where that matters most).
+const cadenceLabel = (n) => CADENCES.find(([m]) => m === n)?.[1] || `every ${n} min`;
+const cadWord = (bearer) => cadenceLabel(bearer?.refresh?.every ?? 0);
+
+// `url` keeps its wire id; the UI calls it "link" everywhere a kind is shown.
+const kindWord = (k) => (k === "url" ? "link" : k);
+const quote = (s) => `“${s}”`;
+const clone = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)));
+
+// ── The client source table ─────────────────────────────────────────────────
+// Mirror of server/field-sources.js FIELD_SOURCE_DEFS — the client can't import
+// server modules, so the structural facts are restated here next to the
+// presentation the wire deliberately doesn't carry (labels, menu helpers,
+// glyphs, tile summaries). KEEP THE TWO IN STEP. Everything below the glyph is
+// read by generic code — the add menu, the field drawer and collect() ask this
+// table what a source needs instead of branching on its id, so a new source is
+// a row here (plus its server row) rather than another arm in three switches.
+//
+//   glyph       ICONS name; `ai` decides its ink (.mm-glyph.ai = violet).
+//   capability  which capability runs it — drives the provenance bands; null =
+//               deterministic, no model, no band.
+//   catalog     bound to a closed vocabulary, named with the server's own
+//               vocabulary ids ("connector" | "media"): the entry decides key,
+//               kind AND fn together, so the menu lists entries and no drawer
+//               asks. The pane's CATALOGS registry resolves the name to the
+//               fetched list. Absent = the user names the field themselves.
+//   kinds       the formats a user may pick, in display order. Absent with a
+//               catalog = the catalog's kind; absent without one = no kind at
+//               all (detect emits located hits, not a scalar).
+//   ask         the server's `takesInstruction`, carrying the copy the wire
+//               doesn't: the instruction editor's label, placeholder and hint.
+//   refreshable the value can change under us — offer a re-pull cadence.
+//   filesOnly   needs stored files to act on, so a connector board doesn't
+//               offer it — there is nothing there to look at. (The server's
+//               flag of the same name REJECTS such a field; here it only
+//               withholds it, which is why detect carries it on this side
+//               only: on a connector board it would collect nothing rather
+//               than mean nothing.)
+//   connectorOnly the value is pulled from the bound domain, so a files board
+//               doesn't offer it — the dual of filesOnly, mirroring the
+//               server's flag of the same name.
+//   cap         per-board ceiling on fields of this source (extract fields feed
+//               the extraction schema; detect fields add detector queries).
+//   label       menu/drawer name — a function of ctx because the connector's
+//               name is the domain's ("Live data · Crypto"), learned at runtime.
+//   menuNote    the add-menu helper: what the AI does about it, or the useful
+//               opposite ("no AI — …").
+//   tile        the one-line summary a tile / def row shows for a binding.
+const SOURCES = {
+  connector: {
+    id: "connector", glyph: "srcGlobe", ai: false, capability: null,
+    catalog: "connector", connectorOnly: true, refreshable: true,
+    label: (ctx) => (ctx.connectorLabel ? `Live data · ${ctx.connectorLabel}` : "Live data"),
+    menuNote: "no AI — pulled on a schedule",
+    tile: (f, ctx) => `${ctx.connectorLabel || "Live data"} · ${kindWord(f.kind)} · ${cadWord(f)}`,
+  },
+  file: {
+    id: "file", glyph: "srcFile", ai: false, capability: null,
+    catalog: "media", filesOnly: true,
+    label: () => "File metadata",
+    menuNote: "no AI — read from the file",
+    tile: (f) => `From the file · ${kindWord(f.kind)}`,
+  },
+  extract: {
+    id: "extract", glyph: "srcSparkle", ai: true, capability: "extract",
+    kinds: ["text", "number", "date", "url"], cap: 12,
+    ask: {
+      label: "AI instruction",
+      placeholder: "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")",
+      hint: "Sent to the model for every item.",
+    },
+    label: () => "AI extraction",
+    menuNote: "AI answers from the item's content",
+    tile: (f) => `AI extraction · ${kindWord(f.kind)}${f.instruction ? ` · ${quote(f.instruction)}` : ""}`,
+  },
+  detect: {
+    id: "detect", glyph: "srcFrame", ai: true, capability: "detect",
+    cap: 12, filesOnly: true,
+    ask: {
+      label: "Object to detect",
+      placeholder: "the object to detect — e.g. \"cat\"; commas are synonyms for the same thing",
+      hint: "The detection engine scans every image for it — one field, one kind of thing.",
+    },
+    label: () => "Object detection",
+    menuNote: "AI finds them in each image",
+    tile: (f) => `Object detection · ${quote(f.instruction || "…")}`,
+  },
+};
+
+// User-named field keys: lowercase snake, must start with a letter. The key is
+// written to the draft on EVERY keystroke and merely re-displayed on blur —
+// writing only on blur loses the key when a rebuild replaces the focused input
+// (removing a focused element does not reliably fire `blur` in any browser).
+// Normalizing on input keeps the draft the same value blur would produce; the
+// DISPLAY is left alone until blur — rewriting under a live caret is rude.
+const normalizeKey = (v) =>
+  v.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "").replace(/^[^a-z]+/, "") || "";
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, collect, setExtractionBand }: the host folds collect()'s
-// payload into its one PATCH/POST, and names the model behind the "Using …"
-// band via setExtractionBand. Fully parameterized (no gallery-state reads), so
-// it works on admin.html and for not-yet-created boards:
+// Returns { isDirty, collect, setBands }: the host folds collect()'s payload
+// into its one PATCH/POST, and names the models behind the provenance bands
+// via setBands. Fully parameterized (no gallery-state reads), so it works on
+// admin.html and for not-yet-created boards:
 //   isAdmin  — editable pane; false = read-only view
 //   mapping  — the board's current mapping (null for a new/unmapped board)
 //   hasItems — locks the connector-template picker (templates rewire the whole
 //              mapping, only sane while the board is empty)
-//   onExtractionChange — the band's "Change" action: the host opens its
-//              AI-models strip at the extraction row (admin only)
-export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, onExtractionChange = null }) {
+//   onCapabilityChange — a band's "Change" action, handed the capability id:
+//              the host opens its AI-models strip at that capability's row
+export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, onCapabilityChange = null }) {
   // Any user edit flips the pane dirty, so a pure-tagging save omits `mapping`
   // and doesn't needlessly re-run the server's reschedule/backfill.
   let dirty = false;
   const markDirty = () => { dirty = true; };
-  // Clone current mapping so edits are buffered until Save.
+
+  // Clone the current mapping so edits are buffered until Save. The state IS
+  // the new wire shape — no per-slot from/hint/candidates translation layer.
   let fields = (mapping?.fields || []).map((f) => ({ ...f }));
-  let identityFrom = mapping?.identity?.from || "raw";
-  let identityHint = mapping?.identity?.hint || "";
-  // Classify mode (Slice 3): a declared list of allowed answers. Its presence is
-  // the mode; `classifyOn` just drives the reveal so an on-with-empty state is
-  // distinguishable (and blocked at save) from off.
-  let candidates = (mapping?.identity?.candidates || []).map((c) => ({ ...c }));
-  let classifyOn = candidates.length > 0;
-  let inputConnector = mapping?.input?.connector || null; // set when a connector template is loaded
-  let connectorCatalog = null;   // the active connector's full field set (manifest.fields)
+  let identityCfg = clone(mapping?.identity) || null; // null = the filename
+  let faceCfg = clone(mapping?.face) || null;         // null = the slot default
+  let inputConnector = mapping?.input?.connector || null;
+
+  // The bound domain's whole row from /api/connectors — label, field catalog,
+  // face producers, its own words for the identity slot, providers, and whether
+  // it can serve at all (`available`/`reason`, the capabilities feed's ladder).
+  // ONE object, not eight parallel lets: every place that (re)binds a domain —
+  // the catalog fetch, a template apply, a template clear — sets it in a single
+  // assignment, so the pane can't half-agree with itself about which domain it
+  // is describing. null = no connector, or its row hasn't landed yet.
+  let conn = null;
+  const faces = () => conn?.faces || [];
+  // The domain's field catalog, with the two absences kept apart: null = the row
+  // hasn't landed (the menu is right to say "loading"), [] = it landed and
+  // declares no fields, which is a loaded catalog that happens to be empty.
+  const connCatalog = () => (conn ? conn.fields || [] : null);
+  // Availability starts optimistic by construction: until the row lands there
+  // is nothing to accuse the domain of, and a banner that flashes on every open
+  // would be its own lie.
+  const unavailable = () => !!inputConnector && conn?.available === false;
+
   let fileFieldCatalog = null;   // file-metadata field catalog (server/media) — file boards only
-  let connectorFaces = [];       // the connector's face producers (with per-provider availability)
-  let connectorLabel = null;
-  let connectorProviders = [];   // [{ name, label, needsKey }] — for naming providers in hints
-  let connectorActiveProvider = null; // the backend currently resolving this connector
-  // Whether the BOUND domain can serve at all, and why not — straight off
-  // /api/connectors (`available`/`reason`, the capabilities feed's own ladder).
-  // Starts optimistic: until the catalog lands there is nothing to accuse it of,
-  // and a banner that flashes on every open would be its own lie.
-  let connectorAvailable = true;
-  let connectorReason = null;
-  let faceCfg = { ...(mapping?.face || { from: "raw" }) }; // the entity's card visual
+  let catalogFailed = false;     // a catalog fetch LOST (vs still in flight) — the add menu says which
 
-  // The template picker's trigger (admin only) — it names the template the
-  // board is currently on, so every path that changes that has to re-sync it:
-  // the two switch handlers, and loadCatalog, which is where a bound board
-  // learns its connector's display label ("Crypto", not "crypto").
-  let templateBtn = null;
-  let templateBtnValue = null;
-  function syncTemplateBtn() {
-    if (!templateBtnValue) return;
-    templateBtnValue.textContent = inputConnector ? (connectorLabel || inputConnector) : "Files";
+  // SOURCES[..].catalog names a vocabulary; this resolves the name to the
+  // fetched list (behind getters — both land after the pane builds). The one
+  // place a catalog NAME is enumerated: everywhere else asks catalogFor.
+  const CATALOGS = { connector: connCatalog, media: () => fileFieldCatalog };
+  const catalogFor = (def) => (def?.catalog ? CATALOGS[def.catalog]() : null);
+
+  const ctx = { get connectorLabel() { return conn?.label || null; } };
+  const srcLabel = (def) => def.label(ctx);
+  const tileSum = (f) => (SOURCES[f.source] ? SOURCES[f.source].tile(f, ctx) : f.source);
+
+  // ── Provenance bands, one per capability ──────────────────────────────────
+  // Which capability runs a source comes from the table, never a name — a
+  // future capability-backed source is covered by its row alone. The host
+  // pushes the whole map via setBands (only it can see the strip's unsaved
+  // edits and follow delegation); the pane decides which bands are VISIBLE:
+  // one line per capability the current edited mapping actually uses. The
+  // pushed map is stored and re-applied after every re-render — same problem
+  // the old setExtractionBand pattern solved, same fix: the band elements are
+  // stable, only their state is replayed.
+  const bands = new Map(); // capability id → provBand
+  if (isAdmin) {
+    for (const def of Object.values(SOURCES)) {
+      if (def.capability && !bands.has(def.capability)) {
+        const capId = def.capability;
+        const band = provBand(() => onCapabilityChange?.(capId));
+        band.el.style.margin = "2px 0";
+        bands.set(capId, band);
+      }
+    }
   }
+  let lastBands = {};
+  const usedCapabilities = () => {
+    const used = new Set();
+    // Slots and fields alike ask the table for their capability — never a name
+    // check, so a future capability-backed source (the planned face/voice
+    // matching) is covered by its SOURCES row alone.
+    for (const slot of [identityCfg, faceCfg]) {
+      const cap = SOURCES[slot?.source]?.capability;
+      if (cap) used.add(cap);
+    }
+    for (const f of fields) {
+      const cap = SOURCES[f.source]?.capability;
+      if (cap) used.add(cap);
+    }
+    return used;
+  };
+  const applyBands = () => {
+    const used = usedCapabilities();
+    for (const [capId, band] of bands) band.set(used.has(capId) ? lastBands[capId] ?? null : null);
+  };
+  const setBands = (map) => { lastBands = map || {}; applyBands(); };
 
-  // The provenance band under "AI-extracted fields": which model fills the AI
-  // fields. The picker itself lives in the host's AI-models strip; only the
-  // host can name the model — the answer includes strip edits it hasn't saved
-  // yet, and follows delegation — so it pushes via setExtractionBand on every
-  // reveal of this pane and on every pin change. The band element is
-  // re-appended by renderFields (which wipes fieldsList), so the pushed text
-  // lives on the element and survives re-renders.
-  //
-  // The band itself is modal.js's, shared with the Tagging pane's: the copy is
-  // pinned and the empty state is a rule, and neither survives being written
-  // out twice — the two hand-built copies disagreed about when to hide and both
-  // ended up printing "Using none configured".
-  const extractBand = isAdmin ? provBand(() => onExtractionChange?.()) : null;
-  if (extractBand) extractBand.el.style.margin = "2px 0 8px";
-  // Straight through: the host decides what the band says (only it can see the
-  // strip's unsaved edits, and follow delegation), the band decides how to look
-  // — including whether to be there at all, for a null.
-  const setExtractionBand = (state) => extractBand?.set(state);
+  // ── Small builders ────────────────────────────────────────────────────────
+  const glyphEl = (name, ai) => {
+    const el = document.createElement("span");
+    el.className = "mm-glyph" + (ai ? " ai" : "");
+    el.innerHTML = ICONS[name] || ICONS.srcDot;
+    return el;
+  };
+  // A select over [value, label] pairs. Options go through select.js's
+  // fillSelect, the same filler the board editor uses; pairs are the terser
+  // shape for the short literal lists this pane declares. No placeholder:
+  // every list here is closed and always has a current value to sit on. No
+  // read-only handling either — every select now lives inside a drawer, and
+  // drawers only open on the admin pane.
+  const mkSel = (opts, val, title) => {
+    const sel = document.createElement("select");
+    if (title) sel.title = title;
+    fillSelect(sel, opts.map(([value, label]) => ({ value, label })), { value: val });
+    return sel;
+  };
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  // Drawer form group: uppercase label / control / quiet hint.
+  const group = (label, control, hint) => {
+    const g = el("div", "dw-group");
+    if (label) g.appendChild(el("div", "dw-label", label));
+    g.appendChild(control);
+    if (hint) g.appendChild(el("div", "dw-hint", hint));
+    return g;
+  };
+  // Horizontal source card (drawer slot pickers).
+  const srcCard = ({ glyph, ai, lab, note, pressed, onPick }) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mm-srcopt" + (ai ? " ai" : "");
+    b.setAttribute("aria-pressed", String(!!pressed));
+    b.appendChild(glyphEl(glyph, ai));
+    b.appendChild(el("span", "lab", lab));
+    if (note) b.appendChild(el("span", "note", note));
+    if (onPick) b.addEventListener("click", onPick);
+    return b;
+  };
+
+  // The drawer rises over the WHOLE modal dialog, not just this pane — built
+  // lazily so a read-only view (which never opens one) doesn't hang a sheet
+  // off the modal for nothing.
+  let drawerInst = null;
+  const drawer = () => (drawerInst ??= createDrawer(container.closest(".modal-dialog") || container));
+  const drawerHeadParts = (glyphName, ai, title, src) => {
+    const g = glyphEl(glyphName, ai);
+    const t = el("span", "drawer-title", title);
+    const s = el("span", "drawer-src", src);
+    return { nodes: [g, t, s], g, t, s };
+  };
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
   // where an inline display:flex would defeat the host's display:none.
-  // Real data edits (text/select/checkbox) fire input/change; button-driven
-  // mutations (add/remove/apply-template) call markDirty() at their handlers.
+  // Real data edits fire input/change; the drawer commits and the structural
+  // ops (add/remove/apply-template) call markDirty() at their handlers.
   container.addEventListener("input", markDirty, true);
   container.addEventListener("change", markDirty, true);
   const body = container;
 
-  // Template row — very top of the body, right-aligned, divider below.
-  // It reads as a select, not a load action: the board is ALWAYS on a template
-  // ("Files" is the one it starts on), so the control names the current one and
-  // the menu switches between them. A "Load template…" button implied the
-  // opposite — that nothing was loaded yet and the only move was forward.
-  // Switching rewires the whole mapping (input, identity, fields) in one click,
-  // which only makes sense while the board is empty: existing items were
-  // ingested under the current input source, so once the first item lands the
-  // picker locks.
+  // ── Template row ──────────────────────────────────────────────────────────
+  // Very top of the body, right-aligned, divider below. It reads as a select,
+  // not a load action: the board is ALWAYS on a template ("Files" is the one it
+  // starts on), so the control names the current one and the menu switches
+  // between them. A "Load template…" button implied the opposite — that nothing
+  // was loaded yet and the only move was forward. Switching rewires the whole
+  // mapping (input, identity, face, fields) in one click, which only makes
+  // sense while the board is empty: existing items were ingested under the
+  // current input source, so once the first item lands the picker locks.
   // Neither switch toasts. A pick is a pending edit like typing in a field —
   // nothing is saved until the host's Save — and the pane visibly redrawing
   // around it is the feedback. A toast here would announce a change that
   // hasn't happened yet.
+  let templateBtn = null;
+  let templateBtnValue = null;
+  function syncTemplateBtn() {
+    if (!templateBtnValue) return;
+    templateBtnValue.textContent = inputConnector ? (conn?.label || inputConnector) : "Files";
+  }
   if (isAdmin) {
     const templateRow = document.createElement("div");
     templateRow.className = "mm-template-row";
-    const templateLabel = document.createElement("span");
-    templateLabel.className = "mm-template-label";
-    templateLabel.textContent = "Template";
+    const templateLabel = el("span", "mm-template-label", "Template");
     templateBtn = document.createElement("button");
     templateBtn.type = "button";
     templateBtn.className = "dd-trigger";
-    templateBtnValue = document.createElement("span");
-    templateBtnValue.className = "dd-trigger-value";
-    const chev = document.createElement("span");
-    chev.className = "dd-caret";
+    templateBtnValue = el("span", "dd-trigger-value");
+    const chev = el("span", "dd-caret");
     chev.innerHTML = ICONS.chevron;
     templateBtn.append(templateBtnValue, chev);
     syncTemplateBtn();
@@ -188,26 +392,23 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     body.appendChild(templateRow);
   }
 
-  // The bound domain's outage, stated for as long as the board is on it.
-  //
+  // ── The bound domain's outage, stated for as long as the board is on it ───
   // The menu row's dim sublabel is only seen by whoever opens the menu, and the
   // board that most needs this explanation is the one nobody is switching: an
-  // existing board whose provider went away. Its picker is LOCKED by hasItems,
-  // its connector fields render exactly as they always did, and the face row
-  // deliberately makes no availability claim (the server ships faces
-  // unannotated when nothing is resolving, rather than assert a gap it can't
-  // attribute) — so without this line the pane's whole answer to "why has
-  // nothing updated in a week" is a confident silence.
+  // existing board whose provider went away. Its picker is LOCKED by hasItems
+  // and its connector tiles render exactly as they always did — so without this
+  // line the pane's whole answer to "why has nothing updated in a week" is a
+  // confident silence.
   //
   // Not admin-gated: a board-admin reading the pane read-only is owed an answer
-  // too. Amber, borrowing the face row's hint box — the same class of statement
-  // (a thing you configured cannot currently render), one step up in scope.
+  // too. Amber, borrowing the face hint box — the same class of statement (a
+  // thing you configured cannot currently render), one step up in scope.
   const unavailBanner = document.createElement("div");
   unavailBanner.className = "mm-face-hint mm-unavail";
   unavailBanner.hidden = true;
   body.appendChild(unavailBanner);
   function syncUnavailable() {
-    const show = !!inputConnector && !connectorAvailable;
+    const show = unavailable();
     unavailBanner.hidden = !show;
     if (!show) return;
     // The diagnosis names a provider and its key state, so the server ships it
@@ -216,712 +417,705 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     // Without the reason the banner still has to answer the question that
     // brought the reader here, so the cause degrades from the diagnosis to the
     // plain fact, and the remedy from an instruction to who owns it.
-    const cause = sentence(connectorReason) || `${connectorLabel || "This board's data source"} isn't available`;
-    const remedy = connectorReason ? "Fix this in Admin → Plugins." : "Ask an admin to check the Plugins page.";
+    const cause = sentence(conn.reason) || `${conn.label || "This board's data source"} isn't available`;
+    const remedy = conn.reason ? "Fix this in Admin → Plugins." : "Ask an admin to check the Plugins page.";
     unavailBanner.textContent = `${cause}, so this board can't fetch or refresh its data. ${remedy}`;
   }
 
-  // Explanation + identity anchor
-  const intro = document.createElement("div");
-  intro.className = "mm-intro";
-  intro.innerHTML =
-    "<p>Define structured fields for each item. Connector fields come from a live " +
-    "data source; AI fields are extracted from the item's content.</p>";
-  body.appendChild(intro);
+  // ── The sheet: def rows, tiles, bands ─────────────────────────────────────
+  // One render that is always right, rebuilt wholesale on every structural
+  // edit and wrapped in keepPlace (modal.js) — the pane lives in a scrolling
+  // modal body, and without it any edit dropped the reader at the top. Def
+  // rows and tile buttons carry data-place so the control that opened a drawer
+  // gets focus back after the commit's re-render.
+  const sheet = document.createElement("div");
+  body.appendChild(sheet);
 
-  // ── The parts every row in this pane is built from ─────────────────────────
-  // identity, face and the field rows all say the same three things in the same
-  // three chips: what the slot is CALLED, where its value COMES FROM, and what
-  // it IS. Each chip was being hand-built at four or five call sites, which is
-  // how the field rows ended up with a redundant inline `font-family:monospace`
-  // that .mm-key-locked was already applying and identity/face were already
-  // relying on. Declared up here because renderIdentityRow — the first thing
-  // that runs — needs them.
-  const keyChip = (text) => {
-    const el = document.createElement("span");
-    el.className = "mm-key-locked";
-    el.textContent = text;
-    return el;
-  };
-  // Where the value comes from: `stocks:price`, `file:created`, `crypto:id`.
-  const srcChip = (text) => {
-    const el = document.createElement("span");
-    el.className = "mm-connector-badge";
-    el.textContent = text;
-    return el;
-  };
-  // What it is, and can't be argued with: a kind, or the one face a board gets.
-  const kindChip = (text) => {
-    const el = document.createElement("span");
-    el.className = "mm-locked-badge";
-    el.textContent = text;
-    return el;
-  };
-  // A select over [value, label] pairs, disabled on the read-only pane. The
-  // title is optional — assigning an absent one writes the string "undefined"
-  // into the tooltip, which is exactly the kind of thing a shared builder is
-  // supposed to stop happening. The options themselves go through select.js's
-  // fillSelect, the same filler the board editor and plugin modal use; pairs
-  // are the terser shape for the short literal lists this pane declares, so the
-  // conversion happens here rather than at seven call sites. No placeholder:
-  // every list here is closed and always has a current value to sit on.
-  const mkSel = (opts, val, title) => {
-    const sel = document.createElement("select");
-    sel.disabled = !isAdmin;
-    if (title) sel.title = title;
-    fillSelect(sel, opts.map(([value, label]) => ({ value, label })), { value: val });
-    return sel;
-  };
+  const render = keepPlace(sheet, () => {
+    sheet.replaceChildren();
 
-  // Identity row — always present. Raw/AI are hand-switchable; connector-bound
-  // identity renders locked with a badge, matching the connector field rows.
-  const identityRow = document.createElement("div");
+    const defs = el("div", "mm-def");
+    defs.append(identityDefRow(), faceDefRow());
+    sheet.appendChild(defs);
 
-  // Every render function in this pane rebuilds its subtree wholesale, so every
-  // one of them is wrapped in keepPlace (modal.js) — the pane lives in a
-  // scrolling modal body, and without it any structural edit dropped the reader
-  // at the top. See the note there for what a rebuild costs and what is held.
-  const renderIdentityRow = keepPlace(identityRow, () => {
-    const isConnectorId = identityFrom === "connector";
-    identityRow.className = "mm-row" + (isConnectorId ? " mm-row-connector" : "");
-    identityRow.replaceChildren();
+    const heading = sectionHeadingEl("Extract Fields");
+    heading.style.margin = "10px 0 8px";
+    sheet.appendChild(heading);
 
-    const idControls = document.createElement("div");
-    idControls.className = "fe-head";
-    idControls.appendChild(keyChip("identity"));
-
-    if (isConnectorId) {
-      // Locked, badge-styled — same pattern as the connector field rows below.
-      idControls.appendChild(srcChip(`${inputConnector}:id`));
-      identityRow.appendChild(idControls);
-      return;
+    const tiles = el("div", "mm-tiles");
+    fields.forEach((f, i) => tiles.appendChild(fieldTile(f, i)));
+    if (isAdmin) {
+      const add = document.createElement("button");
+      add.className = "fe-add-facet";
+      add.type = "button";
+      add.textContent = "+ Add field";
+      add.dataset.place = "add-field";
+      add.addEventListener("click", () => openAddFieldMenu(add));
+      tiles.appendChild(add);
+    } else if (!fields.length) {
+      tiles.appendChild(el("p", "mm-empty", "No fields defined."));
     }
+    sheet.appendChild(tiles);
 
-    const idSrcSel = mkSel(
-      [["raw", "filename (raw)"], ["ai", "AI instruction"]],
-      identityFrom, "What gives each item its title");
-    idControls.appendChild(idSrcSel);
-
-    const idHintWrap = document.createElement("div");
-    idHintWrap.style.cssText = "margin-top:6px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
-    const idHint = document.createElement("textarea");
-    idHint.placeholder = "What to extract as the item's title — any format (e.g. \"the person's full name\", \"invoice month, as Month - YYYY\")";
-    idHint.rows = 2;
-    idHint.value = identityHint;
-    idHint.disabled = !isAdmin;
-    idHint.addEventListener("input", () => { identityHint = idHint.value; });
-    idHintWrap.appendChild(idHint);
-
-    // Classify mode: a "Match to a list" toggle that reveals a flat editor of
-    // allowed options (value + optional per-option hint). Off = open extraction,
-    // exactly as before. Reuses the tagging value-editor's fe-* styling so it
-    // reads the same as the Tagging tab. Shown only under AI instruction.
-    const classifyWrap = document.createElement("div");
-    classifyWrap.style.cssText = "margin-top:8px;display:" + (identityFrom === "ai" ? "block" : "none") + ";";
-
-    const candidatesBox = document.createElement("div");
-    candidatesBox.className = "fe-root";
-    candidatesBox.style.cssText = "margin-top:6px;display:" + (classifyOn ? "block" : "none") + ";";
-
-    const renderCandidates = keepPlace(candidatesBox, () => {
-      candidatesBox.replaceChildren();
-      candidates.forEach((c, i) => {
-        const rowEl = document.createElement("div");
-        rowEl.className = "fe-val-row";
-        rowEl.style.cssText = "gap:6px;";
-        const valIn = document.createElement("input");
-        valIn.placeholder = "option";
-        valIn.value = c.value || "";
-        valIn.disabled = !isAdmin;
-        valIn.style.cssText = "flex:0 0 38%;";
-        valIn.addEventListener("input", () => { c.value = valIn.value; });
-        const hintIn = document.createElement("input");
-        hintIn.placeholder = "hint (optional) — helps the AI tell options apart";
-        hintIn.value = c.hint || "";
-        hintIn.disabled = !isAdmin;
-        hintIn.style.cssText = "flex:1;";
-        hintIn.addEventListener("input", () => { c.hint = hintIn.value; });
-        rowEl.append(valIn, hintIn);
-        if (isAdmin) {
-          const rm = document.createElement("button");
-          rm.className = "fe-rm";
-          rm.type = "button";
-          rm.textContent = "×";
-          rm.addEventListener("click", () => { candidates.splice(i, 1); markDirty(); renderCandidates(); });
-          rowEl.appendChild(rm);
-        }
-        candidatesBox.appendChild(rowEl);
-      });
-      if (isAdmin) {
-        const add = document.createElement("button");
-        add.className = "fe-add-val";
-        add.type = "button";
-        add.textContent = "+ option";
-        add.addEventListener("click", () => {
-          candidates.push({ value: "", hint: "" });
-          markDirty();
-          renderCandidates();
-          candidatesBox.querySelectorAll(".fe-val-row input").item((candidates.length - 1) * 2)?.focus();
-        });
-        candidatesBox.appendChild(add);
-      }
-    });
-    renderCandidates();
-
-    const classifyToggle = switchRow(
-      "Match to a list",
-      "constrain the answer to options you define — leave off to extract any value",
-      classifyOn,
-      (on) => {
-        classifyOn = on;
-        markDirty();
-        candidatesBox.style.display = on ? "block" : "none";
-        if (on && !candidates.length) { candidates.push({ value: "", hint: "" }); renderCandidates(); }
-      },
-      { small: true }
-    );
-    // Read-only pane: the switch has no disabled state of its own, so freeze it
-    // to match the disabled inputs/selects elsewhere.
-    if (!isAdmin) { classifyToggle.style.pointerEvents = "none"; classifyToggle.style.opacity = "0.6"; }
-    classifyWrap.append(classifyToggle, candidatesBox);
-
-    idSrcSel.addEventListener("change", () => {
-      identityFrom = idSrcSel.value;
-      const isAi = identityFrom === "ai";
-      idHintWrap.style.display = isAi ? "block" : "none";
-      classifyWrap.style.display = isAi ? "block" : "none";
-      // A file board's face controls only make sense under derived identity
-      // (several instances per entity), so they track this select — like the hint.
-      renderFaceRow();
-    });
-
-    identityRow.append(idControls, idHintWrap, classifyWrap);
+    if (bands.size) {
+      const prov = document.createElement("div");
+      prov.style.cssText = "display:flex;flex-direction:column;gap:4px;margin-top:12px;";
+      for (const band of bands.values()) prov.appendChild(band.el);
+      sheet.appendChild(prov);
+    }
+    applyBands();
   });
 
-  renderIdentityRow();
-  body.appendChild(identityRow);
-
-  // Face row — below identity on every board (the face is ~mandatory). File
-  // boards show "File preview"; connector boards show the connector's own
-  // producer (a price chart) with its range + re-render cadence under it.
-  const faceRow = document.createElement("div");
-  body.appendChild(faceRow);
-
-  // The face row's own two pieces, so a file face and a connector face are built
-  // from the same parts (they're deliberately the same shape as a field row: a
-  // locked statement of WHAT the face is, then a line that refines it).
-  const faceHead = () => {
-    const head = document.createElement("div");
-    head.className = "fe-head";
-    head.appendChild(keyChip("face"));
-    return head;
-  };
-  // The refinement line under the face: a muted label + its controls.
-  const faceSubRow = (label, ...controls) => {
-    const sub = document.createElement("div");
-    sub.className = "mm-face-prefer";
-    const lbl = document.createElement("span");
-    lbl.className = "mm-face-prefer-label";
-    lbl.textContent = label;
-    sub.append(lbl, ...controls);
-    return sub;
-  };
-
-  const renderFaceRow = keepPlace(faceRow, () => {
-    faceRow.replaceChildren();
-    // File boards get a face row too (normalized): a read-only "File preview"
-    // label that expands to instance-pick controls under derived identity.
-    if (!inputConnector) { faceRow.style.display = ""; renderFileFaceRow(); return; }
-    renderConnectorFaceRow();
-  });
-
-  // A connector board's face row. The face is the connector's face producer —
-  // the SYMBOL TILE IS NOT A CHOICE HERE. It isn't a producer at all (there's no
-  // tile in server/faces); it's what a card draws when it has no rendered face,
-  // which is exactly what happens when a producer is unavailable or its series
-  // comes back empty. Offering it as a peer of "Price chart" dressed a fallback
-  // up as a decision — and, being the default, made it the one most boards got.
-  // So: one producer (every built-in) renders as a locked chip, mirroring the
-  // file board's "File preview"; a domain declaring several gets a select over
-  // THOSE, with no tile entry. A second line refines the render — chart range +
-  // the same cadence widget the fields use.
-  function renderConnectorFaceRow() {
-    // The producer list arrives with the connector catalog (fetched for an
-    // already-bound board); until then there's nothing truthful to show.
-    if (!connectorCatalog && !connectorFaces.length) { faceRow.style.display = "none"; return; }
-    faceRow.style.display = "";
-    faceRow.className = "mm-row" + (connectorFaces.length ? " mm-row-connector" : "");
-    const controls = faceHead();
-
-    // A domain with no face producer at all (possible for a connector plugin):
-    // the tile IS the face. Name it, in the one place where it's the whole
-    // answer rather than a fallback, and serialize nothing (collect() writes a
-    // face only for `from: "connector"`).
-    if (!connectorFaces.length) {
-      controls.appendChild(kindChip("Symbol tile"));
-      faceRow.appendChild(controls);
-      return;
+  // A definition row: glyph + small mono label + plain value line (+ options
+  // preview). A LOCKED slot (connector identity: the domain supplies it,
+  // nothing to configure; a file face under filename identity: one instance,
+  // nothing to pick) renders as a statement, not a control — no chevron, no
+  // hover, no drawer.
+  function defRow({ glyph, ai, label, value, none, more, onOpen, place }) {
+    const locked = !onOpen;
+    const row = document.createElement(locked ? "div" : "button");
+    if (!locked) {
+      row.type = "button";
+      if (place) row.dataset.place = place;
     }
-
-    // Normalize onto a real producer + a period it actually offers. This also
-    // COERCES a legacy `{ from: "raw" }` mapping (a board saved back when the
-    // tile was selectable) onto the chart, so the row never shows a chart the
-    // save wouldn't write. Idempotent — it re-runs on every render.
-    const producer = connectorFaces.find((p) => p.name === faceCfg.producer) || connectorFaces[0];
-    const period = faceCfg.period && producer.periods.includes(faceCfg.period) ? faceCfg.period
-      : producer.periods.includes("1y") ? "1y" : producer.periods[0];
-    faceCfg = { from: "connector", producer: producer.name, period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
-
-    if (connectorFaces.length === 1) {
-      controls.appendChild(kindChip(producer.label));
-    } else {
-      const srcSel = mkSel(connectorFaces.map((p) => [p.name, p.label]), producer.name,
-        "How this connector renders the card");
-      srcSel.addEventListener("change", () => {
-        // Drop the period — the normalizer above picks one the new producer offers.
-        faceCfg = { from: "connector", producer: srcSel.value, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
-        renderFaceRow();
-      });
-      controls.appendChild(srcSel);
-    }
-    faceRow.appendChild(controls);
-
-    const periodSel = mkSel(producer.periods.map((p) => [p, p]), faceCfg.period,
-      "How much history the chart covers");
-    periodSel.addEventListener("change", () => { faceCfg.period = periodSel.value; });
-    faceRow.appendChild(faceSubRow("Range", periodSel, livenessSelect(faceCfg, true)));
-
-    // Warn when the face can't be rendered by the connector's active provider —
-    // cards silently fall back to the tile otherwise. Name the provider and, if
-    // any others can render it, point the way to switch. This is where the tile
-    // gets disclosed: as the consequence of a provider gap, not as an option.
-    if (producer.available === false) {
-      const activeLabel = connectorProviders.find((p) => p.name === connectorActiveProvider)?.label || connectorActiveProvider || "The active provider";
-      const capable = (producer.supportedBy || [])
-        .filter((n) => n !== connectorActiveProvider)
-        .map((n) => connectorProviders.find((p) => p.name === n)?.label || n);
-      const hint = document.createElement("div");
-      hint.className = "mm-face-hint";
-      hint.textContent =
-        `${activeLabel} can’t render this face — cards will show the symbol tile instead.` +
-        (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Plugins to enable it.` : "");
-      faceRow.appendChild(hint);
-    }
-  }
-
-  // A file board's face row. The face is always the "File preview" — the pretty
-  // rendered face of one instance (mirroring identity's "filename (raw)"). Under
-  // derived identity an entity can bundle several instances, so a second line
-  // refines WHICH one supplies that preview: a preferred file type (image by
-  // default) and, among those, first/latest added.
-  function renderFileFaceRow() {
-    faceRow.className = "mm-row";
-    const controls = faceHead();
-    controls.appendChild(kindChip("File preview"));
-    faceRow.appendChild(controls);
-
-    if (identityFrom !== "ai") return; // one instance per entity — nothing to pick
-
-    const prefer = faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : "image";
-    const preferSel = mkSel(
-      [["image", "Image"], ["document", "Document"], ["audio", "Audio"]],
-      prefer, "Preferred file type for the preview");
-    const pickSel = mkSel(
-      [["first", "First added"], ["latest", "Latest added"]],
-      faceCfg.pick || "first", "Which instance when several qualify");
-    const sync = () => { faceCfg = { from: "file", prefer: preferSel.value, pick: pickSel.value }; };
-    preferSel.addEventListener("change", sync);
-    pickSel.addEventListener("change", sync);
-    faceRow.appendChild(faceSubRow("Prefer (when available)", preferSel, pickSel));
-  }
-
-  const fieldsList = document.createElement("div");
-  fieldsList.className = "mm-fields";
-
-  // A liveness cadence select bound to a field object's live/every. Off (0)
-  // clears them. Identity has no liveness (it's the stable key), so it never
-  // gets one of these. The refresh glyph in front labels what the select does:
-  // this is a re-fetch cadence, not just another dropdown.
-  function livenessSelect(f, enabled) {
-    const wrap = document.createElement("span");
-    wrap.className = "mm-live-wrap";
-    wrap.title = "How often this field refreshes in the app";
-
-    const icon = document.createElement("span");
-    icon.className = "mm-live-icon";
-    icon.innerHTML = ICONS.redo;
-
-    // Off (0) is the selected option for a field with no cadence, and for the
-    // un-included field the row is offering — the select is disabled there, so
-    // what it shows is a statement rather than a default anyone can act on.
-    const current = String(f?.live ? f.every : 0);
-    const opts = CADENCES.map(([min, label]) => [String(min), label]);
-    // CADENCES is what this pane OFFERS; the server accepts any 1–43200 minutes
-    // (server.js), so a mapping written by the API — or by a build whose list
-    // included a value this one dropped — can hold a cadence with no option to
-    // sit on. Name it rather than let the select answer for it: it used to
-    // render blank, and a list of options with none selected reads as Off,
-    // which is a live field claiming it never refreshes.
-    if (!opts.some(([v]) => v === current)) {
-      const at = opts.findIndex(([v]) => Number(v) > Number(current));
-      opts.splice(at < 0 ? opts.length : at, 0, [current, `${f.every} min`]);
-    }
-    const sel = mkSel(opts, current);
-    sel.className = "mm-live";
-    if (!enabled) sel.disabled = true; // on top of mkSel's read-only rule
-    if (sel.disabled) wrap.classList.add("disabled");
-    sel.addEventListener("change", () => {
-      if (!f) return;
-      const every = Number(sel.value);
-      if (every > 0) { f.live = true; f.every = every; }
-      else { delete f.live; delete f.every; }
-    });
-    wrap.append(icon, sel);
-    return wrap;
-  }
-
-  // ── One row shape for every locked field ──────────────────────────────────
-  // A connector-catalog row, a file-field row and the saved-connector fallback
-  // used to be three hand-written copies of the same six elements, and they had
-  // already drifted apart in ways nobody chose: only one of them could carry a
-  // note, and the fallback silently dropped the include checkbox. They are ONE
-  // row — a locked statement of what the field IS (its key, where it comes
-  // from, its kind), optionally preceded by whether this board takes it and
-  // followed by how often it refreshes.
-  //
-  //   include — { checked, title, place, onToggle }. Omit for a row that can't
-  //             be un-included: the fallback has no catalog behind it, so an
-  //             un-tick there would be a one-way door. `place` is the focus key
-  //             keepPlace restores through (see modal.js) — the field's own
-  //             identity, so the checkbox you clicked is the one you get back.
-  //             It rides in HERE rather than beside `key` because the checkbox
-  //             is the only thing in the row that can hold focus; a place on a
-  //             checkbox-less row would be a key nothing answers to.
-  //   live    — { field, enabled }. Omit for a source with no cadence — files
-  //             are immutable, so a file field is fetched once and never again.
-  //   note    — a caveat the catalog carries (e.g. `created` is null for
-  //             browser uploads).
-  function lockedRow({ key, badge, kind, include, live, note }) {
-    const row = document.createElement("div");
-    row.className = "mm-row mm-row-connector";
-    const controls = document.createElement("div");
-    controls.className = "fe-head";
-
-    if (include) {
-      const cb = document.createElement("input");
-      cb.type = "checkbox";
-      cb.checked = include.checked;
-      cb.disabled = !isAdmin;
-      cb.title = include.title;
-      cb.dataset.place = include.place;
-      cb.addEventListener("change", () => include.onToggle(cb.checked));
-      controls.appendChild(cb);
-    }
-
-    controls.append(keyChip(key), srcChip(badge), kindChip(kind));
-    if (live) controls.appendChild(livenessSelect(live.field, live.enabled));
-    row.appendChild(controls);
-
-    if (note) {
-      const noteEl = document.createElement("div");
-      noteEl.className = "mm-face-hint";
-      noteEl.textContent = note;
-      row.appendChild(noteEl);
-    }
+    row.className = "mm-def-row" + (ai ? " ai" : "") + (locked ? " locked" : "");
+    row.appendChild(glyphEl(glyph, ai));
+    const bodyEl = el("div", "mm-def-body");
+    bodyEl.appendChild(el("div", "mm-def-label", label));
+    bodyEl.appendChild(el("div", "mm-def-val" + (none ? " none" : ""), value));
+    if (more) bodyEl.appendChild(el("div", "mm-def-more", more));
+    row.appendChild(bodyEl);
+    if (!locked) row.addEventListener("click", onOpen);
     return row;
   }
 
-  // Include or drop one catalog field on this board. The catalog is global to
-  // the source; `fields` is this board's pick from it, which is the only thing
-  // a tick changes.
-  function toggleField(from, cat, on) {
-    const idx = fields.findIndex((f) => f.from === from && f.key === cat.key);
-    if (on) {
-      if (idx < 0) fields.push({ key: cat.key, kind: cat.kind, from, fn: cat.fn });
-    } else if (idx >= 0) fields.splice(idx, 1);
-    renderFields();
+  function identityDefRow() {
+    if (inputConnector) {
+      // Identity on a connector board is not a choice — the domain supplies
+      // it, in the domain's own words (the manifest names the thing, never the
+      // architecture: "each coin is its own card", not "connector id").
+      return defRow({
+        glyph: "srcGlobe", ai: false, label: "identity",
+        value: conn?.identity?.blurb || "each entry is its own card",
+      });
+    }
+    const bound = identityCfg?.source === "extract";
+    return defRow({
+      glyph: bound ? "srcSparkle" : "srcDot", ai: bound, label: "identity",
+      value: bound ? (identityCfg.instruction || "not said yet") : "each file is its own card",
+      none: !bound,
+      more: bound && identityCfg.options?.length
+        ? identityCfg.options.map((o) => o.value).filter(Boolean).join("  ·  ")
+        : null,
+      onOpen: isAdmin ? openIdentityDrawer : null,
+      place: "def:identity",
+    });
   }
 
-  // "+ Add file field" — opens a menu of the not-yet-included catalog fields,
-  // grouped by applicability (All files / Images / Documents). Keeps the modal
-  // compact: only chosen file fields render as rows above.
-  function fileMenuLabel(cat) {
-    const wrap = document.createElement("span");
-    wrap.className = "dd-label";
-    wrap.style.cssText = "display:flex;align-items:center;gap:8px;";
-    // NOT keyChip: this is the one place a field name is drawn outside the pane,
-    // and openDropdown's default surface is dark. .mm-key-locked pins a near-
-    // black color for the pane's white ground, which on a #15171c menu is an
-    // invisible label. The kind pill has its own ground, so it travels.
-    const key = document.createElement("span");
-    key.style.fontFamily = "monospace";
-    key.textContent = cat.key;
-    wrap.append(key, kindChip(cat.kind));
-    return wrap;
+  function faceDefRow() {
+    if (inputConnector) {
+      // The face is the connector's producer — THE SYMBOL TILE IS NOT A CHOICE
+      // HERE. It isn't a producer at all (there's no tile in server/faces);
+      // it's what a card draws when nothing renders, which is exactly what
+      // happens when a producer is unavailable or its series comes back empty.
+      // Offering it as a peer of "Price chart" dressed a fallback up as a
+      // decision. A domain with no producer at all gets the tile named as the
+      // whole answer, locked.
+      const cfg = faceCfg?.source === "connector" ? faceCfg : null;
+      const producer = faces().find((p) => p.name === cfg?.producer) || faces()[0] || null;
+      return defRow({
+        glyph: "srcGlobe", ai: false, label: "face",
+        value: cfg ? `a ${cfg.period} ${(producer?.label || "chart").toLowerCase()}, ${cadWord(cfg)}` : "the symbol tile",
+        none: !cfg,
+        onOpen: isAdmin && faces().length ? openConnectorFaceDrawer : null,
+        place: "def:face",
+      });
+    }
+    // A file board's face is always the file preview. Under extract identity
+    // an entity can bundle several instances, so WHICH file supplies the
+    // preview is configurable; under filename identity there is one instance
+    // per entity and nothing to pick — locked, like connector identity.
+    if (identityCfg?.source !== "extract") {
+      return defRow({ glyph: "srcFile", ai: false, label: "face", value: "the file's preview" });
+    }
+    const cfg = faceCfg?.source === "file" ? faceCfg : null;
+    return defRow({
+      glyph: "srcFile", ai: false, label: "face",
+      value: `the ${cfg?.pick || "first"} ${cfg?.prefer || "image"} added`,
+      onOpen: isAdmin ? openFileFaceDrawer : null,
+      place: "def:face",
+    });
   }
 
-  function openAddFileFieldMenu(anchor) {
-    const included = new Set(fields.filter((f) => f.from === "file").map((f) => f.fn));
-    const available = (fileFieldCatalog || []).filter((c) => !included.has(c.fn));
-    if (!available.length) { toast.info("All file fields added"); return; }
+  function fieldTile(f, i) {
+    const def = SOURCES[f.source];
+    // A field whose source this build has no row for still renders and can
+    // still be REMOVED — there's just no editor to open for it, because we
+    // don't know what it would ask. (collect() passes such a field through
+    // untouched for the same reason.)
+    const editable = isAdmin && !!def;
+    const tile = el("div", "mm-tile" + (def?.ai ? " ai" : ""));
+    const main = document.createElement(editable ? "button" : "div");
+    main.className = "mm-tile-main";
+    if (editable) {
+      main.type = "button";
+      main.dataset.place = `tile:${f.source}:${f.key || i}`;
+    } else {
+      main.style.cursor = "default"; // the class assumes a button; this one isn't
+    }
+    main.appendChild(glyphEl(def?.glyph || "srcDot", !!def?.ai));
+    const b = el("div", "mm-tile-body");
+    b.appendChild(el("div", "mm-tile-name", f.key || "unnamed"));
+    b.appendChild(el("div", "mm-tile-sum", tileSum(f)));
+    main.appendChild(b);
+    if (editable) main.addEventListener("click", () => openFieldDrawer({ mode: "edit", index: i }));
+    tile.appendChild(main);
+    if (isAdmin) {
+      const rm = document.createElement("button");
+      rm.className = "mm-tile-rm";
+      rm.type = "button";
+      rm.textContent = "×";
+      rm.setAttribute("aria-label", `Remove ${f.key || "field"}`);
+      rm.addEventListener("click", (e) => {
+        e.stopPropagation();
+        fields.splice(i, 1);
+        markDirty();
+        render();
+      });
+      tile.appendChild(rm);
+    }
+    return tile;
+  }
+
+  // ── "+ Add field": the source menu ────────────────────────────────────────
+  // The open sources first — the ones that ask a question worth thinking about
+  // — then the input's catalog, laid out as chips. Order and layout are the
+  // same decision: as a column of one-line rows the ~15-entry file catalog ran
+  // past the bottom of the menu and took AI extraction and Object detection
+  // with it, so the two choices that shape a board were the two you couldn't
+  // see. The menu also opens at the width of the button that summons it
+  // (`width: "anchor"`), which is what gives the chips room to be a glance
+  // rather than a list.
+  //
+  // Extract is offered everywhere; detect only where there are files to look
+  // at — connector boards have no images. Media-kind gating beyond that is
+  // deliberately skipped: the board's media mix isn't reliably known
+  // client-side, and the server validates anyway.
+  const menuNoteEl = (text) => {
+    const s = el("span", null, text);
+    // pointer-events off so a click on the helper still lands on the row —
+    // ddRow treats trailing clicks as the trailing element's own.
+    s.style.cssText = "margin-left:14px;font-size:11px;color:#79808c;text-align:right;pointer-events:none;";
+    return s;
+  };
+  // A source's own row: glyph, name, and what it does about the field. With no
+  // handler it's a HEADER — the catalog source, whose entries follow it and
+  // which isn't itself pickable. With one it IS the pick: an open source has
+  // nothing to list, so choosing it goes straight to a drawer.
+  const sourceRow = (id, onClick) => {
+    const def = SOURCES[id];
+    const lead = glyphEl(def.glyph, def.ai);
+    lead.style.pointerEvents = "none";
+    return ddRow({ label: srcLabel(def), leading: lead, trailing: menuNoteEl(def.menuNote), onClick });
+  };
+  // A catalog entry adds IMMEDIATELY — its key, kind and fn are all decided by
+  // the catalog, so there is nothing left for a drawer to ask. The chip's title
+  // carries what the chip itself can't: the catalog's human name for the field,
+  // its kind, and — for one already on the board — why it isn't pickable.
+  const catalogChip = (sourceId, cat, added, close) => ({
+    label: cat.key,
+    mono: true,
+    disabled: added,
+    title: added
+      ? `${cat.label || cat.key} — already a field on this board`
+      : `${cat.label || cat.key} · ${kindWord(cat.kind)}${cat.note ? ` · ${cat.note}` : ""}`,
+    onClick: () => {
+      fields.push({ key: cat.key, kind: cat.kind, source: sourceId, fn: cat.fn });
+      markDirty();
+      close();
+      render();
+    },
+  });
+
+  function openAddFieldMenu(anchor) {
+    // The board's input decides which catalog source it offers: the one whose
+    // board-type flag fits. Never both — the input is one or the other.
+    const catDef = Object.values(SOURCES).find((d) =>
+      d.catalog && !(d.filesOnly && inputConnector) && !(d.connectorOnly && !inputConnector));
+    const catalog = catalogFor(catDef);
     openDropdown(anchor, {
       align: "start",
-      minWidth: 240,
+      width: "anchor",
+      // Row-counting is meaningless once a group of chips is one child; the
+      // viewport-room cap inside the component still keeps it on screen.
+      maxItems: 0,
       build: (menuBody, { close }) => {
+        // Open sources, straight off the table — each needs a drawer (nothing
+        // to list: the user names the field and says what it means).
+        for (const def of Object.values(SOURCES)) {
+          if (def.catalog || (def.filesOnly && inputConnector) || (def.connectorOnly && !inputConnector)) continue;
+          menuBody.appendChild(sourceRow(def.id, () => {
+            close();
+            openFieldDrawer({ mode: "new", source: def.id });
+          }));
+        }
+        menuBody.appendChild(ddSep());
+        menuBody.appendChild(sourceRow(catDef.id));
+        if (!catalog) {
+          menuBody.appendChild(ddEmpty(catalogFailed
+            ? "Couldn't load the field catalog — reopen the modal to retry"
+            : "Loading fields…"));
+          return;
+        }
+        const taken = new Set(fields.filter((f) => f.source === catDef.id).map((f) => f.fn));
+        // Sectioned by the catalog's own `group` where it declares one (file
+        // fields do: All files / Images / …). A catalog without groups, like
+        // the connector manifests', is one unheaded set of chips.
         const groups = [];
-        for (const c of available) {
-          let g = groups.find((x) => x.name === c.group);
-          if (!g) { g = { name: c.group, items: [] }; groups.push(g); }
+        for (const c of catalog) {
+          let g = groups.find((x) => x.name === (c.group || null));
+          if (!g) groups.push((g = { name: c.group || null, items: [] }));
           g.items.push(c);
         }
-        groups.forEach((g, gi) => {
-          if (gi > 0) menuBody.appendChild(ddSep());
-          const h = document.createElement("div");
-          h.style.cssText = "padding:6px 12px 2px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a8a92;";
-          h.textContent = g.name;
-          menuBody.appendChild(h);
-          for (const c of g.items) {
-            menuBody.appendChild(ddRow({
-              labelEl: fileMenuLabel(c),
-              onClick: () => {
-                fields.push({ key: c.key, kind: c.kind, from: "file", fn: c.fn });
-                markDirty();
-                close();
-                renderFields();
-              },
-            }));
-          }
-        });
+        for (const g of groups) {
+          if (g.name) menuBody.appendChild(ddHead(g.name));
+          menuBody.appendChild(ddChips(g.items.map((c) => catalogChip(catDef.id, c, taken.has(c.fn), close))));
+        }
       },
     });
   }
 
-  function makeAddFileFieldBtn() {
-    const btn = document.createElement("button");
-    btn.className = "fe-add-facet";
-    btn.type = "button";
-    btn.textContent = "+ Add file field";
-    btn.addEventListener("click", () => openAddFileFieldMenu(btn));
-    return btn;
-  }
+  // ── The drawers ───────────────────────────────────────────────────────────
+  // Everything in a drawer edits a DRAFT; the primary button commits it and
+  // triggers the full re-render. Cancel/scrim/Esc discard — the component owns
+  // those paths (modal.js), so a dismissal can never half-apply.
+  //
+  // Every commit is the same four beats — write the draft into pane state, flag
+  // the edit, close, redraw — and only the write differs, so it's the only part
+  // a drawer supplies.
+  const commit = (write) => {
+    write();
+    markDirty();
+    drawer().close();
+    render();
+  };
 
-  function makeAddAiFieldBtn() {
-    const btn = document.createElement("button");
-    btn.className = "fe-add-facet";
-    btn.type = "button";
-    btn.textContent = "+ Add AI field";
-    btn.addEventListener("click", () => {
-      if (fields.filter((f) => f.from === "ai").length >= 12) { toast.info("Maximum 12 AI fields"); return; }
-      fields.push({ key: "", kind: "text", from: "ai", hint: "" });
-      markDirty();
-      renderFields();
-      // After the render, so the focus lands on the row that now exists — and
-      // after keepPlace has restored the offset, so this scroll-into-view wins.
-      // Right: the field you just asked for should be brought to you.
-      const rows = fieldsList.querySelectorAll(".mm-key");
-      rows[rows.length - 1]?.focus();
-    });
-    return btn;
-  }
-
-  // AI field row — editable key/kind/hint, removable.
-  function makeAiRow(f) {
-    const row = document.createElement("div");
-    row.className = "mm-row";
-    const controls = document.createElement("div");
-    controls.className = "fe-head";
-
-    const keyInput = document.createElement("input");
-    keyInput.type = "text";
-    keyInput.className = "mm-key";
-    keyInput.style.cssText = "flex:1;min-width:90px;font-family:monospace;";
-    keyInput.placeholder = "field_key";
-    keyInput.value = f.key || "";
-    keyInput.disabled = !isAdmin;
-    // The key is written to the model on EVERY keystroke, like the hint below,
-    // and merely re-displayed on blur. It used to be written only on blur, and
-    // a rebuild is how you lost a key you had typed: a render replaces this
-    // input, and removing a focused element does not reliably fire `blur` in
-    // any browser — so the typed text went with the node. Reachable without
-    // trying: type a key, delete a different field, watch yours empty itself.
-    // (The catalog fetches landing behind you did it too.)
-    //
-    // Normalizing on input rather than storing raw keeps `f.key` the same value
-    // blur would have produced, so collect()'s validation still sees exactly
-    // what the row is claiming. The DISPLAY is left alone until blur — rewriting
-    // under a live caret is its own kind of rude.
-    const normalizeKey = (v) =>
-      v.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "").replace(/^[^a-z]+/, "") || "";
-    keyInput.addEventListener("input", () => { f.key = normalizeKey(keyInput.value); });
-    keyInput.addEventListener("blur", () => {
-      f.key = normalizeKey(keyInput.value);
-      keyInput.value = f.key;
-    });
-
-    const kindSel = mkSel(KINDS.map((k) => [k, k]), f.kind || "text", "What kind of value this field holds");
-    kindSel.addEventListener("change", () => { f.kind = kindSel.value; });
-    if (!f.kind) f.kind = "text";
-
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "fe-rm";
-    removeBtn.setAttribute("aria-label", "Remove field");
-    removeBtn.textContent = "×";
-    removeBtn.disabled = !isAdmin;
-    removeBtn.addEventListener("click", () => {
-      const idx = fields.indexOf(f);
-      if (idx >= 0) fields.splice(idx, 1);
-      markDirty();
-      renderFields();
-    });
-
-    controls.append(keyInput, kindSel);
-    if (isAdmin) controls.appendChild(removeBtn);
-
-    const hint = document.createElement("textarea");
-    hint.rows = 2;
-    hint.value = f.hint || "";
-    hint.disabled = !isAdmin;
-    hint.addEventListener("input", () => { f.hint = hint.value; });
-    // Object fields feed the detector a list of things to find; scalar fields are
-    // an extraction instruction. The placeholder tracks the kind select. One
-    // object field = one object type; commas are synonyms for the SAME thing.
-    const syncHintPlaceholder = () => {
-      hint.placeholder = kindSel.value === "object"
-        ? "the object to detect (defaults to the field name) — e.g. \"car\"; commas = synonyms for the same thing"
-        : "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")";
-    };
-    kindSel.addEventListener("change", syncHintPlaceholder);
-    syncHintPlaceholder();
-
-    row.append(controls, hint);
-    return row;
-  }
-
-  function sectionTitle(text) {
-    const el = sectionHeadingEl(text); // textContent path — the connector label rides in here
-    // Siblings in the mm-fields gap:12 column — extra top margin pulls the
-    // heading away from the section above so it binds to its own group.
-    el.style.marginTop = "10px";
-    return el;
-  }
-
-  // ── The pane's field sections ─────────────────────────────────────────────
-  // A board draws exactly two of them: the fields its INPUT supplies (connector
-  // or file — never both, since the input is one or the other) and the
-  // AI-extracted ones. All three sources are the same shape — a heading, an
-  // optional band under it, the rows, the line that stands in when there are
-  // none, and an optional footer control — so each one describes what fills
-  // those slots and drawSection owns the drawing. They used to be three inlined
-  // blocks that each decided for itself when a "nothing here" line was
-  // warranted; the file one grew a third case the other two never got.
-  function drawSection({ title, band, rows, empty, footer }) {
-    fieldsList.appendChild(sectionTitle(title));
-    if (band) fieldsList.appendChild(band);
-    for (const row of rows) fieldsList.appendChild(row);
-    if (!rows.length && empty) {
-      const p = document.createElement("p");
-      p.className = "mm-empty";
-      p.textContent = empty;
-      fieldsList.appendChild(p);
-    }
-    if (footer) fieldsList.appendChild(footer);
-  }
-
-  // Connector fields: the connector's WHOLE catalog, one row each, ticked for
-  // the ones this board takes. Until the catalog lands (or if its fetch failed)
-  // the board's saved connector fields stand in, so the pane is never blank
-  // about fields it is actually collecting — without checkboxes, since there's
-  // no catalog to re-add from, but with their cadence still editable.
-  function connectorSection() {
-    const rows = connectorCatalog
-      ? connectorCatalog.map((cat) => {
-          const inc = fields.find((f) => f.from === "connector" && f.key === cat.key);
-          return lockedRow({
-            key: cat.key,
-            badge: `${inputConnector}:${cat.fn}`,
-            kind: cat.kind,
-            include: {
-              checked: !!inc,
-              title: "Include this field",
-              place: `connector:${cat.key}`,
-              onToggle: (on) => toggleField("connector", cat, on),
-            },
-            live: { field: inc, enabled: !!inc },
+  function openFieldDrawer({ mode, source, index }) {
+    // The edit target is held by OBJECT, not index: the list can shift under
+    // an open drawer (keyboard focus can reach a tile's × behind the scrim),
+    // and a stale index would overwrite the wrong field on commit.
+    const original = mode === "edit" ? fields[index] : null;
+    const def = SOURCES[mode === "edit" ? original.source : source];
+    const draft = mode === "edit"
+      ? { ...original }
+      : { key: "", source: def.id, ...(def.kinds ? { kind: def.kinds[0] } : {}), ...(def.ask ? { instruction: "" } : {}) };
+    const head = drawerHeadParts(def.glyph, def.ai, draft.key || "new_field", srcLabel(def));
+    // fns already used by OTHER fields of the same source — the edited field's
+    // own binding stays pickable (it's the pressed chip).
+    const takenFns = new Set(
+      fields.filter((f, i2) => f.source === draft.source && i2 !== index).map((f) => f.fn)
+    );
+    drawer().open({
+      head: head.nodes,
+      build: (bodyEl) => {
+        // The drawer asks exactly what the source declares it needs: a catalog
+        // source has one question (WHICH entry — it decides key, kind and fn
+        // together); an open source is named by the user, may offer a format,
+        // and may need telling what to do.
+        if (def.catalog) bodyEl.append(fnGroup(draft, head, takenFns));
+        else {
+          bodyEl.append(keyGroup(draft, head));
+          if (def.kinds) bodyEl.append(formatGroup(draft, def));
+          if (def.ask) bodyEl.append(askGroup(draft, def.ask));
+        }
+        if (def.refreshable) bodyEl.append(group("How often it re-pulls", cadenceSelect(draft), null));
+      },
+      primary: {
+        label: mode === "new" ? "Add field" : "Done",
+        onClick: () => {
+          if (mode === "new" && def.cap && fields.filter((f) => f.source === def.id).length >= def.cap) {
+            toast.info(`Maximum ${def.cap} ${srcLabel(def)} fields`);
+            return;
+          }
+          commit(() => {
+            if (mode === "new") fields.push(draft);
+            else {
+              const at = fields.indexOf(original);
+              // Removed while the drawer was open → the removal wins; committing
+              // a draft of a deleted field must not resurrect it elsewhere.
+              if (at >= 0) fields[at] = draft;
+            }
           });
-        })
-      : fields.filter((f) => f.from === "connector").map((f) => lockedRow({
-          key: f.key,
-          badge: `${inputConnector}:${f.fn}`,
-          kind: f.kind,
-          live: { field: f, enabled: true },
-        }));
-    return {
-      title: connectorLabel ? `Connector fields · ${connectorLabel}` : "Connector fields",
-      rows,
-      empty: connectorCatalog ? "No connector fields." : "Loading connector fields…",
-    };
-  }
-
-  // File fields (server/media). Only the INCLUDED ones render as rows;
-  // "+ Add file field" reveals the rest, so the ~15-field catalog isn't a wall
-  // of rows by default. The un-tick therefore REMOVES rather than un-includes,
-  // which is what its title says.
-  function fileSection() {
-    const rows = fields.filter((f) => f.from === "file").map((f) => {
-      // The catalog is what carries the kind and the note; a field saved under
-      // a catalog entry that has since gone (or one that hasn't loaded yet)
-      // falls back to what the mapping itself remembers.
-      const cat = (fileFieldCatalog || []).find((c) => c.fn === f.fn) || { key: f.key, fn: f.fn, kind: f.kind };
-      return lockedRow({
-        key: cat.key,
-        badge: `file:${cat.fn}`,
-        kind: cat.kind,
-        note: cat.note,
-        include: {
-          checked: true,
-          title: "Remove this field",
-          place: `file:${cat.key}`,
-          onToggle: (on) => toggleField("file", cat, on),
         },
-      });
+      },
     });
-    return {
-      title: "File fields",
-      rows,
-      // An admin gets the add button as the empty state: it says what to do
-      // about the emptiness, which "No file fields." doesn't.
-      empty: !fileFieldCatalog ? "Loading file fields…" : isAdmin ? null : "No file fields.",
-      footer: fileFieldCatalog && isAdmin ? makeAddFileFieldBtn() : null,
+  }
+
+  function keyGroup(draft, head) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.style.fontFamily = "monospace";
+    input.placeholder = "field_key";
+    input.value = draft.key || "";
+    input.addEventListener("input", () => {
+      draft.key = normalizeKey(input.value);
+      head.t.textContent = draft.key || "new_field"; // the title IS the key
+    });
+    input.addEventListener("blur", () => { input.value = draft.key || ""; });
+    return group("Key", input, null);
+  }
+
+  function formatGroup(draft, def) {
+    const row = el("div", "mm-chips");
+    for (const k of def.kinds) {
+      const c = document.createElement("button");
+      c.type = "button";
+      c.textContent = kindWord(k);
+      c.setAttribute("aria-pressed", String((draft.kind || def.kinds[0]) === k));
+      // Pressed state flips in place — a refresh would rebuild the body and
+      // cost whoever is typing in the key input their focus.
+      c.addEventListener("click", () => {
+        draft.kind = k;
+        for (const b of row.children) b.setAttribute("aria-pressed", String(b === c));
+      });
+      row.appendChild(c);
+    }
+    return group("Format", row, "How the app stores and displays the extracted value.");
+  }
+
+  // What the source needs told, in the source's own words (SOURCES[…].ask).
+  // Extraction and detection ask different questions of the reader but hold the
+  // same thing on the wire — one `instruction` string — so they get one editor.
+  function askGroup(bearer, ask) {
+    const t = document.createElement("textarea");
+    t.rows = 2;
+    t.value = bearer.instruction || "";
+    t.placeholder = ask.placeholder;
+    t.addEventListener("input", () => { bearer.instruction = t.value; });
+    return group(ask.label, t, ask.hint);
+  }
+
+  // A catalog field's editor is one question: WHICH catalog entry. Picking a
+  // chip rebinds key/kind/fn together — they are one fact in the catalog, so
+  // the pane never lets them disagree.
+  function fnGroup(draft, head, takenFns) {
+    const catalog = catalogFor(SOURCES[draft.source]);
+    const row = el("div", "mm-chips");
+    const hint = el("div", "dw-hint");
+    const currentNote = () =>
+      (catalog || []).find((c) => c.fn === draft.fn)?.note || "";
+    if (!catalog) {
+      // Catalog fetch failed or hasn't landed: the saved binding still renders,
+      // it just can't be re-pointed — a drawer that offered nothing to switch
+      // to would be a one-way door pretending otherwise.
+      const c = document.createElement("button");
+      c.type = "button";
+      c.textContent = draft.key;
+      c.setAttribute("aria-pressed", "true");
+      c.disabled = true;
+      row.appendChild(c);
+      hint.textContent = "The field catalog didn't load — this field keeps its saved binding.";
+    } else {
+      for (const cat of catalog) {
+        const c = document.createElement("button");
+        c.type = "button";
+        c.textContent = cat.key;
+        c.setAttribute("aria-pressed", String(cat.fn === draft.fn));
+        c.disabled = takenFns.has(cat.fn);
+        c.addEventListener("click", () => {
+          draft.fn = cat.fn;
+          draft.key = cat.key;
+          draft.kind = cat.kind;
+          head.t.textContent = cat.key;
+          for (const b of row.children) b.setAttribute("aria-pressed", String(b === c));
+          hint.textContent = currentNote();
+        });
+        row.appendChild(c);
+      }
+      hint.textContent = currentNote(); // the catalog's caveat, e.g. created is null for browser uploads
+    }
+    const g = group("Field", row, null);
+    g.appendChild(hint);
+    return g;
+  }
+
+  // A cadence select bound to `bearer.refresh.every`; "once" (0) clears it.
+  // CADENCES is what this pane OFFERS; the server accepts any 1–43200 minutes,
+  // so a mapping written by the API — or by a build whose list included a value
+  // this one dropped — can hold a cadence with no option to sit on. Name it
+  // rather than let the select answer for it: it used to render blank, and a
+  // list of options with none selected reads as "once", which is a live field
+  // claiming it never refreshes.
+  function cadenceSelect(bearer) {
+    const current = String(bearer.refresh?.every ?? 0);
+    const opts = CADENCES.map(([min, label]) => [String(min), label]);
+    if (!opts.some(([v]) => v === current)) {
+      const at = opts.findIndex(([v]) => Number(v) > Number(current));
+      opts.splice(at < 0 ? opts.length : at, 0, [current, `every ${current} min`]);
+    }
+    const sel = mkSel(opts, current, "How often this refreshes in the app");
+    sel.addEventListener("change", () => {
+      const every = Number(sel.value);
+      if (every > 0) bearer.refresh = { every };
+      else delete bearer.refresh;
+    });
+    return sel;
+  }
+
+  // ── The identity drawer (file boards) ─────────────────────────────────────
+  // "Get identity from" over horizontal source cards; picking reshapes the
+  // config below, draft-side. The Filename card sets the draft to null — the
+  // slot's absence-of-configuration, not a source of its own.
+  function openIdentityDrawer() {
+    // `stash` is drawer-session scratch (see matchListBlock) and lives on the
+    // EDITOR, never on the draft — the draft is written to the mapping verbatim,
+    // and scratch on it would be config.
+    const ed = { draft: identityCfg ? clone(identityCfg) : null, stash: null };
+    const head = drawerHeadParts("srcDot", false, "identity", "");
+    drawer().open({
+      head: head.nodes,
+      build: (bodyEl) => {
+        const isAi = ed.draft?.source === "extract";
+        // The head follows the current pick — it names what the slot would be
+        // saved as, not what it was when the drawer opened.
+        head.g.className = "mm-glyph" + (isAi ? " ai" : "");
+        head.g.innerHTML = isAi ? ICONS.srcSparkle : ICONS.srcDot;
+        head.s.textContent = isAi ? "AI extraction" : "Filename";
+
+        const row = el("div", "mm-srcrow");
+        row.append(
+          srcCard({
+            glyph: "srcDot", ai: false, lab: "Filename", note: "each file is its own card",
+            pressed: !ed.draft,
+            onPick: () => { ed.draft = null; drawer().refresh(); },
+          }),
+          srcCard({
+            glyph: "srcSparkle", ai: true, lab: "AI extraction", note: "the AI derives it",
+            pressed: isAi,
+            onPick: () => {
+              // Re-picking AI restores what was saved rather than a blank —
+              // flipping to Filename and back should not cost the instruction.
+              ed.draft = identityCfg?.source === "extract" ? clone(identityCfg) : { source: "extract", instruction: "" };
+              drawer().refresh();
+            },
+          }),
+        );
+        bodyEl.appendChild(group("Get identity from", row, null));
+
+        if (isAi) {
+          // The identity slot asks the same question extraction fields do, in
+          // its own words — what the AI should read out of each item.
+          bodyEl.appendChild(askGroup(ed.draft, {
+            label: "AI instruction",
+            placeholder: "what to extract as the item's identity — e.g. \"the person's full name\"",
+            hint: "Sent to the model for every item.",
+          }));
+          bodyEl.appendChild(matchListBlock(ed, bodyEl));
+        }
+      },
+      primary: {
+        label: "Done",
+        onClick: () => commit(() => { identityCfg = ed.draft; }),
+      },
+    });
+  }
+
+  // "Match to a list": a declared list of allowed answers. Its presence on the
+  // draft (`options` is an array) IS the mode — the switch adds or deletes the
+  // array, and the option rows follow it with no second label.
+  function matchListBlock(ed, bodyEl) {
+    const wrap = el("div", "dw-group");
+    const on = Array.isArray(ed.draft.options);
+    wrap.appendChild(switchRow(
+      "Match to a list",
+      "constrain the answer to options you define — leave off to extract any value",
+      on,
+      (now) => {
+        if (now) {
+          // Prefer what was typed THIS drawer session (stashed on the flip
+          // off) over the committed list — an off/on flip mid-edit must not
+          // silently discard fresh options.
+          ed.draft.options = ed.stash
+            || (identityCfg?.options?.length ? clone(identityCfg.options) : [{ value: "", hint: "" }]);
+          ed.stash = null;
+        } else {
+          ed.stash = ed.draft.options;
+          delete ed.draft.options;
+        }
+        drawer().refresh();
+      },
+      { small: true }
+    ));
+    if (on) wrap.appendChild(optionRows(ed.draft, bodyEl));
+    return wrap;
+  }
+
+  function optionRows(draft, bodyEl) {
+    const wrap = document.createElement("div");
+    draft.options.forEach((o, i) => {
+      const rowEl = el("div", "fe-val-row");
+      rowEl.style.cssText = "gap:6px;";
+      const valIn = document.createElement("input");
+      valIn.placeholder = "option";
+      valIn.value = o.value || "";
+      valIn.style.cssText = "flex:0 0 38%;";
+      valIn.addEventListener("input", () => { o.value = valIn.value; });
+      const hintIn = document.createElement("input");
+      hintIn.placeholder = "hint (optional) — helps the AI tell options apart";
+      hintIn.value = o.hint || "";
+      hintIn.style.cssText = "flex:1;";
+      hintIn.addEventListener("input", () => { o.hint = hintIn.value; });
+      const rm = document.createElement("button");
+      rm.className = "fe-rm";
+      rm.type = "button";
+      rm.textContent = "×";
+      rm.setAttribute("aria-label", "Remove option");
+      rm.addEventListener("click", () => { draft.options.splice(i, 1); drawer().refresh(); });
+      rowEl.append(valIn, hintIn, rm);
+      wrap.appendChild(rowEl);
+    });
+    const add = document.createElement("button");
+    add.className = "fe-add-val";
+    add.type = "button";
+    add.textContent = draft.options.length ? "+ option" : "+ add the first option";
+    add.addEventListener("click", () => {
+      draft.options.push({ value: "", hint: "" });
+      drawer().refresh();
+      // refresh() rebuilds into the same body node, so the new row is queryable
+      // — focus the option you just asked for.
+      bodyEl.querySelectorAll(".fe-val-row input").item((draft.options.length - 1) * 2)?.focus();
+    });
+    wrap.appendChild(add);
+    return wrap;
+  }
+
+  // ── The face drawers ──────────────────────────────────────────────────────
+  // File board: only reachable under extract identity (several instances per
+  // entity — WHICH one supplies the preview is a real question). The single
+  // "File preview" card states what the face is; the preference below is soft.
+  function openFileFaceDrawer() {
+    const ed = {
+      draft: faceCfg?.source === "file" ? clone(faceCfg) : { source: "file", prefer: "image", pick: "first" },
+    };
+    const head = drawerHeadParts("srcFile", false, "face", "File preview");
+    drawer().open({
+      head: head.nodes,
+      build: (bodyEl) => {
+        const row = el("div", "mm-srcrow");
+        row.appendChild(srcCard({
+          glyph: "srcFile", ai: false, lab: "File preview", note: "the stored file, rendered", pressed: true,
+        }));
+        bodyEl.appendChild(group("Get face from", row, null));
+
+        const chips = el("div", "mm-chips");
+        for (const [v, label] of [["image", "Image"], ["document", "Document"], ["audio", "Audio"]]) {
+          const c = document.createElement("button");
+          c.type = "button";
+          c.textContent = label;
+          c.setAttribute("aria-pressed", String(ed.draft.prefer === v));
+          c.addEventListener("click", () => {
+            ed.draft.prefer = v;
+            for (const b of chips.children) b.setAttribute("aria-pressed", String(b === c));
+          });
+          chips.appendChild(c);
+        }
+        const pick = mkSel([["first", "First added"], ["latest", "Latest added"]], ed.draft.pick || "first",
+          "Which instance when several qualify");
+        pick.style.width = "auto";
+        pick.addEventListener("change", () => { ed.draft.pick = pick.value; });
+        const inline = el("div", "dw-inline");
+        inline.append(chips, pick);
+        bodyEl.appendChild(group("Prefer (when available)", inline,
+          "Soft — falls back to any file when that type is absent."));
+      },
+      primary: {
+        label: "Done",
+        onClick: () => commit(() => { faceCfg = ed.draft; }),
+      },
+    });
+  }
+
+  // Connector board: one card per declared producer (usually just the chart),
+  // then how much history it covers and how often it re-draws.
+  function openConnectorFaceDrawer() {
+    normalizeConnectorFace();
+    const ed = { draft: clone(faceCfg) };
+    const head = drawerHeadParts("srcGlobe", false, "face", srcLabel(SOURCES.connector));
+    drawer().open({
+      head: head.nodes,
+      build: (bodyEl) => {
+        const row = el("div", "mm-srcrow");
+        for (const p of faces()) {
+          row.appendChild(srcCard({
+            glyph: "srcGlobe", ai: false, lab: p.label, note: "drawn from live history",
+            pressed: ed.draft.producer === p.name,
+            onPick: faces().length > 1 ? () => {
+              ed.draft.producer = p.name;
+              // Drop onto a period the new producer actually offers.
+              if (!p.periods?.includes(ed.draft.period)) {
+                ed.draft.period = p.periods?.includes("1y") ? "1y" : p.periods?.[0];
+              }
+              drawer().refresh();
+            } : undefined,
+          }));
+        }
+        bodyEl.appendChild(group("Get face from", row, null));
+
+        const producer = faces().find((p) => p.name === ed.draft.producer) || faces()[0];
+        const periodSel = mkSel((producer.periods || []).map((p) => [p, p]), ed.draft.period,
+          "How much history the chart covers");
+        periodSel.addEventListener("change", () => { ed.draft.period = periodSel.value; });
+        bodyEl.appendChild(group("How much history the chart covers", periodSel, null));
+        bodyEl.appendChild(group("How often it re-draws", cadenceSelect(ed.draft), null));
+
+        // Warn when the face can't be rendered by the connector's active
+        // provider — cards silently fall back to the tile otherwise. Name the
+        // provider and, if any others can render it, point the way to switch.
+        // This is where the tile gets disclosed: as the consequence of a
+        // provider gap, not as an option.
+        if (producer.available === false) {
+          const active = conn?.activeProvider || null;
+          const providerLabel = (n) => (conn?.providers || []).find((p) => p.name === n)?.label || n;
+          const activeLabel = (active && providerLabel(active)) || "The active provider";
+          const capable = (producer.supportedBy || [])
+            .filter((n) => n !== active)
+            .map(providerLabel);
+          const hint = el("div", "dw-hint");
+          hint.textContent =
+            `${activeLabel} can’t render this face — cards will show the symbol tile instead.` +
+            (capable.length ? ` Switch to ${capable.join(" or ")} in Admin → Plugins to enable it.` : "");
+          bodyEl.appendChild(hint);
+        }
+      },
+      primary: {
+        label: "Done",
+        onClick: () => commit(() => { faceCfg = ed.draft; }),
+      },
+    });
+  }
+
+  // Normalize the face onto a real producer + a period it actually offers.
+  // This also COERCES a board saved without a face (or under a producer that's
+  // gone) onto the first declared producer, so the def row never summarizes a
+  // face the save wouldn't write. Idempotent — re-runs whenever faces land.
+  function normalizeConnectorFace() {
+    if (!inputConnector || !faces().length) return;
+    const producer = faces().find((p) => p.name === faceCfg?.producer) || faces()[0];
+    const period = faceCfg?.period && producer.periods?.includes(faceCfg.period) ? faceCfg.period
+      : producer.periods?.includes("1y") ? "1y" : producer.periods?.[0];
+    faceCfg = {
+      source: "connector", producer: producer.name, period,
+      ...(faceCfg?.refresh?.every ? { refresh: { every: faceCfg.refresh.every } } : {}),
     };
   }
 
-  // AI fields: the only editable rows in the pane, and the only section with a
-  // provenance band — the model that fills them is a thing worth naming here.
-  function aiSection() {
-    return {
-      title: "AI-extracted fields",
-      band: extractBand?.el,
-      rows: fields.filter((f) => f.from === "ai").map(makeAiRow),
-      empty: isAdmin ? "No AI fields — add one below." : "No AI fields defined.",
-      footer: isAdmin ? makeAddAiFieldBtn() : null,
-    };
-  }
+  render();
 
-  const renderFields = keepPlace(fieldsList, () => {
-    fieldsList.replaceChildren();
-    drawSection(inputConnector ? connectorSection() : fileSection());
-    drawSection(aiSection());
-  });
-
-  renderFaceRow();
-  renderFields();
-  body.appendChild(fieldsList);
-  // For an already-bound board, fetch the connector's catalog so un-included
-  // fields + face producers show too (template load fills them directly).
-  if (inputConnector && !connectorCatalog) loadCatalog();
-  // File boards: fetch the media field catalog so the "File fields" section can
-  // offer every addable field (already-included ones render checked).
-  if (!inputConnector) loadFileFields();
+  // For an already-bound board, fetch the connector's catalog so the add menu,
+  // the identity blurb and the face producers show (a template load fills them
+  // directly). File boards fetch the media catalog for the add menu.
+  if (inputConnector) loadCatalog();
+  else loadFileFields();
 
   // The host modal owns the Save button. Non-admins get a read-only pane, so
   // say why inline (the host's Save persists tagging only for them).
@@ -932,160 +1126,214 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     body.appendChild(note);
   }
 
+  // Bind the pane to a domain row (or to none) and redraw around it. The three
+  // callers below — the catalog fetch, a template apply, a template clear —
+  // differ only in what they hand this and what they do to the MAPPING first.
+  function bindConnector(row) {
+    conn = row;
+    normalizeConnectorFace(); // no-op off a connector board or before faces land
+    syncTemplateBtn();        // the trigger may have been showing a bare name
+    syncUnavailable();
+    render();
+  }
+
   async function loadCatalog() {
     try {
       const connectors = await fetch("/api/connectors").then((r) => r.json());
-      const c = connectors.find((x) => x.name === inputConnector);
-      if (c) {
-        connectorCatalog = c.fields || [];
-        connectorFaces = c.faces || [];
-        connectorLabel = c.label;
-        connectorProviders = c.providers || [];
-        connectorActiveProvider = c.activeProvider || null;
-        connectorAvailable = c.available !== false;
-        connectorReason = c.reason || null;
-        syncTemplateBtn(); // the trigger was showing the bare connector name
-        syncUnavailable();
-        renderFields();
-        renderFaceRow();
-      }
-    } catch { /* leave catalog null → the saved-fields fallback stands */ }
+      const row = Array.isArray(connectors) ? connectors.find((x) => x.name === inputConnector) : null;
+      // A board bound to a domain the server doesn't list any more (its plugin
+      // was removed) is the same dead end as a failed fetch — the pane keeps
+      // rendering what it saved, and the add menu must stop claiming a catalog
+      // is on its way.
+      if (row) bindConnector(row);
+      else catalogFailed = true;
+    } catch {
+      // Saved tiles carry their own key/kind — the pane is never blank about
+      // fields it collects. The flag stops the add menu claiming "Loading…"
+      // for a fetch that already lost.
+      catalogFailed = true;
+    }
   }
 
   async function loadFileFields() {
     if (fileFieldCatalog) return;
     try {
-      fileFieldCatalog = await fetch("/api/file-fields").then((r) => r.json());
-      renderFields();
-    } catch { /* leave null → the "Loading…" line stands, AI section still works */ }
+      const cat = await fetch("/api/file-fields").then((r) => r.json());
+      if (Array.isArray(cat)) fileFieldCatalog = cat;
+    } catch {
+      catalogFailed = true; // the open sources stay addable; the menu says why
+    }
   }
 
-  function applyTemplate(connector) {
-    const t = connector.template;
+  function applyTemplate(row) {
+    // A domain with no template can't rewire the board — bail rather than
+    // silently apply as a "Files" board with an unreachable catalog. Both
+    // built-ins declare one; this guards a plugin domain that doesn't.
+    if (!row.template) {
+      toast.error(`${row.label} doesn't provide a board template`);
+      return;
+    }
+    const t = row.template;
     inputConnector = t.input?.connector || null;
-    identityFrom = t.identity?.from || "raw";
-    identityHint = t.identity?.hint || "";
-    candidates = (t.identity?.candidates || []).map((c) => ({ ...c }));
-    classifyOn = candidates.length > 0;
+    identityCfg = t.identity ? clone(t.identity) : null;
+    faceCfg = t.face ? clone(t.face) : null;
     fields = (t.fields || []).map((f) => ({ ...f }));
-    connectorCatalog = connector.fields || [];
-    connectorFaces = connector.faces || [];
-    connectorLabel = connector.label;
-    connectorProviders = connector.providers || [];
-    connectorActiveProvider = connector.activeProvider || null;
-    connectorAvailable = connector.available !== false;
-    connectorReason = connector.reason || null;
-    faceCfg = t.face ? { ...t.face } : { from: "raw" };
     markDirty();
-    syncTemplateBtn();
-    syncUnavailable();
-    renderIdentityRow();
-    renderFaceRow();
-    renderFields();
+    bindConnector(row);
   }
 
   // The inverse of applyTemplate: back to the pristine file board. A template
   // rewires the whole mapping, so unloading one has to undo the whole thing —
-  // the connector fields name a source that's gone, and the identity/face they
-  // set only mean something under that source. That takes the template's AI
-  // fields with it, which is the same wholesale swap applyTemplate already
-  // does in the other direction.
+  // the connector fields name a source that's gone, and the identity/face it
+  // set only mean something under that source. That takes the template's
+  // extract fields with it, which is the same wholesale swap applyTemplate
+  // already does in the other direction.
   function clearTemplate() {
     if (!inputConnector) return;
     inputConnector = null;
-    identityFrom = "raw";
-    identityHint = "";
-    candidates = [];
-    classifyOn = false;
+    identityCfg = null;
+    faceCfg = null;
     fields = [];
-    connectorCatalog = null;
-    connectorFaces = [];
-    connectorLabel = null;
-    connectorProviders = [];
-    connectorActiveProvider = null;
-    connectorAvailable = true;
-    connectorReason = null;
-    faceCfg = { from: "raw" };
     markDirty();
-    syncTemplateBtn();
-    syncUnavailable();
-    loadFileFields(); // the File fields section needs a catalog it never fetched
-    renderIdentityRow();
-    renderFaceRow();
-    renderFields();
+    loadFileFields(); // the file source's menu section needs a catalog it never fetched
+    bindConnector(null);
   }
 
   // Validate + assemble the mapping payload for the host modal's PATCH. Returns
   // { ok:false } after toasting on invalid input, else { ok:true, payload } —
-  // the payload merges straight into the board PATCH body. Extraction's pin
-  // rides the host's capability pickers, not this pane.
+  // the payload merges straight into the board PATCH body. The capability pins
+  // behind the bands ride the host's pickers, not this pane.
   function collect() {
-    // Blur whatever is being edited so the key input re-displays its normalized
-    // value. The MODEL is already current — every control in the pane writes on
-    // input/change — so this is about what the reader sees: the messages below
-    // name keys, and they have to name what's on screen.
-    const activeKey = document.activeElement;
-    if (activeKey && fieldsList.contains(activeKey)) activeKey.blur();
+    // Blur whatever is being edited — the MODEL is already current (every
+    // control writes on input/change), this is about what the reader sees: the
+    // messages below name keys, and they have to name what's on screen.
+    const active = document.activeElement;
+    if (active && container.contains(active)) active.blur();
 
-    // Separate AI fields (need validation) from connector + file fields (locked, pass through).
-    const aiFields = fields.filter((f) => f.from === "ai" && f.key);
-    const connectorFields = fields.filter((f) => f.from === "connector");
-    const fileFields = fields.filter((f) => f.from === "file");
+    // A user-named field committed without a key is a half-thought, not an
+    // error worth blocking the save over — drop it, as the old pane did.
+    const kept = fields.filter((f) => SOURCES[f.source]?.catalog || f.key);
     const seen = new Set();
-    for (const f of aiFields) {
-      if (!/^[a-z][a-z0-9_]*$/.test(f.key)) { toast.error(`Invalid field key: "${f.key}"`); return { ok: false }; }
-      if (seen.has(f.key)) { toast.error(`Duplicate field key: "${f.key}"`); return { ok: false }; }
+    for (const f of kept) {
+      if (!SOURCES[f.source]?.catalog && !/^[a-z][a-z0-9_]*$/.test(f.key)) {
+        toast.error(`Invalid field key: "${f.key}"`);
+        return { ok: false };
+      }
+      // Mirrors the server (validateMapping): "identity" is the identity
+      // slot's key in the record_fields schema; instructions cap at 500.
+      if (f.key === "identity") {
+        toast.error(`"identity" is reserved for the identity slot — pick another key`);
+        return { ok: false };
+      }
+      if ((f.instruction || "").length > 500) {
+        toast.error(`The instruction for "${f.key}" is too long (max 500 characters)`);
+        return { ok: false };
+      }
+      if (seen.has(f.key)) {
+        toast.error(`Duplicate field key: "${f.key}"`);
+        return { ok: false };
+      }
       seen.add(f.key);
     }
 
-    if (identityFrom === "ai" && !identityHint.trim()) {
-      toast.error("Identity hint is required when using AI instruction");
-      return { ok: false };
+    // Identity: the domain's on connector boards; extract needs its
+    // instruction; absent = the filename (no slot stores a word for that).
+    let identity = null;
+    if (inputConnector) identity = { source: "connector" };
+    else if (identityCfg?.source === "extract") {
+      const instruction = (identityCfg.instruction || "").trim();
+      if (!instruction) {
+        toast.error("An AI instruction is required when identity comes from AI extraction");
+        return { ok: false };
+      }
+      if (instruction.length > 500) {
+        toast.error("The identity instruction is too long (max 500 characters)");
+        return { ok: false };
+      }
+      // Match-list: keep only options that carry a value; trim hints. An on
+      // toggle with nothing usable is a half-state — block it rather than save
+      // a listless matcher (keeps "mode = has a list" true, like the server).
+      const cleanOptions = (identityCfg.options || [])
+        .map((o) => ({ value: (o.value || "").trim(), ...(o.hint && o.hint.trim() ? { hint: o.hint.trim() } : {}) }))
+        .filter((o) => o.value);
+      if (Array.isArray(identityCfg.options) && !cleanOptions.length) {
+        toast.error("Add at least one option, or turn off “Match to a list”");
+        return { ok: false };
+      }
+      // The server dedups options on a NORMALIZED key (worker normaliseIdentity:
+      // trim, collapse -_ and whitespace, lowercase) — "BTC" and "btc" collide.
+      // Catch it here so a colliding pair doesn't 400 the whole save.
+      const optKeys = new Set();
+      for (const o of cleanOptions) {
+        const k = o.value.trim().toLowerCase().replace(/[-_\s]+/g, " ");
+        if (optKeys.has(k)) {
+          toast.error(`Two options mean the same thing: "${o.value}"`);
+          return { ok: false };
+        }
+        optKeys.add(k);
+        if ((o.hint || "").length > 500) {
+          toast.error(`The hint for option "${o.value}" is too long (max 500 characters)`);
+          return { ok: false };
+        }
+      }
+      identity = { source: "extract", instruction, ...(cleanOptions.length ? { options: cleanOptions } : {}) };
     }
-    // Classify: keep only options that carry a value; trim hints. An on toggle
-    // with nothing usable is a half-state — block it rather than save a listless
-    // classifier (keeps "mode = has a list" true, mirroring the server).
-    const cleanCandidates = candidates
-      .map((c) => ({ value: (c.value || "").trim(), ...(c.hint && c.hint.trim() ? { hint: c.hint.trim() } : {}) }))
-      .filter((c) => c.value);
-    if (identityFrom === "ai" && classifyOn && !cleanCandidates.length) {
-      toast.error("Add at least one option, or turn off “Match to a list”");
-      return { ok: false };
-    }
-    const identitySlot = identityFrom === "ai"
-      ? { from: "ai", hint: identityHint.trim(), ...(classifyOn && cleanCandidates.length ? { candidates: cleanCandidates } : {}) }
-      : identityFrom === "connector"
-        ? { from: "connector" }
-        : { from: "raw" };
 
-    const allFields = [
-      ...connectorFields.map((f) => ({ key: f.key, kind: f.kind, from: "connector", fn: f.fn, ...(f.live ? { live: true, every: f.every } : {}) })),
-      ...fileFields.map((f) => ({ key: f.key, kind: f.kind, from: "file", fn: f.fn })),
-      ...aiFields.map((f) => ({ key: f.key, kind: f.kind, from: "ai", ...(f.hint ? { hint: f.hint } : {}) })),
-    ];
+    // Each field is emitted from what its source declares it carries, so the
+    // wire shape of a new source is its table row rather than another arm here.
+    // A catalog source's key/kind/fn are the catalog entry's; an open source
+    // holds a kind only where the user picks one (detection outputs located
+    // hits, not a scalar, so it carries none at all).
+    const outFields = kept.map((f) => {
+      const def = SOURCES[f.source];
+      // A source this build has no row for (a plugin domain's template can put
+      // one here) travels through untouched: dropping it would delete a field
+      // the pane just showed, and re-shaping it from a row we don't have isn't
+      // possible. The server names it if it's really unsupported — which is a
+      // better answer than either.
+      if (!def) return { ...f };
+      const out = { key: f.key, source: f.source };
+      if (def.catalog) { out.kind = f.kind; out.fn = f.fn; }
+      else if (def.kinds) out.kind = def.kinds.includes(f.kind) ? f.kind : def.kinds[0];
+      if (def.ask && f.instruction?.trim()) out.instruction = f.instruction.trim();
+      if (def.refreshable && f.refresh?.every) out.refresh = { every: f.refresh.every };
+      return out;
+    });
+
+    // The face is emitted only where it was really configured. Connector
+    // boards: the normalized producer config. File boards: only under extract
+    // identity (several instances per entity) — the preference is soft, image/
+    // first by default, and flipping identity back to filename drops it.
     let face = null;
-    if (faceCfg.from === "connector") {
-      face = { from: "connector", producer: faceCfg.producer, period: faceCfg.period, ...(faceCfg.live ? { live: true, every: faceCfg.every } : {}) };
-    } else if (!inputConnector && identityFrom === "ai") {
-      // Derived file board: the preview follows an explicit preference — image by
-      // default. There's no "no preference" option; prefer is soft (selectFace
-      // falls back to any instance when the type is absent), so a default of image
-      // just means "show the image if there is one". Raw identity is single-
-      // instance, so flipping ai→raw and saving drops the face entirely.
-      face = { from: "file", prefer: faceCfg.prefer && faceCfg.prefer !== "any" ? faceCfg.prefer : "image", pick: faceCfg.pick || "first" };
+    if (inputConnector) {
+      if (faceCfg?.source === "connector") {
+        face = {
+          source: "connector", producer: faceCfg.producer, period: faceCfg.period,
+          ...(faceCfg.refresh?.every ? { refresh: { every: faceCfg.refresh.every } } : {}),
+        };
+      }
+    } else if (identity?.source === "extract") {
+      face = {
+        source: "file",
+        prefer: (faceCfg?.source === "file" && faceCfg.prefer) || "image",
+        pick: (faceCfg?.source === "file" && faceCfg.pick) || "first",
+      };
     }
-    const hasContent = allFields.length > 0 || identityFrom !== "raw" || inputConnector || face;
-    const mapping = hasContent
+
+    // Nothing configured at all collapses to null — an unmapped board, not an
+    // empty mapping.
+    const hasContent = outFields.length > 0 || identity || inputConnector || face;
+    const out = hasContent
       ? {
           ...(inputConnector ? { input: { connector: inputConnector } } : {}),
-          identity: identitySlot,
+          ...(identity ? { identity } : {}),
           ...(face ? { face } : {}),
-          fields: allFields,
+          fields: outFields,
         }
       : null;
 
-    return { ok: true, payload: { mapping } };
+    return { ok: true, payload: { mapping: out } };
   }
 
-  return { isDirty: () => dirty, collect, setExtractionBand };
+  return { isDirty: () => dirty, collect, setBands };
 }

@@ -5,6 +5,7 @@ import { selectFace } from "./faces/select.js";
 // Pure scheduling rules — safe to import here (schedule.js imports nothing),
 // unlike connectors/runtime.js, which imports THIS module.
 import { liveFields, nextRefreshAt, faceSchedule } from "./connectors/schedule.js";
+import { aiWork } from "./field-sources.js"; // pure data + one predicate, no imports
 import { projectEntry } from "./media/index.js";
 import { CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
 
@@ -774,14 +775,21 @@ export async function queuedAmong(db, ids) {
 }
 
 // The mapping to stamp for AI extraction: the given mapping when it has AI
-// work in it (derived identity or AI fields), else null. Mirrors ingest's
-// hasMapping gate.
+// work in it (derived identity or extract/detect fields — aiWork asks the
+// source table), else null. Same gate as ingest's admitFile.
 function aiMappingJson(mapping) {
-  const hasAi =
-    mapping?.identity?.from === "ai" ||
-    (Array.isArray(mapping?.fields) && mapping.fields.some((f) => f.from === "ai"));
-  return hasAi ? JSON.stringify(mapping) : null;
+  return aiWork(mapping) ? JSON.stringify(mapping) : null;
 }
+
+// The stamped-face routing predicate shared VERBATIM by retagBoard /
+// releaseHeld / queueUntagged: an unfaced connector tag-vehicle (chart face in
+// the stamp, no files) re-enters the face leg before tagging. One string so
+// the three can't drift. reprocessEntity's variant differs ON PURPOSE — it
+// prefers the fresh re-stamp (COALESCE) and also re-faces rendered charts
+// (generated file) — so it is not folded in here.
+const STAMPED_CONNECTOR_FACE =
+  `payload->'mapping'->'face'->>'source' = 'connector'
+                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0`;
 
 async function boardAiMappingJson(db, boardId) {
   const { rows } = await db.query("SELECT mapping FROM boards WHERE id=$1", [boardId]);
@@ -1483,8 +1491,7 @@ export async function retagBoard(db, boardId) {
      SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
-           WHEN payload->'mapping'->'face'->>'from' = 'connector'
-                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
            ELSE 'pending' END,
@@ -1548,8 +1555,7 @@ export async function releaseHeld(db, boardId) {
      SET payload = CASE WHEN NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
-           WHEN payload->'mapping'->'face'->>'from' = 'connector'
-                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
            ELSE 'pending' END,
@@ -1575,8 +1581,7 @@ export async function queueUntagged(db, boardId) {
      SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
-           WHEN payload->'mapping'->'face'->>'from' = 'connector'
-                AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0 THEN 'pending_face'
+           WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
            ELSE 'pending' END,
@@ -2608,7 +2613,7 @@ export async function reprocessEntity(db, entityId) {
      SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
                         ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
          status = CASE
-           WHEN COALESCE($3::jsonb, payload->'mapping')->'face'->>'from' = 'connector'
+           WHEN COALESCE($3::jsonb, payload->'mapping')->'face'->>'source' = 'connector'
                 AND (jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
                      OR payload->'files'->0->>'generated' = 'true') THEN 'pending_face'
            WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract'

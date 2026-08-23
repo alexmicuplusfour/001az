@@ -396,7 +396,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   {
     const sel = state.selected.get("~objects") || new Set();
     const declared = (state.boardMapping?.fields || [])
-      .filter((f) => f.from === "ai" && f.kind === "object")
+      .filter((f) => f.source === "detect")
       .map((f) => f.key);
     const chips = [...new Set([...declared, ...sel])].filter(
       (key) => (totals.get(tag("~objects", key)) || 0) > 0 || sel.has(key)

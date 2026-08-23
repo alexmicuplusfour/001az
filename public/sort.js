@@ -2,15 +2,15 @@
 // assembled from the board's attribute catalogs, decided by the mapping's
 // identity source (see planning/board-sorting-plan.md):
 //
-// - raw (or no mapping): universal + media-catalog fields for the file kinds
-//   present on the board (entity:instance is 1:1, so a file's metadata IS the
-//   entity's — no aggregation question).
+// - null (no identity source, or no mapping): universal + media-catalog fields
+//   for the file kinds present on the board (entity:instance is 1:1, so a
+//   file's metadata IS the entity's — no aggregation question).
 // - connector: universal + the mapping's bound connector fields — exactly the
 //   keys whose values exist in entities.fields, so the menu can never offer a
 //   sort without data behind it.
-// - ai (derived identity): universal only, by decision — name, dates, hearts,
-//   file count. Media attributes are per-instance there and would need an
-//   aggregation policy we've declined to invent.
+// - extract (derived identity): universal only, by decision — name, dates,
+//   hearts, file count. Media attributes are per-instance there and would need
+//   an aggregation policy we've declined to invent.
 //
 // One sort at a time; state.sort === null is the server default (newest
 // first). Missing values sort last in either direction, in their incoming
@@ -28,7 +28,9 @@ const UNIVERSAL = [
 // entities always have exactly one instance).
 const INSTANCES_ENTRY = { by: "instances", label: "Files", kind: "number" };
 
-const identityFrom = () => state.boardMapping?.identity?.from || "raw";
+// The identity slot's source: "extract" | "connector" | null (null = the
+// filename default — the slot carries no config).
+const identityFrom = () => state.boardMapping?.identity?.source || null;
 
 // Static per-session catalogs, fetched lazily on first menu open. A failed or
 // empty response isn't cached — a boot-time network blip shouldn't degrade the
@@ -64,12 +66,12 @@ function kindsPresent() {
 // Async only for the catalog fetches (cached after the first call).
 export async function sortCatalog() {
   const from = identityFrom();
-  const universal = from === "ai" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
+  const universal = from === "extract" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
   const sections = [{ label: "Board", entries: universal }];
 
   if (from === "connector") {
     const bound = (state.boardMapping?.fields || []).filter(
-      (f) => f.from === "connector" && f.kind !== "url"
+      (f) => f.source === "connector" && f.kind !== "url"
     );
     if (bound.length) {
       const mod = (await connectorList()).find(
@@ -88,7 +90,7 @@ export async function sortCatalog() {
     return sections;
   }
 
-  if (from === "ai") return sections;
+  if (from === "extract") return sections;
 
   // Raw board: media sections for the kinds present. `added` duplicates the
   // universal Date added (entity created_at IS the upload moment on raw
@@ -169,13 +171,13 @@ function validSort(s) {
   if (!s || typeof s.by !== "string" || !["asc", "desc"].includes(s.dir)) return false;
   const from = identityFrom();
   if (UNIVERSAL.some((u) => u.by === s.by)) return true;
-  if (s.by === "instances") return from === "ai";
-  if (s.by.startsWith("media:")) return from === "raw";
+  if (s.by === "instances") return from === "extract";
+  if (s.by.startsWith("media:")) return from === null;
   if (s.by.startsWith("field:")) {
     const key = s.by.slice(6);
     return (
       from === "connector" &&
-      (state.boardMapping?.fields || []).some((f) => f.from === "connector" && f.key === key)
+      (state.boardMapping?.fields || []).some((f) => f.source === "connector" && f.key === key)
     );
   }
   return false;
@@ -201,7 +203,7 @@ export function restoreSort() {
     const key = mod?.browse?.defaultSort;
     const bound = key
       ? (state.boardMapping?.fields || []).find(
-          (f) => f.from === "connector" && f.key === key && f.kind !== "url"
+          (f) => f.source === "connector" && f.key === key && f.kind !== "url"
         )
       : null;
     if (!bound) return;

@@ -72,11 +72,11 @@ export function projectEntry(entry) {
 }
 
 // Project the mapping's file fields onto a file entry. `mappingFields` is a
-// mapping's `fields` array (from:"file" entries are selected here). Returns
+// mapping's `fields` array (source:"file" entries are selected here). Returns
 // { key: { v, src:"file", kind } }; a field whose catalog kind doesn't apply to
 // this entry's kind yields v:null — the field still shows, just empty.
 export function extractFileFields(entry, mappingFields = []) {
-  const requested = (mappingFields || []).filter((f) => f.from === "file");
+  const requested = (mappingFields || []).filter((f) => f.source === "file");
   if (!requested.length) return {};
   const ctx = ctxFromEntry(entry);
   const values = projectEntry(entry);

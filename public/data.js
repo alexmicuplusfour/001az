@@ -205,8 +205,8 @@ async function refreshTokens() {
 function liveBoard() {
   const m = state.boardMapping;
   if (!m) return false;
-  return (m.fields || []).some((f) => f.from === "connector" && f.live) ||
-    (m.face?.from === "connector" && !!m.face.live);
+  return (m.fields || []).some((f) => f.source === "connector" && f.refresh) ||
+    (m.face?.source === "connector" && !!m.face.refresh);
 }
 
 // Exported for tests: the cadence decision in one place. Boards with a run

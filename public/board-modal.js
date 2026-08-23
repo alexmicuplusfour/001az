@@ -607,14 +607,14 @@ export async function openBoardModal(boardId, opts = {}) {
           isAdmin: canEditAI,
           mapping: board?.mapping || null,
           hasItems: !!board?.has_items,
-          onExtractionChange: () => openExtractRow(),
+          onCapabilityChange: (capId) => openCapRow(capId),
         });
       }
-      // A reveal re-pushes the band's label — one push here covers every way
+      // A reveal re-pushes the bands' labels — one push here covers every way
       // the pickers moved while Mapping was hidden, including a provider's
       // live model list landing (which repaints a select without firing
       // `change`).
-      if (showMapping) mappingPane?.setExtractionBand(extractionBand());
+      if (showMapping) mappingPane?.setBands(mappingBands());
     });
   }
 
@@ -831,8 +831,11 @@ export async function openBoardModal(boardId, opts = {}) {
   // The bands resolve through delegation (an unset extractor follows the
   // tagger), so they derive from closures set once the feed lands; until then
   // the bands stay hidden and the strip head says nothing.
-  let extractionBand = () => null;
-  let openExtractRow = () => {};
+  // Bands for the Mapping pane, keyed by capability id — one entry per
+  // mappingBand capability in the feed (extract, detect, and whatever a future
+  // source's capability declares). {} until the feed lands.
+  let mappingBands = () => ({});
+  let openCapRow = () => {};
   if (canEditAI) {
     const wrap = document.getElementById("board-modal-caps");
     Promise.all([
@@ -900,13 +903,17 @@ export async function openBoardModal(boardId, opts = {}) {
       // here). Same field shape either way — see mountCapConfigs.
       if (isNew) mountCapConfigs(caps.flatMap((c) => c.config || []));
 
-      // Which picker feeds which band comes from data, not names: the
-      // capability the Mapping pane surfaces (mappingBand) is the extraction
-      // band's, and its delegatesTo names the tagging band's — the same source
-      // the old extraction select used for its "Board default" note.
-      const bandCap = caps.find((c) => c.mappingBand);
-      const extractPicker = capPickers.find((p) => p.cap.id === bandCap?.id) || null;
-      const tagPicker = capPickers.find((p) => p.cap.id === bandCap?.delegatesTo) || null;
+      // Which pickers feed which bands comes from data, not names: every
+      // capability flagged mappingBand gets a band in the Mapping pane (keyed
+      // by capability id — the pane joins them to sources via the source
+      // table's `capability`). The one that delegates (extract → tag) also
+      // names the Tagging pane's band, same as before.
+      const bandCaps = caps.filter((c) => c.mappingBand);
+      const bandPickers = bandCaps
+        .map((c) => capPickers.find((p) => p.cap.id === c.id))
+        .filter(Boolean);
+      const delegatingCap = bandCaps.find((c) => c.delegatesTo);
+      const tagPicker = capPickers.find((p) => p.cap.id === delegatingCap?.delegatesTo) || null;
 
       const chosen = (p) => p.plan.chosenLabel(p.keySel.value, p.modelSel.hidden ? null : p.modelSel.value || null);
       // WHICH picker actually decides a capability's model: itself, unless it is
@@ -932,7 +939,8 @@ export async function openBoardModal(boardId, opts = {}) {
           empty: `No ${d.cap.agent} configured`,
         };
       };
-      extractionBand = () => (extractPicker ? bandState(extractPicker) : null);
+      mappingBands = () =>
+        Object.fromEntries(bandPickers.map((p) => [p.cap.id, bandState(p)]));
 
       const openStripAt = (p) => {
         if (!p) return;
@@ -943,7 +951,7 @@ export async function openBoardModal(boardId, opts = {}) {
         p.row.classList.add("flash");
         p.row.scrollIntoView({ block: "nearest" });
       };
-      openExtractRow = () => openStripAt(extractPicker);
+      openCapRow = (capId) => openStripAt(capPickers.find((p) => p.cap.id === capId));
       openTagRow = () => openStripAt(tagPicker);
 
       // Web research is a modifier of the tagging capability: available only
@@ -975,7 +983,7 @@ export async function openBoardModal(boardId, opts = {}) {
           ? chosen(tagPicker) + (n ? ` · ${n} board choice${n === 1 ? "" : "s"}` : " · all app defaults")
           : "";
         tagBand?.set(tagPicker ? bandState(tagPicker) : null);
-        mappingPane?.setExtractionBand(extractionBand());
+        mappingPane?.setBands(mappingBands());
         syncAi(); // research availability follows the tagging selection
       };
       updateAiPresentation();

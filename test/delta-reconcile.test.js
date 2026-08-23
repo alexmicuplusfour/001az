@@ -104,13 +104,13 @@ test("poll cadence: fast while work is in flight, slow on a live board, off othe
   state.boardMapping = null;
   assert.equal(pollDelay(), 0, "settled non-live board: no poll");
 
-  state.boardMapping = { fields: [{ key: "price", from: "connector", live: true, every: 1 }] };
+  state.boardMapping = { fields: [{ key: "price", source: "connector", refresh: { every: 1 } }] };
   assert.equal(pollDelay(), 30000, "live connector fields: slow poll");
 
-  state.boardMapping = { fields: [], face: { from: "connector", producer: "chart", live: true, every: 60 } };
+  state.boardMapping = { fields: [], face: { source: "connector", producer: "chart", refresh: { every: 60 } } };
   assert.equal(pollDelay(), 30000, "live chart face: slow poll");
 
-  state.boardMapping = { fields: [{ key: "price", from: "connector" }], face: { from: "connector", producer: "chart" } };
+  state.boardMapping = { fields: [{ key: "price", source: "connector" }], face: { source: "connector", producer: "chart" } };
   assert.equal(pollDelay(), 0, "connector but nothing live: no poll");
 
   // Automatic ingestion admits items server-side on quiet boards — same

@@ -79,14 +79,24 @@
 }
 .modal-body > input, .modal-body > textarea { margin-bottom: 10px; }
 .modal-section { border-top: 1px solid #eee; margin-top: 18px; padding-top: 14px; }
-.modal-section-title {
+/* The uppercase micro-label, declared once for everything in a modal that wears
+   one. They had drifted into three near-copies (11/.07, 11/.06, 10.5/.08) that
+   differed by nothing anyone could see. The one difference that MEANS something
+   is the ink: a section title and the template row's label name a region and are
+   set in body ink; .dw-label sits directly above a single control inside a
+   drawer and is dimmed so it doesn't compete with the control's own text. */
+.modal-section-title,
+.mm-template-label,
+.dw-label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .07em;
-  color: var(--text, #111);
-  margin-bottom: 12px;
 }
+.modal-section-title,
+.mm-template-label { color: var(--text, #111); }
+.modal-section-title { margin-bottom: 12px; }
+.dw-label { color: #8a8a92; }
 /* A section heading with controls parked on its right — the heading keeps its
    own margins, so pass the row's bottom spacing inline where the section
    needs it. */
@@ -136,8 +146,14 @@
   box-sizing: border-box;
 }
 
-/* button styles inside modal footer (gallery page has no global button styles) */
-.modal-footer button {
+/* Button styles for a modal's action row (the gallery page has no global button
+   styles). BOTH action rows: the dialog's own footer and a drawer's
+   (modal.js createDrawer). One definition, because a drawer's Cancel is the
+   same button as the dialog's Cancel — it was an outlined one only because it
+   had been declared somewhere else. Unclassed = the primary; `.ghost` = the
+   secondary, the same class every other surface in the app uses for one. */
+.modal-footer button,
+.drawer-foot button {
   border: 1px solid transparent;
   border-radius: 7px;
   padding: 8px 14px;
@@ -146,8 +162,10 @@
   background: #111;
   color: #fff;
 }
-.modal-footer button.ghost { background: #f1f1f3; color: #111; }
-.modal-footer button.ghost:hover { background: #e6e6ea; }
+.modal-footer button.ghost,
+.drawer-foot button.ghost { background: #f1f1f3; color: #111; }
+.modal-footer button.ghost:hover,
+.drawer-foot button.ghost:hover { background: #e6e6ea; }
 
 /* toggle switch */
 .switch {
@@ -396,79 +414,20 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .clip-btn { background: none; border: 1px solid #d8d8de; border-radius: 5px; color: #6b6b72; cursor: pointer; font: 12px/1 inherit; padding: 3px 9px; }
 .clip-btn:hover { border-color: #999; color: #111; }
 
-/* ─── entity mapping modal: field-row components ─── */
-.mm-intro {
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: #5a5a68;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.mm-intro p { margin: 0; }
-.mm-row-locked {
-  background: #f3f3f6;
-  border-color: #dcdce4;
-  opacity: 0.85;
-}
-.mm-key-locked {
-  font-family: monospace;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text, #111);
-}
-.mm-locked-badge {
-  font-size: 11px;
-  color: #8a8a96;
-  background: #e8e8ee;
-  border-radius: 4px;
-  padding: 2px 7px;
-  margin-left: 6px;
-}
+/* ─── entity mapping modal ───
+   The field-ROW component family (.mm-row/.mm-key-locked/.mm-live-*/
+   .mm-connector-badge/.mm-locked-badge/.mm-face-prefer/.mm-intro) died with
+   the three-section pane — fields are .mm-tile objects now (below), and
+   cadence/config live in the drawer. What survives here is what the rebuilt
+   pane still draws. */
 .mm-empty {
   font-size: 13px;
   color: #8a8a92;
   margin: 0;
   padding: 8px 0;
 }
-.mm-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.mm-row {
-  background: #f7f7fa;
-  border-radius: 8px;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-.mm-src { color: #6b6b75; }
-/* per-field liveness cadence on connector rows; the refresh glyph labels the
-   select as a re-fetch cadence rather than an unmarked dropdown */
-.mm-live-wrap {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.mm-live-icon {
-  display: inline-flex;
-  color: #8a8a96;
-}
-.mm-live-icon svg { width: 14px; height: 14px; }
-.mm-live-wrap.disabled .mm-live-icon { color: #c6c6d0; }
-.mm-live {
-  font-size: 12px;
-  color: #5a5a6a;
-  border: 1px solid #d8d8e0;
-  border-radius: 6px;
-  padding: 2px 6px;
-  background: #fff;
-}
-.mm-live:disabled { color: #b0b0ba; background: #f0f0f4; }
-/* face-can't-render warning under the mapping modal's face row */
+/* amber statement box: a configured thing that can't currently render (a face
+   the provider can't draw; the whole domain unavailable via .mm-unavail) */
 .mm-face-hint {
   margin-top: 8px;
   font-size: 12px;
@@ -479,26 +438,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   border-radius: 6px;
   padding: 6px 9px;
 }
-/* Second line of the file-board face row: "prefer when available [type] [order]". */
-.mm-face-prefer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-.mm-face-prefer-label {
-  font-size: 12px;
-  color: #8a8a92;
-}
-.mm-connector-badge {
-  font-size: 11px;
-  font-weight: 600;
-  color: #4f46e5;
-  background: #ededfa;
-  border-radius: 4px;
-  padding: 2px 7px;
-  font-family: monospace;
-}
 /* template picker row (very top of the mapping pane body, above the intro) */
 .mm-template-row {
   display: flex;
@@ -508,13 +447,7 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   padding-bottom: 12px;
   border-bottom: 1px solid #eee;
 }
-.mm-template-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text, #111);
-}
+/* .mm-template-label's type is up with .modal-section-title — same label. */
 /* The picker itself is .dd-trigger + .dd-caret (dropdown.css) — it shows the
    template the board is on rather than an action, so it reads as a select. */
 /* The bound domain's outage banner: the face row's hint box, hoisted out of a
@@ -622,7 +555,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-more:hover { background: #efeff3; }
 .cb-more:disabled { opacity: .6; cursor: default; }
 
-.modal-footer button:disabled { opacity: .5; cursor: default; }
+.modal-footer button:disabled,
+.drawer-foot button:disabled { opacity: .5; cursor: default; }
 
 /* ── automatic ingestion modal (ingest-modal.js) ──────────────────────────── */
 #ingest-modal .modal-dialog { width: min(640px, 94vw); }
@@ -878,3 +812,161 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* One per modal, above the list — not one per finding. */
 .fd-edit { display: block; background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; font-size: 12px; padding: 0; margin: -6px 0 14px; }
 .fd-edit:hover { text-decoration: underline; }
+
+/* ─── Field sources: AI marker tokens ─────────────────────────────────────────
+   Violet marks a value a MODEL produces (extract, detect — the sources whose
+   field-sources.js row carries a capability); grey stays deterministic. One
+   pair of tokens so a future inferred source inherits the treatment. */
+:root {
+  --ai-ink: #5b4bd6;
+  --ai-bg: #f4f2fd;
+  --ai-bg-line: #e5e1f8;
+  --ai-bg-hover: #eeebfb;
+}
+
+/* ─── Bottom drawer (modal.js createDrawer) ──────────────────────────────────
+   A full-width sheet inside a modal body: scrim over the pane, sheet rising
+   from the bottom, head / scrollable body / footer with Cancel + one primary. */
+/* Light: this scrim is the third dimming layer on the same pixels — the page
+   overlay, then the dialog, then this — so it only has to say "the sheet has
+   the floor", not black the pane out. */
+.drawer-scrim {
+  position: absolute; inset: 0; z-index: 40;
+  background: rgba(21, 23, 28, 0.18);
+  opacity: 0; pointer-events: none; transition: opacity 0.16s ease;
+}
+.drawer-scrim.open { opacity: 1; pointer-events: auto; }
+/* The entrance is a fixed 12px rise + a fade — the same idiom and the same
+   distance .modal-dialog uses above, so every surface in a modal arrives the
+   same way. It used to be translateY(102%), which travelled the sheet's OWN
+   height over a fixed 200ms: a two-field drawer crept and a tall one flew.
+   That transform was also what hid the sheet when closed, so the hiding is
+   opacity + visibility's job now. `visibility` is load-bearing, not belt-and-
+   braces: an opacity-0 sheet still eats clicks and still holds its buttons in
+   the tab order (which the old off-screen sheet did too — a Tab from the pane
+   could land inside a closed drawer). It flips instantly on open and only
+   after the fade on close, hence the 0s transition with a delay. */
+.drawer {
+  position: absolute; z-index: 50; left: 0; right: 0; bottom: 0;
+  background: #fff; border-top: 1px solid #e4e6ea;
+  border-radius: 14px 14px 0 0; box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.18);
+  max-height: 88%; display: flex; flex-direction: column;
+  opacity: 0; visibility: hidden; transform: translateY(12px);
+  transition:
+    opacity 160ms ease,
+    transform 180ms cubic-bezier(.2, .8, .2, 1),
+    visibility 0s linear 180ms;
+}
+.drawer.open {
+  opacity: 1; visibility: visible; transform: translateY(0);
+  transition:
+    opacity 160ms ease,
+    transform 180ms cubic-bezier(.2, .8, .2, 1),
+    visibility 0s;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* `.drawer.open` has to be named: it now carries a transition of its own, and
+     a bare `.drawer` here would lose the specificity contest to it. */
+  .drawer, .drawer.open, .drawer-scrim { transition: none; }
+  .drawer { transform: none; }
+}
+.drawer-head { display: flex; align-items: center; gap: 9px; padding: 13px 18px 9px; flex: none; }
+.drawer-head svg { width: 17px; height: 17px; }
+/* .drawer-title / .drawer-src are the HEAD'S CONTENT, which createDrawer never
+   builds — the caller passes nodes. They're the mapping pane's, and they are
+   the same two lines a tile carries (a field key, then what produces it), so
+   their type is declared once with .mm-tile-name / .mm-tile-sum below. Only
+   the layout each needs differs: a tile stacks and truncates, a head sits on
+   one line with the source pushed to the far end. */
+.drawer-src { margin-left: auto; }
+.drawer-body { padding: 4px 18px 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 15px; }
+/* The buttons themselves are the shared modal-action pair, up with
+   .modal-footer button — nothing about them is the drawer's to restyle. */
+.drawer-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid #edeef1; flex: none; }
+
+/* Drawer form groups — label / control / quiet hint. */
+.dw-group { display: flex; flex-direction: column; gap: 6px; }
+/* .dw-label's type is up with .modal-section-title — same label, dimmer ink. */
+.dw-hint { font-size: 12px; color: #adb1b8; }
+.dw-inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* Choice chips (Format, face prefer): app-black selection, never violet. */
+.mm-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.mm-chips button {
+  background: #fff; border: 1px solid #d9dce2; color: #545962;
+  font-family: monospace; font-size: 12.5px; padding: 5px 12px;
+  border-radius: 6px; cursor: pointer;
+}
+.mm-chips button:hover { border-color: #111; color: #111; }
+.mm-chips button[aria-pressed="true"] { background: #111; border-color: #111; color: #fff; }
+
+/* ─── The pane: identity + face definition rows ────────────────────────────── */
+.mm-def { padding: 4px 0 6px; display: flex; flex-direction: column; gap: 6px; }
+.mm-def-row {
+  display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left;
+  background: none; border: none; font: inherit; padding: 8px 6px; border-radius: 9px; cursor: pointer;
+}
+.mm-def-row:hover { background: #f5f6f8; }
+.mm-def-row.locked { cursor: default; }
+.mm-def-row.locked:hover { background: transparent; }
+.mm-glyph { flex: none; display: inline-flex; color: #868c96; }
+.mm-glyph.ai { color: var(--ai-ink); }
+.mm-def-row .mm-glyph { margin-top: 1px; }
+.mm-def-row .mm-glyph svg { width: 19px; height: 19px; }
+.mm-def-body { min-width: 0; flex: 1; }
+/* Same ink as a tile's name — identity and face are slots on the same footing
+   as the fields below them, and a dimmed label made them read as captions. */
+.mm-def-label { font-family: monospace; font-size: 11px; font-weight: 500; color: #15171c; }
+.mm-def-val { font-size: 15px; line-height: 1.35; color: #15171c; margin-top: 2px; }
+.mm-def-val.none { color: #adb1b8; }
+.mm-def-more { font-size: 12.5px; color: #8a8a92; margin-top: 3px; }
+
+/* ─── The pane: fields as tiles ──────────────────────────────────────────────
+   Same bounded object at the same height for every source; violet tint = a
+   model produces it. Nothing on a tile is editable — the drawer is. */
+.mm-tiles { display: flex; flex-direction: column; gap: 8px; }
+.mm-tile {
+  display: flex; align-items: center;
+  background: #f7f7fa; border: 1px solid #e7e9ed; border-radius: 10px;
+  min-height: 62px; overflow: hidden;
+}
+.mm-tile:hover { background: #eff1f4; }
+.mm-tile.ai { background: var(--ai-bg); border-color: var(--ai-bg-line); }
+.mm-tile.ai:hover { background: var(--ai-bg-hover); }
+.mm-tile-main {
+  display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0; text-align: left;
+  background: none; border: none; font: inherit; cursor: pointer;
+  padding: 11px 4px 11px 12px; align-self: stretch;
+}
+.mm-tile-main .mm-glyph svg { width: 18px; height: 18px; }
+.mm-tile-body { min-width: 0; flex: 1; }
+/* A field key as a title, and the quiet line under it — shared with the drawer
+   head, which shows the same two facts about the same field. */
+.mm-tile-name,
+.drawer-title { font-family: monospace; font-size: 13px; font-weight: 500; color: #15171c; }
+.mm-tile-sum,
+.drawer-src { font-size: 12.5px; color: #8a8a92; }
+.mm-tile-name,
+.mm-tile-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mm-tile-sum { margin-top: 2px; }
+.mm-tile-rm {
+  background: none; border: none; color: #adb1b8; font-size: 16px; line-height: 1;
+  cursor: pointer; padding: 0 12px; align-self: stretch; flex: none;
+}
+.mm-tile-rm:hover { color: #d33; }
+
+/* ─── Slot source picker: horizontal cards inside the drawer ───────────────── */
+.mm-srcrow { display: flex; gap: 7px; }
+.mm-srcopt {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 7px;
+  text-align: left; background: #f7f7fa; border: 1px solid #e7e9ed;
+  border-radius: 9px; padding: 11px 12px; font: inherit; cursor: pointer;
+}
+.mm-srcopt:hover:not(:disabled) { background: #eff1f4; }
+.mm-srcopt.ai { background: var(--ai-bg); border-color: var(--ai-bg-line); }
+.mm-srcopt.ai:hover:not(:disabled) { background: var(--ai-bg-hover); }
+.mm-srcopt[aria-pressed="true"] { border-color: #111; box-shadow: 0 0 0 1px #111 inset; }
+.mm-srcopt:disabled { opacity: 0.5; cursor: not-allowed; }
+.mm-srcopt .mm-glyph svg { width: 17px; height: 17px; }
+.mm-srcopt .lab { font-size: 12.5px; font-weight: 500; color: #15171c; }
+.mm-srcopt .note { font-size: 11px; color: #adb1b8; }

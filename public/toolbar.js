@@ -3,7 +3,7 @@ import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration, attachBtnDot } from './utils.js';
 import { openJobsModal, jobsUnseen } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
-import { openDropdown, ddRow, ddSep, ddAction } from './dropdown.js';
+import { openDropdown, ddRow, ddSep, ddAction, ddHead } from './dropdown.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
@@ -600,10 +600,9 @@ function openSortMenu(anchorEl, sections) {
         onClick: () => commit(null, close),
       }));
       for (const section of sections) {
-        const head = document.createElement("div");
-        head.className = "dd-head";
-        head.textContent = section.count != null ? `${section.label} · ${section.count}` : section.label;
-        body.appendChild(head);
+        body.appendChild(ddHead(
+          section.count != null ? `${section.label} · ${section.count}` : section.label
+        ));
         for (const entry of section.entries) {
           const active = state.sort?.by === entry.by;
           body.appendChild(ddRow({

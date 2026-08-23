@@ -121,7 +121,7 @@ test("admit: birth statuses match the upload door (unmapped→pending, mapped+pa
 
   // AI mapping + auto_tag off → pending_extract, parked.
   const mapped = await boardWatching("st-mapped", "st", {
-    mapping: { identity: { from: "ai", hint: "x" }, fields: [] },
+    mapping: { identity: { source: "extract", instruction: "x" }, fields: [] },
     autoTag: false,
   });
   const r2 = await admit(db, mapped, cand, { sources });
@@ -143,10 +143,9 @@ test("admit: folder ingestion fills the `created` file field browsers can't", as
   put("cf/doc.txt", "some words here");
   const board = await boardWatching("cf", "cf", {
     mapping: {
-      identity: { from: "raw" },
       fields: [
-        { key: "created", kind: "date", from: "file", fn: "created" },
-        { key: "modified", kind: "date", from: "file", fn: "modified" },
+        { key: "created", kind: "date", source: "file", fn: "created" },
+        { key: "modified", kind: "date", source: "file", fn: "modified" },
       ],
     },
   });

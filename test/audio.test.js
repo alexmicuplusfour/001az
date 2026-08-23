@@ -365,9 +365,9 @@ test("media/audio fields project from the stored meta", () => {
     meta: { duration: 63, bitrate: 128000, sample_rate: 44100, channels: 2, codec: "PCM" },
   };
   const mapping = [
-    { key: "duration", from: "file", fn: "duration", kind: "number" },
-    { key: "channels", from: "file", fn: "channels", kind: "number" },
-    { key: "codec", from: "file", fn: "codec", kind: "text" },
+    { key: "duration", source: "file", fn: "duration", kind: "number" },
+    { key: "channels", source: "file", fn: "channels", kind: "number" },
+    { key: "codec", source: "file", fn: "codec", kind: "text" },
   ];
   const fields = extractFileFields(entry, mapping);
   assert.equal(fields.duration.v, 63);

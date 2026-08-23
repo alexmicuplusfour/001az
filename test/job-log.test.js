@@ -522,7 +522,7 @@ test("tag leg: the facet-less completion is a real ok row with zero tags", async
 test("extract + tag legs: one ok row each, with fields/identity and tags detail", async () => {
   await setPluginState(db, "ai:openai", { installed: true });
   const keyId = await createAiKey(db, "jobs-k2", "openai", "sk-test");
-  const mapping = { identity: { from: "ai" }, fields: [{ key: "role", from: "ai", kind: "text" }] };
+  const mapping = { identity: { source: "extract" }, fields: [{ key: "role", source: "extract", kind: "text" }] };
   const board = await createBoard(db, "jobs-legs", FACETS, "", true, keyId, null, {}, false, { mapping });
   const { eid, iid } = await seedLegItem(board, "resume.txt", "pending_extract", { mapping });
   const seen = [];
@@ -801,7 +801,7 @@ test("extract leg: an image extraction records its rendition too, not just the t
   // hole in it.
   await setPluginState(db, "ai:openai", { installed: true });
   const keyId = await createAiKey(db, "jobs-img-x", "openai", "sk-test");
-  const mapping = { fields: [{ key: "role", from: "ai", kind: "text" }] };
+  const mapping = { fields: [{ key: "role", source: "extract", kind: "text" }] };
   const board = await createBoard(db, "jobs-extract-image", FACETS, "", true, keyId, null, {}, false, { mapping });
   await updateBoard(db, board, { boardBindings: { tag_image_preset: "standard" } });
 

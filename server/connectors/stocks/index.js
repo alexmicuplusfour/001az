@@ -26,24 +26,26 @@ export const manifest = {
     { key: "currency",   kind: "text",   fn: "currency",   label: "Currency" },
     { key: "website",    kind: "url",    fn: "website",    label: "Company website" },
   ],
+  // The identity slot in this domain's own words (see crypto's note).
+  identity: { label: "Ticker", blurb: "each stock is its own card" },
   template: {
     input: { connector: "stocks" },
-    identity: { from: "connector" },
+    identity: { source: "connector" },
     // The price chart is the face; the symbol tile is only its fallback. See the
-    // crypto template — same rule, same cadence-off default.
-    face: { from: "connector", producer: "chart", period: "1y" },
+    // crypto template — same rule, same no-refresh default.
+    face: { source: "connector", producer: "chart", period: "1y" },
     fields: [
-      { key: "price",      kind: "number", from: "connector", fn: "price" },
-      { key: "change_1d",  kind: "number", from: "connector", fn: "change_1d" },
-      { key: "market_cap", kind: "number", from: "connector", fn: "market_cap" },
-      { key: "volume",     kind: "number", from: "connector", fn: "volume" },
-      { key: "pe_ratio",   kind: "number", from: "connector", fn: "pe_ratio" },
-      { key: "dividend_yield", kind: "number", from: "connector", fn: "dividend_yield" },
-      { key: "sector",     kind: "text",   from: "connector", fn: "sector" },
-      { key: "industry",   kind: "text",   from: "connector", fn: "industry" },
-      { key: "exchange",   kind: "text",   from: "connector", fn: "exchange" },
-      { key: "currency",   kind: "text",   from: "connector", fn: "currency" },
-      { key: "website",    kind: "url",    from: "connector", fn: "website" },
+      { key: "price",      kind: "number", source: "connector", fn: "price" },
+      { key: "change_1d",  kind: "number", source: "connector", fn: "change_1d" },
+      { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" },
+      { key: "volume",     kind: "number", source: "connector", fn: "volume" },
+      { key: "pe_ratio",   kind: "number", source: "connector", fn: "pe_ratio" },
+      { key: "dividend_yield", kind: "number", source: "connector", fn: "dividend_yield" },
+      { key: "sector",     kind: "text",   source: "connector", fn: "sector" },
+      { key: "industry",   kind: "text",   source: "connector", fn: "industry" },
+      { key: "exchange",   kind: "text",   source: "connector", fn: "exchange" },
+      { key: "currency",   kind: "text",   source: "connector", fn: "currency" },
+      { key: "website",    kind: "url",    source: "connector", fn: "website" },
     ],
   },
   providers: Object.entries(providers).map(([name, provider]) => ({
