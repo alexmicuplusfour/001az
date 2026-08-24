@@ -301,12 +301,17 @@ const parentPath = (p) => {
 // One directory level for the source-browse modal: folders (to descend) and
 // files (context). `navPath` is where the modal currently is; the saved base
 // path plays no part — you navigate the whole source and pick a folder.
-export async function browse(db, source = {}, navPath = "") {
+// `limit` exists for the modal's health probe (limit: 1 answers "does this
+// level open" without paying for a listing); the tree view omits it and gets
+// the full level. Defaulted AND clamped here, the route passes the body value
+// raw — one owner for the bound.
+export async function browse(db, source = {}, navPath = "", { limit } = {}) {
+  const lim = Math.min(1000, Math.max(1, Number(limit) || 1000));
   const type = source.type || "folder";
   const mod = getSourceBackend(type);
   if (!mod || !mod.manifest.browsable) throw new Error("this source can't be browsed");
   const be = await resolveBackend(db, { ...source, path: navPath, folder: navPath });
-  const { entries, truncated } = await be.list({ path: navPath, recursive: false, includeDirs: true, limit: 1000 });
+  const { entries, truncated } = await be.list({ path: navPath, recursive: false, includeDirs: true, limit: lim });
   const dirs = entries.filter((e) => e.type === "dir");
   const filesE = entries.filter((e) => e.type === "file");
   return {

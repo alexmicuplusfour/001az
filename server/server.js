@@ -114,7 +114,7 @@ import {
   setIngestNextRun,
   setIngestState,
   demoteFacetDiagnostics,
-  clearIngestDrain,
+  clearIngestSuperseded,
   ingestedKeys,
   ingestedAmong,
   setPluginState,
@@ -1142,12 +1142,12 @@ const saveBoardPatch = wrap(async (req, res) => {
   // A redefined facet's finding quotes wording that no longer exists; its stats
   // are the only baseline for "was 60% unanimous, now 88%". Demote, don't drop.
   await demoteFacetDiagnostics(db, prev.id, demote);
-  // A saved ingest config supersedes any half-drained run of the old one — a
-  // stale drain_left would hand the next run the dead config's budget as its
-  // limit. An input SWITCH goes further: run state written against the old
-  // adapter means nothing to the new one.
+  // A saved ingest config supersedes the old one's run verdicts — its
+  // half-drained budget AND its last_error (the chips clear on save; the next
+  // run judges the new config). An input SWITCH goes further: run state
+  // written against the old adapter means nothing to the new one.
   if (inputSwitched) await setIngestState(db, prev.id, null);
-  else if (update.ingest !== undefined) await clearIngestDrain(db, prev.id);
+  else if (update.ingest !== undefined) await clearIngestSuperseded(db, prev.id);
   // A mapping change can turn fields live/idle, move their cadence, or turn the
   // face on — recompute every entity's next refresh (an empty live set clears
   // their schedules; a newly-configured face marks unrendered entities due now,
@@ -1173,14 +1173,18 @@ const saveBoardPatch = wrap(async (req, res) => {
     await setBoardMembers(db, prev.id, req.body.memberIds.map(Number).filter(Boolean), adminIds);
   }
   invalidateBoardCache(prev.id);
-  // Hand back the ingestion pair this save landed on, so the modal can stamp it
+  // Hand back the ingestion trio this save landed on, so the modal can stamp it
   // straight into client state instead of re-deriving the mode in JS (a second
   // copy of ingestMode's rules) or paying a refetch to learn what we just wrote.
+  // ingest_error: an ingest save just cleared last_error (superseded, above),
+  // so no state = false is the truth there; a save that didn't touch ingest
+  // carries the row's live state so the echo stays honest for every reader.
   res.json({
     ok: true,
     ...ingestStatus({
       ingest: update.ingest !== undefined ? update.ingest : prev.ingest,
       ingest_next_run_at: update.ingestNextRunAt !== undefined ? update.ingestNextRunAt : prev.ingest_next_run_at,
+      ...(update.ingest === undefined ? { ingest_state: prev.ingest_state } : {}),
     }),
   });
 });
@@ -1202,7 +1206,13 @@ app.get("/api/boards/:id/ingest", requireAuth, requireBoardManager, wrap(async (
     sources: adapter?.listSources ? await adapter.listSources(db) : null,
     config: req.board.ingest || null,
     state: req.board.ingest_state || null,
-    root: !!process.env.INGEST_ROOT,
+    // The resolved root itself (null = folder ingestion unconfigured), so the
+    // modal can show what a subpath actually means (/data/ingest/ +
+    // "wardrobe") instead of a bare name whose real location only ever
+    // surfaced by accident in raw fs error strings. This route is
+    // manager-gated precisely because the config carries server paths, so the
+    // root string sits behind the same fence.
+    rootPath: process.env.INGEST_ROOT || null,
   });
 }));
 
@@ -1216,9 +1226,15 @@ app.post("/api/boards/:id/ingest/source/browse", requireAuth, requireBoardManage
   const source = req.body?.source || {};
   const navPath = req.body?.path != null ? String(req.body.path) : (source.path ?? source.folder ?? "");
   try {
-    res.json(await adapter.browse(db, source, navPath));
+    // limit rides through raw — browse() owns the default and the clamp.
+    res.json(await adapter.browse(db, source, navPath, { limit: req.body?.limit }));
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    // 404 = the path itself is missing — err.notFound, tagged by the backend
+    // (the contract note in sources/folder.js's header) — and the modal falls
+    // back a level and offers the relink. Anything else (dead server, bad
+    // connection, escape) is a plain 400: falling back would fail at every
+    // level too, some behind a 30s connect timeout each.
+    res.status(err.notFound ? 404 : 400).json({ error: err.message });
   }
 }));
 

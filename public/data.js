@@ -286,6 +286,11 @@ export function ensurePolling() {
 export function stampBoardIngest(b) {
   state.boardIngestMode = b.ingest_mode ?? null;
   state.boardIngestNextRun = b.ingest_next_run_at ?? null;
+  // ?? false covers payloads without the flag (the boot fallback {}). A save
+  // response's false is truthful, not stale: saving an ingest config clears
+  // last_error server-side (superseded — the next run judges the new config),
+  // so the chip clearing on save agrees with every other surface.
+  state.boardIngestError = b.ingest_error ?? false;
 }
 
 // Re-learn the flags after something changed them server-side (save, run-now,

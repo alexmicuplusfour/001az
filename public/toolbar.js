@@ -35,20 +35,30 @@ let ingestEtaFetchAt = 0;
 let ingestEtaBackoff = 5000;
 
 function ingestChip() {
+  const baseTitle = "Automatic ingestion — next run countdown. Click to configure.";
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = "mapping-chip ingest-chip";
-  chip.title = "Automatic ingestion — next run countdown. Click to configure.";
+  chip.title = baseTitle;
   const icon = document.createElement("span");
   icon.className = "ingest-chip-icon";
   icon.innerHTML = ICONS.redo;
   const eta = document.createElement("span");
   chip.append(icon, eta);
   chip.addEventListener("click", () => openIngestModal());
+  // render() runs on a 1s interval — the title only changes when the state
+  // does, so skip the attribute write (and its a11y-tree churn) otherwise.
+  const setTitle = (t) => { if (chip.title !== t) chip.title = t; };
 
   // A pending run outranks the mode: a hand-fired run on a paused board should
   // read as the run it is, not as the pause it will fall back to when it lands.
   const render = () => {
+    // Failing tints, it doesn't replace: the countdown is real (it's the
+    // retry), so the chip keeps counting — red. The state signal the jobs
+    // dot deliberately isn't (it fires once at onset; this holds while the
+    // failure does, and clears the moment a run succeeds).
+    const failing = !!state.boardIngestError;
+    chip.classList.toggle("error", failing);
     const at = state.boardIngestNextRun;
     if (!at) {
       // A manual board's chip is on its way out here — the run it was showing
@@ -57,12 +67,17 @@ function ingestChip() {
       if (state.boardIngestMode !== "paused") return false;
       chip.classList.add("paused");
       eta.textContent = "paused";
-      chip.title = "Automatic ingestion is paused — the schedule is held. Click to configure.";
+      setTitle(failing
+        ? "Automatic ingestion is paused — and its last run failed. Click to see the error."
+        : "Automatic ingestion is paused — the schedule is held. Click to configure.");
       return false;
     }
     chip.classList.remove("paused");
     const left = at - Date.now();
     eta.textContent = left <= 0 ? "now" : fmtDuration(left);
+    setTitle(failing
+      ? "Automatic ingestion is failing — the countdown is its retry. Click to see the error."
+      : baseTitle);
     return left <= 0;
   };
   render();

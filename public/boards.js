@@ -278,7 +278,13 @@ function chipsFor(b) {
     const when = left != null
       ? (left <= 0 ? " — next run due" : ` — next run in ${fmtDuration(left)}`)
       : { manual: " — off", paused: " — paused" }[b.ingest_mode] ?? "";
-    chips.appendChild(chip(ICONS.redo, "", `Automatic ingestion${when}`));
+    // Failing outranks the countdown in words (the countdown is the retry),
+    // and tints the chip — the gallery toolbar's ingest chip does the same.
+    const c = chip(ICONS.redo, "", b.ingest_error
+      ? "Automatic ingestion — failing (it retries on its own; open the board for the error)"
+      : `Automatic ingestion${when}`);
+    if (b.ingest_error) c.classList.add("error");
+    chips.appendChild(c);
   }
   if (b.has_mapping) {
     // A connector-backed board names its data source, the same chip vocabulary

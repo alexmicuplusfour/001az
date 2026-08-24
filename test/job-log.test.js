@@ -394,7 +394,9 @@ test("ingest run failure: failed row with the run's error", async () => {
   const rows = await jobsFor(board);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].outcome, "failed");
-  assert.match(rows[0].error, /unreadable/);
+  // The friendly form — job-log rows are member-visible, so the message names
+  // the configured subpath, never the server's resolved absolute path.
+  assert.match(rows[0].error, /folder "does-not-exist" doesn't exist under the ingest root/);
 });
 
 test("a scheduled scan that ledgers a skip keeps its row and names the file", async () => {
@@ -452,7 +454,7 @@ test("a scheduled run failing the same way folds into one row per outage", async
   const rows = await jobsFor(board);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].outcome, "failed");
-  assert.match(rows[0].error, /unreadable/);
+  assert.match(rows[0].error, /folder "gone" doesn't exist under the ingest root/);
 });
 
 // --- the pipeline legs (Stage 3) ---

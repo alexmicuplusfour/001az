@@ -14,10 +14,10 @@
 // `./toast.js` is `/toast.js` whether the document is `/`, `/boards` or
 // `/admin.html` (see board-modal.js for what the root-absolute form cost).
 import { toast } from "./toast.js";
-import { openDropdown, ddRow, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
-import { ICONS, sentence } from "./utils.js";
+import { openDropdown, ddRow, ddNote, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
+import { ICONS, glyphEl, sentence } from "./utils.js";
 import { switchRow } from "./board-modal.js";
-import { sectionHeadingEl, provBand, keepPlace, createDrawer } from "./modal.js";
+import { sectionHeadingEl, provBand, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group } from "./modal.js";
 import { fillSelect } from "./select.js";
 
 // Refresh cadence choices (minutes) this pane OFFERS. 0 = once: the field is
@@ -48,7 +48,7 @@ const clone = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)));
 // table what a source needs instead of branching on its id, so a new source is
 // a row here (plus its server row) rather than another arm in three switches.
 //
-//   glyph       ICONS name; `ai` decides its ink (.mm-glyph.ai = violet).
+//   glyph       ICONS name; `ai` decides its ink (.glyph.ai = violet).
 //   capability  which capability runs it — drives the provenance bands; null =
 //               deterministic, no model, no band.
 //   catalog     bound to a closed vocabulary, named with the server's own
@@ -226,13 +226,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   };
   const setBands = (map) => { lastBands = map || {}; applyBands(); };
 
-  // ── Small builders ────────────────────────────────────────────────────────
-  const glyphEl = (name, ai) => {
-    const el = document.createElement("span");
-    el.className = "mm-glyph" + (ai ? " ai" : "");
-    el.innerHTML = ICONS[name] || ICONS.srcDot;
-    return el;
-  };
+  // ── Small builders (glyphEl/drawerHeadParts/tileRow live in utils/modal) ──
   // A select over [value, label] pairs. Options go through select.js's
   // fillSelect, the same filler the board editor uses; pairs are the terser
   // shape for the short literal lists this pane declares. No placeholder:
@@ -250,14 +244,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     if (cls) n.className = cls;
     if (text != null) n.textContent = text;
     return n;
-  };
-  // Drawer form group: uppercase label / control / quiet hint.
-  const group = (label, control, hint) => {
-    const g = el("div", "dw-group");
-    if (label) g.appendChild(el("div", "dw-label", label));
-    g.appendChild(control);
-    if (hint) g.appendChild(el("div", "dw-hint", hint));
-    return g;
   };
   // Horizontal source card (drawer slot pickers).
   const srcCard = ({ glyph, ai, lab, note, pressed, onPick }) => {
@@ -277,12 +263,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // off the modal for nothing.
   let drawerInst = null;
   const drawer = () => (drawerInst ??= createDrawer(container.closest(".modal-dialog") || container));
-  const drawerHeadParts = (glyphName, ai, title, src) => {
-    const g = glyphEl(glyphName, ai);
-    const t = el("span", "drawer-title", title);
-    const s = el("span", "drawer-src", src);
-    return { nodes: [g, t, s], g, t, s };
-  };
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
@@ -404,7 +384,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // too. Amber, borrowing the face hint box — the same class of statement (a
   // thing you configured cannot currently render), one step up in scope.
   const unavailBanner = document.createElement("div");
-  unavailBanner.className = "mm-face-hint mm-unavail";
+  unavailBanner.className = "warn-box flush";
   unavailBanner.hidden = true;
   body.appendChild(unavailBanner);
   function syncUnavailable() {
@@ -442,7 +422,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     heading.style.margin = "10px 0 8px";
     sheet.appendChild(heading);
 
-    const tiles = el("div", "mm-tiles");
+    const tiles = el("div", "tiles");
     fields.forEach((f, i) => tiles.appendChild(fieldTile(f, i)));
     if (isAdmin) {
       const add = document.createElement("button");
@@ -553,38 +533,22 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     // still be REMOVED — there's just no editor to open for it, because we
     // don't know what it would ask. (collect() passes such a field through
     // untouched for the same reason.)
-    const editable = isAdmin && !!def;
-    const tile = el("div", "mm-tile" + (def?.ai ? " ai" : ""));
-    const main = document.createElement(editable ? "button" : "div");
-    main.className = "mm-tile-main";
-    if (editable) {
-      main.type = "button";
-      main.dataset.place = `tile:${f.source}:${f.key || i}`;
-    } else {
-      main.style.cursor = "default"; // the class assumes a button; this one isn't
-    }
-    main.appendChild(glyphEl(def?.glyph || "srcDot", !!def?.ai));
-    const b = el("div", "mm-tile-body");
-    b.appendChild(el("div", "mm-tile-name", f.key || "unnamed"));
-    b.appendChild(el("div", "mm-tile-sum", tileSum(f)));
-    main.appendChild(b);
-    if (editable) main.addEventListener("click", () => openFieldDrawer({ mode: "edit", index: i }));
-    tile.appendChild(main);
-    if (isAdmin) {
-      const rm = document.createElement("button");
-      rm.className = "mm-tile-rm";
-      rm.type = "button";
-      rm.textContent = "×";
-      rm.setAttribute("aria-label", `Remove ${f.key || "field"}`);
-      rm.addEventListener("click", (e) => {
-        e.stopPropagation();
-        fields.splice(i, 1);
-        markDirty();
-        render();
-      });
-      tile.appendChild(rm);
-    }
-    return tile;
+    return tileRow({
+      glyph: def?.glyph || "srcDot",
+      ai: !!def?.ai,
+      name: f.key || "unnamed",
+      sum: tileSum(f),
+      place: `tile:${f.source}:${f.key || i}`,
+      onOpen: isAdmin && def ? () => openFieldDrawer({ mode: "edit", index: i }) : null,
+      onRemove: isAdmin
+        ? () => {
+            fields.splice(i, 1);
+            markDirty();
+            render();
+          }
+        : null,
+      removeLabel: `Remove ${f.key || "field"}`,
+    });
   }
 
   // ── "+ Add field": the source menu ────────────────────────────────────────
@@ -601,13 +565,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // at — connector boards have no images. Media-kind gating beyond that is
   // deliberately skipped: the board's media mix isn't reliably known
   // client-side, and the server validates anyway.
-  const menuNoteEl = (text) => {
-    const s = el("span", null, text);
-    // pointer-events off so a click on the helper still lands on the row —
-    // ddRow treats trailing clicks as the trailing element's own.
-    s.style.cssText = "margin-left:14px;font-size:11px;color:#79808c;text-align:right;pointer-events:none;";
-    return s;
-  };
   // A source's own row: glyph, name, and what it does about the field. With no
   // handler it's a HEADER — the catalog source, whose entries follow it and
   // which isn't itself pickable. With one it IS the pick: an open source has
@@ -616,7 +573,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     const def = SOURCES[id];
     const lead = glyphEl(def.glyph, def.ai);
     lead.style.pointerEvents = "none";
-    return ddRow({ label: srcLabel(def), leading: lead, trailing: menuNoteEl(def.menuNote), onClick });
+    return ddRow({ label: srcLabel(def), leading: lead, trailing: ddNote(def.menuNote), onClick });
   };
   // A catalog entry adds IMMEDIATELY — its key, kind and fn are all decided by
   // the catalog, so there is nothing left for a drawer to ask. The chip's title
@@ -878,7 +835,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         const isAi = ed.draft?.source === "extract";
         // The head follows the current pick — it names what the slot would be
         // saved as, not what it was when the drawer opened.
-        head.g.className = "mm-glyph" + (isAi ? " ai" : "");
+        head.g.className = "glyph" + (isAi ? " ai" : "");
         head.g.innerHTML = isAi ? ICONS.srcSparkle : ICONS.srcDot;
         head.s.textContent = isAi ? "AI extraction" : "Filename";
 

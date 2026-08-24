@@ -191,3 +191,31 @@ test("admit: undecodable bytes throw err.skip and roll the tx back clean", async
   const { rows } = await db.query("SELECT COUNT(*)::int AS c FROM items WHERE board_id=$1", [board.id]);
   assert.equal(rows[0].c, 0);
 });
+
+test("a missing configured folder throws friendly and tagged — no server paths", async () => {
+  const board = await boardWatching("gone", "renamed-away");
+  await assert.rejects(enumerate(db, board, board.ingest), (err) => {
+    assert.match(err.message, /folder "renamed-away" doesn't exist under the ingest root — renamed or removed\?/);
+    assert.equal(err.notFound, true, "tagged so the routes can answer 404 (browse fallback, health probe)");
+    // These strings reach the member-visible job log and the board's
+    // last_error — the server's filesystem layout must not ride along.
+    assert.ok(!err.message.includes(root), "no resolved absolute path");
+    assert.ok(!/ENOENT|scandir/.test(err.message), "no raw fs error text");
+    return true;
+  });
+});
+
+test("a file that vanishes between scan and admit fails readable, path-free", async () => {
+  const p = put("vanish/x.txt");
+  const board = await boardWatching("vanish", "vanish");
+  const { candidates } = await enumerate(db, board, board.ingest);
+  const c = candidates.find((x) => x.key === "x.txt");
+  fs.rmSync(p);
+  // Not tagged skip/unprocessable: a vanish is transient-shaped, the sweep may
+  // retry it (and the next scan simply won't list it).
+  await assert.rejects(admit(db, board, c, { sources }), (err) => {
+    assert.match(err.message, /file vanished before it could be copied/);
+    assert.ok(!err.message.includes(root), "no resolved absolute path");
+    return true;
+  });
+});

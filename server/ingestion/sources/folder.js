@@ -10,6 +10,12 @@
 // new source (ftp, s3, …) is just another backend beside this one, not a new
 // adapter. (Distinct from server/sources/ — those are MEDIA handlers that read
 // file bytes; these are INGESTION sources that fetch the bytes to begin with.)
+//
+// Backend error contract: when list() fails because the BASE path itself
+// doesn't exist (vs. a dead host / bad credentials), tag the throw with
+// `err.notFound = true` — the browse route maps it to 404, which is what lets
+// the browse modal fall back to an ancestor and offer the relink instead of
+// orphaning. Optional: an untagged throw degrades to a plain 400, no relink.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -22,6 +28,27 @@ export function resolveJailed(root, sub) {
   const rel = path.relative(base, p);
   if (rel === "") return p;
   return !rel.startsWith("..") && !path.isAbsolute(rel) ? p : null;
+}
+
+// A root-level read failure becomes the board's last_error, the job log (which
+// members can read — transparency), and the browse/preview responses, so the
+// message is built from the CONFIGURED subpath, never the resolved absolute
+// path — raw fs errors carry the server's filesystem layout ("scandir
+// '/data/ingest/…'"), which is nobody's business past the manager gate.
+// `notFound` is the machine-readable half: the browse modal's fall-back-and-
+// relink flow and the health probe both key on it (the routes map it to 404).
+function unreadableError(err, sub) {
+  if (err.code === "ENOENT" || err.code === "ENOTDIR") {
+    const e = new Error(sub
+      ? `folder "${sub}" doesn't exist under the ingest root — renamed or removed?`
+      : "the ingest root itself is missing on the server");
+    e.notFound = true;
+    return e;
+  }
+  const what = sub ? `folder "${sub}"` : "the ingest root";
+  if (err.code === "EACCES" || err.code === "EPERM")
+    return new Error(`${what} can't be read (permission denied)`);
+  return new Error(`${what} can't be read (${err.code || err.message})`);
 }
 
 export const manifest = {
@@ -65,7 +92,7 @@ export function backend({ source } = {}) {
         try {
           dirents = await fs.promises.readdir(abs, { withFileTypes: true });
         } catch (err) {
-          if (rel === "") throw new Error(`ingestion folder unreadable: ${err.message}`);
+          if (rel === "") throw unreadableError(err, sub);
           return; // a vanished/unreadable subfolder shouldn't fail the whole scan
         }
         for (const e of dirents) {
@@ -115,7 +142,14 @@ export function backend({ source } = {}) {
       if (!dir) throw new Error("ingestion folder is not configured");
       const src = resolveJailed(dir, key);
       if (!src) throw new Error("source path escapes the ingestion root");
-      await fs.promises.copyFile(src, tmpPath);
+      try {
+        await fs.promises.copyFile(src, tmpPath);
+      } catch (err) {
+        // Same leak rule as the walk: the worker prefixes this with the file's
+        // label, so the message needs no path at all.
+        if (err.code === "ENOENT") throw new Error("file vanished before it could be copied");
+        throw new Error(`file can't be read (${err.code || err.message})`);
+      }
     },
 
     async test() {

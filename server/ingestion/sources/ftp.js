@@ -28,12 +28,21 @@ export const manifest = {
   ],
   // Per-board fields (the modal's Source section).
   sourceSchema: [
-    { key: "path", type: "text", label: "Base folder", help: "path on the server; blank = login root" },
+    { key: "path", type: "text", label: "Folder", help: "path on the server; blank = login root" },
     { key: "recursive", type: "boolean", label: "Include subfolders", default: true },
   ],
 };
 
 const joinPosix = (a, b) => (a ? `${a.replace(/\/+$/, "")}/${b}` : b);
+
+// Does this list() failure mean the PATH is gone (→ err.notFound, the backend
+// contract in ./folder.js's header), as opposed to a dead host or bad login?
+// 550 is RFC 959's file-unavailable answer; some servers (ftp-srv among them)
+// answer 451 with the underlying ENOENT text instead, so the message is the
+// second witness. Exported for its unit test — the in-process test server only
+// ever exercises the 451 branch.
+export const isPathMissing = (err) =>
+  Number(err.code) === 550 || /\bENOENT\b|no such (file|directory)/i.test(String(err.message));
 
 // Control-connection timeout; a slow server just fails the tick and retries.
 const CONNECT_TIMEOUT_MS = 30000;
@@ -70,7 +79,12 @@ export function backend({ conn = {} } = {}) {
           try {
             infos = await client.list(dir || "/");
           } catch (err) {
-            if (dir === path) throw new Error(`FTP list failed: ${err.message}`);
+            if (dir === path) {
+              // A dead host never gets here — client.access fails first.
+              const e = new Error(`FTP list failed: ${err.message}`);
+              if (isPathMissing(err)) e.notFound = true;
+              throw e;
+            }
             return; // a vanished/forbidden subdir shouldn't fail the whole scan
           }
           for (const info of infos) {

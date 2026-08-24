@@ -4,7 +4,10 @@
 // conn })` factory returning list / fetch / test. The shared file adapter
 // (../files.js) drives them; the plugin catalog (server/plugins.js) reads the
 // manifests as the `source` plugin kind. Adding a source = one module + one
-// entry here — no adapter, route, sweep or modal edits.
+// entry here — no adapter, route, sweep or modal edits. Optional error
+// contract: a list() throw for a base path that itself doesn't exist should
+// carry `err.notFound = true` (see ./folder.js's header) — untagged throws
+// degrade to a plain 400, no browse-modal relink.
 //
 // NOTE: distinct from server/sources/ (MEDIA handlers that read file bytes).
 // These are INGESTION sources that fetch the bytes in the first place.

@@ -313,6 +313,9 @@ img.bc-thumb {
   height: 11px;
   display: block;
 }
+/* failing state, family-wide: any card chip can wear .error — today the
+   ingestion chip does. Same red the gallery toolbar's chip family turns. */
+.bc-chip.error { color: #b4232a; border-color: #b4232a55; }
 
 /* Page-level states (no boards, load failure) — full width of the grid. */
 .boards-note {

@@ -1454,6 +1454,11 @@ body.bulk-mode .heart {
   padding: 0 10px;
   white-space: nowrap;
 }
+/* failing state, family-wide: any toolbar chip can wear .error. Today the
+   ingest chip does when its watch is failing — the countdown keeps running
+   (it IS the retry), red says it's failing. Composes with .paused below: a
+   held schedule whose last run failed is both. */
+.mapping-chip.error { color: #b4232a; }
 /* ingestion chip — the mapping chip's clickable sibling: a refresh glyph +
    countdown to the next run; opens the ingestion modal */
 .ingest-chip {

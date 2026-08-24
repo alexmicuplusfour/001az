@@ -93,13 +93,21 @@ export function nextScheduledIngestRun(cfg, from = Date.now(), opts = {}) {
   return ingestMode(cfg) === "scheduled" ? nextIngestRunAt(cfg.trigger, from, opts) : null;
 }
 
-// The ingestion pair every board payload ships: what it's doing, and when the
-// next run lands. They travel together — a stamp means nothing without the mode
-// to read it against — so they're derived together in exactly one place.
+// The ingestion trio every board payload ships: what it's doing, when the next
+// run lands, and whether the last run failed. They travel together — a stamp
+// means nothing without the mode to read it against — so they're derived
+// together in exactly one place. `ingest_error` is the ONGOING-state signal
+// the job log's failure stamp deliberately isn't (latestJobFailureAt fires
+// once at onset and folds keep it there): a watch that is still failing tints
+// the chip until a run succeeds or the config changes. A boolean, not the
+// message — the string can name server paths, and these payloads reach plain
+// members; the modal (manager-gated) carries the words. Gated on `ingest` like
+// the stamp: a deconfigured board's leftover sweep state isn't news.
 export function ingestStatus(board) {
   return {
     ingest_mode: ingestMode(board.ingest),
     ingest_next_run_at: board.ingest ? board.ingest_next_run_at ?? null : null,
+    ingest_error: !!(board.ingest && board.ingest_state?.last_error),
   };
 }
 

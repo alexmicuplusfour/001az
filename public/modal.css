@@ -417,27 +417,17 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* ─── entity mapping modal ───
    The field-ROW component family (.mm-row/.mm-key-locked/.mm-live-*/
    .mm-connector-badge/.mm-locked-badge/.mm-face-prefer/.mm-intro) died with
-   the three-section pane — fields are .mm-tile objects now (below), and
-   cadence/config live in the drawer. What survives here is what the rebuilt
-   pane still draws. */
+   the three-section pane — fields are .tile objects now (shared vocabulary,
+   below), and cadence/config live in the drawer. What survives here is what
+   the rebuilt pane still draws. */
 .mm-empty {
   font-size: 13px;
   color: #8a8a92;
   margin: 0;
   padding: 8px 0;
 }
-/* amber statement box: a configured thing that can't currently render (a face
-   the provider can't draw; the whole domain unavailable via .mm-unavail) */
-.mm-face-hint {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: #92650a;
-  background: #fff7e6;
-  border: 1px solid #ffe1a3;
-  border-radius: 6px;
-  padding: 6px 9px;
-}
+/* The amber statement box is `.warn-box` now — shared vocabulary, with the
+   drawer/tiles below (the ingest modal states its missing-root case in it). */
 /* template picker row (very top of the mapping pane body, above the intro) */
 .mm-template-row {
   display: flex;
@@ -450,13 +440,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* .mm-template-label's type is up with .modal-section-title — same label. */
 /* The picker itself is .dd-trigger + .dd-caret (dropdown.css) — it shows the
    template the board is on rather than an action, so it reads as a select. */
-/* The bound domain's outage banner: the face row's hint box, hoisted out of a
-   row and up to the top of the pane. The pane is a gap:12px flex column, so it
-   is already spaced from the template row above it — the hint's own margin-top
-   (which exists to lift it off the row it sits INSIDE) would only double it. */
-.mm-unavail {
-  margin: 0;
-}
 
 /* ── connector browse-and-add modal (connector-browse.js) ─────────────────── */
 #connector-browse .modal-dialog { width: min(900px, 94vw); }
@@ -570,15 +553,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .im-row > label { font-size: 12px; color: #6b6b72; margin: 0; }
 .im-row select { max-width: 260px; }
-/* the focused Folder block in the Source section: label over a full-width path
-   field + Browse, so the thing you actually set stands out from the pickers */
-.im-sublabel { font-size: 12px; color: #6b6b72; margin: 6px 0 3px; }
-.im-source-path { display: flex; align-items: center; gap: 8px; }
-.im-source-path input {
-  flex: 1; min-width: 0;
-  padding: 6px 10px; font: inherit; font-size: 13px;
-  border: 1px solid #d8d8de; border-radius: 6px; background: #fff;
-}
 .im-filters { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .im-filter-row { display: flex; align-items: center; gap: 6px; }
 .im-filter-row select { font-size: 13px; padding: 6px 26px 6px 8px; }
@@ -630,8 +604,20 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   color: #111;
 }
 .im-preview-count:hover { text-decoration: underline; }
-.im-status { font-size: 12px; color: #6b6b72; margin: 12px 0 0; }
+/* Modal-body status line — shared vocabulary like .im-btn, not ingest-only:
+   one 12px line whose tone IS the verdict. Base = neutral accounting ("Last
+   run 2m ago — added 3"). Tones borrow the app's existing families rather
+   than minting colors: .error the notice red, .ok the bare-text green of
+   .cb-up, .warn the text tone of .warn-box. Spacing: base sits 12px under a
+   section; .tight hugs the control it judges (the source-health line);
+   .flush zeroes the margin for flex-gap parents (the browse modal's relink
+   notice). */
+.im-status { font-size: 12px; color: #6b6b72; margin: 12px 0 0; line-height: 1.4; }
 .im-status.error { color: #b4232a; }
+.im-status.warn { color: #7a5b12; }
+.im-status.ok { color: #16a34a; }
+.im-status.tight { margin: 4px 0 0; }
+.im-status.flush { margin: 0; }
 
 /* ── alert editor + history (alerts-modal.js) ── */
 #alert-modal .modal-dialog { max-width: 480px; }
@@ -873,22 +859,89 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .drawer-head { display: flex; align-items: center; gap: 9px; padding: 13px 18px 9px; flex: none; }
 .drawer-head svg { width: 17px; height: 17px; }
 /* .drawer-title / .drawer-src are the HEAD'S CONTENT, which createDrawer never
-   builds — the caller passes nodes. They're the mapping pane's, and they are
-   the same two lines a tile carries (a field key, then what produces it), so
-   their type is declared once with .mm-tile-name / .mm-tile-sum below. Only
-   the layout each needs differs: a tile stacks and truncates, a head sits on
-   one line with the source pushed to the far end. */
+   builds — the caller passes nodes (drawerHeadParts). They are the same two
+   lines a tile carries (a name, then what produces it), so their type is
+   declared once with .tile-name / .tile-sum below. Only the layout each needs
+   differs: a tile stacks and truncates, a head sits on one line with the
+   source pushed to the far end. */
 .drawer-src { margin-left: auto; }
 .drawer-body { padding: 4px 18px 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 15px; }
 /* The buttons themselves are the shared modal-action pair, up with
    .modal-footer button — nothing about them is the drawer's to restyle. */
 .drawer-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid #edeef1; flex: none; }
 
+/* Size variant: a TALL sheet is a fixed fraction of its host dialog — for a
+   task whose content resizes as it runs (a directory tree re-renders per
+   level), where a content-hugging sheet would bounce on every click. The
+   body stops scrolling and hands that job to its one scroll region, and
+   .cb-scroll's global 200px floor drops so it can fit — inside drawer bodies
+   only; connector-browse and the ingest results view keep theirs. */
+.drawer.tall { height: 80%; }
+.drawer.tall .drawer-body { overflow: hidden; }
+.drawer-body .cb-scroll { min-height: 0; }
+
 /* Drawer form groups — label / control / quiet hint. */
 .dw-group { display: flex; flex-direction: column; gap: 6px; }
 /* .dw-label's type is up with .modal-section-title — same label, dimmer ink. */
 .dw-hint { font-size: 12px; color: #adb1b8; }
 .dw-inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* ─── Shared vocabulary: glyph atom, object tiles, warn box ──────────────────
+   Promoted out of the mapping pane when the ingest modal adopted them; built
+   by glyphEl (utils.js) and tileRow (modal.js). Mapping's def rows and source
+   cards keep their mm- prefix — single-consumer, still the pane's own. */
+.glyph { flex: none; display: inline-flex; color: #868c96; }
+.glyph.ai { color: var(--ai-ink); }
+
+/* Object tiles: a bounded object per row at one height; violet tint = a model
+   produces it. Nothing on a tile is editable — opening it is the edit. */
+.tiles { display: flex; flex-direction: column; gap: 8px; }
+.tile {
+  display: flex; align-items: center;
+  background: #f7f7fa; border: 1px solid #e7e9ed; border-radius: 10px;
+  min-height: 62px; overflow: hidden;
+}
+.tile:hover { background: #eff1f4; }
+.tile.ai { background: var(--ai-bg); border-color: var(--ai-bg-line); }
+.tile.ai:hover { background: var(--ai-bg-hover); }
+.tile-main {
+  display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0; text-align: left;
+  background: none; border: none; font: inherit; cursor: pointer;
+  padding: 11px 4px 11px 12px; align-self: stretch;
+}
+.tile-main .glyph svg { width: 18px; height: 18px; }
+.tile-body { min-width: 0; flex: 1; }
+/* A tile's title, and the quiet line under it — shared with the drawer head,
+   which shows the same two facts about the same object. */
+.tile-name,
+.drawer-title { font-family: monospace; font-size: 13px; font-weight: 500; color: #15171c; }
+.tile-sum,
+.drawer-src { font-size: 12.5px; color: #8a8a92; }
+.tile-name,
+.tile-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-sum { margin-top: 2px; }
+.tile-rm {
+  background: none; border: none; color: #adb1b8; font-size: 16px; line-height: 1;
+  cursor: pointer; padding: 0 12px; align-self: stretch; flex: none;
+}
+.tile-rm:hover { color: #d33; }
+
+/* Amber statement box: a configured thing that can't currently render — a
+   face the provider can't draw or a whole domain outage (mapping), the
+   server's missing ingest root (ingest). The margin-top exists to lift it
+   off a row it sits inside; `.flush` drops it where the container's own
+   spacing already separates it. */
+.warn-box {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #92650a;
+  background: #fff7e6;
+  border: 1px solid #ffe1a3;
+  border-radius: 6px;
+  padding: 6px 9px;
+}
+.warn-box.flush { margin: 0; }
 
 /* Choice chips (Format, face prefer): app-black selection, never violet. */
 .mm-chips { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -909,10 +962,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .mm-def-row:hover { background: #f5f6f8; }
 .mm-def-row.locked { cursor: default; }
 .mm-def-row.locked:hover { background: transparent; }
-.mm-glyph { flex: none; display: inline-flex; color: #868c96; }
-.mm-glyph.ai { color: var(--ai-ink); }
-.mm-def-row .mm-glyph { margin-top: 1px; }
-.mm-def-row .mm-glyph svg { width: 19px; height: 19px; }
+.mm-def-row .glyph { margin-top: 1px; }
+.mm-def-row .glyph svg { width: 19px; height: 19px; }
 .mm-def-body { min-width: 0; flex: 1; }
 /* Same ink as a tile's name — identity and face are slots on the same footing
    as the fields below them, and a dimmed label made them read as captions. */
@@ -920,40 +971,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .mm-def-val { font-size: 15px; line-height: 1.35; color: #15171c; margin-top: 2px; }
 .mm-def-val.none { color: #adb1b8; }
 .mm-def-more { font-size: 12.5px; color: #8a8a92; margin-top: 3px; }
-
-/* ─── The pane: fields as tiles ──────────────────────────────────────────────
-   Same bounded object at the same height for every source; violet tint = a
-   model produces it. Nothing on a tile is editable — the drawer is. */
-.mm-tiles { display: flex; flex-direction: column; gap: 8px; }
-.mm-tile {
-  display: flex; align-items: center;
-  background: #f7f7fa; border: 1px solid #e7e9ed; border-radius: 10px;
-  min-height: 62px; overflow: hidden;
-}
-.mm-tile:hover { background: #eff1f4; }
-.mm-tile.ai { background: var(--ai-bg); border-color: var(--ai-bg-line); }
-.mm-tile.ai:hover { background: var(--ai-bg-hover); }
-.mm-tile-main {
-  display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0; text-align: left;
-  background: none; border: none; font: inherit; cursor: pointer;
-  padding: 11px 4px 11px 12px; align-self: stretch;
-}
-.mm-tile-main .mm-glyph svg { width: 18px; height: 18px; }
-.mm-tile-body { min-width: 0; flex: 1; }
-/* A field key as a title, and the quiet line under it — shared with the drawer
-   head, which shows the same two facts about the same field. */
-.mm-tile-name,
-.drawer-title { font-family: monospace; font-size: 13px; font-weight: 500; color: #15171c; }
-.mm-tile-sum,
-.drawer-src { font-size: 12.5px; color: #8a8a92; }
-.mm-tile-name,
-.mm-tile-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mm-tile-sum { margin-top: 2px; }
-.mm-tile-rm {
-  background: none; border: none; color: #adb1b8; font-size: 16px; line-height: 1;
-  cursor: pointer; padding: 0 12px; align-self: stretch; flex: none;
-}
-.mm-tile-rm:hover { color: #d33; }
 
 /* ─── Slot source picker: horizontal cards inside the drawer ───────────────── */
 .mm-srcrow { display: flex; gap: 7px; }
@@ -967,6 +984,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .mm-srcopt.ai:hover:not(:disabled) { background: var(--ai-bg-hover); }
 .mm-srcopt[aria-pressed="true"] { border-color: #111; box-shadow: 0 0 0 1px #111 inset; }
 .mm-srcopt:disabled { opacity: 0.5; cursor: not-allowed; }
-.mm-srcopt .mm-glyph svg { width: 17px; height: 17px; }
+.mm-srcopt .glyph svg { width: 17px; height: 17px; }
 .mm-srcopt .lab { font-size: 12.5px; font-weight: 500; color: #15171c; }
 .mm-srcopt .note { font-size: 11px; color: #adb1b8; }

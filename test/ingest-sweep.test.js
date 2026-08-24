@@ -91,9 +91,13 @@ test("a paused schedule that was hand-fired runs once, then disarms itself", asy
   // What "Run now" does: arm the stamp for the next tick.
   await setIngestNextRun(db, id, Date.now() - 1);
 
+  // The sweep writes ingest_state and ingest_next_run_at as TWO statements
+  // (same race the backoff test below guards): waiting on the state alone can
+  // read the board in between and still see the hand-fired arm stamp. Wait
+  // for the disarm too; the assertions then judge settled values.
   const board = await until(async () => {
     const b = await getBoard(db, id);
-    return b.ingest_state ? b : null;
+    return b.ingest_state && b.ingest_next_run_at == null ? b : null;
   });
   assert.equal(board.ingest_state.last_error, null);
   assert.equal(board.ingest_state.last_added, 1, "the hand-fired run admitted the file");
@@ -149,7 +153,7 @@ test("an unreadable source lands in ingest_state with a spaced retry, not a wedg
     const b = await getBoard(db, id);
     return b.ingest_state?.last_error && Number(b.ingest_next_run_at) > armedAt ? b : null;
   });
-  assert.match(board.ingest_state.last_error, /unreadable|not configured/);
+  assert.match(board.ingest_state.last_error, /doesn't exist under the ingest root/);
   assert.ok(board.ingest_next_run_at > armedAt + 4 * 60000, "5-minute backoff, not the continuous cadence");
   await setIngestNextRun(db, id, null);
 });

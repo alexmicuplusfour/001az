@@ -8,6 +8,8 @@
 //
 // Options: title (string, also the dialog aria-label), id (overlay element id),
 // bodyStyle (cssText for the body), onClose (run after the modal is dismissed).
+import { glyphEl } from './utils.js';
+
 // Lock/unlock page scroll while a modal is open. Removing the scrollbar would
 // otherwise reflow the page wider by its width; we reserve that width as
 // padding-right on the root element so the layout stays put. We pad <html>
@@ -261,8 +263,10 @@ export function sectionHeadingEl(title, sub) {
 // COPY of your state and write it back only in primary.onClick.
 //
 //   const drawer = createDrawer(bodyEl);            // once per modal body
-//   drawer.open({ head, build, primary: { label, onClick }, onDismiss });
+//   drawer.open({ head, build, primary: { label, onClick, disabled? },
+//                 onDismiss, tall });               // tall: fixed-height sheet
 //   drawer.refresh();                               // re-run build in place
+//   drawer.setPrimaryDisabled(on);                  // gate the commit while open
 //
 // Esc is registered on document in CAPTURE phase and stops propagation while
 // the drawer is open — mountModal's own Escape handler lives on document too
@@ -288,9 +292,16 @@ export function createDrawer(hostEl) {
 
   let current = null; // { build, onDismiss } while open
   let opener = null;  // the element to hand focus back to
+  let okBtn = null;   // the current open's primary — setPrimaryDisabled's target
 
   function onKey(e) {
     if (!current) return;
+    // A ghost task: the host modal was torn down around an open drawer (the
+    // scrim covers the dialog, not the overlay ring, so click-out can close
+    // the modal under an open sheet — close() never ran). Detach on the
+    // first keypress instead of swallowing Tab and Escape for a sheet
+    // nobody can see, and release the detached tree the closure retains.
+    if (!sheet.isConnected) { close(); return; }
     if (e.key === "Escape") {
       e.stopPropagation(); // the host modal must NOT also close on this press
       dismiss();
@@ -338,9 +349,16 @@ export function createDrawer(hostEl) {
   }
   scrim.addEventListener("click", dismiss);
 
-  function open({ head: headNodes, build, primary, onDismiss } = {}) {
+  function open({ head: headNodes, build, primary, onDismiss, tall } = {}) {
     opener = document.activeElement;
     current = { build, onDismiss };
+    // Size axis: by default the sheet hugs its content (max-height 88%);
+    // `tall` pins it to a fixed fraction of the host — a stable viewport for
+    // a task whose content resizes as it runs (a directory tree re-renders
+    // per level). Toggled per open because the sheet is reused: a default
+    // task after a tall one must hug again. Set before the reflow read below
+    // so the first open resolves its closed geometry at the right size.
+    sheet.classList.toggle("tall", !!tall);
 
     head.replaceChildren(...[].concat(headNodes || []));
     body.replaceChildren();
@@ -357,7 +375,13 @@ export function createDrawer(hostEl) {
     const ok = document.createElement("button");
     ok.type = "button";
     ok.textContent = primary?.label || "Done";
+    // A primary may open gated (`disabled`) and be flipped by
+    // setPrimaryDisabled while the task runs — for commits that are only
+    // valid once async state arrives (a browse level that rendered).
+    // Dismissal paths are never gated: leaving without applying always works.
+    ok.disabled = !!primary?.disabled;
     ok.addEventListener("click", () => primary?.onClick?.());
+    okBtn = ok;
     foot.append(cancel, ok);
 
     document.addEventListener("keydown", onKey, true);
@@ -373,8 +397,9 @@ export function createDrawer(hostEl) {
     // First focusable in the TASK, so keyboard users land in the form rather
     // than on its Cancel — scoped to the body rather than excluding the footer
     // by class, which is both simpler and one less thing the footer's markup
-    // can break. A task with nothing to focus falls back to its own commit, so
-    // focus is always inside the sheet for the trap to keep.
+    // can break. A task with nothing to focus falls back to its own commit —
+    // unless that commit opened `disabled`, which refuses focus; then focus
+    // stays on the opener until the trap's first Tab pulls it in.
     (body.querySelector("input, textarea, select, button") || ok)
       .focus?.({ preventScroll: true });
   }
@@ -388,5 +413,92 @@ export function createDrawer(hostEl) {
     current.build(body);
   }
 
-  return { open, refresh, close, isOpen: () => !!current };
+  // Gate the commit while the task runs (async validity — see the header).
+  // A no-op when closed, so a stale async callback landing after a dismissal
+  // can't flip a button that belongs to the next task.
+  function setPrimaryDisabled(on) {
+    if (!current) return;
+    okBtn.disabled = !!on;
+  }
+
+  return { open, refresh, close, isOpen: () => !!current, setPrimaryDisabled };
+}
+
+// Drawer form group: dim label / control / quiet hint (.dw-*) — the shape
+// every drawer task states its questions in. Label and hint are optional.
+export function dwGroup(label, control, hint) {
+  const g = document.createElement("div");
+  g.className = "dw-group";
+  if (label) {
+    const l = document.createElement("div");
+    l.className = "dw-label";
+    l.textContent = label;
+    g.appendChild(l);
+  }
+  g.appendChild(control);
+  if (hint) {
+    const h = document.createElement("div");
+    h.className = "dw-hint";
+    h.textContent = hint;
+    g.appendChild(h);
+  }
+  return g;
+}
+
+// Standard drawer head: glyph + title + the source label pushed right (CSS on
+// .drawer-src). The refs come back so a task can live-update its own head —
+// the field editor retitles as its key input types; the identity editor
+// recolors its glyph on a pick.
+export function drawerHeadParts(glyphName, ai, title, src) {
+  const g = glyphEl(glyphName, ai);
+  const t = document.createElement("span");
+  t.className = "drawer-title";
+  t.textContent = title;
+  const s = document.createElement("span");
+  s.className = "drawer-src";
+  s.textContent = src;
+  return { nodes: [g, t, s], g, t, s };
+}
+
+// A tile: one bounded object in a list — glyph | name over a quiet summary |
+// optional ×. Nothing on a tile is editable; opening it (onOpen) IS the edit.
+// onOpen absent = a locked tile: a div, no hover cursor, no tab stop (a thing
+// with no editor still renders and can still be removable). onRemove absent =
+// no ×. `place` rides the main button for keepPlace focus restoration.
+export function tileRow({ glyph, ai, name, sum, title, place, onOpen, onRemove, removeLabel, removeTitle }) {
+  const tile = document.createElement("div");
+  tile.className = "tile" + (ai ? " ai" : "");
+  const main = document.createElement(onOpen ? "button" : "div");
+  main.className = "tile-main";
+  if (onOpen) {
+    main.type = "button";
+    if (place) main.dataset.place = place;
+    main.addEventListener("click", onOpen);
+  } else {
+    main.style.cursor = "default"; // the class assumes a button; this one isn't
+  }
+  if (title) main.title = title;
+  main.appendChild(glyphEl(glyph, ai));
+  const body = document.createElement("div");
+  body.className = "tile-body";
+  const nameEl = document.createElement("div");
+  nameEl.className = "tile-name";
+  nameEl.textContent = name;
+  const sumEl = document.createElement("div");
+  sumEl.className = "tile-sum";
+  sumEl.textContent = sum;
+  body.append(nameEl, sumEl);
+  main.appendChild(body);
+  tile.appendChild(main);
+  if (onRemove) {
+    const rm = document.createElement("button");
+    rm.className = "tile-rm";
+    rm.type = "button";
+    rm.textContent = "×";
+    if (removeLabel) rm.setAttribute("aria-label", removeLabel);
+    if (removeTitle) rm.title = removeTitle;
+    rm.addEventListener("click", (e) => { e.stopPropagation(); onRemove(); });
+    tile.appendChild(rm);
+  }
+  return tile;
 }

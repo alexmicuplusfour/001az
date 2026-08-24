@@ -255,6 +255,16 @@ export function openDropdown(anchor, {
   return ctx;
 }
 
+// A dim right-hand note for a ddRow's `trailing` — what the choice does, or
+// why it isn't one. pointer-events off so a click on the helper still lands
+// on the row: ddRow treats trailing clicks as the trailing element's own.
+export function ddNote(text) {
+  const s = document.createElement("span");
+  s.textContent = text;
+  s.style.cssText = "margin-left:14px;font-size:11px;color:#79808c;text-align:right;pointer-events:none;";
+  return s;
+}
+
 // A standard menu row: [leading?] label [trailing?]. Clicks on the embedded
 // leading/trailing controls are theirs to handle; onClick gets the rest.
 //

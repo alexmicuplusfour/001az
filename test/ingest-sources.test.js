@@ -11,7 +11,7 @@ import net from "node:net";
 import path from "node:path";
 import { FtpSrv } from "ftp-srv";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
-import { backend as ftpBackend } from "../server/ingestion/sources/ftp.js";
+import { backend as ftpBackend, isPathMissing } from "../server/ingestion/sources/ftp.js";
 import * as files from "../server/ingestion/files.js";
 import { readWindow, pruneExpired } from "../server/ingestion/window-cache.js";
 import {
@@ -376,6 +376,35 @@ test("browsing a removed connection is a readable refusal", async () => {
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /removed|pick another/);
+});
+
+test("isPathMissing: the 550 standards branch has its own witness", () => {
+  // The route test below runs against ftp-srv, which answers 451 + ENOENT
+  // text — so only the message branch gets exercised end-to-end. The RFC 959
+  // branch (real servers answer 550) is pinned here directly.
+  assert.equal(isPathMissing({ code: 550, message: "550 Requested action not taken" }), true);
+  assert.equal(isPathMissing({ code: 451, message: "451 ENOENT: no such file or directory, stat '/x'" }), true);
+  assert.equal(isPathMissing({ message: "No such directory." }), true);
+  // Transport failures are NOT missing paths — they must stay 400 so the
+  // browse modal doesn't ascend into a dead host's 30s timeouts.
+  assert.equal(isPathMissing({ code: "ECONNREFUSED", message: "connect ECONNREFUSED 127.0.0.1:21" }), false);
+  assert.equal(isPathMissing({ message: "Timeout (control socket)" }), false);
+});
+
+test("browsing a missing FTP path answers 404 — the modal's relink fallback", async () => {
+  const admin = await adminSession(db);
+  await setPluginState(db, "source:ftp", { installed: true });
+  const connId = await createSourceConnection(db, "ftp", "missing-dir", ftpConn);
+  const boardId = await seedBoard(db, "browse-missing");
+  // 550 from the server = the path itself is gone → tagged notFound → 404, so
+  // the modal falls back a level instead of orphaning. A dead HOST fails in
+  // connect (no 550) and stays a plain 400 — no fallback cascade against a
+  // 30s-timeout server.
+  const r = await req(srv.base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
+    sid: admin.sid, body: { source: { type: "ftp", connectionId: connId }, path: "no-such-dir" },
+  });
+  assert.equal(r.status, 404, JSON.stringify(r.json));
+  assert.match(r.json.error, /FTP list failed/);
 });
 
 // --- remote enumeration: full-listing cache (no reach cap that would clog) ---

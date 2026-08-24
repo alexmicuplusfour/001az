@@ -11,12 +11,13 @@
 // summarize thousands of files. Back returns to the settings view with every
 // buffered edit intact (same modal, same closure — nothing is rebuilt).
 import { state } from './state.js';
-import { fmtDuration } from './utils.js';
+import { fmtDuration, glyphEl } from './utils.js';
 import { toast } from './toast.js';
-import { createModal, sectionHeadingEl } from './modal.js';
+import { createModal, sectionHeadingEl, createDrawer, tileRow } from './modal.js';
 import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './board-modal.js';
-import { openSourceBrowse } from './source-browse-modal.js';
+import { openDropdown, ddRow, ddNote } from './dropdown.js';
+import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
 import { stampBoardIngest, ensurePolling } from './data.js';
 
 const OP_LABELS = {
@@ -86,29 +87,49 @@ export function openIngestModal() {
     const desc = info.descriptor;
     const catalogByFn = Object.fromEntries((desc.filters || []).map((c) => [c.fn, c]));
 
-    // Buffered config — edits stay local until Save.
+    // Buffered config — edits stay local until Save. (Where a source keeps
+    // its base path — `folder` vs `path` — is pathKeyFor, the source
+    // module's one spelling of that rule.)
     const saved = info.config;
     const cfg = {
-      // Opt-in: a board with no saved config opens PAUSED, so configuring a
-      // source and hitting Save can't silently arm the sweep — Run now is there
-      // to try it once first. An existing config keeps its saved state (only an
-      // explicit false = paused), and picking a manual trigger forces this true,
-      // since a board with no timer has nothing to hold (see syncTriggerInputs).
+      // An existing config keeps its saved state (only an explicit false =
+      // paused); picking the "Off" trigger forces this true, since a board
+      // with no timer has nothing to hold (see syncTriggerInputs).
       enabled: saved ? saved.enabled !== false : false,
       source: { ...(saved?.source || {}) },
       filters: (saved?.filters || []).map((f) => ({ ...f })),
       sort: saved?.sort ? { ...saved.sort } : { by: desc.sorts?.[0]?.by, order: "desc" },
       limit: saved?.limit ?? null,
-      // Default to watching when the adapter offers it (folders); a feed
-      // adapter without "continuous" starts on its first declared mode —
+      // A board with no saved config opens with the trigger OFF. Automatic
+      // ingestion is opt-in, and the old default — Continuous pre-selected but
+      // held Paused — read as saved state ("it's on and paused?!") on every
+      // unconfigured board. Off says the truth in one word, and it moves the
+      // arming consent to the right place: a schedule present at Save time was
+      // chosen by hand, so Save arming it is what the user asked for (the Off
+      // state's enabled-normalization has already cleared the pause by then).
+      // A feed adapter without "manual" starts on its first declared mode —
       // defaulting outside the descriptor would make Save fail validation.
       trigger: saved?.trigger
         ? { ...saved.trigger }
-        : { mode: (desc.triggerModes || []).includes("continuous") ? "continuous" : (desc.triggerModes?.[0] || "manual") },
+        : { mode: (desc.triggerModes || []).includes("manual") ? "manual" : (desc.triggerModes?.[0] || "manual") },
     };
-    // Per-source field defaults are seeded per SELECTED source (each source has
-    // its own field schema) inside buildFileSource — not here, where the source
-    // isn't chosen yet.
+    // The source block treats an ABSENT path key as "no source added yet". A
+    // saved config is an added source even when its key is absent (a legacy
+    // root-watch saved as bare `{type}`): normalize the historical
+    // type-absent-means-folder and a missing key to "" so the modal renders
+    // what the sweep actually does — only a truly unconfigured board opens
+    // with nothing added.
+    if (saved?.source) {
+      if (!cfg.source.type) cfg.source.type = "folder";
+      const k = pathKeyFor(cfg.source.type);
+      if (cfg.source[k] === undefined) cfg.source[k] = "";
+    }
+    // "Is there a source to scan?" — the preview and Save both refuse to act
+    // on a file board with no added path (acting would implicitly mean "the
+    // whole ingest root", the exact presumption the add step exists to kill).
+    const sourceAdded = () => !info.sources || cfg.source[pathKeyFor(cfg.source.type)] !== undefined;
+    // Per-kind field defaults are seeded at chooser COMMIT (each kind carries
+    // its own schema) — not here, where no kind is chosen yet.
 
     // Two views in one modal: settings (the config sections) and results (the
     // paged preview list). Swapping views detaches nothing — all edit state
@@ -147,154 +168,219 @@ export function openIngestModal() {
     }
     settingsView.appendChild(srcSection);
 
-    // The file-source picker + the selected source's fields. cfg.source carries
-    // { type, folder|path, recursive, connectionId? } — type absent = folder.
-    // Layout: a compact "Pull from" line (source type + connection, inline) over
-    // a focused Folder block (path field + Browse) and the subfolders toggle —
-    // the folder is the thing you actually set, so it gets the emphasis.
+    // The file-source block, on the mapping pane's Fields model: an added
+    // source renders as a TILE — glyph, resolved location, quiet summary, × —
+    // and everything that defines it (kind, connection, path, subfolders) is
+    // chosen in the chooser drawer and committed by ONE click. cfg.source
+    // carries { type, folder|path, recursive, connectionId? }; nothing added
+    // = no path key (a saved legacy config normalizes above).
+    let drawerInst = null;
+    const drawer = () => (drawerInst ??= createDrawer(dialog));
+
     function buildFileSource(host) {
       const sources = info.sources;
-      if (!cfg.source.type) cfg.source.type = "folder";
-      if (!sources.some((s) => s.type === cfg.source.type)) cfg.source.type = sources[0].type;
-      const current = () => sources.find((x) => x.type === cfg.source.type) || sources[0];
-      // Fill the selected source's field defaults (e.g. recursive:true) for
-      // anything the saved config left unset — each source carries its own
-      // schema (info.sources[].sourceSchema), so this is per-source, not shared.
-      const seedSourceDefaults = (s) => {
-        for (const f of s?.sourceSchema || [])
+      // Fill the committed kind's field defaults (a future schema field) for
+      // anything the chooser didn't set explicitly — per-kind, from its own
+      // schema (info.sources[].sourceSchema).
+      const seedSourceDefaults = (sk) => {
+        for (const f of sk?.sourceSchema || [])
           if (f.default !== undefined && cfg.source[f.key] === undefined) cfg.source[f.key] = f.default;
       };
-      seedSourceDefaults(current());
 
-      // "Pull from" line: the source-type picker (only when there's a choice) and,
-      // for a remote source, the connection picker — both inline on one row.
-      const pullRow = document.createElement("div");
-      pullRow.className = "im-row";
-      const pullLbl = document.createElement("label");
-      pullLbl.textContent = "Pull from";
-      pullRow.append(pullLbl);
+      // Whether a kind can be picked at all. The reasons render as the add
+      // menu's static rows (short form; full sentence on title) — or, when
+      // NOTHING is usable, in place of the add button (full sentences).
+      const usableKind = (sk) => (sk.type === "folder"
+        ? !!(info.rootPath && sk.ready)
+        : !sk.needsConnection || !!(sk.connections && sk.connections.length));
+      const shortReason = (sk) => (sk.type === "folder"
+        ? "needs INGEST_ROOT on the server"
+        : "no connections yet — Plugins page");
+      const fullReason = (sk) => (sk.type === "folder"
+        ? "The server has no ingestion root configured (INGEST_ROOT), so folder ingestion is unavailable."
+        : `No ${sk.label} connections yet — an admin adds them on the Plugins page.`);
+      // What picking a usable kind means, in the menu's right-hand voice.
+      const KIND_NOTES = {
+        folder: "on the server's ingest root",
+        ftp: "a folder on a server you connect to",
+        s3: "a bucket prefix",
+      };
 
-      if (sources.length > 1) {
-        const typeSel = document.createElement("select");
-        typeSel.setAttribute("aria-label", "Source type");
-        for (const s of sources) {
-          const o = document.createElement("option");
-          o.value = s.type;
-          o.textContent = s.label;
-          if (s.type === cfg.source.type) o.selected = true;
-          typeSel.appendChild(o);
-        }
-        typeSel.disabled = !canEdit;
-        typeSel.addEventListener("change", () => {
-          const next = sources.find((x) => x.type === typeSel.value) || sources[0];
-          // A source switch is a fresh source config (keep only recursive intent).
-          cfg.source = { type: typeSel.value, recursive: cfg.source.recursive !== false };
-          seedSourceDefaults(next);
-          // Remote sources CAN watch continuously, but a 30s poll against a
-          // network source is rarely wanted — nudge a carried-over "continuous"
-          // to interval. A default, not a law: continuous stays in the dropdown.
-          if (next.needsConnection && cfg.trigger.mode === "continuous") cfg.trigger.mode = "interval";
-          renderConn();
-          renderDetail();
-          renderTriggerModes(); // the new source may offer different modes
-          invalidatePreview();
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+      host.appendChild(wrap);
+
+      // Kind settled (a menu pick, or the tile's saved one); everything else
+      // is the chooser's — connection + path + subfolders, one atomic commit.
+      function openChooser(sk) {
+        const editing = sourceAdded() && cfg.source.type === sk.type;
+        openSourceChooser({
+          drawer: drawer(),
+          boardId: state.boardId,
+          source: sk,
+          rootPath: info.rootPath || "",
+          draft: editing
+            ? {
+                connectionId: cfg.source.connectionId,
+                path: cfg.source[pathKeyFor(sk.type)] || "",
+                recursive: cfg.source.recursive !== false,
+              }
+            : {},
+          onCommit: (picked) => {
+            // A commit is a fresh source config of the picked kind — nothing
+            // from another kind survives it.
+            cfg.source = {
+              type: sk.type,
+              ...(picked.connectionId !== undefined ? { connectionId: picked.connectionId } : {}),
+              [pathKeyFor(sk.type)]: picked.path,
+              ...(picked.recursive !== undefined ? { recursive: picked.recursive } : {}),
+            };
+            seedSourceDefaults(sk);
+            // Remote sources CAN watch continuously, but a 30s poll against a
+            // network source is rarely wanted — nudge a carried-over
+            // "continuous" to interval. A default, not a law: continuous
+            // stays in the dropdown.
+            if (sk.needsConnection && cfg.trigger.mode === "continuous") cfg.trigger.mode = "interval";
+            renderTriggerModes(); // the new kind may offer different modes
+            invalidatePreview();
+            renderSource();
+            // The chooser's close() hands focus back to its opener, which
+            // this render just detached — a no-op — so landing it on the new
+            // tile here sticks.
+            wrap.querySelector(".tile-main")?.focus?.({ preventScroll: true });
+          },
         });
-        pullRow.appendChild(typeSel);
       }
 
-      let connSel = null;
-      function renderConn() {
-        if (connSel) { connSel.remove(); connSel = null; }
-        const s = current();
-        if (!s.needsConnection || !s.connections || !s.connections.length) return;
-        // Default to — or repair a dangling saved id to — the first connection,
-        // so the select's value and cfg.source.connectionId always agree.
-        if (!s.connections.some((c) => String(c.id) === String(cfg.source.connectionId)))
-          cfg.source.connectionId = s.connections[0].id;
-        connSel = document.createElement("select");
-        connSel.setAttribute("aria-label", "Connection");
-        for (const c of s.connections) {
-          const o = document.createElement("option");
-          o.value = String(c.id);
-          o.textContent = c.label;
-          connSel.appendChild(o);
-        }
-        connSel.value = String(cfg.source.connectionId);
-        connSel.disabled = !canEdit;
-        connSel.addEventListener("change", () => { cfg.source.connectionId = Number(connSel.value); invalidatePreview(); });
-        pullRow.appendChild(connSel);
+      // "+ Add source" → the rich dropdown, in the add-field menu's grammar:
+      // glyph, kind, a dim note. An unusable kind is a STATIC row (no
+      // onClick — a line in a list, not a menu item) whose note says why.
+      function openAddMenu(anchor) {
+        openDropdown(anchor, {
+          align: "start",
+          width: "anchor",
+          build: (menuBody, { close }) => {
+            for (const sk of sources) {
+              const lead = glyphEl(sourceGlyph(sk.type), false);
+              lead.style.pointerEvents = "none";
+              const ok = usableKind(sk);
+              const row = ddRow({
+                label: sk.label,
+                leading: lead,
+                trailing: ddNote(ok ? (KIND_NOTES[sk.type] ?? "") : shortReason(sk)),
+                onClick: ok ? () => { close(); openChooser(sk); } : undefined,
+              });
+              if (!ok) row.title = fullReason(sk);
+              menuBody.appendChild(row);
+            }
+          },
+        });
       }
-      renderConn();
-      host.appendChild(pullRow);
-      // Nothing to pick (single source, no connection) → drop the empty row.
-      if (!pullRow.querySelector("select")) pullRow.style.display = "none";
 
-      const detail = document.createElement("div");
-      detail.style.cssText = "display:flex;flex-direction:column;gap:6px;";
-      host.appendChild(detail);
+      // The silent health line: a limit-1 browse of the committed source that
+      // renders ONLY a server-verdict error — an auto-check that announces
+      // success answers a question nobody asked, and a transport blip has no
+      // verdict to report. Eager (connectionless) kinds only: a dead FTP
+      // server holds a 30s connect timeout, so remote saved paths surface
+      // problems in the chooser (opening it IS the test) and in the sweep's
+      // status line instead.
+      async function probe(sk, health) {
+        try {
+          const r = await fetch(`/api/boards/${state.boardId}/ingest/source/browse`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              source: { type: sk.type, connectionId: cfg.source.connectionId },
+              path: cfg.source[pathKeyFor(sk.type)] || "",
+              limit: 1,
+            }),
+          });
+          if (r.ok) return;
+          const data = await r.json().catch(() => ({}));
+          // isConnected: the tile re-rendered out from under a slow answer —
+          // this line is no longer on screen, nothing to say.
+          if (!data.error || !health.isConnected) return;
+          health.classList.add("error");
+          health.style.display = "";
+          health.textContent = `✗ ${data.error}`;
+        } catch { /* transport blip — no verdict, no line */ }
+      }
 
-      function renderDetail() {
-        detail.replaceChildren();
-        const s = current();
-        if (s.type === "folder" && (!info.root || !s.ready)) {
-          const warn = document.createElement("p");
-          warn.className = "mm-face-hint";
-          warn.textContent = "The server has no ingestion root configured (INGEST_ROOT), so folder ingestion is unavailable.";
-          detail.appendChild(warn);
+      function renderTile() {
+        const sk = sources.find((x) => x.type === cfg.source.type);
+        const base = sk ? sourceRootLabel(sk, cfg.source.connectionId, info.rootPath) : "";
+        const loc = fmtLocation(base, cfg.source[pathKeyFor(cfg.source.type)] || "");
+        const recWord = cfg.source.recursive !== false ? "includes subfolders" : "this folder only";
+        // A kind whose backend is gone (an uninstalled source plugin) still
+        // renders and can still be removed — there's just no chooser to open
+        // for it, since we don't know what it would ask. (The old type select
+        // silently re-aimed such a config at the first installed kind — an
+        // implied choice.)
+        wrap.appendChild(tileRow({
+          glyph: sourceGlyph(cfg.source.type),
+          ai: false,
+          name: loc,
+          sum: `${sk ? sk.label : `${cfg.source.type} (not installed)`} · ${recWord}`,
+          title: loc,
+          onOpen: canEdit && sk ? () => openChooser(sk) : null,
+          onRemove: canEdit
+            ? () => {
+                cfg.source = {};
+                invalidatePreview();
+                renderSource();
+              }
+            : null,
+          removeLabel: "Remove source",
+          removeTitle: "Remove this source — save afterwards to turn ingestion off for this board",
+        }));
+        const health = document.createElement("p");
+        health.className = "im-status tight";
+        health.style.display = "none";
+        wrap.appendChild(health);
+        // Silent existence check whenever the tile stands (open, commit) —
+        // only bad news renders.
+        if (sk && !sk.needsConnection) probe(sk, health);
+      }
+
+      function renderSource() {
+        wrap.replaceChildren();
+        if (sourceAdded()) {
+          renderTile();
           return;
         }
-        if (s.needsConnection && (!s.connections || !s.connections.length)) {
+        if (!canEdit) {
           const note = document.createElement("p");
           note.className = "im-hint";
-          note.textContent = `No ${s.label} connections yet — an admin adds them on the Plugins page.`;
-          detail.appendChild(note);
+          note.textContent = "No source configured.";
+          wrap.appendChild(note);
           return;
         }
-        renderFolderBlock(detail, s);
-      }
-      renderDetail();
-    }
-
-    // The focused Folder block: a "Folder" label over a full-width path field +
-    // Browse (the tree modal), then the subfolders toggle. `key` is where the
-    // base path lives on cfg.source (local folder keeps `folder`; remote uses
-    // `path`); blank = the source's root.
-    function renderFolderBlock(host, s) {
-      const key = s.type === "folder" ? "folder" : "path";
-
-      const lbl = document.createElement("div");
-      lbl.className = "im-sublabel";
-      lbl.textContent = "Folder";
-      host.appendChild(lbl);
-
-      const row = document.createElement("div");
-      row.className = "im-source-path";
-      const pathIn = document.createElement("input");
-      pathIn.type = "text";
-      pathIn.placeholder = "blank = the whole source";
-      pathIn.value = cfg.source[key] || "";
-      pathIn.disabled = !canEdit;
-      pathIn.addEventListener("input", () => { cfg.source[key] = pathIn.value; invalidatePreview(); });
-      const browseBtn = document.createElement("button");
-      browseBtn.type = "button";
-      browseBtn.className = "im-btn";
-      browseBtn.textContent = "Browse…";
-      browseBtn.disabled = !canEdit || !s.browsable || (s.needsConnection && cfg.source.connectionId == null);
-      browseBtn.addEventListener("click", () => {
-        openSourceBrowse({
-          boardId: state.boardId,
-          source: { type: s.type, connectionId: cfg.source.connectionId },
-          start: cfg.source[key] || "",
-          onPick: (picked) => { cfg.source[key] = picked; pathIn.value = picked; invalidatePreview(); },
+        const usable = sources.filter(usableKind);
+        if (!usable.length) {
+          // Nothing pickable: the reasons stand where the button would — a
+          // menu of only-static rows would be a click into a dead end.
+          for (const sk of sources) {
+            const note = document.createElement("p");
+            note.className = sk.type === "folder" ? "warn-box" : "im-hint";
+            note.textContent = fullReason(sk);
+            wrap.appendChild(note);
+          }
+          return;
+        }
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "fe-add-facet";
+        add.textContent = "+ Add source";
+        // One installed kind = nothing to ask — straight to the chooser, the
+        // same rule that used to hide the one-option type select.
+        add.addEventListener("click", () => {
+          if (sources.length === 1) openChooser(sources[0]);
+          else openAddMenu(add);
         });
-      });
-      row.append(pathIn, browseBtn);
-      host.appendChild(row);
+        wrap.appendChild(add);
+      }
 
-      host.appendChild(inertUnlessEditable(switchRow("Include subfolders", null, cfg.source.recursive !== false, (on) => {
-        cfg.source.recursive = on;
-        invalidatePreview();
-      }, { small: true })));
+      renderSource();
     }
 
     // The trigger modes offered for the currently-selected source (file boards
@@ -496,8 +582,8 @@ export function openIngestModal() {
       if (cfg.trigger.mode !== "continuous") { trigHint.style.display = "none"; return; }
       trigHint.style.display = "";
       trigHint.textContent = currentSource()?.needsConnection
-        ? "Continuous re-checks the source about every 30s — fine for your own server, but a busy poll on a remote source. Interval is gentler."
-        : "Continuous re-checks the folder about every 30s.";
+        ? "Continuous re-checks the source about every 30s — fine for your own server, but a busy poll on a remote source; after an error it retries every 5 minutes. Interval is gentler."
+        : "Continuous re-checks the folder about every 30s (after an error, every 5 minutes until it recovers).";
     }
     // Trigger modes come from the selected source (all sources offer all modes;
     // remote just defaults away from continuous). Rebuilt when the source
@@ -570,6 +656,13 @@ export function openIngestModal() {
     }
 
     previewBtn.addEventListener("click", async () => {
+      // No source added = nothing to scan. Without this gate the preview
+      // would fall through to "blank path" and scan the whole ingest root —
+      // the exact presumption the add step exists to kill.
+      if (!sourceAdded()) {
+        toast.error("Add a source first — there's nothing to preview.");
+        return;
+      }
       const mySeq = ++previewSeq;
       previewBtn.disabled = true;
       previewBtn.classList.add("loading");
@@ -765,21 +858,37 @@ export function openIngestModal() {
       const saveBtn = document.createElement("button");
       saveBtn.textContent = "Save";
       saveBtn.addEventListener("click", async () => {
-        // Preview quietly skips an unfinished filter row, but saving that way
-        // would flip "matches nothing yet" into "matches everything" on the
-        // next run — refuse and point at the row instead.
-        const unfinished = cfg.filters.find(unfinishedFilter);
-        if (unfinished) {
-          const label = (desc.filters || []).find((c) => c.fn === unfinished.fn)?.label || unfinished.fn;
-          toast.error(`The "${label}" filter has no value — fill it in or remove it`);
-          return;
+        // No source added: with a saved config this is the remove gesture —
+        // Save clears the board's ingestion outright (ingest: null). With
+        // nothing saved either, there's nothing to write; saving the config
+        // anyway would mean "watch the whole ingest root", the presumption
+        // the add step exists to kill.
+        let body;
+        let okToast = "Ingestion saved";
+        if (!sourceAdded()) {
+          if (!saved) {
+            toast.error("Add a source first — nothing to save.");
+            return;
+          }
+          body = { ingest: null };
+          okToast = "Ingestion removed";
+        } else {
+          // Preview quietly skips an unfinished filter row, but saving that
+          // way would flip "matches nothing yet" into "matches everything" on
+          // the next run — refuse and point at the row instead.
+          const unfinished = cfg.filters.find(unfinishedFilter);
+          if (unfinished) {
+            const label = (desc.filters || []).find((c) => c.fn === unfinished.fn)?.label || unfinished.fn;
+            toast.error(`The "${label}" filter has no value — fill it in or remove it`);
+            return;
+          }
+          body = { ingest: { ...previewConfig(), enabled: cfg.enabled } };
         }
-        const payload = { ...previewConfig(), enabled: cfg.enabled };
         try {
           const r = await fetch(`/api/boards/${state.boardId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ingest: payload }),
+            body: JSON.stringify(body),
           });
           const data = await r.json().catch(() => ({}));
           if (!r.ok) {
@@ -795,7 +904,7 @@ export function openIngestModal() {
           if (data.ingest_mode !== undefined) stampBoardIngest(data);
           ensurePolling();
           document.dispatchEvent(new Event("app:render"));
-          toast("Ingestion saved");
+          toast(okToast);
           close();
         } catch {
           toast.error("Save failed");

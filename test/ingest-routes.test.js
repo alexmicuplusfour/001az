@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
-import { getBoard, updateBoard, recordIngest, setIngestNextRun } from "../server/db.js";
+import { getBoard, updateBoard, recordIngest, setIngestNextRun, setIngestState } from "../server/db.js";
 
 let srv, db, base, admin, member, boardId, root;
 const OLD = Date.now() - 120000;
@@ -47,7 +47,11 @@ test("GET /api/boards/:id/ingest serves the descriptor + config in one fetch", a
   const r = await req(base, "GET", `/api/boards/${boardId}/ingest`, { sid: admin.sid });
   assert.equal(r.status, 200);
   assert.equal(r.json.available, true);
-  assert.equal(r.json.root, true);
+  // The resolved root itself (null = unconfigured) — this route is manager-
+  // gated — so the modal can show what a subpath actually means instead of a
+  // bare name. One field: a `root` boolean beside it would just be
+  // `rootPath != null` waiting to drift.
+  assert.equal(r.json.rootPath, root);
   assert.ok(r.json.descriptor.filters.some((f) => f.fn === "extension"));
   assert.ok(r.json.descriptor.triggerModes.includes("continuous"));
   assert.equal(r.json.config, null, "nothing saved yet");
@@ -132,7 +136,10 @@ test("PATCH bookkeeping: arming, rearming on trigger change, disarming", async (
   // re-derives the mode.
   const norm = await patchIngest({ ...GOOD, enabled: false, trigger: { mode: "manual" } });
   assert.equal(norm.status, 200);
-  assert.deepEqual(norm.json, { ok: true, ingest_mode: "manual", ingest_next_run_at: null });
+  // ingest_error false: an ingest save clears last_error at the save seam
+  // (superseded — the next run judges the new config), so the echo and
+  // storage agree.
+  assert.deepEqual(norm.json, { ok: true, ingest_mode: "manual", ingest_next_run_at: null, ingest_error: false });
   b = await getBoard(db, boardId);
   assert.equal(b.ingest.enabled, true, "manual + enabled:false is normalized, not stored");
 
@@ -320,4 +327,67 @@ test("connector boards: the feed adapter serves a browse-derived descriptor", as
   });
   const gone = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
   assert.equal(gone.json.available, false);
+});
+
+test("browse: a missing folder is a friendly 404; limit bounds the probe", async () => {
+  // 404 — the backend tagged it — with a message built from the subpath, not
+  // the resolved absolute path. The browse modal keys its ascend-and-relink
+  // fallback on exactly this status.
+  const gone = await req(base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
+    sid: admin.sid, body: { source: { type: "folder" }, path: "not-here" },
+  });
+  assert.equal(gone.status, 404);
+  assert.match(gone.json.error, /folder "not-here" doesn't exist under the ingest root/);
+  assert.ok(!gone.json.error.includes(root), "no absolute server path in the message");
+  assert.ok(!/ENOENT|scandir/.test(gone.json.error), "no raw fs error text either");
+
+  // Config-shaped failures stay 400 — only a missing path earns the fallback.
+  const escape = await req(base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
+    sid: admin.sid, body: { source: { type: "folder" }, path: "../escape" },
+  });
+  assert.equal(escape.status, 400);
+
+  // The health probe's bound: limit 1 answers "does this level open" with a
+  // single entry instead of the whole listing.
+  const probe = await req(base, "POST", `/api/boards/${boardId}/ingest/source/browse`, {
+    sid: admin.sid, body: { source: { type: "folder" }, path: "pick", limit: 1 },
+  });
+  assert.equal(probe.status, 200);
+  assert.equal(probe.json.entries.length, 1);
+  assert.equal(probe.json.truncated, true, "there was more than the probe asked to see");
+});
+
+test("board payload: ingest_error flags a failing watch — boolean only, config-gated", async () => {
+  await patchIngest(GOOD);
+  await setIngestState(db, boardId, {
+    last_run_at: Date.now(), last_added: 0,
+    last_error: 'folder "pick" doesn\'t exist under the ingest root — renamed or removed?',
+  });
+  let r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
+  assert.equal(r.json.ingest_error, true, "the ongoing-state signal the chips tint on");
+  assert.equal(r.json.ingest_mode, "scheduled", "failing composes with the mode, it doesn't replace it");
+
+  // A clean run clears it — the flag holds while the failure does, no longer.
+  await setIngestState(db, boardId, { last_run_at: Date.now(), last_added: 3, last_error: null });
+  r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
+  assert.equal(r.json.ingest_error, false);
+
+  // A config save supersedes the old config's verdict: last_error drops at
+  // the save seam, so every surface greys together — the PATCH echo, this
+  // GET, and the boards page can't disagree. Run history survives.
+  await setIngestState(db, boardId, { last_run_at: Date.now(), last_added: 0, last_error: "boom again" });
+  assert.equal((await patchIngest(GOOD)).status, 200);
+  const st = (await getBoard(db, boardId)).ingest_state;
+  assert.equal(st.last_error, undefined, "save dropped the superseded error");
+  assert.ok(st.last_run_at, "run history survives the save");
+  r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
+  assert.equal(r.json.ingest_error, false);
+
+  // Leftover sweep state on a deconfigured board isn't news (ingest_state is
+  // sweep-owned; the state here lands AFTER the clearing save, as a crashed
+  // sweep's would).
+  assert.equal((await patchIngest(null)).status, 200);
+  await setIngestState(db, boardId, { last_run_at: Date.now(), last_added: 0, last_error: "stale" });
+  r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
+  assert.equal(r.json.ingest_error, false, "no config, no flag");
 });

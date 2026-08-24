@@ -1641,11 +1641,14 @@ export async function setIngestState(db, boardId, state) {
   await db.query("UPDATE boards SET ingest_state=$1 WHERE id=$2", [state === null ? null : JSON.stringify(state), boardId]);
 }
 
-// The one sweep-state field a config save IS allowed to touch: drain_left is
-// the unfinished budget of the run the OLD config started — carrying it into
-// a new config hands the next run a stale limit. Run history stays.
-export async function clearIngestDrain(db, boardId) {
-  await db.query("UPDATE boards SET ingest_state = ingest_state - 'drain_left' WHERE id=$1", [boardId]);
+// The two sweep-state fields a config save IS allowed to touch, because both
+// are verdicts on the OLD config: drain_left is the unfinished budget of the
+// run it started (carried forward it hands the next run a stale limit), and
+// last_error is its failure (carried forward every chip stays red after the
+// user just fixed the folder — the next run re-judges the new config either
+// way). Run history (last_run_at / last_added) stays.
+export async function clearIngestSuperseded(db, boardId) {
+  await db.query("UPDATE boards SET ingest_state = ingest_state - 'drain_left' - 'last_error' WHERE id=$1", [boardId]);
 }
 
 // The dedup ledger: every source_key ever admitted to this board. Rows outlive

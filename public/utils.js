@@ -178,6 +178,12 @@ export const ICONS = {
   srcPerson: glyph('<circle cx="12" cy="9.5" r="3.3"/><path d="M5.5 20.5a6.5 6.5 0 0 1 13 0"/>'),
   srcWave: glyph('<path d="M4 10.5v3M8 7.5v9M12 4.5v15M16 7.5v9M20 10.5v3"/>'),
   srcDot: glyph('<circle cx="12" cy="12" r="3.4"/>'),
+  // Ingestion source kinds join the set here (sourceGlyph in
+  // source-chooser.js): the local folder and an S3 bucket get their own
+  // marks; other remote servers (FTP, installed source plugins) ride
+  // srcGlobe above.
+  srcFolder: glyph('<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>'),
+  srcCloud: glyph('<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>'),
   // Fills on the favourite state — the surfaces that do it say `fill:
   // currentColor` in CSS, since each one was already tinting the outline the
   // same colour it wanted inside.
@@ -287,6 +293,16 @@ export const ICONS = {
   // character's weight is whichever font wins the race.
   stop: glyph('<rect x="5" y="5" width="14" height="14" rx="2"/>'),
   play: glyph('<path d="M6 4.5 20 12 6 19.5Z"/>'),
+};
+
+// An inline icon holder: ICONS[name] in a span the sizing/context rules
+// target (.glyph; .ai flips it to the model ink). Unknown names fall back to
+// the neutral dot rather than an empty box.
+export const glyphEl = (name, ai) => {
+  const el = document.createElement("span");
+  el.className = "glyph" + (ai ? " ai" : "");
+  el.innerHTML = ICONS[name] || ICONS.srcDot;
+  return el;
 };
 
 // Corner presence dot for any button — sits centered on the top-right
