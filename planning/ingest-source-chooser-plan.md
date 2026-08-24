@@ -172,10 +172,11 @@ kind**:
   `setPrimaryDisabled` (see §5).
 - **Commit** hands `{ type, connectionId?, path, recursive }` to the ingest
   modal, which does what pick-then-save does today: write `cfg.source` (via
-  `keyFor`), seed the source's schema defaults, nudge a continuous trigger to
-  interval when the committed type needs a connection (the nudge moves here
-  from the old type-select handler), `renderTriggerModes()`,
-  `invalidatePreview()`, re-render the tile, eager-probe.
+  `keyFor`), seed the source's schema defaults, `renderTriggerModes()`,
+  `invalidatePreview()`, re-render the tile, eager-probe. (Revised in live
+  review 2026-08-24: the old continuous→interval nudge for remote kinds is
+  GONE — the trigger defaults Off, so "continuous" is always the user's
+  explicit act, and the schedule hint informs without overriding.)
 - **Edit flow**: clicking the tile opens the chooser for the saved kind
   directly (no menu) — its connection selected, the tree starting at the
   saved path. A missing path enters the relink flow (ascend + notice) — the
@@ -305,7 +306,8 @@ vocabulary.
 - Tile: ×, remove+Save clears config ("Ingestion removed"), re-add, sum
   reflects recursive, long path truncates with full title.
 - Mapping tab after the promotion sweep: pixel-identical tiles/drawers.
-- Trigger: committing a remote source nudges continuous → interval; modes
+- Trigger: committing a source never touches the chosen schedule
+  (continuous stays continuous on remote — the hint informs); modes
   re-render per source.
 - Suite: unchanged and green (no server edits).
 
@@ -686,10 +688,11 @@ imports.
 
 `onCommit(picked)` → rebuild `cfg.source` fresh (`{ type, connectionId?,
 [pathKeyFor(type)]: path, recursive? }`) → `seedSourceDefaults(sk)` (future
-schema fields; path/recursive are already explicit) → the remote
-continuous→interval nudge (moves from the dead typeSel handler) →
+schema fields; path/recursive are already explicit) →
 `renderTriggerModes()` → `invalidatePreview()` → `renderSource()` (+ eager
-probe) → focus the new `.tile-main`. The chooser's `drawer.close()` runs
+probe) → focus the new `.tile-main`. (The remote continuous→interval nudge
+that rode here from the old typeSel handler was removed in live review —
+it silently rewrote an explicit schedule on every commit.) The chooser's `drawer.close()` runs
 after onCommit and its opener-restore targets a now-detached node — a
 no-op — so the explicit focus survives.
 

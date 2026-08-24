@@ -236,11 +236,12 @@ export function openIngestModal() {
               ...(picked.recursive !== undefined ? { recursive: picked.recursive } : {}),
             };
             seedSourceDefaults(sk);
-            // Remote sources CAN watch continuously, but a 30s poll against a
-            // network source is rarely wanted — nudge a carried-over
-            // "continuous" to interval. A default, not a law: continuous
-            // stays in the dropdown.
-            if (sk.needsConnection && cfg.trigger.mode === "continuous") cfg.trigger.mode = "interval";
+            // The schedule is NOT touched: a continuous trigger stays
+            // continuous on a remote source. It can only be there because
+            // the user set it (the default is Off), and the trigger hint
+            // already says a 30s poll is busy against a network source —
+            // inform, never override. (An earlier nudge to "interval" here
+            // silently rewrote that explicit choice on every commit.)
             renderTriggerModes(); // the new kind may offer different modes
             invalidatePreview();
             renderSource();
@@ -698,12 +699,15 @@ export function openIngestModal() {
     // Only send filters the user has finished typing (a value-less filter
     // matches nothing server-side, which reads as a broken preview).
     const unfinishedFilter = (f) => f.value === "" || f.value === null || f.value === undefined;
+    // The MATCH half of the config — what preview dry-runs. No trigger: the
+    // schedule has no bearing on what matches, and a half-typed "every N
+    // minutes" must not block a preview. Save adds it back (and the server
+    // validates it there).
     function previewConfig() {
       return {
         source: cfg.source,
         filters: cfg.filters.filter((f) => !unfinishedFilter(f)),
         sort: cfg.sort,
-        trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" },
         ...(cfg.limit ? { limit: cfg.limit } : {}),
       };
     }
@@ -882,7 +886,13 @@ export function openIngestModal() {
             toast.error(`The "${label}" filter has no value — fill it in or remove it`);
             return;
           }
-          body = { ingest: { ...previewConfig(), enabled: cfg.enabled } };
+          body = {
+            ingest: {
+              ...previewConfig(),
+              trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" },
+              enabled: cfg.enabled,
+            },
+          };
         }
         try {
           const r = await fetch(`/api/boards/${state.boardId}`, {

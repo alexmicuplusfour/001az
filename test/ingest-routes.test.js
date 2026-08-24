@@ -226,6 +226,21 @@ test("preview: dry-runs the request body without saving it; count by default, pa
   const r2 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, { sid: admin.sid, body: previewBody });
   assert.equal(r2.json.new, 2, "the count view still accounts against the whole ledger");
 
+  // The schedule is not the preview's business: no trigger at all, or a
+  // half-typed one ("every N minutes" with no N yet), previews fine — only
+  // Save validates the trigger.
+  const noTrig = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
+    sid: admin.sid,
+    body: { source: previewBody.source, filters: previewBody.filters, sort: previewBody.sort },
+  });
+  assert.equal(noTrig.status, 200);
+  assert.equal(noTrig.json.count, 3, "triggerless preview matches the same set");
+  const halfTrig = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
+    sid: admin.sid,
+    body: { ...previewBody, trigger: { mode: "interval" } },
+  });
+  assert.equal(halfTrig.status, 200, "an unfinished trigger doesn't block a preview");
+
   const badWindow = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
     sid: admin.sid,
     body: { ...previewBody, sample: { offset: -1, limit: 0 } },

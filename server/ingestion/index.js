@@ -116,7 +116,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // Validate a candidate ingest config against the adapter's descriptor.
 // Returns an error string, or null when valid — sibling of validateMapping.
-export function validateIngest(ingest, descriptor, { hasRoot = false } = {}) {
+export function validateIngest(ingest, descriptor, { hasRoot = false, trigger = true } = {}) {
   if (!ingest || typeof ingest !== "object" || Array.isArray(ingest)) return "ingest must be an object";
   if (!descriptor) return "ingestion is not available for this board";
   if (typeof ingest.enabled !== "boolean") return "ingest.enabled must be a boolean";
@@ -168,13 +168,17 @@ export function validateIngest(ingest, descriptor, { hasRoot = false } = {}) {
       return `limit must be an integer between 1 and ${SAFETY_CAP}`;
   }
 
-  // Trigger.
-  const trig = ingest.trigger;
-  if (!trig || typeof trig !== "object") return "ingest.trigger is required";
-  if (!(descriptor.triggerModes || []).includes(trig.mode)) return `unknown trigger mode "${trig?.mode}"`;
-  if (trig.mode === "interval" && !(Number.isInteger(trig.every) && trig.every >= 1 && trig.every <= 43200))
-    return "trigger.every must be an integer between 1 and 43200 minutes";
-  if (trig.mode === "daily" && !TIME_RE.test(String(trig.at))) return "trigger.at must be HH:MM";
+  // Trigger — skippable (`trigger: false`) for callers that only ask "what
+  // would this MATCH": the preview route dry-runs source/filters/sort/limit,
+  // and a half-typed schedule is none of its business. Save always checks.
+  if (trigger) {
+    const trig = ingest.trigger;
+    if (!trig || typeof trig !== "object") return "ingest.trigger is required";
+    if (!(descriptor.triggerModes || []).includes(trig.mode)) return `unknown trigger mode "${trig?.mode}"`;
+    if (trig.mode === "interval" && !(Number.isInteger(trig.every) && trig.every >= 1 && trig.every <= 43200))
+      return "trigger.every must be an integer between 1 and 43200 minutes";
+    if (trig.mode === "daily" && !TIME_RE.test(String(trig.at))) return "trigger.at must be HH:MM";
+  }
 
   return null;
 }

@@ -1281,7 +1281,9 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   const cfg = { ...body, enabled: true }; // preview ignores the toggle
   delete cfg.sample;
   const hasRoot = !!process.env.INGEST_ROOT;
-  const err = validateIngest(cfg, adapter.descriptor(), { hasRoot });
+  // trigger: false — preview answers "what matches", and the schedule has no
+  // bearing on that; a half-typed "every N minutes" must not block it.
+  const err = validateIngest(cfg, adapter.descriptor(), { hasRoot, trigger: false });
   if (err) return res.status(400).json({ error: err });
   if (adapter.validateSource) {
     const srcErr = await adapter.validateSource(db, cfg.source || {}, { hasRoot });
