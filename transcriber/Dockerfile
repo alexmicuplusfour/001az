@@ -1,7 +1,23 @@
 FROM python:3.12-slim
 # No apt layer: faster-whisper decodes via PyAV, whose wheels bundle the ffmpeg
 # libraries — unlike the extractor's tesseract, no system codec package needed.
-RUN pip install --no-cache-dir faster-whisper
+# sherpa-onnx (speaker diarization) is likewise a self-contained manylinux
+# wheel — it bundles its onnxruntime, no system package.
+RUN pip install --no-cache-dir faster-whisper sherpa-onnx
+
+# Diarization models, baked like the whisper model below (offline at runtime; a
+# bad URL fails the build, never a request). ARG-swappable — the same one-knob
+# deploy story as WHISPER_MODEL: pyannote-segmentation-3.0 is the segmenter,
+# nemo titanet_small the voice-embedding extractor (sherpa's fastest documented
+# pairing; English-trained, but voice embeddings generalize across languages —
+# swap the URL to trade). Rev's reverb model rejected on license
+# (non-commercial). Runtime opt-out: WHISPER_DIARIZE=0. This layer sits BEFORE
+# the whisper bake so flipping WHISPER_MODEL (the common knob) doesn't
+# invalidate it and re-download these.
+ARG DIARIZE_SEGMENTATION_URL=https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2
+ARG DIARIZE_EMBEDDING_URL=https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx
+COPY fetch-diarize-models.py /tmp/
+RUN python /tmp/fetch-diarize-models.py && rm /tmp/fetch-diarize-models.py
 
 # Bake the model at build so the first request isn't blocked by a HF fetch (and
 # the runtime can run fully offline, local_files_only). The build ARG and the

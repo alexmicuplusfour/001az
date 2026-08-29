@@ -205,7 +205,7 @@ test("pruneJobLog removes old settled rows, never running ones", async () => {
 test("transcription success: one row, running→ok, chars + engine detail; turns land on the payload", async () => {
   const board = await seedBoard(db, "jobs-transcribe-ok");
   const { eid, iid } = await seedAudio(board, "interview.mp3");
-  const restore = stubFetch(sidecarOk("hello world", [{ start: 0, end: 1, text: "hello world" }]));
+  const restore = stubFetch(sidecarOk("hello world", [{ start: 0, end: 1, text: "hello world", speaker: "S1" }]));
   const stop = runWorker();
   try {
     await until(async () => (await itemPayload(iid))?.transcript);
@@ -214,8 +214,8 @@ test("transcription success: one row, running→ok, chars + engine detail; turns
     restore();
   }
   const p = await itemPayload(iid);
-  assert.deepEqual(p.transcript_turns, [{ start: 0, end: 1, text: "hello world" }],
-    "the structured turns land beside the flat transcript");
+  assert.deepEqual(p.transcript_turns, [{ start: 0, end: 1, text: "hello world", speaker: "S1" }],
+    "the structured turns — speaker labels included — land beside the flat transcript");
   const rows = await jobsFor(board);
   assert.equal(rows.length, 1);
   const r = rows[0];
@@ -224,7 +224,7 @@ test("transcription success: one row, running→ok, chars + engine detail; turns
   assert.equal(Number(r.item_id), iid);
   assert.equal(Number(r.entity_id), eid);
   assert.equal(r.target, "interview.mp3");
-  assert.deepEqual(r.detail, { chars: 11, turns: 1, engine: "whisper:small" });
+  assert.deepEqual(r.detail, { chars: 11, turns: 1, speakers: 1, engine: "whisper:small" });
   assert.ok(Number(r.ended_at) >= Number(r.started_at));
 });
 

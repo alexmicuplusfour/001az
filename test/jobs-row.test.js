@@ -66,6 +66,16 @@ test("a transcribe row counts turns only when the engine produced them", () => {
   assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134 } }), "134 chars");
 });
 
+test("a transcribe row names its speaker count when diarization produced one", () => {
+  assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134, turns: 3, speakers: 2 } }),
+    "134 chars · 3 turns · 2 speakers");
+  assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134, turns: 3, speakers: 1 } }),
+    "134 chars · 3 turns · 1 speaker");
+  // The stamp omits speakers when zero — an undiarized row reads as before.
+  assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134, turns: 3 } }),
+    "134 chars · 3 turns");
+});
+
 // --- the hover: the full facts, and the cache's measurement ---
 
 test("the title names the resolution actually sent, its size, and its cost", () => {

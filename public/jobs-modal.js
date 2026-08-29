@@ -118,7 +118,9 @@ export function summaryFor(j) {
   const d = j.detail || {};
   if (j.outcome === "ok") {
     if (j.kind === "transcribe")
-      return d.chars != null ? `${d.chars.toLocaleString()} chars${d.turns != null ? ` · ${d.turns} turns` : ""}` : "";
+      return d.chars != null
+        ? `${d.chars.toLocaleString()} chars${d.turns != null ? ` · ${d.turns} turns` : ""}${d.speakers ? ` · ${d.speakers} speaker${d.speakers === 1 ? "" : "s"}` : ""}`
+        : "";
     if (j.kind === "ingest") {
       const bits = [`+${d.admitted ?? 0} admitted`, `${d.scanned ?? 0} scanned`];
       // Skips are permanent (the file is ledgered out of every future scan) —

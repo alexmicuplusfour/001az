@@ -75,7 +75,7 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
     { status: "queued", progress: { done_s: 0, total_s: null } },
     { status: "running", progress: { done_s: 12.5, total_s: 60 } },
     { status: "done", progress: { done_s: 60, total_s: 60 }, text: "hi there", model: "small",
-      turns: [{ start: 0, end: 60, text: "hi there" }] },
+      turns: [{ start: 0, end: 60, text: "hi there", speaker: "S1" }] },
   ];
   globalThis.fetch = async (url, opts = {}) => {
     calls.push({ url: String(url), method: opts.method || "GET" });
@@ -83,8 +83,8 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
     return { ok: true, status: 200, json: async () => states.shift() };
   };
   assert.deepEqual(await eng.transcribe(Buffer.from("x")),
-    { text: "hi there", turns: [{ start: 0, end: 60, text: "hi there" }] },
-    "the done payload's per-segment turns ride out beside the flat text");
+    { text: "hi there", turns: [{ start: 0, end: 60, text: "hi there", speaker: "S1" }] },
+    "turns — speaker labels included — ride out beside the flat text untouched");
   assert.equal(eng.model, "small", "the cache stamp's model is the sidecar's own answer");
   assert.match(calls[0].url, /\/transcribe$/);
   assert.equal(calls[0].method, "POST");
@@ -137,6 +137,30 @@ test("whisper client: failure taxonomy — lane-scope vs job-scope vs permanent"
     : { ok: false, status: 404, json: async () => ({}) });
   await assert.rejects(eng.transcribe(Buffer.from("x")),
     (e) => /lost the job/.test(e.message) && e.transient === true && e.scope === "job");
+});
+
+test("whisper client: diarization progress (diarized_s) counts as liveness while done_s sits at 0", async (t) => {
+  // The sidecar diarizes BEFORE transcribing: done_s stays 0 for many minutes
+  // on a long clip while diarized_s advances. The stall detector sums both, so
+  // the diarization phase must never read as a stall.
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+  const states = [
+    { status: "running", progress: { done_s: 0, diarized_s: 100, total_s: 7200 } },
+    { status: "running", progress: { done_s: 0, diarized_s: 900, total_s: 7200 } },
+    { status: "running", progress: { done_s: 0, diarized_s: 2400, total_s: 7200 } },
+    { status: "done", progress: { done_s: 7200, diarized_s: 7200, total_s: 7200 }, text: "long clip", model: "small" },
+  ];
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
+    ? { ok: true, status: 202, json: async () => ({ job: "j5", status: "queued" }) }
+    : { ok: true, status: 200, json: async () => states.shift() });
+  // stallMs shorter than the poll backoff: with done_s frozen at 0, ONLY the
+  // advancing diarized_s (via the sum) keeps this from tripping the stall —
+  // under the old done_s-only rule this exact sequence threw.
+  const out = await eng.transcribe(Buffer.from("x"), "clip.mp3", { stallMs: 300 });
+  assert.equal(out.text, "long clip");
 });
 
 test("whisper client: a running job whose progress freezes is declared stalled (transient, job-scope)", async (t) => {

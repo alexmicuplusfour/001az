@@ -20,7 +20,7 @@
 // register-last pattern); until one exists the array is the registry.
 import { fullUrl, thumbUrl } from './kinds.js';
 import { chartDetail } from './detail-chart.js';
-import { transcriptParagraphs } from './transcript-paragraphs.js';
+import { transcriptParagraphs, speakerBands } from './transcript-paragraphs.js';
 
 // ── audio ───────────────────────────────────────────────────────────────────
 // The waveform face (when it rendered) above a native <audio> player; the
@@ -71,12 +71,28 @@ const audioDetail = {
         if (!wrap.isConnected) return;
         const { transcript, turns } = r.ok ? await r.json() : {};
         const paras = transcriptParagraphs(turns);
+        // Relative slots ("S1") → palette index by first appearance, shared by
+        // the paragraphs and the timeline strip so one speaker is one color
+        // everywhere. Labels: "S3" → "Speaker 3"; anything else (a future
+        // engine's real names) passes through as-is.
+        const slotIdx = new Map();
+        // % 6: the palette cycles at the six .spk-N classes in styles.css —
+        // the cycle rule lives here once, not at each call site.
+        const idxFor = (s) => { if (!slotIdx.has(s)) slotIdx.set(s, slotIdx.size); return slotIdx.get(s) % 6; };
+        const labelFor = (s) => (/^S\d+$/.test(s) ? `Speaker ${s.slice(1)}` : s);
         if (paras.length) {
           wave.hidden = true;
           wave.removeAttribute("src");
           for (const p of paras) {
             const el = document.createElement("p");
-            el.textContent = p.text;
+            if (p.speaker) {
+              el.className = `spk spk-${idxFor(p.speaker)}`;
+              const who = document.createElement("span");
+              who.className = "spk-name";
+              who.textContent = labelFor(p.speaker);
+              el.appendChild(who);
+            }
+            el.appendChild(document.createTextNode(p.text));
             el.title = `Jump to ${mmss(p.start)}`;
             // Seek only — play state is untouched: playing continues from the
             // new spot, paused just moves the playhead. No autoplay surprises.
@@ -92,6 +108,30 @@ const audioDetail = {
           wave.removeAttribute("src");
           text.textContent = transcript;
           text.hidden = false;
+        }
+        // Speaker timeline: a thin seek strip above the player — deliberately
+        // NOT on the waveform (the wave hides whenever a transcript shows, and
+        // an ffmpeg-less deploy has no wave at all). Positioned from the
+        // player's own duration — exact, no payload projection involved.
+        if (turns?.some((t) => t.speaker)) {
+          const strip = document.createElement("div");
+          strip.className = "lightbox-audio-speakers";
+          const bands = () => {
+            const dur = player.duration;
+            if (!isFinite(dur) || !dur) return;
+            for (const b of speakerBands(turns)) {
+              const band = document.createElement("i");
+              band.className = `spk-band spk-${idxFor(b.speaker)}`;
+              band.style.left = `${(b.start / dur) * 100}%`;
+              band.style.width = `${Math.max(((b.end - b.start) / dur) * 100, 0.5)}%`;
+              band.title = `${labelFor(b.speaker)} · ${mmss(b.start)}`;
+              band.addEventListener("click", () => { player.currentTime = b.start; });
+              strip.appendChild(band);
+            }
+          };
+          if (isFinite(player.duration) && player.duration) bands();
+          else player.addEventListener("loadedmetadata", bands, { once: true });
+          wrap.insertBefore(strip, player);
         }
       } catch { /* keep the waveform fallback */ }
     })();

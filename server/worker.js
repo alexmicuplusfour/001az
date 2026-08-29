@@ -978,10 +978,11 @@ function whisperTranscriber(binding) {
         const job = await res.json();
         if (job.status === "done") {
           if (job.model) model = job.model;
-          // turns: per-segment { start, end, text } ([] = structure produced,
-          // no speech; speaker joins in a later slice). null when the sidecar
-          // image predates them — either image can ship first. `text` stays
-          // the canonical material; turns are seek/display structure.
+          // turns: per-segment { start, end, text, speaker? } — [] = structure
+          // produced, no speech; speaker is a relative slot ("S1") when the
+          // engine diarized, absent otherwise. null when the sidecar image
+          // predates turns — either image can ship first. `text` stays the
+          // canonical material; turns are seek/display structure.
           return { text: job.text || "", turns: Array.isArray(job.turns) ? job.turns : null };
         }
         if (job.status === "failed") {
@@ -990,7 +991,13 @@ function whisperTranscriber(binding) {
           e.scope = "job";
           throw e;
         }
-        const done = Number(job.progress?.done_s) || 0;
+        // Liveness = the SUM of both phases' progress: diarized_s advances
+        // while the sidecar diarizes (done_s sits at 0 for many minutes on a
+        // long clip — it would otherwise trip the stall window), done_s takes
+        // over during ASR. Each is monotonic within a job, so any advance in
+        // either resets the clock; a pre-diarization sidecar sends neither
+        // field's sibling and the sum degrades to plain done_s.
+        const done = (Number(job.progress?.done_s) || 0) + (Number(job.progress?.diarized_s) || 0);
         if (done > lastDone) {
           lastDone = done;
           lastAdvance = Date.now();
@@ -2580,8 +2587,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
               // provider model) and readers fall back to the flat text.
               await updateItemPayload(db, row.id, { transcript: text, ...(turns ? { transcript_turns: turns } : {}) });
               transcribeRetry.delete(row.id);
+              // Distinct speaker count for the job log — engine-agnostic (any
+              // diarizing engine's labels count); omitted when zero so
+              // speakerless rows read exactly as before.
+              const speakers = new Set((turns || []).map((t) => t.speaker).filter(Boolean)).size;
               // whisper's model is the sidecar's own answer (null if it predates self-reporting)
-              await stamp({ outcome: "ok", detail: { chars: text.length, turns: turns?.length, engine: [transcriber.id, transcriber.model].filter(Boolean).join(":") } });
+              await stamp({ outcome: "ok", detail: { chars: text.length, turns: turns?.length, speakers: speakers || undefined, engine: [transcriber.id, transcriber.model].filter(Boolean).join(":") } });
               console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
             } catch (err) {
               const attempts = transcribeRetry.get(row.id)?.attempts || 0;

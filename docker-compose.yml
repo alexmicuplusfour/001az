@@ -38,6 +38,10 @@ services:
       # optional language pin (e.g. "ro") — skips per-file auto-detect, which
       # can misroute a transcript off a musical/silent first 30 seconds
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
+      # speaker diarization (models baked like the whisper model; 0 disables)
+      WHISPER_DIARIZE: ${WHISPER_DIARIZE:-1}
+      # real default: the sidecar does float() on it, empty would crash
+      WHISPER_DIARIZE_THRESHOLD: ${WHISPER_DIARIZE_THRESHOLD:-0.8}
     # detects a dead process (restart: unless-stopped revives it); a hung model
     # is caught separately by the sidecar's own progress watchdog, which exits
     healthcheck:

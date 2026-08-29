@@ -1,12 +1,13 @@
 # Structured transcripts — paragraphs, speaker turns, and a second transcriber engine
 
-**Status: Slices 1–2 BUILT & VERIFIED — slice 1 committed `f5ed190`
-(2026-08-29): sidecar emits per-segment `turns`, engine contract
-`{ text, turns }` on both paths, loop stores `payload.transcript_turns`
-(+ job-log detail). Slice 2 (2026-08-29, uncommitted): the transcript endpoint
-serves `turns`, and the lightbox renders click-to-seek paragraphs via the pure
-`public/transcript-paragraphs.js` planner. Suite 1225 green; both slices
-live-verified end-to-end. Slices 3–5 not started.
+**Status: Slices 1–3 BUILT & VERIFIED — slice 1 committed `f5ed190`, slice 2
+committed `261351e` (both 2026-08-29): turns through the whole pipe + lightbox
+click-to-seek paragraphs. Slice 3 (2026-08-29, uncommitted): sherpa-onnx
+diarization bundled into the whisper sidecar — turns carry `speaker: "S1"`
+labels, the lightbox shows speaker-labeled paragraphs + a timeline strip, the
+job log counts speakers. Suite 1227 green; live-verified end-to-end (two-voice
+SAPI conversation → S1/S2 attribution exactly matching the scripted
+alternation). Slices 4–5 not started.
 Research done (engine landscape + diarization survey below). Successor to
 [transcription-plan.md](transcription-plan.md) (slices 1–3 built: the
 `transcriber/` sidecar, the transcription loop, the provider slot) and
@@ -203,7 +204,39 @@ so [] turns (silent clip) and legacy flat items degrade correctly.
   item whose transcript the admin clears re-transcribes with turns. Revisit a
   bulk backfill only if demanded.
 
-### Slice 3 — diarization bundled into the whisper sidecar (tier 2, local floor)
+### Slice 3 — diarization bundled into the whisper sidecar (tier 2, local floor) ✅ (2026-08-29)
+
+As-built notes — three deviations from the block below, each found in the
+pre-build dive: (1) **no express-lane skip** — express is a SIZE cut, not a
+purpose cut, so skipping would silently strip speakers from small user files
+(voice notes); a probe-sized clip diarizes in milliseconds. (The diarization
+progress callback is deliberately progress-ONLY — draining express there would
+re-enter diarizer.process() on the same native object from inside its own
+callback, which sherpa gives no re-entrancy guarantee for; express jobs wait
+out the diarization phase like they always waited out decode+VAD.) (2) **turns stay 1:1 with ASR
+segments** (no sidecar merging) — merging same-speaker runs would collapse a
+monologue into one mega-turn and defeat the planner's length cap. (3) **the
+speaker bands are a timeline strip above the player, not waveform overlays** —
+the wave hides whenever a transcript shows, and an ffmpeg-less deploy has no
+wave at all. Plus one protocol addition the plan missed: diarization runs as a
+pre-ASR phase during which done_s sits at 0, which would trip the app's
+15-minute stall window on long clips — the sidecar reports monotonic
+`progress.diarized_s` and the app's stall detector sums both phases (one-line
+change, absent-field-safe in both deploy orders). Engine: pyannote-seg-3.0 fp32
++ nemo titanet_small (ARG-swappable URLs; reverb rejected on its non-commercial
+license); one decode (faster_whisper.audio.decode_audio) feeds both passes.
+Measured: 31s clip diarized in 3s (~10× real-time). Speaker palette =
+dataviz-validated categorical 6 (worst adjacent CVD ΔE 9.1). Chrome revised on
+user direction (2026-08-29, from a real screenshot): no left border, no dot —
+a subtle same-hue background wash per paragraph with the colored speaker label
+as the only saturated mark. Identity still never color-alone (the label names
+the speaker in text). The timeline strip draws
+from `speakerBands()` (transcript-paragraphs.js) — presentation-side merging
+of same-speaker runs, tens of bands instead of thousands of segment slivers.
+Reviewed-and-not-adopted: replacing the done_s+diarized_s sum with a single
+sidecar-owned progress scalar (e.g. `worked_s`) — strictly cleaner if an
+engine ever grows a third phase, but the two-field form was already verified
+on the wire; revisit when a multi-phase engine (MOSS, Parakeet+align) lands.
 
 - **Engine**: sherpa-onnx offline diarization — pyannote-segmentation-3.0 ONNX
   (~6.6MB) + a 3D-Speaker embedding model, both plain GitHub-release downloads
@@ -303,6 +336,14 @@ likely supersedes the Parakeet bundle. Not a dependency of anything above.
 - **sherpa vs pyannote accuracy gap** — known small mismatch vs upstream;
   acceptable for relative labels in a gallery app, re-evaluate only if turns
   look wrong in practice.
+- **Clustering threshold** — RESOLVED empirically (2026-08-29): the 0.5
+  default fragmented a real noisy one-voice phone clip into 4–9 phantom
+  speakers. A two-clip sweep (that clip must collapse to 1 speaker; the
+  two-voice SAPI dialog must stay 2) mapped the curve: one-voice whole at
+  ≥0.8, dialog correct through 0.85, merged at 0.9. **Default moved to 0.8**;
+  the re-transcribed real clip attributes all 14 turns to S1. The sweep
+  (a threshold loop exec'd in the transcriber container against saved clips)
+  is the recipe for re-deriving the default if the embedding model changes.
 - **Overlapping speech** — turn assignment picks the dominant speaker of a
   segment; crosstalk-heavy audio will read imperfectly. Accepted.
 - **Turn payload size** — a 3-hour clip is ~2–4k turns; fine in jsonb beside a
