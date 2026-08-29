@@ -218,6 +218,13 @@ def _transcribe(job_id: str, body: bytes, drain_express: bool):
     turns = []
     used = 0  # raw chars accumulated — turns stop at the same cap as the text
     speaker_at = _speaker_matcher(ranges)
+    # Slots are defined over the TRANSCRIPT, not the clusterer's scratch space:
+    # raw cluster indices include every sliver-cluster that never wins a
+    # segment, so emitting them leaks holes ("Speaker 1, 5, 9") and inflated
+    # numbers ("Speaker 20") into the contract. Dense remap by first
+    # appearance: the first voice heard is S1, and a slot exists only if it
+    # owns turns.
+    slots = {}
     last_beat = time.monotonic()
     for seg in segments:
         parts.append(seg.text)
@@ -225,7 +232,7 @@ def _transcribe(job_id: str, body: bytes, drain_express: bool):
             turn = {"start": round(seg.start, 1), "end": round(seg.end, 1), "text": seg.text.strip()}
             speaker = speaker_at(seg.start, seg.end)
             if speaker is not None:
-                turn["speaker"] = f"S{speaker + 1}"
+                turn["speaker"] = f"S{slots.setdefault(speaker, len(slots)) + 1}"
             turns.append(turn)
         used += len(seg.text)
         with lock:

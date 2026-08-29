@@ -225,6 +225,16 @@ pre-ASR phase during which done_s sits at 0, which would trip the app's
 change, absent-field-safe in both deploy orders). Engine: pyannote-seg-3.0 fp32
 + nemo titanet_small (ARG-swappable URLs; reverb rejected on its non-commercial
 license); one decode (faster_whisper.audio.decode_audio) feeds both passes.
+Speaker slots are DENSE and transcript-defined (2026-08-29 follow-up): raw
+cluster indices are the clusterer's scratch space — sliver-clusters that never
+win a segment left holes ("Speaker 1, 5, 9") and inflated numbers ("Speaker
+20") in the labels. The sidecar remaps by first appearance at turn-build (the
+boundary where internal representation becomes contract), so a slot exists
+only if it owns turns; each future engine owes the same invariant at its own
+boundary (the slice-5 wire normalizes provider labels the same way).
+Deliberately NO stray-cluster suppression heuristic on top — a talk-time
+floor would eat genuinely brief speakers; actual over-splitting stays the
+threshold knob's job, with phantom-labeled paragraphs as the trigger.
 Measured: 31s clip diarized in 3s (~10× real-time). Speaker palette =
 dataviz-validated categorical 6 (worst adjacent CVD ΔE 9.1). Chrome revised on
 user direction (2026-08-29, from a real screenshot): no left border, no dot —

@@ -1691,6 +1691,10 @@ body.bulk-mode .heart {
   color: #2a2a30;
   max-width: 820px;
   box-sizing: border-box;
+  /* Follow-playback: offsetTop must be container-relative, and the tracker's
+     scrollTop assignments glide instead of jumping. */
+  position: relative;
+  scroll-behavior: smooth;
 }
 /* Structured transcripts render as paragraphs, each a click-to-seek target
    (flat legacy transcripts stay bare text in the container above). */
@@ -1704,6 +1708,13 @@ body.bulk-mode .heart {
 }
 .lightbox-audio-transcript p:hover {
   background: #f5f5f5;
+}
+/* The paragraph playback is currently inside — one step past hover's wash. */
+.lightbox-audio-transcript p.playing {
+  background: #eef0f4;
+}
+.lightbox-audio-transcript p.spk.playing {
+  background: color-mix(in srgb, var(--spk) 16%, #fff);
 }
 /* Speaker palette — 6 slots cycled by first appearance, CVD-validated order
    (dataviz reference categorical, slots 1–6). One class carries the hue for

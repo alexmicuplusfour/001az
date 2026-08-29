@@ -80,9 +80,16 @@ const audioDetail = {
         // the cycle rule lives here once, not at each call site.
         const idxFor = (s) => { if (!slotIdx.has(s)) slotIdx.set(s, slotIdx.size); return slotIdx.get(s) % 6; };
         const labelFor = (s) => (/^S\d+$/.test(s) ? `Speaker ${s.slice(1)}` : s);
+        // Follow playback: the current paragraph is highlighted and kept
+        // centered while playing. Manual scrolling (wheel/touch — never the
+        // programmatic scroll, which also fires `scroll`) breaks the follow so
+        // reading isn't hijacked; clicking a paragraph or a band re-engages it
+        // (the click moved playback — following it again is what it asked for).
+        let follow = true;
         if (paras.length) {
           wave.hidden = true;
           wave.removeAttribute("src");
+          const paraEls = [];
           for (const p of paras) {
             const el = document.createElement("p");
             if (p.speaker) {
@@ -94,14 +101,33 @@ const audioDetail = {
             }
             el.appendChild(document.createTextNode(p.text));
             el.title = `Jump to ${mmss(p.start)}`;
-            // Seek only — play state is untouched: playing continues from the
-            // new spot, paused just moves the playhead. No autoplay surprises.
-            // A click that ends a text selection is copying, not seeking.
+            // Click = "hear this part": seek AND play. A click that ends a
+            // text selection is copying, not seeking.
             el.addEventListener("click", () => {
-              if (getSelection().isCollapsed) player.currentTime = p.start;
+              if (!getSelection().isCollapsed) return;
+              follow = true;
+              player.currentTime = p.start;
+              player.play();
             });
             text.appendChild(el);
+            paraEls.push({ start: p.start, el });
           }
+          text.addEventListener("wheel", () => { follow = false; }, { passive: true });
+          text.addEventListener("touchmove", () => { follow = false; }, { passive: true });
+          let current = -1;
+          player.addEventListener("timeupdate", () => {
+            const t = player.currentTime;
+            let i = -1;
+            while (i + 1 < paraEls.length && paraEls[i + 1].start <= t) i++;
+            if (i === current) return;
+            paraEls[current]?.el.classList.remove("playing");
+            current = i;
+            const hit = paraEls[i];
+            if (!hit) return;
+            hit.el.classList.add("playing");
+            if (follow && !player.paused)
+              text.scrollTop = hit.el.offsetTop - (text.clientHeight - hit.el.clientHeight) / 2;
+          });
           text.hidden = false;
         } else if (transcript && transcript.trim()) {
           wave.hidden = true;
@@ -125,7 +151,11 @@ const audioDetail = {
               band.style.left = `${(b.start / dur) * 100}%`;
               band.style.width = `${Math.max(((b.end - b.start) / dur) * 100, 0.5)}%`;
               band.title = `${labelFor(b.speaker)} · ${mmss(b.start)}`;
-              band.addEventListener("click", () => { player.currentTime = b.start; });
+              band.addEventListener("click", () => {
+                follow = true;
+                player.currentTime = b.start;
+                player.play();
+              });
               strip.appendChild(band);
             }
           };
