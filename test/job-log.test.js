@@ -92,11 +92,13 @@ function stubFetch(handler) {
   };
 }
 // The sidecar speaks the async job protocol: POST /transcribe → 202 {job},
-// then GET /jobs/<id> polls until settled. sidecarOk settles on the first poll.
-const sidecarOk = (text) => async (url, opts = {}) =>
+// then GET /jobs/<id> polls until settled. sidecarOk settles on the first poll;
+// pass `turns` to include the structured half (omitted = a pre-turns image).
+const sidecarOk = (text, turns) => async (url, opts = {}) =>
   opts.method === "POST"
     ? new Response(JSON.stringify({ job: "stub", status: "queued" }), { status: 202 })
-    : new Response(JSON.stringify({ status: "done", progress: { done_s: 1, total_s: 1 }, text, model: "small" }), { status: 200 });
+    : new Response(JSON.stringify({ status: "done", progress: { done_s: 1, total_s: 1 }, text, model: "small",
+        ...(turns ? { turns } : {}) }), { status: 200 });
 const sidecarStatus = (status) => async () => new Response("nope", { status });
 const sidecarDown = () => async () => {
   throw new TypeError("fetch failed");
@@ -200,10 +202,10 @@ test("pruneJobLog removes old settled rows, never running ones", async () => {
 
 // --- the transcribe write point ---
 
-test("transcription success: one row, running→ok, chars + engine detail", async () => {
+test("transcription success: one row, running→ok, chars + engine detail; turns land on the payload", async () => {
   const board = await seedBoard(db, "jobs-transcribe-ok");
   const { eid, iid } = await seedAudio(board, "interview.mp3");
-  const restore = stubFetch(sidecarOk("hello world"));
+  const restore = stubFetch(sidecarOk("hello world", [{ start: 0, end: 1, text: "hello world" }]));
   const stop = runWorker();
   try {
     await until(async () => (await itemPayload(iid))?.transcript);
@@ -211,6 +213,9 @@ test("transcription success: one row, running→ok, chars + engine detail", asyn
     await stop();
     restore();
   }
+  const p = await itemPayload(iid);
+  assert.deepEqual(p.transcript_turns, [{ start: 0, end: 1, text: "hello world" }],
+    "the structured turns land beside the flat transcript");
   const rows = await jobsFor(board);
   assert.equal(rows.length, 1);
   const r = rows[0];
@@ -219,7 +224,7 @@ test("transcription success: one row, running→ok, chars + engine detail", asyn
   assert.equal(Number(r.item_id), iid);
   assert.equal(Number(r.entity_id), eid);
   assert.equal(r.target, "interview.mp3");
-  assert.deepEqual(r.detail, { chars: 11, engine: "whisper:small" });
+  assert.deepEqual(r.detail, { chars: 11, turns: 1, engine: "whisper:small" });
   assert.ok(Number(r.ended_at) >= Number(r.started_at));
 });
 
@@ -267,6 +272,8 @@ test("transcription transient failure: requeued row; the retry is a fresh row (p
     await stop();
     restore();
   }
+  // The turnless done payload (an older sidecar image) leaves the key absent.
+  assert.equal((await itemPayload(iid)).transcript_turns, undefined);
   const rows = await jobsFor(board);
   assert.deepEqual(rows.map((r) => r.outcome), ["requeued", "ok"]);
   assert.match(rows[0].error, /unreachable/);

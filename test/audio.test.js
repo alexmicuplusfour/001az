@@ -74,19 +74,34 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
   const states = [
     { status: "queued", progress: { done_s: 0, total_s: null } },
     { status: "running", progress: { done_s: 12.5, total_s: 60 } },
-    { status: "done", progress: { done_s: 60, total_s: 60 }, text: "hi there", model: "small" },
+    { status: "done", progress: { done_s: 60, total_s: 60 }, text: "hi there", model: "small",
+      turns: [{ start: 0, end: 60, text: "hi there" }] },
   ];
   globalThis.fetch = async (url, opts = {}) => {
     calls.push({ url: String(url), method: opts.method || "GET" });
     if (opts.method === "POST") return { ok: true, status: 202, json: async () => ({ job: "abc123", status: "queued" }) };
     return { ok: true, status: 200, json: async () => states.shift() };
   };
-  assert.equal(await eng.transcribe(Buffer.from("x")), "hi there");
+  assert.deepEqual(await eng.transcribe(Buffer.from("x")),
+    { text: "hi there", turns: [{ start: 0, end: 60, text: "hi there" }] },
+    "the done payload's per-segment turns ride out beside the flat text");
   assert.equal(eng.model, "small", "the cache stamp's model is the sidecar's own answer");
   assert.match(calls[0].url, /\/transcribe$/);
   assert.equal(calls[0].method, "POST");
   assert.match(calls[1].url, /\/jobs\/abc123$/, "polls the job id the submit returned");
   assert.equal(calls.length, 4, "submit + one poll per state");
+});
+
+test("whisper client: a done payload without turns (older sidecar image) degrades to turns: null", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+  globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
+    ? { ok: true, status: 202, json: async () => ({ job: "j0", status: "queued" }) }
+    : { ok: true, status: 200, json: async () => ({ status: "done", progress: { done_s: 1, total_s: 1 }, text: "old shape" }) });
+  assert.deepEqual(await eng.transcribe(Buffer.from("x")), { text: "old shape", turns: null },
+    "either image can ship first — a missing turns key is null, never a crash");
 });
 
 test("whisper client: failure taxonomy — lane-scope vs job-scope vs permanent", async (t) => {
@@ -214,7 +229,8 @@ test("resolveTranscriber: an installed provider with a key resolves a provider e
   t.after(() => { globalThis.fetch = orig; });
   let seen;
   globalThis.fetch = async (url, opts) => { seen = { url: String(url), opts }; return { ok: true, status: 200, json: async () => ({ text: "spoken words" }) }; };
-  assert.equal(await eng.transcribe(Buffer.from("audio")), "spoken words");
+  assert.deepEqual(await eng.transcribe(Buffer.from("audio")), { text: "spoken words", turns: null },
+    "a plain provider model reports no structure — turns arrive with a diarizing wire later");
   assert.match(seen.url, /\/audio\/transcriptions$/);
 });
 

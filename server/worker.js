@@ -978,7 +978,11 @@ function whisperTranscriber(binding) {
         const job = await res.json();
         if (job.status === "done") {
           if (job.model) model = job.model;
-          return job.text || "";
+          // turns: per-segment { start, end, text } ([] = structure produced,
+          // no speech; speaker joins in a later slice). null when the sidecar
+          // image predates them — either image can ship first. `text` stays
+          // the canonical material; turns are seek/display structure.
+          return { text: job.text || "", turns: Array.isArray(job.turns) ? job.turns : null };
         }
         if (job.status === "failed") {
           const e = new Error(`transcriber: ${job.error || "unknown failure"}`);
@@ -1038,9 +1042,13 @@ export async function resolveTranscriber(db, board = null) {
     // Runs under the plugin-health ledger like every other provider call
     // (trackedTagger, embedBatch) so transcription traffic + errors show on
     // the Plugins page — otherwise a paid provider transcribes invisibly.
-    transcribe: async (buf, filename) =>
-      (await withPluginHealth(db, `ai:${b.provider}`, () =>
-        transcribeAudio({ provider: b.provider, apiKey: b.apiKey, base: b.base, model: b.model, rpm, burst, audio: buf, filename }))).text,
+    transcribe: async (buf, filename) => {
+      const r = await withPluginHealth(db, `ai:${b.provider}`, () =>
+        transcribeAudio({ provider: b.provider, apiKey: b.apiKey, base: b.base, model: b.model, rpm, burst, audio: buf, filename }));
+      // turns pass through from the wire when a diarizing model serves it —
+      // null until then, the same contract the sidecar path wears.
+      return { text: r.text, turns: r.turns ?? null };
+    },
   };
 }
 
@@ -2566,11 +2574,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
               const board = row.board_id ? await getBoard(db, row.board_id) : null;
               const transcriber = await resolveTranscriber(db, board);
               const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-              const text = await transcriber.transcribe(buf, file.name);
-              await updateItemPayload(db, row.id, { transcript: text });
+              const { text, turns } = await transcriber.transcribe(buf, file.name);
+              // turns ([] included) land beside the flat transcript; the key is
+              // absent when the engine gave none (legacy sidecar image, plain
+              // provider model) and readers fall back to the flat text.
+              await updateItemPayload(db, row.id, { transcript: text, ...(turns ? { transcript_turns: turns } : {}) });
               transcribeRetry.delete(row.id);
               // whisper's model is the sidecar's own answer (null if it predates self-reporting)
-              await stamp({ outcome: "ok", detail: { chars: text.length, engine: [transcriber.id, transcriber.model].filter(Boolean).join(":") } });
+              await stamp({ outcome: "ok", detail: { chars: text.length, turns: turns?.length, engine: [transcriber.id, transcriber.model].filter(Boolean).join(":") } });
               console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
             } catch (err) {
               const attempts = transcribeRetry.get(row.id)?.attempts || 0;

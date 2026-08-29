@@ -117,7 +117,8 @@ export const imageTitle = (img) => {
 export function summaryFor(j) {
   const d = j.detail || {};
   if (j.outcome === "ok") {
-    if (j.kind === "transcribe") return d.chars != null ? `${d.chars.toLocaleString()} chars` : "";
+    if (j.kind === "transcribe")
+      return d.chars != null ? `${d.chars.toLocaleString()} chars${d.turns != null ? ` · ${d.turns} turns` : ""}` : "";
     if (j.kind === "ingest") {
       const bits = [`+${d.admitted ?? 0} admitted`, `${d.scanned ?? 0} scanned`];
       // Skips are permanent (the file is ledgered out of every future scan) —

@@ -77,7 +77,7 @@ def _is_permanent(exc: Exception) -> bool:
     return type(exc).__module__.split(".", 1)[0] == "av" or isinstance(exc, EOFError)
 
 
-def _transcribe(job_id: str, body: bytes, drain_express: bool) -> str:
+def _transcribe(job_id: str, body: bytes, drain_express: bool):
     # segments is a generator — iterating it is what actually runs inference.
     # transcribe() itself decodes the full file + runs VAD first, so the first
     # segment can be minutes away on a long clip; progress starts ticking after.
@@ -91,9 +91,19 @@ def _transcribe(job_id: str, body: bytes, drain_express: bool) -> str:
     with lock:
         jobs[job_id]["total_s"] = round(info.duration, 1)
     parts = []
+    # The per-segment structure the flat join used to discard: start/end (0.1s,
+    # matching done_s precision) + stripped text, for the caller's paragraphing
+    # and click-to-seek. `speaker` is deliberately absent until a diarization
+    # pass exists. The flat text stays the canonical material — turn texts are
+    # stripped individually, so they need not concatenate to it byte-for-byte.
+    turns = []
+    used = 0  # raw chars accumulated — turns stop at the same cap as the text
     last_beat = time.monotonic()
     for seg in segments:
         parts.append(seg.text)
+        if used < MAX_CHARS:
+            turns.append({"start": round(seg.start, 1), "end": round(seg.end, 1), "text": seg.text.strip()})
+        used += len(seg.text)
         with lock:
             jobs[job_id]["done_s"] = round(seg.end, 1)
             jobs[job_id]["advanced"] = time.monotonic()
@@ -110,7 +120,7 @@ def _transcribe(job_id: str, body: bytes, drain_express: bool) -> str:
                 if nxt is None:
                     break
                 _run_job(nxt, drain_express=False)
-    return "".join(parts).strip()[:MAX_CHARS]
+    return "".join(parts).strip()[:MAX_CHARS], turns
 
 
 def _run_job(job_id: str, drain_express: bool = True):
@@ -123,9 +133,9 @@ def _run_job(job_id: str, drain_express: bool = True):
         body = job["body"]
     t0 = time.monotonic()
     try:
-        text = _transcribe(job_id, body, drain_express)
+        text, turns = _transcribe(job_id, body, drain_express)
         with lock:
-            job.update(status="done", text=text, body=None, finished=time.monotonic())
+            job.update(status="done", text=text, turns=turns, body=None, finished=time.monotonic())
         print(f"job {job_id}: {len(body)}b -> {len(text)} chars in {(time.monotonic() - t0):.0f}s", flush=True)
     except Exception as exc:
         permanent = _is_permanent(exc)
@@ -197,8 +207,8 @@ class Handler(BaseHTTPRequestHandler):
                 if len(q) >= QUEUE_MAX:
                     self._json(503, {"error": "transcriber busy — queue full"})
                     return
-                jobs[job_id] = {"status": "queued", "body": body, "text": None, "error": None,
-                                "permanent": False, "done_s": 0.0, "total_s": None,
+                jobs[job_id] = {"status": "queued", "body": body, "text": None, "turns": None,
+                                "error": None, "permanent": False, "done_s": 0.0, "total_s": None,
                                 "advanced": time.monotonic(), "finished": None}
                 q.append(job_id)
                 wake.set()
@@ -223,6 +233,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "progress": {"done_s": job["done_s"], "total_s": job["total_s"]}}, 200
                     if job["status"] == "done":
                         out["text"] = job["text"]
+                        out["turns"] = job["turns"]
                         # The sidecar owns its model name: callers stamp
                         # transcripts from this (never from a mirrored env),
                         # so the stamp can't drift from the serving model.

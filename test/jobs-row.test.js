@@ -56,6 +56,16 @@ test("rows from before the rendition shipped still summarize", () => {
   assert.equal(summaryFor({ kind: "tag", outcome: "ok", detail: { tags: 1 } }), "1 tag");
 });
 
+test("a transcribe row counts turns only when the engine produced them", () => {
+  assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134, turns: 3 } }),
+    "134 chars · 3 turns");
+  // 0 is real news (structure produced, no speech) — not the same as absent.
+  assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 0, turns: 0 } }),
+    "0 chars · 0 turns");
+  // Rows from a turnless engine (older sidecar, plain provider model) stay as before.
+  assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134 } }), "134 chars");
+});
+
 // --- the hover: the full facts, and the cache's measurement ---
 
 test("the title names the resolution actually sent, its size, and its cost", () => {
