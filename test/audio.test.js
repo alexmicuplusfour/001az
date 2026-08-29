@@ -319,6 +319,32 @@ test("reprocess clears a transcript_error so a failed transcription retries; a g
   assert.equal(Number(nextUp.id), badItem);
 });
 
+test("GET /api/instances/:id/transcript: flat text + structured turns, each nullable on its own", async (t) => {
+  const { base, db, close } = await startServer();
+  t.after(close);
+  const admin = await adminSession(db);
+  const board = await seedBoard(db, "transcript-endpoint");
+  const mk = async (name, payloadExtra, status) => {
+    const eid = await createEntity(db, board, { identity: name });
+    return insertItem(db, board, { files: [{ name, kind: "audio" }], ...payloadExtra }, status, eid);
+  };
+  const turns = [{ start: 0, end: 1.8, text: "hi there" }];
+  const structured = await mk("with.mp3", { transcript: "hi there", transcript_turns: turns }, "tagged");
+  const legacy = await mk("legacy.mp3", { transcript: "old flat" }, "tagged");
+  const fresh = await mk("fresh.mp3", {}, "held");
+
+  const a = await req(base, "GET", `/api/instances/${structured}/transcript`, { sid: admin.sid });
+  assert.equal(a.status, 200);
+  assert.deepEqual(a.json, { transcript: "hi there", turns });
+
+  const b = await req(base, "GET", `/api/instances/${legacy}/transcript`, { sid: admin.sid });
+  assert.deepEqual(b.json, { transcript: "old flat", turns: null },
+    "pre-turns items stay flat — no fake structure");
+
+  const c = await req(base, "GET", `/api/instances/${fresh}/transcript`, { sid: admin.sid });
+  assert.deepEqual(c.json, { transcript: null, turns: null }, "still transcribing — the client keeps the waveform");
+});
+
 test("embedTextFor: an audio transcript is part of the embed text (searchable by speech)", () => {
   const withText = embedTextFor([], {}, { transcript: "the quick brown fox jumps", files: [{ original_name: "clip.mp3" }] });
   assert.match(withText, /quick brown fox/, "the transcript feeds the vector");

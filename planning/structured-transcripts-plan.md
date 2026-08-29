@@ -1,11 +1,12 @@
 # Structured transcripts — paragraphs, speaker turns, and a second transcriber engine
 
-**Status: Slice 1 BUILT & VERIFIED (2026-08-29, uncommitted) — the sidecar
-emits per-segment `turns` beside the flat text, the engine contract is
-`{ text, turns }` on both paths, and the loop stores `payload.transcript_turns`
-(+ `turns` in the job-log detail). Full suite 1217 green (+1); live-verified
-end-to-end (real sidecar + real app: 3 turns with clean timestamps on a real
-speech clip, job-log `{chars, turns, engine}` stamped). Slices 2–5 not started.
+**Status: Slices 1–2 BUILT & VERIFIED — slice 1 committed `f5ed190`
+(2026-08-29): sidecar emits per-segment `turns`, engine contract
+`{ text, turns }` on both paths, loop stores `payload.transcript_turns`
+(+ job-log detail). Slice 2 (2026-08-29, uncommitted): the transcript endpoint
+serves `turns`, and the lightbox renders click-to-seek paragraphs via the pure
+`public/transcript-paragraphs.js` planner. Suite 1225 green; both slices
+live-verified end-to-end. Slices 3–5 not started.
 Research done (engine landscape + diarization survey below). Successor to
 [transcription-plan.md](transcription-plan.md) (slices 1–3 built: the
 `transcriber/` sidecar, the transcription loop, the provider slot) and
@@ -170,7 +171,20 @@ modal ok-row gained "· N turns". Loop-level e2e pinned in job-log.test.js
   — done payload with/without turns; loop stores/omits `transcript_turns`;
   probe still passes on text-only. `transcribeFailurePolicy` untouched.
 
-### Slice 2 — lightbox paragraphs (tier 1 shipped)
+### Slice 2 — lightbox paragraphs (tier 1 shipped) ✅ (2026-08-29)
+
+As-built notes: the grouping heuristic lives in its own import-free module
+`public/transcript-paragraphs.js` (NOT exported from detail-view.js — its
+import chain is browser-bound: toast.js touches document.body and grid.js
+constructs an IntersectionObserver at module scope, so it cannot load under
+test/browser-stub.js; capability-present.js is the precedent). Measured
+correction to the design intuition: whisper's VAD only exposes >~2s silences
+as timestamp gaps (short spoken pauses produce abutting segments — the live
+clip's turns abut exactly), so the LENGTH CAP does most of the paragraphing on
+continuous speech and the gap rule fires on real, long pauses. Click-to-seek
+sets currentTime only (play state untouched); each paragraph carries a
+"Jump to m:ss" title. Precedence: paragraphs → flat transcript → waveform,
+so [] turns (silent clip) and legacy flat items degrade correctly.
 
 - **API**: [`GET /api/instances/:id/transcript`](../server/server.js#L2507)
   returns `{ transcript, turns }` (turns null for legacy items — additive, no

@@ -2503,10 +2503,13 @@ app.get("/api/instances/:id/reasoning", requireAuth, requireItemAccess, wrap(asy
 
 // The audio transcript for the lightbox — produced out-of-band by the
 // transcription loop. null while still transcribing (or not audio); "" for a
-// clip with no discernible speech.
+// clip with no discernible speech. `turns` is the structured half
+// (structured-transcripts-plan.md): per-segment { start, end, text } for
+// paragraphing + click-to-seek — null for items transcribed before it shipped
+// or by an engine that gave none, and the client falls back to the flat text.
 app.get("/api/instances/:id/transcript", requireAuth, requireItemAccess, wrap(async (req, res) => {
   const row = await getItemReasoning(db, req.itemId);
-  res.json({ transcript: row?.payload?.transcript ?? null });
+  res.json({ transcript: row?.payload?.transcript ?? null, turns: row?.payload?.transcript_turns ?? null });
 }));
 
 // Tags are per instance — a human call about one piece of material.

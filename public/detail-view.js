@@ -20,12 +20,21 @@
 // register-last pattern); until one exists the array is the registry.
 import { fullUrl, thumbUrl } from './kinds.js';
 import { chartDetail } from './detail-chart.js';
+import { transcriptParagraphs } from './transcript-paragraphs.js';
 
 // ── audio ───────────────────────────────────────────────────────────────────
 // The waveform face (when it rendered) above a native <audio> player; the
-// transcript replaces the waveform when there's speech. Fetched per mount;
-// the waveform stays as the fallback while a fresh upload is still
-// transcribing (null) or for a clip with no discernible speech ("").
+// transcript replaces the waveform when there's speech — as clickable-to-seek
+// paragraphs when the item carries structured turns, as flat text for items
+// transcribed before turns shipped. Fetched per mount; the waveform stays as
+// the fallback while a fresh upload is still transcribing (null) or for a
+// clip with no discernible speech ("" flat / [] turns).
+// Media-timestamp format (1:05, 1:02:05) — deliberately NOT utils.fmtDuration,
+// which rounds to a coarse "2m"/"1h" and can't label a seek target.
+const mmss = (s) => {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = String(Math.floor(s % 60)).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+};
 const audioDetail = {
   name: "audio",
   matches: (inst) => inst?.kind === "audio",
@@ -60,8 +69,25 @@ const audioDetail = {
         const r = await fetch(`/api/instances/${inst.id}/transcript`);
         // Unmounted (or superseded — a new mount detaches this wrap) → drop it.
         if (!wrap.isConnected) return;
-        const { transcript } = r.ok ? await r.json() : {};
-        if (transcript && transcript.trim()) {
+        const { transcript, turns } = r.ok ? await r.json() : {};
+        const paras = transcriptParagraphs(turns);
+        if (paras.length) {
+          wave.hidden = true;
+          wave.removeAttribute("src");
+          for (const p of paras) {
+            const el = document.createElement("p");
+            el.textContent = p.text;
+            el.title = `Jump to ${mmss(p.start)}`;
+            // Seek only — play state is untouched: playing continues from the
+            // new spot, paused just moves the playhead. No autoplay surprises.
+            // A click that ends a text selection is copying, not seeking.
+            el.addEventListener("click", () => {
+              if (getSelection().isCollapsed) player.currentTime = p.start;
+            });
+            text.appendChild(el);
+          }
+          text.hidden = false;
+        } else if (transcript && transcript.trim()) {
           wave.hidden = true;
           wave.removeAttribute("src");
           text.textContent = transcript;
