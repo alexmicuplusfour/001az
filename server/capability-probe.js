@@ -12,8 +12,8 @@
 import sharp from "sharp";
 import { testKey, embedTexts } from "./providers.js";
 import { withPluginHealth } from "./db.js";
-import { resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector, detectorSidecarModel } from "./worker.js";
-import { CAPABILITY } from "./capabilities.js";
+import { resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector } from "./worker.js";
+import { sidecarDefaultModel } from "./sidecar-catalog.js";
 
 const bad = (message) => Object.assign(new Error(message), { status: 400 });
 
@@ -64,10 +64,11 @@ const PROBES = {
   detect: async (db) => {
     const d = await resolveDetector(db);
     const objects = await d.detect(await tinyImage(), ["object."]);
-    // The on-device engine's model is baked into the sidecar image — report what
-    // /health says so the toast can't drift from the served model; a paid
-    // provider names its own model on the descriptor.
-    const model = d.id === CAPABILITY.detect.floor.provider ? (await detectorSidecarModel()) || d.model : d.model;
+    // An on-device engine's model is baked into its sidecar image — report what
+    // /health says so the toast can't drift from the served model. A provider
+    // that isn't sidecar-backed answers null and keeps the model it named on
+    // its descriptor, so there is nothing here to test against first.
+    const model = (await sidecarDefaultModel(d.id)) || d.model;
     return { provider: d.id, model, count: objects.length };
   },
 };

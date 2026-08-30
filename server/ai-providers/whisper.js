@@ -22,4 +22,15 @@ export default () => ({
   // Truthy = advertises transcription (capability gates check `!!transcribes`);
   // empty = the model list isn't the app's to declare — the sidecar reports it.
   transcribes: { default: null, models: [] },
+  // …and THIS is how it reports: the sidecar's own /health is the catalog the
+  // admin surfaces show (see sidecar-catalog.js, which knows no engine names —
+  // it asks whoever declares this). The address lives here beside the rest of
+  // the provider's wiring, the way a keyed provider declares its base URL, and
+  // worker.js's transcribe calls read it from here too. Lazy so the env is read
+  // when asked, not at registry-build time.
+  liveCatalog: {
+    cap: "transcribe",
+    url: () => process.env.TRANSCRIBER_URL || "http://transcriber:3003",
+    note: "runs on-server · no API key · baked at deploy (BAKE_MODELS)",
+  },
 });

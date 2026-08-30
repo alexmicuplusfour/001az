@@ -134,7 +134,8 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, transcriberSidecarModel, detectorSidecarModel, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
@@ -2116,6 +2117,12 @@ app.get("/api/admin/ai-providers", requireAdmin, wrap(async (_req, res) => {
   for (const p of catalog) {
     p.installed = await pluginInstalled(db, `ai:${p.name}`);
   }
+  // …plus what the sidecar-backed engines actually serve. This feed is what
+  // the board modal's per-board picker reads, so without the overlay a
+  // sidecar's models are invisible exactly where they'd be chosen.
+  // The entry's `provides` is the descriptor's own object by reference, so the
+  // overlay writes a fresh one onto this row rather than into the registry.
+  applySidecarCatalogs(await sidecarCatalogs(), (p) => catalog.find((e) => e.name === p));
   res.json(catalog);
 }));
 
@@ -2131,19 +2138,15 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   // different one. An unreachable sidecar leaves the list empty and the card
   // notes the fallback. Written into `provides` only — the one capability shape
   // on the wire since 7b, so there is no second copy to read stale.
-  // `askModel` is the probe, not its answer: no card, no /health call.
-  const sidecarCatalog = async (id, cap, askModel, note) => {
-    const entry = plugins.find((p) => p.id === id);
-    if (!entry) return;
-    const live = await askModel();
-    const catalog = { default: live, models: live ? [{ id: live, note }] : [] };
-    // don't mutate: `ai` is shared with the memoized plugin defs
-    entry.ai = { ...entry.ai, provides: { ...entry.ai.provides, [cap]: catalog } };
-  };
-  await sidecarCatalog("ai:whisper", "transcribe", transcriberSidecarModel,
-    "runs on-server · no API key · baked at deploy (WHISPER_MODEL)");
-  await sidecarCatalog("ai:localDetector", "detect", detectorSidecarModel,
-    "runs in the object-detector sidecar · no API key · baked at deploy (OBJECT_DETECTOR_MODEL)");
+  // The catalogs and the overlay itself live in ./sidecar-catalog.js — the SAME
+  // answer, applied the SAME way as the board picker's feed above, so a card
+  // and a picker can never disagree about what an engine serves. All this
+  // route contributes is where to find the holder: detached from the memoized
+  // plugin def first, because `ai` is shared with it.
+  applySidecarCatalogs(await sidecarCatalogs(), (provider) => {
+    const entry = plugins.find((p) => p.id === `ai:${provider}`);
+    return entry ? (entry.ai = { ...entry.ai }) : null;
+  });
   // The legacy `slots` block died in 7c: every status read it carried — slot
   // defaults, domain stars, embed stats, the detect threshold — lives on
   // GET /api/admin/capabilities, so this payload stopped running three

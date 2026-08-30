@@ -111,6 +111,23 @@ export const configureTarget = (c) => c.running?.provider || c.bound?.provider |
 // pane the tagger was doing the extracting. A predicate cannot be half-copied.
 export const isDelegating = (c) => !!c.delegatesTo && !c.bound?.keyId;
 
+// A provider's declared slice for one capability, or null when it advertises
+// nothing there. `provides` carries a capability-keyed object per the 7b wire
+// shape; the typeof guard is for feeds that predate it.
+const capCatalog = (provides, cap) => {
+  const slice = provides?.[cap.declaredBy];
+  return slice && typeof slice === "object" ? slice : null;
+};
+
+// Does an ON-DEVICE engine have a model question to ask? A select holding a
+// single option asks none, so a one-baked-model sidecar keeps its "baked at
+// deploy" note instead — and the axis stays invisible until an engine reports
+// a second model. The same rule serves the board picker and the Plugins card
+// (see isDelegating above for what happens when a rule like this is copied).
+// Keyed rows are exempt: a live listing can always offer more than the
+// curated set, so they get the picker at any size.
+const offersChoice = (models) => (models?.length || 0) > 1;
+
 // --- who serves what (7c) — the Plugins tab's badges, tags, and warnings ---
 // These used to be four hand-lists over the legacy `slots` payload, and the
 // removal warning's copy forgot the transcriber — the exact omission class the
@@ -220,22 +237,31 @@ export function planBoardPicker(cap, keys, board, catalog) {
     // that a pure function cannot see; what it must NOT do is re-decide whether
     // to look.
     delegated,
-    // The model axis exists only for a keyed selection — an on-device engine's
-    // model is baked, the default row inherits. `kind` addresses the live
-    // per-connection listing; the entry is the provider's declared slice for
-    // THIS capability, not its tagging catalog.
+    // The model axis for a selection — a keyed row's provider, or an on-device
+    // engine picked by NAME. `kind` addresses the live per-connection listing
+    // (keyed rows only; a sidecar reports its own list through the catalog);
+    // the entry is the provider's declared slice for THIS capability, not its
+    // tagging catalog.
+    //
+    // An on-device engine offers the axis only when it actually serves more
+    // than one model: a select holding a single option asks no question, and a
+    // one-model engine keeps its "baked at deploy" note. This is also what
+    // makes the axis invisible until an engine reports a second model —
+    // nothing here names a provider or a capability.
     modelAxis(sel) {
       const key = keyFor(sel);
-      if (!key) return null;
-      const slice = catalog?.[key.provider]?.provides?.[cap.declaredBy];
+      const provider = key ? key.provider : sel || null;
+      if (!provider) return null; // the inherited-default row
+      const slice = capCatalog(catalog?.[provider]?.provides, cap);
+      const entry = slice ? { defaultModel: slice.default ?? null, models: slice.models || [] } : null;
+      if (!key && !offersChoice(entry?.models)) return null;
       return {
-        entry: slice && typeof slice === "object"
-          ? { defaultModel: slice.default ?? null, models: slice.models || [] }
-          : null,
-        keyId: key.id,
+        entry,
+        keyId: key?.id ?? null,
         kind: cap.declaredBy,
-        // The board's persisted model belongs to its persisted key only.
-        saved: savedKey && sel === savedKey && bb.model ? board?.[bb.model] ?? null : null,
+        // The board's persisted model belongs to its persisted SELECTION —
+        // a pinned key or a pinned engine name, whichever is stored.
+        saved: sel && sel === (savedKey || savedProvider) && bb.model ? board?.[bb.model] ?? null : null,
       };
     },
     // Is there anything BEHIND a given selection, or would naming it be a
@@ -255,7 +281,9 @@ export function planBoardPicker(cap, keys, board, catalog) {
       if (!sel) return delegated ? unsetLabel : inherit;
       const key = keyFor(sel);
       if (key) return `${key.name} — ${key.provider}${model ? ` · ${model}` : ""}`;
-      return rows.find((r) => r.value === sel)?.label || sel;
+      // A named engine names its model too when it had one to choose — the
+      // "Using …" bands must not go quieter than a keyed pin's for the same act.
+      return `${rows.find((r) => r.value === sel)?.label || sel}${model ? ` · ${model}` : ""}`;
     },
     // The save body, in the feed's column names. Full-state per capability:
     // every column written on every save, so a cleared picker clears the pin.
@@ -271,6 +299,9 @@ export function planBoardPicker(cap, keys, board, catalog) {
       } else if (sel && bb.provider) {
         // A name row only exists where the capability has a provider column.
         out[bb.provider] = sel;
+        // An on-device engine carries a model too when it serves several; the
+        // server clears it when the engine has nothing to choose from.
+        if (bb.model) out[bb.model] = model || null;
       }
       return out;
     },
@@ -372,11 +403,12 @@ export function planSection(cap, provider, keys) {
   const ask = !!rows && (rows.length > 1 || !holder);
 
   // The model axis: a networked provider gets the picker (live listings can
-  // offer more than the curated set); an on-device engine's model is baked, so
-  // it reads as a note — live-reported when the sidecar answered.
-  const cat = provider.ai?.provides?.[cap.declaredBy];
-  const catalog = cat && typeof cat === "object" ? cat : null;
-  const model = onDevice || !catalog
+  // offer more than the curated set). An on-device engine gets one too WHEN it
+  // reports serving several models; a single baked model is a note, not a
+  // question — which keeps this invisible for the one-model engines that are
+  // the norm today.
+  const catalog = capCatalog(provider.ai?.provides, cap);
+  const model = !catalog || (onDevice && !offersChoice(catalog.models))
     ? { note: catalog?.models?.[0]
         ? `${catalog.models[0].id} — ${catalog.models[0].note}`
         : "model baked at deploy — the sidecar names it when reachable" }
@@ -389,7 +421,8 @@ export function planSection(cap, provider, keys) {
     toast: `Default ${cap.agent} saved`,
     payload: (sel) =>
       onDevice
-        ? { provider: provider.name, ...(cap.binding.enable ? { enabled: true } : {}) }
+        ? { provider: provider.name, ...(model.catalog ? { model: sel.model } : {}),
+            ...(cap.binding.enable ? { enabled: true } : {}) }
         : {
             ...(cap.binding.provider ? { provider: provider.name } : {}),
             keyId: sel.key === "env" ? null : Number(sel.key),

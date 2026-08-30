@@ -32,6 +32,10 @@ services:
         # to the app (/health + job payloads). Changing it is a rebuild
         # (`docker compose build transcriber`), not an .env-only flip.
         WHISPER_MODEL: ${WHISPER_MODEL:-small}
+        # Optional comma list of EVERY model to bake (default: just the one
+        # above). Two or more grow a per-board model picker offering exactly
+        # what was baked; each costs its own image weight.
+        BAKE_MODELS: ${BAKE_MODELS:-}
     restart: unless-stopped
     environment:
       WHISPER_BEAM: ${WHISPER_BEAM:-5}

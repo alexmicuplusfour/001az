@@ -58,6 +58,7 @@ import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
+import { sidecarUrl } from "./sidecar-catalog.js";
 import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector, prefetchDueRefreshes } from "./connectors/index.js";
@@ -863,7 +864,6 @@ const noTextError = (file) => {
 // old sync sidecar forever. Because the id hashes the bytes, a retry or an app
 // restart RE-JOINS the same in-flight job instead of duplicating it, and a
 // finished result stays claimable sidecar-side for ~1h.
-const TRANSCRIBER_URL = process.env.TRANSCRIBER_URL || "http://transcriber:3003";
 // Bounds ONE HTTP exchange (a poll), never the job. Submit gets a higher floor
 // below — it ships the whole file.
 const TRANSCRIBER_HTTP_TIMEOUT_MS = Number(process.env.TRANSCRIBER_HTTP_TIMEOUT_MS) || 30000;
@@ -873,23 +873,10 @@ const TRANSCRIBER_HTTP_TIMEOUT_MS = Number(process.env.TRANSCRIBER_HTTP_TIMEOUT_
 // frozen model). Covers the pre-segment decode+VAD phase of a long clip too.
 const TRANSCRIBER_STALL_MS = Number(process.env.TRANSCRIBER_STALL_MS) || 900000;
 
-// The sidecar's live model, read off its /health and cached briefly — for
-// display surfaces (the Plugins page whisper card). The sidecar is the ONLY
-// place that names its model (baked at image build); nothing app-side mirrors
-// WHISPER_MODEL, so nothing can drift. Null when unreachable — callers show a
-// "baked at deploy" fallback. Failures cache too, so an admin page reload
-// doesn't re-time-out against a down sidecar on every hit.
-let sidecarModelCache = { at: 0, model: null };
-export async function transcriberSidecarModel() {
-  if (Date.now() - sidecarModelCache.at < 60000) return sidecarModelCache.model;
-  let model = null;
-  try {
-    const res = await fetch(`${TRANSCRIBER_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) model = (await res.json()).model || null;
-  } catch { /* down/unreachable — display-only, fall back */ }
-  sidecarModelCache = { at: Date.now(), model };
-  return model;
-}
+// What a sidecar reports about itself — its model, its baked list, its address
+// — lives in ./sidecar-catalog.js, generic over any descriptor that declares
+// `liveCatalog`. The sidecar is the ONLY place that names its model (baked at
+// image build); nothing app-side mirrors WHISPER_MODEL, so nothing can drift.
 
 // The on-server whisper-sidecar engine, wrapped as an interchangeable descriptor
 // { id, model, transcribe } so a provider engine slots in the way resolveEmbedder
@@ -904,6 +891,10 @@ export async function transcriberSidecarModel() {
 // merely what serves it.
 function whisperTranscriber(binding) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // …and its address comes from the same place, off the descriptor the binding
+  // names, so the sidecar's URL is declared once (beside its /health, which the
+  // admin catalogs read) rather than mirrored in a const here.
+  const base = sidecarUrl(binding.provider);
   // The sidecar names its own model: the done payload carries it, and `model`
   // fills in from there — null until a job completes. The cache stamp thus
   // records the model that actually produced the text, even across a mid-job
@@ -919,7 +910,12 @@ function whisperTranscriber(binding) {
       const started = Date.now();
       let sub;
       try {
-        sub = await fetch(`${TRANSCRIBER_URL}/transcribe`, {
+        // The model rides the submit when one is pinned; absent = the
+        // sidecar's own default. An image that predates the axis ignores the
+        // parameter and self-reports what it actually ran, so the job log
+        // still stamps the truth.
+        const url = `${base}/transcribe${binding.model ? `?model=${encodeURIComponent(binding.model)}` : ""}`;
+        sub = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: buf,
@@ -953,7 +949,7 @@ function whisperTranscriber(binding) {
         }
         let res;
         try {
-          res = await fetch(`${TRANSCRIBER_URL}/jobs/${jobId}`, { signal: AbortSignal.timeout(TRANSCRIBER_HTTP_TIMEOUT_MS) });
+          res = await fetch(`${base}/jobs/${jobId}`, { signal: AbortSignal.timeout(TRANSCRIBER_HTTP_TIMEOUT_MS) });
         } catch (e) {
           if (++pollFailures < 5) continue;
           const err = new Error(`transcriber unreachable mid-job (${e.message}) — will retry`);
@@ -1059,29 +1055,10 @@ export async function resolveTranscriber(db, board = null) {
   };
 }
 
-const OBJECT_DETECTOR_URL = process.env.OBJECT_DETECTOR_URL || "http://object-detector:3004";
 // Bounds ONE /detect exchange: a detection is seconds, but a queued image behind
 // others (the sidecar is single-threaded) plus a cold model load can run longer,
 // so keep it generous like the extractor.
 const OBJECT_DETECTOR_TIMEOUT_MS = Number(process.env.OBJECT_DETECTOR_TIMEOUT_MS) || 180000;
-
-// The detector sidecar's live model, read off its /health and cached briefly —
-// the peer of transcriberSidecarModel(). The model is baked into the image at
-// build (OBJECT_DETECTOR_MODEL), so the app never mirrors it; the admin card
-// reads it from here and thus can't drift when the image is rebuilt with a
-// different model. Null when unreachable — callers show a baked-at-deploy
-// fallback. Failures cache too, so an admin reload doesn't re-time-out per hit.
-let detectorModelCache = { at: 0, model: null };
-export async function detectorSidecarModel() {
-  if (Date.now() - detectorModelCache.at < 60000) return detectorModelCache.model;
-  let model = null;
-  try {
-    const res = await fetch(`${OBJECT_DETECTOR_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) model = (await res.json()).model || null;
-  } catch { /* down/unreachable — display-only, fall back */ }
-  detectorModelCache = { at: Date.now(), model };
-  return model;
-}
 
 // The on-server object-detector sidecar wrapped as an interchangeable engine
 // { id, model, detect } — the peer of whisperTranscriber(). POSTs the ORIGINAL
@@ -1089,15 +1066,16 @@ export async function detectorSidecarModel() {
 // [{ label, box(0..1 xyxy), score }]. Unreachable/non-OK throws transient → the
 // extract leg requeues (mirrors the extractor contract), never a silent empty.
 function objectDetectorSidecar(binding, threshold) {
+  const base = sidecarUrl(binding.provider);
   return {
-    // Both come from the resolved floor binding — naming the provider here would
-    // put the registry's job back in the engine.
+    // All three come from the resolved floor binding and its descriptor —
+    // naming the provider here would put the registry's job back in the engine.
     id: binding.provider,
     model: binding.model, // the sidecar's baked default
     detect: async (image, queries) => {
       let res;
       try {
-        res = await fetch(`${OBJECT_DETECTOR_URL}/detect`, {
+        res = await fetch(`${base}/detect`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ image_b64: image.toString("base64"), queries, threshold }),

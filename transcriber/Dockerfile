@@ -29,9 +29,16 @@ RUN python /tmp/fetch-diarize-models.py && rm /tmp/fetch-diarize-models.py
 # fallback-heavy output on Romanian); small is the lean end of usable. Still one
 # knob — --build-arg WHISPER_MODEL=base to go back to the lighter model.
 ARG WHISPER_MODEL=small
+# Every model to bake, comma-separated (model-axis-plan.md). Defaults to just
+# WHISPER_MODEL, so an existing build is byte-identical; add a second and the
+# board modal grows a model picker offering exactly what is baked here —
+# --build-arg BAKE_MODELS=small,medium. Each model costs its own download and
+# image weight (small ~0.5GB, medium ~1.5GB), which is why this is opt-in.
+ARG BAKE_MODELS=
 ENV HF_HOME=/models
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')"
 ENV WHISPER_MODEL=${WHISPER_MODEL}
+ENV BAKE_MODELS=${BAKE_MODELS:-${WHISPER_MODEL}}
+RUN python -c "import os; from faster_whisper import WhisperModel; [WhisperModel(m.strip(), device='cpu', compute_type='int8') for m in os.environ['BAKE_MODELS'].split(',') if m.strip()]"
 
 WORKDIR /app
 COPY main.py .

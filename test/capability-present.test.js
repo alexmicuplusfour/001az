@@ -136,6 +136,10 @@ const openaiP = {
 const anthropicP = { name: "anthropic", label: "Anthropic", ai: { onDevice: false, keyless: false, provides: { tag: { models: [], default: "claude-haiku-4-5" } } } };
 const localP = { name: "local", label: "Local Embedder (Xenova)", ai: { onDevice: true, keyless: true, provides: { embed: { models: [{ id: "bge", note: "on-device" }], default: "bge" } } } };
 const whisperP = { name: "whisper", label: "Local Transcriber (Whisper)", ai: { onDevice: true, keyless: true, provides: { transcribe: { models: [], default: null } } } };
+// The same engine once its sidecar reports serving several baked models — the
+// only thing that turns the model axis on (model-axis-plan.md slice 1).
+const whisperMultiP = { name: "whisper", label: "Local Transcriber (Whisper)", ai: { onDevice: true, keyless: true, provides: {
+  transcribe: { models: [{ id: "small", note: "baked" }, { id: "medium", note: "baked" }], default: "small" } } } };
 
 test("planSection: the env row exists only on its provider's card, and its apply saves keyId null", () => {
   const plan = planSection({ ...tagCap, bound: { provider: null, keyId: null, model: null }, running: { provider: "anthropic", model: "m", keyId: "env" } }, anthropicP, []);
@@ -161,6 +165,21 @@ test("planSection: embed's one apply binds AND enables; Turn off keeps the bindi
   const local = planSection({ ...embedCap, running: { provider: "local", model: "bge", keyId: null } }, localP, []);
   assert.equal(local.rows, null);
   assert.deepEqual(local.buttons[0].payload({ key: null, model: null }), { provider: "local", enabled: true });
+});
+
+test("planSection: an on-device engine gets a model picker only once it reports serving several", () => {
+  // One baked model (today) — a note, no question asked, and the apply body
+  // carries no model.
+  const one = planSection(transcribeCap, whisperP, []);
+  assert.ok(one.model.note, "a single baked model reads as a note");
+  assert.equal(one.model.catalog, undefined);
+  assert.deepEqual(one.buttons[0].payload({ key: null, model: null }), { provider: "whisper" });
+
+  // Two baked models — the picker appears and the choice is saved.
+  const many = planSection(transcribeCap, whisperMultiP, []);
+  assert.deepEqual(many.model.catalog, { models: whisperMultiP.ai.provides.transcribe.models, defaultModel: "small" });
+  assert.equal(many.model.note, undefined);
+  assert.deepEqual(many.buttons[0].payload({ key: null, model: "medium" }), { provider: "whisper", model: "medium" });
 });
 
 test("planSection: revert targets the floor by name — and never appears on the floor's own card", () => {
@@ -262,6 +281,41 @@ test("planBoardPicker: the rows are the App default (named), installed on-device
   // The default's meaning updates with what actually serves.
   const floorServed = planBoardPicker({ ...boardTranscribe, running: { provider: "whisper", model: "large-v3", keyId: null } }, allKeys, null, boardCatalog);
   assert.equal(floorServed.rows[0].label, "App default (Local Transcriber (Whisper) · large-v3)");
+});
+
+test("planBoardPicker: the model axis follows the SELECTION — a key row, or an on-device engine serving several", () => {
+  // A sidecar reporting one baked model (today) offers no axis: the board has
+  // nothing to choose, and a one-option select would ask a false question.
+  const one = { ...boardCatalog, whisper: { provides: { transcribe: { models: [{ id: "small", note: "baked" }], default: "small" } } } };
+  assert.equal(planBoardPicker(boardTranscribe, allKeys, null, one).modelAxis("whisper"), null);
+
+  // Reporting several turns the axis on, with keyId null so the shell fills
+  // from the catalog instead of fetching a per-connection listing.
+  const many = { ...boardCatalog, whisper: { provides: { transcribe: {
+    models: [{ id: "small", note: "baked" }, { id: "medium", note: "baked" }], default: "small" } } } };
+  const plan = planBoardPicker(boardTranscribe, allKeys, null, many);
+  const axis = plan.modelAxis("whisper");
+  assert.equal(axis.keyId, null, "no connection to list — the catalog IS the offer");
+  assert.deepEqual(axis.entry, { defaultModel: "small", models: many.whisper.provides.transcribe.models });
+  assert.equal(plan.modelAxis(""), null, "the inherited-default row has no axis");
+  // A keyed row keeps its own axis, unchanged.
+  assert.equal(plan.modelAxis("7").keyId, 7);
+
+  // A name pin's saved model preselects (it used to key on the saved KEY only,
+  // so a pinned engine's model silently reset on every open).
+  const pinned = { transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: "medium" };
+  const savedPlan = planBoardPicker(boardTranscribe, allKeys, pinned, many);
+  assert.equal(savedPlan.preselect, "whisper");
+  assert.equal(savedPlan.modelAxis("whisper").saved, "medium");
+  // …and the save body carries provider + model together.
+  assert.deepEqual(savedPlan.payload("whisper", "medium"),
+    { transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: "medium" });
+
+  // The band names the model for a named engine, as it does for a keyed pin —
+  // and stays quiet when there was nothing to choose (the shell passes null
+  // whenever the picker is hidden).
+  assert.equal(savedPlan.chosenLabel("whisper", "medium"), "Local Transcriber (Whisper) — built-in · medium");
+  assert.equal(savedPlan.chosenLabel("whisper", null), "Local Transcriber (Whisper) — built-in");
 });
 
 test("planBoardPicker: a delegate capability's unset row says what it follows, never a false app default", () => {

@@ -22,6 +22,26 @@ const advertises = (cap, provider) => !!declaredCatalog(PROVIDERS[provider], cap
 const keyedCandidates = (cap) =>
   Object.keys(PROVIDERS).filter((n) => advertises(cap, n) && !PROVIDERS[n].onDevice);
 
+// The model to store for a (capability, provider) choice — one rule for both
+// the global rung and a board's pin, so the two scopes cannot drift on what
+// they accept (model-axis-plan.md).
+//
+// `pinnedModelMustBeAdvertised` judges against the DECLARED catalog, and an
+// EMPTY one advertises nothing — so it forbids nothing. That is not a
+// loophole: a sidecar-backed engine's list is live (it reports what its image
+// baked on /health, which is also all the picker ever offers), so the engine
+// is the validator and a stale pin fails there with a readable error rather
+// than being second-guessed here against a catalog the app deliberately does
+// not keep. A provider that DOES declare models still has them enforced.
+function chooseModel(cap, provider, model) {
+  const m = model || null;
+  if (!m || !cap.pinnedModelMustBeAdvertised) return m;
+  const models = declaredCatalog(PROVIDERS[provider], cap.declaredBy)?.models || [];
+  if (models.length && !models.some((x) => x.id === m))
+    throw bad(`${PROVIDERS[provider].label} has no ${cap.noun} model "${m}"`);
+  return m;
+}
+
 // Validate a (provider, keyId, model) choice and return the three values to
 // store. Throws a 400 with a readable reason; writes nothing itself.
 async function chooseBinding(db, cap, patch) {
@@ -44,30 +64,32 @@ async function chooseBinding(db, cap, patch) {
   // the key path" — it must not read as "clear everything".)
   const provider = patch.provider || (patch.keyId != null ? (await getAiKey(db, Number(patch.keyId)))?.provider : null);
 
-  // Cleared, or the floor named outright → back to the always-on engine.
-  if (!provider || provider === floorProvider) return { provider: provider || floorProvider, keyId: null, model: null };
+  // CLEARED → back to the always-on engine with nothing pinned.
+  if (!provider) return { provider: floorProvider, keyId: null, model: null };
 
   // The one message that covers both halves of the choice, because both are
   // genuinely wrong here: this provider can't serve the capability, and the
   // alternatives are either a capable provider's key or an on-device engine.
-  if (!advertises(cap, provider)) {
+  // The floor is exempt — it is the capability's own fallback by definition.
+  if (provider !== floorProvider && !advertises(cap, provider)) {
     const names = keyedCandidates(cap).join(" or ");
     throw bad(`${provider} advertises no ${cap.noun}${names ? ` — try ${names}` : ""} (or an on-device engine, which needs no key)`);
   }
 
-  // On-device engines are picked by NAME and carry no key row.
-  if (PROVIDERS[provider].onDevice) return { provider, keyId: null, model: null };
+  // On-device engines are picked by NAME and carry no key row — the built-in
+  // floor included. Naming the floor is a CHOICE of the built-in, not a clear,
+  // so it belongs here: it used to short-circuit above and force model:null,
+  // which (since the floor IS the on-device engine for transcribe and detect)
+  // made the app-wide default the one binding that could never carry a model.
+  if (provider === floorProvider || PROVIDERS[provider].onDevice)
+    return { provider, keyId: null, model: chooseModel(cap, provider, patch.model) };
 
   const desc = PROVIDERS[provider];
   const key = patch.keyId != null ? await getAiKey(db, Number(patch.keyId)) : null;
   if (!key || key.provider !== provider)
     throw bad(`pick a ${desc.label} ${desc.keyless ? "connection" : "key"} to serve ${cap.noun} with it`);
 
-  const model = patch.model || null;
-  if (model && cap.pinnedModelMustBeAdvertised && !declaredCatalog(PROVIDERS[provider], cap.declaredBy)?.models.some((m) => m.id === model))
-    throw bad(`${desc.label} has no ${cap.noun} model "${model}"`);
-
-  return { provider, keyId: key.id, model };
+  return { provider, keyId: key.id, model: chooseModel(cap, provider, patch.model) };
 }
 
 // Apply a patch to a capability's stored binding. Any of `provider`, `keyId`,
@@ -139,6 +161,10 @@ export async function boardBindingPatch(db, body = {}) {
     const keyVal = body[bk.keyId];
     const modelVal = bk.model ? body[bk.model] : undefined;
     if (provVal === undefined && keyVal === undefined && modelVal === undefined) continue;
+    // An empty string is a CLEARED select, not a model named "" — said once for
+    // both pin shapes below, which must agree on what clearing looks like. The
+    // raw value stays readable: only it can tell "cleared" from "not mentioned".
+    const modelIn = modelVal != null && modelVal !== "" ? String(modelVal) : null;
 
     if (provVal != null && keyVal != null) {
       throw bad(`pin ${cap.noun} to an on-device engine by name OR to a key — not both`);
@@ -155,7 +181,11 @@ export async function boardBindingPatch(db, body = {}) {
       }
       cols[bk.provider] = name;
       cols[bk.keyId] = null;
-      if (bk.model) cols[bk.model] = null;
+      // An on-device engine serving several models keeps the board's pick;
+      // one serving a single baked model has nothing to store and clears.
+      // Same rule as the global rung — board scope changes where a choice is
+      // stored, never what makes it valid.
+      if (bk.model) cols[bk.model] = chooseModel(cap, name, modelIn);
       continue; // a name pin owns all three columns
     }
 
@@ -169,10 +199,7 @@ export async function boardBindingPatch(db, body = {}) {
       if (!declaredCatalog(desc, cap.declaredBy)) {
         throw bad(`${desc?.label || key.provider} advertises no ${cap.noun} — pick a key from a provider that does`);
       }
-      const model = modelVal != null && modelVal !== "" ? String(modelVal) : null;
-      if (model && cap.pinnedModelMustBeAdvertised && !declaredCatalog(desc, cap.declaredBy)?.models.some((m) => m.id === model)) {
-        throw bad(`${desc.label} has no ${cap.noun} model "${model}"`);
-      }
+      const model = chooseModel(cap, key.provider, modelIn);
       cols[bk.keyId] = key.id;
       if (bk.model && modelVal !== undefined) cols[bk.model] = model;
       if (bk.provider) cols[bk.provider] = null;

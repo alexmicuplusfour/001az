@@ -13,6 +13,7 @@ import path from "node:path";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
 import { setPluginState, createAiKey, setSetting, getSetting, oneAudioNeedingTranscription,
   createEntity, insertItem, reprocessEntity } from "../server/db.js";
+import { boardBindingPatch } from "../server/capability-bind.js";
 import { audioSource } from "../server/sources/audio.js";
 import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
@@ -90,6 +91,51 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
   assert.equal(calls[0].method, "POST");
   assert.match(calls[1].url, /\/jobs\/abc123$/, "polls the job id the submit returned");
   assert.equal(calls.length, 4, "submit + one poll per state");
+});
+
+test("whisper client: a pinned model rides the submit; unpinned asks for nothing", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const done = { ok: true, status: 200, json: async () => ({ status: "done", progress: { done_s: 1, total_s: 1 }, text: "hi", model: "medium" }) };
+  const seen = [];
+  globalThis.fetch = async (url, opts = {}) => {
+    seen.push(String(url));
+    return opts.method === "POST" ? { ok: true, status: 202, json: async () => ({ job: "j", status: "queued" }) } : done;
+  };
+
+  // A board pinned to a size: the choice reaches the sidecar as a query param.
+  const { db, close } = await startServer();
+  t.after(close);
+  const board = { transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: "medium" };
+  const pinned = await resolveTranscriber(db, board);
+  await pinned.transcribe(Buffer.from("x"));
+  assert.match(seen[0], /\/transcribe\?model=medium$/);
+
+  // Nothing pinned: no parameter at all, so an image that predates the axis
+  // sees exactly the request it always saw.
+  seen.length = 0;
+  const plain = await resolveTranscriber(db);
+  await plain.transcribe(Buffer.from("x"));
+  assert.match(seen[0], /\/transcribe$/);
+
+  // The APP-WIDE default carries its model too — stored beside the built-in's
+  // own name, so the floor binding may use it.
+  seen.length = 0;
+  await setSetting(db, "transcribe_provider", "whisper");
+  await setSetting(db, "transcribe_model", "medium");
+  const globalPin = await resolveTranscriber(db);
+  await globalPin.transcribe(Buffer.from("x"));
+  assert.match(seen[0], /\/transcribe\?model=medium$/);
+
+  // …but a model left over from ANOTHER provider is never handed to the
+  // sidecar: falling back from a dead key must not ask whisper for whisper-1.
+  seen.length = 0;
+  await setSetting(db, "transcribe_provider", "openai");
+  await setSetting(db, "transcribe_model", "whisper-1");
+  const fellBack = await resolveTranscriber(db);
+  await fellBack.transcribe(Buffer.from("x"));
+  assert.equal(fellBack.id, "whisper", "no key stored → the floor serves");
+  assert.match(seen[0], /\/transcribe$/, "the other provider's model does not ride along");
 });
 
 test("whisper client: a done payload without turns (older sidecar image) degrades to turns: null", async (t) => {
@@ -290,6 +336,56 @@ test("bind: a transcribe model the provider doesn't advertise is rejected (400, 
   });
   assert.equal(ok.status, 200);
   assert.equal(await getSetting(db, "transcribe_model"), "whisper-1");
+});
+
+test("bind: naming the built-in keeps a model (the floor branch used to swallow it)", async (t) => {
+  const { base, db, close } = await startServer();
+  t.after(close);
+  const admin = await adminSession(db);
+
+  // Whisper is transcription's FLOOR and an on-device engine, so naming it
+  // short-circuited before the on-device rule and forced model:null — the
+  // app-wide default was the one binding that could never carry a model.
+  // Its declared catalog is empty (the sidecar reports what it serves), and
+  // an empty catalog advertises nothing, so it forbids nothing.
+  const ok = await req(base, "POST", "/api/admin/capabilities/transcribe/bind", {
+    sid: admin.sid, body: { provider: "whisper", model: "medium" },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(await getSetting(db, "transcribe_provider"), "whisper");
+  assert.equal(await getSetting(db, "transcribe_model"), "medium");
+
+  // Clearing still returns to the floor with nothing pinned.
+  const cleared = await req(base, "POST", "/api/admin/capabilities/transcribe/bind", {
+    sid: admin.sid, body: { provider: null },
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal(await getSetting(db, "transcribe_model"), null);
+
+  // A provider that DOES declare its models still has them enforced.
+  await setPluginState(db, "ai:openai", { installed: true });
+  const created = await createAiKey(db, "k", "openai", "sk-test");
+  const bad = await req(base, "POST", "/api/admin/capabilities/transcribe/bind", {
+    sid: admin.sid, body: { provider: "openai", keyId: created.id ?? created, model: "nope-9" },
+  });
+  assert.equal(bad.status, 400);
+});
+
+test("board pin: an on-device engine's model rides its name pin, and a keyed pin still displaces it", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  const cols = await boardBindingPatch(db, {
+    transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: "medium",
+  });
+  assert.deepEqual(cols, { transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: "medium" });
+
+  // Clearing the pin clears the model with it (the provider branch falls
+  // through to the keyId branch, which owns both columns).
+  const clearedCols = await boardBindingPatch(db, {
+    transcribe_provider: null, transcribe_key_id: null, transcribe_model: null,
+  });
+  assert.equal(clearedCols.transcribe_provider, null);
+  assert.equal(clearedCols.transcribe_model, null);
 });
 
 // ── Transcription is decoupled from tagging (its own loop) ───────────────────

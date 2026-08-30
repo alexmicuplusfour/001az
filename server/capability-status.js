@@ -29,7 +29,7 @@ import { pluginCatalog } from "./plugins.js";
 import { listConnectors, getConnector } from "./connectors/index.js";
 import { domainState } from "./connectors/runtime.js";
 import { tagQueueDepth, embeddingStats, countBoardOverrides } from "./db.js";
-import { transcriberSidecarModel, detectorSidecarModel } from "./worker.js";
+import { sidecarDefaultModel } from "./sidecar-catalog.js";
 import { listSources } from "./ingestion/files.js";
 import { probeable } from "./capability-probe.js";
 
@@ -61,15 +61,6 @@ const PROGRESS = {
     const { tagged, embedded, failed } = await embeddingStats(db, running.model);
     return { done: embedded, total: tagged, failed };
   },
-};
-
-// The floor engines' models are baked into their sidecar images — the
-// descriptors deliberately declare little or nothing (whisper's own comment:
-// the sidecar names its model). Overlay what /health reports, so a floor
-// `running` line states the truth instead of "—". Cached ~60s in worker.js.
-const FLOOR_LIVE_MODEL = {
-  transcribe: transcriberSidecarModel,
-  detect: detectorSidecarModel,
 };
 
 // Who could serve this capability — every AI provider whose descriptor
@@ -126,9 +117,13 @@ async function aiEntry(db, cap, catalog) {
   let running = null;
   if (eff) {
     running = { provider: eff.provider, model: eff.model ?? null, keyId: eff.keyId ?? null };
-    // Live sidecar model wins over the descriptor's (possibly stale, possibly
-    // absent) baked default; falls back to it when the sidecar is unreachable.
-    if (viaFloor && FLOOR_LIVE_MODEL[cap.id]) running.model = (await FLOOR_LIVE_MODEL[cap.id]()) || running.model;
+    // A floor engine's model is baked into its sidecar image — the descriptors
+    // deliberately declare little or nothing (whisper's own comment: the
+    // sidecar names its model). Overlay what /health reports, so the `running`
+    // line states the truth instead of "—"; falls back to the descriptor's when
+    // the sidecar is unreachable, and answers null for a floor that isn't
+    // sidecar-backed, which is why this needs no table of which ones are.
+    if (viaFloor) running.model = (await sidecarDefaultModel(eff.provider)) || running.model;
   }
 
   const demand =

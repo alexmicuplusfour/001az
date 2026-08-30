@@ -29,11 +29,12 @@ export const ADMIN_EMAIL = "admin@test.local";
 // AbortSignal timeout, twice, in every file that loaded the route. A closed local
 // port takes the same unreachable-sidecar branch and is refused instantly.
 //
-// Set at module scope, NOT inside startServer(): worker.js reads these into
-// consts when it loads, and a test file that imports it statically loads it long
-// before any before() hook runs. Every such file imports this helper first, so
-// this assignment lands ahead of it. Tests that exercise sidecar behaviour stub
-// the wire themselves and don't depend on these.
+// Set at module scope, NOT inside startServer(): worker.js reads the extractor
+// URL into a const when it loads, and a test file that imports it statically
+// loads it long before any before() hook runs. Every such file imports this
+// helper first, so this assignment lands ahead of it. (The two sidecar-backed
+// providers read theirs lazily off their descriptors, so those are safe either
+// way.) Tests that exercise sidecar behaviour stub the wire themselves.
 process.env.TRANSCRIBER_URL = "http://127.0.0.1:1";
 process.env.OBJECT_DETECTOR_URL = "http://127.0.0.1:1";
 process.env.EXTRACTOR_URL = "http://127.0.0.1:1";

@@ -115,12 +115,23 @@ async function boardBinding(db, cap, board) {
   const named = bk.provider ? board[bk.provider] : null;
   const keyId = bk.keyId ? Number(board[bk.keyId]) || 0 : 0;
   if (!named && !keyId) return {};
+  // The board's own model pick, whatever it turns out to be pinned to — read
+  // once here rather than at each of the three branches below, which must all
+  // prefer it over any default.
+  const pick = bk.model ? board[bk.model] : null;
 
   // A deliberate pin of the built-in — the floor binding, chosen rather than
   // fallen to. Checked before disqualified(): the builtin provider has no wire
   // by design, and viaFloor:true is what routes the engine to the sidecar.
   const floorProvider = cap.floor?.kind === "builtin" ? cap.floor.provider : null;
-  if (named && named === floorProvider) return { binding: await floorBinding(db, cap) };
+  if (named && named === floorProvider) {
+    // …and the board's own model column comes with it. The built-in may serve
+    // several models (model-axis-plan.md); the floor binding supplies the
+    // credential shape, the board supplies the pick. Without this the pin
+    // resolves to the engine's default and the choice silently evaporates.
+    const b = await floorBinding(db, cap);
+    return { binding: { ...b, model: pick || b.model } };
+  }
 
   if (named) {
     const miss = await disqualified(db, cap, named);
@@ -134,7 +145,7 @@ async function boardBinding(db, cap, board) {
       binding: {
         provider: named,
         apiKey: null,
-        model: (bk.model ? board[bk.model] : null) || declaredCatalog(desc, cap.declaredBy)?.default || null,
+        model: pick || declaredCatalog(desc, cap.declaredBy)?.default || null,
         keyId: null,
         viaFloor: false,
       },
@@ -155,7 +166,7 @@ async function boardBinding(db, cap, board) {
       apiKey: key.api_key,
       // The board's own model, else the provider's declared default — NEVER the
       // global pinned model, which may belong to a different provider entirely.
-      model: (bk.model ? board[bk.model] : null) || declaredCatalog(desc, cap.declaredBy)?.default || null,
+      model: pick || declaredCatalog(desc, cap.declaredBy)?.default || null,
       base: key.base_url || undefined,
       keyId: key.id,
       viaFloor: false,
@@ -192,13 +203,16 @@ async function floorBinding(db, cap, board = null) {
   if (floor.kind === "delegate") return resolveCapability(db, floor.to, { board });
   if (floor.kind !== "builtin") return null;
   const desc = PROVIDERS[floor.provider];
-  return {
-    provider: floor.provider,
-    apiKey: null,
-    model: declaredCatalog(desc, cap.declaredBy)?.default ?? null,
-    keyId: null,
-    viaFloor: true,
-  };
+  // A model stored ALONGSIDE this provider is the admin's pick among what the
+  // built-in serves, so it rides the floor binding. A model stored for some
+  // OTHER provider is not ours to use — falling back from a dead OpenAI key
+  // must not hand `whisper-1` to the whisper sidecar, which never baked it.
+  const storedProvider = cap.binding.keys?.provider ? await getSetting(db, cap.binding.keys.provider) : null;
+  const pinned = storedProvider === floor.provider && cap.binding.keys?.model
+    ? await getSetting(db, cap.binding.keys.model)
+    : null;
+  const model = pinned || declaredCatalog(desc, cap.declaredBy)?.default || null;
+  return { provider: floor.provider, apiKey: null, model, keyId: null, viaFloor: true };
 }
 
 // The one resolver. Returns a binding, or null when the capability's floor is

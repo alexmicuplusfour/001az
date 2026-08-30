@@ -275,7 +275,45 @@ on the wire; revisit when a multi-phase engine (MOSS, Parakeet+align) lands.
   component vocabulary; nothing new in styles.css beyond the component's own
   block.
 
-### Slice 4 — the second transcriber sidecar (Parakeet TDT v3 + sherpa diarization)
+### Slice 4 — the second transcriber sidecar (Parakeet TDT v3) ❌ NOT BUILT — benchmark says no (2026-08-29)
+
+The research gate closed negative, which was always a valid outcome. Measured
+in the running sidecar, both engines int8, both at `num_threads=2`, 257s of
+audio (two real noisy clips + a known-ground-truth TTS dialog):
+
+| | whisper-small | parakeet-tdt-0.6b-v3-int8 |
+|---|---|---|
+| speed | **5.7× real-time** | 17.0× real-time (3× faster) |
+| peak RSS | **694 MB** | 1178 MB (+484 MB) |
+| WER vs known truth | **0.0%** (0/86 words) | 2.3% (2 deletions) |
+| noisy phone clip | **clearly better** | drops clauses, mangles more |
+| comedy sketch | mixed | mixed (wins "peasants", loses "bumpy") |
+
+Parakeet's only win is speed — and whisper is **not the bottleneck it was
+assumed to be**: at 5.7× real-time a 2-hour clip transcribes in ~21 minutes,
+so the plan's "a 2h clip is ~real-time on CPU" premise (from the original
+transcription plan, on weaker settings) no longer holds. Against that,
+Parakeet costs 70% more RAM — the actual constraint on a small droplet — and
+its errors are **deletions** ("Thanks for joining me today" → "Thanks me
+today" on CLEAN audio), the worst error kind for a transcript that gets
+tagged and searched: silent information loss rather than a visibly wrong
+word. The leaderboard claim (beats whisper large-v3) is fp32 on clean
+benchmark speech; it did not transfer to int8 on this app's real material.
+
+One more finding that would have cost UX: Parakeet's turns come from VAD
+regions, so **every pause becomes a turn boundary** — 25 turns vs whisper's
+14 on the same clip, with fragments like "Um.", "You.", "God." Since the
+paragraph planner breaks on gaps ≥1.25s and VAD gaps are real silences, that
+renders as choppy one-line paragraphs — worse than the flowing paragraphs
+whisper's abutting segments produce.
+
+Limits of the test, honestly: 3 clips (~4 min), int8 both sides, untuned VAD
+params, a 12-core dev box (both engines equally constrained). What would
+reopen it: a genuinely CPU-starved deploy where 3× throughput outranks
+accuracy, or a better-quality export (fp32 costs still more RAM, so it likely
+trades the wrong way). **The app-side generalization below is still valid and
+would be needed by any future second engine — see the design notes; nothing
+was built.**
 
 - **Sidecar** `transcriber-parakeet/` (name TBD at build): the job-queue
   harness from [transcriber/main.py](../transcriber/main.py) (submit/poll,
@@ -341,8 +379,14 @@ likely supersedes the Parakeet bundle. Not a dependency of anything above.
 
 ## Open questions / risks
 
-- **Parakeet v3 ONNX availability + droplet RTF** — slice 4's gate; benchmark
-  before building the image.
+- **Parakeet v3 ONNX availability + droplet RTF** — RESOLVED 2026-08-29, gate
+  closed NEGATIVE: the export exists (sherpa's own int8 conversion, 487MB) and
+  the installed sherpa-onnx wheel already serves transducer ASR + VAD, but the
+  benchmark says don't build it (3× faster, 70% more RAM, worse WER, choppier
+  turns). Full table in the slice-4 block. Slice 4 is shelved, not deleted:
+  the app-side generalization it identified (sidecar-backing as descriptor
+  data, retiring `disqualified()`'s wire rejection) is what ANY second local
+  engine needs, and stands ready if one arrives.
 - **sherpa vs pyannote accuracy gap** — known small mismatch vs upstream;
   acceptable for relative labels in a gallery app, re-evaluate only if turns
   look wrong in practice.

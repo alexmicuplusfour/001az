@@ -25,6 +25,7 @@ enqueue and look up. Tiny payloads (admin probes, voice notes) take an express
 lane serviced between segments of a long job, so a 2-hour grind never makes the
 "Test" button hang for an hour.
 """
+import gc
 import hashlib
 import io
 import json
@@ -34,11 +35,22 @@ import threading
 import time
 from collections import deque
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 from faster_whisper import WhisperModel
 from faster_whisper.audio import decode_audio
+from faster_whisper.utils import download_model
 
+# The DEFAULT model — what a submit that names none is served with.
 MODEL = os.environ.get("WHISPER_MODEL", "small")
+# Every model baked into this image (model-axis-plan.md). Defaults to just the
+# default, so a single-model build behaves exactly as it always has. Deduped in
+# order: a repeated name ("small,small") would otherwise reach the picker as
+# two identical options, turning a typo into a broken-looking choice.
+# `or MODEL` covers unset AND empty: compose passes ${BAKE_MODELS:-} through as
+# an empty string, so a plain `docker run` of this image (or a bare python
+# main.py) must not read that as "bake nothing" and refuse to start.
+BAKED = list(dict.fromkeys(m.strip() for m in (os.environ.get("BAKE_MODELS") or MODEL).split(",") if m.strip()))
 BEAM = int(os.environ.get("WHISPER_BEAM", "5"))
 COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
 # Optional language pin (e.g. "ro"). Unset = per-file auto-detect, which reads
@@ -73,9 +85,47 @@ DIARIZE_THRESHOLD = float(os.environ.get("WHISPER_DIARIZE_THRESHOLD", "0.8"))
 DIARIZE_SEG = "/models/diarize/segmentation.onnx"
 DIARIZE_EMB = "/models/diarize/embedding.onnx"
 
-print(f"loading whisper '{MODEL}' (compute={COMPUTE}, beam={BEAM}, language={LANGUAGE or 'auto'})...", flush=True)
-model = WhisperModel(MODEL, device="cpu", compute_type=COMPUTE, local_files_only=LOCAL_ONLY)
-print(f"whisper '{MODEL}' ready", flush=True)
+# Baked models are verified to EXIST at startup — resolving the cache directory
+# loads no weights, so this is cheap — because lazy loading would otherwise move
+# a missing/half-baked model's failure from boot (where the healthcheck's
+# start_period is aimed) to a user's first job hours later.
+if MODEL not in BAKED:
+    raise RuntimeError(f"WHISPER_MODEL '{MODEL}' is not among BAKE_MODELS {BAKED}")
+for _name in BAKED:
+    try:
+        download_model(_name, local_files_only=True)
+    except Exception as _exc:  # noqa: BLE001 — any failure to resolve is fatal
+        raise RuntimeError(f"whisper model '{_name}' is not baked into this image: {_exc}")
+
+# ONE model resident at a time: RAM is max(models), never their sum. Only the
+# worker thread touches these (the HTTP handlers never load), so no lock.
+_loaded_name = None
+_loaded = None
+
+
+def _model(name: str):
+    global _loaded_name, _loaded
+    if name == _loaded_name:
+        return _loaded
+    # Release BEFORE constructing. Building the new model first would hold both
+    # in memory and peak at the SUM — which is the whole thing this avoids.
+    # Not a redundant pair of lines; do not fold them into the assignment.
+    if _loaded is not None:
+        print(f"unloading whisper '{_loaded_name}'", flush=True)
+        _loaded, _loaded_name = None, None
+        gc.collect()
+    t0 = time.monotonic()
+    print(f"loading whisper '{name}' (compute={COMPUTE}, beam={BEAM}, language={LANGUAGE or 'auto'})...", flush=True)
+    _loaded = WhisperModel(name, device="cpu", compute_type=COMPUTE, local_files_only=LOCAL_ONLY)
+    _loaded_name = name
+    print(f"whisper '{name}' ready in {time.monotonic() - t0:.1f}s", flush=True)
+    return _loaded
+
+
+# The default loads eagerly, so boot still fails loudly on a broken model and
+# the first job of a single-model deploy waits for nothing.
+_model(MODEL)
+print(f"baked models: {', '.join(BAKED)} (default {MODEL})", flush=True)
 
 diarizer = None
 if DIARIZE:
@@ -118,11 +168,22 @@ def _drain_express():
     # Service the express lane between ASR segments of a long job — a tiny
     # probe answers in seconds instead of queueing behind hours of audio.
     # Express jobs run with drain_express=False, so nesting stops at depth one.
+    #
+    # ONLY jobs the currently-loaded model can serve. Swapping here would evict
+    # the running job's model and force a reload the moment it resumes — ~12s
+    # each way, after EVERY segment. A mismatched express job simply waits for
+    # the running job to finish, exactly like any other queued job: a running
+    # job never pays a reload mid-flight.
     while True:
         with lock:
-            nxt = express_q.popleft() if express_q else None
+            nxt = None
+            for i, jid in enumerate(express_q):
+                if jobs.get(jid, {}).get("model") == _loaded_name:
+                    nxt = jid
+                    del express_q[i]
+                    break
         if nxt is None:
-            break
+            return
         _run_job(nxt, drain_express=False)
 
 
@@ -189,6 +250,10 @@ def _transcribe(job_id: str, body: bytes, drain_express: bool):
     duration = len(audio) / 16000
     with lock:
         jobs[job_id]["total_s"] = round(duration, 1)
+        want = jobs[job_id]["model"]
+    # Loads only on a change (and only ever from the worker thread). A swap
+    # costs seconds; the express lane is what keeps it off the hot path.
+    model = _model(want)
 
     ranges = _diarize(job_id, audio, duration) if diarizer else []
 
@@ -309,16 +374,34 @@ def _watchdog():
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path != "/transcribe":
+        parsed = urlparse(self.path)
+        if parsed.path != "/transcribe":
             self.send_response(404)
             self.end_headers()
             return
+        # ?model= picks among the baked set; absent = the deploy's default, so
+        # an older caller that knows nothing about the axis still works.
+        want = (parse_qs(parsed.query).get("model") or [MODEL])[0]
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         if not body:
             self._json(422, {"error": "empty body"})
             return
-        job_id = hashlib.sha256(body).hexdigest()[:16]
+        if want not in BAKED:
+            # 422, not 500: a model this image never baked is a permanent fault
+            # of the request, so the caller parks the clip with a readable
+            # reason instead of retrying it forever.
+            self._json(422, {"error": f"model '{want}' is not baked into this transcriber (have: {', '.join(BAKED)})"})
+            return
+        # The model is part of the identity: same bytes at a different size is
+        # a DIFFERENT job, or re-pinning a board would be served the previous
+        # model's cached transcript for the rest of RETAIN_S. Fed in two
+        # updates, not concatenated: `body` is the whole upload (hundreds of MB
+        # for the long recordings this exists to serve), and `+` would copy all
+        # of it to append eight bytes.
+        h = hashlib.sha256(body)
+        h.update(b"\x00" + want.encode())
+        job_id = h.hexdigest()[:16]
         with lock:
             job = jobs.get(job_id)
             # Dedupe by content: a queued/running twin is joined, a done result
@@ -331,7 +414,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(503, {"error": "transcriber busy — queue full"})
                     return
                 jobs[job_id] = {"status": "queued", "body": body, "text": None, "turns": None,
-                                "error": None, "permanent": False, "done_s": 0.0, "diarized_s": 0.0,
+                                "model": want, "error": None, "permanent": False,
+                                "done_s": 0.0, "diarized_s": 0.0,
                                 "total_s": None, "advanced": time.monotonic(), "finished": None}
                 q.append(job_id)
                 wake.set()
@@ -343,7 +427,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             with lock:
                 queued = len(main_q) + len(express_q)
-            self._json(200, {"ok": True, "model": MODEL, "queued": queued})
+            # `model` is the default (an older caller reads only this);
+            # `models` is what this image actually baked and can serve.
+            self._json(200, {"ok": True, "model": MODEL, "models": BAKED, "queued": queued})
             return
         if self.path.startswith("/jobs/"):
             job_id = self.path[len("/jobs/"):]
@@ -360,8 +446,10 @@ class Handler(BaseHTTPRequestHandler):
                         out["turns"] = job["turns"]
                         # The sidecar owns its model name: callers stamp
                         # transcripts from this (never from a mirrored env),
-                        # so the stamp can't drift from the serving model.
-                        out["model"] = MODEL
+                        # so the stamp can't drift from the serving model —
+                        # and with an axis it names THIS job's model, which
+                        # makes per-item job-log stamps accurate for free.
+                        out["model"] = job["model"]
                     elif job["status"] == "failed":
                         out["error"], out["permanent"] = job["error"], job["permanent"]
             self._json(status, out)
