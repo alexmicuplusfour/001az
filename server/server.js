@@ -26,6 +26,7 @@ import {
   setPassword,
   anyPasswordSet,
   setUserName,
+  setBoardOrder,
   mintInvite,
   consumeInvite,
   deleteUnredeemedInvites,
@@ -403,12 +404,58 @@ app.post("/api/account/password", authLimiter, requireAuth, wrap(async (req, res
   res.json({ ok: true });
 }));
 
-// Profile settings (currently just the display name). Empty clears it.
+// The reader's board arrangement, shape-checked but deliberately NOT checked
+// against the boards table (planning/board-arrangement-plan.md). These ids are
+// only ever compared against the boards a reader can already see, so one naming
+// a board that is gone — or was never theirs — ranks nothing and discloses
+// nothing; validating them would buy an authorization property this list does
+// not carry, at the price of a query on every drag. What IS enforced is that
+// the column cannot be used as storage: strings only, deduped, bounded.
+//
+// Returns null for a body that isn't an order at all, which the route turns
+// into a 400. An empty array is valid and means "forget my arrangement".
+const MAX_BOARD_ORDER = 500;
+const BOARD_ID_MAX = 64; // a uuid is 36; the slack is for whatever ids become
+function cleanBoardOrder(value) {
+  if (!Array.isArray(value) || value.length > MAX_BOARD_ORDER) return null;
+  const seen = new Set();
+  for (const id of value) {
+    if (typeof id !== "string" || !id || id.length > BOARD_ID_MAX) return null;
+    seen.add(id);
+  }
+  return [...seen];
+}
+
+// Account settings: the display name (empty clears it) and the board
+// arrangement. One route for both because they are the same kind of thing —
+// state belonging to the reader rather than to any board — and each field is
+// written only when it is SENT, so the profile page (name alone) and the boards
+// index (order alone) can never clobber the other's.
 app.patch("/api/account", requireAuth, wrap(async (req, res) => {
-  if (typeof req.body?.name !== "string") return res.status(400).json({ error: "name required" });
-  const name = req.body.name.trim().slice(0, 80) || null;
-  await setUserName(db, req.user.id, name);
-  res.json({ ok: true, name });
+  const { name, board_order: boardOrder } = req.body ?? {};
+  // Everything is judged before anything is written — the rule the plugins
+  // route states as "a bad field can't half-apply". These are two statements
+  // rather than one, so a rejected order must not leave a renamed account.
+  if (name === undefined && boardOrder === undefined)
+    return res.status(400).json({ error: "nothing to update" });
+  if (name !== undefined && typeof name !== "string")
+    return res.status(400).json({ error: "name must be text" });
+  let order = null;
+  if (boardOrder !== undefined) {
+    order = cleanBoardOrder(boardOrder);
+    if (!order) return res.status(400).json({ error: "board_order must be a list of board ids" });
+  }
+
+  const out = { ok: true };
+  if (name !== undefined) {
+    out.name = name.trim().slice(0, 80) || null;
+    await setUserName(db, req.user.id, out.name);
+  }
+  if (order) {
+    out.board_order = order;
+    await setBoardOrder(db, req.user.id, order);
+  }
+  res.json(out);
 }));
 
 app.get("/auth/:token", authLimiter, wrap(async (req, res) => {
@@ -794,7 +841,10 @@ app.patch("/api/admin/users/:id/boards", requireAdmin, wrap(async (req, res) => 
 
 // --- boards ---
 
-// Every board this user may see, in listBoards order. The check goes through the
+// Every board this user may see, in the READER's own arrangement (arrangeFor
+// below) — which is the whole of that feature for the three routes that call
+// this. A board listing that must NOT follow a reader, the admin ledger, goes
+// to listBoards directly and says so there. The check goes through the
 // shared per-board helper rather than one batched board_members read: a second
 // authorization path is exactly the thing that drifts when the role rules move.
 // It is only fanned out so the lookups overlap instead of serializing (a global
@@ -806,7 +856,31 @@ app.patch("/api/admin/users/:id/boards", requireAdmin, wrap(async (req, res) => 
 async function accessibleBoards(user) {
   const all = await listBoards(db);
   const ok = await Promise.all(all.map((b) => canAccessBoard(db, b.id, user)));
-  return all.filter((_, i) => ok[i]);
+  return arrangeFor(user, all.filter((_, i) => ok[i]));
+}
+
+// The reader's own arrangement (planning/board-arrangement-plan.md), applied to
+// the boards they can see.
+//
+// Sorting HERE is what makes the feature free at every surface it covers: the
+// switcher (/api/boards) and the index (/api/boards/overview) both come out of
+// accessibleBoards, and both already render in received order, so neither
+// client learns anything about ordering. /api/admin/boards reads listBoards
+// directly and keeps created_at — that table is the instance's ledger, and a
+// per-reader shelf order there would make two admins' screenshots disagree.
+//
+// Unranked boards sort last in the order they arrived, which Array#sort being
+// stable gives us rather than a tiebreaker. That is also the entire lifecycle:
+// a board created or shared since the last drag has no rank and lands at the
+// end; an id whose board is gone matches nothing. Neither needs a write.
+const UNRANKED = Number.MAX_SAFE_INTEGER;
+function arrangeFor(user, boards) {
+  const order = Array.isArray(user?.board_order) ? user.board_order : [];
+  if (!order.length) return boards;
+  const rank = new Map(order.map((id, i) => [id, i]));
+  // In place is safe: `boards` is the fresh array filter() just produced, never
+  // the listBoards rows themselves.
+  return boards.sort((a, b) => (rank.get(a.id) ?? UNRANKED) - (rank.get(b.id) ?? UNRANKED));
 }
 
 app.get("/api/boards", requireAuth, wrap(async (req, res) => {

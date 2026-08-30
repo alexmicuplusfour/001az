@@ -26,6 +26,12 @@
     </header>
     <div id="gate" class="gate">Checking access…</div>
     <main id="boards-grid" hidden></main>
+    <!-- Where the arrange grip's arrow keys say what moved where
+         (planning/board-arrangement-plan.md). Declared here, not built in JS:
+         a live region has to be in the document BEFORE its text changes or the
+         change goes unannounced, and a sibling of the grid rather than a child,
+         since a child would take a grid cell and open a hole in the row. -->
+    <p id="arrange-note" class="vis-hidden" aria-live="polite"></p>
     <script src="/boards.js" type="module"></script>
   </body>
 </html>

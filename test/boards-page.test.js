@@ -82,17 +82,28 @@ globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} 
 globalThis.Audio = class { play() { return Promise.resolve(); } };
 
 const BOARD = "b-boot";
+const OTHER = "b-second";
 const served = { signals: [{ board_id: BOARD, failed_at: 5000, alerts_unseen: 2, diagnostic_at: null }] };
 
+// TWO boards, because one is the case where half the card's controls don't
+// exist: the rearrange grip only renders for a reader with something to
+// rearrange (planning/board-arrangement-plan.md). The second is also managed,
+// so the tools cluster is exercised holding both buttons.
 globalThis.fetch = async (url) => {
   const body =
     url.includes("/api/me") ? { id: 1, name: "Boot", is_admin: false } :
     url.includes("/api/boards/overview")
-      ? [{ id: BOARD, name: "People", count: 2, facet_count: 0, has_mapping: false, manage: false, preview: [] }]
+      ? [
+          { id: BOARD, name: "People", count: 2, facet_count: 0, has_mapping: false, manage: false, preview: [] },
+          { id: OTHER, name: "Places", count: 0, facet_count: 0, has_mapping: false, manage: true, preview: [] },
+        ]
       : url.includes("/api/boards/signals") ? served.signals : null;
   if (body === null) throw new Error("unexpected fetch " + url);
   return { ok: true, status: 200, json: async () => body };
 };
+
+const toolsOf = (w) => w.children.find((c) => c.className === "bc-tools");
+const toolClasses = (w) => (toolsOf(w)?.children || []).map((c) => c.className);
 
 let grid, wrap, card;
 let armed = 0;
@@ -117,8 +128,27 @@ before(async () => {
 after(() => store.clear());
 
 test("the page boots and renders a card per board", () => {
-  assert.equal(grid.children.length, 1);
+  assert.equal(grid.children.length, 2);
   assert.ok(card, "the wrapper holds a board-card link");
+});
+
+test("every card gets a rearrange grip once there is more than one board", () => {
+  assert.deepEqual(toolClasses(grid.children[0]), ["bc-grip"]);
+  // …and the manager's pencil rides in the same cluster, grip first, so the
+  // two never have to know about each other's presence to be placed.
+  assert.deepEqual(toolClasses(grid.children[1]), ["bc-grip", "bc-edit"]);
+});
+
+test("the card link opts out of the browser's own drag", () => {
+  // A link is draggable by default, which would make grabbing anywhere on a
+  // card start a URL drag instead of the rearrange the grip owns.
+  assert.equal(card.draggable, false);
+});
+
+test("a card the signals response doesn't mention stays dark", () => {
+  const other = grid.children[1];
+  assert.equal(other.children.filter((c) => c.className === "btn-dot").length, 0);
+  assert.ok(!other.classes.has("has-dot"));
 });
 
 test("the wrapper carries its board id, which is how a repaint finds its way back", () => {

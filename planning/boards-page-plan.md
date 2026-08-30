@@ -468,8 +468,10 @@ is exactly that case; the empty-board card keeps it to copy + placeholder.
   ever grates, the fix is a `selectFace` pass server-side, not client patching.
 - **Per-board membership lookups** use the shared helpers, fanned out rather
   than batched — see the query plan for why that's deliberate.
-- **Board ordering** — `listBoards` order for now. [board-sorting-plan.md](board-sorting-plan.md)
-  territory if members want recency/pinning; the endpoint shape doesn't
-  preclude it.
+- **Board ordering** — CLOSED 2026-08-30 by
+  [board-arrangement-plan.md](board-arrangement-plan.md): the reader arranges
+  the cards by hand and the order rides on their account, applied server-side in
+  `accessibleBoards`. The endpoint shape did not have to change, as predicted —
+  the page still renders in received order.
 - **Live counts** — the page is fetch-on-load, no delta poll. It's a lobby,
   not a dashboard; the gallery's polling machinery stays where it is.

@@ -25,8 +25,21 @@ import { ICONS, fmtDuration } from "./utils.js";
 import { openBoardModal } from "./board-modal.js";
 import { applyBoardDot } from "./board-signal.js";
 import { createTicker } from "./ticker.js";
+import { toast } from "./toast.js";
 
 const LOGIN = "/login.html?next=%2Fboards";
+
+const gridEl = () => document.getElementById("boards-grid");
+
+// Arrangement state — the section that uses it is "rearranging the grid",
+// far below. Declared UP HERE because the boot block runs during module
+// evaluation and render() reads `saveTimer` synchronously: a `let` further down
+// would still be in its temporal dead zone at that moment. That is the hazard
+// boards-page.test.js exists to catch, and it has caught it once already.
+let savedOrder = [];  // the sequence the server last confirmed
+let dragging = null;  // the card in flight
+let home = null;      // …and the sibling it was sitting in front of, for Escape
+let saveTimer = null;
 
 const me = await fetch("/api/me", { cache: "no-store" })
   .then((r) => r.json())
@@ -42,8 +55,9 @@ if (!me) {
 } else {
   document.getElementById("gate").hidden = true;
   document.querySelector("header").hidden = false;
-  document.getElementById("boards-grid").hidden = false;
+  gridEl().hidden = false;
   renderToolbar();
+  initArrange();
   // In parallel, and deliberately not awaited together: the grid renders on the
   // overview and the dots attach when signals land. The gallery's own precedent
   // — "the button is drawn immediately either way, and only the dot waits."
@@ -117,7 +131,11 @@ function openUserMenu(anchorEl) {
 // --- the board grid ---
 
 async function render() {
-  const grid = document.getElementById("boards-grid");
+  const grid = gridEl();
+  // A save still queued from a drag is about the cards that are about to be
+  // replaced. Dropping it is what keeps "the DOM is the model" honest — the
+  // model is the cards on screen, and these are on their way out.
+  clearTimeout(saveTimer);
   let boards;
   try {
     boards = await api("GET", "/api/boards/overview");
@@ -130,7 +148,11 @@ async function render() {
     grid.replaceChildren(note("No boards yet — ask an admin for access."));
     return;
   }
-  grid.replaceChildren(...boards.map(cardFor));
+  // The response IS the reader's arrangement — the server sorts it (server.js
+  // arrangeFor), so this page never sorts. Remembering it is what lets a drag
+  // that lands back where it started cost nothing.
+  savedOrder = boards.map((b) => b.id);
+  grid.replaceChildren(...boards.map((b) => cardFor(b, boards.length > 1)));
 }
 
 // ── the attention dots (planning/boards-signals-plan.md) ─────────────────────
@@ -151,7 +173,10 @@ const signals = new Map();
 // The cards on screen. Also the answer to "is there anything to poll for" —
 // which is why nothing tracks that separately: a second structure saying how
 // many boards exist is a second thing to clear on every exit from render().
-const wraps = () => document.querySelectorAll("#boards-grid .bc-wrap");
+// An array rather than the live NodeList: the arrange path needs indexOf and
+// map off the same accessor, and one answer to "the cards on screen, in order"
+// is the whole point of there being an accessor at all.
+const wraps = () => [...document.querySelectorAll("#boards-grid .bc-wrap")];
 
 // 60 s, not the gallery's 20 s, and the same ticker so the two pages cannot
 // disagree about what a hidden tab does. This page is a lobby rather than a
@@ -212,7 +237,7 @@ const applyDot = (wrap) => applyBoardDot(wrap, signals.get(wrap.dataset.board));
 // lands on the same URL the toolbar's board switcher uses. A manager's pencil
 // rides alongside it in the wrapper — see .bc-wrap in boards.css for why it
 // can't live inside the link.
-function cardFor(b) {
+function cardFor(b, arrangeable) {
   const card = document.createElement("a");
   card.className = "board-card";
   card.href = `/?board=${encodeURIComponent(b.id)}`;
@@ -235,32 +260,209 @@ function cardFor(b) {
   body.append(name, meta);
 
   card.append(faceFor(b), body);
+  // A link is draggable by default, and that default would eat the rearrange:
+  // grabbing anywhere on a card would start a URL drag instead. The wrapper is
+  // the draggable one, and only while the grip is held (gripFor).
+  card.draggable = false;
 
   const wrap = document.createElement("div");
   wrap.className = "bc-wrap";
   wrap.dataset.board = b.id; // what lets paintDots find its way back to the row
   wrap.appendChild(card);
-  if (b.manage) wrap.appendChild(editBtn(b));
+
+  // The card's controls, as one cluster rather than each button positioning
+  // itself: the grip only exists for a reader with more than one board and the
+  // pencil only for a manager, so any of the four combinations can occur, and
+  // absolute coordinates per button would have to encode every one of them.
+  const tools = document.createElement("div");
+  tools.className = "bc-tools";
+  if (arrangeable) tools.appendChild(gripFor(b.name, wrap));
+  if (b.manage) tools.appendChild(editBtn(b));
+  if (tools.children.length) wrap.appendChild(tools);
+
   applyDot(wrap);
   return wrap;
+}
+
+// The two card controls share a stylesheet rule (.bc-tools > button) because
+// they are one kind of thing: an icon button sitting ON a link, which is what
+// the swallowed click is for — without it, pressing either would navigate to
+// the board. Built here so a third control cannot drift from the pair.
+function cardToolBtn(className, icon, label, onClick) {
+  const btn = document.createElement("button");
+  btn.className = className;
+  btn.type = "button";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.innerHTML = icon;
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick?.(e);
+  });
+  return btn;
 }
 
 // Board settings. `canEditAI` gates the admin-only half of the modal (AI keys,
 // models, the mapping pane); a board-admin gets the content-only editor, which
 // is the same split the gallery toolbar's pencil applies.
-function editBtn(b) {
-  const btn = document.createElement("button");
-  btn.className = "bc-edit";
-  btn.type = "button";
-  btn.title = `Board settings — ${b.name}`;
-  btn.setAttribute("aria-label", `Board settings — ${b.name}`);
-  btn.innerHTML = ICONS.pencil;
-  btn.addEventListener("click", (e) => {
-    e.preventDefault(); // the pencil sits over a link; don't follow it
-    e.stopPropagation();
-    openBoardModal(b.id, { canEditAI: !!me.is_admin, onSaved: render });
+const editBtn = (b) =>
+  cardToolBtn("bc-edit", ICONS.pencil, `Board settings — ${b.name}`, () =>
+    openBoardModal(b.id, { canEditAI: !!me.is_admin, onSaved: render })
+  );
+
+// ── rearranging the grid (planning/board-arrangement-plan.md) ────────────────
+//
+// The order is the READER's, kept on their account, and the server hands it back
+// already applied (server.js arrangeFor) — so this section only has to produce a
+// new sequence and post it. Nothing here sorts, and the gallery's board switcher
+// gets the same arrangement without knowing this feature exists.
+//
+// The DOM is the model. A drag reorders the grid live and the saved order is
+// read back off it, which is why there is no array of ids to keep in step with
+// the cards — the same reason the dots keep no card index (see `wraps` above).
+//
+// Handle-only, and the handle is a <button>: a card is a link first, so making
+// the whole card draggable would put a rearrange in the way of the thing the
+// page is for. The button is also the keyboard path — arrows move the focused
+// card — which a bare `draggable` attribute could never be.
+//
+// Touch is the honest gap: HTML5 drag-and-drop does not fire for touch, so on a
+// phone the cards are read-only. Accepted rather than papered over with a
+// pointer-event reimplementation — that would mean hand-rolling the drag image,
+// the edge autoscroll and the escape-to-cancel this gets from the browser, for
+// a one-column layout where the arrangement matters least.
+//
+// The state this runs on is declared at the top of the file; see why there.
+const orderNow = () => wraps().map((el) => el.dataset.board);
+
+// Every drag event bound once, to the container. render() replaces every card
+// whenever a board is edited, so per-card handlers would be rebuilt under a
+// drag in flight — and drag events bubble, while the wrapper already carries
+// its board id for paintDots, so the target resolves to all a handler needs.
+function initArrange() {
+  const grid = gridEl();
+
+  grid.addEventListener("dragstart", (e) => {
+    const wrap = e.target?.closest?.(".bc-wrap");
+    // Ours only. The link and the tiles opt out of being drag sources (cardFor,
+    // tileFor), and the wrapper is draggable only while its grip is held — so
+    // anything else arriving here is a drag this page did not start.
+    if (!wrap?.draggable) return;
+    dragging = wrap;
+    home = wrap.nextSibling; // exactly one card moves, so its old neighbour is the undo
+    e.dataTransfer.effectAllowed = "move";
+    // Firefox refuses to start a drag with an empty dataTransfer, so it gets
+    // one — but a PRIVATE type, deliberately not text/plain or a URL. Those
+    // would make the card droppable into other apps, and into this page's own
+    // chrome, as a link the browser then navigates to.
+    e.dataTransfer.setData("application/x-board-id", wrap.dataset.board);
+    // Next tick: the browser snapshots the drag image after this handler
+    // returns, and dimming the card here would dim the ghost too. Re-checked
+    // when it fires — a drag that ends inside that gap has already run dragend,
+    // and this would otherwise dim a card that is no longer moving, for good.
+    setTimeout(() => { if (dragging === wrap) wrap.classList.add("dragging"); }, 0);
   });
+
+  grid.addEventListener("dragover", (e) => {
+    if (!dragging) return;
+    e.preventDefault(); // the only way to say "you may drop here"
+    e.dataTransfer.dropEffect = "move";
+    const over = e.target?.closest?.(".bc-wrap");
+    if (!over || over === dragging) return;
+    // One axis is enough. dragover fires on the card actually under the
+    // pointer, so which ROW we're in is already decided by which card that is;
+    // all that's left is whether we're before or after it in reading order.
+    const box = over.getBoundingClientRect();
+    const ref = e.clientX > box.left + box.width / 2 ? over.nextSibling : over;
+    // Usually the card is already exactly there: this fires tens of times a
+    // second, most of them over the same half of the same card. insertBefore
+    // re-inserts even when nothing moves, and that write dirties the layout
+    // which the getBoundingClientRect above then has to flush — so the idle
+    // case would pay a full grid reflow per event to change nothing.
+    if (ref === dragging || dragging.nextSibling === ref) return;
+    grid.insertBefore(dragging, ref);
+  });
+
+  // Without this the browser applies its own default to the drop.
+  grid.addEventListener("drop", (e) => { if (dragging) e.preventDefault(); });
+
+  grid.addEventListener("dragend", (e) => {
+    const wrap = dragging;
+    if (!wrap) return;
+    dragging = null;
+    wrap.draggable = false;
+    wrap.classList.remove("dragging");
+    // Escape (and a drop off the grid) reports "none" — put the card back in
+    // front of the neighbour it was picked up from, `null` meaning it was last.
+    // The preview was a real DOM move, so cancelling has to be a real move
+    // back; leaving it would save an arrangement the reader walked away from.
+    if (e.dataTransfer?.dropEffect === "none") grid.insertBefore(wrap, home);
+    else scheduleSave();
+    home = null;
+  });
+}
+
+function gripFor(name, wrap) {
+  const btn = cardToolBtn("bc-grip", ICONS.grip, `Rearrange ${name}`);
+  // `draggable` goes on only while the grip is held, and comes off on dragend.
+  // Left on permanently it would make the whole card a drag source, since the
+  // pointer inherits it wherever inside the wrapper it lands.
+  btn.addEventListener("pointerdown", () => { wrap.draggable = true; });
+  btn.addEventListener("pointerup", () => { wrap.draggable = false; });
+  btn.addEventListener("pointercancel", () => { wrap.draggable = false; });
+  btn.addEventListener("keydown", (e) => onGripKey(e, name, wrap, btn));
   return btn;
+}
+
+// Arrows move the focused card one place along the sequence. Up/Down are bound
+// to the same step as Left/Right rather than a row's worth: the column count is
+// a viewport accident, and a key that moves by a number the reader can't see is
+// worse than one that moves by one.
+function onGripKey(e, name, wrap, btn) {
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+  if (!step) return;
+  const all = wraps();
+  const to = all.indexOf(wrap) + step;
+  if (to < 0 || to >= all.length) return; // at the end: nothing to do, and no wrap-around
+  e.preventDefault(); // …only now, so an arrow that can't move still scrolls
+  // Same phrasing as the dragover move above: the card is what travels.
+  gridEl().insertBefore(wrap, step > 0 ? all[to].nextSibling : all[to]);
+  btn.focus(); // moving a node can drop focus; the reader is mid-gesture
+  document.getElementById("arrange-note").textContent =
+    `${name} moved to position ${to + 1} of ${all.length}`;
+  scheduleSave();
+}
+
+// Coalesced, because the keyboard path can fire several moves a second while a
+// held arrow walks a card across the grid. A drag produces exactly one move and
+// pays only the delay.
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveOrder, 300);
+}
+
+async function saveOrder() {
+  const ids = orderNow();
+  // Backstop for a render that lands between this being queued and firing:
+  // an empty grid is the note element, not an empty arrangement, and storing
+  // [] would wipe the order this feature exists to keep. render() drops the
+  // timer for exactly this reason; this covers the sliver where it can't.
+  if (!ids.length) return;
+  // A drag that ends where it began is not an edit — and after a failed save
+  // this is what still knows there is something to say, since the retry is
+  // measured against what the SERVER confirmed rather than the last attempt.
+  if (ids.join() === savedOrder.join()) return;
+  try {
+    await api("PATCH", "/api/account", { board_order: ids });
+    savedOrder = ids;
+  } catch (err) {
+    // The grid on screen is now a claim the server never accepted. Say so, and
+    // re-render — which redraws from the stored arrangement, so the cards go
+    // back to the last order that is actually true.
+    toast.error(`Couldn't save the arrangement: ${err.message}`);
+    render();
+  }
 }
 
 // Capability chips: present = the board has it. Order matches the pipeline —
@@ -367,6 +569,9 @@ function tileFor(entry, slot, spares, face) {
   img.loading = "lazy";
   img.decoding = "async";
   img.alt = ""; // decorative: the card's name and count carry the meaning
+  // Images are natively draggable too, and the tile is decoration — grabbing
+  // one must not start an image drag over a card whose own drag is the grip's.
+  img.draggable = false;
   img.src = thumbUrl(entry.name);
   // A thumbnail can go missing (pruned file, lost render). Take over the slot
   // with the next spare so the pile keeps its shape; if the pile empties

@@ -891,6 +891,14 @@ export async function setUserName(db, userId, name) {
   await db.query("UPDATE users SET name=$1 WHERE id=$2", [name, userId]);
 }
 
+// The reader's board arrangement (planning/board-arrangement-plan.md), written
+// whole. The client sends the sequence it just produced, so there is no
+// per-board bookkeeping here and no way for two ids to claim one position —
+// which is the difference between storing a ranking and storing an index.
+export async function setBoardOrder(db, userId, order) {
+  await db.query("UPDATE users SET board_order=$1 WHERE id=$2", [JSON.stringify(order), userId]);
+}
+
 export async function listUsers(db) {
   // No invite token here: it's a bearer credential and only its hash is stored
   // now anyway. The admin mints a fresh link on demand (POST /users/:id/link).
@@ -1305,6 +1313,10 @@ export async function createBoard(db, name, facets = [], context = "", aiReasoni
   return id;
 }
 
+// Creation order, which is the INSTANCE's order — the admin board table reads
+// it directly and should, since those rows get compared across people. Anything
+// a member sees goes through accessibleBoards (server.js), which re-sorts into
+// the reader's own arrangement; a new reader-facing listing wants that one.
 export async function listBoards(db) {
   const { rows } = await db.query(`SELECT ${BOARD_COLS} FROM boards ORDER BY created_at ASC`);
   return rows;

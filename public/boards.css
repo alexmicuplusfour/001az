@@ -50,11 +50,13 @@ main#boards-grid {
   padding: 40px 24px;
 }
 
-/* The grid item is a WRAPPER, not the card link. A manager's edit pencil is a
-   <button>, and a button inside an <a> is invalid (and unreliable) nested
-   interactive content — so the pencil is the link's SIBLING, positioned over
-   it. The wrapper also owns the hover lift, so the card and its pencil rise
-   together; the link keeps only the shadow. */
+/* The grid item is a WRAPPER, not the card link. The card's controls (the
+   rearrange grip, the manage pencil) are <button>s, and a button inside an <a>
+   is invalid — and unreliable — nested interactive content, so they are the
+   link's SIBLINGS, positioned over it in .bc-tools. The wrapper also owns the
+   hover lift, so the card and its controls rise together; the link keeps only
+   the shadow. It is the drag unit too, for the same reason: it is the whole
+   card, controls included. */
 .bc-wrap {
   position: relative;
   display: flex;
@@ -68,8 +70,8 @@ main#boards-grid {
    circle itself — same 8px red, same white ring, same half-in/half-out corner as
    all three header dots, because it means the same thing.
 
-   Moved to the LEFT corner: the right one belongs to the manage pencil, and the
-   two must not collide or trade places on hover. The pencil is hover-revealed
+   Moved to the LEFT corner: the right one belongs to the card's controls, and
+   the two must not collide or trade places on hover. Those are hover-revealed
    and the dot is permanent, so the dot is the one that cannot move.
 
    Overridden in CSS rather than parameterised on attachBtnDot, and the reason is
@@ -82,7 +84,7 @@ main#boards-grid {
   right: auto;
   left: 0;
   transform: translate(-50%, -50%);
-  /* Above the pencil (5) and the preview tiles (1–4), which are the reason this
+  /* Above the controls (5) and the preview tiles (1–4), which are the reason this
      is needed at all: .btn-dot ships with no z-index, and a positioned element
      at `auto` paints BELOW any positioned sibling with a positive one. The tiles
      are clipped to .bc-face, but the dot's inner half overhangs into exactly
@@ -118,13 +120,24 @@ main#boards-grid {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
 }
 
-/* Manage affordance — the gallery toolbar's board-edit pencil, moved onto the
-   card. Hidden until hover (or keyboard focus, which hover alone would strand). */
-.bc-edit {
+/* The card's controls: the rearrange grip (planning/board-arrangement-plan.md)
+   and the manage pencil, as a hover-revealed cluster in the top-right corner.
+
+   One positioned box holding both, rather than coordinates per button. Each
+   appears on its own condition — the grip for a reader with more than one
+   board, the pencil for a manager — so all four combinations occur, and a
+   pencil that had to sit at right:8 alone but right:34 beside a grip would be
+   encoding the other button's existence in its own rule. The flex row means
+   neither knows about the other. */
+.bc-tools {
   position: absolute;
   top: 8px;
   right: 8px;
   z-index: 5;
+  display: flex;
+  gap: 4px;
+}
+.bc-tools > button {
   display: inline-flex;
   align-items: center;
   padding: 5px 6px;
@@ -135,19 +148,41 @@ main#boards-grid {
   backdrop-filter: blur(6px);
   color: var(--text-dim);
   cursor: pointer;
+  /* Hidden until hover — or keyboard focus, which hover alone would strand,
+     and which is the whole arrow-key path's way onto the card. */
   opacity: 0;
   transition: opacity 0.15s, color 0.15s;
 }
-.bc-edit svg {
+.bc-tools > button svg {
   width: 14px;
   height: 14px;
 }
-.bc-wrap:hover .bc-edit,
-.bc-edit:focus-visible {
+.bc-wrap:hover .bc-tools > button,
+.bc-tools > button:focus-visible {
   opacity: 1;
 }
-.bc-edit:hover {
+.bc-tools > button:hover {
   color: var(--text);
+}
+/* Scoped to the cluster so it outranks the `pointer` above — a bare .bc-grip
+   is one class against that rule's class-plus-element, and would lose. */
+.bc-tools > .bc-grip { cursor: grab; }
+.bc-tools > .bc-grip:active { cursor: grabbing; }
+
+/* The card in flight. It stays in the grid and slides between its neighbours as
+   the live preview — the ghost under the pointer is the browser's copy — so it
+   is dimmed rather than hidden, which would collapse the row it came from. */
+.bc-wrap.dragging {
+  opacity: 0.4;
+}
+/* …and its pile stays shut while it travels: a card being carried is not a
+   card being inspected, and the hover fan would fire from whatever it passes
+   under. Its grip also stays lit, so the thing you are holding still shows it. */
+.bc-wrap.dragging .bc-thumb {
+  transition: none;
+}
+.bc-wrap.dragging .bc-tools > .bc-grip {
+  opacity: 1;
 }
 
 /* Fixed aspect so a row of cards lines up regardless of what the previews

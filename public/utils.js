@@ -216,6 +216,11 @@ export const ICONS = {
   bell: glyph('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
   // 2x2 tiles — "all boards", the boards page (planning/boards-page-plan.md)
   grid: glyph('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'),
+  // Drag handle — the six-dot grip, the one shape that reads as "pick this up"
+  // without a label. Filled circles rather than the family's strokes, because a
+  // 1.4-radius ring at 14px renders as grey mush; `stroke="none"` per dot so the
+  // shared stroke-width can't thicken them into blobs.
+  grip: glyph('<g fill="currentColor" stroke="none"><circle cx="9" cy="5" r="1.6"/><circle cx="15" cy="5" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="19" r="1.6"/><circle cx="15" cy="19" r="1.6"/></g>'),
   // AI-derived content (the boards page's custom-mapping chip)
   sparkle: glyph('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 14.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z"/>'),
   // Tagging consistency — two ticks, the second offset up-right. It draws the

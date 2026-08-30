@@ -1,0 +1,21 @@
+-- Per-reader board arrangement (planning/board-arrangement-plan.md): the order
+-- the boards index and the gallery's board switcher list boards in, held as an
+-- array of board ids on the READER rather than a position column on the board.
+--
+-- Per-user because a board is shared. One `position` on `boards` would mean any
+-- member's drag reshuffles everyone else's index, and it would land in every
+-- listing that reads listBoards — the admin table included, which stays in
+-- created_at order on purpose: that view is the instance's ledger, not a
+-- reader's shelf, and its rows are compared across people.
+--
+-- The array is a RANKING, not a registry, and that is what keeps it free of
+-- upkeep: an id naming a board that is gone (or was never this reader's) ranks
+-- nothing, and a board missing from the array falls to the end in created_at
+-- order. So a new board needs no write here, a deleted one needs no cleanup
+-- loop, and a membership change needs no reconciliation.
+--
+-- NOT NULL with a default rather than nullable, for the reason 0029 and 0031
+-- give: an archive written before this column doesn't name it, and loadTable
+-- only inserts the columns a manifest lists — the default is what keeps every
+-- existing backup restorable.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS board_order JSONB NOT NULL DEFAULT '[]'::jsonb;
