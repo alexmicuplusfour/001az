@@ -34,6 +34,6 @@ export default () => ({
   liveCatalog: {
     cap: "detect",
     url: () => process.env.OBJECT_DETECTOR_URL || "http://object-detector:3004",
-    note: `${NOTE} · baked at deploy (OBJECT_DETECTOR_MODEL)`,
+    note: NOTE,
   },
 });

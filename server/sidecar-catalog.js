@@ -56,10 +56,16 @@ export async function sidecarDefaultModel(provider) {
 // /health → the admin catalog shape. An image that predates the model axis
 // reports only `model`; that reads as a one-model catalog, which is exactly
 // what keeps the picker hidden for it.
+//
+// The note rides the CATALOG, not each model: "runs on-server · no API key" is
+// a fact about the engine, and stamping it on every option made a two-model
+// dropdown repeat the same sentence twice while saying nothing about either
+// model. A keyed provider's notes stay per-model, because there they genuinely
+// differ (speed, price, context).
 function catalogOf(body, note) {
   const models = (Array.isArray(body?.models) ? body.models : [body?.model]).filter(Boolean);
   if (!models.length) return null;
-  return { default: body.model || models[0], models: models.map((id) => ({ id, note })) };
+  return { default: body.model || models[0], models: models.map((id) => ({ id })), note };
 }
 
 // provider name → { cap, catalog } for every sidecar-backed engine that

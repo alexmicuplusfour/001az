@@ -410,7 +410,9 @@ export function planSection(cap, provider, keys) {
   const catalog = capCatalog(provider.ai?.provides, cap);
   const model = !catalog || (onDevice && !offersChoice(catalog.models))
     ? { note: catalog?.models?.[0]
-        ? `${catalog.models[0].id} — ${catalog.models[0].note}`
+        // The engine's note when it carries one (a live sidecar catalog), else
+        // the model's own (a descriptor's curated list).
+        ? [catalog.models[0].id, catalog.note || catalog.models[0].note].filter(Boolean).join(" — ")
         : "model baked at deploy — the sidecar names it when reachable" }
     : { catalog: { models: catalog.models, defaultModel: catalog.default } };
 

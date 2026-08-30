@@ -31,6 +31,6 @@ export default () => ({
   liveCatalog: {
     cap: "transcribe",
     url: () => process.env.TRANSCRIBER_URL || "http://transcriber:3003",
-    note: "runs on-server · no API key · baked at deploy (BAKE_MODELS)",
+    note: "runs on-server · no API key",
   },
 });

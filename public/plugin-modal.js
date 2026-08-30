@@ -75,7 +75,14 @@ function slotButton(label, isDefault, sels, apply) {
 // read as instructions, so an untouched slot section can't be mistaken for a
 // configured one.
 const pickKey = (p) => `Select a ${p.ai.keyless ? "connection" : "key"}`;
-const PICK_MODEL = "Select a model";
+// …and the model select's empty state NAMES what leaving it alone will use.
+// Saving without a pick has always fallen back to the catalog's default (see
+// selVals below), so "Select a model" was the one label here that wasn't true:
+// it read as "nothing will happen until you choose" while a choice was already
+// implied. Naming it keeps the placeholder honest without pre-selecting a
+// suggestion as though it were a decision — the board modal's "App default
+// (…)" row says the same thing the same way.
+const pickModel = (defaultModel) => (defaultModel ? `Default (${defaultModel})` : "Select a model");
 
 // Live commit for a SETTINGS control — the plugin modals carry no Save
 // buttons; each field commits itself on `change` (blur for typed input,
@@ -583,7 +590,7 @@ function capabilitySection(cap, p, ctx, reload) {
     const syncLive = () => syncModelPicker(modelSel, plan.model.catalog, keySel ? (keySel.value === "env" ? "env" : Number(keySel.value) || null) : null, {
       kind: cap.declaredBy,
       saved: plan.holder && (!keySel || keySel.value === plan.preselect) ? plan.savedModel : null,
-      placeholder: PICK_MODEL,
+      placeholder: pickModel(plan.model.catalog.defaultModel),
     });
     if (keySel) keySel.addEventListener("change", syncLive);
     syncLive();
