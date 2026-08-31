@@ -23,7 +23,17 @@ services:
       # needs a real default: the sidecar does int() on it, empty would crash
       OCR_MAX_PAGES: ${OCR_MAX_PAGES:-20}
 
+  # The two heavy sidecars are OPT-IN: ~1.2GB and ~3GB of image, most of it
+  # model weights, for capabilities a first run rarely touches. A plain
+  # `docker compose up -d` brings up the app, its database and the extractor
+  # (~3.5GB, minutes); add either engine with ONE line in .env —
+  #   COMPOSE_PROFILES=transcribe,detect
+  # Without one, its capability reads `unavailable` on the admin Capabilities
+  # tab (with whatever paid providers could serve it instead), audio waits
+  # untranscribed rather than failing, and nothing is billed for the gap.
+  # See planning/sidecar-presence-plan.md.
   transcriber:
+    profiles: ["transcribe"]
     build:
       context: ./transcriber
       args:
@@ -56,6 +66,7 @@ services:
       start_period: 120s
 
   object-detector:
+    profiles: ["detect"] # opt-in — see the transcriber's note above
     build:
       context: ./object-detector
       args:
@@ -144,15 +155,16 @@ services:
     volumes:
       - appdata:/data
       - ./ingest-root:/data/ingest
+    # Only the database is a real startup dependency — the app reads it at
+    # boot. The sidecars are called lazily, per job, and an unreachable one is
+    # already a transient the worker retries (an ABSENT one is a wait it never
+    # even claims: sidecar-presence-plan.md). Naming them here would also make
+    # them un-optional: compose refuses a project whose depends_on names a
+    # service its profiles left out, which is exactly what the two heavy ones
+    # now are.
     depends_on:
       db:
         condition: service_healthy
-      extractor:
-        condition: service_started
-      transcriber:
-        condition: service_started
-      object-detector:
-        condition: service_started
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s

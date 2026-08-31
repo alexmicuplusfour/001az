@@ -46,14 +46,14 @@ a live connector.
   text-only, with a vendor whose quirks diverge from the OpenAI defaults).
 - **Transcription** — audio items are transcribed before tagging, so a
   recording is tagged and searched by what's spoken. An on-device Whisper
-  sidecar works out of the box — with on-device speaker diarization, so a
-  conversation reads as labeled, clickable speaker paragraphs; a paid provider
-  (e.g. OpenAI) can take over app-wide or per board — a podcast board on a
-  paid engine while every other board stays on the free one.
+  sidecar (opt-in, see the Quickstart) brings speaker diarization with it, so
+  a conversation reads as labeled, clickable speaker paragraphs; a paid
+  provider (e.g. OpenAI) can serve instead, app-wide or per board — a podcast
+  board on a paid engine while every other board stays on the free one.
 - **Object detection** — a board's *object* fields find what's **in** an image
   (open-vocabulary, query-driven), so items become searchable by their
-  contents. An on-device LLMDet sidecar is the default; provider-backed
-  detection slots in the same way, app-wide or per board.
+  contents. An on-device LLMDet sidecar (opt-in) or a provider-backed
+  detector, app-wide or per board.
 - **Entities & instances** — an entity is a thin row (its identity + structured
   fields) sitting above one or more per-file *instances*, each with their own
   fields and tags. Merge re-parents instances, split breaks them out, and both
@@ -157,6 +157,40 @@ Caddy ── TLS + reverse-proxy ──► Node/Express (server/server.js)
 `gallery/` (originals), `thumbnails/`, and the Postgres data are server-owned
 runtime state and are not in git.
 
+## Quickstart
+
+```sh
+cp .env.example .env      # every value has a working local default
+docker compose up -d
+```
+
+Then open http://localhost and claim the instance (the first visitor sets the
+admin email + password).
+
+That base stack is Caddy + the app + Postgres + the extractor — roughly 3.5 GB
+of images. The two **on-device AI engines are opt-in**, because between them
+they are more image weight than everything else combined, almost all of it
+model files:
+
+| Add to `.env` | Starts | Cost | Gives you |
+|---|---|---|---|
+| *(nothing)* | caddy, app, db, extractor | ~3.5 GB | uploads, previews, PDF/docx text, tagging, extraction, semantic search |
+| `COMPOSE_PROFILES=transcribe` | + whisper sidecar | +~1.2 GB | speech-to-text with speaker labels, on-device, no API key |
+| `COMPOSE_PROFILES=detect` | + LLMDet sidecar | +~3 GB | open-vocabulary object detection in images, on-device, no API key |
+
+Both together: `COMPOSE_PROFILES=transcribe,detect`. Changing the line and
+re-running `docker compose up -d` is the whole operation.
+
+**Nothing breaks without them.** A capability whose engine isn't installed
+reads *unavailable* on the admin **Capabilities** tab, which also names the
+paid providers you could bind instead (OpenAI transcription, a vision model
+for detection) — bind one and that capability works with no sidecar at all.
+Until something serves it, audio simply ingests untranscribed and waits; no
+item fails and nothing is billed for the gap.
+
+AI tagging needs a provider key either way — set `ANTHROPIC_API_KEY` in `.env`
+or add any provider's key on the Plugins page.
+
 ## Local development
 
 The reference stack is Docker Compose (Caddy + app + Postgres). To run the app
@@ -237,9 +271,16 @@ sensible defaults; see the top of `server/server.js`, `server/worker.js`,
 The reference setup is the Docker Compose stack (`docker-compose.yml`): Caddy
 terminates TLS and reverse-proxies to the Node app, which serves the frontend
 and its own `/gallery` + `/thumbnails` (both require a session), backed by
-Postgres. `cp .env.example .env`, fill it in, `docker compose up -d`. Secrets
-live in `.env`, never in the repo. `deploy.ps1` builds the image, ships it over
-SSH (no registry), and restarts the stack.
+Postgres. `cp .env.example .env`, fill it in, `docker compose up -d` (see the
+Quickstart above for the opt-in engines). Secrets live in `.env`, never in the
+repo. `deploy.ps1` builds the images, ships only the ones the target doesn't
+already have (content-digest match — an unchanged sidecar is retagged in place
+rather than re-sent), and restarts the stack over SSH, no registry involved.
+A host that runs a reduced set names it once in `deploy.local.json`
+(`"exclude": ["transcriber", "object-detector"]`): those are never built or
+shipped, their containers and images are removed from the host, and the
+deploy keeps the host's `COMPOSE_PROFILES` in step so a bare compose command
+there starts the same set.
 
 ## Security & operations
 
