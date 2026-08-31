@@ -30,6 +30,19 @@ import { PROVIDERS, declaredCatalog } from "./providers.js";
 import { CAPABILITY, CAPABILITY_DEFS, configFieldView } from "./capabilities.js";
 import { getSetting, getAiKey } from "./db.js";
 import { pluginInstalled } from "./plugins.js";
+import { sidecarPresent } from "./sidecar-catalog.js";
+
+// The one spelling of "the engine isn't on this host". Module-private like
+// every other miss sentence here: readers outside get it from floorMiss()
+// below, the projection that re-walks the same check — never by re-deriving
+// presence themselves and correlating it with a null resolution.
+const SIDECAR_ABSENT_MISS = "the built-in engine is not running on this server";
+
+// The provider named in a capability's own setting, read once — storedBinding
+// publishes it and floorBinding needs it, and the transcription lane walks
+// both every poll tick, where a duplicated PK SELECT is ~30k queries a day.
+const storedProviderName = async (db, cap) =>
+  (cap.binding.keys?.provider ? await getSetting(db, cap.binding.keys.provider) : null);
 
 // Why can this provider NOT serve this capability right now? Null = it can.
 // One implementation, two consumers: resolution reads it as a boolean (usable →
@@ -66,10 +79,15 @@ async function modelFor(db, cap, desc) {
 // resolver reads `.binding` and falls through; storedBindingMiss (the status
 // projection) reads `.miss` — same walk, so the reason can never disagree with
 // what resolution actually did.
+//
+// `named` (the provider SETTING, read here) rides every shape so the resolver
+// can hand it to floorBinding instead of that rung re-reading the same row —
+// the transcription lane walks this path every poll tick, where a duplicated
+// PK SELECT is ~30k queries a day.
 async function storedBinding(db, cap) {
   const keys = cap.binding.keys;
-  if (!keys) return {};
-  const named = keys.provider ? await getSetting(db, keys.provider) : null;
+  if (!keys) return { named: null };
+  const named = await storedProviderName(db, cap);
   const keyId = keys.keyId ? Number(await getSetting(db, keys.keyId)) || 0 : 0;
   const key = keyId ? await getAiKey(db, keyId) : null;
   const provider = named || key?.provider || null;
@@ -77,19 +95,20 @@ async function storedBinding(db, cap) {
     // A keyId whose row is GONE is a real miss, not "nothing stored" — the live
     // cleanup clears the setting with the row, but a restored backup can
     // resurrect the pointer without the key.
-    return keyId ? { miss: "the stored key no longer exists" } : {};
+    return keyId ? { named, miss: "the stored key no longer exists" } : { named };
   }
 
   const miss = await disqualified(db, cap, provider);
-  if (miss) return { miss };
+  if (miss) return { named, miss };
   const desc = PROVIDERS[provider];
   // A key/connection row is required unless the provider runs in-process. A
   // KEYLESS-networked provider (a self-hosted Ollama) still needs its row: that
   // is where its base_url lives, which is the whole point of the row.
   if (!desc.onDevice && (!key || key.provider !== provider))
-    return { miss: `no ${desc.keyless ? "connection" : "key"} stored for ${desc.label}` };
+    return { named, miss: `no ${desc.keyless ? "connection" : "key"} stored for ${desc.label}` };
 
   return {
+    named,
     binding: {
       provider,
       apiKey: key?.api_key ?? null,
@@ -129,7 +148,11 @@ async function boardBinding(db, cap, board) {
     // several models (model-axis-plan.md); the floor binding supplies the
     // credential shape, the board supplies the pick. Without this the pin
     // resolves to the engine's default and the choice silently evaporates.
-    const b = await floorBinding(db, cap);
+    const b = await floorBinding(db, cap, null, await storedProviderName(db, cap));
+    // The floor can now decline (its engine absent from this host, below) —
+    // a pinned engine that isn't running is a missed pin like any other, so
+    // it falls to the GLOBAL rung, loudly, never silently to another engine.
+    if (!b) return { miss: SIDECAR_ABSENT_MISS };
     return { binding: { ...b, model: pick || b.model } };
   }
 
@@ -192,9 +215,10 @@ async function envBinding(db, cap) {
 
 // What happens with no usable binding. `off`/`blocked` resolve to nothing (the
 // difference is what the CALLER does — the embed sweep pauses, the tag queue
-// requeues without consuming an attempt); `builtin` hands back the always-on
-// provider so resolution never fails; `delegate` defers to another capability.
-async function floorBinding(db, cap, board = null) {
+// requeues without consuming an attempt); `builtin` hands back the built-in
+// provider — when its engine is actually on this host; `delegate` defers to
+// another capability.
+async function floorBinding(db, cap, board = null, storedProvider) {
   const floor = cap.floor;
   if (!floor) return null;
   // Delegation forwards the board: extraction falling to "the tagger" means the
@@ -202,12 +226,23 @@ async function floorBinding(db, cap, board = null) {
   // hand-write.
   if (floor.kind === "delegate") return resolveCapability(db, floor.to, { board });
   if (floor.kind !== "builtin") return null;
+  // A sidecar-backed built-in is only a floor where its sidecar runs — a slim
+  // host deploys without one (sidecar-presence-plan.md), and handing back a
+  // binding for an engine that isn't there is how audio once retried forever.
+  // Strictly `=== false`: null means "not sidecar-backed" (no probe to fail),
+  // so a hypothetical in-process builtin stays always-on. Absence resolves to
+  // nothing, and the caller waits — blocked semantics, never an item failure.
+  if ((await sidecarPresent(floor.provider)) === false) return null;
   const desc = PROVIDERS[floor.provider];
   // A model stored ALONGSIDE this provider is the admin's pick among what the
   // built-in serves, so it rides the floor binding. A model stored for some
   // OTHER provider is not ours to use — falling back from a dead OpenAI key
   // must not hand `whisper-1` to the whisper sidecar, which never baked it.
-  const storedProvider = cap.binding.keys?.provider ? await getSetting(db, cap.binding.keys.provider) : null;
+  // `storedProvider` is required, not optional: both callers have already read
+  // it (the resolver off storedBinding, the board floor-pin off its own
+  // storedProviderName), and an optional one would have to tell "not passed"
+  // from "nothing stored" — two meanings for null on a setting whose null is
+  // meaningful.
   const pinned = storedProvider === floor.provider && cap.binding.keys?.model
     ? await getSetting(db, cap.binding.keys.model)
     : null;
@@ -215,8 +250,9 @@ async function floorBinding(db, cap, board = null) {
   return { provider: floor.provider, apiKey: null, model, keyId: null, viaFloor: true };
 }
 
-// The one resolver. Returns a binding, or null when the capability's floor is
-// `off`/`blocked` and nothing is configured.
+// The one resolver. Returns a binding, or null when nothing is configured and
+// the floor has nothing to give — it is `off`/`blocked`, or its built-in
+// engine is not running on this host.
 //
 // `ignoreEnabled` asks the question the enable button needs: "would this resolve
 // if it were on?" — used to refuse turning a capability on when nothing would
@@ -238,7 +274,7 @@ export async function resolveCapability(db, capId, { ignoreEnabled = false, boar
   if (pinned.miss) console.log(`board's pinned ${cap.noun} provider can't serve (${pinned.miss}) — falling back to the app default`);
   const stored = await storedBinding(db, cap);
   if (stored.binding) return stored.binding;
-  return (await envBinding(db, cap)) || (await floorBinding(db, cap, board));
+  return (await envBinding(db, cap)) || (await floorBinding(db, cap, board, stored.named));
 }
 
 // Why is the STORED choice not the thing serving? Null when it serves — or when
@@ -248,6 +284,19 @@ export async function resolveCapability(db, capId, { ignoreEnabled = false, boar
 export async function storedBindingMiss(db, capId) {
   const cap = CAPABILITY[capId];
   return cap ? (await storedBinding(db, cap)).miss ?? null : null;
+}
+
+// …and why did the FLOOR not catch the fall? Null when it did, or when it has
+// no reason of its own to give (`off`/`blocked`/`delegate` are states the card
+// already names). storedBindingMiss's peer, and for the same reason: a reason
+// re-derived by its reader is a reason that can drift from what resolution
+// actually did. Today one floor kind can decline — a builtin whose sidecar
+// isn't on this host — so a future kind that can decline adds its sentence
+// here and every card renders it with no edit.
+export async function floorMiss(db, capId) {
+  const floor = CAPABILITY[capId]?.floor;
+  if (floor?.kind !== "builtin") return null;
+  return (await sidecarPresent(floor.provider)) === false ? SIDECAR_ABSENT_MISS : null;
 }
 
 // What is STORED for a capability, with the floor's provider standing in when

@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startServer, adminSession, seedBoard, req, meterTotals } from "./helpers.js";
+import { startServer, adminSession, seedBoard, req, meterTotals, primeSidecars } from "./helpers.js";
 import { setPluginState, createAiKey, setSetting, getSetting, oneAudioNeedingTranscription,
   createEntity, insertItem, reprocessEntity, boardUsageSummary } from "../server/db.js";
 import { boardBindingPatch } from "../server/capability-bind.js";
@@ -63,6 +63,10 @@ test("the waveform producer is registered in the face registry", () => {
 test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 202 → poll → text)", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  // The floor tests below resolve the ENGINE, so the sidecar must read present
+  // once resolution is presence-gated (sidecar-presence-plan.md); the seeded
+  // answer keeps the probe out of this test's stub and its call ledger.
+  primeSidecars();
 
   // A stub db whose settings are all empty → no transcribe_provider → whisper.
   const db = { query: async () => ({ rows: [] }) };
@@ -132,7 +136,9 @@ test("transcribeOne: meters the clip's measured duration to its board, priced at
 
   // The whisper sidecar, stubbed at the fetch layer (URL-matched, so nothing
   // else a server tick might fetch is swallowed): submit → done, the model
-  // self-reported in the done payload.
+  // self-reported in the done payload. Present via the seeded
+  // cache (see the protocol test above).
+  primeSidecars();
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
   globalThis.fetch = async (url, opts = {}) => {
@@ -176,6 +182,7 @@ test("transcribeOne: meters the clip's measured duration to its board, priced at
 test("whisper client: a pinned model rides the submit; unpinned asks for nothing", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  primeSidecars(); // floor engine — present via the seeded cache
   const done = { ok: true, status: 200, json: async () => ({ status: "done", progress: { done_s: 1, total_s: 1 }, text: "hi", model: "medium" }) };
   const seen = [];
   globalThis.fetch = async (url, opts = {}) => {
@@ -221,6 +228,7 @@ test("whisper client: a pinned model rides the submit; unpinned asks for nothing
 test("whisper client: a done payload without turns (older sidecar image) degrades to turns: null", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  primeSidecars(); // floor engine — present via the seeded cache
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
   globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
@@ -233,6 +241,7 @@ test("whisper client: a done payload without turns (older sidecar image) degrade
 test("whisper client: failure taxonomy — lane-scope vs job-scope vs permanent", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  primeSidecars(); // floor engine — present via the seeded cache
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
   const submitOk = { ok: true, status: 202, json: async () => ({ job: "j1", status: "queued" }) };
@@ -271,6 +280,7 @@ test("whisper client: diarization progress (diarized_s) counts as liveness while
   // the diarization phase must never read as a stall.
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  primeSidecars(); // floor engine — present via the seeded cache
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
   const states = [
@@ -292,6 +302,7 @@ test("whisper client: diarization progress (diarized_s) counts as liveness while
 test("whisper client: a running job whose progress freezes is declared stalled (transient, job-scope)", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  primeSidecars(); // floor engine — present via the seeded cache
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
   globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
@@ -304,6 +315,7 @@ test("whisper client: a running job whose progress freezes is declared stalled (
 test("whisper client: deadlineMs bounds an interactive caller's wait (the admin probe)", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  primeSidecars(); // floor engine — present via the seeded cache
   const db = { query: async () => ({ rows: [] }) };
   const eng = await resolveTranscriber(db);
   globalThis.fetch = async (url, opts = {}) => (opts.method === "POST"
@@ -322,6 +334,11 @@ test("transcribeFailurePolicy: park / park-capped / backoff-item / backoff-lane"
   assert.equal(transcribeFailurePolicy(mk({ message: "transcriber unreachable (x) — will retry", transient: true }), 0), "backoff-lane");
   assert.equal(transcribeFailurePolicy(mk({ status: 503 }), 0), "backoff-lane");
   assert.equal(transcribeFailurePolicy(mk({ status: 429 }), 0), "backoff-lane");
+  // a configuration gap (no engine bound for this board) waits like a faulted
+  // job and can NEVER park, however many times it recurs — parking a clip over
+  // an unconfigured instance would turn a wait into data loss
+  assert.equal(transcribeFailurePolicy(mk({ noCount: true }), 0), "backoff-item");
+  assert.equal(transcribeFailurePolicy(mk({ noCount: true }), 99, 5), "backoff-item");
   // job-scope transients retry the item... until the cap parks it
   assert.equal(transcribeFailurePolicy(mk({ status: 500, scope: "job" }), 0), "backoff-item");
   assert.equal(transcribeFailurePolicy(mk({ transient: true, scope: "job" }), 3, 5), "backoff-item");
@@ -390,6 +407,7 @@ test("resolveTranscriber: a configured provider with no key falls back to local 
   t.after(close);
   await setPluginState(db, "ai:openai", { installed: true });
   await setSetting(db, "transcribe_provider", "openai"); // but no transcribe_key_id
+  primeSidecars(); // the fallback lands on the floor engine — present via the seeded cache
   const eng = await resolveTranscriber(db);
   assert.equal(eng.id, "whisper", "no usable key → the always-on sidecar, not an error");
 });

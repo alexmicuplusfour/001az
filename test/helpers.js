@@ -21,6 +21,11 @@ import {
   setPluginState,
   usageRows,
 } from "../server/db.js";
+// The health cache is ONE instance per process: server.js is imported with a
+// ?bust= query, but query strings don't propagate to its bare imports, so
+// sidecar-catalog.js (like worker.js and db.js) resolves once and is shared by
+// every bust and every static test import. Clearing here clears the app's.
+import { clearSidecarHealth, seedSidecarHealth } from "../server/sidecar-catalog.js";
 
 const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgres://gallery:gallery@127.0.0.1:5433/postgres";
 const TEMPLATE_DB = process.env.TEST_TEMPLATE_DB || "gallery_test_template";
@@ -37,9 +42,12 @@ export const ADMIN_EMAIL = "admin@test.local";
 // helper first, so this assignment lands ahead of it. (The two sidecar-backed
 // providers read theirs lazily off their descriptors, so those are safe either
 // way.) Tests that exercise sidecar behaviour stub the wire themselves.
-process.env.TRANSCRIBER_URL = "http://127.0.0.1:1";
-process.env.OBJECT_DETECTOR_URL = "http://127.0.0.1:1";
-process.env.EXTRACTOR_URL = "http://127.0.0.1:1";
+//
+// Named, because sidecarsUp() below restores it.
+const DEAD_SIDECAR = "http://127.0.0.1:1";
+process.env.TRANSCRIBER_URL = DEAD_SIDECAR;
+process.env.OBJECT_DETECTOR_URL = DEAD_SIDECAR;
+process.env.EXTRACTOR_URL = DEAD_SIDECAR;
 
 export async function startServer() {
   const name = "gallery_test_" + crypto.randomBytes(6).toString("hex");
@@ -217,6 +225,59 @@ export function jsonBox(payload, { status = 200, delay = 0 } = {}) {
   Object.assign(box, { payload, status, hits: [] });
   box.url = (path = "") => `http://127.0.0.1:${box.address().port}${path}`;
   return new Promise((resolve) => box.listen(0, "127.0.0.1", () => resolve(box)));
+}
+
+// What a healthy host's sidecars report on /health, keyed by provider name —
+// ONE statement of it, so the two fixtures below can't drift into describing
+// different machines.
+const SIDECAR_HEALTH = {
+  whisper: { model: "base" },
+  localDetector: { model: "iSEE-Laboratory/llmdet_tiny" },
+};
+
+// Stand the sidecar-backed engines up for a file: one jsonBox per engine
+// answering /health (a box answers every path with its payload — harmless,
+// because suites that drive the engine protocols stub globalThis.fetch, which
+// intercepts box URLs too). The descriptors read their URLs lazily, so
+// reassigning env here works after import; the health cache is cleared so the
+// dead-port defaults don't linger.
+//
+// The boxes come back mutable (jsonBox's own contract), so a test that wants
+// an engine to go down mid-file flips `status`/`payload` and clears the cache
+// — no second fixture, and no option here, for absence.
+//
+// Behavior today: the capabilities feed overlays what /health reports, so a
+// floor's `running.model` reads the box's model instead of null. Presence
+// (sidecar-presence-plan.md) reads the same probe, so files wired through this
+// keep their floor-served assertions unchanged when resolution starts gating.
+export async function sidecarsUp() {
+  const [whisper, detector] = await Promise.all([
+    jsonBox(SIDECAR_HEALTH.whisper), jsonBox(SIDECAR_HEALTH.localDetector),
+  ]);
+  process.env.TRANSCRIBER_URL = whisper.url();
+  process.env.OBJECT_DETECTOR_URL = detector.url();
+  clearSidecarHealth();
+  return {
+    whisper, detector,
+    close: async () => {
+      process.env.TRANSCRIBER_URL = DEAD_SIDECAR;
+      process.env.OBJECT_DETECTOR_URL = DEAD_SIDECAR;
+      clearSidecarHealth();
+      await Promise.all([whisper, detector].map((b) => new Promise((r) => b.close(r))));
+    },
+  };
+}
+
+// Same claim as sidecarsUp — both engines are up and report the canonical
+// bodies — stated straight into the health cache instead of over HTTP. For
+// unit tests that resolve a floor engine and then drive its protocol through
+// their own fetch stub: presence-gated resolution (sidecar-presence-plan.md)
+// reads the seeded answer, so no /health probe lands in that stub's call
+// ledger and the assertions on it stay exactly as written. A test wanting
+// absence is the inverse: clearSidecarHealth() against the dead-port defaults.
+export function primeSidecars() {
+  clearSidecarHealth();
+  for (const [provider, body] of Object.entries(SIDECAR_HEALTH)) seedSidecarHealth(provider, body);
 }
 
 // --- usage meter ---

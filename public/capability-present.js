@@ -79,6 +79,10 @@ export function presentLines(c) {
 // listed is the message.
 export function presentSupported(p) {
   if (!p.installed) return { text: `${p.label} — not added`, dim: true, link: true };
+  // A sidecar-backed engine whose sidecar isn't on this host. Dim like "not
+  // added" — this is a statement about supply, not an alarm, and the remedy
+  // is a deploy, not a click (so no link either).
+  if (engineAbsent(p)) return { text: `${p.label} — not running on this server`, dim: true, link: false };
   if (p.onDevice) return { text: `${p.label} — built-in`, dim: false, link: false };
   if (p.needsKey !== undefined) {
     // a connector provider: key presence is a boolean, not a count
@@ -110,6 +114,22 @@ export const configureTarget = (c) => c.running?.provider || c.bound?.provider |
 // extraction's own model over the TAGGER's as its source, and told the Mapping
 // pane the tagger was doing the extracting. A predicate cannot be half-copied.
 export const isDelegating = (c) => !!c.delegatesTo && !c.bound?.keyId;
+
+// --- presence (sidecar-presence-plan.md) ---
+// `present` rides ONLY entries the server actually probed — a sidecar-backed
+// engine's roster row and the floor payload. Absent field = the question does
+// not apply (a networked provider, the in-process embedder), which is why
+// every test is `=== false` and never `!p.present`: the latter reads every
+// keyed provider as missing. Named here so that rule can't be half-copied.
+export const engineAbsent = (p) => p.present === false;
+
+// Is the built-in floor a promise this host can keep? Both readers of that
+// question — the removal confirm's consequence clause and the plugin card's
+// "use the built-in instead" button — are two halves of ONE offer: promise a
+// fallback in one and withhold the button in the other and the admin is told
+// two different stories. (See isDelegating above for what happens when a
+// two-clause predicate gets copied instead of named.)
+export const floorPromises = (c) => c.floor?.kind === "builtin" && !engineAbsent(c.floor);
 
 // A provider's declared slice for one capability, or null when it advertises
 // nothing there. `provides` carries a capability-keyed object per the 7b wire
@@ -164,7 +184,10 @@ export const keyRoles = (caps, keyId) =>
 // always the next rung's.)
 export function removalStory(c) {
   if (c.env?.configured) return `${c.noun} falls back to the ${c.env.var} env var`;
-  if (c.floor?.kind === "builtin") return `${c.noun} falls back to ${c.floor.label}`;
+  // A builtin floor is only a promise where its engine is running — on a host
+  // without it, the truthful consequence is the tail line, not a fallback to
+  // nothing.
+  if (floorPromises(c)) return `${c.noun} falls back to ${c.floor.label}`;
   if (c.floor?.kind === "delegate") return `${c.noun} falls back to each board's ${c.delegatesToAgent || c.delegatesTo}`;
   if (c.floor?.kind === "off") return `${c.label} turns off`;
   return `${c.noun} stops until another key is bound`;
@@ -205,12 +228,15 @@ export function planBoardPicker(cap, keys, board, catalog) {
     ? `Same as the ${cap.delegatesToAgent || cap.delegatesTo}`
     : `App default (${inherit})`;
 
-  // Rows: the inherited default, every INSTALLED on-device engine (pinned by
-  // name — the built-in floor arrives via this same rule, no special case),
-  // then every key whose provider advertises. A not-installed provider's key
-  // stays pickable (defaults, not laws) but says so.
+  // Rows: the inherited default, every INSTALLED and PRESENT on-device engine
+  // (pinned by name — the built-in floor arrives via this same rule, no
+  // special case; an engine whose sidecar isn't on this host is not offered,
+  // the no-implied-choices rule), then every key whose provider advertises. A
+  // not-installed provider's key stays pickable (defaults, not laws) but says
+  // so. A STORED pin of a now-absent engine degrades like any vanished offer:
+  // preselect falls to the default row below, the pin column is never written.
   const rows = [{ value: "", label: unsetLabel }];
-  for (const p of roster.filter((p) => p.onDevice && p.installed)) {
+  for (const p of roster.filter((p) => p.onDevice && p.installed && !engineAbsent(p))) {
     rows.push({ value: p.name, label: `${p.label} — built-in` });
   }
   for (const k of keys.filter((k) => advertisers.has(k.provider))) {
@@ -436,7 +462,10 @@ export function planSection(cap, provider, keys) {
   if (cap.binding.enable && holder) {
     buttons.push({ kind: "off", label: "Turn off", toast: `${cap.label} turned off`, payload: () => ({ enabled: false }) });
   }
-  if (holder && cap.floor?.kind === "builtin" && cap.floor.provider !== provider.name) {
+  // …and only toward an engine that is actually running — a revert to an
+  // absent sidecar would bind the capability to nothing (the other half of
+  // removalStory's promise, hence the shared predicate).
+  if (holder && floorPromises(cap) && cap.floor.provider !== provider.name) {
     buttons.push({
       kind: "revert",
       label: `Use the built-in ${cap.noun} instead`,

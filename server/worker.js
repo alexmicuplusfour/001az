@@ -53,6 +53,7 @@ import {
   withTx,
   reapEmptyEntities,
 } from "./db.js";
+import { CAPABILITY } from "./capabilities.js";
 import { meterAiCall, meterAiCalls, spentDetail } from "./metering.js";
 import { learnPrices } from "./price-learner.js";
 import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
@@ -128,14 +129,19 @@ export function embedTextFor(tags = [], reasoning = {}, payload = {}) {
 export const resolveBoardAi = (db, boardEntry) =>
   resolveCapability(db, "tag", { board: { ai_key_id: boardEntry.aiKeyId, ai_model: boardEntry.aiModel } });
 
-// A missing key is a configuration gap, not an item failure: the claim gate
-// normally keeps such items unclaimed, and when its race lets one through,
-// noCount tells failOrRequeue to requeue without consuming an attempt.
-function noKeyError() {
-  const e = new Error("no API key configured");
+// A CONFIGURATION GAP: nothing is bound (or installed, or running) to do this
+// work. Not an item failure — the item is fine, the instance isn't ready — so
+// `noCount` tells every consumer to requeue without consuming an attempt:
+// failOrRequeue skips the increment and spaces the retry (db.js), the leg logs
+// skip the row, and transcribeFailurePolicy answers "wait, never park". The
+// claim queries normally keep such items unclaimed; this covers the races and
+// the per-board residue they can't express.
+export function configGapError(message) {
+  const e = new Error(message);
   e.noCount = true;
   return e;
 }
+const noKeyError = () => configGapError("no API key configured");
 
 // Generic fallback glosses for common design-vocabulary facet keys, used when
 // a facet doesn't carry its own description in the board config.
@@ -1056,6 +1062,14 @@ const TRANSCRIBE_MAX_ATTEMPTS = Number(process.env.TRANSCRIBE_MAX_ATTEMPTS) || 5
 //   backoff-item  this clip's job faulted/stalled — retry IT later, lane moves on
 //   backoff-lane  the engine itself is unwell (down, 429/5xx) — nothing would succeed
 export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_MAX_ATTEMPTS) {
+  // A configuration gap (noCount — no engine bound for this board) waits like a
+  // faulted job but must never reach the cap: parking a clip because the
+  // INSTANCE isn't configured would turn a wait into permanent data loss, and
+  // an operator fixing the binding an hour later would find it dead. First
+  // rule, so nothing below can promote it to park-capped; the caller likewise
+  // leaves attempts untouched for it, the arithmetic failOrRequeue already
+  // does for the same flag.
+  if (err?.noCount) return "backoff-item";
   const s = Number(err?.status);
   const transient = err?.transient === true || s === 429 || s === 408 || (s >= 500 && s < 600)
     || /unreachable/.test(String(err?.message));
@@ -1065,16 +1079,21 @@ export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_
 }
 
 // A board's audio→text engine. Resolution is generic (capability-resolve.js);
-// this only decides which SHAPE the binding wears — the always-on sidecar, or a
+// this only decides which SHAPE the binding wears — the on-server sidecar, or a
 // provider wire. `viaFloor` covers every way the configured choice can fail to
 // resolve: unset, an uninstalled plugin, a no-audio provider, a missing key, or
 // whisper itself (which advertises transcription with no wire) — and a board's
 // deliberate pin of the built-in, which resolves as the floor binding by
-// design. Never fails to resolve: audio must always become taggable. `board`
-// is the item's board row (slice 5) — its pin outranks the app default.
-// Exported for tests + server.
+// design. Fails to resolve only on a host running no sidecar with no provider
+// bound — audio then WAITS to become taggable (blocked semantics), it is never
+// failed. `board` is the item's board row (slice 5) — its pin outranks the app
+// default. Exported for tests + server.
 export async function resolveTranscriber(db, board = null) {
   const b = await resolveCapability(db, "transcribe", { board });
+  // Null since the floor became presence-gated: no provider bound and the
+  // whisper sidecar is not on this host. The caller waits (the lane's gate and
+  // per-item backoff), never fails the clip.
+  if (!b) return null;
   if (b.viaFloor) return whisperTranscriber(b);
   const { rpm, burst } = await aiRate(db, b.provider); // per-provider pacing, same bucket as tagging
   return {
@@ -1140,7 +1159,14 @@ export async function transcribeOne(db, galleryDir, row, retry) {
     // and the job-log stamp below records engine:model per item, so
     // per-board engines stay visible in job history.
     const board = row.board_id ? await getBoard(db, row.board_id) : null;
+    // No engine for THIS board: the claim query admits a board by the SHAPE of
+    // its pin, which can't tell a pin that resolves from one that doesn't (a
+    // key whose provider was uninstalled), and the engine can vanish between
+    // claim and resolve. The residue lands here as a configuration gap — the
+    // catch below waits it out on the clip's own backoff, spends no attempt,
+    // and folds repeats into one job row.
     const transcriber = await resolveTranscriber(db, board);
+    if (!transcriber) throw configGapError("no transcription engine on this server for this board");
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
     const { text, turns, usage } = await transcriber.transcribe(buf, file.name);
     // Meter BEFORE the landing (the tag leg's rule): the engine ran whatever
@@ -1187,7 +1213,10 @@ export async function transcribeOne(db, galleryDir, row, retry) {
     const action = transcribeFailurePolicy(err, attempts);
     if (action === "backoff-lane" || action === "backoff-item") {
       if (action !== "backoff-lane") {
-        retry.set(row.id, { attempts: attempts + 1, until: Date.now() + 60000 });
+        // A configuration gap costs no attempt (failOrRequeue's arithmetic for
+        // the same flag) — the clip waits, and the cap stays for clips that are
+        // actually failing.
+        retry.set(row.id, { attempts: attempts + (err.noCount ? 0 : 1), until: Date.now() + 60000 });
       }
       // Consecutive transient retries of one clip are one story,
       // not one row per backoff tick: fold into the clip's prior
@@ -1281,8 +1310,12 @@ function objectDetectorSidecar(binding, threshold) {
 // settings — deliberately global, never per-board.
 export async function resolveDetector(db, board = null) {
   const b = await resolveCapability(db, "detect", { board });
+  // Null since the floor became presence-gated: no provider bound and the
+  // detector sidecar is not on this host. The extract leg requeues the item
+  // without spending or counting an attempt.
+  if (!b) return null;
   const { detect_threshold: threshold } = await capabilityConfig(db, "detect");
-  // The always-on on-server object-detector sidecar — no key, resolved directly
+  // The on-server object-detector sidecar — no key, resolved directly
   // (wire: null), like the whisper transcriber.
   if (b.viaFloor) return objectDetectorSidecar(b, threshold);
   const { rpm, burst } = await aiRate(db, b.provider);
@@ -2254,6 +2287,33 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // detector pass below on a detect-only board. Still null at the return only
     // when nothing was called at all (detect fields on a non-image item), and
     // then the row says nothing rather than naming an engine that never ran.
+    // The detector resolves BEFORE the paid extraction call. In the old order
+    // it resolved inside the detect pass below — after the model was called
+    // and metered — so with the sidecar absent and nothing bound, every
+    // attempt billed extraction, threw at detection, and re-billed on retry
+    // until the cap failed the item, discarding extraction that succeeded
+    // every time. Absence now requeues before a token moves. The image-kind
+    // guard mirrors the detect pass's own: a non-image item never calls the
+    // detector (it lands "no image to detect on"), so a host without the
+    // engine must not hold items that never needed it.
+    // ONE derivation of "this item has something to detect on", read by the
+    // guard here and by the pass below. Two copies could drift — and the way
+    // they would drift is ugly: a pass that widened its notion of an image
+    // while this guard stayed narrow would leave `detector` null and throw a
+    // TypeError mid-leg, failing the item on attempts, which is the exact
+    // outcome this stage exists to prevent.
+    const detectFile = row.payload.files?.[0];
+    const detectable = objectFields.length > 0 && detectFile?.kind === "image";
+    let detector = null;
+    if (detectable) {
+      detector = await resolveDetector(db, board);
+      // A configuration gap, not an item failure (configGapError's rule): the
+      // item requeues unfailed with attempts untouched, failOrRequeue spaces
+      // the retry, and the catch below skips the job log — so the wait is
+      // quiet on every ledger and ends within a minute of an engine appearing.
+      if (!detector) throw configGapError("object detection is not available on this server — the item waits for an engine");
+    }
+
     let input = {}, usage = null, ai = null, imageRender = null, spent = null;
     if (needsLLM) {
       // Extraction's whole ladder in one call: the board's extract pin, the
@@ -2338,20 +2398,20 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // to detect (empty, not an error); a detector failure throws → the extract leg
     // requeues, like extractor downtime. Boxes arrive canonical (xyxy, 0..1).
     if (objectFields.length) {
-      const file = row.payload.files?.[0];
-      const image = file?.kind === "image"
-        ? await fs.promises.readFile(path.join(galleryDir, file.name))
-        : null;
-      if (!image) {
+      // `detectable` (and with it `detector`) was settled above, before the
+      // extraction spend — this reads that one answer rather than deriving a
+      // second one.
+      if (!detectable) {
         for (const f of objectFields) fields[f.key] = { v: [], why: "no image to detect on" };
       } else {
+        const image = await fs.promises.readFile(path.join(galleryDir, detectFile.name));
         for (const f of objectFields) fields[f.key] = { v: [], why: "No objects detected" };
         // Build the query set, run ONE detection pass, demux boxes back to fields
         // by matched label (detectionDemux owns the sidecar-matching normalization).
         // The image is capped + oriented first (imageForDetection) — same boxes,
-        // far less to ship to the single-threaded sidecar.
+        // far less to ship to the single-threaded sidecar. `detector` resolved
+        // above, before the extraction spend.
         const demux = detectionDemux(objectFields);
-        const detector = await resolveDetector(db, board);
         const { objects, usage: detected } = await detector.detect(await imageForDetection(image), demux.queries);
         // Meter at the paid call, like every other leg — everything below can
         // throw and the bill must not ride on it. One call and one image are
@@ -2760,13 +2820,26 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // caps here, so a pathological clip can't freeze the whole audio lane the way
   // the old single global backoff did — the query below skips clips in backoff.
   const transcribeRetry = new Map();
+  // Whether the app-wide chain resolves at all — its floor is presence-gated
+  // since sidecar-presence-plan.md, so on a host running no sidecar with
+  // nothing bound this is false and ONLY boards with their own pin are
+  // servable. The claim query takes it from here (board pins are a column
+  // test, so it filters them in SQL rather than claiming clips it would only
+  // put back): on an engine-less host the lane idles without touching an item
+  // — nothing claimed, failed, or logged — and the first tick after an engine
+  // appears picks the backlog straight up.
+  const transcribeServed = async () => ({
+    globally: !!(await resolveCapability(db, "transcribe")),
+    pinCols: CAPABILITY.transcribe.binding.boardKeys,
+    floorProvider: CAPABILITY.transcribe.floor?.provider ?? null,
+  });
   const transcribeLoop = (async () => {
     while (running) {
       let did = false;
       try {
         if (Date.now() >= transcribeBackoffUntil) {
           const waiting = [...transcribeRetry.entries()].filter(([, r]) => r.until > Date.now()).map(([id]) => id);
-          const row = await oneAudioNeedingTranscription(db, waiting);
+          const row = await oneAudioNeedingTranscription(db, waiting, await transcribeServed());
           if (row) {
             did = true;
             if (await transcribeOne(db, galleryDir, row, transcribeRetry) === "backoff-lane") {

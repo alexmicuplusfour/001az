@@ -2746,15 +2746,45 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 // key-exists test (an empty-string transcript for a silent clip still counts).
 // excludeIds: clips in per-item retry backoff (the worker's in-memory ledger) —
 // skipped so one repeatedly-failing clip doesn't head-of-line-block the lane.
-export async function oneAudioNeedingTranscription(db, excludeIds = []) {
+// `served` is the transcription lane's claim gate, the shape claimFairBatch
+// (above) uses for tagging: don't hand back work no engine can do. When the
+// app-wide chain resolves nothing — no provider bound and the built-in's
+// sidecar isn't on this host (sidecar-presence-plan.md) — only boards carrying
+// their OWN pin are servable, so the filter moves into SQL rather than being
+// approximated in JS, where every unservable clip would still be claimed,
+// resolved, logged and backed off once a minute forever.
+//
+// A pin OF the absent built-in is not a pin that can serve, so the floor's
+// provider is excluded by name — the name arrives from the capability registry,
+// never spelled here. `IS DISTINCT FROM` so a null floorProvider (a capability
+// with no built-in) still admits every named pin.
+//
+// Coarse on purpose, exactly like the tag queue's `b.ai_key_id IS NOT NULL`: a
+// pin that exists but can't resolve (its provider uninstalled) passes here and
+// is handled per item, unfailed, by transcribeOne.
+export async function oneAudioNeedingTranscription(db, excludeIds = [], served = {}) {
+  const { globally = true, pinCols = null, floorProvider = null } = served;
+  // The floor's name is bound only where the SQL references it — a caller that
+  // names no pin columns (the plain "give me the next clip" reads) would
+  // otherwise send a parameter the statement never mentions, which Postgres
+  // refuses outright.
+  const params = [excludeIds, globally];
+  const pins = [];
+  if (pinCols?.keyId) pins.push(`b.${pinCols.keyId} IS NOT NULL`);
+  if (pinCols?.provider) {
+    params.push(floorProvider);
+    pins.push(`(b.${pinCols.provider} IS NOT NULL AND b.${pinCols.provider} IS DISTINCT FROM $${params.length})`);
+  }
   const { rows } = await db.query(
-    `SELECT id, board_id, entity_ids, payload FROM items
-     WHERE payload->'files'->0->>'kind'='audio'
-       AND NOT (payload ? 'transcript')
-       AND NOT (payload ? 'transcript_error')
-       AND NOT (id = ANY($1::bigint[]))
-     ORDER BY created_at DESC LIMIT 1`,
-    [excludeIds]
+    `SELECT i.id, i.board_id, i.entity_ids, i.payload FROM items i
+     LEFT JOIN boards b ON b.id = i.board_id
+     WHERE i.payload->'files'->0->>'kind'='audio'
+       AND NOT (i.payload ? 'transcript')
+       AND NOT (i.payload ? 'transcript_error')
+       AND NOT (i.id = ANY($1::bigint[]))
+       AND ($2 OR ${pins.length ? pins.join(" OR ") : "FALSE"})
+     ORDER BY i.created_at DESC LIMIT 1`,
+    params
   );
   return rows[0] || null;
 }

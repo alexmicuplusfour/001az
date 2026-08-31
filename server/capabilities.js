@@ -34,7 +34,15 @@
 
 // The floor kinds, all five of which exist in the tree today:
 //   builtin   a registered provider with no wire; the engine is the sidecar
-//             adapter. Resolution NEVER fails.        (transcribe, detect)
+//             adapter. Resolves whenever that engine is actually on this host
+//             — a sidecar-backed built-in (one whose descriptor declares
+//             `liveCatalog`, the address its /health answers on) is only a
+//             floor where its sidecar runs, and a slim install may deploy
+//             without one. Absent, it resolves to NOTHING and the capability
+//             behaves as `blocked`: work waits, it is never failed. Presence
+//             is a runtime fact about the PROVIDER, so it is asked of the
+//             descriptor at resolution (capability-resolve.js) rather than
+//             declared as a second truth here.        (transcribe, detect)
 //   off       resolves to nothing until an enable flag is set.        (embed)
 //   blocked   resolves to nothing and work waits unserved — the queue requeues
 //             via noKeyError's noCount rather than failing.             (tag)

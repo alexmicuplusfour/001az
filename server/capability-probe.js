@@ -17,6 +17,11 @@ import { resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector 
 import { sidecarDefaultModel } from "./sidecar-catalog.js";
 
 const bad = (message) => Object.assign(new Error(message), { status: 400 });
+// The floors can decline now (sidecar-presence-plan.md): a host running no
+// sidecar with no provider bound serves neither transcription nor detection.
+// One sentence for both, so the two buttons can't answer differently.
+const notServed = (noun) =>
+  bad(`${noun} isn't served on this instance — the built-in sidecar isn't running and no provider is bound`);
 
 // A ~0.25s 8 kHz mono PCM WAV of a quiet tone — small, valid audio for a
 // reachability probe. The endpoint accepts it and returns (transcript is
@@ -55,11 +60,15 @@ const PROBES = {
     await meterAiCall(db, APP_SCOPE, { capability: "embed", provider: em.provider, model: em.model }, usage);
     return { provider: em.provider, model: em.model };
   },
-  // Transcription and detection probe the ENGINE, which always resolves — so
-  // neither has a "not configured" case. The engine wraps itself in the health
-  // ledger already (the sidecar floors have none, by design).
+  // Transcription and detection probe the ENGINE. Since the floors became
+  // presence-gated (sidecar-presence-plan.md), resolution CAN come up empty —
+  // a host running no sidecar with no provider bound — and that is this
+  // button's "not configured" case, a readable 400 like embed's. The engine
+  // wraps itself in the health ledger already (the sidecar floors have none,
+  // by design).
   transcribe: async (db) => {
     const t = await resolveTranscriber(db);
+    if (!t) throw notServed("transcription");
     // The deadline keeps this admin-facing probe from waiting behind a long job —
     // the sidecar's express lane answers tiny clips in seconds when healthy.
     const { usage } = await t.transcribe(tinyWav(), "probe.wav", { deadlineMs: 30000 });
@@ -71,6 +80,7 @@ const PROBES = {
   },
   detect: async (db) => {
     const d = await resolveDetector(db);
+    if (!d) throw notServed("object detection");
     const { objects, usage } = await d.detect(await tinyImage(), ["object."]);
     // A probe is a paid call too — one image, filed at the app scope like the
     // embed and transcribe pings above. This was the last probe still spending

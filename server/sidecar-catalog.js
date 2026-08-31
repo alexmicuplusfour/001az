@@ -30,21 +30,64 @@ export const sidecarUrl = (provider) => PROVIDERS[provider]?.liveCatalog?.url() 
 // ONE /health read per sidecar, cached ~60s — failures included, so an admin
 // page reload doesn't re-time-out against a down sidecar on every hit. Every
 // reader shares it (the catalogs below, the capabilities page's running line,
-// the probe toast), so a request costs at most one round trip per engine.
+// the probe toast, presence below), so a request costs at most one round trip
+// per engine.
+//
+// The cache holds the probe's PROMISE, stamped at probe start: presence put
+// this on the resolution hot path (one ask per claimed item), where concurrent
+// cache misses against a down-but-routing host would otherwise each burn the
+// full 2s timeout instead of sharing one.
 const health = new Map();
 export async function sidecarHealth(provider) {
   const url = sidecarUrl(provider);
   if (!url) return null;
   const hit = health.get(provider);
   if (hit && Date.now() - hit.at < 60000) return hit.body;
-  let body = null;
-  try {
-    const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
-    if (res.ok) body = await res.json();
-  } catch { /* down/unreachable — display-only, fall back */ }
+  const body = (async () => {
+    try {
+      const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) return await res.json();
+      // Drain the refused body: an abandoned one holds its socket until GC.
+      await res.body?.cancel();
+      return null;
+    } catch { return null; /* down/unreachable — callers fall back */ }
+  })();
   health.set(provider, { at: Date.now(), body });
   return body;
 }
+
+// Tests flip presence mid-file (a stand-in box goes down, an env URL moves) and
+// the TTL would otherwise carry the stale answer across that line. `seed` is
+// its twin: state what an engine reports without standing one up, for tests
+// that drive an engine's protocol through their own fetch stub and must not
+// have a /health probe land in that stub's call ledger.
+export const clearSidecarHealth = () => health.clear();
+export const seedSidecarHealth = (provider, body) => health.set(provider, { at: Date.now(), body });
+
+// Is the engine actually on this machine? true/false for a sidecar-backed
+// provider, null for anything else — so callers ask unconditionally, the
+// `sidecarDefaultModel` convention. "Present" = /health answered inside the
+// probe budget; a hang, a refusal, or a 5xx all read absent, which under the
+// resolver's blocked semantics is a short wait, never a wrong answer.
+export async function sidecarPresent(provider) {
+  if (!sidecarUrl(provider)) return null;
+  return !!(await sidecarHealth(provider));
+}
+
+// Presence for EVERY sidecar-backed engine at once, probed concurrently — the
+// sidecarCatalogs shape, for the same reason: a serial reader (the
+// capabilities feed walks its entries one by one) must pay one cold-cache
+// timeout for N down engines, not N. Callers that then ask per provider hit
+// the warmed cache.
+//
+// Built out of sidecarPresent, not out of sidecarHealth: "present" is defined
+// once, above, so the resolver's floor gate and the admin card can never come
+// to different conclusions about the same engine. Concurrency is unaffected —
+// sidecarHealth starts its fetch before it yields, so every probe is in flight
+// before the first await here.
+export const sidecarPresenceMap = async () =>
+  new Map(await Promise.all(
+    sidecars().map(async ([name]) => [name, (await sidecarPresent(name)) ?? false])));
 
 // The sidecar's DEFAULT model as a bare string. Null for a provider that isn't
 // sidecar-backed, which is what lets callers ask unconditionally instead of

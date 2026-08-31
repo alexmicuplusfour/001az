@@ -24,12 +24,12 @@
 // secrets-scan test seeds a sentinel key and greps the serialized response.
 import { PROVIDERS } from "./providers.js";
 import { CAPABILITY, CAPABILITY_DEFS, configFieldView } from "./capabilities.js";
-import { resolveCapability, capabilityBinding, capabilityConfig, storedBindingMiss } from "./capability-resolve.js";
+import { resolveCapability, capabilityBinding, capabilityConfig, storedBindingMiss, floorMiss } from "./capability-resolve.js";
 import { pluginCatalog } from "./plugins.js";
 import { listConnectors, getConnector } from "./connectors/index.js";
 import { domainState } from "./connectors/runtime.js";
 import { tagQueueDepth, embeddingStats, countBoardOverrides } from "./db.js";
-import { sidecarDefaultModel } from "./sidecar-catalog.js";
+import { sidecarDefaultModel, sidecarPresenceMap } from "./sidecar-catalog.js";
 import { listSources } from "./ingestion/files.js";
 import { probeable } from "./capability-probe.js";
 
@@ -66,7 +66,14 @@ const PROGRESS = {
 // Who could serve this capability — every AI provider whose descriptor
 // advertises `declaredBy`, with its install/key/health state off the one
 // catalog. Works for `extract` too (declaredBy "tag").
-const aiRoster = (catalog, declaredBy) =>
+//
+// `present` rides only entries whose provider is sidecar-backed (a key in the
+// presence map, i.e. it declares a liveCatalog): "installed" for those means
+// the PLUGIN, and whether its engine is on this host is a separate runtime
+// fact (sidecar-presence-plan.md). The in-app embedder and every networked
+// provider never grow the field, so readers key on `present !== false` and
+// stay bit-for-bit for them.
+const aiRoster = (catalog, declaredBy, presence) =>
   catalog
     .filter((p) => p.kind === "ai" && p.capabilities?.[declaredBy])
     .map((p) => ({
@@ -77,14 +84,15 @@ const aiRoster = (catalog, declaredBy) =>
       onDevice: !!p.ai?.onDevice,
       keyless: !!p.ai?.keyless,
       health: p.state.health || null,
+      ...(presence.has(p.name) ? { present: presence.get(p.name) } : {}),
     }));
 
-async function aiEntry(db, cap, catalog) {
+async function aiEntry(db, cap, catalog, presence) {
   const keys = cap.binding.keys;
   const bound = await capabilityBinding(db, cap.id);
   const miss = await storedBindingMiss(db, cap.id);
   const eff = await resolveCapability(db, cap.id);
-  const supported = aiRoster(catalog, cap.declaredBy);
+  const supported = aiRoster(catalog, cap.declaredBy, presence);
 
   // "The admin chose something other than the floor." capabilityBinding
   // floor-fills the provider, so a cleared transcribe binding reads "whisper" —
@@ -97,6 +105,17 @@ async function aiEntry(db, cap, catalog) {
   // The order is load-bearing (see the plan §3.3): `off` is an explicit choice
   // and wins; a MISSED stored choice is degraded even when the env rung or the
   // floor picked up the work (an effective-first rule would call that healthy).
+  //
+  // Availability reads the roster with presence in it: an installed advertiser
+  // counts only if its engine isn't known-absent, and the floor's provider is
+  // itself a roster entry — which is what retired the old `floor.kind !==
+  // "builtin"` escape (a builtin floor no longer proves anything by existing).
+  // So: whisper absent + a keyless provider installed → `blocked` ("needs a
+  // key" — there IS installable supply); whisper absent + nothing else →
+  // `unavailable`, with the absence sentence as the why. A stored pin OF the
+  // absent floor lands here too, not on degraded — naming the floor is a
+  // non-choice (above), and "your engine isn't running" is supply news, not
+  // binding news.
   let state;
   let reason = null;
   if (keys?.enabled && bound && !bound.enabled) {
@@ -106,8 +125,11 @@ async function aiEntry(db, cap, catalog) {
     reason = miss;
   } else if (eff) {
     state = "active";
-  } else if (!supported.some((p) => p.installed) && cap.floor?.kind !== "builtin") {
+  } else if (!supported.some((p) => p.installed && p.present !== false)) {
     state = "unavailable";
+    // Why the floor didn't catch the fall, from the walk that took it — not
+    // re-derived here off the presence map (storedBindingMiss's rule).
+    reason = await floorMiss(db, cap.id);
   } else {
     state = "blocked";
   }
@@ -170,11 +192,17 @@ async function aiEntry(db, cap, catalog) {
     // The floor's identity travels even while a keyed provider serves — the
     // revert button ("Use Whisper instead") and the active(floor) line both
     // need its NAME, which is otherwise only implicit when the floor answers.
+    // `present` rides for sidecar-backed floors: the same readers must not
+    // offer a revert to, or promise a fallback on, an engine that isn't here.
     floor: cap.floor
       ? {
           kind: cap.floor.kind,
           ...(cap.floor.provider
-            ? { provider: cap.floor.provider, label: PROVIDERS[cap.floor.provider]?.label || cap.floor.provider }
+            ? {
+                provider: cap.floor.provider,
+                label: PROVIDERS[cap.floor.provider]?.label || cap.floor.provider,
+                ...(presence.has(cap.floor.provider) ? { present: presence.get(cap.floor.provider) } : {}),
+              }
             : {}),
         }
       : null,
@@ -302,11 +330,17 @@ async function sourceEntry(db, catalog) {
 }
 
 export async function capabilityStatus(db) {
-  const catalog = await pluginCatalog(db);
+  // ONE concurrent probe round for every sidecar-backed engine, ahead of the
+  // serial walk below — whose entries each read presence and (when a floor
+  // serves) the sidecar's model. The walk would otherwise probe engine by
+  // engine, paying a down one's full timeout apiece; now the page pays one
+  // round and every later read is a cache hit. Overlapped with the catalog it
+  // shares nothing with.
+  const [catalog, presence] = await Promise.all([pluginCatalog(db), sidecarPresenceMap()]);
   const out = [];
   for (const cap of CAPABILITY_DEFS) {
     if (cap.modifierOf) continue; // renders inside its parent, never as a row
-    out.push(await aiEntry(db, cap, catalog));
+    out.push(await aiEntry(db, cap, catalog, presence));
   }
   for (const c of listConnectors()) out.push(await domainEntry(db, c, catalog));
   out.push(ingestEntry(catalog));

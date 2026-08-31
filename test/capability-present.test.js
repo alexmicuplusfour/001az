@@ -558,6 +558,38 @@ test("keyRoles: the stored view — every capability bound to the row; a disable
   assert.deepEqual(keyRoles(caps, 9), []);
 });
 
+test("presence: an absent engine dims, isn't offered, isn't promised, and isn't a revert target", () => {
+  // The roster chip: a fact about supply, muted like "not added" (the remedy
+  // is a deploy, not a click); present:true and the field's absence both keep
+  // the old built-in line.
+  assert.deepEqual(presentSupported({ name: "w", label: "W", installed: true, onDevice: true, present: false }),
+    { text: "W — not running on this server", dim: true, link: false });
+  assert.equal(presentSupported({ name: "w", label: "W", installed: true, onDevice: true, present: true }).text, "W — built-in");
+
+  // The board picker stops offering it (no-implied-choices)…
+  const absent = {
+    ...boardTranscribe,
+    supportedBy: boardTranscribe.supportedBy.map((p) => (p.name === "whisper" ? { ...p, present: false } : p)),
+  };
+  const plan = planBoardPicker(absent, allKeys, null, boardCatalog);
+  assert.equal(plan.rows.find((r) => r.value === "whisper"), undefined,
+    "an engine that cannot serve is not a row");
+  // …and a STORED pin of it hides rather than being destroyed: preselect
+  // falls to the default row, nothing is written.
+  const pinned = planBoardPicker(absent, allKeys,
+    { transcribe_provider: "whisper", transcribe_key_id: null, transcribe_model: "medium" }, boardCatalog);
+  assert.equal(pinned.preselect, "", "the vanished offer degrades to the App default row");
+
+  // The removal confirm stops promising a fallback that isn't there…
+  assert.equal(
+    removalStory({ noun: "transcription", floor: { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)", present: false } }),
+    "transcription stops until another key is bound");
+  // …and the plugin card stops offering a revert to nothing.
+  const noRevert = planSection({ ...transcribeCap, floor: { ...transcribeCap.floor, present: false } },
+    openaiP, [{ id: 7, name: "prod" }]);
+  assert.equal(noRevert.buttons.find((b) => b.kind === "revert"), undefined);
+});
+
 test("removalStory: the consequence clause per floor shape", () => {
   assert.equal(
     removalStory({ noun: "tagging", env: { configured: true, provider: "anthropic", var: "ANTHROPIC_API_KEY" }, floor: { kind: "blocked" } }),

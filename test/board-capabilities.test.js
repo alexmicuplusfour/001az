@@ -15,7 +15,7 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { startServer, adminSession, seedUser, req } from "./helpers.js";
+import { startServer, adminSession, seedUser, req, sidecarsUp } from "./helpers.js";
 import { CAPABILITY_DEFS, CAPABILITY } from "../server/capabilities.js";
 import { resolveCapability } from "../server/capability-resolve.js";
 import { resolveTranscriber, resolveDetector } from "../server/worker.js";
@@ -24,14 +24,17 @@ import { getBoard, createAiKey, deleteAiKey, listAiKeys, countBoardOverrides, se
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 
-let srv, db, admin;
+let srv, db, admin, sidecars;
 before(async () => {
+  // Board pins of the built-ins are choices about RUNNING engines — stand the
+  // sidecars up (sidecar-presence-plan.md stage 1; see capabilities.test.js).
+  sidecars = await sidecarsUp();
   srv = await startServer();
   ({ db } = srv);
   admin = await adminSession(db);
   await setPluginState(db, "ai:openai", { installed: true });
 });
-after(() => srv.close());
+after(async () => { await srv.close(); await sidecars.close(); });
 
 const byId = (r) => Object.fromEntries(r.json.capabilities.map((c) => [c.id, c]));
 const caps = async () => byId(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));

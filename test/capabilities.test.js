@@ -16,8 +16,9 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { startServer, adminSession, req, seedBoard } from "./helpers.js";
+import { startServer, adminSession, req, seedBoard, sidecarsUp } from "./helpers.js";
 import { CAPABILITY_DEFS, CAPABILITY, bindingSettings } from "../server/capabilities.js";
+import { PROVIDERS, declaredCatalog } from "../server/providers.js";
 import { resolveCapability, capabilityConfig } from "../server/capability-resolve.js";
 import { setCapabilityConfig } from "../server/capability-bind.js";
 import { IMAGE_PRESETS, DEFAULT_PRESET } from "../server/ai-image.js";
@@ -28,9 +29,17 @@ import { getSetting, setSetting, createAiKey, deleteAiKey, setPluginState } from
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 const keyBound = CAPABILITY_DEFS.filter((c) => c.binding.keys?.keyId);
 
-let srv, db;
-before(async () => { srv = await startServer(); ({ db } = srv); });
-after(() => srv.close());
+let srv, db, sidecars;
+// The floor assertions below (active · built-in, running.provider whisper/…)
+// describe a host whose sidecars are RUNNING — so stand them up, rather than
+// passing by the accident that nothing consults their health yet
+// (sidecar-presence-plan.md stage 1).
+before(async () => {
+  sidecars = await sidecarsUp();
+  srv = await startServer();
+  ({ db } = srv);
+});
+after(async () => { await srv.close(); await sidecars.close(); });
 
 // --- pure: no server needed ---
 
@@ -39,8 +48,19 @@ test("the registry stays consistent with what providers may declare", () => {
     // extract borrows tagging's declaration and wire, so it must never appear as
     // something a provider can advertise.
     assert.ok(CAPABILITY[cap.declaredBy], `${cap.id}: declaredBy names a real capability`);
-    if (cap.floor?.kind === "builtin")
+    if (cap.floor?.kind === "builtin") {
       assert.ok(cap.floor.provider, `${cap.id}: a builtin floor names its provider`);
+      // …and that provider must be a ROSTER member: since presence-gating, the
+      // availability rule is "some installed, non-absent advertiser exists"
+      // (capability-status.js), with no floor-kind escape hatch — so a floor
+      // whose provider didn't advertise this capability would read as
+      // unavailable even while serving. Registry invariant, checked here
+      // rather than assumed by the state machine.
+      const desc = PROVIDERS[cap.floor.provider];
+      assert.ok(desc, `${cap.id}: the floor's provider is registered`);
+      assert.ok(declaredCatalog(desc, cap.declaredBy),
+        `${cap.id}: the floor's provider advertises ${cap.declaredBy}`);
+    }
     if (cap.floor?.kind === "delegate")
       assert.ok(CAPABILITY[cap.floor.to], `${cap.id}: a delegate floor names a real capability`);
   }
@@ -194,7 +214,9 @@ test("the status payload on a fresh instance — every default state, in one rea
   // The page-facing fields (slice 4a): the floor's identity travels even when
   // it isn't serving; Test buttons come from data; the env rung says whether
   // the server holds its secret; the re-embed confirm is descriptor copy.
-  assert.deepEqual(caps.transcribe.floor, { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)" });
+  // `present: true` because this file stands the sidecars up (Stage 1's boxes)
+  // — the floor's payload now carries whether its engine is on this host.
+  assert.deepEqual(caps.transcribe.floor, { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)", present: true });
   assert.deepEqual(caps.tag.floor, { kind: "blocked" });
   assert.equal(caps.transcribe.probeable, true);
   assert.equal(caps.extract.probeable, undefined, "a delegate has nothing of its own to probe");

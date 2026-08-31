@@ -3,13 +3,15 @@
 // provider is catalog-only (wire: null) like the whisper transcriber, and
 // resolveDetector resolves it directly. A keyed provider that advertises `detects`
 // routes through wire.detect via detectObjects (the paid path, stubbed here). None
-// of these tests hit the real sidecar — resolution returns the engine descriptor
-// without calling detect(), and the dispatch test uses a stub wire.
+// of these tests hit the real sidecar: detect() itself is always fetch-stubbed,
+// and the file-level sidecarsUp() boxes stand in for /health — which resolution
+// consults once the floor is presence-gated (sidecar-presence-plan.md), so
+// resolveDetector keeps answering the engine descriptor here.
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { startServer, adminSession, seedBoard, req, meterTotals, until } from "./helpers.js";
+import { startServer, adminSession, seedBoard, req, meterTotals, until, sidecarsUp } from "./helpers.js";
 import { resolveDetector, detectionDemux, imageForDetection, startWorker } from "../server/worker.js";
 import sharp from "sharp";
 import { detectObjects, providerCatalog, PROVIDERS, registerProvider, unregisterProvider } from "../server/providers.js";
@@ -155,9 +157,16 @@ test("imageForDetection falls back to the original bytes on an undecodable image
 
 // --- integration: resolution + config validation through the server ---
 
-let srv, db, admin;
-before(async () => { srv = await startServer(); ({ db } = srv); admin = await adminSession(db); });
-after(() => srv.close());
+let srv, db, admin, sidecars;
+// A root-suite hook, so the boxes stand before every test in the file — the
+// unit tests above included (they resolve the floor engine too).
+before(async () => {
+  sidecars = await sidecarsUp();
+  srv = await startServer();
+  ({ db } = srv);
+  admin = await adminSession(db);
+});
+after(async () => { await srv.close(); await sidecars.close(); });
 
 test("resolveDetector defaults to the on-server object-detector sidecar (no settings)", async () => {
   const d = await resolveDetector(db);
@@ -269,9 +278,10 @@ test("the detect leg meters one image to its board, priced at the on-device zero
 test("the detect probe meters its ping at the app scope", async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });
+  // /health falls through to the file's box, which reports LOCAL_MODEL — one
+  // statement of what the engine serves, not a second one to keep in step.
   globalThis.fetch = async (url, opts = {}) => {
     if (String(url).includes("/detect")) return { ok: true, status: 200, json: async () => ({ objects: [] }) };
-    if (String(url).includes("/health")) return { ok: true, status: 200, json: async () => ({ model: LOCAL_MODEL }) };
     return original(url, opts);
   };
   const before2 = await meterTotals(db, APP_SCOPE, "detect");
