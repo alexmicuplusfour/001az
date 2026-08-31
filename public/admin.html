@@ -110,12 +110,12 @@
       .price-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
       .price-head .muted, .price-note { font-size: 12px; }
       .price-note { margin: 0 0 14px; }
+      /* The rate cells and the set-price form live in the prices dialog now;
+         .price-filter and .price-edit are stated in modal.css beside its width,
+         because inside a dialog they have `.modal-dialog input` to outrank as
+         well as the global `input { flex: 1 }` this one escapes. */
       .price-cell { cursor: pointer; }
-      /* The three inputs that must escape the global `input { flex: 1;
-         min-width: 140px }` rule — the same escape .cap-config makes. */
-      .price-filter { flex: none; max-width: 240px; margin-bottom: 10px; font-size: 13px; }
       .price-form input[type=number] { flex: 0 0 110px; min-width: 0; }
-      .price-edit { flex: none; width: 100px; min-width: 0; padding: 3px 6px; font-size: 12px; }
 
       /* logs tab — a dark embedded console (palette ported from logs.html);
          .fullbleed lifts the same element over the whole page */

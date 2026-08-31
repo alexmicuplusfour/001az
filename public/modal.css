@@ -541,6 +541,19 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .modal-footer button:disabled,
 .drawer-foot button:disabled { opacity: .5; cursor: default; }
 
+/* ── price editor (prices-modal.js) ───────────────────────────────────────── */
+/* Wide, because the table is Provider × Model × one column per metered unit and
+   the registry decides that width. Stated HERE and not in styles.css, which the
+   admin page deliberately does not load — the jobs modal's own width lives
+   there and is the trap this rule sidesteps.
+   The three inputs below already escape admin.html's global `input { flex: 1 }`;
+   inside a dialog they must also outrank `.modal-dialog input` above, which is
+   the more specific of the two. Scoped rather than duplicated: this editor only
+   ever renders in the dialog now. */
+#prices-modal .modal-dialog { width: min(900px, 94vw); }
+#prices-modal .price-filter { flex: none; max-width: 240px; margin-bottom: 10px; font-size: 13px; padding: 6px 8px; }
+#prices-modal .price-edit { flex: none; width: 100px; min-width: 0; padding: 3px 6px; font-size: 12px; }
+
 /* ── automatic ingestion modal (ingest-modal.js) ──────────────────────────── */
 #ingest-modal .modal-dialog { width: min(640px, 94vw); }
 /* results view: wide browse-style list; the inner .cb-scroll owns the scroll */

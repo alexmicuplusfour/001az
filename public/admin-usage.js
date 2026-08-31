@@ -17,9 +17,9 @@
 import { api } from "/api.js";
 import { toast } from "/toast.js";
 import { busy } from "/plugin-modal.js";
-import { fillSelect } from "/select.js";
 import { pill, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
 import { sparkline, dayKey } from "/sparkline.js";
+import { openPricesModal } from "/prices-modal.js";
 
 const usageContent = document.getElementById("usage-content");
 
@@ -158,9 +158,13 @@ async function draw() {
   usageContent.replaceChildren(
     head,
     chartSec,
+    // The cells join two dimensions' VALUES, so the header joins the same two
+    // LABELS the same way — a connector row has no model and reads as its
+    // provider alone, which a column headed "Model" would have miscalled.
     breakdown(byModel, "model", (r, dims) =>
       [dims.provider.values[r.provider], dims.model.values[r.model]].filter(Boolean).join(" · ")
-        || '<span class="muted">—</span>'),
+        || '<span class="muted">—</span>',
+      [byModel.dims.provider.label, byModel.dims.model.label].join(" · ")),
     breakdown(byBoard, "board", (r, dims) => r.board
       // The admin boards table's link, so "which board is this" is one click —
       // and the drill-down: #jobs opens the board's own jobs modal (app.js),
@@ -177,7 +181,12 @@ async function draw() {
 // One breakdown table: a row per value of the dimension, a column per unit
 // the window actually used, then the spend. Sorted by spend, then by calls —
 // the two figures that mean the same thing in every row.
-function breakdown(res, dim, labelOf) {
+//
+// `head` names the first column when its cells carry more than the one
+// dimension the section is titled by — the model table joins two. Default is
+// the dimension's own served label, so the axis names its column the same way
+// it names the section.
+function breakdown(res, dim, labelOf, head = null) {
   const defs = defsOf(res);
   const rows = res.rows
     .map((r) => ({ r, cost: costOf(r.units, defs) }))
@@ -193,7 +202,7 @@ function breakdown(res, dim, labelOf) {
   const sec = document.createElement("div");
   sec.className = "section";
   sec.innerHTML = `<h2>${res.dims[dim].label}</h2>
-    <table><thead><tr><th></th>${res.units.map((u) => `<th>${u.label}</th>`).join("")}<th>spend</th></tr></thead>
+    <table><thead><tr><th>${head ?? res.dims[dim].label}</th>${res.units.map((u) => `<th>${u.label}</th>`).join("")}<th>spend</th></tr></thead>
     <tbody>${rows.map(({ r, cost }) => `<tr><td>${labelOf(r, res.dims)}</td>${unitCells(r)}${costCell(cost)}</tr>`).join("")}</tbody></table>`;
   return sec;
 }
@@ -247,25 +256,15 @@ function kpi(value, label, title = "") {
   return `<div class="usage-kpi"${title ? ` title="${title}"` : ""}><div class="v">${value}</div><div class="k">${label}</div></div>`;
 }
 
-// ── Prices (metering-plan.md, Stage 4c) ─────────────────────────────────────
-// The rate editor over /api/admin/prices — the RESOLVED map with per-unit
-// provenance, straight from the same walk stamping reads, so what this table
-// shows is exactly what a call would be stamped at.
+// ── Prices: the status, not the editor ────────────────────────────
+// What belongs beside the figures above is whether they can be TRUSTED: when
+// each learner rung last heard from its source, and which models are spending
+// with no rate at all. Both qualify the ≈$ the rest of this tab renders.
 //
-// A rate is shown and typed in its unit's own frame, and the frame is SERVED:
-// units.js declares what a price for each unit is quoted per (`rate.per`) and
-// what to call it (`rate.label`). This module only does the arithmetic. That
-// split is load-bearing rather than tidy — deriving the frame from the display
-// kind, which is what the first cut did, is how a rate lands a factor of a
-// million out, and validRate cannot catch it because 1e6 × a valid rate is
-// still valid. The result would be a falsified billing record, the one thing
-// the meter can never repair.
-
-// Micro-dollars per unit ⇄ the number a person reads and types.
-const toRate = (micros, rate) => (micros * rate.per) / 1e6;
-// toPrecision sheds the float dust the scaling can mint (0.834 × 1e6 →
-// 834000.0000000001), the same guard price-learner's dollarsToMicros holds.
-const toMicros = (v, rate) => Number(((v * 1e6) / rate.per).toPrecision(12));
+// The catalog itself — hundreds of rows by the unit columns — opens in a dialog
+// (prices-modal.js). It is a table to work in, not one to scroll past on the
+// way to the rest of the tab, and this endpoint is no longer fetched by a page
+// load that never asked about prices.
 
 async function loadPrices() {
   let data;
@@ -273,31 +272,11 @@ async function loadPrices() {
   renderPrices(data);
 }
 
-// The ONE save path. Both entrances — a table cell and the form — route
-// through it, so the rate rule and the two sentences a person reads are
-// stated once. Answers false when nothing was written, so a caller can keep
-// its editor open on the value that failed.
-async function savePrice({ provider, model, unit, rate }, raw) {
-  const v = Number(raw);
-  if (!String(raw).trim() || !Number.isFinite(v) || v < 0) {
-    toast.error("a rate is a non-negative number (0 = known-free)");
-    return false;
-  }
-  try {
-    await api("PUT", "/api/admin/prices", { provider, model, unit, microsPerUnit: toMicros(v, rate) });
-    toast("Price saved — new calls stamp at it");
-    loadPrices();
-    return true;
-  } catch (err) {
-    toast.error(err.message);
-    return false;
-  }
-}
-
-function renderPrices({ models, wanted, freshness, units }) {
+function renderPrices({ wanted, freshness }) {
   pricesSec.innerHTML = `<h2>Prices</h2>
-    <p class="sub">The rates stamping reads, best answer per unit — hover a rate for which rung said so.
-    An edit inserts a new effective rate: new calls stamp at it, history keeps what it ran at.</p>`;
+    <p class="sub">The rates stamping reads, best answer per unit. What this section says is
+    whether the figures above can be trusted — when each rung last heard from its source, and
+    which models are still spending unpriced.</p>`;
 
   // Freshness + Refresh: when each learner rung last heard from its source,
   // and the button that asks them all again right now.
@@ -323,7 +302,16 @@ function renderPrices({ models, wanted, freshness, units }) {
       loadPrices(); // rebuilds this section, button included
     } catch (err) { toast.error(err.message); }
   });
-  controls.append(freshEl, refreshBtn);
+  // The editor itself is a dialog: a resolved catalog runs to hundreds of rows
+  // by the unit columns, which is a table to work in rather than one to scroll
+  // past on the way to the rest of the tab. `onChange` because a save can
+  // retire a model from the hunting list below.
+  const editBtn = document.createElement("button");
+  editBtn.className = "ghost sm";
+  editBtn.textContent = "edit prices";
+  editBtn.title = "The resolved rate for every provider and model — and where to type one in";
+  editBtn.onclick = () => openPricesModal({ onChange: loadPrices });
+  controls.append(freshEl, refreshBtn, editBtn);
   pricesSec.appendChild(controls);
 
   // What the learners are still hunting — models seen by the meter, no rate yet.
@@ -335,152 +323,4 @@ function renderPrices({ models, wanted, freshness, units }) {
     pricesSec.appendChild(w);
   }
 
-  // One vocabulary for the section: every unit the server serves gets a
-  // column. Narrowing to the units something happens to have been priced in
-  // would hide the empty cell that IS the way to price it — and width is set
-  // by the registry (a handful) while the rows are what run to hundreds, so
-  // there is nothing to save on this axis anyway.
-  const rows = [...models].sort((a, b) =>
-    a.provider.localeCompare(b.provider)
-    || (b.model === "*") - (a.model === "*") // the provider-wide default leads its provider
-    || a.model.localeCompare(b.model));
-
-  const table = document.createElement("table");
-  table.innerHTML = `<thead><tr><th>Provider</th><th>Model</th>${units.map((u) =>
-    `<th>${u.label} <span class="muted">${u.rate.label}</span></th>`).join("")}</tr></thead>`;
-  const tbody = document.createElement("tbody");
-  for (const [i, m] of rows.entries()) {
-    const tr = document.createElement("tr");
-    tr.dataset.row = i;
-    const prov = document.createElement("td");
-    prov.textContent = m.provider;
-    const model = document.createElement("td");
-    model.textContent = m.model;
-    if (m.model === "*") model.title = "provider-wide default — a model's own rate overrides it, unit by unit";
-    tr.append(prov, model);
-    for (const [j, u] of units.entries()) {
-      const td = document.createElement("td");
-      td.className = "price-cell";
-      td.dataset.unit = j;
-      const cur = m.units[u.unit];
-      showRate(td, cur, u);
-      tr.appendChild(td);
-    }
-    tbody.appendChild(tr);
-  }
-  table.appendChild(tbody);
-  // ONE listener for the whole table rather than a closure per cell: a
-  // provider-rung catalog is hundreds of rows wide by the unit columns, and
-  // this section is never discarded (see pricesSec), so those closures would
-  // be retained for the life of the admin session.
-  table.addEventListener("click", (e) => {
-    const td = e.target.closest("td.price-cell");
-    if (!td || !table.contains(td)) return;
-    editRate(td, rows[td.parentElement.dataset.row], units[td.dataset.unit]);
-  });
-
-  const empty = document.createElement("p");
-  empty.className = "muted";
-  empty.hidden = !!rows.length;
-  empty.textContent = "No rates known yet — refresh, or type one in below.";
-
-  // A provider-rung catalog is hundreds of rows, so it gets a filter rather
-  // than pagination. Filtering hides rows instead of rebuilding the table:
-  // the reason the filter exists is the size that makes a per-keystroke
-  // rebuild expensive.
-  if (rows.length > 12) {
-    const hay = rows.map((m) => `${m.provider} ${m.model}`.toLowerCase());
-    const trs = [...tbody.children];
-    const filter = document.createElement("input");
-    filter.className = "price-filter";
-    filter.placeholder = "filter models…";
-    filter.oninput = () => {
-      const q = filter.value.trim().toLowerCase();
-      let shown = 0;
-      trs.forEach((tr, i) => {
-        const hit = !q || hay[i].includes(q);
-        tr.hidden = !hit;
-        if (hit) shown++;
-      });
-      empty.hidden = shown > 0;
-      empty.textContent = "No models match the filter.";
-    };
-    pricesSec.appendChild(filter);
-  }
-  pricesSec.append(table, empty);
-
-  // Type a price in for ANY pair — including one nothing has metered yet;
-  // seeding rates before spending is the point.
-  const form = document.createElement("form");
-  form.className = "price-form";
-  const provIn = document.createElement("input");
-  provIn.placeholder = "provider";
-  const modelIn = document.createElement("input");
-  modelIn.placeholder = "model (* = provider-wide)";
-  const unitSel = document.createElement("select");
-  // Through fillSelect for the capability the element lacks: a picker nobody
-  // has answered must not render as one somebody has (select.js).
-  fillSelect(unitSel, units.map((u) => ({ value: u.unit, label: u.label })), { placeholder: "unit…" });
-  const rateIn = document.createElement("input");
-  rateIn.type = "number";
-  rateIn.step = "any";
-  rateIn.min = "0";
-  const chosen = () => units.find((u) => u.unit === unitSel.value);
-  // The frame follows the unit, and says nothing until one is picked.
-  const setFrame = () => { rateIn.placeholder = chosen()?.rate.label ?? "rate"; };
-  unitSel.onchange = setFrame;
-  setFrame();
-  const addBtn = document.createElement("button");
-  addBtn.type = "submit";
-  addBtn.className = "ghost";
-  addBtn.textContent = "set price";
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    const unit = chosen();
-    if (!provIn.value.trim() || !modelIn.value.trim()) return toast.error("provider and model are required");
-    if (!unit) return toast.error("pick the unit this rate is for");
-    await savePrice(
-      { provider: provIn.value.trim(), model: modelIn.value.trim(), unit: unit.unit, rate: unit.rate },
-      rateIn.value
-    );
-  };
-  form.append(provIn, modelIn, unitSel, rateIn, addBtn);
-  pricesSec.appendChild(form);
-}
-
-// A cell's resolved rate, or the dash that says nobody has priced this yet.
-function showRate(td, cur, unitDef) {
-  td.replaceChildren();
-  if (cur) td.textContent = fmtUsd(toRate(cur.micros, unitDef.rate));
-  else td.innerHTML = '<span class="muted">—</span>';
-  td.title = cur ? `${cur.source} rate — click to edit` : "no rate — click to set";
-}
-
-// Click-to-edit on a rate cell: an input in the unit's own frame. Enter saves
-// (a new effective admin row), Escape or leaving puts the cell back.
-function editRate(cell, model, unitDef) {
-  if (cell.querySelector("input")) return;
-  const cur = model.units[unitDef.unit];
-  const input = document.createElement("input");
-  input.type = "number";
-  input.step = "any";
-  input.min = "0";
-  input.className = "price-edit";
-  input.placeholder = unitDef.rate.label;
-  if (cur) input.value = toRate(cur.micros, unitDef.rate);
-  const done = () => showRate(cell, cur, unitDef);
-  input.onkeydown = async (e) => {
-    if (e.key === "Escape") return done();
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    const saved = await savePrice(
-      { provider: model.provider, model: model.model, unit: unitDef.unit, rate: unitDef.rate },
-      input.value
-    );
-    if (!saved && !input.isConnected) return; // the reload beat us to it
-    if (!saved) input.focus(); // rejected: keep the value in front of the person who typed it
-  };
-  input.onblur = done;
-  cell.replaceChildren(input);
-  input.focus();
 }
