@@ -8,6 +8,7 @@ import { liveFields, nextRefreshAt, faceSchedule } from "./connectors/schedule.j
 import { aiWork } from "./field-sources.js"; // pure data + one predicate, no imports
 import { projectEntry } from "./media/index.js";
 import { CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
+import { describeUnit } from "./units.js"; // pure data + predicates, no imports
 
 // BIGINT (int8) comes back from pg as a string by default. Everything we store
 // in BIGINT is a ms epoch or a row id — both far below 2^53 — so parse to
@@ -1382,6 +1383,9 @@ export async function deleteBoard(db, id) {
     const locked = await client.query("SELECT 1 FROM boards WHERE id=$1 FOR UPDATE", [id]);
     if (!locked.rows.length) return null;
     const items = await client.query("SELECT payload FROM items WHERE board_id=$1", [id]);
+    // The meter has no FK on boards (its '' sentinel forbids one — see 0040),
+    // so the cascade the other tables ride doesn't reach it. Purged here.
+    await client.query("DELETE FROM usage_meter WHERE board_id=$1", [id]);
     const result = await client.query("DELETE FROM boards WHERE id=$1", [id]);
     if (result.rowCount === 0) return null;
     return items.rows.map((r) => r.payload);
@@ -2886,81 +2890,325 @@ export async function recoverStuck(db, olderThanMs, maxAttempts = 3, excludeIds 
   return rowCount;
 }
 
-function today() {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+// YYYY-MM-DD (UTC) — the day key every rollup in this file is filed under.
+// One derivation, so a change to what "a day" means lands in one place.
+export function day(ms = Date.now()) {
+  return new Date(ms).toISOString().slice(0, 10);
 }
 
-// One successful tagging call: bump the board's daily row with the token
-// usage the provider reported ({ input, output, cacheRead, searches }).
-export async function bumpUsage(db, boardId, usage = {}) {
+// --- the usage meter (metering-plan.md, Stage 1) ---
+
+// Record "N units of `unit` consumed by this subject" — the whole contract.
+// The meter does not know AI exists: `units` is { unit: quantity } with any
+// unit string a spender cares to name, and the dimensions are plain text with
+// '' — never NULL — for "doesn't apply" (see 0040 for why NULL would quietly
+// break the upsert). Zero/absent quantities are skipped so the common
+// no-cache, no-search call writes only the rows it has news for. Throws like
+// any db helper — route through meterWrite to make a failure survivable.
+//
+// `rates` is { unit: microsPerUnit } with '*' as a whole-subject wildcard —
+// plain data handed in by the caller (metering.js joins pricing to this;
+// Stage 3). A unit WITH a rate stamps cost_micros = round(q × rate) and
+// counts its whole quantity as priced — rate 0 (on-device) is priced-at-zero,
+// which is a knowledge claim, not an absence. A unit WITHOUT a rate stamps
+// neither, and quantity − priced_quantity stays visible as the unpriced
+// remainder. Cost is computed HERE, at write time, and never recomputed — a
+// later price edit must not rewrite history.
+// The meter's "doesn't apply" sentinel, and what it MEANS — declared once,
+// here, beside the writer that stamps it. Work with no board (a sweep, a
+// connector's quota burn) files under it; readers filter to it as a value and
+// name it from this label rather than each inventing the English (0040 says
+// why it is '' and never NULL).
+export const APP_SCOPE = "";
+export const APP_SCOPE_LABEL = "outside any board";
+// The model-call axes' own '' has a different meaning and so its own name:
+// work with no provider/model attribution — the pre-meter backfill (0040), or
+// spend with no model call behind it. Named for the PROVIDER axis; a bare ''
+// model under a named provider stays blank (the provider's name already
+// carries the row, and "OpenAI · unattributed" would read as a claim).
+export const UNATTRIBUTED_LABEL = "unattributed";
+
+export async function meter(db, { boardId = "", capability, provider = "", model = "" }, units = {}, rates = {}) {
+  const rows = Object.entries(units)
+    .map(([unit, n]) => [unit, Math.round(Number(n)), rates[unit] ?? rates["*"]])
+    .filter(([, q]) => q > 0)
+    .map(([unit, q, rate]) => ({
+      unit, q,
+      pq: rate == null ? 0 : q,
+      cm: rate == null ? 0 : Math.round(q * rate),
+    }));
+  if (!rows.length) return;
   await db.query(
-    `INSERT INTO ai_board_usage (day, board_id, count, input_tokens, output_tokens, cache_read_tokens, search_count)
-     VALUES ($1, $2, 1, $3, $4, $5, $6)
-     ON CONFLICT (day, board_id) DO UPDATE SET
-       count = ai_board_usage.count + 1,
-       input_tokens = ai_board_usage.input_tokens + EXCLUDED.input_tokens,
-       output_tokens = ai_board_usage.output_tokens + EXCLUDED.output_tokens,
-       cache_read_tokens = ai_board_usage.cache_read_tokens + EXCLUDED.cache_read_tokens,
-       search_count = ai_board_usage.search_count + EXCLUDED.search_count`,
-    [today(), boardId, Number(usage.input) || 0, Number(usage.output) || 0, Number(usage.cacheRead) || 0, Number(usage.searches) || 0]
+    `INSERT INTO usage_meter (day, board_id, capability, provider, model, unit, quantity, priced_quantity, cost_micros)
+     SELECT $1, $2, $3, $4, $5, u.unit, u.q, u.pq, u.cm
+     FROM jsonb_to_recordset($6::jsonb) AS u(unit text, q bigint, pq bigint, cm bigint)
+     ON CONFLICT (day, board_id, capability, provider, model, unit)
+     DO UPDATE SET quantity = usage_meter.quantity + EXCLUDED.quantity,
+                   priced_quantity = usage_meter.priced_quantity + EXCLUDED.priced_quantity,
+                   cost_micros = usage_meter.cost_micros + EXCLUDED.cost_micros`,
+    [day(), boardId, capability, provider, model, JSON.stringify(rows)]
   );
 }
 
-// Per-board tagger usage, all-time + today, plus the last 14 days broken out
-// for the admin sparkline:
-// { boardId: { calls, input, output, cacheRead, searches, today: { calls, input, output },
-//              days: [{ day, calls, input, output, searches }] } }  (days ascending, gaps omitted)
-export async function boardAiUsage(db) {
+// --- the rate map's stored rungs (model_prices; pricing.js resolves) ---
+
+// The latest effective row per (provider, model, unit, source) — the shape the
+// rate-table build consumes. Older effective_from rows stay as history.
+export async function loadModelPrices(db) {
   const { rows } = await db.query(
-    `SELECT board_id,
-       SUM(count) AS calls, SUM(input_tokens) AS input,
-       SUM(output_tokens) AS output, SUM(cache_read_tokens) AS cache_read,
-       SUM(search_count) AS searches,
-       COALESCE(SUM(count)         FILTER (WHERE day=$1), 0) AS t_calls,
-       COALESCE(SUM(input_tokens)  FILTER (WHERE day=$1), 0) AS t_input,
-       COALESCE(SUM(output_tokens) FILTER (WHERE day=$1), 0) AS t_output
-     FROM ai_board_usage GROUP BY board_id`,
-    [today()]
+    `SELECT DISTINCT ON (provider, model, unit, source)
+            provider, model, unit, source, micros_per_unit
+     FROM model_prices WHERE effective_from <= $1
+     ORDER BY provider, model, unit, source, effective_from DESC`,
+    [Date.now()]
   );
+  // NUMERIC comes back from pg as a string; coercing HERE (like every other
+  // reader in this file) rather than leaving each consumer to remember it.
+  return rows.map((r) => ({ ...r, micros_per_unit: Number(r.micros_per_unit) }));
+}
+
+// When each learner rung last heard from its source, per provider — the
+// staleness input for price-learner.js's cadence. fetched_at is NULL on admin
+// rows, which is exactly what keeps hand-typed prices out of a "when did we
+// last fetch" answer.
+export async function modelPriceFreshness(db) {
+  const { rows } = await db.query(
+    `SELECT source, provider, MAX(fetched_at) AS at FROM model_prices
+     WHERE fetched_at IS NOT NULL GROUP BY source, provider`
+  );
+  return rows.map((r) => ({ source: r.source, provider: r.provider, at: Number(r.at) }));
+}
+
+// A price is learned or edited by INSERTING a new effective row, never by
+// updating one — stamped costs reference the past, and the past keeps its row.
+// Takes MANY rows in one round-trip: the provider rung stores whole catalogs
+// (an aggregator answers with hundreds of models × several units), and a row
+// at a time would be that many round-trips inside a maintenance tick. Same
+// jsonb_to_recordset shape as meter() and updateItemPayloads.
+export async function addModelPrices(db, rows) {
+  if (!rows.length) return;
+  const now = Date.now();
+  await db.query(
+    `INSERT INTO model_prices (provider, model, unit, micros_per_unit, source, effective_from, fetched_at)
+     SELECT p.provider, p.model, p.unit, p.micros_per_unit, p.source, p.effective_from, p.fetched_at
+     FROM jsonb_to_recordset($1::jsonb)
+       AS p(provider text, model text, unit text, micros_per_unit numeric, source text, effective_from bigint, fetched_at bigint)
+     ON CONFLICT (provider, model, unit, source, effective_from) DO UPDATE SET
+       micros_per_unit = EXCLUDED.micros_per_unit, fetched_at = EXCLUDED.fetched_at`,
+    [JSON.stringify(rows.map(({ provider, model, unit, microsPerUnit, source = "admin", effectiveFrom = now, fetchedAt = null }) =>
+      ({ provider, model, unit, micros_per_unit: microsPerUnit, source, effective_from: effectiveFrom, fetched_at: fetchedAt })))]
+  );
+}
+export const addModelPrice = (db, row) => addModelPrices(db, [row]);
+
+// The meter observes work; it must never break the work it observes. Every
+// metering write goes through here — a failure is a warn, never a throw into
+// the leg or sweep being measured (worker.js's jobLogWrite, same rule for the
+// same reason). Concretely, it is what stops a bookkeeping blip from being
+// written up as "post-tag write failed — left for recovery" by the tag
+// landing's catch. A new spender routes through this rather than remembering
+// to re-implement the rule.
+export async function meterWrite(fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    console.warn("usage meter write failed:", e.message);
+    return null;
+  }
+}
+
+// The AI adapters (meterAiCall/meterAiCalls/spentDetail) live in metering.js —
+// they join this mechanism to the pricing rungs, and pricing reads the
+// provider registry, which this module must not import.
+
+// Age out meter rows. Day is the TEXT primary-key prefix, so the cutoff
+// compares as a date string.
+export async function pruneUsageMeter(db, cutoffMs) {
+  const { rowCount } = await db.query(`DELETE FROM usage_meter WHERE day < $1`, [day(cutoffMs)]);
+  return rowCount;
+}
+
+// Per-board paid-call usage, all-time + today, plus the last 14 days broken
+// out for the admin sparkline:
+// { boardId: { units: { unit: quantity }, today: { unit: quantity },
+//              days: [{ day, units }] } }  (days ascending, gaps omitted)
+// Every capability's spend rolls up together here (that is what the admin cell
+// shows); the per-capability breakdown is Stage 4's query, not this one.
+//
+// Every half is a UNITS MAP (Stage 5b): which units to feature, and how, is
+// the cell's display choice, so a unit this query never heard of rides
+// through to the client with no edit here — the route serves the vocabulary
+// beside it. Both halves ride `usageRows`, the one dimensioned reader, rather
+// than spelling its GROUP BY a third time; the day half just windows and
+// groups by day as well.
+export async function boardAiUsage(db) {
+  // Independent — the day window is not a subset of the all-time aggregate's
+  // work, and the admin page waits on both.
+  const [allTime, dayRows] = await Promise.all([
+    usageRows(db, { group: ["board"] }),
+    usageRows(db, { group: ["board", "day"], from: day(Date.now() - 13 * 86400000) }),
+  ]);
   const out = Object.fromEntries(
-    rows.map((r) => [
-      r.board_id,
-      {
-        calls: Number(r.calls),
-        input: Number(r.input),
-        output: Number(r.output),
-        cacheRead: Number(r.cache_read),
-        searches: Number(r.searches),
-        today: { calls: Number(r.t_calls), input: Number(r.t_input), output: Number(r.t_output) },
-        days: [],
-      },
-    ])
+    allTime
+      // The app scope is not a board — the admin table has no row for it (the
+      // Usage tab is where app-level spend is read).
+      .filter((r) => r.board !== APP_SCOPE)
+      .map((r) => [
+        r.board,
+        {
+          units: Object.fromEntries(Object.entries(r.units).map(([u, x]) => [u, x.quantity])),
+          // Spend, when any is known — one fold, shared with the board's own
+          // reader (boardUsageSummary): micros sum legally across units, the
+          // remainder never does.
+          cost: costOf(r.units),
+          today: {},
+          days: [],
+        },
+      ])
   );
-  const cutoff = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
-  const { rows: dayRows } = await db.query(
-    `SELECT board_id, day, count, input_tokens, output_tokens, search_count
-     FROM ai_board_usage WHERE day >= $1 ORDER BY day`,
-    [cutoff]
-  );
+  // Today is always inside the 14-day window, so it is one of these rows —
+  // read it off rather than making the aggregate above compute it a second time.
+  const t = day();
   for (const r of dayRows) {
-    out[r.board_id]?.days.push({
-      day: r.day,
-      calls: Number(r.count),
-      input: Number(r.input_tokens),
-      output: Number(r.output_tokens),
-      searches: Number(r.search_count),
-    });
+    const b = out[r.board];
+    if (!b) continue;
+    const units = Object.fromEntries(Object.entries(r.units).map(([u, x]) => [u, x.quantity]));
+    b.days.push({ day: r.day, units });
+    if (r.day === t) b.today = units;
   }
   return out;
 }
 
-// Total (input + output) tokens consumed by AI tagging for a single board.
-export async function getBoardTokenTotal(db, boardId) {
+// The dimensioned usage read (metering-plan.md, Mechanism 3): group by any
+// subset of the meter's dimensions over any day window. `group` names are the
+// API's, mapped here onto columns — the allowlist is what makes interpolating
+// them into SQL safe, and the route 400s anything not in it before calling.
+// Rows always additionally group by unit (the meter's grain), folded into a
+// per-unit object under each dimension tuple: quantities sum legally within a
+// unit, and cost sums across everything (one currency); nothing else is ever
+// added together.
+// The groupable dimensions, WITH their names. This is the one resolver — the
+// route validates against it AND serves it, so what a client can offer and
+// what the server will accept are the same list by construction (the
+// browseFilters rule, connectors/runtime.js). Mechanism 3 asks for three
+// things: the units, their labels, and WHICH BREAKDOWNS EXIST. A Stage 5
+// dimension added here appears in the picker with no client edit — the
+// alternative is a hardcoded list in the tab, which is the mistake this
+// feature has already caught twice (a prose capability list, then a unit-id
+// transform).
+//
+// `emptyLabel` is what THIS axis's '' means, stated on the axis rather than
+// branched on by whoever renders it. The sentinel is one schema fact with a
+// different meaning per dimension (no board / no attribution), and the reader
+// had grown one `id === "" ? …` branch per axis in another file — two of them,
+// already disagreeing about whether to compare against the named constant or a
+// bare "". A dimension with no `emptyLabel` has nothing to say about '' and
+// renders it blank, which is the deliberate answer for `model`: under a named
+// provider, "OpenAI · unattributed" would read as a claim.
+export const USAGE_DIMS = {
+  day: { column: "day", label: "Day" },
+  board: { column: "board_id", label: "Board", emptyLabel: APP_SCOPE_LABEL },
+  capability: { column: "capability", label: "Work" },
+  provider: { column: "provider", label: "Provider", emptyLabel: UNATTRIBUTED_LABEL },
+  model: { column: "model", label: "Model" },
+};
+
+export async function usageRows(db, { from = null, to = null, board = null, capability = null, group = [] } = {}) {
+  const cols = group.map((g) => USAGE_DIMS[g]?.column);
+  // Also the guard on the interpolation below — every name reaching the SQL
+  // came out of the table above, never out of a request.
+  if (cols.some((c) => !c)) throw new Error("unknown group dimension");
+  const cond = [], args = [];
+  const where = (sql, v) => { args.push(v); cond.push(`${sql} $${args.length}`); };
+  if (from) where("day >=", from);
+  if (to) where("day <=", to);
+  // `board` is compared when GIVEN, including the '' app scope — which is a
+  // value, not an absence, so null is the only way to say "every board".
+  if (board != null) where("board_id =", board);
+  if (capability) where("capability =", capability);
+  const sel = [...cols, "unit"];
   const { rows } = await db.query(
-    `SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS total FROM ai_board_usage WHERE board_id=$1`,
-    [boardId]
+    `SELECT ${sel.join(", ")}, SUM(quantity) AS q, SUM(priced_quantity) AS pq, SUM(cost_micros) AS cm
+     FROM usage_meter ${cond.length ? `WHERE ${cond.join(" AND ")}` : ""}
+     GROUP BY ${sel.join(", ")} ORDER BY ${sel.join(", ")}`,
+    args
   );
-  return Number(rows[0]?.total ?? 0);
+  // Fold one row per unit into one row per dimension tuple.
+  const out = new Map();
+  for (const r of rows) {
+    const key = JSON.stringify(cols.map((c) => r[c]));
+    let row = out.get(key);
+    if (!row) out.set(key, row = { ...Object.fromEntries(group.map((g, i) => [g, r[cols[i]]])), units: {} });
+    row.units[r.unit] = { quantity: Number(r.q), priced_quantity: Number(r.pq), cost_micros: Number(r.cm) };
+  }
+  return [...out.values()];
+}
+
+// The unpriced remainder as something displayable: per UNIT, never one summed
+// number — unpriced tokens plus unpriced searches is a quantity of nothing.
+// Labels come from the registry here, at the source, rather than being
+// invented from the id by whoever renders it (units.js says why).
+// Named field by field rather than spread: this list is a statement about
+// QUANTITIES ("1,200 input tokens are unpriced"), so it takes the naming half
+// of describeUnit and leaves the rate frame to the surface that prices things.
+const unpricedList = (byUnit) =>
+  Object.entries(byUnit || {})
+    .filter(([, q]) => Number(q) > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([unit, q]) => {
+      const { label, format } = describeUnit(unit);
+      return { unit, label, format, quantity: Number(q) };
+    });
+
+// Everything one board's chip and its cost figure need, in ONE pass over its
+// rows: the token buckets kept apart (input and output bill at 3-5× different
+// rates and cache reads at a fraction of input, so adding any of them together
+// produces a figure that means nothing) and the spend.
+//
+// Grouping by unit rather than pivoting per bucket is what keeps this reader
+// free of a unit vocabulary — a Stage 5 unit joins the cost and the remainder
+// with no edit here. The three named buckets are a DISPLAY choice, made where
+// the display is.
+//
+// `cost` is null when nothing was ever priced: "≈$0.00" on a board whose rates
+// we don't know would be a claim, not an absence. A board that ran free
+// on-device DOES get its true $0.00 — rate 0 is priced-at-zero. Note cost is
+// computed for every caller and DISCLOSED by the route (spend is
+// management-visible); it is one query either way, so the gate stays a
+// disclosure rule rather than becoming a second query path.
+export async function boardUsageSummary(db, boardId) {
+  // The ungrouped read of the dimensioned reader IS this query — one board,
+  // every unit. Calling it rather than spelling the same SELECT again is what
+  // keeps a Stage 5 unit (or a renamed cost column) from having to land twice.
+  const [row] = await usageRows(db, { board: boardId });
+  return {
+    // Every unit, by id — NOT three named token buckets. The bucket pivot that
+    // used to live here was a display choice made in the wrong building: it
+    // decided what the chip COULD say, so Stage 5b's audio joined the cost and
+    // the remainder while being unrepresentable in `tokens` — and the chip,
+    // which gates on input+output, went dark on a board whose only spend was
+    // transcription. The surfaces name their own buckets now; this reader
+    // stays free of a unit vocabulary, which is what it always claimed.
+    units: Object.fromEntries(Object.entries(row?.units || {}).map(([u, x]) => [u, x.quantity])),
+    cost: costOf(row?.units),
+  };
+}
+
+// The spend fold both board readers share: micros sum legally across units
+// (one currency), the per-unit remainder never does, and `null` means NOTHING
+// was ever priced — "≈$0.00" on a board whose rates we don't know would be a
+// claim, not an absence, while a board that ran free on-device gets its true
+// $0.00 (rate 0 is priced-at-zero). One rule, stated once, so the two grades
+// of the same figure cannot drift apart.
+function costOf(units) {
+  let micros = 0, priced = false;
+  const remainder = {};
+  for (const [unit, u] of Object.entries(units || {})) {
+    micros += u.cost_micros;
+    if (u.priced_quantity > 0) priced = true;
+    if (u.quantity > u.priced_quantity) remainder[unit] = u.quantity - u.priced_quantity;
+  }
+  return priced ? { micros, unpriced: unpricedList(remainder) } : null;
 }
 
 // Delete a row; returns { payload, board_id } (the caller hands the payload's

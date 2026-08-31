@@ -184,16 +184,22 @@ export function reconcile(data, presentIds = null) {
 }
 
 // Tokens only accrue while items are being tagged — exactly when we're already
-// polling — so we refresh the board's running total on the same cadence and let
-// the toolbar's odometer roll to the new value.
+// polling — so we refresh the board's running totals on the same cadence and
+// let the toolbar's odometer roll to the new values.
 async function refreshTokens() {
   if (!state.boardId) return;
   try {
     const r = await fetch(`/api/boards/${state.boardId}/tokens`, { cache: "no-store" });
     if (!r.ok) return;
-    const { token_total } = await r.json();
-    if (typeof token_total === 'number') state.boardTokens = token_total;
-  } catch { /* leave the last known total */ }
+    const { units, unitDefs, cost } = await r.json();
+    if (units) {
+      state.boardUnits = units;
+      state.boardUnitDefs = unitDefs ?? null;
+      // cost is a manager-only key and absent when nothing was priced — both
+      // read as "no figure", so the chip drops its ≈$ rather than showing $0.
+      state.boardCost = cost ?? null;
+    }
+  } catch { /* leave the last known totals */ }
 }
 
 // A live board (connector fields or a live chart face) changes server-side on

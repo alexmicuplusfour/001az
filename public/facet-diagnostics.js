@@ -14,7 +14,7 @@
 import { state } from './state.js';
 import { api } from './api.js';
 import { createModal } from './modal.js';
-import { ICONS, fmtDuration } from './utils.js';
+import { ICONS, fmtDuration, relTime } from './utils.js';
 import { unseen, markSeen, DIAG_SEEN as SEEN } from './seen-mark.js';
 
 // Which of the five states a facet is in, from one roll-up row (server shape:
@@ -165,10 +165,6 @@ const sampleThin = (row) => {
   const queued = row?.queued || 0;
   return queued > 0 && queued / (queued + (row?.items || 0)) >= RATE_BUCKET;
 };
-// The same one-liner alerts-modal, jobs-modal, ingest-modal and plugin-modal
-// each keep locally over fmtDuration. Copied rather than shared, matching them.
-const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
-
 // Whether the header shows the door at all. Both halves are load-bearing and
 // each alone leaves a button that opens something useless: without
 // `boardManage` a reader gets a facet suggestion they cannot act on, and

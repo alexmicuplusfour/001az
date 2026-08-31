@@ -505,7 +505,8 @@ test("face leg: a keyless render-nothing advance writes an ok row", async () => 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].kind, "face");
   assert.equal(rows[0].outcome, "ok");
-  assert.deepEqual(rows[0].detail, { provider: null, rendered: false });
+  // `connector`, not `provider` — the AI legs own that key now (metering Stage 2).
+  assert.deepEqual(rows[0].detail, { connector: null, rendered: false });
 });
 
 test("tag leg: the facet-less completion is a real ok row with zero tags", async () => {
@@ -556,6 +557,12 @@ test("extract + tag legs: one ok row each, with fields/identity and tags detail"
   assert.equal(typeof ext.detail.model, "string");
   assert.equal(tag.detail.tags, 1);
   assert.equal(Number(tag.item_id), iid);
+  // Stage 2 (metering-plan.md): each paid leg's row says what it cost and who
+  // served it — the stub bills 10/5 per call, no cache so no cache key.
+  assert.deepEqual(ext.detail.tokens, { in: 10, out: 5 });
+  assert.equal(ext.detail.provider, "openai");
+  assert.deepEqual(tag.detail.tokens, { in: 10, out: 5 });
+  assert.equal(tag.detail.provider, "openai");
   // The derivation really landed — the entity was renamed by the extract leg.
   const { rows: [e] } = await db.query("SELECT identity FROM entities WHERE id=$1", [eid]);
   assert.equal(e.identity, "maya chen");

@@ -7,11 +7,15 @@
 // without calling detect(), and the dispatch test uses a stub wire.
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, req } from "./helpers.js";
-import { resolveDetector, detectionDemux, imageForDetection } from "../server/worker.js";
+import fs from "node:fs";
+import path from "node:path";
+import { startServer, adminSession, seedBoard, req, meterTotals, until } from "./helpers.js";
+import { resolveDetector, detectionDemux, imageForDetection, startWorker } from "../server/worker.js";
 import sharp from "sharp";
 import { detectObjects, providerCatalog, PROVIDERS, registerProvider, unregisterProvider } from "../server/providers.js";
-import { setSetting } from "../server/db.js";
+import { setSetting, createBoard, createAiKey, createEntity, insertItem,
+  boardUsageSummary, APP_SCOPE } from "../server/db.js";
+import { probeCapability } from "../server/capability-probe.js";
 
 const LOCAL_MODEL = "iSEE-Laboratory/llmdet_tiny";
 
@@ -39,12 +43,18 @@ test("dispatch: detectObjects routes to a keyed provider's wire.detect (the paid
   registerProvider("stubdet", {
     label: "StubDet",
     onDevice: true, // exempt from rate-limit contract
-    wire: { detect: (_desc, rest) => { seen = rest; return [{ label: "x", box: [0, 0, 1, 1], score: 0.9 }]; } },
+    // { objects, usage } — the same shape embed and transcribe answer in, so a
+    // detector that bills in TOKENS can say so (metering-plan.md Stage 5c).
+    wire: { detect: (_desc, rest) => {
+      seen = rest;
+      return { objects: [{ label: "x", box: [0, 0, 1, 1], score: 0.9 }], usage: { input: 700, output: 20 } };
+    } },
     detects: { default: "stub-1", models: [{ id: "stub-1", note: "t" }] },
   });
   try {
     const out = await detectObjects({ provider: "stubdet", image: Buffer.from("img"), queries: ["cat."], threshold: 0.2 });
-    assert.deepEqual(out, [{ label: "x", box: [0, 0, 1, 1], score: 0.9 }]);
+    assert.deepEqual(out.objects, [{ label: "x", box: [0, 0, 1, 1], score: 0.9 }]);
+    assert.deepEqual(out.usage, { input: 700, output: 20 });
     assert.equal(seen.threshold, 0.2);
     assert.deepEqual(seen.queries, ["cat."]);
     assert.ok(Buffer.isBuffer(seen.image));
@@ -185,4 +195,112 @@ test("the capabilities feed exposes the detect binding; bind gates the provider 
   assert.equal(next.bound.provider, "localDetector");
   assert.deepEqual(next.config, [{ key: "detect_threshold", value: 0.25 }]);
   await setSetting(db, "detect_threshold", null); // leave settings as found
+});
+
+// --- metering: the leg, the probe, and the free case (Stage 5c) ---
+
+// One image through the whole extract leg, sidecar stubbed at the fetch layer
+// like audio.test.js's — but DRIVEN through the worker, because `extractOne`
+// lives inside startWorker's closure and there is no other door (transcribeOne
+// is exported, which is why its test needs no worker at all). Detection was the
+// last capability spending nothing visible: every call was free, but "free" and
+// "unmetered" are different claims and only one of them was true.
+test("the detect leg meters one image to its board, priced at the on-device zero", async (t) => {
+  const mapping = { fields: [{ key: "car", source: "detect", instruction: "car" }] };
+  // A key only opens the claim gate (claimFairBatch wants one on the board);
+  // no facets means the tag leg that follows completes without a model call.
+  const keyId = await createAiKey(db, "detect-meter-k", "openai", "sk-test");
+  const boardId = await createBoard(db, "detect-meter", [], "", true, keyId, null, { enabled: true }, false, { mapping });
+
+  const name = "aa11bb22cc33.png";
+  fs.mkdirSync(srv.galleryDir, { recursive: true });
+  fs.writeFileSync(path.join(srv.galleryDir, name),
+    await sharp({ create: { width: 40, height: 30, channels: 3, background: { r: 9, g: 9, b: 9 } } }).png().toBuffer());
+  const eid = await createEntity(db, boardId, { identity: name });
+  const iid = await insertItem(db, boardId, {
+    identity: name, fields: {}, mapping,
+    files: [{ name, original_name: "street.png", kind: "image" }],
+  }, "pending_extract", eid);
+
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/detect"))
+      return { ok: true, status: 200, json: async () => ({ objects: [{ label: "car", box: [0.1, 0.1, 0.5, 0.5], score: 0.9 }] }) };
+    throw new Error("no network in this test"); // nothing else may reach out
+  };
+
+  process.env.POLL_MS = "50";
+  t.after(() => { delete process.env.POLL_MS; });
+  const stop = startWorker({ db, galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir });
+  try {
+    await until(async () =>
+      (await db.query("SELECT status FROM items WHERE id=$1", [iid])).rows[0]?.status !== "pending_extract");
+  } finally {
+    await stop();
+  }
+
+  // One call, one image — the two units this call site KNOWS it spent. Many
+  // queries ride a single pass, so the IMAGE is the quantity, not the query.
+  const m = await meterTotals(db, boardId, "detect");
+  assert.deepEqual([m.calls, m.images, m.provider, m.model], [1, 1, "localDetector", LOCAL_MODEL]);
+  assert.equal(m.input, 0, "the sidecar reported no usage, so no token row was written");
+
+  // On-device → install() normalizes it to a provider-wide $0, so this is a
+  // KNOWN zero with nothing left over — not the absent figure an unpriced
+  // model gets. "4,213 detections · $0.00" is a true thing to say.
+  const { cost } = await boardUsageSummary(db, boardId);
+  assert.deepEqual(cost, { micros: 0, unpriced: [] });
+
+  // The job row names the engine that actually ran. It used to stamp the
+  // literal string "detection" into the MODEL slot on a detect-only board —
+  // a placeholder standing where a model name goes.
+  const { rows: [job] } = await db.query(
+    "SELECT outcome, detail FROM job_log WHERE board_id=$1 AND kind='extract'", [boardId]);
+  assert.equal(job.outcome, "ok");
+  assert.equal(job.detail.model, LOCAL_MODEL);
+  assert.equal(job.detail.provider, "localDetector");
+  assert.ok(!("tokens" in job.detail), "a keyless engine reported none — absent, not zeroed");
+});
+
+// The half of Stage 5a that 5b left open: embed and transcribe probes already
+// file their ping at the app scope, and this was the last one spending in the
+// dark. A probe is a paid call too.
+test("the detect probe meters its ping at the app scope", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async (url, opts = {}) => {
+    if (String(url).includes("/detect")) return { ok: true, status: 200, json: async () => ({ objects: [] }) };
+    if (String(url).includes("/health")) return { ok: true, status: 200, json: async () => ({ model: LOCAL_MODEL }) };
+    return original(url, opts);
+  };
+  const before2 = await meterTotals(db, APP_SCOPE, "detect");
+  const r = await probeCapability(db, "detect");
+  assert.deepEqual([r.ok, r.provider, r.count], [true, "localDetector", 0]);
+  const after2 = await meterTotals(db, APP_SCOPE, "detect");
+  assert.deepEqual([after2.calls - before2.calls, after2.images - before2.images], [1, 1]);
+});
+
+// A plugin written against the pre-5c contract still answers a bare array.
+// The dispatcher normalizes it rather than letting it through, because the old
+// shape does NOT fail loudly on the leg: `objects` would destructure to
+// undefined, demux.route() reads it as `|| []`, and the item lands "No objects
+// detected" while the meter bills the image. A silent wrong answer on a paid
+// path is the one outcome worth a test.
+test("a legacy plugin's bare array still detects — normalized at the dispatcher", async () => {
+  registerProvider("olddet", {
+    label: "OldDet",
+    onDevice: true, // exempt from the rate-limit contract
+    wire: { detect: async () => [{ label: "car", box: [0, 0, 1, 1], score: 0.8 }] },
+    detects: { default: "old-1", models: [{ id: "old-1", note: "t" }] },
+  });
+  try {
+    const out = await detectObjects({ provider: "olddet", image: Buffer.from("i"), queries: ["car."] });
+    assert.deepEqual(out.objects, [{ label: "car", box: [0, 0, 1, 1], score: 0.8 }]);
+    assert.deepEqual(out.usage, {}, "it declared no spend — silence, not zeros");
+    // The boxes reach their field, which is the thing that silently stopped.
+    assert.equal(detectionDemux([{ key: "car", instruction: "car" }]).route(out.objects).get("car").length, 1);
+  } finally {
+    unregisterProvider("olddet");
+  }
 });

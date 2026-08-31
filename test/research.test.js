@@ -126,7 +126,7 @@ test("ai_research: off by default, settable at create, flippable via PATCH", asy
   assert.equal(created.status, 200);
   assert.equal(created.json.ai_research, true);
 
-  const list = async () => (await req(base, "GET", "/api/admin/boards", { sid: admin.sid })).json;
+  const list = async () => (await req(base, "GET", "/api/admin/boards", { sid: admin.sid })).json.boards;
   let board = (await list()).find((b) => b.id === created.json.id);
   assert.equal(board.ai_research, true);
 

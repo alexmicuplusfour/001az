@@ -11,7 +11,8 @@
 // provider's own message is the payload.
 import sharp from "sharp";
 import { testKey, embedTexts } from "./providers.js";
-import { withPluginHealth } from "./db.js";
+import { withPluginHealth, APP_SCOPE } from "./db.js";
+import { meterAiCall } from "./metering.js";
 import { resolveDefaultAi, resolveEmbedder, resolveTranscriber, resolveDetector } from "./worker.js";
 import { sidecarDefaultModel } from "./sidecar-catalog.js";
 
@@ -48,7 +49,10 @@ const PROBES = {
   embed: async (db) => {
     const em = await resolveEmbedder(db);
     if (!em) throw bad("semantic search is not enabled/configured");
-    await withPluginHealth(db, `ai:${em.provider}`, () => embedTexts({ ...em, texts: ["ping"] }));
+    const { usage } = await withPluginHealth(db, `ai:${em.provider}`, () => embedTexts({ ...em, texts: ["ping"] }));
+    // A probe is a paid call too — one request, a few tokens, filed at the
+    // app scope: no board asked for it (metering-plan.md Stage 5a).
+    await meterAiCall(db, APP_SCOPE, { capability: "embed", provider: em.provider, model: em.model }, usage);
     return { provider: em.provider, model: em.model };
   },
   // Transcription and detection probe the ENGINE, which always resolves — so
@@ -58,12 +62,27 @@ const PROBES = {
     const t = await resolveTranscriber(db);
     // The deadline keeps this admin-facing probe from waiting behind a long job —
     // the sidecar's express lane answers tiny clips in seconds when healthy.
-    await t.transcribe(tinyWav(), "probe.wav", { deadlineMs: 30000 });
+    const { usage } = await t.transcribe(tinyWav(), "probe.wav", { deadlineMs: 30000 });
+    // A probe is a paid call too — filed at the app scope like the embed ping
+    // above, through the same projection. Its quarter-second WAV rounds to
+    // zero seconds, so this spend is purely call-shaped (Stage 5b).
+    await meterAiCall(db, APP_SCOPE, { capability: "transcribe", provider: t.id, model: t.model }, usage);
     return { provider: t.id, model: t.model };
   },
   detect: async (db) => {
     const d = await resolveDetector(db);
-    const objects = await d.detect(await tinyImage(), ["object."]);
+    const { objects, usage } = await d.detect(await tinyImage(), ["object."]);
+    // A probe is a paid call too — one image, filed at the app scope like the
+    // embed and transcribe pings above. This was the last probe still spending
+    // invisibly (Stage 5c closes the gap 5a opened).
+    //
+    // Metered against `d.model`, NOT the live `model` resolved below: the
+    // extract leg has no cheap way to ask /health per item, so it meters the
+    // descriptor's spelling. Recording the other one here would split one
+    // engine across two rows — and two rows price separately, since the rate
+    // table is keyed on (provider, model). The live answer's job is display.
+    await meterAiCall(db, APP_SCOPE, { capability: "detect", provider: d.id, model: d.model },
+      usage, { images: 1 });
     // An on-device engine's model is baked into its sidecar image — report what
     // /health says so the toast can't drift from the served model. A provider
     // that isn't sidecar-backed answers null and keeps the model it named on

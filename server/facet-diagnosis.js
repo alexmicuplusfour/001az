@@ -9,8 +9,9 @@
 import crypto from "node:crypto";
 import {
   boardFacetSegments, facetSplitValues, facetExamples,
-  boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog, bumpUsage,
+  boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog,
 } from "./db.js";
+import { meterAiCall, spentDetail } from "./metering.js";
 
 // How many worked examples of each kind the prompt carries. Four unanimous is
 // enough to make the comparison possible without letting the contrast set crowd
@@ -574,7 +575,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // never engages and a facet retried every tick. Written on the attempt path
   // only; on a finding, `stats` already is what it asked about.
   const t0 = Date.now();
-  const attempted = async (error) => {
+  const attempted = async (error, spent = null) => {
     const attempts = (sameQuestion(prior, fresh, segment) ? prior.attempts || 0 : 0) + 1;
     await setFacetDiagnostic(db, board.id, facet.key, {
       k: fresh, at: Date.now(), attempts, error,
@@ -589,7 +590,11 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
     // failed. Warn-never-throw for the same reason as the success row.
     await addJobLog(db, {
       boardId: board.id, target: facet.key, kind: "diagnose", outcome: "failed", error,
-      detail: { attempts, items: segment.items, unanimous: segment.unanimous },
+      // `spent` only where the call actually happened and its answer was
+      // unusable — the wire-throw site has no usage to report. That row is the
+      // one this function exists for ("it cost real money"), so it says how
+      // much, the same way a discarded tag row does.
+      detail: { attempts, items: segment.items, unanimous: segment.unanimous, ...spent },
       startedAt: t0, endedAt: Date.now(),
     }).catch((e) => console.warn(`diagnose job log write failed: ${e.message}`));
   };
@@ -613,9 +618,14 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
     await attempted(String(e.message).slice(0, 200));
     throw e;
   }
-  // One row per paid call, whatever came back — the token ledger tracks spend, not
-  // usefulness.
-  if (usage) await bumpUsage(db, board.id, usage);
+  // One meter write per paid call, whatever came back — the ledger tracks
+  // spend, not usefulness. Metered as its own kind ('diagnose', the job-log
+  // vocabulary): it rides the tag binding but it is not tagging, and spend
+  // transparency is exactly the place the difference matters.
+  const dims = { capability: "diagnose", provider: ai.provider, model: ai.model };
+  if (usage) await meterAiCall(db, board.id, dims, usage);
+  // The same facts in the row's spelling, for whichever row this pass writes.
+  const spent = spentDetail(dims, [usage]);
 
   // strictTools:false providers treat the schema as advisory, so an off-list
   // verdict is reachable. Record no FINDING rather than inventing one: a stored
@@ -625,7 +635,7 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   const verdict = VERDICTS.includes(input?.verdict) ? input.verdict : null;
   if (!verdict) {
     console.warn(`diagnose: board ${board.id} facet ${facet.key} — unusable verdict ${JSON.stringify(input?.verdict)}`);
-    await attempted(`unusable verdict: ${JSON.stringify(input?.verdict)}`.slice(0, 200));
+    await attempted(`unusable verdict: ${JSON.stringify(input?.verdict)}`.slice(0, 200), spent);
     return null;
   }
 
@@ -663,7 +673,9 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // as a failure.
   await addJobLog(db, {
     boardId: board.id, target: facet.key, kind: "diagnose", outcome: "ok",
-    detail: { items: segment.items, unanimous: segment.unanimous, verdict, scoped: segment.scoped },
+    detail: {
+      items: segment.items, unanimous: segment.unanimous, verdict, scoped: segment.scoped, ...spent,
+    },
     startedAt: t0, endedAt: Date.now(),
   }).catch((e) => console.warn(`diagnose job log write failed: ${e.message}`));
   return entry;

@@ -6,7 +6,8 @@ import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openBoardModal } from "/board-modal.js";
 import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddSep, ddAction, ddEmpty } from "/dropdown.js";
-import { ICONS } from "/utils.js";
+import { ICONS, fmtTok, fmtCost, fmtUnpriced, fmtUnit, unitDefs } from "/utils.js";
+import { sparkline } from "/sparkline.js";
 
 const boardsContent = document.getElementById("boards-content");
 
@@ -18,9 +19,13 @@ export async function renderBoards() {
   const me = await fetch("/api/me").then((r) => r.json());
   if (!me || !me.is_admin) return;
 
-  let boards;
+  let boards, defs;
   try {
-    boards = await api("GET", "/api/admin/boards");
+    const r = await api("GET", "/api/admin/boards");
+    boards = r.boards;
+    // The vocabulary for the usage cells' units maps — served beside the data
+    // so the cell renders what it is handed and names no unit itself.
+    defs = unitDefs(r.units);
   } catch { return; }
 
   const sec = document.createElement("div");
@@ -29,42 +34,60 @@ export async function renderBoards() {
 
   // Board table
   const table = document.createElement("table");
-  table.innerHTML = `<thead><tr><th>Name</th><th>Items</th><th>AI tokens</th><th></th></tr></thead>`;
+  // The cell sums every capability metered on the board, so the label says
+  // exactly that and nothing narrower. It deliberately does NOT enumerate which
+  // capabilities those are: the meter is built to gain units and capabilities
+  // without a migration (metering-plan.md Stage 5 adds embeddings,
+  // transcription, detection), and a prose list in a client attribute is the
+  // one form of that fact nobody can keep true. The per-capability breakdown
+  // is Stage 4's dashboard.
+  table.innerHTML = `<thead><tr><th>Name</th><th>Items</th><th title="all AI usage metered on this board">AI usage</th><th></th></tr></thead>`;
   const tbody = document.createElement("tbody");
 
-  const fmtTok = (n) =>
-    n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M"
-    : n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "K"
-    : String(n);
-  // Last 14 days as 2px bars, height = billable input tokens (cache
-  // reads excluded), scaled to the board's busiest day in the window.
-  // Idle days show a 1px baseline tick; bottom-aligned flex puts the
-  // ticks exactly on the text baseline.
-  function sparkline(days) {
-    if (!days || !days.some((d) => d.input > 0)) return "";
-    const byDay = Object.fromEntries(days.map((d) => [d.day, d]));
-    const max = Math.max(...days.map((d) => d.input));
-    let bars = "";
-    for (let i = 13; i >= 0; i--) {
-      const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
-      const d = byDay[day];
-      const h = d && d.input ? Math.max(2, Math.round((d.input / max) * 12)) : 1;
-      const tip = d
-        ? `${day} — ${d.calls} call(s), ${fmtTok(d.input)} in / ${fmtTok(d.output)} out${d.searches ? `, ${d.searches} search(es)` : ""}`
-        : `${day} — no tagging`;
-      bars += `<span title="${tip}" style="width:2px;height:${h}px;background:#000"></span>`;
-    }
-    return `<span style="display:inline-flex;align-items:flex-end;gap:2px;margin-left:10px;cursor:default">${bars}</span>`;
-  }
+  // Last 14 days beside the totals — the shared day-bars component at its
+  // original size; bar height is billable input tokens (cache reads excluded).
+  // The rows are units maps, so the callbacks pick what they show.
+  const dq = (d, unit) => d.units[unit] || 0;
+  const spark = (days) => sparkline(days, {
+    value: (d) => dq(d, "input_tokens"),
+    title: (day, d) => d
+      ? `${day} — ${Object.entries(d.units).map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ")}`
+      : `${day} — no usage`,
+    style: "margin-left:10px",
+  });
+  // The cell gives a few units a bespoke phrase ("3.9M in", "525K cached") and
+  // lets every other unit append in the served vocabulary's own words. Which
+  // ones get the bespoke treatment is a DISPLAY choice and belongs here — but
+  // it is RECORDED rather than restated: `q` remembers what it was asked for,
+  // so "this cell already says something about X" is stated exactly once, at
+  // the line that says it. Drop a phrase below and its unit rejoins the
+  // appendix automatically instead of vanishing.
   function usageCell(u) {
-    if (!u || !u.calls) return `<span style="color:#9aa0aa">—</span>`;
+    if (!u || !Object.keys(u.units).length) return `<span style="color:#9aa0aa">—</span>`;
+    const said = new Set();
+    const q = (unit) => { said.add(unit); return u.units[unit] || 0; };
+    const today = Object.entries(u.today).map(([unit, n]) => fmtUnit(n, defs[unit] ?? { unit })).join(", ");
     const tip = [
-      `${u.calls} call(s) all-time`,
-      u.searches ? `${u.searches} web search(es)` : "",
-      u.cacheRead ? `${fmtTok(u.cacheRead)} cached input reads` : "",
-      u.today.calls ? `today: ${u.today.calls} call(s), ${fmtTok(u.today.input)} in / ${fmtTok(u.today.output)} out` : "",
+      q("requests") ? `${u.units.requests} call(s) all-time` : "",
+      q("web_searches") ? `${u.units.web_searches} web search(es)` : "",
+      today ? `today: ${today}` : "",
+      // Same per-unit remainder shape the board's own endpoint ships, with
+      // its labels — one contract, so one phrase renders either grade.
+      u.cost?.unpriced?.length ? `not in the $ figure: ${fmtUnpriced(u.cost.unpriced)}` : "",
     ].filter(Boolean).join(" · ");
-    return `<span title="${tip}">${fmtTok(u.input)} in · ${fmtTok(u.output)} out</span>${sparkline(u.days)}`;
+    // Cache reads in the cell, not the tooltip: they bill at a fraction of the
+    // input rate, so "is the cache earning its keep" deserves a glance, not a
+    // hover. Omitted entirely when zero.
+    const cached = q("cache_read_tokens") ? ` · ${fmtTok(u.units.cache_read_tokens)} cached` : "";
+    const tokens = `${fmtTok(q("input_tokens"))} in · ${fmtTok(q("output_tokens"))} out`;
+    const extra = Object.entries(u.units)
+      .filter(([unit]) => !said.has(unit))
+      .map(([unit, n]) => ` · ${fmtUnit(n, defs[unit] ?? { unit })}`)
+      .join("");
+    // Cost only when any is KNOWN (u.cost is null otherwise — no ≈$0.00 out
+    // of ignorance); an all-on-device board's true $0.00 does show.
+    const cost = u.cost ? ` · ${fmtCost(u.cost)}` : "";
+    return `<span title="${tip}">${tokens}${cached}${extra}${cost}</span>${spark(u.days)}`;
   }
 
   for (const b of boards) {

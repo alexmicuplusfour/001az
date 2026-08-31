@@ -10,16 +10,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startServer, adminSession, seedBoard, req } from "./helpers.js";
+import { startServer, adminSession, seedBoard, req, meterTotals } from "./helpers.js";
 import { setPluginState, createAiKey, setSetting, getSetting, oneAudioNeedingTranscription,
-  createEntity, insertItem, reprocessEntity } from "../server/db.js";
+  createEntity, insertItem, reprocessEntity, boardUsageSummary } from "../server/db.js";
 import { boardBindingPatch } from "../server/capability-bind.js";
 import { audioSource } from "../server/sources/audio.js";
 import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
-import { resolveTranscriber, transcribeFailurePolicy, embedTextFor } from "../server/worker.js";
+import { resolveTranscriber, transcribeFailurePolicy, embedTextFor, transcribeOne } from "../server/worker.js";
 import { transcribeAudio, providerCatalog } from "../server/providers.js";
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
@@ -91,6 +91,86 @@ test("resolveTranscriber: whisper sidecar speaks the async job protocol (submit 
   assert.equal(calls[0].method, "POST");
   assert.match(calls[1].url, /\/jobs\/abc123$/, "polls the job id the submit returned");
   assert.equal(calls.length, 4, "submit + one poll per state");
+});
+
+// ── metering (Stage 5b) ──────────────────────────────────────────────────────
+
+test("compat transcribe: a token-billed model's usage passes through; silence stays zeros", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  // gpt-4o-transcribe answers with token usage; whisper-1 answers bare text.
+  let body = { text: "hi", usage: { type: "tokens", input_tokens: 44, output_tokens: 11 } };
+  globalThis.fetch = async (url, opts = {}) => {
+    if (!String(url).includes("/audio/transcriptions")) return original(url, opts);
+    return { ok: true, status: 200, json: async () => body };
+  };
+  let r = await transcribeAudio({ provider: "openai", apiKey: "k", model: "gpt-4o-transcribe", audio: Buffer.from("x"), filename: "a.wav" });
+  assert.deepEqual(r.usage, { input: 44, output: 11, cacheRead: 0 });
+  body = { text: "hi" };
+  r = await transcribeAudio({ provider: "openai", apiKey: "k", model: "whisper-1", audio: Buffer.from("x"), filename: "a.wav" });
+  assert.deepEqual(r.usage, { input: 0, output: 0, cacheRead: 0 },
+    "a duration-billed model reports nothing — the caller meters the clip's own measured seconds");
+});
+
+test("transcribeOne: meters the clip's measured duration to its board, priced at the sidecar's declared zero", async (t) => {
+  const srv = await startServer();
+  t.after(() => srv.close());
+  const { db } = srv;
+  const { galleryDir } = tmpDirs(t);
+  const boardId = await seedBoard(db, "audio-meter");
+  const wav = wavBuffer({ seconds: 2 });
+  fs.writeFileSync(path.join(galleryDir, "abc123.wav"), wav);
+  // The file entry as the audio source writes it at ingest — duration is the
+  // MEASURED media fact the leg meters, not something the engine reports.
+  const payload = {
+    identity: "clip", fields: {},
+    files: [{ name: "abc123.wav", original_name: "clip.wav", kind: "audio", size: wav.length, meta: { duration: 90.4 } }],
+  };
+  const id = await insertItem(db, boardId, payload, "tagged");
+  const row = await oneAudioNeedingTranscription(db);
+  assert.equal(row.id, id);
+
+  // The whisper sidecar, stubbed at the fetch layer (URL-matched, so nothing
+  // else a server tick might fetch is swallowed): submit → done, the model
+  // self-reported in the done payload.
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  globalThis.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/transcribe")) return { ok: true, status: 202, json: async () => ({ job: "j1", status: "queued" }) };
+    if (u.includes("/jobs/")) return { ok: true, status: 200, json: async () => ({ status: "done", progress: { done_s: 2, total_s: 2 }, text: "hello world", model: "small" }) };
+    return original(url, opts);
+  };
+  assert.equal(await transcribeOne(db, galleryDir, row, new Map()), "ok");
+
+  // One call, the clip's own 90 seconds (rounded from 90.4), attributed to
+  // the model that actually produced the text — and priced at the on-device
+  // zero: a KNOWN $0.00, not an absence.
+  const m = await meterTotals(db, boardId, "transcribe");
+  assert.deepEqual([m.calls, m.audio, m.provider, m.model], [1, 90, "whisper", "small"]);
+  const { cost } = await boardUsageSummary(db, boardId);
+  assert.deepEqual(cost, { micros: 0, unpriced: [] });
+
+  // The transcript landed, and the job row states seconds beside its
+  // kind-specific facts — no tokens key: the sidecar reported none.
+  const { rows: [item] } = await db.query("SELECT payload FROM items WHERE id=$1", [id]);
+  assert.equal(item.payload.transcript, "hello world");
+  const { rows: [job] } = await db.query("SELECT outcome, detail FROM job_log WHERE board_id=$1 AND kind='transcribe'", [boardId]);
+  assert.equal(job.outcome, "ok");
+  assert.equal(job.detail.seconds, 90);
+  assert.equal(job.detail.engine, "whisper:small");
+  assert.ok(!("tokens" in job.detail));
+
+  // The admin ledger serves the units map WITH its vocabulary — the cell
+  // renders a unit it never hard-coded, label and format from the wire.
+  const admin = await adminSession(db);
+  const r = await req(srv.base, "GET", "/api/admin/boards", { sid: admin.sid });
+  const b = r.json.boards.find((x) => x.id === boardId);
+  assert.equal(b.ai_usage.units.audio_seconds, 90);
+  assert.equal(b.ai_usage.units.requests, 1);
+  const units = Object.fromEntries(r.json.units.map((u) => [u.unit, u]));
+  assert.deepEqual(units.audio_seconds,
+    { unit: "audio_seconds", label: "audio", format: "duration", rate: { per: 60, label: "$/min" } });
 });
 
 test("whisper client: a pinned model rides the submit; unpinned asks for nothing", async (t) => {
@@ -299,8 +379,9 @@ test("resolveTranscriber: an installed provider with a key resolves a provider e
   t.after(() => { globalThis.fetch = orig; });
   let seen;
   globalThis.fetch = async (url, opts) => { seen = { url: String(url), opts }; return { ok: true, status: 200, json: async () => ({ text: "spoken words" }) }; };
-  assert.deepEqual(await eng.transcribe(Buffer.from("audio")), { text: "spoken words", turns: null },
-    "a plain provider model reports no structure — turns arrive with a diarizing wire later");
+  assert.deepEqual(await eng.transcribe(Buffer.from("audio")),
+    { text: "spoken words", turns: null, usage: { input: 0, output: 0, cacheRead: 0 } },
+    "a plain provider model reports no structure — turns arrive with a diarizing wire later; usage rides out for the leg to meter");
   assert.match(seen.url, /\/audio\/transcriptions$/);
 });
 

@@ -4,8 +4,9 @@
 // lowercase symbol, provenance is the provider name.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedUser, req, installConnectors, withLegacyEntityId } from "./helpers.js";
-import { createEntity, setSetting, getSetting, setPluginState } from "../server/db.js";
+import { startServer, adminSession, seedUser, req, installConnectors, withLegacyEntityId, meterTotals } from "./helpers.js";
+import { createEntity, setSetting, getSetting, setPluginState, APP_SCOPE } from "../server/db.js";
+import { meterSpend } from "../server/metering.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -131,7 +132,7 @@ test("provider budgets: interactive vs bulk, env-tunable per call", () => {
 test("callProvider renames a bare TimeoutError after the provider, status-less", async () => {
   const fast = { rpm: 100000, burst: 100 };
   await assert.rejects(
-    runtime.callProvider("acme-t", fast, async () => {
+    runtime.callProvider(db, "acme-t", fast, async () => {
       throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
     }),
     (e) => {
@@ -143,7 +144,7 @@ test("callProvider renames a bare TimeoutError after the provider, status-less",
   // Non-timeout errors pass through untouched (429 retry behavior is covered
   // in faces.test.js).
   await assert.rejects(
-    runtime.callProvider("acme-t", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
+    runtime.callProvider(db, "acme-t", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
     /boom/
   );
 });
@@ -1116,4 +1117,65 @@ test("plugins/:id/test: honors the plugin's provider, not the active one", async
   } finally {
     globalThis.fetch = original;
   }
+});
+
+// ─── Stage 5d (metering-plan.md): connector quota burn ───────────────────────
+
+// What ONE provider has burned. Scoped, because the app scope accumulates every
+// connector call this file makes — and scoping pins the attribution too.
+const apiSpent = async (provider) =>
+  (await meterTotals(db, APP_SCOPE, "api", provider)).units.api_requests || 0;
+
+test("api quota: a fan-out meters per REQUEST, not per logical call", async () => {
+  // A request-pacing provider driven through the real runtime: it awaits the
+  // threaded ctx.pace() before each outbound fetch, which is the pacing moment
+  // and the meter point. One search(), a three-request fan-out inside it.
+  const prov = {
+    label: "Meter Co", pacesRequests: true, rpm: 100000, burst: 100,
+    async search(q, { pace }) { for (let i = 0; i < 3; i++) await pace(); return [{ id: q }]; },
+  };
+  const conn = { name: "metered", providers: { meterco: prov }, defaultProvider: "meterco", manifest: {} };
+  await installConnectors(db, "metered:meterco");
+
+  const before = await apiSpent("meterco");
+  await runtime.search(db, conn, "gizmo");
+  assert.equal(await apiSpent("meterco") - before, 3, "three requests, not one logical call");
+  assert.equal((await meterTotals(db, APP_SCOPE, "api")).calls, 0,
+    "the AI `requests` unit is never written here — the two call families cannot sum together");
+});
+
+test("api quota: a retried attempt costs a request — quota is spent by what was SENT", async () => {
+  // LEGACY pacing (no pacesRequests): the token is taken by callProvider. It is
+  // taken per ATTEMPT, inside the retry loop — a retried request was sent, and
+  // a provider that counts refusals against the quota charges for it. Before
+  // the 5d pass the acquire sat outside the loop, so the retry was not only
+  // unmetered but unpaced: it re-sent at full speed into the provider that had
+  // just said slow down, bypassing the very throttle the 429 had armed.
+  const prov = { rpm: 100000, burst: 100 };
+  const before = await apiSpent("retry-co");
+  let tries = 0;
+  await runtime.callProvider(db, "retry-co", prov, async () => {
+    if (++tries === 1) { const e = new Error("rate limited"); e.status = 429; e.retryAfter = "0"; throw e; }
+    return "ok";
+  });
+  assert.equal(tries, 2);
+  assert.equal(await apiSpent("retry-co") - before, 2, "both attempts spent quota");
+});
+
+test("api quota: the usage feed names the provider and calls the work API", async () => {
+  await meterSpend(db, APP_SCOPE, { capability: "api", provider: "coingecko" }, { api_requests: 4 });
+  const r = await req(base, "GET", "/api/usage?group=capability,provider", { sid: admin.sid });
+  assert.equal(r.status, 200);
+  // The label comes from the CONNECTOR half of the plugin catalog — the AI
+  // registry has never heard of coingecko, and before 5d this rendered a bare id.
+  assert.equal(r.json.dims.provider.values.coingecko, "CoinGecko");
+  assert.equal(r.json.dims.capability.values.api, "API");
+  const row = r.json.rows.find((x) => x.capability === "api" && x.provider === "coingecko");
+  assert.ok(row.units.api_requests.quantity >= 4);
+  // Unpriced because no rate is seeded for coingecko — NOT because the unit
+  // can't be priced. It declares `rate: EACH` and rides unitVocabulary(), so a
+  // paid API tier is something an admin can enter in the price editor; the
+  // meter records the quantity either way and the remainder says the rest.
+  assert.equal(row.units.api_requests.cost_micros, 0);
+  assert.equal(row.units.api_requests.priced_quantity, 0);
 });

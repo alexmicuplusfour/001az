@@ -51,14 +51,16 @@
       .gear { background: none; border: none; padding: 6px; cursor: pointer; color: #6b6b72; border-radius: 7px; flex: none; display: flex; }
       .gear svg { width: 15px; height: 15px; }
       .gear:hover { background: #f1f1f3; color: #111; }
-      /* kind filter chips between Add and the list — the gallery's pill look,
-         colors inlined since this page doesn't load styles.css */
-      .plugin-filters { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 6px; }
-      .plugin-filters .pill { border: 1px solid #0a0a181a; background: #fff; color: #111; border-radius: 999px; padding: 4px 11px; font-size: 12px; white-space: nowrap; user-select: none; transition: background .12s, color .12s, border-color .12s; }
-      .plugin-filters .pill:hover { background: #f1f1f3; }
-      .plugin-filters .pill .count { color: #6b6b72; font-size: 11px; margin-left: 5px; }
-      .plugin-filters .pill.active { background: #111; color: #fff; border-color: #111; }
-      .plugin-filters .pill.active .count { color: rgba(255, 255, 255, .7); }
+      /* pill row — the gallery's pill look, colors inlined since this page
+         doesn't load styles.css. Worn by the plugins tab's kind filters and
+         the usage tab's window picker (was .plugin-filters until the second
+         wearer arrived). */
+      .pill-row { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 6px; }
+      .pill-row .pill { border: 1px solid #0a0a181a; background: #fff; color: #111; border-radius: 999px; padding: 4px 11px; font-size: 12px; white-space: nowrap; user-select: none; transition: background .12s, color .12s, border-color .12s; }
+      .pill-row .pill:hover { background: #f1f1f3; }
+      .pill-row .pill .count { color: #6b6b72; font-size: 11px; margin-left: 5px; }
+      .pill-row .pill.active { background: #111; color: #fff; border-color: #111; }
+      .pill-row .pill.active .count { color: rgba(255, 255, 255, .7); }
       .plugin-add { margin-top: 16px; }
       /* deliberately a dashed "add zone", not a primary button */
       .plugin-add button { border-style: dashed; border-color: #cfcfd6; background: #fff; color: #444; }
@@ -97,6 +99,23 @@
       .cap-config input { flex: 0 0 90px; min-width: 90px; }
       .cap-config select { flex: 0 0 auto; } /* sized by its options, unlike the fixed numeric input */
       .cap-config .hint { color: #9aa0aa; }
+
+      /* usage tab — the headline strip; everything below it is stock .section
+         + table + .pill-row */
+      .usage-kpis { display: flex; flex-wrap: wrap; gap: 34px; margin: 22px 0 4px; }
+      .usage-kpi .v { font-size: 20px; font-weight: 600; }
+      .usage-kpi .k { color: #6b6b72; font-size: 12px; margin-top: 2px; }
+      /* the prices editor. The dim lines WEAR .muted for their colour and
+         state only their size, the way .boards-chip wears .p-note. */
+      .price-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+      .price-head .muted, .price-note { font-size: 12px; }
+      .price-note { margin: 0 0 14px; }
+      .price-cell { cursor: pointer; }
+      /* The three inputs that must escape the global `input { flex: 1;
+         min-width: 140px }` rule — the same escape .cap-config makes. */
+      .price-filter { flex: none; max-width: 240px; margin-bottom: 10px; font-size: 13px; }
+      .price-form input[type=number] { flex: 0 0 110px; min-width: 0; }
+      .price-edit { flex: none; width: 100px; min-width: 0; padding: 3px 6px; font-size: 12px; }
 
       /* logs tab — a dark embedded console (palette ported from logs.html);
          .fullbleed lifts the same element over the whole page */
@@ -146,6 +165,7 @@
         <nav class="tabs" id="tabs">
           <button class="tab active" data-tab="members" data-icon="users">Members</button>
           <button class="tab" data-tab="boards" data-icon="grid">Boards</button>
+          <button class="tab" data-tab="usage" data-icon="coin">Usage</button>
           <button class="tab" data-tab="capabilities" data-icon="activity">Capabilities</button>
           <button class="tab" data-tab="plugins" data-icon="plugin">Plugins</button>
           <button class="tab" data-tab="backups" data-icon="database">Backups</button>
@@ -160,6 +180,9 @@
           </section>
           <section class="panel" id="panel-boards" hidden>
             <div id="boards-content"></div>
+          </section>
+          <section class="panel" id="panel-usage" hidden>
+            <div id="usage-content"></div>
           </section>
           <section class="panel" id="panel-capabilities" hidden>
             <div id="capabilities-content"></div>

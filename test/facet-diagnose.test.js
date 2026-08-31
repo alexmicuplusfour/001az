@@ -8,7 +8,7 @@
 // it sends `facets` on every save whether or not the taxonomy moved.
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, req, meterTotals } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
   updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
@@ -95,8 +95,8 @@ function stubTagger(answer = {}, calls = []) {
           rewrite: "The silhouette. When a mark reads both round and wide, prefer wide.",
           ...answer,
         },
-        // The shape bumpUsage actually reads — input_tokens/output_tokens
-        // would book zero while still incrementing the row's count.
+        // The shape meterAiCall actually reads — input_tokens/output_tokens
+        // would book zero while still metering the call's request.
         usage: { input: 100, output: 20, cacheRead: 0 },
       };
     },
@@ -134,13 +134,19 @@ test("an unstable facet is diagnosed, stored, billed and logged", async () => {
   assert.equal(e.scoped, false);
   assert.deepEqual(e.split, ["round", "wide"]);
 
-  const [usage] = (await db.query("SELECT count, input_tokens FROM ai_board_usage WHERE board_id=$1", [b])).rows;
-  assert.equal(usage.count, 1, "the call is billed like any other");
-  assert.equal(Number(usage.input_tokens), 100, "…with its tokens, not just its row");
+  const usage = await meterTotals(db, b, "diagnose");
+  assert.equal(usage.calls, 1, "the call is billed like any other — as its own kind");
+  assert.equal(usage.input, 100, "…with its tokens, not just its row");
 
   const [job] = (await db.query("SELECT * FROM job_log WHERE board_id=$1 AND kind='diagnose'", [b])).rows;
   assert.equal(job.target, "shape", "the ledger names the facet");
-  assert.deepEqual(job.detail, { items: 21, unanimous: 4, verdict: "overlapping-values", scoped: false });
+  // The row carries what served it and what it cost, the tag/extract spelling
+  // (metering-plan.md Stage 2). Stub usage is 100/20 with no cache — so no
+  // cache key, not a zero.
+  assert.deepEqual(job.detail, {
+    items: 21, unanimous: 4, verdict: "overlapping-values", scoped: false,
+    model: "gpt-5-mini", provider: "openai", tokens: { in: 100, out: 20 },
+  });
 });
 
 test("a stable facet on the same board is never diagnosed", async () => {
@@ -1140,12 +1146,12 @@ test("startWorker's diagnose loop reaches a real board through the real tagger",
   const e = (await diagnosticsOf(b)).shape;
   assert.equal(e.rewrite, "The silhouette; prefer wide for lockups.");
 
-  // Billed through the same ledger as any other call, in the shape bumpUsage
-  // actually reads — asserting only `count` would pass with the tokens at zero.
-  const [usage] = (await db.query("SELECT count, input_tokens, output_tokens FROM ai_board_usage WHERE board_id=$1", [b])).rows;
-  assert.equal(usage.count, 1);
-  assert.equal(Number(usage.input_tokens), 900);
-  assert.equal(Number(usage.output_tokens), 120);
+  // Billed through the same meter as any other call, in the shape meterAiCall
+  // actually reads — asserting only the request would pass with tokens at zero.
+  const usage = await meterTotals(db, b, "diagnose");
+  assert.equal(usage.calls, 1);
+  assert.equal(usage.input, 900);
+  assert.equal(usage.output, 120);
 });
 
 // ─── a failed diagnosis must not become a standing order ─────────────────────

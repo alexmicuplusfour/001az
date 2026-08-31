@@ -1,8 +1,8 @@
 import { state } from './state.js';
-import { toItem, sentence, plural } from './utils.js';
+import { toItem, sentence, plural, fmtUsd } from './utils.js';
 import { toast } from './toast.js';
 import { createModal } from './modal.js';
-import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
+import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { fillSelect } from './select.js';
 import { ensurePolling } from './data.js';
 

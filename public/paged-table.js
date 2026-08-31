@@ -5,16 +5,9 @@
 // visibility stay with the caller.
 
 // --- agnostic cell formatting, keyed by a column's declared display kind ---
-// Shared by both consumers so the same value never renders two ways.
-export function fmtUsd(v) {
-  if (v == null || !Number.isFinite(v)) return "—";
-  const a = Math.abs(v);
-  if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
-  if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
-  if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
-  if (a >= 1) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-  return `$${v.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
-}
+// Shared by both consumers so the same value never renders two ways. (fmtUsd
+// moved to utils.js when the metering surfaces became its third and fourth
+// callers; both consumers import it from there, so one function has one name.)
 export function fmtNumber(v) {
   return v == null || !Number.isFinite(v) ? "—" : v.toLocaleString();
 }

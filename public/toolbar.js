@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
-import { ICONS, toolBtn, formatTokens, fmtDuration, attachBtnDot } from './utils.js';
+import { ICONS, toolBtn, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot } from './utils.js';
 import { openJobsModal, jobsUnseen } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep, ddAction, ddHead } from './dropdown.js';
@@ -340,17 +340,58 @@ export function renderToolbar(resultCount) {
       if (diag) boardGroup.appendChild(diag);
       if (templateChip) boardGroup.appendChild(templateChip);
 
-      if (state.boardTokens > 0) {
-        if (!tokenOdo) tokenOdo = new Odometer(formatTokens(state.boardTokens));
+      // Input and output bill at very different rates, so the chip never sums
+      // them: "in / out", each bucket rolling on its own (the odometer renders
+      // the non-digit " / " as static cells).
+      //
+      // The GATE is "did this board spend anything", asked of every unit —
+      // not of tokens. It used to add input+output, which quietly made the
+      // chip a tokens-only instrument: a board whose spend was transcription
+      // showed nothing at all, dollars included, while the admin table showed
+      // both. The units are the server's now (state.boardUnits), so a board
+      // that spends in a unit this file has never heard of still gets its
+      // chip, its cost, and its remainder.
+      //
+      // This chip living in the manager branch is a decision, not an accident:
+      // spend detail is management-visible (metering-plan.md), and the cost
+      // figure rides the SAME odometer — " · ≈$" renders as static cells
+      // exactly like " / ", and the cents roll as spend accrues. Cost only
+      // when known (state.boardCost is null when nothing was ever priced —
+      // no ≈$0.00 out of ignorance; a free on-device board's true $0 shows).
+      const units = state.boardUnits;
+      if (units && Object.values(units).some((n) => n > 0)) {
+        const defs = unitDefs(state.boardUnitDefs);
+        const q = (unit) => units[unit] || 0;
+        const cost = state.boardCost;
+        // Tokens lead when there are any — the phrase this chip has always
+        // said. A board with none leads with whatever it did spend, named
+        // from the served vocabulary rather than from a list kept here.
+        const tokenText = q("input_tokens") || q("output_tokens")
+          ? `${formatTokens(q("input_tokens"))} / ${formatTokens(q("output_tokens"))}`
+          : Object.entries(units).filter(([, n]) => n > 0)
+              .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
+        const chipText = tokenText + (cost ? ` · ${fmtCost(cost)}` : "");
+        if (!tokenOdo) tokenOdo = new Odometer(chipText);
         const tokenChip = document.createElement("span");
         tokenChip.className = "token-chip";
         tokenChip.innerHTML = ICONS.coin;
         tokenChip.appendChild(tokenOdo.el);
-        tokenChip.title = `${state.boardTokens.toLocaleString()} tokens used (AI tagging)`;
+        // No capability list here either (see admin-boards.js): the totals sum
+        // whatever is metered on this board, which is a set that grows. Same
+        // rule for the unit LABELS, here and in the unpriced remainder — they
+        // come from the server (server/units.js), because a client that turns
+        // a unit id into English is making a claim about a vocabulary it
+        // doesn't own.
+        const unpriced = fmtUnpriced(cost?.unpriced);
+        const detail = Object.entries(units).filter(([, n]) => n > 0)
+          .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
+        tokenChip.title = `${detail} — AI usage`
+          + (cost ? `\n${fmtCost(cost)} at the rates known when each call ran` : "")
+          + (unpriced ? `\nnot in the figure: ${unpriced}` : "");
         boardGroup.appendChild(tokenChip);
-        // Re-append then set: if the value grew since the last render, the
+        // Re-append then set: if a value grew since the last render, the
         // changed digits roll; if not, this is a no-op.
-        tokenOdo.set(formatTokens(state.boardTokens));
+        tokenOdo.set(chipText);
       }
     } else if (templateChip) {
       // No edit pencil (non-manager) — still show the data-source chip.

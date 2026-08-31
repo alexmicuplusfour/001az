@@ -6,7 +6,7 @@
 //    gallery into that firing's ?event= view).
 // Alerts are per-user like saved filters; state.alerts is the local mirror.
 import { state } from './state.js';
-import { ICONS, fmtDuration } from './utils.js';
+import { ICONS, fmtDuration, relTime } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl } from './modal.js';
 import { ddRow, ddSep, ddEmpty } from './dropdown.js';
@@ -17,7 +17,6 @@ import { ensurePolling } from './data.js';
 
 export const alertsUnseen = () => state.alerts.reduce((n, a) => n + (a.unseen || 0), 0);
 
-const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 // ── the plus-menu section ──
 

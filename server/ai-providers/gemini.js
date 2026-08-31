@@ -29,6 +29,9 @@ export default (wires) => ({
     { id: "gemini-3.1-pro-preview", note: "sharpest, most expensive · preview id" },
   ],
   research: false, // the compat layer exposes no grounding
+  // LiteLLM community-map namespace (verified live 2026-08-31). Its gemini
+  // entries are keyed "gemini/<model>" — the learner's ns-prefixed match.
+  priceNamespace: "gemini",
   // Live-list carving (the compat /models dump has no capability metadata):
   // tagging keeps gemini-* chat models (embedding/imagen/veo/tts drop out;
   // gemma-* too, deliberately — tool-calling is spotty there and the wire

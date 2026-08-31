@@ -115,5 +115,7 @@ export const anthropicWire = {
     return out;
   },
 
+  listPrices: null, // models.list carries no pricing — the descriptor + community rungs answer instead
+
   embed: null, // Anthropic has no embeddings API
 };

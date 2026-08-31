@@ -24,6 +24,7 @@ export default (wires) => ({
     { id: "gpt-5.1", note: "sharpest, most expensive" },
   ],
   research: false, // web search lives on the Responses API, not chat completions
+  priceNamespace: "openai", // LiteLLM community-map namespace (verified live 2026-08-31)
   // Live-list carving (OpenAI's /models is bare ids, no capability metadata):
   // tagging keeps the chat families (gpt-*/o3/chatgpt-*) minus the non-chat
   // suffixes that share the gpt- prefix (transcribe/tts/audio/realtime/image…).

@@ -5,6 +5,7 @@
 import { ICONS } from "/utils.js";
 import { renderMembers } from "/admin-members.js";
 import { renderBoards } from "/admin-boards.js";
+import { renderUsage } from "/admin-usage.js";
 import { renderPluginSurfaces } from "/admin-plugins.js";
 import { renderBackups } from "/admin-backups.js";
 import { renderLogs, setLogsActive } from "/admin-logs.js";
@@ -17,7 +18,7 @@ for (const el of document.querySelectorAll("[data-icon]")) {
   el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon]);
 }
 
-const TAB_NAMES = ["members", "boards", "capabilities", "plugins", "backups", "logs"];
+const TAB_NAMES = ["members", "boards", "usage", "capabilities", "plugins", "backups", "logs"];
 const tabBtns = [...document.querySelectorAll(".tab")];
 function selectTab(name) {
   tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -37,6 +38,7 @@ addEventListener("hashchange", () => { if (TAB_NAMES.includes(tabFromHash())) se
 
 renderMembers().catch(() => (document.getElementById("gate").innerHTML = 'Error loading. <a href="/">Back</a>'));
 renderBoards().catch(() => {});
+renderUsage().catch(() => {});
 renderPluginSurfaces().catch(() => {}); // Capabilities + Plugins: one state fetch, both tabs
 renderBackups().catch(() => {});
 renderLogs().catch(() => {});

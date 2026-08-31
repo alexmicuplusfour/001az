@@ -144,7 +144,7 @@ export async function renderPlugins(prefetched) {
   if (activeKind !== "all" && kindCount(activeKind) === 0) activeKind = "all";
 
   const filters = document.createElement("div");
-  filters.className = "plugin-filters";
+  filters.className = "pill-row";
   const setKind = (k) => { activeKind = k; renderPlugins(state); };
   filters.appendChild(filterPill("All", installed.length, activeKind === "all", () => setKind("all")));
   for (const [kind, label] of KIND_FILTERS) {

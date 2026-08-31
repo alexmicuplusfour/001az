@@ -32,6 +32,11 @@ export default (wires) => ({
   // stored key returns 1113 "insufficient balance" with or without the
   // parameter), and this provider's quirks are live-verified by policy, never
   // guessed. Add `temperature: 0` here once a working key confirms it accepts.
+  // No `priceNamespace`, deliberately: the LiteLLM map has no zhipu/GLM
+  // provider entries (verified live 2026-08-31 — every glm-* key there belongs
+  // to an aggregator: cerebras, azure_ai, dashscope…). Matching those would
+  // price GLM's own API at someone else's rates. Unpriced-but-metered beats
+  // wrongly-priced; add the namespace if coverage appears.
   compat: { maxTokensField: "max_tokens", forceToolChoice: false, strictTools: false, disableThinking: true, keyTest: "completion", listModels: false },
   embeds: null,
 });

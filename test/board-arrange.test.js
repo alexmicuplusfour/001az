@@ -79,7 +79,7 @@ test("the admin board ledger keeps created_at order whatever the admin arranged"
   await setOrder(admin.sid, [c, b, a]);
   assert.deepEqual(await names(admin.sid), ["C", "B", "A"]);
   const ledger = await req(base, "GET", "/api/admin/boards", { sid: admin.sid });
-  assert.deepEqual(ledger.json.map((x) => x.name), ["A", "B", "C"]);
+  assert.deepEqual(ledger.json.boards.map((x) => x.name), ["A", "B", "C"]);
 });
 
 test("duplicates collapse rather than fighting over one position", async () => {

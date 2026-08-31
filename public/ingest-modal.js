@@ -11,10 +11,10 @@
 // summarize thousands of files. Back returns to the settings view with every
 // buffered edit intact (same modal, same closure — nothing is rebuilt).
 import { state } from './state.js';
-import { fmtDuration, glyphEl } from './utils.js';
+import { fmtDuration, glyphEl, fmtUsd, relTime } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, createDrawer, tileRow } from './modal.js';
-import { pagedTableScaffold, fmtUsd, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
+import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
 import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
@@ -41,7 +41,6 @@ const TRIGGER_LABELS = {
 };
 const PAGE_SIZE = 50;
 
-const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 let modalEl = null;
 

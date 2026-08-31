@@ -8,7 +8,8 @@
 // Settings are namespaced by the connector's own name, so domains never collide:
 //   <name>_provider           active provider (unset/unknown → defaultProvider)
 //   <name>_key_<provider>      that provider's API key (its own slot; no bleed)
-import { getSetting, getPluginRow, withPluginHealth } from "../db.js";
+import { getSetting, getPluginRow, withPluginHealth, APP_SCOPE } from "../db.js";
+import { meterSpend } from "../metering.js";
 import { getFaceProducer } from "../faces/index.js";
 import { acquire, throttled } from "../provider-pacing.js";
 import { createTtlCache, keyFingerprint, CHART_LEARN_TTL } from "./chart-series.js";
@@ -96,22 +97,53 @@ export const providerSignal = (kind) => AbortSignal.timeout(providerBudgetMs(kin
 // One provider's token acquisition, with the merged rpm/burst (env overrides
 // CONNECTOR_RPM/CONNECTOR_BURST let the test harness run unthrottled — its
 // provider calls are stubbed, so pacing would only add wall-clock delay).
-const paceFor = (name, provider) => {
+//
+// Also the METER (metering-plan.md Stage 5d), because a granted token IS a
+// request about to be sent, and this is the one place both pacing modes reach
+// it: the legacy pre-acquire in callProvider and the ctx.pace() a
+// request-pacing provider awaits per raw fetch. A quota is spent by requests
+// SENT — a retried attempt and a refused one cost the same as a success — so
+// counting anywhere later would count answers instead.
+//
+// The write cannot outrun the thing it counts: a token is what the bucket
+// hands out at rpm/min, so one write per token is bounded by the provider's
+// own rate limit rather than by how hard a sweep pushes.
+//
+// APP SCOPE, always. Some callers know a board (refresh, faces) and some
+// don't (search, testConnection) — but prefetch batches up to 100 ids that
+// span boards into ONE request, deliberately, and dividing that request
+// between them would be apportionment. Stage 5a could partition the embed
+// sweep per board because splitting the batch cost nothing; splitting this one
+// would destroy the reason it exists. So no row claims a board rather than
+// some rows claiming one.
+const paceFor = (db, name, provider) => {
   const rpm = Number(process.env.CONNECTOR_RPM) || provider.rpm || DEFAULT_RPM;
   const burst = Number(process.env.CONNECTOR_BURST) || provider.burst || DEFAULT_BURST;
-  return () => acquire(name, rpm, burst);
+  return async () => {
+    await acquire(name, rpm, burst);
+    // Never throws (meterWrite) — the cardinal rule: a metering blip must not
+    // read as a connector failure to the sweep, the preview, or the health row.
+    await meterSpend(db, APP_SCOPE, { capability: "api", provider: name }, { api_requests: 1 });
+  };
 };
 
 // Rate-limited + 429-retried provider call. Exported for tests.
 //
-// Pacing has two modes. Legacy: one token per LOGICAL call, acquired here —
-// blind to what the provider actually does (a cache-served list() pays for
+// Pacing has two modes. Legacy: one token per ATTEMPT, acquired here — blind to
+// what the provider actually does inside one (a cache-served list() pays for
 // zero HTTP; fetchEntity pays one token for a three-request fan-out). A
-// provider that declares `pacesRequests = true` opts into truthful metering:
-// this pre-acquire is skipped and the provider awaits the threaded ctx.pace()
-// before EACH raw request instead — cache hits cost nothing, fan-outs pay
-// full fare, and retried attempts pay per attempt. Dynamic plugin providers
-// without the flag keep legacy behavior untouched.
+// provider that declares `pacesRequests = true` is finer-grained: it awaits the
+// threaded ctx.pace() before EACH raw request instead, so cache hits cost
+// nothing and fan-outs pay full fare.
+//
+// Per ATTEMPT, not per logical call, is a fix Stage 5d's metering surfaced. The
+// acquire used to sit outside withRetry, which meant a legacy retry re-sent
+// while spending nothing — and worse, unpaced: `throttled` halves the bucket on
+// a 429 (see the note above it), but with no acquire in the loop that halving
+// only bound the NEXT logical call. The one call that just provoked the refusal
+// re-sent at full speed, which is the exact failure that note says the throttle
+// exists to prevent. Inside the loop, both modes now agree that a quota is
+// spent by what was SENT.
 //
 // AbortSignal.timeout rejects with a bare DOMException ("The operation was
 // aborted due to timeout") — no provider name, no status. Rewrap it readably
@@ -119,9 +151,10 @@ const paceFor = (name, provider) => {
 // log, plugins health row). Still status-less, so withRetry above never
 // retried it and callers treat it as a plain failure. Providers may pre-wrap
 // with more context (FMP names the endpoint); this is the floor.
-export function callProvider(name, provider, fn) {
-  const pre = provider.pacesRequests ? Promise.resolve() : paceFor(name, provider)();
-  return pre.then(() => withRetry(fn, name)).catch((e) => {
+export function callProvider(db, name, provider, fn) {
+  const pace = paceFor(db, name, provider);
+  const attempt = provider.pacesRequests ? fn : async () => { await pace(); return fn(); };
+  return withRetry(attempt, name).catch((e) => {
     if (e?.name === "TimeoutError") throw new Error(`${name}: request timed out`);
     throw e;
   });
@@ -131,7 +164,7 @@ export function callProvider(name, provider, fn) {
 // land on the provider's plugins row (structured error or heal), feeding the
 // Plugins page dot and, later, the self-healing loop.
 const tracked = (db, conn, name, provider, fn) =>
-  withPluginHealth(db, `${conn.name}:${name}`, () => callProvider(name, provider, fn));
+  withPluginHealth(db, `${conn.name}:${name}`, () => callProvider(db, name, provider, fn));
 
 // Resolve the active provider + its key. An unset or unknown provider name
 // falls back to the connector's default, and a NOT-INSTALLED provider falls
@@ -220,11 +253,11 @@ export function domainState({ setting, effective }, { label, providers = [] }) {
 // pacing handle (see callProvider — request-pacing providers await it before
 // each raw fetch). Built fresh per logical call; `pace` closes over the
 // merged rpm/burst so Plugins-page overrides flow everywhere from here.
-const ctxFor = (name, provider, apiKey) => ({ apiKey, pace: paceFor(name, provider) });
+const ctxFor = (db, name, provider, apiKey) => ({ apiKey, pace: paceFor(db, name, provider) });
 
 export async function search(db, conn, query) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  return tracked(db, conn, name, provider, () => provider.search(query, ctxFor(name, provider, apiKey)));
+  return tracked(db, conn, name, provider, () => provider.search(query, ctxFor(db, name, provider, apiKey)));
 }
 
 // Browse a sorted, paginated page of the domain's catalog for the ingestion
@@ -234,7 +267,7 @@ export async function search(db, conn, query) {
 export async function list(db, conn, opts) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.list) return [];
-  return tracked(db, conn, name, provider, () => provider.list(opts, ctxFor(name, provider, apiKey)));
+  return tracked(db, conn, name, provider, () => provider.list(opts, ctxFor(db, name, provider, apiKey)));
 }
 
 // The browse filters a user can actually apply RIGHT NOW: the manifest's
@@ -274,7 +307,7 @@ export async function browseFilters(db, conn) {
       const { name, provider, apiKey } = await activeProvider(db, conn);
       if (provider.filterOptions)
         supplied = await tracked(db, conn, name, provider, () =>
-          provider.filterOptions(ctxFor(name, provider, apiKey))) || {};
+          provider.filterOptions(ctxFor(db, name, provider, apiKey))) || {};
     } catch (e) {
       console.warn(`${conn.name}: filter options unavailable (static filters only): ${e.message}`);
     }
@@ -296,7 +329,7 @@ export async function browseFilters(db, conn) {
 //  - source = { provider, id } — the provider handle a future refresh re-fetches from.
 export async function fetchEntity(db, conn, id, now = Date.now()) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, ctxFor(name, provider, apiKey)));
+  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, ctxFor(db, name, provider, apiKey)));
   const symbol = e.symbol || null;
   const identity = (symbol || "").toLowerCase() || e.id;
   const fields = {};
@@ -316,7 +349,7 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
   const apiKey = kOverride !== undefined && kOverride !== "" ? kOverride : await providerKey(db, conn, name);
   const provider = paced(conn.providers[name], st.config, apiKey);
   if (!provider.testConnection) throw new Error("provider has no connection test");
-  await tracked(db, conn, name, provider, () => provider.testConnection(ctxFor(name, provider, apiKey)));
+  await tracked(db, conn, name, provider, () => provider.testConnection(ctxFor(db, name, provider, apiKey)));
   return { provider: name };
 }
 
@@ -355,17 +388,17 @@ const resolveProviderId = (db, conn, activeName, source, symbol) =>
 // ROWS (below), the ingestion sweep with an admission batch's ids straight off
 // the enumerated candidates. This is the seam they share; writing it twice is
 // how the quote-cache economics drifted the first time.
-async function warmIds(active, ids) {
+async function warmIds(db, active, ids) {
   const want = [...new Set((ids || []).filter((v) => v != null).map(String))];
   if (want.length < 2) return; // nothing a batch would save
-  await callProvider(active.name, active.provider, () =>
-    active.provider.prefetch(want, ctxFor(active.name, active.provider, active.apiKey)));
+  await callProvider(db, active.name, active.provider, () =>
+    active.provider.prefetch(want, ctxFor(db, active.name, active.provider, active.apiKey)));
 }
 
 export async function prefetchIds(db, conn, ids) {
   const active = await activeProvider(db, conn).catch(() => null);
   if (!active?.provider.prefetch) return;
-  await warmIds(active, ids);
+  await warmIds(db, active, ids);
 }
 
 // The refresh sweep's shape: `rows` are its due entries ({ entity, inst, … }).
@@ -374,7 +407,7 @@ export async function prefetchIds(db, conn, ids) {
 export async function prefetchRefresh(db, conn, rows) {
   const active = await activeProvider(db, conn).catch(() => null);
   if (!active?.provider.prefetch) return;
-  await warmIds(active, rows
+  await warmIds(db, active, rows
     .map((r) => r?.inst?.payload?.source)
     .filter((s) => s && s.provider === active.name && s.id != null)
     .map((s) => s.id));
@@ -409,7 +442,7 @@ export async function refresh(db, conn, entity, inst, mapping, now = Date.now())
   let fetched = null;
   if (active.provider.fetchFields) {
     const partial = await tracked(db, conn, active.name, active.provider, () =>
-      active.provider.fetchFields(id, dueKeys, ctxFor(active.name, active.provider, active.apiKey)));
+      active.provider.fetchFields(id, dueKeys, ctxFor(db, active.name, active.provider, active.apiKey)));
     const fields = {};
     for (const [k, v] of Object.entries(partial?.fields || {})) fields[k] = { ...v, src: active.name, at: now };
     if (dueKeys.every((k) => fields[k])) fetched = { fields };
@@ -442,7 +475,7 @@ export async function produceFace(db, conn, entity, source, faceCfg) {
   if (!provider.history) return null; // provider can't supply history → fall back
   const id = await resolveProviderId(db, conn, name, source, entity.symbol);
   if (id == null) return null;
-  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, ctxFor(name, provider, apiKey)));
+  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, ctxFor(db, name, provider, apiKey)));
   if (!series || !series.length) return null;
   return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
 }
@@ -526,7 +559,7 @@ export async function chartSeries(db, conn, entity, source, { range, kind } = {}
     // catch instead of skipping the dance.
     const out = await tracked(db, conn, name, provider, () =>
       Promise.resolve()
-        .then(() => provider.chart(id, { range, kind }, ctxFor(name, provider, apiKey)))
+        .then(() => provider.chart(id, { range, kind }, ctxFor(db, name, provider, apiKey)))
         .catch((e) => { if (e?.unsupported) return REFUSED; throw e; }));
     if (out !== REFUSED) {
       return out && { ...out, range, ranges, kind, kinds, provider: name,

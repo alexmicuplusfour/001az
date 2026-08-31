@@ -264,7 +264,7 @@ test("refreshDueEntity: a face-only board stays scheduled when the render is una
 test("callProvider retries a 429 (honoring Retry-After) and surfaces other errors", async () => {
   const fast = { rpm: 100000, burst: 100 }; // effectively unthrottled for the test
   let calls = 0;
-  const res = await runtime.callProvider("rl-retry", fast, async () => {
+  const res = await runtime.callProvider(db, "rl-retry", fast, async () => {
     calls++;
     if (calls === 1) { const e = new Error("rate limited"); e.status = 429; e.retryAfter = "0"; throw e; }
     return "ok";
@@ -273,7 +273,7 @@ test("callProvider retries a 429 (honoring Retry-After) and surfaces other error
   assert.equal(calls, 2); // retried once
 
   await assert.rejects(
-    runtime.callProvider("rl-other", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
+    runtime.callProvider(db, "rl-other", fast, async () => { const e = new Error("boom"); e.status = 500; throw e; }),
     /boom/
   ); // non-429 propagates immediately
 });
@@ -286,7 +286,7 @@ test("a 429 slows the bucket down, not just the one call", async () => {
   const fast = { rpm: 100000, burst: 100 };
   assert.equal(pacing._penaltyOf("rl-learn"), 1, "no penalty until a provider objects");
 
-  await runtime.callProvider("rl-learn", fast, async function once() {
+  await runtime.callProvider(db, "rl-learn", fast, async function once() {
     if (!once.done) { once.done = true; const e = new Error("slow down"); e.status = 429; e.retryAfter = "0"; throw e; }
     return "ok";
   });
@@ -296,7 +296,7 @@ test("a 429 slows the bucket down, not just the one call", async () => {
   // though we stopped retrying it.
   process.env.CONNECTOR_RETRY_CAP_MS = "1";
   try {
-    await assert.rejects(runtime.callProvider("rl-learn", fast, async () => {
+    await assert.rejects(runtime.callProvider(db, "rl-learn", fast, async () => {
       const e = new Error("slow down"); e.status = 429; throw e;
     }), /slow down/);
   } finally { delete process.env.CONNECTOR_RETRY_CAP_MS; }
@@ -304,7 +304,7 @@ test("a 429 slows the bucket down, not just the one call", async () => {
 
   // A provider that never objects is never slowed — the penalty is measured,
   // not assumed.
-  await runtime.callProvider("rl-clean", fast, async () => "ok");
+  await runtime.callProvider(db, "rl-clean", fast, async () => "ok");
   assert.equal(pacing._penaltyOf("rl-clean"), 1);
 
 });
@@ -350,7 +350,7 @@ test("a 401 is retried but never throttles — it is usually a bad key, not a fa
   // which is why it is still RETRIED here.
   const fast = { rpm: 100000, burst: 100 };
   let calls = 0;
-  const res = await runtime.callProvider("rl-401", fast, async () => {
+  const res = await runtime.callProvider(db, "rl-401", fast, async () => {
     if (++calls === 1) { const e = new Error("unauthorized"); e.status = 401; e.retryAfter = "0"; throw e; }
     return "ok";
   });
@@ -365,7 +365,7 @@ test("withRetry caps a huge Retry-After instead of honoring it verbatim", async 
   try {
     let calls = 0;
     const t0 = Date.now();
-    const res = await runtime.callProvider("rl-cap", fast, async () => {
+    const res = await runtime.callProvider(db, "rl-cap", fast, async () => {
       calls++;
       if (calls === 1) { const e = new Error("rate limited"); e.status = 429; e.retryAfter = "3600"; throw e; }
       return "ok";

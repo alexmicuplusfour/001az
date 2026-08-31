@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import http from "node:http";
 import {
   createUser,
   getUserByEmail,
@@ -18,6 +19,7 @@ import {
   createEntity,
   insertItem,
   setPluginState,
+  usageRows,
 } from "../server/db.js";
 
 const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgres://gallery:gallery@127.0.0.1:5433/postgres";
@@ -195,4 +197,72 @@ export async function req(base, method, pathname, { sid, body } = {}) {
     /* non-JSON body (static files, redirects) */
   }
   return { status: res.status, json, text };
+}
+
+// --- local HTTP stand-ins ---
+
+// A throwaway JSON server: records every request URL on `hits`, serves
+// `payload` (mutable, so a test can change the answer without a second box)
+// with `status` (also mutable — flip a box from erroring to healthy in place).
+// The seam behind every "the app fetched something" test: an upstream listing,
+// a price map, a sidecar. Close it in `after`.
+export function jsonBox(payload, { status = 200, delay = 0 } = {}) {
+  const box = http.createServer((rq, rs) => {
+    box.hits.push(rq.url);
+    setTimeout(() => {
+      rs.writeHead(box.status, { "Content-Type": "application/json" });
+      rs.end(JSON.stringify(typeof box.payload === "function" ? box.payload() : box.payload));
+    }, delay);
+  });
+  Object.assign(box, { payload, status, hits: [] });
+  box.url = (path = "") => `http://127.0.0.1:${box.address().port}${path}`;
+  return new Promise((resolve) => box.listen(0, "127.0.0.1", () => resolve(box)));
+}
+
+// --- usage meter ---
+
+// What a board spent, optionally narrowed to one capability. Rides usageRows —
+// the reader the app itself uses — rather than a second hand-written aggregate
+// over the same table: db.js says above boardUsageSummary that calling it "is
+// what keeps a Stage 5 unit (or a renamed cost column) from having to land
+// twice", and this helper was the last reader still spelling the SELECT out.
+// It had already paid for that twice (5b added an `audio` column, 5c an
+// `images` one).
+//
+// `units` is the whole map, so a NEW unit needs no edit here. The named
+// aliases stay because an assertion reads better as `m.calls` than
+// `m.units.requests?.quantity`, and 11 call sites already use them.
+//
+// `provider` narrows to one backend — the app scope accumulates every spender
+// in a test file, so a test asserting what ONE provider burned has to say so.
+// It rides the grouping the reader already does rather than a second query.
+export async function meterTotals(db, boardId, capability = null, provider = null) {
+  const all = await usageRows(db, { board: boardId, capability, group: ["provider", "model"] });
+  const rows = provider == null ? all : all.filter((r) => r.provider === provider);
+  const units = {};
+  for (const r of rows)
+    for (const [unit, u] of Object.entries(r.units)) units[unit] = (units[unit] || 0) + u.quantity;
+  const q = (unit) => units[unit] || 0;
+  return {
+    calls: q("requests"), input: q("input_tokens"), output: q("output_tokens"),
+    cache_read: q("cache_read_tokens"), searches: q("web_searches"),
+    audio: q("audio_seconds"), images: q("images"),
+    // usageRows orders by the grouped columns, so the first row is the
+    // lowest (provider, model) PAIR — where the old MIN()/MIN() could pick a
+    // provider and a model that never appeared together.
+    provider: rows[0]?.provider ?? null, model: rows[0]?.model ?? null,
+    units,
+  };
+}
+
+// Wait for a condition the worker settles asynchronously. Nine test files had
+// hand-rolled this exact loop; new tests import it from here instead.
+export async function until(fn, ms = 8000) {
+  const t0 = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - t0 > ms) throw new Error("condition never held");
+    await new Promise((r) => setTimeout(r, 60));
+  }
 }

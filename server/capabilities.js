@@ -255,6 +255,71 @@ export const bindingSettings = (cap) => {
   return k ? [k.provider, k.keyId, k.model, k.enabled].filter(Boolean) : [];
 };
 
+// --- the work-kind vocabulary (job_log.kind; metering-plan.md Stage 4) ---
+// Every kind of work the app logs, in the jobs modal's pill order, with its
+// display label and the capability its PAID legs meter as. The two vocabularies
+// are linked, not equal: a retag SWEEP logs kind='retag' while the item legs it
+// queues meter capability='tag', and `null` means this kind spends nothing
+// itself (ingest enumerates, refresh moves values, face draws — none is a paid
+// model call). This list is what replaces the client's hardcoded KIND_LABELS:
+// the routes serve it and the client renders what it is handed, so a plugin or
+// a new sweep appears with its own name instead of a bare id (the units.js
+// rule, applied to work).
+//
+// Labels are the WORK's names, deliberately distinct from CAPABILITY_DEFS'
+// feature names where they differ — an embed run is "Embedding" in a job list
+// even though the capability card is "Semantic search". Same id, two surfaces,
+// each speaking its own language; the id is the join.
+export const KIND_DEFS = [
+  { id: "transcribe", label: "Transcription", capability: "transcribe" },
+  { id: "ingest", label: "Ingestion", capability: null },
+  { id: "tag", label: "Tagging", capability: "tag" },
+  { id: "extract", label: "Extraction", capability: "extract" },
+  { id: "face", label: "Chart", capability: null },
+  { id: "retag", label: "Retag pass", capability: "tag" },
+  { id: "embed", label: "Embedding", capability: "embed" },
+  { id: "refresh", label: "Refresh", capability: null },
+  { id: "diagnose", label: "Facet review", capability: "diagnose" },
+];
+
+// A capability id as prose, for usage breakdowns: the kind that IS the
+// capability names it ("Tagging"); a capability with no job kind of its own
+// (detect — it runs inside extract legs) falls back to its CAPABILITY_DEFS
+// label, and an id neither knows renders as itself — a plugin may meter any
+// capability string it likes, and an unknown one degrades to its id rather
+// than being dropped.
+const kindDef = (id) => KIND_DEFS.find((k) => k.id === id);
+
+// Work the app spends on that is neither a job kind nor an AI capability: the
+// connector runtime's outbound requests, which burn a data provider's request
+// QUOTA rather than dollars. It is named here and not in CAPABILITY_DEFS on
+// purpose — that table means "something a provider can be bound to serve", so
+// every entry needs a wire verb, a binding and a floor, and the cleanup loops
+// iterate it. An entry with none of those would be a permanent exception in
+// each of them, which is exactly how `detect` came to be missed by both.
+// Naming is a smaller job than that table does, so it gets a smaller table.
+const WORK_LABELS = { api: "API" };
+
+export const capabilityLabel = (id) =>
+  kindDef(id)?.label ?? CAPABILITY[id]?.label ?? WORK_LABELS[id] ?? id;
+
+// The kind vocabulary as it goes over the wire: id + label, no `capability`.
+// ONE projection for every route that serves it, so two surfaces can't ship
+// two shapes of one vocabulary — the reason configFieldView exists above. The
+// join column stays server-side: which capability a kind's legs meter as is
+// how the drill-down joins, not something a client should recompute.
+export const kindList = () => KIND_DEFS.map(({ id, label }) => ({ id, label }));
+
+// What a KIND's paid legs meter as — the spenders' read of the join column
+// above. Every meter call site derives its capability through here rather
+// than restating the string, which is what makes the table the single source
+// instead of a parallel claim nothing checks: a kind whose legs bill as an
+// existing capability states that fact once, and the meter and the labels
+// both follow. A kind the table doesn't know (or one declared to spend
+// nothing) degrades to metering under its own id — visible and labelled by
+// the capabilityLabel fallback, never blocked.
+export const meterAs = (kind) => kindDef(kind)?.capability ?? kind;
+
 // What a PROVIDER can declare in `provides` — every capability that carries its
 // own declaration. `extract` is excluded: it advertises nothing of its own, it
 // reads tagging's. This is the list the per-provider capability flags iterate,

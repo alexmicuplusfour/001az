@@ -42,7 +42,9 @@ export const state = {
   boardMapping: null,
   boardIngestMode: null, // null | "manual" | "paused" | "scheduled" — drives the toolbar chip
   boardIngestNextRun: null, // ms timestamp of the next ingestion run (chip countdown; also what keeps the slow delta poll alive)
-  boardTokens: null,
+  boardUnits: null, // { unit: quantity } — every unit metered on this board, never summed across them
+  boardUnitDefs: null, // the served vocabulary for boardUnits ([{ unit, label, format }])
+  boardCost: null, // { micros, unpriced: [{ unit, label, format, quantity }] } — manager-only, absent when nothing was ever priced
   searchAvailable: false,
   searchDraft: "",
   searchQuery: "",

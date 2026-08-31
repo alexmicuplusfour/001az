@@ -11,6 +11,7 @@ import { initFilterConfigsUI } from './filterconfigs.js';
 import { initUpload } from './upload.js';
 import { initLightbox, openLightbox } from './lightbox.js';
 import { openAlertEvent } from './alert-event.js';
+import { openJobsModal } from './jobs-modal.js';
 import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
@@ -120,7 +121,9 @@ async function main() {
   state.facetStats = null;
   state.boardMapping = boardData?.mapping || null;
   stampBoardIngest(boardData || {});
-  state.boardTokens = boardData?.token_total ?? null;
+  state.boardUnits = boardData?.units ?? null;
+  state.boardUnitDefs = boardData?.unitDefs ?? null;
+  state.boardCost = boardData?.cost ?? null; // manager-only key; absent = nothing priced or not ours to see
   state.searchAvailable = !!boardData?.search;
   state.me = meData;
   // No session → login page (preserving the interrupted URL); a session that
@@ -179,6 +182,25 @@ async function main() {
       setTimeout(() => document.removeEventListener('app:render', onRender), 60000);
     }
   }
+
+  // Jobs deep link: #jobs (optionally #jobs/<kind>) opens this board's jobs
+  // modal — the Usage tab's drill-down lands here rather than on a second
+  // admin job viewer (metering-plan.md, Stage 4c). Consumed like ?item=: the
+  // modal is a destination, not an address worth keeping.
+  //
+  // Bound to the ADDRESS, not to page load: a hash is the one part of a URL
+  // that changes without a navigation, so a boot-only read would work purely
+  // by the grace of the one link that happens to open a new tab, and go inert
+  // for a bookmark followed in place or any in-app link added later. Same
+  // arrangement, for the same reason, as admin-capabilities.js's deep link.
+  const openJobsFromHash = () => {
+    const m = location.hash.match(/^#jobs(?:\/([\w-]+))?$/);
+    if (!m || !state.boardId) return;
+    openJobsModal({ kind: m[1] });
+    history.replaceState(null, "", location.pathname + location.search);
+  };
+  addEventListener("hashchange", openJobsFromHash);
+  openJobsFromHash();
 }
 
 main();

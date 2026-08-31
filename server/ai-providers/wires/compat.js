@@ -27,6 +27,25 @@ const embedSignal = () => AbortSignal.timeout(Number(process.env.AI_EMBED_TIMEOU
 const transcribeSignal = () => AbortSignal.timeout(Number(process.env.AI_TRANSCRIBE_TIMEOUT_MS) || 240000);
 const keyTestSignal = () => AbortSignal.timeout(30000); // admin Test button — interactive, fail fast
 
+// GET {base}/models, the raw rows — the ONE fetch behind both listModels and
+// listPrices. null when the provider has no models endpoint at all (GLM says
+// so in its quirk block); the engine serves the curated fallback instead.
+async function modelRows(desc, { apiKey, base } = {}) {
+  if (desc.compat.listModels === false) return null;
+  const r = await compatFetch(desc.label, `${baseOf(desc, base)}/models`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
+  if (!r.ok) throw await compatError(r, desc.label);
+  const data = await r.json();
+  return Array.isArray(data.data) ? data.data : [];
+}
+
+// A listed row's id in the spelling the chat endpoint and our curated lists
+// use — see stripListPrefix on listModels.
+function modelId(desc, m) {
+  const id = String(m.id || "");
+  const strip = desc.compat.stripListPrefix;
+  return strip && id.startsWith(strip) ? id.slice(strip.length) : id;
+}
+
 // A failed compat response, turned into a readable error. OpenRouter buries
 // the useful upstream detail under error.metadata.raw and leaves error.message
 // as a generic "Provider returned error", so prefer the raw when present; other
@@ -278,19 +297,48 @@ export const compatWire = {
   // per-model GET). stripListPrefix: Gemini's compat layer lists ids as
   // "models/gemini-…" while its chat endpoint (and our curated lists) use the
   // bare id — the quirk normalizes so the merge and filters see one spelling.
-  async listModels(desc, { apiKey, base }) {
-    if (desc.compat.listModels === false) return null;
-    const r = await fetch(`${baseOf(desc, base)}/models`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
-    if (!r.ok) throw await compatError(r, desc.label);
-    const data = await r.json();
-    const rows = Array.isArray(data.data) ? data.data : [];
-    const strip = desc.compat.stripListPrefix;
-    return rows
-      .map((m) => {
-        const id = String(m.id || "");
-        return { id: strip && id.startsWith(strip) ? id.slice(strip.length) : id };
-      })
-      .filter((m) => m.id);
+  //
+  // The fetch and the id normalization are shared with listPrices (below):
+  // ONE endpoint, two projections over its rows, so a box that both prefixes
+  // its ids and prices them can't file rates under a spelling nothing looks
+  // up.
+  async listModels(desc, opts) {
+    const rows = await modelRows(desc, opts);
+    return rows && rows.map((m) => ({ id: modelId(desc, m) })).filter((m) => m.id);
+  },
+
+  // Per-model rates, when the listing carries them (metering-plan.md, the
+  // provider rung): the same GET {base}/models rows, reading a `pricing`
+  // object that is NOT part of the OpenAI-compatible protocol — so which
+  // fields it holds is descriptor data (`compat.priceFields`), exactly like
+  // every other vendor difference in this file. A descriptor that declares
+  // none answers null ("didn't say"), which is also what keeps this rung
+  // OPT-IN: without it, any compat box — including a proxy in front of a
+  // self-hosted model, serving an upstream's hosted prices — would have its
+  // listing believed. That is the community rung's `priceNamespace` trap
+  // arriving through the other door, and it gets the same lock.
+  //
+  // Answers in the VENDOR's unit — dollars per unit, as stated on the wire.
+  // Converting to the rate map's micros is the pricing layer's business, not
+  // a wire's: a wire translates a vendor's format and knows nothing about how
+  // this app stores a rate. Zero is kept (a free model is a KNOWN price); a
+  // negative (-1 = "variable") is dropped, since that is not a rate and we
+  // never guess one.
+  async listPrices(desc, opts) {
+    const fields = desc.compat.priceFields;
+    if (!fields) return null;
+    const rows = await modelRows(desc, opts);
+    const out = [];
+    for (const m of rows || []) {
+      const model = modelId(desc, m);
+      if (!model || !m.pricing || typeof m.pricing !== "object") continue;
+      for (const [field, unit] of Object.entries(fields)) {
+        const dollarsPerUnit = Number(m.pricing[field]);
+        if (m.pricing[field] != null && Number.isFinite(dollarsPerUnit) && dollarsPerUnit >= 0)
+          out.push({ model, unit, dollarsPerUnit });
+      }
+    }
+    return out.length ? out : null;
   },
 
   // Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
@@ -320,8 +368,11 @@ export const compatWire = {
   // Transcribe audio → text (OpenAI-style POST /audio/transcriptions, multipart).
   // The parallel to embed: any compat-family provider whose backend exposes this
   // endpoint opts in by setting `transcribes` on its descriptor — the generic
-  // path never names a provider. Returns { text, usage }; usage is per-audio
-  // (not tokens), left zero — transcription billing isn't tracked yet.
+  // path never names a provider. Returns { text, usage }: token-billed
+  // transcription models (gpt-4o-transcribe) report usage on the response and
+  // it passes through; per-duration models (whisper-1) report nothing and the
+  // zeros stand — the caller meters the audio's own measured duration, which
+  // is the unit those models bill in.
   async transcribe(desc, { apiKey, model, audio, filename, base }) {
     const form = new FormData();
     form.append("model", model || desc.transcribes.default);
@@ -338,6 +389,13 @@ export const compatWire = {
     });
     if (!r.ok) throw await compatError(r, desc.label);
     const data = await r.json();
-    return { text: data.text || "", usage: { input: 0, output: 0, cacheRead: 0 } };
+    return {
+      text: data.text || "",
+      usage: {
+        input: data.usage?.input_tokens || 0,
+        output: data.usage?.output_tokens || 0,
+        cacheRead: 0,
+      },
+    };
   },
 };

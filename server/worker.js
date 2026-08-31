@@ -11,7 +11,6 @@ import {
   objectKeysOf,
   failOrRequeue,
   recoverStuck,
-  bumpUsage,
   getBoard,
   dueBoards,
   retagBoard,
@@ -42,6 +41,7 @@ import {
   latestSettledJob,
   markInterruptedJobs,
   pruneJobLog,
+  pruneUsageMeter,
   requeueItemForTag,
   advanceFaced,
   dueIngestBoards,
@@ -53,6 +53,8 @@ import {
   withTx,
   reapEmptyEntities,
 } from "./db.js";
+import { meterAiCall, meterAiCalls, spentDetail } from "./metering.js";
+import { learnPrices } from "./price-learner.js";
 import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
@@ -64,7 +66,7 @@ import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector, prefetchDueRefreshes } from "./connectors/index.js";
 import { entityRefreshAt, faceSchedule } from "./connectors/runtime.js";
 import { storeFace } from "./faces/index.js";
-import { extractFileFields } from "./media/index.js";
+import { extractFileFields, projectEntry } from "./media/index.js";
 import { aiWork } from "./field-sources.js";
 import { sharpGate, MAX_DECODE_PIXELS } from "./sharp-gate.js";
 import { aiImageFor, resolvePreset, GENERIC_IMAGES } from "./ai-image.js";
@@ -670,18 +672,44 @@ export function invalidateAllBoardCaches() {
 }
 
 // Embed one batch of rows (itemsNeedingEmbedding shape), isolating poison
-// inputs. The whole batch is one API call on the happy path. When it fails
-// with a request-content 4xx — the only class that can be item-specific;
-// auth/model/rate statuses (401/403/404/408/429) and 5xx/network are the
-// caller's to back off on — each item is retried alone: lone failures are
-// marked (setItemEmbedError) and skipped by future sweeps, innocents proceed.
-// If NOTHING succeeds one-by-one, the 400 was config-shaped after all (e.g. a
-// provider that rejects a bad model as 400), so throw for the backoff instead
-// of wrongly marking a whole batch. Returns { embedded, skipped }; throws for
-// batch-level failures. Exported so the sweep and tests share one path.
+// inputs. The batch is one API call PER BOARD present in it: the wire answers
+// one usage total per call, so a call whose rows spanned boards would leave
+// the per-board split a guess — apportionment, which the meter never does.
+// The sweep's pull is app-wide and usually single-board, so this costs an
+// extra HTTP call only when a pull genuinely mixes boards.
+// Returns { embedded, skipped } summed across groups; throws for batch-level
+// failures (a mid-way throw leaves earlier groups' work standing — the same
+// partial progress the isolation path already produces). Exported so the
+// sweep and tests share one path.
 export async function embedBatch(db, embedder, rows) {
-  const t0 = Date.now();
   const { rpm, burst } = await aiRate(db, embedder.provider); // per-provider pacing (local: none)
+  const groups = new Map();
+  for (const r of rows) {
+    if (!groups.has(r.board_id)) groups.set(r.board_id, []);
+    groups.get(r.board_id).push(r);
+  }
+  let embedded = 0, skipped = 0;
+  for (const g of groups.values()) {
+    const res = await embedGroup(db, embedder, g, { rpm, burst });
+    embedded += res.embedded;
+    skipped += res.skipped;
+  }
+  return { embedded, skipped };
+}
+
+// One board's slice of the batch — the wire calls, the poison isolation, and
+// the metering, which is why every row here shares a board. The whole group is
+// one API call on the happy path. When it fails with a request-content 4xx —
+// the only class that can be item-specific; auth/model/rate statuses
+// (401/403/404/408/429) and 5xx/network are the caller's to back off on —
+// each item is retried alone: lone failures are marked (setItemEmbedError)
+// and skipped by future sweeps, innocents proceed. If NOTHING succeeds
+// one-by-one, the 400 was config-shaped after all (e.g. a provider that
+// rejects a bad model as 400), so throw for the backoff instead of wrongly
+// marking a whole batch.
+async function embedGroup(db, embedder, rows, { rpm, burst }) {
+  const t0 = Date.now();
+  const dims = { capability: "embed", provider: embedder.provider, model: embedder.model };
   const call = (rs) =>
     withPluginHealth(db, `ai:${embedder.provider}`, () =>
       embedTexts({
@@ -694,7 +722,11 @@ export async function embedBatch(db, embedder, rows) {
       })
     );
   try {
-    const { vectors } = await call(rows);
+    const { vectors, usage } = await call(rows);
+    // Meter BEFORE the landing (the tag leg's rule, worker-queue-holes #11):
+    // the tokens are spent whatever the writes below do, and the write itself
+    // never throws (meterWrite).
+    await meterAiCall(db, rows[0].board_id, dims, usage);
     for (let i = 0; i < rows.length; i++) await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
     return { embedded: rows.length, skipped: 0 };
   } catch (err) {
@@ -704,15 +736,21 @@ export async function embedBatch(db, embedder, rows) {
   }
   let embedded = 0;
   const failures = [];
+  const usages = [];
   for (const r of rows) {
     try {
-      const { vectors } = await call([r]);
+      const { vectors, usage } = await call([r]);
+      usages.push(usage);
       await setItemEmbedding(db, r.id, vectors[0], embedder.model);
       embedded++;
     } catch (e) {
       failures.push({ row: r, message: String(e?.message ?? e) });
     }
   }
+  // One write for the salvage round's paid calls — `requests` counts the
+  // calls that ANSWERED; a failed call returned no usage, and inventing a
+  // number for it is exactly what the meter refuses (empty round: no-op).
+  await meterAiCalls(db, rows[0].board_id, dims, usages);
   if (!embedded) throw new Error(failures[0].message);
   for (const { row: r, message } of failures) {
     await setItemEmbedError(db, r.id, message);
@@ -1049,10 +1087,136 @@ export async function resolveTranscriber(db, board = null) {
       const r = await withPluginHealth(db, `ai:${b.provider}`, () =>
         transcribeAudio({ provider: b.provider, apiKey: b.apiKey, base: b.base, model: b.model, rpm, burst, audio: buf, filename }));
       // turns pass through from the wire when a diarizing model serves it —
-      // null until then, the same contract the sidecar path wears.
-      return { text: r.text, turns: r.turns ?? null };
+      // null until then, the same contract the sidecar path wears. usage
+      // likewise: token-billed transcription models report it, the leg
+      // meters it (Stage 5b); the sidecar path carries none.
+      return { text: r.text, turns: r.turns ?? null, usage: r.usage };
     },
   };
+}
+
+// Fold a repeating non-event into its prior row: attempts up, error and
+// detail refreshed, this attempt's fresh row retracted. Without the fold a
+// failure repeating on its retry cadence is the flat-tick trap in failure
+// clothes — a transcriber outage writes a `requeued` row per 60 s backoff,
+// a wedged ingest scan one per 30 s tick (a weekend ≈ 3k identical rows).
+// The first occurrence and any CHANGE (a different error, something
+// admitted, the eventual resolution) still get their own rows. Module scope
+// (db passed in) because its users straddle levels: the ingest folds live in
+// startWorker's closure, transcribeOne outside it.
+const foldJobRepeat = async (db, prior, freshId, { outcome, error = null, detail = {} }) => {
+  await jobLogWrite(() => stampJobLog(db, prior.id, {
+    outcome, error,
+    detail: { ...detail, attempts: (Number(prior.detail?.attempts) || 1) + 1 },
+    endedAt: Date.now(),
+  }));
+  if (freshId != null) await jobLogWrite(() => deleteJobLog(db, freshId));
+};
+
+// One clip, end to end: job-log row, resolve the board's engine, transcribe,
+// meter, land the transcript, stamp the outcome. Extracted from the loop so
+// the flow is testable without racing a poll tick; the loop keeps its lane
+// state and reads this function's answer — "backoff-lane" means the ENGINE is
+// unwell and the whole lane should sleep; every other outcome ("ok",
+// "backoff-item", "parked") is already fully handled here, `retry` (the
+// per-clip attempts ledger) included. `retry` is required rather than
+// defaulted: a throwaway map would silently disable both mechanisms it exists
+// for — the attempt cap, and the per-clip backoff that stops one pathological
+// clip blocking the whole audio lane. Never throws.
+export async function transcribeOne(db, galleryDir, row, retry) {
+  const file = row.payload.files?.[0];
+  // A `running` job-log row is the only place "transcribing now" exists —
+  // this sweep has no items.status leg. Each attempt is its own row (a
+  // transient retry after the backoff opens a fresh one).
+  const jobId = await jobLogWrite(() => addJobLog(db, {
+    boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
+    target: file?.original_name || file?.name || null, kind: "transcribe",
+  }));
+  const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
+  try {
+    if (!file) throw new Error("no file on the item");
+    // The board's own pin outranks the app default (slice 5). One PK
+    // SELECT ahead of a multi-second sidecar/API call — noise here,
+    // and the job-log stamp below records engine:model per item, so
+    // per-board engines stay visible in job history.
+    const board = row.board_id ? await getBoard(db, row.board_id) : null;
+    const transcriber = await resolveTranscriber(db, board);
+    const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
+    const { text, turns, usage } = await transcriber.transcribe(buf, file.name);
+    // Meter BEFORE the landing (the tag leg's rule): the engine ran whatever
+    // the writes below do. The quantity is the clip's own measured duration —
+    // an engine-agnostic fact, so the on-device sidecar's volume meters too,
+    // priced at its declared zero. It is read through projectEntry, the one
+    // place that decides what a file's metadata says (media/index.js): this
+    // number multiplies into cost_micros, so it comes from the module that
+    // DECLARES it (media/audio.js) rather than from a second reach into the
+    // payload bag. A clip with no measured duration meters its call and
+    // nothing else: absence, not zero. Token-billed engines meter what their
+    // wire reported beside it, through the shared projection (no model prices
+    // both seconds AND tokens — verified against the live map, 2026-08-31).
+    // Dims are read AFTER the call on purpose: the sidecar self-reports its
+    // model in the done payload, so `transcriber.model` now names the model
+    // that actually produced this text.
+    const secs = Number(projectEntry(file).duration) || 0;
+    const dims = { capability: "transcribe", provider: transcriber.id, model: transcriber.model };
+    await meterAiCall(db, row.board_id, dims, usage, { audio_seconds: secs });
+    // turns ([] included) land beside the flat transcript; the key is
+    // absent when the engine gave none (legacy sidecar image, plain
+    // provider model) and readers fall back to the flat text.
+    await updateItemPayload(db, row.id, { transcript: text, ...(turns ? { transcript_turns: turns } : {}) });
+    retry.delete(row.id);
+    // Distinct speaker count for the job log — engine-agnostic (any
+    // diarizing engine's labels count); omitted when zero so
+    // speakerless rows read exactly as before.
+    const speakers = new Set((turns || []).map((t) => t.speaker).filter(Boolean)).size;
+    // What the row spent, in the row's own spelling: seconds beside the
+    // kind-specific facts, tokens through the same projection the tag and
+    // extract legs use (the modal already renders detail.tokens).
+    const { tokens } = spentDetail(dims, [usage]);
+    // whisper's model is the sidecar's own answer (null if it predates self-reporting)
+    await stamp({ outcome: "ok", detail: {
+      chars: text.length, turns: turns?.length, speakers: speakers || undefined,
+      ...(secs ? { seconds: Math.round(secs) } : {}),
+      ...(tokens ? { tokens } : {}),
+      engine: [transcriber.id, transcriber.model].filter(Boolean).join(":"),
+    } });
+    console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
+    return "ok";
+  } catch (err) {
+    const attempts = retry.get(row.id)?.attempts || 0;
+    const action = transcribeFailurePolicy(err, attempts);
+    if (action === "backoff-lane" || action === "backoff-item") {
+      if (action !== "backoff-lane") {
+        retry.set(row.id, { attempts: attempts + 1, until: Date.now() + 60000 });
+      }
+      // Consecutive transient retries of one clip are one story,
+      // not one row per backoff tick: fold into the clip's prior
+      // `requeued` row — attempts up, error and end time refreshed.
+      // The first failure and the eventual resolution (ok/failed)
+      // keep their own rows, and the fold survives restarts because
+      // the prior row is found in the ledger, not in memory.
+      const prior = jobId == null ? null
+        : await jobLogWrite(() => latestSettledJob(db, row.board_id, "transcribe", row.id));
+      if (prior?.outcome === "requeued") {
+        await foldJobRepeat(db, prior, jobId, { outcome: "requeued", error: err.message });
+      } else {
+        await stamp({ outcome: "requeued", error: err.message });
+      }
+      console.warn(`transcribe: transient ${action === "backoff-lane" ? "engine" : `clip #${row.id}`} error (retry in 60s): ${err.message}`);
+      return action;
+    }
+    // Park the clip — a permanent fault (undecodable, provider 4xx)
+    // or a transient one out of attempts. The queue moves on; it'll
+    // tag from its filename, like a textless document. A reprocess
+    // clears transcript_error to grant a fresh set of attempts.
+    const note = action === "park-capped"
+      ? `gave up after ${attempts + 1} attempts: ${err.message}` : err.message;
+    await updateItemPayload(db, row.id, { transcript_error: String(note).slice(0, 300) });
+    retry.delete(row.id);
+    await stamp({ outcome: "failed", error: note });
+    console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${note}`);
+    return "parked";
+  }
 }
 
 // Bounds ONE /detect exchange: a detection is seconds, but a queued image behind
@@ -1063,8 +1227,9 @@ const OBJECT_DETECTOR_TIMEOUT_MS = Number(process.env.OBJECT_DETECTOR_TIMEOUT_MS
 // The on-server object-detector sidecar wrapped as an interchangeable engine
 // { id, model, detect } — the peer of whisperTranscriber(). POSTs the ORIGINAL
 // image + noun-phrase queries to /detect and returns canonical
-// [{ label, box(0..1 xyxy), score }]. Unreachable/non-OK throws transient → the
-// extract leg requeues (mirrors the extractor contract), never a silent empty.
+// { objects: [{ label, box(0..1 xyxy), score }], usage }. Unreachable/non-OK
+// throws transient → the extract leg requeues (mirrors the extractor
+// contract), never a silent empty.
 function objectDetectorSidecar(binding, threshold) {
   const base = sidecarUrl(binding.provider);
   return {
@@ -1098,7 +1263,10 @@ function objectDetectorSidecar(binding, threshold) {
         throw e;
       }
       const { objects } = await res.json();
-      return Array.isArray(objects) ? objects : [];
+      // No usage: the sidecar is keyless and on-device, so it has nothing to
+      // report and says so rather than reporting zeros. The caller meters the
+      // image it sent, which is the unit this engine's $0 price is quoted in.
+      return { objects: Array.isArray(objects) ? objects : [], usage: {} };
     },
   };
 }
@@ -1649,47 +1817,74 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   const REFRESH_BATCH = Math.max(1, Number(process.env.REFRESH_BATCH) || 20);
   let refreshBackoffUntil = 0;
 
-  // Snapshot retention, checked hourly not per tick — the DELETEs are cheap
-  // but there's no point running them every 3s. 0 disables a prune (keep
-  // forever). field_snapshots (movement history) defaults to 90 days;
-  // tag_snapshots (judgment history) defaults to keep-forever — the dedupe in
-  // addTagSnapshot means every row is a real judgment change, i.e. the
-  // then-vs-now data itself, so age-pruning it is opt-in.
-  const SNAPSHOT_RETENTION_DAYS = Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 90);
-  const TAG_SNAPSHOT_RETENTION_DAYS = Number(process.env.TAG_SNAPSHOT_RETENTION_DAYS ?? 0);
-  // The job log (execution history, one row per attempt) defaults to 30 days —
-  // it's operational transparency, not the product's data like the snapshots.
-  const JOB_LOG_RETENTION_DAYS = Number(process.env.JOB_LOG_RETENTION_DAYS ?? 30);
-  let nextPruneAt = 0;
+  // History retention, checked hourly not per tick — the DELETEs are cheap but
+  // there's no point running them every 3s. 0 disables a prune (keep forever).
+  // ONE table, not one hand-written block per ledger: the old shape repeated
+  // the same five lines per entry AND named every knob again in a compound
+  // early-return, so a fifth ledger that forgot that second edit would silently
+  // never prune whenever the other four were zero — the common configuration,
+  // since two of them default to 0.
+  //   field_snapshots  movement history, 90 days.
+  //   tag_snapshots    judgment history, keep-forever — addTagSnapshot dedupes,
+  //                    so every row is a real change, i.e. the then-vs-now data
+  //                    itself; age-pruning it is opt-in.
+  //   job_log          execution history, 30 days — operational transparency,
+  //                    not the product's data like the snapshots.
+  //   usage_meter      spend history, keep-forever — a per-day rollup stays
+  //                    small, and it IS the billing record.
+  const PRUNES = [
+    { days: Number(process.env.SNAPSHOT_RETENTION_DAYS ?? 90), run: pruneFieldSnapshots, noun: "field snapshot(s)" },
+    { days: Number(process.env.TAG_SNAPSHOT_RETENTION_DAYS ?? 0), run: pruneTagSnapshots, noun: "tag snapshot(s)" },
+    { days: Number(process.env.JOB_LOG_RETENTION_DAYS ?? 30), run: pruneJobLog, noun: "job log row(s)" },
+    { days: Number(process.env.USAGE_METER_RETENTION_DAYS ?? 0), run: pruneUsageMeter, noun: "usage meter row(s)" },
+  ];
+  // The maintenance loop ticks at POLL_MS, but several of its jobs only want
+  // to run hourly. ONE gate rather than a `let nextXAt` beside each — the same
+  // reason PRUNES above is a table: the third copy of a shape is where the
+  // shape should have become a mechanism. Each wrapped job keeps its own
+  // independent clock, and the timestamp advances BEFORE the work so a slow
+  // pass can't stack.
+  const hourly = (fn) => {
+    let nextAt = 0;
+    return async (...args) => {
+      if (Date.now() < nextAt) return;
+      nextAt = Date.now() + 3600000;
+      return fn(...args);
+    };
+  };
+
   // Ghost-entity reap: a zero-instance entity is normally impossible, but the
   // FK-less entity_ids link can strand one on a crash or a concurrent delete.
   // Swept hourly; only entities settled empty for REAP_AGE_MS are taken, so an
   // in-flight upload (entity then instance, two statements) is never caught.
   const REAP_AGE_MS = Number(process.env.ENTITY_REAP_AFTER_MS) || 1800000; // 30 min
-  let nextReapAt = 0;
-  async function pruneSnapshots() {
-    if ((!SNAPSHOT_RETENTION_DAYS && !TAG_SNAPSHOT_RETENTION_DAYS && !JOB_LOG_RETENTION_DAYS) || Date.now() < nextPruneAt) return;
-    nextPruneAt = Date.now() + 3600000;
-    if (SNAPSHOT_RETENTION_DAYS) {
-      const n = await pruneFieldSnapshots(db, Date.now() - SNAPSHOT_RETENTION_DAYS * 86400000);
-      if (n) console.log(`pruned ${n} field snapshot(s) older than ${SNAPSHOT_RETENTION_DAYS}d`);
+  const pruneSnapshots = hourly(async () => {
+    for (const { days, run, noun } of PRUNES) {
+      if (!days) continue;
+      const n = await run(db, Date.now() - days * 86400000);
+      if (n) console.log(`pruned ${n} ${noun} older than ${days}d`);
     }
-    if (TAG_SNAPSHOT_RETENTION_DAYS) {
-      const n = await pruneTagSnapshots(db, Date.now() - TAG_SNAPSHOT_RETENTION_DAYS * 86400000);
-      if (n) console.log(`pruned ${n} tag snapshot(s) older than ${TAG_SNAPSHOT_RETENTION_DAYS}d`);
-    }
-    if (JOB_LOG_RETENTION_DAYS) {
-      const n = await pruneJobLog(db, Date.now() - JOB_LOG_RETENTION_DAYS * 86400000);
-      if (n) console.log(`pruned ${n} job log row(s) older than ${JOB_LOG_RETENTION_DAYS}d`);
-    }
-  }
+  });
 
-  async function reapGhostEntities() {
-    if (Date.now() < nextReapAt) return;
-    nextReapAt = Date.now() + 3600000; // hourly, like the snapshot prune
+  const reapGhostEntities = hourly(async () => {
     const n = await reapEmptyEntities(db, REAP_AGE_MS);
     if (n) console.log(`worker: reaped ${n} empty ghost entit${n === 1 ? "y" : "ies"}`);
-  }
+  });
+
+  // Price learning (price-learner.js, metering-plan.md 3b). Hourly rather than
+  // the refresh period so a just-wanted model prices within the hour; the
+  // learner gates its own network beyond that and never throws.
+  //
+  // NOT awaited: this is the one maintenance job that makes outbound calls
+  // (a ~2MB map fetch, a per-provider listing), and this loop's whole design
+  // is that recovery can't be delayed by slow work — which is why the heavy
+  // sweeps got their own loops. A pending pass is tracked so ticks can't pile
+  // passes up on each other.
+  let priceLearnInFlight = null;
+  const learnPricesDue = hourly(() => {
+    if (priceLearnInFlight) return;
+    priceLearnInFlight = learnPrices(db).finally(() => { priceLearnInFlight = null; });
+  });
 
   async function refreshDue() {
     if (Date.now() < refreshBackoffUntil) return false;
@@ -1720,22 +1915,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // resuming from drain_left so the run's `limit` stays exact. Per-board
   // failures land in ingest_state with a 5-minute backoff — never the loop.
   const INGEST_CONTINUOUS_MS = Math.max(5000, Number(process.env.INGEST_CONTINUOUS_MS) || 30000);
-
-  // Fold a repeating non-event into its prior row: attempts up, error and
-  // detail refreshed, this attempt's fresh row retracted. Without the fold a
-  // failure repeating on its retry cadence is the flat-tick trap in failure
-  // clothes — a transcriber outage writes a `requeued` row per 60 s backoff,
-  // a wedged ingest scan one per 30 s tick (a weekend ≈ 3k identical rows).
-  // The first occurrence and any CHANGE (a different error, something
-  // admitted, the eventual resolution) still get their own rows.
-  const foldJobRepeat = async (prior, freshId, { outcome, error = null, detail = {} }) => {
-    await jobLogWrite(() => stampJobLog(db, prior.id, {
-      outcome, error,
-      detail: { ...detail, attempts: (Number(prior.detail?.attempts) || 1) + 1 },
-      endedAt: Date.now(),
-    }));
-    if (freshId != null) await jobLogWrite(() => deleteJobLog(db, freshId));
-  };
 
   async function ingestDue() {
     let draining = false; // any board mid-run → the loop polls short instead of idling
@@ -1838,7 +2017,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
             !Number(prior.detail?.admitted) && !Number(prior.detail?.skipped) &&
             !Number(prior.detail?.duplicates) && !Number(prior.detail?.drain_left);
           if (sameStory) {
-            await foldJobRepeat(prior, jobId, {
+            await foldJobRepeat(db, prior, jobId, {
               outcome: "ok", error: errors[0],
               detail: { scanned: candidates.length, fresh: fresh.length },
             });
@@ -1880,7 +2059,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
           : null;
         if (prior?.outcome === "failed" && prior.error === String(err.message).slice(0, 500)) {
-          await foldJobRepeat(prior, jobId, { outcome: "failed", error: err.message });
+          await foldJobRepeat(db, prior, jobId, { outcome: "failed", error: err.message });
         } else {
           await stamp({ outcome: "failed", error: err.message });
         }
@@ -1957,7 +2136,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // failure — their routing wins, the result is dropped, the tokens were
     // spent either way so usage still counts.
     try {
-      const { undecided, usages, votes, model, image } = result;
+      const { undecided, usages, votes, model, provider, image } = result;
       // A scoped pass (items.tag_facets) writes only the facets it was queued
       // for and keeps the rest of the item's answers. `row` is the CLAIM-TIME
       // state and that is safe without a re-read: markTagged is fenced on
@@ -1974,17 +2153,28 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         result
       );
       const { tags, reasoning, confidence } = merged;
+      // Meter BEFORE the landing: the tokens were spent whatever markTagged
+      // does next, and this call never throws — so the spend is recorded even
+      // when the write below fails and the catch reports the loss. (The old
+      // shape metered after the landing, which quietly dropped the bill on
+      // exactly the "post-tag write failed" path — worker-queue-holes #11's
+      // "usage stays unconditional" invariant, now actually held.)
+      // The meter counts PAID CALLS, not items: every per-call average read
+      // off it (admin dashboard, cost estimates) breaks if N votes record as
+      // one, so `requests` gets all N. One write, not N — the passes share an
+      // attribution, so they fold into the same rows either way.
+      const dims = { capability: "tag", provider, model };
+      await meterAiCalls(db, row.board_id, dims, usages);
+      // What the meter just recorded, in the row's spelling — one derivation
+      // for both landings below, off the same dims the meter got.
+      const spent = spentDetail(dims, usages);
       // Scoped: `undecided` is not written, so the snapshot must be told the
       // flag that IS stored or its dedupe compares against a value nobody saved.
       const landed = await markTagged(db, row.id, tags, scope?.length ? row.undecided : undecided,
                                       reasoning, confidence, !!scope?.length);
-      // One row per PAID call, not per item: ai_board_usage.count is the ledger
-      // of provider calls, and every per-call average read off that table
-      // (admin dashboard, cost estimates) breaks if N votes record as one.
-      for (const u of usages) await bumpUsage(db, row.board_id, u);
       if (landed) {
         await legLog(row, "tag", t0, "ok", null, {
-          tags: tags.length, model,
+          tags: tags.length, ...spent,
           ...(scope?.length ? { facets: scope } : {}),
           ...(votes > 1 ? { votes } : {}),
           ...(!scope?.length && undecided ? { undecided: true } : {}),
@@ -1994,7 +2184,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         console.log(`tagged #${row.id} ${label} [${model}]${scope?.length ? ` (facets: ${scope.join(", ")})` : ""}${!scope?.length && undecided ? " (undecided)" : ""} -> [${tags.join(", ")}]`);
         await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
       } else {
-        await legLog(row, "tag", t0, "discarded", null, { model });
+        // The fence dropped the result; the money was spent anyway. The tokens
+        // on this row are where that shows.
+        await legLog(row, "tag", t0, "discarded", null, spent);
         console.warn(`stale tag result for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
       }
     } catch (err) {
@@ -2030,8 +2222,8 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // normal tag leg picks it up next. When the mapping has derived identity,
   // resolves collisions by merging into the existing entity instead.
   // Returns a job-log summary for processExtractOne — { landed, fields,
-  // identity, model } — or null for the no-AI passthrough (a status flip is
-  // not an execution worth a history row).
+  // identity, spent, image } — or null for the no-AI passthrough (a status
+  // flip is not an execution worth a history row).
   async function extractOne(row) {
     const mapping = row.payload.mapping;
     if (!aiWork(mapping)) {
@@ -2057,7 +2249,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // NOT named `image` — the object-detection block below binds that name to
     // a raw file buffer, and two meanings for one word in one function is how
     // the wrong one gets read.
-    let input = {}, usage = null, ai = null, imageRender = null;
+    // `spent` is the job row's "what served this and what it cost" fragment,
+    // filled by whichever leg spends FIRST — the extractor here, or the
+    // detector pass below on a detect-only board. Still null at the return only
+    // when nothing was called at all (detect fields on a non-image item), and
+    // then the row says nothing rather than naming an engine that never ran.
+    let input = {}, usage = null, ai = null, imageRender = null, spent = null;
     if (needsLLM) {
       // Extraction's whole ladder in one call: the board's extract pin, the
       // app-wide extract default (slice 5), then delegation to the tagger —
@@ -2102,6 +2299,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         parts,
         tool: { name: "record_fields", description: "Record the extracted fields for this item." },
       }));
+      // Meter at the paid call, not at the landing: everything below —
+      // identity derivation, the stamp, the alert sweep — can throw, and the
+      // bill must not ride on any of it succeeding (the same hoist as the tag
+      // landing's). Never throws.
+      const dims = { capability: "extract", provider: ai.provider, model: ai.model };
+      await meterAiCall(db, row.board_id, dims, usage);
+      spent = spentDetail(dims, [usage]);
     }
 
     // Seed with the deterministic file fields projected from the stored entry,
@@ -2148,7 +2352,24 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // far less to ship to the single-threaded sidecar.
         const demux = detectionDemux(objectFields);
         const detector = await resolveDetector(db, board);
-        const byField = demux.route(await detector.detect(await imageForDetection(image), demux.queries));
+        const { objects, usage: detected } = await detector.detect(await imageForDetection(image), demux.queries);
+        // Meter at the paid call, like every other leg — everything below can
+        // throw and the bill must not ride on it. One call and one image are
+        // what this call site KNOWS it spent (many queries ride a single pass,
+        // so the image is the quantity, not the query); whatever the engine
+        // reported rides on top, because a vision-model detector bills in
+        // tokens. The on-device sidecar reports nothing and those zeros never
+        // write a row. Never throws.
+        const detectDims = { capability: "detect", provider: detector.id, model: detector.model };
+        await meterAiCall(db, row.board_id, detectDims, detected, { images: 1 });
+        // A detect-only board never calls a model, so this leg is what the job
+        // row has to describe. It used to stamp the literal string "detection"
+        // into the MODEL slot — a placeholder standing where a model name goes,
+        // while the engine that actually ran was named right here. `??=` because
+        // the extractor above spends first when both legs run: one `spent`
+        // fragment names one engine, and the meter has both regardless.
+        spent ??= spentDetail(detectDims, [detected]);
+        const byField = demux.route(objects);
         for (const f of objectFields) {
           const v = byField.get(f.key) || [];
           fields[f.key].v = v;
@@ -2234,7 +2455,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     } else {
       const label = row.payload?.identity || `item ${row.id}`;
       if ((landed = await stampExtracted(row, fields)))
-        console.log(`extracted #${row.id} ${label} [${ai?.model ?? "detection"}] -> [${Object.keys(fields).join(", ")}]`);
+        console.log(`extracted #${row.id} ${label} [${spent?.model ?? "none"}] -> [${Object.keys(fields).join(", ")}]`);
     }
 
     // A membership change re-homes the instance's tags into a different entity's
@@ -2247,8 +2468,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       await evaluateItemAlerts(db, row.id); // never throws — the ledger never breaks the job
     }
 
-    if (usage) await bumpUsage(db, row.board_id, usage);
-    return { landed, fields: Object.keys(fields).length, identity: disposition, model: ai?.model ?? "detection", image: imageRender };
+    return {
+      landed, fields: Object.keys(fields).length, identity: disposition,
+      spent, image: imageRender,
+    };
   }
 
   async function processExtractOne(row) {
@@ -2260,7 +2483,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // an execution). Otherwise one row per attempt; `discarded` when the
       // fence dropped a stale result.
       if (r) await legLog(row, "extract", t0, r.landed ? "ok" : "discarded", null,
-        { fields: r.fields, ...(r.identity ? { identity: r.identity } : {}), model: r.model,
+        { fields: r.fields, ...(r.identity ? { identity: r.identity } : {}), ...r.spent,
           // Image-bearing extractions only — "what did the model actually see",
           // the same question the tag leg's row answers.
           ...(r.image ? { image: r.image } : {}) });
@@ -2294,8 +2517,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       }
       // rendered:false + render_error is the "why is my chart a tile" answer —
       // the leg still advances (outcome ok), but the log says what happened.
+      // `connector`, not `provider`: since the billing legs started stamping
+      // `provider` with the AI vendor that served them, one JSONB key meaning
+      // both a connector id and a model vendor would quietly mix the two in
+      // any query that spans kinds (Stage 4's drill-down joins on exactly this).
       const detail = {
-        provider: board?.mapping?.input?.connector ?? null, rendered,
+        connector: board?.mapping?.input?.connector ?? null, rendered,
         ...(renderError ? { render_error: renderError } : {}),
       };
       // → pending (tag leg), or held when parked; false = fence discarded a
@@ -2399,6 +2626,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         await retagDue();
         await pruneSnapshots();
         await reapGhostEntities();
+        await learnPricesDue();
         // Scheduled DB-only backup (server/backup.js) — it no-ops unless due
         // and skips itself while any backup/restore job is running.
         if (autoBackup) await autoBackup();
@@ -2541,73 +2769,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           const row = await oneAudioNeedingTranscription(db, waiting);
           if (row) {
             did = true;
-            const file = row.payload.files?.[0];
-            // A `running` job-log row is the only place "transcribing now"
-            // exists — this sweep has no items.status leg. Each attempt is its
-            // own row (a transient retry after the backoff opens a fresh one).
-            const jobId = await jobLogWrite(() => addJobLog(db, {
-              boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
-              target: file?.original_name || file?.name || null, kind: "transcribe",
-            }));
-            const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
-            try {
-              if (!file) throw new Error("no file on the item");
-              // The board's own pin outranks the app default (slice 5). One PK
-              // SELECT ahead of a multi-second sidecar/API call — noise here,
-              // and the job-log stamp below records engine:model per item, so
-              // per-board engines stay visible in job history.
-              const board = row.board_id ? await getBoard(db, row.board_id) : null;
-              const transcriber = await resolveTranscriber(db, board);
-              const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-              const { text, turns } = await transcriber.transcribe(buf, file.name);
-              // turns ([] included) land beside the flat transcript; the key is
-              // absent when the engine gave none (legacy sidecar image, plain
-              // provider model) and readers fall back to the flat text.
-              await updateItemPayload(db, row.id, { transcript: text, ...(turns ? { transcript_turns: turns } : {}) });
-              transcribeRetry.delete(row.id);
-              // Distinct speaker count for the job log — engine-agnostic (any
-              // diarizing engine's labels count); omitted when zero so
-              // speakerless rows read exactly as before.
-              const speakers = new Set((turns || []).map((t) => t.speaker).filter(Boolean)).size;
-              // whisper's model is the sidecar's own answer (null if it predates self-reporting)
-              await stamp({ outcome: "ok", detail: { chars: text.length, turns: turns?.length, speakers: speakers || undefined, engine: [transcriber.id, transcriber.model].filter(Boolean).join(":") } });
-              console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
-            } catch (err) {
-              const attempts = transcribeRetry.get(row.id)?.attempts || 0;
-              const action = transcribeFailurePolicy(err, attempts);
-              if (action === "backoff-lane" || action === "backoff-item") {
-                if (action === "backoff-lane") {
-                  transcribeBackoffUntil = Date.now() + 60000;
-                  did = false; // nothing else would succeed either — sleep the full poll
-                } else {
-                  transcribeRetry.set(row.id, { attempts: attempts + 1, until: Date.now() + 60000 });
-                }
-                // Consecutive transient retries of one clip are one story,
-                // not one row per backoff tick: fold into the clip's prior
-                // `requeued` row — attempts up, error and end time refreshed.
-                // The first failure and the eventual resolution (ok/failed)
-                // keep their own rows, and the fold survives restarts because
-                // the prior row is found in the ledger, not in memory.
-                const prior = jobId == null ? null
-                  : await jobLogWrite(() => latestSettledJob(db, row.board_id, "transcribe", row.id));
-                if (prior?.outcome === "requeued") {
-                  await foldJobRepeat(prior, jobId, { outcome: "requeued", error: err.message });
-                } else {
-                  await stamp({ outcome: "requeued", error: err.message });
-                }
-                console.warn(`transcribe: transient ${action === "backoff-lane" ? "engine" : `clip #${row.id}`} error (retry in 60s): ${err.message}`);
-              } else {
-                // Park the clip — a permanent fault (undecodable, provider 4xx)
-                // or a transient one out of attempts. The queue moves on; it'll
-                // tag from its filename, like a textless document. A reprocess
-                // clears transcript_error to grant a fresh set of attempts.
-                const note = action === "park-capped"
-                  ? `gave up after ${attempts + 1} attempts: ${err.message}` : err.message;
-                await updateItemPayload(db, row.id, { transcript_error: String(note).slice(0, 300) });
-                transcribeRetry.delete(row.id);
-                await stamp({ outcome: "failed", error: note });
-                console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${note}`);
-              }
+            if (await transcribeOne(db, galleryDir, row, transcribeRetry) === "backoff-lane") {
+              transcribeBackoffUntil = Date.now() + 60000;
+              did = false; // nothing else would succeed either — sleep the full poll
             }
           }
         }

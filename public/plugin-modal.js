@@ -13,10 +13,9 @@ import { api } from "/api.js";
 import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
 import { syncModelPicker, switchRow } from "/board-modal.js";
 import { fillSelect, isUnset } from "/select.js";
-import { fmtDuration } from "/utils.js";
+import { fmtDuration, relTime } from "/utils.js";
 import { planSection, fmtProbe, keyRoles, removalStory } from "/capability-present.js";
 
-const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 const LABEL_CSS = "display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;";
 const MONO_CSS = "font-family:'SF Mono',Consolas,monospace;font-size:13px;";

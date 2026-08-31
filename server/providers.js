@@ -18,6 +18,7 @@ import { acquire } from "./provider-pacing.js";
 import { BUILTIN_PROVIDERS } from "./ai-providers/index.js";
 import { WIRES } from "./ai-providers/wires/index.js";
 import { CAPABILITY } from "./capabilities.js";
+import { validRate } from "./units.js";
 
 // Re-exported for the plugin loader (ctx.wires) and tests — the wire families
 // themselves live in ./ai-providers/wires/, one module per protocol; the engine
@@ -56,6 +57,34 @@ export function requireValidImages(name, desc) {
   for (const k of ["maxEdge", "maxBytes"]) {
     if (img[k] !== undefined && !(Number.isFinite(img[k]) && img[k] > 0))
       throw new Error(`AI provider "${name}": images.${k} must be a positive finite number`);
+  }
+}
+
+// The OPTIONAL `prices` block — author-time rate data, { model: { unit:
+// microsPerUnit } }, where '*' on either axis means "every one of these":
+// a '*' model is the provider-wide default, a '*' unit is every unit
+// (pricing.js merges the two, metering-plan.md's descriptor rung). Absent is
+// fine — the model meters unpriced, the honest blank.
+//
+// Present, it must be numbers, and the stakes here are higher than for any
+// other quirk block: a rate is multiplied into cost_micros at write time and,
+// by design, never recomputed. A bad image clamp is fixable by fixing the
+// descriptor; a falsified billing record is not. So it gets the same
+// enforcement point as the other two contracts — the one registry write, which
+// is what holds built-ins and plugins to it identically.
+export function requireValidPrices(name, desc) {
+  const prices = desc.prices;
+  if (prices === undefined) return;
+  if (!prices || typeof prices !== "object" || Array.isArray(prices))
+    throw new Error(`AI provider "${name}": prices must be an object ({ model: { unit: microsPerUnit } })`);
+  for (const [model, units] of Object.entries(prices)) {
+    if (!units || typeof units !== "object" || Array.isArray(units))
+      throw new Error(`AI provider "${name}": prices["${model}"] must be an object ({ unit: microsPerUnit })`);
+    for (const [unit, micros] of Object.entries(units)) {
+      // One definition of a valid rate, shared with every other rung (units.js).
+      if (!validRate(micros))
+        throw new Error(`AI provider "${name}": prices["${model}"].${unit} must be a non-negative finite number`);
+    }
   }
 }
 
@@ -134,9 +163,21 @@ function install(name, desc) {
   desc.name = name;
   // Two orthogonal descriptor flags: `keyless` = connections to this provider
   // carry no secret (auth); `onDevice` = it runs in-process/on-box and makes no
-  // external calls (network). On-device implies keyless — normalize so the two
-  // can never contradict (an on-device provider with a secret is nonsensical).
-  if (desc.onDevice) desc.keyless = true;
+  // external calls (network). What follows from on-device is normalized HERE,
+  // so no reader downstream has to infer it and none can disagree:
+  //   - keyless, because an on-device provider with a secret is nonsensical;
+  //   - free, because it runs on your box, so every unit of every model costs
+  //     $0 — a knowledge claim, not an absence. Written as an ORDINARY `prices`
+  //     declaration rather than left as a flag for the rating layer to read,
+  //     which is what lets pricing.js know only what descriptors SAY about
+  //     prices and never what a provider IS — and lets a networked-but-free
+  //     provider (a plugin pointing at a self-hosted Ollama: free to its user,
+  //     not on-device) declare exactly the same thing for itself.
+  // A default, not a law: a descriptor that states its own prices keeps them.
+  if (desc.onDevice) {
+    desc.keyless = true;
+    desc.prices ??= { "*": { "*": 0 } };
+  }
   // Normalize the capability declaration here, at the one registry write, so
   // every descriptor in PROVIDERS — built-in, plugin, or test-registered —
   // carries `provides` and no reader has to handle both shapes. NOTE: this does
@@ -147,6 +188,7 @@ function install(name, desc) {
   backfillLegacy(desc);
   requireRateLimit(name, desc); // any networked provider declares its rate limit, or it's rejected
   requireValidImages(name, desc); // a declared image-input ceiling must be sane, or it's rejected
+  requireValidPrices(name, desc); // a declared rate must be a number, or it's rejected — costs are stamped, not recomputed
   PROVIDERS[name] = desc;
 }
 
@@ -242,15 +284,32 @@ export async function transcribeAudio({ provider, rpm, burst, ...rest }) {
   return desc.wire.transcribe(desc, rest);
 }
 
-// Detect objects in an image → [{ label, box, score }] via a provider's wire.
-// Only detects-capable providers qualify — callers gate on
-// PROVIDERS[provider].detects. The on-device `localDetector` rides its own
-// wire.detect like any other (paceAi no-ops for keyless), so there's no
-// provider-name branch here.
+// Detect objects in an image → { objects: [{ label, box, score }], usage } via
+// a provider's wire. Only detects-capable providers qualify — callers gate on
+// PROVIDERS[provider].detects. `localDetector` is the on-server sidecar, wired
+// directly by resolveDetector (worker.js) with a null wire, so it never routes
+// here — only keyed provider engines do, exactly like transcribeAudio above.
+//
+// `usage` is why this returns an object rather than the bare array it used to:
+// detection is the ONE capability with no built-in wire, so every paid
+// detector arrives as a plugin, and a plugin backed by a vision model bills in
+// TOKENS. Without a channel to declare that, its spend could only ever meter
+// as the images we know we sent, and the token half would be invisible money
+// (metering-plan.md Stage 5c). Same shape as embed's { vectors, usage } and
+// transcribe's { text, usage } — this was the odd wire out.
 export async function detectObjects({ provider, rpm, burst, ...rest }) {
   await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
-  return desc.wire.detect(desc, rest);
+  const answer = await desc.wire.detect(desc, rest);
+  // A plugin written against the pre-5c contract answered the bare array, and
+  // it still works: normalized HERE, at the one funnel, the way install()
+  // normalizes the three legacy capability-DECLARATION shapes so no reader
+  // downstream handles two. Without this the old shape does not fail loudly —
+  // `objects` destructures to undefined, demux.route() reads it as `|| []`,
+  // and the item lands "No objects detected" while the meter bills the image.
+  // A silently empty answer is the worst of the three outcomes available, and
+  // graceful degradation is the house rule (units.js says it out loud).
+  return Array.isArray(answer) ? { objects: answer, usage: {} } : answer;
 }
 
 // Cheap key/model validation for the admin "Test" buttons. Throws with the

@@ -54,9 +54,16 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
   // Deliberately NO temperature — like GLM above, for the opposite reason: GLM
   // could not be probed, OpenRouter fronts too many backends (including
   // openai/o-series) for one passing probe to generalise.
+  // It is also the only provider that declares priceFields: `pricing` is not
+  // part of the compat protocol, so the listPrices rung is opt-in per
+  // descriptor (metering-plan.md 3b) — the four above answer null, which is
+  // what stops a proxy in front of a local box from having its upstream's
+  // hosted prices believed.
   assert.deepEqual(PROVIDERS.openrouter.compat, {
     maxTokensField: "max_tokens", forceToolChoice: true, strictTools: false, disableThinking: false, keyTest: "completion",
+    priceFields: { prompt: "input_tokens", completion: "output_tokens", input_cache_read: "cache_read_tokens", web_search: "web_searches", request: "requests" },
   });
+  for (const name of ["openai", "gemini", "glm"]) assert.equal(PROVIDERS[name].compat.priceFields, undefined);
   // Anthropic is the only research-capable provider and has no compat block
   assert.equal(PROVIDERS.anthropic.research, true);
   assert.equal(PROVIDERS.anthropic.compat, undefined);

@@ -103,7 +103,12 @@ import {
   retagItemFacets,
   rescheduleEntityRefreshes,
   boardEntityIdentities,
-  getBoardTokenTotal,
+  boardUsageSummary,
+  usageRows,
+  USAGE_DIMS,
+  day,
+  APP_SCOPE,
+  modelPriceFreshness,
   listJobLog,
   listRunningJobs,
   latestJobFailureAt,
@@ -139,7 +144,11 @@ import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
-import { MODEL_CAPABILITIES } from "./capabilities.js";
+import { refreshRateTable, setModelPrice, wantedModels, priceState } from "./pricing.js";
+import { meterAiCall } from "./metering.js";
+import { validRate, unitList, unitVocabulary } from "./units.js";
+import { learnPrices } from "./price-learner.js";
+import { MODEL_CAPABILITIES, kindList, capabilityLabel } from "./capabilities.js";
 import { bindCapability, setCapabilityConfig, assertValidCapabilityConfig, boardBindingPatch, boardConfigPatch } from "./capability-bind.js";
 import { capabilityStatus } from "./capability-status.js";
 import { boardConfigCatalog } from "./capability-resolve.js";
@@ -153,7 +162,7 @@ import { addConnectorEntity } from "./connectors/add.js";
 import { liveFields, faceSchedule, domainState } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
-import { pluginCatalog, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
+import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, ENUM_CAP } from "./ingestion/index.js";
@@ -206,6 +215,13 @@ for (const level of ["log", "warn", "error"]) {
 const db = openDb(DATABASE_URL);
 await initDb(db);
 await loadPlugins(db); // register dynamically-installed plugins before routes serve
+// Build the in-memory rate table (pricing.js) so meter writes can stamp costs.
+// Process-wide state, like the three above — not the worker's, even though the
+// worker is its busiest reader: the rate table is a singleton, this process
+// also serves the admin price routes, and hanging it off startWorker would
+// mean a worker restart pointlessly rebuilt prices. AFTER loadPlugins, so a
+// plugin provider's declared rates are in the registry to be read.
+await refreshRateTable(db);
 await seedAdmin(db, ADMIN_EMAIL);
 
 // --- first-run setup -------------------------------------------------------
@@ -984,11 +1000,15 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
   if (!board || !(await canAccessBoard(db, board.id, req.user)))
     return res.status(404).json({ error: "not found" });
-  const [canManage, tokenTotal, embeddingOk] = await Promise.all([
+  const [canManage, usage, embeddingOk] = await Promise.all([
     canManageBoard(db, board.id, req.user),
-    getBoardTokenTotal(db, board.id),
+    boardUsageSummary(db, board.id),
     resolveEmbedder(db).then(Boolean),
   ]);
+  // Spend is management-visible (metering-plan.md, Decided). The summary is
+  // one query for everyone; management decides only DISCLOSURE, which is why
+  // it can run concurrently with the read rather than gating it.
+  const cost = canManage ? usage.cost : null;
   res.json({
     id: board.id,
     name: board.name,
@@ -1004,7 +1024,12 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     mapping: board.mapping || null,
     search: embeddingOk,
     manage: canManage,
-    token_total: tokenTotal,
+    // The board's all-time spend, per unit and never summed across them
+    // (metering-plan.md Stage 0 — input and output bill at different rates),
+    // with the vocabulary beside it so the chip renders what it is handed.
+    units: usage.units,
+    unitDefs: unitList(Object.keys(usage.units)),
+    ...(cost ? { cost } : {}),
     // What ingestion is doing + the next-run stamp: the toolbar chip counts
     // down to the run, and the client keeps a slow delta poll alive whenever a
     // run is actually coming. The mode is what separates the two no-next-run
@@ -1015,13 +1040,21 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
   });
 }));
 
-// Just the token total — polled by the live token chip while tagging runs, so
-// the count ticks up without re-fetching the whole board payload.
+// Just the token buckets — polled by the live token chip while tagging runs,
+// so the counts tick up without re-fetching the whole board payload.
 app.get("/api/boards/:id/tokens", requireAuth, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
   if (!board || !(await canAccessBoard(db, board.id, req.user)))
     return res.status(404).json({ error: "not found" });
-  res.json({ token_total: await getBoardTokenTotal(db, board.id) });
+  // This route is POLLED while tagging runs, so it stays one meter query:
+  // the summary answers buckets and spend together, and the manager check
+  // rides alongside rather than gating a second read.
+  const [usage, manage] = await Promise.all([
+    boardUsageSummary(db, board.id),
+    canManageBoard(db, board.id, req.user),
+  ]);
+  const cost = manage ? usage.cost : null;
+  res.json({ units: usage.units, unitDefs: unitList(Object.keys(usage.units)), ...(cost ? { cost } : {}) });
 }));
 
 // The board's job log (planning/job-log-plan.md): running sweep jobs (a
@@ -1082,6 +1115,11 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
     nextCursor: history.nextCursor,
     has_refresh: hasRefresh,
     failed_at: failedAt,
+    // The work-kind vocabulary (capabilities.js), pill order — the modal
+    // renders labels from THIS, never a client-side list, so a new kind
+    // arrives with its name (metering-plan.md, Mechanism 3's rule for units,
+    // applied to work).
+    kinds: kindList(),
     // Upcoming work — the modal's "scheduled" strip. Null = nothing of that
     // family is coming on this board. For ingestion the armed stamp is the
     // whole answer: it covers a live schedule AND a "Run now" queued against a
@@ -1424,8 +1462,8 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
   const boards = await listBoards(db);
   const stats = await boardItemStats(db);
   const usage = await boardAiUsage(db);
-  res.json(
-    await Promise.all(
+  res.json({
+    boards: await Promise.all(
       boards.map(async (b) => ({
         ...b,
         item_count: stats[b.id]?.c || 0,
@@ -1435,8 +1473,163 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
         memberIds: await getBoardMemberIds(db, b.id),
         adminIds: await getBoardAdminIds(db, b.id),
       }))
-    )
-  );
+    ),
+    // The vocabulary for every ai_usage units map above — labels and format
+    // kinds, so the cell can render a unit it has no name for (Mechanism 3;
+    // Stage 5b reshaped the bare array into this envelope).
+    units: unitList(Object.values(usage).flatMap((u) => Object.keys(u.units))),
+  });
+}));
+
+// --- usage (metering-plan.md, Mechanism 3 / Stage 4) ---
+// The dimensioned reader behind the Usage tab (and any later consumer): group
+// by any subset of the meter's dimensions over any day window. The response is
+// SELF-DESCRIBING (the detail-chart precedent): units with their labels and
+// format kinds, kind and capability names, board and provider labels — the
+// client renders what it is handed and never invents a vocabulary of its own.
+// A read with no window would scan (and ship) all of history — the meter keeps
+// forever by default, and grouping collapses only the unit axis, so it bounds
+// nothing. The window is a DEFAULT, not a law: `from=` reaches back as far as
+// the caller likes, and the answer always echoes the window it used so the
+// client states the period it is showing rather than assuming one.
+const USAGE_DEFAULT_DAYS = 30;
+
+async function usageResponse(query, { board }) {
+  const group = String(query.group || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const bad = group.find((g) => !USAGE_DIMS[g]);
+  // The app's own status channel (wrap → the error middleware), the same
+  // Object.assign idiom capability-bind/probe use — so this helper returns the
+  // thing it computes and no caller unpacks an HTTP envelope.
+  if (bad) throw Object.assign(new Error(`unknown group dimension "${bad}"`), { status: 400 });
+  const from = query.from || day(Date.now() - (USAGE_DEFAULT_DAYS - 1) * 86400000);
+  const to = query.to || null;
+  const rows = await usageRows(db, {
+    from, to, group,
+    // The board is the CALLER's to state — the scoped route passes its own and
+    // the admin route passes the query's, so scope is never a defaulted
+    // parameter a third route could forget into "every board".
+    board,
+    capability: query.capability || null,
+  });
+  // One shape and one degradation rule for every dimension's values: an id
+  // with no name renders as itself, never dropped (an uninstalled plugin's
+  // provider and a deleted board are the same story). The client loops over
+  // `dims` instead of branching per dimension name.
+  //
+  // The '' sentinel is handled ONCE here, from what the axis declares
+  // (USAGE_DIMS.emptyLabel), rather than by a per-dimension branch inside each
+  // namer — the axis owns what its own emptiness means, and a Stage 5
+  // dimension with a sentinel gets named by declaring it, not by remembering
+  // to add a branch in this file.
+  const boardNames = group.includes("board")
+    ? new Map((await listBoards(db)).map((b) => [b.id, b.name]))
+    : null;
+  // Two registries answer to the `provider` axis, because two families of work
+  // spend against it: AI providers and the connector runtime's data providers
+  // (Stage 5d). pluginDefs() is already the composed catalog over both, and it
+  // is memoized behind the resetDefs() the loader fires on every
+  // register/unregister — so a plugin-registered provider names itself here
+  // with no invalidation of ours. Narrowed to connector defs because the same
+  // catalog also carries media and source defs, where `local` is a source name
+  // AND an AI provider name; AI stays first regardless.
+  //
+  // A COLLISION IS NOT ONLY COSMETIC, and this comment said otherwise until the
+  // 5d pass measured it: the stored provider id is the rate key too
+  // (pricing.js `key(provider, model)`), and an on-device AI provider carries a
+  // `*`/`*` zero rate that matches ANY model spelling. So a connector sharing
+  // that name would have its quota stamped priced-at-zero — a "known free"
+  // claim, not the honest unpriced blank. Nothing collides today and both
+  // families are un-namespaced in the meter; fixing it properly means
+  // namespacing the stored id (both families, or neither) plus a migration of
+  // usage_meter.provider, which is a slice of its own.
+  const connectorProviders = new Map(
+    pluginDefs().filter((d) => d.kind === "connector").map((d) => [d.name, d.label]));
+  const NAMERS = {
+    board: (id) => boardNames?.get(id) ?? id,
+    capability: capabilityLabel,
+    provider: (id) => PROVIDERS[id]?.label ?? connectorProviders.get(id) ?? id,
+    model: (id) => id,
+    day: (id) => id,
+  };
+  const values = (dim) => {
+    const name = NAMERS[dim], { emptyLabel } = USAGE_DIMS[dim];
+    return Object.fromEntries([...new Set(rows.map((r) => r[dim]))]
+      .map((id) => [id, id === APP_SCOPE && emptyLabel ? emptyLabel : name(id)]));
+  };
+  return {
+    rows,
+    from, to,
+    // WHICH BREAKDOWNS EXIST (Mechanism 3), from the same table the group
+    // param is validated against — plus the values present for the ones asked
+    // for, each with its label.
+    dims: Object.fromEntries(Object.entries(USAGE_DIMS).map(([id, d]) => [
+      id,
+      { label: d.label, ...(group.includes(id) ? { values: values(id) } : {}) },
+    ])),
+    units: unitList(rows.flatMap((r) => Object.keys(r.units))),
+  };
+}
+
+app.get("/api/usage", requireAdmin, wrap(async (req, res) => {
+  res.json(await usageResponse(req.query, { board: req.query.board || null }));
+}));
+
+// The board-scoped twin: same reader, the board pinned by the route. Manager-
+// gated — spend is management-visible (metering-plan.md, Decided) — which
+// requireBoardManager already says in the house voice (404 unknown, 403
+// member).
+app.get("/api/boards/:id/usage", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  // The board comes from the ROUTE, so a `?board=` in the query cannot widen
+  // the scope — it is not consulted at all.
+  res.json(await usageResponse(req.query, { board: req.board.id }));
+}));
+
+// --- model prices (metering-plan.md, Stage 3c) ---
+// The rate map's admin surface. Routes only for now — their editor UI belongs
+// to Stage 4's Usage tab (the plan records that routes lead their UI by one
+// stage); until then this is curl-able and what the tab will bind to.
+
+// The editor's read (Stage 4c): the RESOLVED rate map with per-unit
+// provenance — what will actually be stamped and which rung said so — plus
+// the fetch list, when each learner rung last heard from its source, and the
+// unit vocabulary. `units` is the REGISTRY (∪ anything resolved outside it),
+// not just what's present: an editor declares new facts, so its vocabulary
+// can't be limited to the old ones.
+app.get("/api/admin/prices", requireAdmin, wrap(async (_req, res) => {
+  // Independent reads of the same table — concurrent for the reason
+  // learnPrices already states over the identical pair (price-learner.js).
+  const [models, freshness] = await Promise.all([priceState(db), modelPriceFreshness(db)]);
+  res.json({
+    models,
+    wanted: wantedModels(),
+    freshness,
+    units: unitVocabulary(models.flatMap((m) => Object.keys(m.units))),
+  });
+}));
+
+// Type a price in. An admin row always wins, and an edit INSERTS a new
+// effective row — never rewrites one, and never restamps history (the 3a
+// rule). The rate rule is `validRate` (units.js), the same one the descriptor
+// rung, both learners, and the write itself hold — the route's own job is
+// only to turn a rejection into a 400 rather than a 500.
+app.put("/api/admin/prices", requireAdmin, wrap(async (req, res) => {
+  const { provider, model, unit, microsPerUnit } = req.body || {};
+  for (const [k, v] of [["provider", provider], ["model", model], ["unit", unit]])
+    if (!v || typeof v !== "string") return res.status(400).json({ error: `${k} is required` });
+  if (!validRate(microsPerUnit))
+    return res.status(400).json({ error: "microsPerUnit must be a non-negative finite number (0 = known-free)" });
+  await setModelPrice(db, { provider, model, unit, microsPerUnit });
+  res.json({ ok: true });
+}));
+
+// "Refresh prices now" — the learners' pass with the staleness gates skipped
+// (they pace the background sweep; they don't refuse a person who asked).
+// null from the learner means the pass itself broke, and the person who
+// clicked deserves that difference from "nothing new".
+app.post("/api/admin/prices/refresh", requireAdmin, wrap(async (_req, res) => {
+  const learned = await learnPrices(db, { force: true });
+  if (learned == null) return res.status(502).json({ error: "price refresh failed — see the server log" });
+  res.json({ learned });
 }));
 
 // The content-editable board fields shared by every board save surface —
@@ -2527,7 +2720,10 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   if (!embedder) return res.status(404).json({ error: "semantic search is not enabled" });
   const q = String(req.query.q || "").trim().slice(0, 500);
   if (!q) return res.json({ results: [] });
-  const { vectors: [qv] } = await embedTexts({ ...embedder, texts: [q] });
+  const { vectors: [qv], usage } = await embedTexts({ ...embedder, texts: [q] });
+  // The query embed is a paid call like any other, metered to the board being
+  // searched — the search is that board's work (metering-plan.md Stage 5a).
+  await meterAiCall(db, boardId, { capability: "embed", provider: embedder.provider, model: embedder.model }, usage);
   // Vectors are per instance; results speak in entity ids (what cards are),
   // so multiple matching instances collapse to their entity's best score.
   const best = new Map();

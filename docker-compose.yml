@@ -89,6 +89,13 @@ services:
       TAG_SNAPSHOT_RETENTION_DAYS: ${TAG_SNAPSHOT_RETENTION_DAYS:-0}
       # per-board job history (job_log) — execution attempts, 0 = keep forever
       JOB_LOG_RETENTION_DAYS: ${JOB_LOG_RETENTION_DAYS:-30}
+      # per-day AI spend rollup (usage_meter) — the billing record, 0 = keep forever
+      USAGE_METER_RETENTION_DAYS: ${USAGE_METER_RETENTION_DAYS:-0}
+      # model-price learning; set MODEL_PRICE_SOURCE_URL= (empty) to disable the
+      # community rung (air-gapped). Default duplicated from price-learner.js —
+      # compose would otherwise pass "" for unset, which MEANS disabled here.
+      MODEL_PRICE_SOURCE_URL: ${MODEL_PRICE_SOURCE_URL:-https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json}
+      MODEL_PRICE_REFRESH_DAYS: ${MODEL_PRICE_REFRESH_DAYS:-7}
       EXTRACTOR_URL: http://extractor:3002
       TRANSCRIBER_URL: http://transcriber:3003
       OBJECT_DETECTOR_URL: http://object-detector:3004

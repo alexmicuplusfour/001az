@@ -337,9 +337,72 @@ export function formatTokens(n) {
   return `${Math.round(n / 1000).toLocaleString()}k`;
 }
 
+// The compact token count for STATIC text ("3.9M", "575.9K", "208") — the
+// admin usage cell and the job rows. Not interchangeable with formatTokens
+// above: this one rolls up to M and renders small counts exactly, which is
+// right for a label and wrong for the odometer.
+export const fmtTok = (n) =>
+  n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M"
+  : n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "K"
+  : String(n);
+
+// The in/out pair as one phrase — the app says a token bill this way
+// everywhere it says one (admin usage cell, its sparkline hover, job rows).
+export const tokPair = (input, output) => `${fmtTok(input)} in / ${fmtTok(output)} out`;
+
+// A dollar amount — promoted from paged-table.js (which re-exports it) when
+// the metering chip and the admin usage cell became its third and fourth
+// callers. Sub-dollar amounts keep their precision: a board's spend is
+// usually cents, and "$0.00" would round a real number into a lie.
+export function fmtUsd(v) {
+  if (v == null || !Number.isFinite(v)) return "—";
+  const a = Math.abs(v);
+  if (a >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+  if (a >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+  if (a >= 1) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  return `$${v.toLocaleString(undefined, { maximumFractionDigits: 6 })}`;
+}
+
+// Stamped spend as the chip/cell phrase. Micros in, prose out — micros stay
+// the wire unit. The ≈ is CONDITIONAL and the server decides it: a cost object
+// carries the unpriced remainder, so "this figure is incomplete" is a fact we
+// are told, not a hedge every figure wears. Hedging a complete number is the
+// mirror of the mistake this stage refuses at the other end (no ≈$0.00 out of
+// ignorance) — both are the renderer asserting something it wasn't told.
+export const fmtCost = (cost) =>
+  `${cost.unpriced?.length ? "≈" : ""}${fmtUsd(cost.micros / 1e6)}`;
+
+// A quantity in a unit the server described. Format KINDS come from
+// server/units.js and ride the wire beside the label — the client renders
+// what it is handed and names no unit itself; a kind it has no formatter for
+// degrades to a plain count. Shared by every surface printing a quantity it
+// didn't name (the unpriced remainder below, the usage tab's cells).
+const UNIT_FORMAT = {
+  tokens: fmtTok,
+  count: (n) => n.toLocaleString(),
+  duration: (n) => fmtDuration(n * 1000), // served in seconds; fmtDuration speaks ms
+};
+export const fmtQty = (n, format) => (UNIT_FORMAT[format] || UNIT_FORMAT.count)(n);
+
+// A quantity WITH its unit named — "1,200 input tokens", "12h audio". `def` is
+// a served vocabulary entry ({ unit, label, format }); every surface that
+// prints a unit it didn't name says it this way, so the phrase (and what to
+// do when a label is missing) is decided once.
+export const fmtUnit = (n, def = {}) => `${fmtQty(n, def.format)} ${def.label ?? def.unit}`;
+
+// A served vocabulary as a lookup by unit id — the shape every renderer wants
+// from the `units` array the server ships beside its data.
+export const unitDefs = (units = []) => Object.fromEntries(units.map((u) => [u.unit, u]));
+
+// What a cost figure does NOT cover, as a phrase — the per-unit remainder,
+// never summed (unpriced tokens plus unpriced searches is a quantity of
+// nothing).
+export const fmtUnpriced = (unpriced = []) => unpriced.map((u) => fmtUnit(u.quantity, u)).join(", ");
+
 // A duration as one coarse unit ("38s", "12m", "2h", "5d"), every unit
 // computed from the raw seconds — re-rounding minutes into hours would call
-// 85 minutes "2h". Shared by the countdown chip and both "N ago" stamps.
+// 85 minutes "2h". Shared by the countdown chip and every "N ago" stamp.
 export function fmtDuration(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
@@ -347,6 +410,12 @@ export function fmtDuration(ms) {
   if (s < 86400) return `${Math.round(s / 3600)}h`;
   return `${Math.round(s / 86400)}d`;
 }
+
+// A past timestamp as "N ago". This had been copied, character for character,
+// into five modules — each one importing fmtDuration to build it, which is
+// how a shared half ends up with five private wholes. One name, so the next
+// surface that needs the phrase finds it instead of writing a sixth.
+export const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 function appendCount(el, count) {
   if (count == null) return;

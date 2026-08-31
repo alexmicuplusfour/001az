@@ -11,7 +11,7 @@
 import { state } from './state.js';
 import { createModal, sectionHeadingEl } from './modal.js';
 import { ACTIVE, QUEUED } from './data.js';
-import { fmtDuration, pill } from './utils.js';
+import { fmtDuration, pill, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
 import { unseen, markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
 
 // ── the chip's attention dot ──
@@ -37,17 +37,14 @@ export const markJobsSeen = () => markSeen(SEEN, state.boardId, state.jobsFailed
 export const failureDrawn = (rows, failedAt) =>
   !!failedAt && rows.some((j) => j.outcome === "failed" && j.started_at === failedAt);
 
-const KIND_LABELS = {
-  transcribe: "Transcription",
-  ingest: "Ingestion",
-  tag: "Tagging",
-  extract: "Extraction",
-  face: "Chart",
-  retag: "Retag pass",
-  embed: "Embedding",
-  refresh: "Refresh",
-  diagnose: "Facet review",
-};
+// The kind vocabulary comes from the SERVER (capabilities.js KIND_DEFS, on the
+// /jobs response) — the client renders what it is handed, so a new kind shows
+// up with its name instead of a bare id and this file holds no list to keep
+// true (metering-plan.md, Mechanism 3). Module-level because rows render from
+// several paths; refreshed on every fetch; an id the server didn't name (an
+// old response, a plugin's kind) degrades to itself.
+let kindDefs = [];
+const kindLabel = (id) => kindDefs.find((k) => k.id === id)?.label || id;
 const OUTCOME_LABELS = {
   ok: "done",
   failed: "failed",
@@ -67,7 +64,6 @@ const STATUS_LABELS = {
 
 const REFRESH_MS = 5000;
 const QUEUED_SHOWN = 20; // a 300-item retag is one summary line, not 300 rows
-const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
 
 // ── what the tagger was actually shown ──
 // The AI rendition ladder (ai-image-input-plan.md) is designed to be invisible:
@@ -113,13 +109,21 @@ export const imageTitle = (img) => {
   return bits.join(" · ");
 };
 
+// What the row's paid call(s) cost, when the leg recorded it (metering-plan.md
+// Stage 2). Rows from before the detail carried tokens render exactly as they
+// always did — the segment only exists when the key does. Cache reads ride the
+// hover (tokensTitle), not the line: they matter to "is the cache working",
+// which is a question someone hovers for, not one every row should shout.
+const tokensNote = (t) => (t ? tokPair(t.in, t.out) : "");
+const tokensTitle = (t) => (t?.cache ? `${fmtTok(t.cache)} cached reads` : "");
+
 // The per-kind one-liner: what this execution amounted to.
 export function summaryFor(j) {
   const d = j.detail || {};
   if (j.outcome === "ok") {
     if (j.kind === "transcribe")
       return d.chars != null
-        ? `${d.chars.toLocaleString()} chars${d.turns != null ? ` · ${d.turns} turns` : ""}${d.speakers ? ` · ${d.speakers} speaker${d.speakers === 1 ? "" : "s"}` : ""}`
+        ? `${d.chars.toLocaleString()} chars${d.seconds ? ` · ${fmtQty(d.seconds, "duration")} of audio` : ""}${d.turns != null ? ` · ${d.turns} turns` : ""}${d.speakers ? ` · ${d.speakers} speaker${d.speakers === 1 ? "" : "s"}` : ""}${d.tokens ? ` · ${tokensNote(d.tokens)}` : ""}`
         : "";
     if (j.kind === "ingest") {
       const bits = [`+${d.admitted ?? 0} admitted`, `${d.scanned ?? 0} scanned`];
@@ -141,6 +145,7 @@ export function summaryFor(j) {
       const bits = [`${d.unanimous ?? 0}/${d.items ?? 0} unanimous`];
       if (d.verdict) bits.push(d.verdict.replace(/-/g, " "));
       if (d.scoped) bits.push("this facet alone");
+      if (d.tokens) bits.push(tokensNote(d.tokens));
       return bits.join(" · ");
     }
     if (j.kind === "refresh") {
@@ -149,16 +154,24 @@ export function summaryFor(j) {
       const shown = moved.slice(0, 3).map(([k, e]) => `${k}: ${e?.v ?? e}`);
       return shown.join(" · ") + (moved.length > 3 ? ` · +${moved.length - 3} more` : "");
     }
-    // A tag row says what it produced, and — only when it deviates — what the
-    // model had to work with. The same "speak up on deviation" rule the ingest
-    // bits above and the board modal's Advanced summary already follow.
-    if (d.tags != null) return [`${d.tags} tag${d.tags === 1 ? "" : "s"}`, imageNote(d.image)].filter(Boolean).join(" · ");
-    if (d.fields != null) return `${d.fields} field${d.fields === 1 ? "" : "s"}`;
+    // A tag row says what it produced, what it cost, and — only when it
+    // deviates — what the model had to work with (the "speak up on deviation"
+    // rule the ingest bits above and the board modal's Advanced summary follow;
+    // cost is not a deviation, it's the drill-down this row exists for).
+    if (d.tags != null) return [`${d.tags} tag${d.tags === 1 ? "" : "s"}`, tokensNote(d.tokens), imageNote(d.image)].filter(Boolean).join(" · ");
+    if (d.fields != null) return [`${d.fields} field${d.fields === 1 ? "" : "s"}`, tokensNote(d.tokens)].filter(Boolean).join(" · ");
     return "";
   }
   // A folded repeat (the same failure re-attempted on its backoff cadence)
   // carries its count — "12 attempts · unreachable…" is the ongoing story.
-  return (Number(d.attempts) > 1 ? `${d.attempts} attempts · ` : "") + (j.error || "");
+  // A non-ok row's tokens say the quiet part: the result was dropped, the
+  // money was spent anyway. Built as bits like the branches above, so one
+  // separator mechanism covers the whole function.
+  const bits = [];
+  if (Number(d.attempts) > 1) bits.push(`${d.attempts} attempts`);
+  if (j.error) bits.push(j.error);
+  if (d.tokens) bits.push(`${tokensNote(d.tokens)} spent`);
+  return bits.join(" · ");
 }
 
 // `newSince` is the reader's watermark as it stood when the dialog opened — the
@@ -174,7 +187,7 @@ function jobRow(j, newSince = 0) {
 
   const badge = document.createElement("span");
   badge.className = `job-kind job-kind-${j.kind}`;
-  badge.textContent = KIND_LABELS[j.kind] || j.kind;
+  badge.textContent = kindLabel(j.kind);
 
   const label = document.createElement("span");
   label.className = "job-label";
@@ -189,9 +202,9 @@ function jobRow(j, newSince = 0) {
   const summary = document.createElement("span");
   summary.className = "job-summary" + (j.outcome === "ok" ? "" : " job-err");
   summary.textContent = summaryFor(j);
-  // The engine and the rendition share the hover — both answer "what actually
-  // served this row", and the cell has one title slot.
-  const title = [j.detail?.engine, imageTitle(j.detail?.image)].filter(Boolean).join(" · ");
+  // The engine, the rendition and the cache reads share the hover — all answer
+  // "what actually served this row", and the cell has one title slot.
+  const title = [j.detail?.engine, imageTitle(j.detail?.image), tokensTitle(j.detail?.tokens)].filter(Boolean).join(" · ");
   if (title) summary.title = title;
 
   const when = document.createElement("span");
@@ -210,7 +223,7 @@ function runningRow(j) {
   row.className = "job-row job-running";
   const badge = document.createElement("span");
   badge.className = `job-kind job-kind-${j.kind}`;
-  badge.textContent = KIND_LABELS[j.kind] || j.kind;
+  badge.textContent = kindLabel(j.kind);
   const label = document.createElement("span");
   label.className = "job-label";
   label.textContent = j.kind === "ingest" ? "Feed run" : (j.entity_display || j.target || "");
@@ -250,7 +263,11 @@ let modalEl = null;
 // writer here is not merely redundant but wrong.
 export const jobsModalOpen = () => !!modalEl;
 
-export function openJobsModal() {
+// `kind` preselects the history filter — the Usage tab's drill-down deep-link
+// (#jobs/<kind>, app.js) lands here. Optional and destructured, so the two
+// callers that pass nothing (the toolbar chip, announce's toast action —
+// which hands over a click event) fall through to "all" untouched.
+export function openJobsModal({ kind } = {}) {
   if (modalEl) return; // already open
   let timer = null;
   const onRender = () => renderLive();
@@ -339,8 +356,12 @@ export function openJobsModal() {
   let jobs = []; // settled rows fetched so far (across Load-more pages)
   let cursor = null;
   let pages = 0;
-  let activeKind = "all";
+  let activeKind = kind || "all";
   const seenKinds = new Set(); // pills appear as their kinds show up in data
+  // A preselected kind seeds its own pill: a deep-link to a kind with no
+  // history would otherwise render an empty filtered list with no pills at
+  // all — and no way back to "All".
+  if (kind) seenKinds.add(kind);
 
   const note = (el, text) => {
     const p = document.createElement("p");
@@ -384,9 +405,9 @@ export function openJobsModal() {
     if (!seenKinds.size) return; // no history at all — no point in pills
     const setKind = (k) => { activeKind = k; load(true); };
     filters.appendChild(pill("All", null, activeKind === "all", false, () => setKind("all")));
-    for (const kind of Object.keys(KIND_LABELS)) {
-      if (seenKinds.has(kind) || activeKind === kind)
-        filters.appendChild(pill(KIND_LABELS[kind], null, activeKind === kind, false, () => setKind(kind)));
+    for (const { id, label } of kindDefs) {
+      if (seenKinds.has(id) || activeKind === id)
+        filters.appendChild(pill(label, null, activeKind === id, false, () => setKind(id)));
     }
   }
 
@@ -481,6 +502,7 @@ export function openJobsModal() {
       const data = await fetchPage(reset ? null : cursor);
       if (g !== gen) return; // a newer load took over while this one was in flight
       running = data.running;
+      if (data.kinds) kindDefs = data.kinds; // the server's vocabulary, refreshed per fetch
       if (reset) { jobs = data.jobs; pages = 1; }
       else { jobs = jobs.concat(data.jobs); pages++; }
       cursor = data.nextCursor;

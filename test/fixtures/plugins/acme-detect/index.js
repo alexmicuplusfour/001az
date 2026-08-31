@@ -7,7 +7,7 @@ export default function (ctx) {
   return {
     label: "Acme Detector",
     description: "on-device object detection test provider (fixture)",
-    wire: { tag: null, testKey: null, detect: async () => [] },
+    wire: { tag: null, testKey: null, detect: async () => ({ objects: [], usage: {} }) },
     defaultModel: null,
     models: [],
     research: false,

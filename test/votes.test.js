@@ -5,7 +5,7 @@
 // answer, and how much of that disagreement is reported back as confidence.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, req } from "./helpers.js";
+import { startServer, adminSession, req, meterTotals } from "./helpers.js";
 import { createAiKey, createBoard, createEntity, insertItem, setPluginState, updateBoard } from "../server/db.js";
 import { mergeVotes, parseRun, startWorker } from "../server/worker.js";
 
@@ -284,11 +284,15 @@ test("three votes make three calls but exactly one landing", async () => {
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].outcome, "ok");
   assert.equal(jobs[0].detail.votes, 3);
+  // …and the one row carries the whole round's bill: three passes summed
+  // (10/5 each), next to the votes count that explains the multiple.
+  assert.deepEqual(jobs[0].detail.tokens, { in: 30, out: 15 });
 
-  // usage is the one deliberate N: the ledger counts PAID CALLS, not items
-  const [usage] = await rowsOf("SELECT count, input_tokens FROM ai_board_usage WHERE board_id=$1", [board]);
-  assert.equal(usage.count, 3);
-  assert.equal(Number(usage.input_tokens), 30); // 10 prompt tokens x 3
+  // usage is the one deliberate N: the meter counts PAID CALLS, not items
+  const usage = await meterTotals(db, board, "tag");
+  assert.equal(usage.calls, 3);
+  assert.equal(usage.input, 30); // 10 prompt tokens x 3
+  assert.equal(usage.provider, "openai"); // attributed at call time — Stage 1's whole point
 });
 
 test("a single-pass board is untouched: one call, and confidence stays unmeasured", async () => {
@@ -352,7 +356,7 @@ test("ai_votes round-trips, rejects even/out-of-range, and refuses research", as
   assert.equal(made.status, 200);
   assert.equal(made.json.ai_votes, 3);
 
-  const list = async () => (await req(B, "GET", "/api/admin/boards", { sid: admin.sid })).json;
+  const list = async () => (await req(B, "GET", "/api/admin/boards", { sid: admin.sid })).json.boards;
   assert.equal((await list()).find((b) => b.id === made.json.id).ai_votes, 3);
 
   // even counts make a real tie reachable on a single-value facet

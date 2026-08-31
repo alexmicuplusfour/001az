@@ -31,7 +31,11 @@ h1 { font-size: 19px; margin: 0 0 4px; }
 .tab-link svg { width: 16px; height: 16px; flex: none; }
 .panels { flex: 1; min-width: 0; }
 .panel > h2 { font-size: 16px; margin: 0 0 4px; }
+/* A panel's FIRST section sits flush with the panel top; sections after it
+   keep the stacking gap. Was a local override in profile.html until the
+   admin usage tab became the second page to stack sections in a panel. */
 .panel .section { margin-top: 0; }
+.panel .section + .section { margin-top: 40px; }
 @media (max-width: 720px) {
   .layout { flex-direction: column; gap: 20px; }
   .tabs { position: static; width: 100%; flex-direction: row; overflow-x: auto; }
