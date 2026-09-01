@@ -17,7 +17,9 @@ import fitz  # pymupdf
 
 MAX_CHARS = 60_000       # ~15k tokens; generous for any single document
 MIN_PAGE_CHARS = 64      # under this, the page has no real text layer -> OCR
-OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "20"))
+# `or` rather than a get() default: empty and unset both mean 20 — compose
+# passes "" for an unset .env knob, and int("") would kill the boot.
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES") or "20")
 OCR_DPI = 200
 
 def page_text_dict(page, ocr_allowed):

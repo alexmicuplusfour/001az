@@ -25,3 +25,11 @@ services:
     pull_policy: never
     ports:
       - "127.0.0.1:3001:3001"
+
+  caddy:
+    # Prod hosts front the stack with their own proxy (the droplet's host
+    # Caddy owns 80/443 and terminates TLS), so the compose caddy must not
+    # start here — not even from a bare `up`, which is what this profile
+    # guards. A host that wants the compose caddy adds `edge` to
+    # COMPOSE_PROFILES in its .env.
+    profiles: ["edge"]

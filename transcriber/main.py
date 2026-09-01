@@ -42,7 +42,7 @@ from faster_whisper.audio import decode_audio
 from faster_whisper.utils import download_model
 
 # The DEFAULT model — what a submit that names none is served with.
-MODEL = os.environ.get("WHISPER_MODEL", "small")
+MODEL = os.environ.get("WHISPER_MODEL") or "small"
 # Every model baked into this image (model-axis-plan.md). Defaults to just the
 # default, so a single-model build behaves exactly as it always has. Deduped in
 # order: a repeated name ("small,small") would otherwise reach the picker as
@@ -51,15 +51,15 @@ MODEL = os.environ.get("WHISPER_MODEL", "small")
 # an empty string, so a plain `docker run` of this image (or a bare python
 # main.py) must not read that as "bake nothing" and refuse to start.
 BAKED = list(dict.fromkeys(m.strip() for m in (os.environ.get("BAKE_MODELS") or MODEL).split(",") if m.strip()))
-BEAM = int(os.environ.get("WHISPER_BEAM", "5"))
-COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
+BEAM = int(os.environ.get("WHISPER_BEAM") or "5")
+COMPUTE = os.environ.get("WHISPER_COMPUTE") or "int8"
 # Optional language pin (e.g. "ro"). Unset = per-file auto-detect, which reads
 # the first 30s — a musical or silent intro can misroute a whole transcript, so
 # pin it when the library is known to be one language.
 LANGUAGE = os.environ.get("WHISPER_LANGUAGE") or None
 # Never touch the network at request time: a model that wasn't baked at build
 # fails loudly here at startup instead of silently fetching mid-request.
-LOCAL_ONLY = os.environ.get("WHISPER_LOCAL_ONLY", "1") == "1"
+LOCAL_ONLY = (os.environ.get("WHISPER_LOCAL_ONLY") or "1") == "1"
 MAX_CHARS = 200_000  # defensive cap; the app truncates to ~50k for tagging anyway
 RETAIN_S = 3600  # finished jobs stay claimable this long (covers app restarts / poll blips)
 EXPRESS_MAX_BYTES = 2_000_000  # payloads at most this big jump the queue (probes, voice notes)
@@ -67,7 +67,7 @@ QUEUE_MAX = 4  # per lane; the app submits serially, so deeper means something i
 HEARTBEAT_S = 60  # progress log cadence for long jobs
 # Self-heal for a truly hung inference (progress frozen while "running"): exit
 # the process and let docker's restart policy bring up a fresh model. 0 disables.
-WATCHDOG_S = int(os.environ.get("WHISPER_WATCHDOG_S", "1800"))
+WATCHDOG_S = int(os.environ.get("WHISPER_WATCHDOG_S") or "1800")
 # Speaker diarization (structured-transcripts-plan.md slice 3): sherpa-onnx
 # (pyannote segmentation + voice embeddings + clustering), models baked at
 # build like the whisper model. Every job diarizes — the express lane is a
@@ -78,8 +78,8 @@ WATCHDOG_S = int(os.environ.get("WHISPER_WATCHDOG_S", "1800"))
 # noisy single-voice phone video (fragments into 4+ "speakers" at 0.5, whole
 # at 0.8) against a clean two-voice dialog (still cleanly 2 at 0.85, merges at
 # 0.9). A default, not a law — re-transcribing after a tweak is the remedy.
-DIARIZE = os.environ.get("WHISPER_DIARIZE", "1") == "1"
-DIARIZE_THRESHOLD = float(os.environ.get("WHISPER_DIARIZE_THRESHOLD", "0.8"))
+DIARIZE = (os.environ.get("WHISPER_DIARIZE") or "1") == "1"
+DIARIZE_THRESHOLD = float(os.environ.get("WHISPER_DIARIZE_THRESHOLD") or "0.8")
 # Fixed paths, baked by fetch-diarize-models.py. Swapping models is the
 # Dockerfile ARG (a rebuild, like WHISPER_MODEL) — or mount over these paths.
 DIARIZE_SEG = "/models/diarize/segmentation.onnx"

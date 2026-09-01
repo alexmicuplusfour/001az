@@ -1,6 +1,31 @@
+# Copy .env.example to .env — every setting is documented there.
+
 name: 001az
 
 services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-gallery}:${POSTGRES_PASSWORD:-gallery}@db:5432/${POSTGRES_DB:-gallery}
+      INGEST_ROOT: /data/ingest
+    volumes:
+      - appdata:/data
+      - ./ingest-root:/data/ingest
+    depends_on:
+      - db
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gallery}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gallery}
+      POSTGRES_DB: ${POSTGRES_DB:-gallery}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
   caddy:
     image: caddy:2
     restart: unless-stopped
@@ -16,219 +41,37 @@ services:
     depends_on:
       - app
 
-  extractor:
+  extractor: # PDF/docx text + OCR
     build: ./extractor
     restart: unless-stopped
-    environment:
-      # needs a real default: the sidecar does int() on it, empty would crash
-      OCR_MAX_PAGES: ${OCR_MAX_PAGES:-20}
 
-  # The two heavy sidecars are OPT-IN: ~1.2GB and ~3GB of image, most of it
-  # model weights, for capabilities a first run rarely touches. A plain
-  # `docker compose up -d` brings up the app, its database and the extractor
-  # (~3.5GB, minutes); add either engine with ONE line in .env —
-  #   COMPOSE_PROFILES=transcribe,detect
-  # Without one, its capability reads `unavailable` on the admin Capabilities
-  # tab (with whatever paid providers could serve it instead), audio waits
-  # untranscribed rather than failing, and nothing is billed for the gap.
-  # See planning/sidecar-presence-plan.md.
-  transcriber:
+  # Optional on-device AI engines — enable with COMPOSE_PROFILES=transcribe,detect
+  # in .env. Their models are baked into the image at build time.
+
+  transcriber: # speech-to-text + speaker diarization (whisper)
     profiles: ["transcribe"]
     build:
       context: ./transcriber
       args:
-        # THE one place the model is set — baked into the image (see
-        # transcriber/Dockerfile), served from the baked ENV, and self-reported
-        # to the app (/health + job payloads). Changing it is a rebuild
-        # (`docker compose build transcriber`), not an .env-only flip.
         WHISPER_MODEL: ${WHISPER_MODEL:-small}
-        # Optional comma list of EVERY model to bake (default: just the one
-        # above). Two or more grow a per-board model picker offering exactly
-        # what was baked; each costs its own image weight.
         BAKE_MODELS: ${BAKE_MODELS:-}
     restart: unless-stopped
     environment:
-      WHISPER_BEAM: ${WHISPER_BEAM:-5}
-      # optional language pin (e.g. "ro") — skips per-file auto-detect, which
-      # can misroute a transcript off a musical/silent first 30 seconds
+      WHISPER_BEAM: ${WHISPER_BEAM:-}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
-      # speaker diarization (models baked like the whisper model; 0 disables)
-      WHISPER_DIARIZE: ${WHISPER_DIARIZE:-1}
-      # real default: the sidecar does float() on it, empty would crash
-      WHISPER_DIARIZE_THRESHOLD: ${WHISPER_DIARIZE_THRESHOLD:-0.8}
-    # detects a dead process (restart: unless-stopped revives it); a hung model
-    # is caught separately by the sidecar's own progress watchdog, which exits
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3003/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
+      WHISPER_DIARIZE: ${WHISPER_DIARIZE:-}
+      WHISPER_DIARIZE_THRESHOLD: ${WHISPER_DIARIZE_THRESHOLD:-}
 
-  object-detector:
-    profiles: ["detect"] # opt-in — see the transcriber's note above
+  object-detector: # open-vocabulary object detection (LLMDet)
+    profiles: ["detect"]
     build:
       context: ./object-detector
       args:
-        # THE one place the detection model is set — baked into the image (see
-        # object-detector/Dockerfile), served from the baked ENV. Changing it is a
-        # rebuild (`docker compose build object-detector`), not an .env-only flip.
         OBJECT_DETECTOR_MODEL: ${OBJECT_DETECTOR_MODEL:-iSEE-Laboratory/llmdet_tiny}
     restart: unless-stopped
-    environment:
-      OBJECT_DETECTOR_MODEL: ${OBJECT_DETECTOR_MODEL:-iSEE-Laboratory/llmdet_tiny}
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3004/health', timeout=5)"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      # the model loads (~25s CPU) before the server binds — give it room
-      start_period: 180s
-
-  app:
-    build: .
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-gallery}:${POSTGRES_PASSWORD:-gallery}@db:5432/${POSTGRES_DB:-gallery}
-      BASE_URL: ${BASE_URL:-http://localhost}
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      MODEL: ${MODEL:-}
-      COOKIE_SECURE: ${COOKIE_SECURE:-1}
-      SNAPSHOT_RETENTION_DAYS: ${SNAPSHOT_RETENTION_DAYS:-90}
-      # judgment history (tag_snapshots) — deduped upstream, so 0 = keep forever
-      TAG_SNAPSHOT_RETENTION_DAYS: ${TAG_SNAPSHOT_RETENTION_DAYS:-0}
-      # per-board job history (job_log) — execution attempts, 0 = keep forever
-      JOB_LOG_RETENTION_DAYS: ${JOB_LOG_RETENTION_DAYS:-30}
-      # per-day AI spend rollup (usage_meter) — the billing record, 0 = keep forever
-      USAGE_METER_RETENTION_DAYS: ${USAGE_METER_RETENTION_DAYS:-0}
-      # model-price learning; set MODEL_PRICE_SOURCE_URL= (empty) to disable the
-      # community rung (air-gapped). Default duplicated from price-learner.js —
-      # compose would otherwise pass "" for unset, which MEANS disabled here.
-      MODEL_PRICE_SOURCE_URL: ${MODEL_PRICE_SOURCE_URL:-https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json}
-      MODEL_PRICE_REFRESH_DAYS: ${MODEL_PRICE_REFRESH_DAYS:-7}
-      EXTRACTOR_URL: http://extractor:3002
-      TRANSCRIBER_URL: http://transcriber:3003
-      OBJECT_DETECTOR_URL: http://object-detector:3004
-      # outbound tuning — code owns the defaults (empty passes through safely);
-      # set in .env only when a provider's pace or latency demands it
-      CONNECTOR_RPM: ${CONNECTOR_RPM:-}
-      CONNECTOR_BURST: ${CONNECTOR_BURST:-}
-      AI_RPM: ${AI_RPM:-}
-      AI_BURST: ${AI_BURST:-}
-      # worker concurrency lanes (Stage 1) — replace the old single TAG_CONCURRENCY
-      AI_INFLIGHT: ${AI_INFLIGHT:-}
-      EXTRACT_CONCURRENCY: ${EXTRACT_CONCURRENCY:-}
-      FACE_CONCURRENCY: ${FACE_CONCURRENCY:-}
-      CONNECTOR_TIMEOUT_MS: ${CONNECTOR_TIMEOUT_MS:-}
-      # bulk class: provider catalog computations (a hang detector, not a cost)
-      CONNECTOR_BULK_TIMEOUT_MS: ${CONNECTOR_BULK_TIMEOUT_MS:-}
-      CONNECTOR_RETRY_CAP_MS: ${CONNECTOR_RETRY_CAP_MS:-}
-      # stocks universe depth + global feed-window override (per-connector
-      # defaults already cover the whole US-listed universe for stocks;
-      # pair the two for anything deeper)
-      FMP_UNIVERSE_ROWS: ${FMP_UNIVERSE_ROWS:-}
-      INGEST_FEED_CAP: ${INGEST_FEED_CAP:-}
-      AI_CHAT_TIMEOUT_MS: ${AI_CHAT_TIMEOUT_MS:-}
-      AI_EMBED_TIMEOUT_MS: ${AI_EMBED_TIMEOUT_MS:-}
-      AI_TRANSCRIBE_TIMEOUT_MS: ${AI_TRANSCRIBE_TIMEOUT_MS:-}
-      # model-picker discovery cache (server/providers.js) — 0 turns it off
-      AI_MODELS_TTL_MS: ${AI_MODELS_TTL_MS:-}
-      EXTRACTOR_TIMEOUT_MS: ${EXTRACTOR_TIMEOUT_MS:-}
-      # transcription is an async job (submit + poll) — these bound one HTTP
-      # exchange and the no-progress stall window, NEVER the job's duration
-      TRANSCRIBER_HTTP_TIMEOUT_MS: ${TRANSCRIBER_HTTP_TIMEOUT_MS:-}
-      TRANSCRIBER_STALL_MS: ${TRANSCRIBER_STALL_MS:-}
-      # object detection is a synchronous /detect exchange to the sidecar
-      OBJECT_DETECTOR_TIMEOUT_MS: ${OBJECT_DETECTOR_TIMEOUT_MS:-}
-      # automatic ingestion: watched folders live under this root (bind-mounted
-      # below — drop files into ./ingest-root on the host). The tunables are
-      # code-owned defaults; set in .env only to deviate.
-      INGEST_ROOT: /data/ingest
-      INGEST_CONTINUOUS_MS: ${INGEST_CONTINUOUS_MS:-}
-      INGEST_SETTLE_MS: ${INGEST_SETTLE_MS:-}
-      INGEST_RUN_CAP: ${INGEST_RUN_CAP:-}
-      INGEST_FEED_CACHE_MS: ${INGEST_FEED_CACHE_MS:-}
-      # scheduled auto-tagging (weekend detection, run times) and daily alert
-      # digests ("daily at 09:00") use server-local time
-      TZ: ${TZ:-UTC}
-    volumes:
-      - appdata:/data
-      - ./ingest-root:/data/ingest
-    # Only the database is a real startup dependency — the app reads it at
-    # boot. The sidecars are called lazily, per job, and an unreachable one is
-    # already a transient the worker retries (an ABSENT one is a wait it never
-    # even claims: sidecar-presence-plan.md). Naming them here would also make
-    # them un-optional: compose refuses a project whose depends_on names a
-    # service its profiles left out, which is exactly what the two heavy ones
-    # now are.
-    depends_on:
-      db:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
-  db:
-    image: postgres:17-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-gallery}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gallery}
-      POSTGRES_DB: ${POSTGRES_DB:-gallery}
-    ports:
-      # host access for dev tooling (mintlink from the host, the sqlite ETL)
-      - "127.0.0.1:5433:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-gallery} -d $${POSTGRES_DB:-gallery}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # --- optional local sources for exercising remote ingestion (FTP / S3) ---
-  # Opt-in only — a plain `up` never starts these (they carry a profile), so
-  # prod is untouched. Bring them up for testing with:
-  #   docker compose --profile dev-sources up -d ftp minio
-  # then add an FTP / S3 connection on the Plugins page pointing at:
-  #   FTP  host=ftp  user=gallery pass=gallery  (or 127.0.0.1:21 from the host)
-  #   S3   endpoint=http://minio:9000  bucket=<make one>  key/secret=gallery/gallerysecret  path-style=on
-  ftp:
-    image: stilliard/pure-ftpd
-    profiles: ["dev-sources"]
-    restart: unless-stopped
-    environment:
-      FTP_USER_NAME: gallery
-      FTP_USER_PASS: gallery
-      FTP_USER_HOME: /home/ftpusers/gallery
-      PUBLICHOST: 127.0.0.1
-    ports:
-      - "127.0.0.1:21:21"
-      - "127.0.0.1:30000-30009:30000-30009"
-    volumes:
-      # serve the same tree the local folder source watches, for easy comparison
-      - ./ingest-root:/home/ftpusers/gallery
-
-  minio:
-    image: minio/minio
-    profiles: ["dev-sources"]
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: gallery
-      MINIO_ROOT_PASSWORD: gallerysecret
-    ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001" # web console
-    volumes:
-      - miniodata:/data
 
 volumes:
   pgdata:
   appdata:
   caddy_data:
   caddy_config:
-  miniodata:

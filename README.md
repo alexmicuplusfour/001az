@@ -202,6 +202,10 @@ docker compose up -d db          # Postgres on 127.0.0.1:5433
 COOKIE_SECURE=0 BASE_URL=http://127.0.0.1:3001 node server/server.js
 ```
 
+The db's host port (5433) and the FTP/S3 ingestion test rigs are local-dev
+extras defined in `docker-compose.override.yml`, which compose auto-loads next
+to the base file; deploys merge an explicit `-f` list and never see it.
+
 Then open http://127.0.0.1:3001 — a fresh instance shows the first-run setup
 screen: enter an email and password and that's the admin account. (Whoever
 visits a fresh instance first claims it, so create yours before exposing it

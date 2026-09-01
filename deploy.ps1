@@ -194,8 +194,8 @@ $pruneOld = ($builds | ForEach-Object { "drop_tags $($_.Repo) 1" }) -join "`n"
 # gate the DEFAULT set, not addressability), so this list is the whole truth
 # about what a deploy runs — and it is also what keeps the compose `caddy`
 # service out of prod, where the host's own Caddy owns 80/443. db rides along
-# rather than in a pass of its own: the app's depends_on still names it
-# `service_healthy`, so compose orders and waits for it.
+# rather than in a pass of its own: the app's depends_on still names it,
+# so compose starts it first.
 $rest = "db " + (($builds.Service) -join " ")
 
 # …and the same answer in the form a BARE compose command reads, so an

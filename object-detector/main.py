@@ -22,8 +22,8 @@ import torch
 from PIL import Image
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-MODEL_ID = os.environ.get("OBJECT_DETECTOR_MODEL", "iSEE-Laboratory/llmdet_tiny")
-DEFAULT_THRESHOLD = float(os.environ.get("OBJECT_DETECTOR_THRESHOLD", "0.3"))
+MODEL_ID = os.environ.get("OBJECT_DETECTOR_MODEL") or "iSEE-Laboratory/llmdet_tiny"
+DEFAULT_THRESHOLD = float(os.environ.get("OBJECT_DETECTOR_THRESHOLD") or "0.3")
 # A near-full-frame box (≥ this fraction of BOTH dims) is the shape a grounding
 # detector produces when the queried object is ABSENT and the phrase grounds to
 # the whole scene. But a real object CAN legitimately fill the frame (a tightly-
@@ -35,7 +35,7 @@ DEFAULT_THRESHOLD = float(os.environ.get("OBJECT_DETECTOR_THRESHOLD", "0.3"))
 # so those survive while the barely-over-threshold grounding is culled. Env-
 # overridable like the threshold (a per-model tuning knob, not a rebuild).
 FULL_FRAME_COVERAGE = 0.95
-FULL_FRAME_MIN_SCORE = float(os.environ.get("OBJECT_DETECTOR_FULL_FRAME_MIN_SCORE", "0.45"))
+FULL_FRAME_MIN_SCORE = float(os.environ.get("OBJECT_DETECTOR_FULL_FRAME_MIN_SCORE") or "0.45")
 
 print(f"object-detector: loading {MODEL_ID} ...", flush=True)
 _processor = AutoProcessor.from_pretrained(MODEL_ID, local_files_only=True)

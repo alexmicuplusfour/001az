@@ -43,4 +43,5 @@ RUN python -c "import os; from faster_whisper import WhisperModel; [WhisperModel
 WORKDIR /app
 COPY main.py .
 EXPOSE 3003
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3003/health', timeout=5)"]
 CMD ["python", "-u", "main.py"]

@@ -22,4 +22,6 @@ ENV OBJECT_DETECTOR_MODEL=${OBJECT_DETECTOR_MODEL}
 WORKDIR /app
 COPY main.py .
 EXPOSE 3004
+# start-period covers the model load (~25s CPU) that precedes the server bind
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=180s CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3004/health', timeout=5)"]
 CMD ["python", "-u", "main.py"]
