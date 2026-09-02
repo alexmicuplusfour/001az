@@ -108,12 +108,13 @@ test("recoverStuck: counts the interruption, routes per leg, spaces the retry", 
   const tag = await insertStuck("processing");
   const ext = await insertStuck("extracting");
   const face = await insertStuck("facing");
+  const fetch = await insertStuck("fetching");
   const fresh = await insertStuck("processing", { age: 0 }); // in-flight, not stuck
 
   const n = await recoverStuck(db, 180000, 3);
-  assert.equal(n, 3, "fresh in-flight rows are untouched");
+  assert.equal(n, 4, "fresh in-flight rows are untouched");
 
-  const expect = { [tag]: "pending", [ext]: "pending_extract", [face]: "pending_face" };
+  const expect = { [tag]: "pending", [ext]: "pending_extract", [face]: "pending_face", [fetch]: "pending_fetch" };
   for (const [id, status] of Object.entries(expect)) {
     const r = await row(id);
     assert.equal(r.status, status);
@@ -121,7 +122,7 @@ test("recoverStuck: counts the interruption, routes per leg, spaces the retry", 
     assert.ok(Number(r.retry_at) > Date.now() + 30000, "spaced like a transient failure");
   }
   assert.equal((await row(fresh)).status, "processing");
-  for (const id of [tag, ext, face, fresh]) await park(id);
+  for (const id of [tag, ext, face, fetch, fresh]) await park(id);
 });
 
 test("recoverStuck: at the transient ceiling the item finally FAILS (nothing else can fail a crash)", async () => {

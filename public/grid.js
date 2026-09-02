@@ -3,7 +3,7 @@ import { ICONS, actionBtn, hasIdentity, instanceTagCounts } from './utils.js';
 import { openDropdown, ddAction } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, needsTags } from './filters.js';
-import { ensurePolling, dropPendingUploadId } from './data.js';
+import { ensurePolling, dropPendingUploadId, ACTIVE, QUEUED } from './data.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
@@ -395,9 +395,7 @@ export function cardFor(img) {
   // The file kind owns the face (the media); grid owns the frame + chrome.
   // (The instance-count chip rides inside the face's title strip — kinds.js.)
   card.appendChild(kindFor(img).face(img, card, scheduleLayout));
-  if (img.status === "pending" || img.status === "processing" ||
-      img.status === "pending_extract" || img.status === "extracting" ||
-      img.status === "pending_face" || img.status === "facing") {
+  if (ACTIVE.has(img.status) || QUEUED.has(img.status)) {
     card.classList.add("loading");
     const sp = document.createElement("div");
     sp.className = "spinner";

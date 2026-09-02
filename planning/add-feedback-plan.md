@@ -137,52 +137,184 @@ keep it), `.busy-spin` span appended (`aria-hidden`).
 
 ## Stage 2 — queued connector adds
 
-Status vocabulary sites (the complete list, verified by grep):
+**Close-look verified 2026-09-03** — three parallel read agents checked every
+claim below against the code (db mechanics, worker/runtime, client + tests).
+Everything is file:line-verified; the four HARD BLOCKERS are marked ⚠.
 
-server/db.js
-- `STATUS_PRIORITY` — add `"fetching","pending_fetch"` at the front (fetch is
-  the earliest, most-alive leg).
-- `IN_FLIGHT_FOR` — add `pending_fetch: "fetching"`; TAG_QUEUE derives.
-- `claimFairBatch` — CASE arm `'pending_fetch' → 'fetching'`; join the
-  `pending_face` exemption from the AI-key gate (fetch needs no AI key).
-- `recoverStuck` — include `'fetching'`, requeue to `pending_fetch`.
-- retagBoard / releaseHeld / queueUntagged — new first CASE arm shared as one
-  string (the STAMPED_CONNECTOR_FACE pattern): `payload ? 'unfetched'` →
-  `pending_fetch`, so a failed fetch retags into the RIGHT leg. Legacy
-  connector items lack the key and route as before.
-- `advanceFetched(db, id, toStatus, sourcePatch)` — fenced on
-  `status='fetching'` (the advanceFaced pattern), clears `unfetched`, merges
-  the true `source` into payload.
+### The failure class that makes the routing edits load-bearing
 
-server/connectors/add.js
-- `enqueueConnectorEntity(db, board, connectorName, row)` — the enqueue half;
-  `addConnectorEntity` stays for the ingest sweep (already background) and
-  the single-entity route.
+Tagging an entity with empty fields does NOT fail — worker's tagOne builds
+`fieldLines` from `{...entity.fields, ...payload.fields}`, gets `[]`, and the
+prompt still says "judging from its extracted fields below" with nothing
+below. The model tags from the name alone, `markTagged` lands, the leg logs
+"ok". **Silent garbage, indistinguishable from real tags.** Every place that
+could route an unfetched item past its fetch leg feeds this exact hole.
 
-server/server.js
-- bulk route: ids may be strings (legacy) or `{id, symbol, name}` rows; no
-  provider I/O; response rows echo `connector_id` so the modal flips exact
-  rows (kills the match-by-symbol hack).
+### server/db.js
 
-server/worker.js
-- `FETCH_CONCURRENCY` (default 3; provider pacing is the real throttle),
-  fetch lane, `STEP.fetching = processFetchOne`, legLog kind `fetch`.
-- identity reconcile edge (enqueued without symbol): `setEntityIdentity` on
-  mismatch; a 23505 there = late-discovered duplicate → failed with a clear
-  error.
+- `STATUS_PRIORITY` (:87) — add `"fetching","pending_fetch"` at the front.
+  (Single-instance entities pass status through verbatim at :120, so this
+  only matters for multi-instance aggregates — still add it.)
+- ⚠ `IN_FLIGHT_FOR` (:94) — `pending_fetch: "fetching"` is MANDATORY before
+  the leg can fail anything: `failOrRequeue` derives its value fence from
+  this map (`IN_FLIGHT_FOR[requeueStatus] || "processing"`, :2874) — without
+  the entry, every fetch failure fences on 'processing', matches nothing,
+  and the row wedges in 'fetching' forever. TAG_QUEUE derives too; its four
+  consumers were audited — 3 clearly correct with fetch included, 1
+  (tagQueueDepth → capability-status "N waiting") slightly over-counts;
+  accepted, the items do reach the tag leg.
+- `claimFairBatch` (:2012) — CASE arm `'pending_fetch' → 'fetching'` (else
+  the ELSE claims it into 'processing' and the tag leg runs on empty
+  fields), ⚠ the keyless-board gate at :2020 must become
+  `i.status IN ('pending_face','pending_fetch') OR …` (fetch needs no AI
+  key; without this, adds on a keyless board are never claimed — no test
+  pins this today), AND the **default `stages` arrays** in both
+  claimFairBatch and claimNextWork (:2045) must gain 'pending_fetch'.
+- ⚠ `recoverStuck` (:2896) — TWO hand-written lists that do NOT derive from
+  IN_FLIGHT_FOR despite the nearby comment: the WHERE at :2916 (omit
+  'fetching' → crashed fetch rows are unrecoverable forever) and the CASE at
+  :2904 (omit the arm → the ELSE 'pending' routes a recovered fetch into the
+  tag leg = silent garbage tags). Both edits or neither.
+- ⚠ Routing CASEs — FOUR sites, not three: retagBoard (:1509), releaseHeld
+  (:1573), queueUntagged (:1599), **and reprocessEntity (:2649)** — the last
+  has no status filter at all and its own variant predicate. All four need a
+  `payload ? 'unfetched'` → `'pending_fetch'` arm FIRST (an unfetched
+  connector vehicle also satisfies STAMPED_CONNECTOR_FACE, so a later arm is
+  swallowed by the face arm). Share it as one string beside
+  STAMPED_CONNECTOR_FACE, same anti-drift rationale. This is also the rescue
+  path: a fetch that exhausts retries lands in 'failed', and retag/
+  queueUntagged (WHERE includes 'failed') re-enter it at the RIGHT leg.
+- `advanceFetched(db, id, toStatus, patch)` — the advanceFaced shape:
+  `payload = (payload - 'unfetched') || $patch::jsonb` (shallow merge —
+  fine, the patch replaces `source` whole), `attempts=0, error=NULL,
+  retry_at=NULL`, fence `WHERE id=$n AND status='fetching'`, return
+  rowCount>0 (false = discarded, deleted/re-routed mid-flight — deletion
+  paths have no coordination; the fence IS the mechanism). Do NOT use
+  updateItemPayload for the source patch — it has no fence and would splat
+  stale provider data over a re-routed row. `park` must SURVIVE this
+  advance (it's consumed later by advanceFaced / the held-park rule), so
+  strip only 'unfetched'.
+- Entity landing: **no existing helper writes symbol** (createEntity is its
+  only writer, verified — no UPDATE touches entities.symbol), and composing
+  setEntityIdentity (clears identity_provisional, can 23505) +
+  updateEntityFields means two transactions with a strandable gap. Add ONE
+  `landEntityFetch(db, id, {identity, displayName, symbol, fields,
+  refreshAt})` statement. On identity change colliding 23505 (only possible
+  when the enqueue lacked the symbol, or the provider disagrees with its own
+  list): fail the item as a late duplicate — visible in the jobs drill,
+  user-deletable — rather than silently merging.
 
-server/capabilities.js — `KIND_DEFS` + `{ id: "fetch", label: "Data fetch" }`
-(the jobs modal renders kinds from the wire, nothing else to teach it).
+### server/connectors/add.js
 
-public/
-- data.js — `QUEUED` += `pending_fetch`, `ACTIVE` += `fetching`; every pill,
-  toolbar count and poll predicate follows.
-- grid.js — replace the six-status literal with the ACTIVE/QUEUED sets
-  (unifies a drift-prone copy while touching it).
-- jobs-modal.js — STATUS_LABELS for the two new states.
-- connector-browse.js — send `{id, symbol, name}` rows (name from the
-  `primary` browse column), flip rows by `connector_id` on response, busy
-  button from Stage 1, keep the 100-chunk loop (each chunk now ~instant).
+- `enqueueConnectorEntity(db, board, connectorName, {id, symbol, name})`:
+  identity = `(symbol || "").toLowerCase() || String(id)` — the EXACT
+  expression connector-list's on_board marking uses (server.js:3110),
+  pinned to runtime.fetchEntity's derivation (runtime.js:339). createEntity
+  (fields `{}`, display_name from the browse row) + insertItem
+  (status 'pending_fetch', payload `{identity, files: [], fields: {},
+  mapping, source: {provider: activeName, id}, unfetched: true, park?}`) —
+  **wrapped in withTx**: reapEmptyEntities is structural (an entity with its
+  instance row is never reaped) but a crash between the two statements
+  strands a reapable orphan; add.js's existing pair has the same gap and
+  never earned it — this one does I/O-free work, so the tx is cheap.
+  `park` stamped exactly as add.js does (wantsFace && !auto_tag). 23505 →
+  `.duplicate`, same contract. Log "connector entity queued: …" for parity.
+- `addConnectorEntity` STAYS — the ingest sweep's admit() is strictly
+  sequenced (entity before ledger, `.duplicate` must throw synchronously,
+  and its prewarm exists precisely to make the inline fetch cheap), and the
+  single-entity route keeps it too (below).
+
+### server/server.js
+
+- Bulk route: ids as strings (legacy, identity falls to the id and the leg
+  reconciles) or `{id, symbol, name}` rows (the modal's form; symbol may be
+  legitimately empty for symbol-less domains). No provider I/O. Modest
+  length caps on client-supplied name/symbol. Response rows = add.js's
+  return shape (status pending_fetch, fields {}) + `connector_id` echoing
+  the request id. Keep BULK_ADD_MAX 100.
+- **Single-entity POST /entities stays synchronous** — it's the API's
+  immediate-result path (response is rendered with real fields; 409/502
+  contracts pinned by faces.test:398-435 + connectors.test:519), the modal
+  doesn't use it, and converting it buys nothing.
+
+### server/worker.js
+
+- `FETCH_CONCURRENCY = Math.max(1, Number(process.env.FETCH_CONCURRENCY) || 3)`
+  (the `<LANE>_CONCURRENCY` convention; provider pacing is the real
+  throttle). New lane + `STEP.fetching = processFetchOne` + fillLanes line +
+  the boot banner lane list (:2864).
+- **Batch prewarm, or crypto bulk adds are 1 metered request per item**:
+  crypto fetchEntity reads the shared 60s quote cache and a miss buys a
+  BATCHED endpoint for ONE id (coingecko.js:355-361 names this exact trap;
+  FMP has no prefetch and doesn't need one — its fetch is per-symbol
+  anyway). The ingestion adapter already solved this with
+  runtime.prefetchIds(db, conn, ids, board) → warmIds (no-op under 2 ids or
+  without provider.prefetch). The fetch lane's fill claims its batch, groups
+  by board connector (the prefetchDueRefreshes pattern), prewarms, then
+  dispatches — claim-then-fetch sits well inside the 60s TTL.
+- `processFetchOne(row)`: getBoard + getEntity (either missing → advance
+  attempt discards, same as face leg's null-tolerance), getConnector from
+  board.mapping (gone = board re-templated → plain throw → retries →
+  failed), `connector.fetchEntity(db, row.payload.source.id, board.id)`
+  (bound signature verified index.js:36; 15s interactive budget applies —
+  fine), landEntityFetch (fields + display_name + symbol + identity
+  reconcile + refresh_at from firstRefreshAt), then advanceFetched with
+  toStatus = wantsFace ? 'pending_face' : board.auto_tag ? 'pending' :
+  'held' (board freshly read in the leg). Errors → failOrRequeue(…,
+  'pending_fetch') + legLog kind 'fetch' (target auto-falls-through to
+  payload.identity — files is []).
+
+### server/capabilities.js
+
+- KIND_DEFS + `{ id: "fetch", label: "Fetch", capability: null }` — null =
+  spends nothing itself, exactly the ingest/face/refresh row; provider
+  quota already meters separately under the `api` work label. Wire
+  vocabulary flows to the jobs modal untouched; usage-api.test's generic
+  assertions pass as-is.
+
+### public/
+
+- data.js — `QUEUED` += pending_fetch, `ACTIVE` += fetching. ⚠ Required,
+  not cosmetic: filters.js `isTagged` (:93) returns false for unknown
+  statuses AND the pills miss them — an unlisted pending_fetch item is
+  INVISIBLE in the grid, and needsPoll stops polling while fetches run.
+  Nine consumer sites all follow the sets automatically (verified).
+- grid.js :398 — replace the six-status literal with the imported sets
+  (rows.js:261 is the precedent; removes the drift site).
+- jobs-modal.js — `pending_fetch: "queued to fetch"`, `fetching: "fetching
+  data"` (degrades to raw id meanwhile, no crash).
+- connector-browse.js — send `{id, symbol: data.symbol, name:
+  values[primaryCol.key]}` (both bundled manifests declare exactly one
+  primary column, key "name", and both providers' list() rows carry symbol +
+  values.name — verified); flip rows by `connector_id` and DELETE
+  findIdBySymbol/markAddedRow — the symbol match is latently wrong today
+  (CoinGecko id≠symbol; duplicate tickers collide). ensurePolling +
+  app:render already in place. Keep the 100-chunk loop.
+- state.js :29 comment refresh (names the pill's statuses). Cards need
+  nothing: the connector face reads only symbol/identity/displayLabel
+  (fields is never read at card level — verified), so a queued card is
+  visually final at birth; lightbox on a pending_fetch item shows an empty
+  connector-fields section (acceptable, worth an eyeball).
+
+### Tests
+
+- connectors.test bulk (:901): counts survive but the provider stub goes
+  unused — extend: added rows are pending_fetch + payload.unfetched, stub
+  NEVER called, connector_id echoed; duplicate assertion unaffected (23505
+  fires at createEntity, pre-fetch, by design).
+- retry.test (:107): add fetching → pending_fetch recoverStuck case.
+- queue.test: add pending_fetch → fetching claim case + the keyless-gate
+  case (nothing pins it today).
+- fences.test: add an advanceFetched discard case.
+- extraction.test (:479) + faces.test (:445): routing CASEs — seed a
+  pending_fetch/fetching pair in the untouched set and an unfetched failed
+  row asserting → pending_fetch.
+- facet-diagnose.test :698 hardcodes `STATES` as six with a title saying
+  "every one" — extend to eight or derive from an export (it would pass
+  silently while its claim went false).
+- job-log.test: sibling case — the fetch leg writes ok/failed rows.
+- faces.test :398-435 / connectors.test :519 pin the SINGLE-add route's
+  pending_face + park — untouched, that route stays synchronous.
 
 ## Non-goals
 
@@ -211,4 +343,25 @@ public/
   `.im-preview-btn` dissolved into `.im-btn` (it was only ever the spinner
   host); plugin-modal's last hand-rolled guard (key/connection add form)
   converted.
-- Stage 2: PROPOSED — design settled above, not implemented.
+- Stage 2: SHIPPED 2026-09-03 (uncommitted). Built as specified above, all
+  four blockers included. Tests extended per the list (plus a new
+  keyless-claim-gate case and an end-to-end fetch-leg test: enqueue with a
+  provider-call spy proving zero I/O, then the worker landing fields and
+  advancing to the face leg). Full suite green (1325).
+  Simplification pass (same day, 4 agents): claimFairBatch/claimNextWork/
+  recoverStuck now DERIVE their status CASEs and lists from IN_FLIGHT_FOR
+  (the "authoritative list" comment is finally true; `IN_FLIGHT_STATES` is
+  exported and the facet-diagnose states test imports it instead of
+  re-hardcoding); add.js grew `connectorLanding(board)` (one encoding of the
+  park/next-leg rule, used by both add paths AND the fetch leg) and a shared
+  `connectorRow` builder (the client row had two verbatim authors);
+  the prewarm moved beside prefetchDueRefreshes as
+  `prefetchClaimedFetches` and got MATERIALLY better: it warms the board's
+  queued fetch ids (queuedFetchSourceIds), not just the claimed slice —
+  steady-state claims are 1 row at a time, so slice-warming was a no-op and
+  every drained row would have paid a metered batch endpoint for one id; it
+  also resolves the connector from the fresh board row, not the payload
+  stamp, and fillLane's prep hook gained the failure boundary its comment
+  promised. Skipped as beyond-diff: folding the three entity-UPDATE helpers
+  into one keyed writer; a shared per-leg envelope for the four workers'
+  catch blocks.

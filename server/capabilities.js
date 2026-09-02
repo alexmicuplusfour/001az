@@ -281,6 +281,7 @@ export const bindingSettings = (cap) => {
 export const KIND_DEFS = [
   { id: "transcribe", label: "Transcription", capability: "transcribe" },
   { id: "ingest", label: "Ingestion", capability: null },
+  { id: "fetch", label: "Data fetch", capability: null },
   { id: "tag", label: "Tagging", capability: "tag" },
   { id: "extract", label: "Extraction", capability: "extract" },
   { id: "face", label: "Chart", capability: null },

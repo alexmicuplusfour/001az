@@ -5,6 +5,7 @@
 import * as crypto from "./crypto/index.js";
 import * as stocks from "./stocks/index.js";
 import * as runtime from "./runtime.js";
+import { getBoard, queuedFetchSourceIds } from "../db.js";
 
 // The provider descriptor list, derived LIVE from a connector's providers map —
 // the single source of truth. A dynamically-registered provider (Plugins page /
@@ -83,6 +84,40 @@ export async function prefetchDueRefreshes(db, rows) {
   await Promise.all([...byConn].map(([name, group]) =>
     CONNECTORS[name].prefetchRefresh(db, group).catch((e) =>
       console.warn(`${name} refresh prefetch failed (per-entity fallback): ${e.message}`))));
+}
+
+// The fetch leg's twin (worker fillLane's prep hook): warm the provider cache
+// for a claimed batch of pending-fetch rows BEFORE their per-row fetches run.
+// Two things make this more than a group-and-forward:
+//  - the horizon is the board's QUEUE, not the claimed slice — in steady state
+//    the lane claims one row at a time (a slot frees, one claim follows), and
+//    a one-id warm is a no-op, so warming only the claim would leave every
+//    drained row paying a metered batch endpoint for a single id (the exact
+//    trap coingecko.js's cache notes name). One cheap items query per board
+//    widens the warm to everything still waiting, inside the cache TTL.
+//  - the connector comes from the FRESH board row, not the payload's mapping
+//    stamp, so a re-templated board can't spend a warm on the wrong provider
+//    (the leg itself reads the fresh board too — same source, no drift).
+// Purely an economics move, like prefetchRefresh above: any failure means
+// per-row retail, never a lost item.
+export async function prefetchClaimedFetches(db, rows) {
+  const byBoard = new Map();
+  for (const row of rows) {
+    if (!byBoard.has(row.board_id)) byBoard.set(row.board_id, []);
+    byBoard.get(row.board_id).push(row.payload?.source?.id);
+  }
+  await Promise.all([...byBoard].map(async ([boardId, claimed]) => {
+    try {
+      const board = await getBoard(db, boardId);
+      const conn = CONNECTORS[board?.mapping?.input?.connector];
+      if (!conn) return;
+      const ids = [...new Set([...claimed, ...(await queuedFetchSourceIds(db, boardId))].filter(Boolean))];
+      if (ids.length < 2) return; // nothing a batch would save (warmIds' own floor)
+      await conn.prefetchIds(db, ids, boardId);
+    } catch (e) {
+      console.warn(`fetch prewarm failed (per-row fallback): ${e.message}`);
+    }
+  }));
 }
 
 // Manifest listing for the client. `providers` is static (descriptors, no key

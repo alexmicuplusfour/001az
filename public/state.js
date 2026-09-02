@@ -26,7 +26,7 @@ export const state = {
   selectedCrateId: null,
   showFavorites: false,
   showUntagged: false,
-  showProcessing: false,   // status pill: actively worked (processing/extracting/facing)
+  showProcessing: false,   // status pill: actively worked (processing/extracting/facing/fetching)
   showUnprocessed: false,  // status pill: queued, not started (pending*)
   // Active board sort: null = server default (newest first), else { by, dir }.
   // `by` is namespaced: "name"/"created"/"updated"/"hearts"/"instances"

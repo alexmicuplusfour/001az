@@ -510,6 +510,8 @@ test("retag: leaves in-pipeline items alone, routes settled items to the right l
   const midFaceQ    = await insert("pending_face",    { identity: "c", files: [], fields: {}, mapping: FACE_MAPPING });
   const midFace     = await insert("facing",          { identity: "d", files: [], fields: {}, mapping: FACE_MAPPING });
   const midTag      = await insert("processing",      { identity: "e", files: [], fields: {} });
+  const midFetchQ   = await insert("pending_fetch",   { identity: "l", files: [], fields: {}, mapping: FACE_MAPPING, unfetched: true });
+  const midFetch    = await insert("fetching",        { identity: "m", files: [], fields: {}, mapping: FACE_MAPPING, unfetched: true });
 
   // Settled: routed per definition state.
   const taggedDone    = await insert("tagged", { identity: "f", files: [], fields: {}, mapping: MAPPING, extracted_at: 1 });
@@ -518,10 +520,14 @@ test("retag: leaves in-pipeline items alone, routes settled items to the right l
   const failedTag     = await insert("failed", { identity: "i", files: [], fields: {}, mapping: MAPPING, extracted_at: 1 });
   const bareVehicle   = await insert("tagged", { identity: "j", files: [], fields: {}, mapping: FACE_MAPPING, extracted_at: 1, source: { provider: "coingecko", id: "j" } });
   const plainTagged   = await insert("tagged", { identity: "k", files: [], fields: {} }); // unstamped + tagged: stays tag-only, no adoption
+  // A fetch that exhausted its retries: the unfetched stamp must route the
+  // rescue back into the FETCH leg — its mapping also matches the face arm,
+  // and landing there would render + tag on empty fields.
+  const failedFetch   = await insert("failed", { identity: "n", files: [], fields: {}, mapping: FACE_MAPPING, unfetched: true, source: { provider: "coingecko", id: "n" } });
 
   const r = await req(base, "POST", `/api/admin/boards/${board.id}/retag`, { sid: admin.sid });
   assert.equal(r.status, 200);
-  assert.equal(r.json.queued, 6, "only the settled items count");
+  assert.equal(r.json.queued, 7, "only the settled items count");
 
   const status = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0].status;
   assert.equal(await status(midExtractQ), "pending_extract");
@@ -529,6 +535,8 @@ test("retag: leaves in-pipeline items alone, routes settled items to the right l
   assert.equal(await status(midFaceQ),    "pending_face");
   assert.equal(await status(midFace),     "facing");
   assert.equal(await status(midTag),      "processing");
+  assert.equal(await status(midFetchQ),   "pending_fetch");
+  assert.equal(await status(midFetch),    "fetching");
 
   assert.equal(await status(taggedDone),    "pending", "already extracted — never pays a second extraction");
   assert.equal(await status(taggedNoDef),   "pending_extract", "definition never ran — retag heals it");
@@ -536,6 +544,7 @@ test("retag: leaves in-pipeline items alone, routes settled items to the right l
   assert.equal(await status(failedTag),     "pending");
   assert.equal(await status(bareVehicle),   "pending_face", "an unrendered vehicle gets another shot at the chart");
   assert.equal(await status(plainTagged),   "pending");
+  assert.equal(await status(failedFetch),   "pending_fetch", "a never-fetched vehicle resumes the fetch leg, not the face leg");
 });
 
 test("retag: held unstamped item adopts the board mapping gained since upload", async () => {

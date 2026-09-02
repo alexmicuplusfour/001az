@@ -12,7 +12,7 @@ import { startServer, adminSession, req, meterTotals } from "./helpers.js";
 import {
   createAiKey, createBoard, createEntity, insertItem, setPluginState,
   updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
-  retagBoard, boardTagActivity,
+  retagBoard, boardTagActivity, IN_FLIGHT_STATES,
 } from "../server/db.js";
 import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
 import { startWorker } from "../server/worker.js";
@@ -686,16 +686,17 @@ test("a retag is a retag on a MAPPED board too — all four queue states count",
   assert.equal(mapped.current, false);
 });
 
-test("…and every one of the six in-flight states counts, claimed ones included", async () => {
-  // Three legs, each with a state the item WAITS in and a state the worker claims
-  // it INTO — six, not the four the first pass at this named. Missing 'extracting'
-  // and 'facing' is the same defect one level down: a board whose queue has just
-  // been picked up reads quiet, and an evidence item being extracted right now
-  // reads untouched.
+test("…and every in-flight state counts, claimed ones included", async () => {
+  // Every leg, each with a state the item WAITS in and a state the worker
+  // claims it INTO. Missing 'extracting' and 'facing' was the same defect one
+  // level down: a board whose queue has just been picked up reads quiet, and
+  // an evidence item being extracted right now reads untouched.
   //
-  // Driven off the list rather than off two hand-picked examples, because that is
-  // exactly how the first version came to name a subset and look complete.
-  const STATES = ["pending", "processing", "pending_extract", "extracting", "pending_face", "facing"];
+  // Driven off db.js's OWN exported list rather than a copy — a hand-written
+  // array here kept passing while its "every one" title went false the moment
+  // the fetch leg landed, which is exactly how the first version came to name
+  // a subset and look complete.
+  const STATES = IN_FLIGHT_STATES;
   for (const status of STATES) {
     const b = await board(`state-${status}`);
     await seedUnstable(b);

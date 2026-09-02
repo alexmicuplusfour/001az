@@ -206,14 +206,24 @@ export function openConnectorBrowse(connectorName) {
   async function addIds(ids) {
     if (!ids.length) return;
     addSelectedBtn.disabled = true; // a row add locks the footer too
+    // Each id rides with its row's symbol + display name (the `primary`
+    // column): the server derives the identity from the symbol and creates
+    // the entity WITHOUT a provider round-trip — the add is an enqueue, and
+    // the worker's fetch leg fills the data in while the gallery shows the
+    // queued cards.
+    const primaryKey = descriptor.browse.columns.find((c) => c.primary)?.key;
+    const rows = ids.map((id) => {
+      const d = rowCtx.get(id)?.data;
+      return { id, symbol: d?.symbol || null, name: d?.values?.[primaryKey] ?? d?.label ?? null };
+    });
     let addedCount = 0;
     const skipped = [];
     try {
-      for (let i = 0; i < ids.length; i += BULK_CHUNK) {
+      for (let i = 0; i < rows.length; i += BULK_CHUNK) {
         const res = await fetch(`/api/boards/${state.boardId}/entities/bulk`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ connector: connectorName, ids: ids.slice(i, i + BULK_CHUNK) }),
+          body: JSON.stringify({ connector: connectorName, ids: rows.slice(i, i + BULK_CHUNK) }),
         });
         if (!res.ok) {
           const b = await res.json().catch(() => ({}));
@@ -223,7 +233,7 @@ export function openConnectorBrowse(connectorName) {
         const { added = [], skipped: chunkSkipped = [] } = await res.json();
         for (const row of added) {
           state.items.unshift(toItem(row));
-          markAddedRow(row); // flip its browse row to on-board (matched by symbol)
+          markOnBoard(row.connector_id); // the response echoes the exact row we sent
         }
         for (const s of chunkSkipped) if (s.reason === "duplicate") markOnBoard(s.id);
         addedCount += added.length;
@@ -242,18 +252,6 @@ export function openConnectorBrowse(connectorName) {
     } finally {
       syncFooter();
     }
-  }
-
-  // The bulk response rows don't echo the connector id, so match the just-added
-  // entity back to its browse row by symbol (identity) to flip it to on-board.
-  function findIdBySymbol(symbol) {
-    const want = (symbol || "").toUpperCase();
-    for (const c of rowCtx.values()) if ((c.data.symbol || "").toUpperCase() === want) return c.data.id;
-    return null;
-  }
-  function markAddedRow(row) {
-    const id = findIdBySymbol(row.symbol);
-    if (id) markOnBoard(id);
   }
 
   async function fetchPage(append) {

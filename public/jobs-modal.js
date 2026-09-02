@@ -57,9 +57,11 @@ const STATUS_LABELS = {
   processing: "tagging",
   extracting: "extracting",
   facing: "rendering chart",
+  fetching: "fetching data",
   pending: "queued to tag",
   pending_extract: "queued to extract",
   pending_face: "queued for chart",
+  pending_fetch: "queued to fetch",
 };
 
 const REFRESH_MS = 5000;

@@ -158,7 +158,7 @@ import { rateLimit } from "./ratelimit.js";
 import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./password.js";
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
-import { addConnectorEntity } from "./connectors/add.js";
+import { addConnectorEntity, enqueueConnectorEntity } from "./connectors/add.js";
 import { liveFields, faceSchedule, domainState } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
 import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
@@ -2963,8 +2963,15 @@ app.post("/api/boards/:id/entities", requireAuth, wrap(async (req, res) => {
   }
 }));
 
-// Bulk add from the browse modal — same per-entity path, tolerant per id:
-// duplicates and provider errors land in `skipped` rather than failing the batch.
+// Bulk add from the browse modal — ENQUEUE, not fetch (add-feedback-plan
+// Stage 2): each id becomes an entity + vehicle at 'pending_fetch' from the
+// browse row's own data, in milliseconds, and the worker's fetch leg pulls
+// the provider data afterwards. Duplicates still land in `skipped` (the
+// identity derivation is the same one the fetch would produce, so the unique
+// index fires here). Ids may be bare strings (legacy — identity falls back to
+// the id and the fetch leg reconciles) or {id, symbol, name} rows (the
+// modal's form). Each result echoes `connector_id` so the modal flips its
+// exact rows instead of matching by symbol.
 const BULK_ADD_MAX = 100;
 app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
@@ -2980,14 +2987,24 @@ app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => 
   const connector = getConnector(connectorName);
   if (!connector) return res.status(404).json({ error: "unknown connector" });
 
+  // Resolved once for the whole batch — it stamps payload.source.provider so
+  // charts and refresh prefetch have a name before the first fetch lands. A
+  // domain with no provider still enqueues (null; the leg re-resolves).
+  const providerName = await connector.activeProvider(db).then((p) => p.name).catch(() => null);
+
+  const cap = (v, n) => (typeof v === "string" ? v.slice(0, n) : null);
   const added = [], skipped = [];
-  for (const entityId of ids) {
+  for (const entry of ids) {
+    const e = entry && typeof entry === "object" ? entry : { id: entry }; // bare string = legacy form
+    const row = { id: e.id, symbol: cap(e.symbol, 40), name: cap(e.name, 200) };
+    if (row.id == null || row.id === "") { skipped.push({ id: row.id, reason: "id required" }); continue; }
     try {
-      added.push(await addConnectorEntity(db, board, connector, connectorName, String(entityId)));
+      const r = await enqueueConnectorEntity(db, board, connectorName, row, providerName);
+      added.push({ ...r, connector_id: row.id });
     } catch (err) {
-      if (err.duplicate) { skipped.push({ id: entityId, reason: "duplicate" }); continue; }
-      console.error(`bulk add error (${connectorName}/${entityId}):`, err.message);
-      skipped.push({ id: entityId, reason: err.message });
+      if (err.duplicate) { skipped.push({ id: row.id, reason: "duplicate" }); continue; }
+      console.error(`bulk enqueue error (${connectorName}/${row.id}):`, err.message);
+      skipped.push({ id: row.id, reason: err.message });
     }
   }
   res.json({ added, skipped });

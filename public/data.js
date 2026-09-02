@@ -37,8 +37,8 @@ export function dropPendingUploadId(id) {
 
 // The in-flight queue split by aliveness: ACTIVE items are being worked right
 // now, QUEUED ones are waiting in line. The status filter pills mirror this.
-export const ACTIVE = new Set(["processing", "extracting", "facing"]);
-export const QUEUED = new Set(["pending", "pending_extract", "pending_face"]);
+export const ACTIVE = new Set(["processing", "extracting", "facing", "fetching"]);
+export const QUEUED = new Set(["pending", "pending_extract", "pending_face", "pending_fetch"]);
 const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 
 function needsPoll() {

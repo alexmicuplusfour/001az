@@ -4,7 +4,8 @@
 // lowercase symbol, provenance is the provider name.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedUser, req, installConnectors, withLegacyEntityId, meterTotals } from "./helpers.js";
+import { startServer, adminSession, seedUser, req, installConnectors, withLegacyEntityId, meterTotals, until } from "./helpers.js";
+import { startWorker } from "../server/worker.js";
 import { createEntity, setSetting, getSetting, setPluginState, APP_SCOPE } from "../server/db.js";
 import { meterSpend } from "../server/metering.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
@@ -898,33 +899,46 @@ test("GET /api/boards/:id/connector-list: 400 when the board has no connector in
   assert.equal(r.status, 400);
 });
 
-test("POST /api/boards/:id/entities/bulk: adds many, skips duplicates, caps, mismatch", async () => {
+test("POST /api/boards/:id/entities/bulk: enqueues many with NO provider I/O, skips duplicates, caps, mismatch", async () => {
   const { json: board } = await createBoard("conn-bulk");
   await patchBoard(board.id, { mapping: manifest.template });
 
-  coingecko._resetQuoteCache();
+  // Stage 2 (add-feedback-plan): the bulk add is an ENQUEUE — entities are
+  // created from the browse rows' own data at pending_fetch and the provider
+  // fetch happens in the worker's fetch leg. The route must never touch the
+  // provider; the spy proves it.
   const original = globalThis.fetch;
+  let providerCalls = 0;
   globalThis.fetch = async (url, opts) => {
-    const u = String(url);
-    if (u.includes("/coins/markets")) {
-      const ids = (new URL(u).searchParams.get("ids") || "").split(",").filter(Boolean);
-      const map = { bitcoin: { symbol: "btc", name: "Bitcoin", price: 65000 }, ethereum: { symbol: "eth", name: "Ethereum", price: 3000 } };
-      return { ok: true, status: 200, text: async () => "", json: async () => ids.map((id) => {
-        const m = map[id] || { symbol: id, name: id, price: 1 };
-        return { id, name: m.name, symbol: m.symbol, current_price: m.price, market_cap: 1e11, price_change_percentage_24h: 0 };
-      }) };
-    }
+    if (String(url).includes("api.coingecko.com")) { providerCalls++; throw new Error("enqueue must not call the provider"); }
     return original(url, opts);
   };
   try {
-    let r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: ["bitcoin", "ethereum"] } });
+    let r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: [
+      { id: "bitcoin", symbol: "BTC", name: "Bitcoin" },
+      { id: "ethereum", symbol: "ETH", name: "Ethereum" },
+    ] } });
     assert.equal(r.status, 200);
     assert.equal(r.json.added.length, 2);
     assert.equal(r.json.skipped.length, 0);
+    assert.equal(providerCalls, 0, "enqueue spends no provider request");
+    assert.deepEqual(r.json.added.map((a) => a.connector_id), ["bitcoin", "ethereum"], "each row echoes the id it was asked as");
+    for (const a of r.json.added) {
+      assert.equal(a.status, "pending_fetch");
+      assert.equal(a.kind, "connector");
+      assert.equal(a.instances[0].status, "pending_fetch");
+    }
+    assert.equal(r.json.added[0].identity, "btc", "identity derived from the symbol, matching on_board");
+    assert.equal(r.json.added[0].display_name, "Bitcoin");
+    const { rows: [it] } = await db.query(
+      "SELECT status, payload FROM items WHERE board_id=$1 AND payload->>'identity'='btc'", [board.id]);
+    assert.equal(it.status, "pending_fetch");
+    assert.equal(it.payload.unfetched, true, "the routing stamp the fetch leg consumes");
+    assert.equal(it.payload.source.id, "bitcoin", "the provider id rides along for the fetch");
 
-    r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: ["bitcoin"] } });
+    r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: [{ id: "bitcoin", symbol: "BTC", name: "Bitcoin" }] } });
     assert.equal(r.json.added.length, 0);
-    assert.deepEqual(r.json.skipped, [{ id: "bitcoin", reason: "duplicate" }]);
+    assert.deepEqual(r.json.skipped, [{ id: "bitcoin", reason: "duplicate" }], "the unique index fires at enqueue, before any fetch");
 
     r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: Array.from({ length: 101 }, (_, i) => String(i)) } });
     assert.equal(r.status, 400);
@@ -933,6 +947,55 @@ test("POST /api/boards/:id/entities/bulk: adds many, skips duplicates, caps, mis
     r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "stocks", ids: ["x"] } });
     assert.equal(r.status, 400);
   } finally { globalThis.fetch = original; }
+});
+
+test("fetch leg: the worker lands provider data on an enqueued entity and advances it", async () => {
+  const { json: board } = await createBoard("conn-fetch-leg");
+  await patchBoard(board.id, { mapping: manifest.template });
+
+  coingecko._resetQuoteCache();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url);
+    if (u.includes("/coins/markets")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => [
+        { id: "solana", name: "Solana", symbol: "sol", current_price: 150, market_cap: 7e10, price_change_percentage_24h: 1 },
+      ] };
+    }
+    // The face leg's chart follows the fetch on this template — serve an
+    // empty series so it settles instantly on the tile.
+    if (u.includes("/market_chart") || u.includes("/ohlc")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ prices: [] }) };
+    }
+    return original(url, opts);
+  };
+  const stop = startWorker({ db, galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir });
+  try {
+    const r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: [{ id: "solana", symbol: "SOL", name: "Solana" }] } });
+    assert.equal(r.status, 200);
+    const eid = r.json.added[0].id;
+    // No AI key on this board, so the pipeline parks at the tag queue —
+    // everything before it (fetch leg, then the template's face leg) has run.
+    await until(async () => {
+      const { rows: [it] } = await db.query("SELECT status FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
+      return it && (it.status === "pending" || it.status === "held");
+    });
+    const { rows: [it] } = await db.query("SELECT status, payload FROM items WHERE entity_ids @> ARRAY[$1]::bigint[]", [eid]);
+    assert.equal(it.payload.unfetched, undefined, "the routing stamp is consumed by the advance");
+    assert.equal(it.payload.source.provider, "coingecko", "source rewritten with the truth");
+    const { rows: [e] } = await db.query("SELECT fields, display_name, symbol, identity FROM entities WHERE id=$1", [eid]);
+    assert.equal(e.identity, "sol");
+    assert.equal(e.display_name, "Solana");
+    assert.ok(e.fields.price && e.fields.price.v === 150, "provider fields landed on the entity");
+    assert.equal(e.fields.price.src, "coingecko");
+    const { rows: jobs } = await db.query(
+      "SELECT outcome FROM job_log WHERE board_id=$1 AND kind='fetch'", [board.id]);
+    assert.equal(jobs.length, 1, "the fetch leg writes its job row");
+    assert.equal(jobs[0].outcome, "ok");
+  } finally {
+    await stop();
+    globalThis.fetch = original;
+  }
 });
 
 // ── slice-5b migration (0007_coingecko_to_crypto, idempotent) ─────────────────

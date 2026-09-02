@@ -37,17 +37,31 @@ async function seedOn(bid, ageMs) {
 }
 
 test("one queue: oldest work claims first across stages; in-flight status names the step", async () => {
-  const tag = await seed("pending", 30000); // oldest
+  const fetch = await seed("pending_fetch", 40000); // oldest
+  const tag = await seed("pending", 30000);
   const extract = await seed("pending_extract", 20000);
   const face = await seed("pending_face", 10000); // newest
 
-  const claims = [await claimNextWork(db, true), await claimNextWork(db, true), await claimNextWork(db, true)];
+  const claims = [await claimNextWork(db, true), await claimNextWork(db, true), await claimNextWork(db, true), await claimNextWork(db, true)];
   assert.deepEqual(
     claims.map((c) => [c.id, c.status]),
-    [[tag, "processing"], [extract, "extracting"], [face, "facing"]]
+    [[fetch, "fetching"], [tag, "processing"], [extract, "extracting"], [face, "facing"]]
   );
   assert.equal(await claimNextWork(db, true), null, "queue drained");
-  await park([tag, extract, face]);
+  await park([fetch, tag, extract, face]);
+});
+
+test("keyless boards: fetch work still claims (no AI key needed), tag work waits", async () => {
+  // The claim gate exempts pending_face and pending_fetch from the AI-key
+  // requirement — a provider fetch is a data step, no model call. Nothing
+  // pinned this before Stage 2 added the second exemption.
+  const fetch = await seed("pending_fetch", 20000);
+  const tag = await seed("pending", 10000);
+  const claim = await claimNextWork(db, false); // no default key, board has none
+  assert.equal(claim?.id, fetch, "the fetch claims despite no key");
+  assert.equal(claim.status, "fetching");
+  assert.equal(await claimNextWork(db, false), null, "the tag item waits for a key");
+  await park([fetch, tag]);
 });
 
 test("an item flows to completion before newer items start", async () => {

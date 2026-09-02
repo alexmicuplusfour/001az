@@ -14,6 +14,7 @@ import {
   markTagged,
   markExtracted,
   advanceFaced,
+  advanceFetched,
   failOrRequeue,
   retagItem,
   requeueItemForTag,
@@ -66,7 +67,13 @@ test("markExtracted / advanceFaced discard on re-routed rows", async () => {
   const fc = await seed("pending"); // not 'facing'
   assert.equal(await advanceFaced(db, fc), false);
   assert.equal((await row(fc)).status, "pending");
-  await park([ex, fc]);
+
+  const ft = await seed("pending"); // not 'fetching'
+  assert.equal(await advanceFetched(db, ft, "pending_face", { source: { provider: "x", id: "y" } }), false);
+  const r2 = await row(ft);
+  assert.equal(r2.status, "pending", "a stale fetch can't re-route the row");
+  assert.equal(r2.payload.source, undefined, "…or splat provider data onto it");
+  await park([ex, fc, ft]);
 });
 
 test("a stale failure can't stamp error/retry_at over a user's re-route", async () => {

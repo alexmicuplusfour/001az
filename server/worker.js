@@ -44,6 +44,8 @@ import {
   pruneUsageMeter,
   requeueItemForTag,
   advanceFaced,
+  advanceFetched,
+  landEntityFetch,
   dueIngestBoards,
   setIngestNextRun,
   setIngestState,
@@ -64,8 +66,9 @@ import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } fro
 import { sidecarUrl } from "./sidecar-catalog.js";
 import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
-import { getConnector, prefetchDueRefreshes } from "./connectors/index.js";
-import { entityRefreshAt, faceSchedule } from "./connectors/runtime.js";
+import { getConnector, prefetchDueRefreshes, prefetchClaimedFetches } from "./connectors/index.js";
+import { entityRefreshAt, faceSchedule, firstRefreshAt } from "./connectors/runtime.js";
+import { connectorLanding } from "./connectors/add.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
 import { aiWork } from "./field-sources.js";
@@ -1681,6 +1684,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   const AI_INFLIGHT = Math.max(1, Number(process.env.AI_INFLIGHT) || Number(process.env.TAG_CONCURRENCY) || 8);
   const EXTRACT_CONCURRENCY = Math.max(1, Number(process.env.EXTRACT_CONCURRENCY) || 2);
   const FACE_CONCURRENCY = Math.max(1, Number(process.env.FACE_CONCURRENCY) || 2);
+  const FETCH_CONCURRENCY = Math.max(1, Number(process.env.FETCH_CONCURRENCY) || 3);
 
   // Job-log rows still `running` were orphaned by the previous process (a
   // crash or stop mid-transcription/mid-ingest) — stamp them interrupted so
@@ -2600,8 +2604,64 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   }
 
+  // Fetch leg (add-feedback-plan Stage 2): the bulk add enqueues connector
+  // vehicles at 'pending_fetch' with a placeholder entity (browse-row name +
+  // symbol, empty fields); this leg buys the provider data and lands it, then
+  // routes the item to whichever leg the board wants next — the same
+  // computation the synchronous add used to make inline.
+  async function processFetchOne(row) {
+    const label = row.payload?.identity || `item ${row.id}`;
+    const t0 = Date.now();
+    try {
+      const board = await getBoard(db, row.board_id);
+      const entity = row.entity_ids?.[0] ? await getEntity(db, row.entity_ids[0]) : null;
+      // Board or entity gone mid-claim = the row is (or is about to be) gone
+      // too — deleteEntity removes sole-home vehicles, board delete cascades.
+      // Throwing routes through failOrRequeue, whose fence no-ops on a row
+      // that no longer exists.
+      if (!board || !entity) throw new Error("board or entity deleted mid-fetch");
+      const connectorName = board.mapping?.input?.connector;
+      const conn = connectorName ? getConnector(connectorName) : null;
+      if (!conn) throw new Error("board no longer has a connector input");
+      const fetched = await conn.fetchEntity(db, row.payload?.source?.id, board.id);
+      // Land fields + the corrected identity/name/symbol in one statement.
+      // A 23505 here is a LATE duplicate — the enqueue lacked the symbol (or
+      // the provider disagrees with its own list) and the true identity is
+      // already on the board. 409 makes failOrRequeue fail it immediately
+      // (permanent), so it surfaces in the jobs drill instead of retrying.
+      try {
+        await landEntityFetch(db, entity.id, {
+          identity: fetched.identity,
+          displayName: fetched.display_name,
+          symbol: fetched.symbol,
+          fields: fetched.fields,
+          refreshAt: firstRefreshAt(fetched.fields, board.mapping),
+        });
+      } catch (err) {
+        if (err.code === "23505") {
+          const e = new Error(`"${fetched.identity}" is already on this board`);
+          e.status = 409;
+          throw e;
+        }
+        throw err;
+      }
+      const to = connectorLanding(board).status;
+      const detail = { connector: connectorName, provider: fetched.source?.provider ?? null };
+      if (await advanceFetched(db, row.id, to, { identity: fetched.identity, source: fetched.source })) {
+        await legLog(row, "fetch", t0, "ok", null, detail);
+      } else {
+        await legLog(row, "fetch", t0, "discarded", null, detail);
+        console.warn(`stale fetch advance for #${row.id} ${label} discarded (re-routed or deleted mid-flight)`);
+      }
+    } catch (err) {
+      const failed = await failOrRequeue(db, row.id, err, MAX_ATTEMPTS, "pending_fetch");
+      if (!err.noCount) await legLog(row, "fetch", t0, failed ? "failed" : "requeued", err.message);
+      console.warn(`fetch error #${row.id} ${label}: ${err.message} (${failed ? "failed" : "requeued"})`);
+    }
+  }
+
   // The claimed row's in-flight status names the step it needs.
-  const STEP = { extracting: processExtractOne, facing: processFaceOne, processing: processOne };
+  const STEP = { extracting: processExtractOne, facing: processFaceOne, processing: processOne, fetching: processFetchOne };
 
   // --- per-resource lanes (worker-rework Stage 1) ---
   // The single-flight tick is gone. A dispatcher claims fair work and LAUNCHES it
@@ -2610,7 +2670,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // blocks another. Maintenance (recovery + sweeps) runs on its own loop, so a slow
   // sweep can't stall the dispatcher either.
   const lane = (max) => { let used = 0; return { free: () => used < max, freeSlots: () => max - used, take: () => { used++; }, release: () => { used--; } }; };
-  const aiLane = lane(AI_INFLIGHT), extractLane = lane(EXTRACT_CONCURRENCY), faceLane = lane(FACE_CONCURRENCY);
+  const aiLane = lane(AI_INFLIGHT), extractLane = lane(EXTRACT_CONCURRENCY), faceLane = lane(FACE_CONCURRENCY), fetchLane = lane(FETCH_CONCURRENCY);
 
   // inFlight: ids this process is actively holding — recoverStuck skips them so it
   // can't reclaim a live call as "stuck" (Stage 0: recovery ownership). pipelines:
@@ -2634,8 +2694,11 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // board's backlog) instead of the oldest board monopolizing the lane. A batch, not
   // one-at-a-time: single-row claims collapse to FIFO. Each pipeline is fire-and-tracked
   // — on settle it frees its lane, leaves the in-flight sets, and nudges the dispatcher.
-  async function fillLane(ln, stage) {
+  async function fillLane(ln, stage, prep = null) {
     const rows = await claimFairBatch(db, hasDefault, [stage], ln.freeSlots());
+    // prep is an economics hook (cache prewarm) — a throw here must not strand
+    // rows the claim already flipped in-flight, so it can never abort the loop.
+    if (prep && rows.length) { try { await prep(rows); } catch (e) { console.warn(`lane prep failed (continuing): ${e.message}`); } }
     for (const row of rows) {
       ln.take();
       inFlight.add(row.id);
@@ -2655,6 +2718,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     if (running && aiLane.free()) await fillLane(aiLane, "pending");
     if (running && extractLane.free()) await fillLane(extractLane, "pending_extract");
     if (running && faceLane.free()) await fillLane(faceLane, "pending_face");
+    if (running && fetchLane.free()) await fillLane(fetchLane, "pending_fetch", (rows) => prefetchClaimedFetches(db, rows));
   }
 
   // The dispatcher: keep the lanes full. Poll short while work is in flight (a
@@ -2861,9 +2925,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
 
   resolveDefaultAi(db).then((ai) => {
     if (ai) {
-      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face).`);
+      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face / ${FETCH_CONCURRENCY} fetch).`);
     } else {
-      console.log(`AI tagging worker started (no default key — only boards with their own key will tag; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face).`);
+      console.log(`AI tagging worker started (no default key — only boards with their own key will tag; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face / ${FETCH_CONCURRENCY} fetch).`);
     }
   }).catch((e) => console.warn(`worker: default-AI probe failed at start: ${e.message}`)); // log-only — an unhandled rejection here would crash the boot
   // Stop claiming immediately; the returned promise resolves once the

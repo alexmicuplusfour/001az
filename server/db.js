@@ -84,18 +84,34 @@ export async function countItems(db) {
 // state wins (the card shows a spinner), then failed, then held; an entity
 // whose instances are all done reads tagged. Single-instance entities (every
 // raw board) pass their status through verbatim.
-const STATUS_PRIORITY = ["facing", "pending_face", "extracting", "pending_extract", "processing", "pending", "failed", "held"];
+const STATUS_PRIORITY = ["fetching", "pending_fetch", "facing", "pending_face", "extracting", "pending_extract", "processing", "pending", "failed", "held"];
 
-// The three legs an item passes through before it carries tags, each as the
+// The legs an item passes through before it carries tags, each as the
 // state it WAITS in and the state the worker claims it INTO. Lives up here with
 // STATUS_PRIORITY rather than beside its first user, because it is the
 // authoritative list of "the pipeline is doing something to this row" and two
-// other things now derive from it.
-const IN_FLIGHT_FOR = { pending: "processing", pending_extract: "extracting", pending_face: "facing" };
+// other things now derive from it — including failOrRequeue's value fence,
+// which is why a leg missing here can't fail its own work (the fence falls
+// back to 'processing' and matches nothing).
+const IN_FLIGHT_FOR = { pending_fetch: "fetching", pending: "processing", pending_extract: "extracting", pending_face: "facing" };
+
+// …and the derived spellings the SQL below composes, so the claim CASE, the
+// recovery arms and the in-flight WHERE lists cannot drift from the map (they
+// did: recoverStuck's hand-written lists survived one leg addition only
+// because a close-look audit caught them). All values are code-local
+// literals — nothing user-supplied ever enters these strings.
+export const IN_FLIGHT_STATES = Object.entries(IN_FLIGHT_FOR).flat();
+const CLAIM_CASE = `CASE items.status ${Object.entries(IN_FLIGHT_FOR)
+  .map(([p, f]) => `WHEN '${p}' THEN '${f}'`).join(" ")} ELSE 'processing' END`;
+const REQUEUE_ARMS = Object.entries(IN_FLIGHT_FOR)
+  .map(([p, f]) => `WHEN status = '${f}' THEN '${p}'`).join("\n         ");
+const IN_FLIGHT_SQL = `(${Object.values(IN_FLIGHT_FOR).map((s) => `'${s}'`).join(",")})`;
 
 // Every state that means "this item's tags are about to be rewritten" — both
-// halves of all three legs, six in total. DERIVED rather than written out, so a
-// fourth leg cannot be added without this following it.
+// halves of all four legs, eight in total. DERIVED rather than written out, so
+// a fifth leg cannot be added without this following it. (The fetch leg's
+// inclusion mildly over-counts tagQueueDepth's "N waiting on the tagger" —
+// accepted: those items do reach the tag leg.)
 //
 // Facet diagnosis had this as `('pending','processing')` in three separate
 // queries, and retagBoard does not queue items uniformly: it routes each one by
@@ -114,7 +130,7 @@ const IN_FLIGHT_FOR = { pending: "processing", pending_extract: "extracting", pe
 // wording yet. Re-tag this board" over a board being re-tagged as the user read
 // it. Three surfaces, one missing set of strings, and the first fix for it named
 // four states and still missed the two the worker claims into.
-const TAG_QUEUE = `(${Object.entries(IN_FLIGHT_FOR).flat().map((s) => `'${s}'`).join(",")})`;
+const TAG_QUEUE = `(${IN_FLIGHT_STATES.map((s) => `'${s}'`).join(",")})`;
 export function aggregateStatus(instances) {
   if (!instances.length) return "tagged";
   if (instances.length === 1) return instances[0].status;
@@ -791,6 +807,16 @@ function aiMappingJson(mapping) {
 const STAMPED_CONNECTOR_FACE =
   `payload->'mapping'->'face'->>'source' = 'connector'
                 AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0`;
+
+// Its sibling, shared by the same three routers AND reprocessEntity: an
+// enqueued connector vehicle whose provider fetch never landed (bulk add's
+// queued path — connectors/add.js enqueueConnectorEntity) re-enters the FETCH
+// leg, and this arm must come FIRST in every CASE that uses it: an unfetched
+// vehicle on a chart-face board satisfies STAMPED_CONNECTOR_FACE too, and the
+// face arm would swallow it — rendering a chart from empty fields and then
+// tagging on nothing, which lands as ordinary-looking tags (the tagger does
+// not fail on an empty field set; it just isn't told anything).
+const UNFETCHED = `payload ? 'unfetched'`;
 
 async function boardAiMappingJson(db, boardId) {
   const { rows } = await db.query("SELECT mapping FROM boards WHERE id=$1", [boardId]);
@@ -1489,10 +1515,10 @@ export async function boardPreviewFaces(db, boardIds, n = 8) {
 
 // Queue a board's settled items for a fresh tagging pass (held ones included —
 // retag is an explicit "tag now"). Returns the count. Only terminal states are
-// touched: items still in the pipeline (pending_extract/extracting/
-// pending_face/facing/processing) already end in the tag leg when their legs
-// finish, so flipping them here would only skip their definition legs and tag
-// them with no fields, identity or face. Touched items resume the RIGHT leg,
+// touched: items still in the pipeline (any waiting or claimed leg status)
+// already end in the tag leg when their legs finish, so flipping them here
+// would only skip their definition legs and tag them with no fields,
+// identity or face. Touched items resume the RIGHT leg,
 // with the same routing as releaseHeld: an unfaced connector vehicle re-enters
 // the face leg (another shot at the chart), anything already extracted goes
 // straight to tagging, anything not yet extracted — a failed extraction, or a
@@ -1507,6 +1533,7 @@ export async function retagBoard(db, boardId) {
      SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
+           WHEN ${UNFETCHED} THEN 'pending_fetch'
            WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
@@ -1571,6 +1598,7 @@ export async function releaseHeld(db, boardId) {
      SET payload = CASE WHEN NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
+           WHEN ${UNFETCHED} THEN 'pending_fetch'
            WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
@@ -1597,6 +1625,7 @@ export async function queueUntagged(db, boardId) {
      SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
                         THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
          status = CASE
+           WHEN ${UNFETCHED} THEN 'pending_fetch'
            WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
            WHEN payload ? 'extracted_at' THEN 'pending'
            WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
@@ -1992,15 +2021,16 @@ export async function deleteExternalPlugin(db, id) {
 // SKIP LOCKED keeps concurrent claimers (or a second worker) from grabbing the
 // same row. When no default key is configured, boards without their own key
 // are skipped for the AI stages — their items stay queued until a key appears
-// (never failed for a missing key) — while faces still claim (rendering a
-// chart is a data+render step, no model call). Rows whose retry_at is still in
-// the future (a spaced transient retry) are skipped; every requeue path that
-// wants an immediate run clears retry_at.
+// (never failed for a missing key) — while faces and fetches still claim
+// (rendering a chart and pulling provider data are data steps, no model
+// call). Rows whose retry_at is still in the future (a spaced transient
+// retry) are skipped; every requeue path that wants an immediate run clears
+// retry_at.
 //
 // `stages` is the set of pending statuses the caller will accept — the worker's
 // dispatcher passes only the stages whose lane has a free slot (worker-rework
 // Stage 1: capacity-aware claiming), so a full sidecar lane doesn't stop tag work
-// from being claimed. Default = all three (the single-flight/test path, unchanged).
+// from being claimed. Default = all four (the single-flight/test path, unchanged).
 // Board-fair batch claim (worker-rework Stage 2). Ranks each board's ready items by
 // age (row_number per board), then serves rank 0 of every board before rank 1, etc. —
 // so a small board's work interleaves ahead of a large board's backlog instead of
@@ -2009,7 +2039,7 @@ export async function deleteExternalPlugin(db, id) {
 // single-row claims would collapse to FIFO (removing a head promotes the same board's
 // next item). The window function forbids FOR UPDATE, so the pick (ranked, unlocked)
 // and the lock (by id, SKIP LOCKED) are separate CTEs feeding the UPDATE.
-export async function claimFairBatch(db, hasDefaultKey = true, stages = ["pending_extract", "pending_face", "pending"], limit = 1) {
+export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1) {
   const now = Date.now();
   const { rows } = await db.query(
     `WITH ready AS (
@@ -2017,7 +2047,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = ["pendin
               row_number() OVER (PARTITION BY i.board_id ORDER BY i.created_at, i.id) AS board_rank
        FROM items i JOIN boards b ON b.id = i.board_id
        WHERE i.status = ANY($3::text[])
-         AND (i.status = 'pending_face' OR b.ai_key_id IS NOT NULL OR $2)
+         AND (i.status IN ('pending_face', 'pending_fetch') OR b.ai_key_id IS NOT NULL OR $2)
          AND (i.retry_at IS NULL OR i.retry_at <= $1)
      ),
      pick AS (
@@ -2027,10 +2057,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = ["pendin
        SELECT id FROM items WHERE id IN (SELECT id FROM pick) FOR UPDATE SKIP LOCKED
      )
      UPDATE items SET
-       status = CASE items.status
-         WHEN 'pending_extract' THEN 'extracting'
-         WHEN 'pending_face'    THEN 'facing'
-         ELSE 'processing' END,
+       status = ${CLAIM_CASE},
        updated_at = $1
      WHERE id IN (SELECT id FROM claimed)
      RETURNING *`,
@@ -2042,7 +2069,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = ["pendin
 // One row, oldest-ready-first — the LIMIT-1 case of claimFairBatch (which equals plain
 // FIFO: the globally-oldest ready row is always its own board's rank 0). The stable
 // entry point for tests and any single-claim caller.
-export async function claimNextWork(db, hasDefaultKey = true, stages = ["pending_extract", "pending_face", "pending"]) {
+export async function claimNextWork(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR)) {
   return (await claimFairBatch(db, hasDefaultKey, stages, 1))[0] || null;
 }
 
@@ -2076,6 +2103,45 @@ export async function markExtracted(db, id, fields) {
     [JSON.stringify(fields || {}), Date.now(), id]
   );
   return rowCount > 0;
+}
+
+// The fetch leg's advance: provider data landed on the entity, so the vehicle
+// moves on to whichever leg the board wants next (the caller computes
+// toStatus from a fresh board read: face leg, tag leg, or held). Clears the
+// 'unfetched' routing stamp — park is NOT consumed here; the face leg and the
+// held-park rule read it later — and folds the true provider source into the
+// payload in the same fenced statement, because updateItemPayload has no
+// fence and a stale fetch must not splat provider data over a re-routed row.
+// Value-fenced like its siblings: lands only while the row is still
+// 'fetching'; false = discarded (deleted or re-routed mid-fetch).
+export async function advanceFetched(db, id, toStatus, patch = {}) {
+  const { rowCount } = await db.query(
+    `UPDATE items
+     SET payload = (payload - 'unfetched') || $1::jsonb,
+         status = $2,
+         attempts = 0,
+         error = NULL,
+         retry_at = NULL,
+         updated_at = $3
+     WHERE id = $4 AND status = 'fetching'`,
+    [JSON.stringify(patch), toStatus, Date.now(), id]
+  );
+  return rowCount > 0;
+}
+
+// A board's still-queued fetch ids — the prewarm horizon for the fetch leg
+// (connectors/index.js prefetchClaimedFetches): the lane claims one row at a
+// time in steady state, so warming only the claimed slice would leave every
+// subsequent claim paying a provider call; warming the queue makes them cache
+// hits. Oldest first, capped at one provider batch.
+export async function queuedFetchSourceIds(db, boardId, limit = 250) {
+  const { rows } = await db.query(
+    `SELECT payload->'source'->>'id' AS id FROM items
+     WHERE board_id=$1 AND status='pending_fetch'
+     ORDER BY created_at, id LIMIT $2`,
+    [boardId, limit]
+  );
+  return rows.map((r) => r.id).filter(Boolean);
 }
 
 // The face leg's counterpart: the chart (or tile fallback) is rendered — the
@@ -2309,6 +2375,25 @@ export async function dueLiveEntities(db, now, limit = 20) {
     inst: { id: r.i_id, payload: r.i_payload },
     board: { id: r.b_id, mapping: r.b_mapping, retag_on_refresh: r.retag_on_refresh, auto_tag: r.auto_tag },
   }));
+}
+
+// Land a fetch leg's provider answer on an enqueued entity in ONE statement:
+// fields, the (possibly corrected) identity/display_name/symbol, and the
+// first liveness due time. One statement on purpose — composing
+// setEntityIdentity + updateEntityFields would strand a real identity with
+// empty fields if the process died between them, and setEntityIdentity also
+// force-clears identity_provisional, a side effect this path doesn't want.
+// Throws 23505 when the corrected identity collides with an entity already on
+// the board (an enqueue that lacked the symbol, or a provider disagreeing
+// with its own list) — the caller fails the item as a late duplicate.
+export async function landEntityFetch(db, id, { identity, displayName = null, symbol = null, fields, refreshAt = null }) {
+  await db.query(
+    `UPDATE entities
+     SET identity=$1, display_name=COALESCE($2, display_name), symbol=COALESCE($3, symbol),
+         fields=$4, refresh_at=$5, updated_at=$6
+     WHERE id=$7`,
+    [identity, displayName, symbol, JSON.stringify(fields || {}), refreshAt, Date.now(), id]
+  );
 }
 
 // Write refreshed connector fields + the next due time, atomically.
@@ -2647,6 +2732,7 @@ export async function reprocessEntity(db, entityId) {
      SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
                         ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
          status = CASE
+           WHEN ${UNFETCHED} THEN 'pending_fetch'
            WHEN COALESCE($3::jsonb, payload->'mapping')->'face'->>'source' = 'connector'
                 AND (jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
                      OR payload->'files'->0->>'generated' = 'true') THEN 'pending_face'
@@ -2828,7 +2914,8 @@ export async function embeddingStats(db, model) {
 //    without consuming an attempt at all — the claim gate promises a missing
 //    key never fails an item, and this closes its race.
 // requeueStatus controls which queue the item returns to ('pending' for the
-// tag leg, 'pending_extract' / 'pending_face' for the definition legs).
+// tag leg, 'pending_fetch' / 'pending_extract' / 'pending_face' for the
+// definition legs).
 // Returns true if the item was failed.
 const RETRY_BACKOFF_MS = [60000, 300000, 900000];
 const TRANSIENT_EXTRA = 2;
@@ -2877,7 +2964,7 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
   return rowCount > 0 && failed;
 }
 
-// Recover items stranded mid-flight ('processing'/'extracting'/'facing') by a
+// Recover items stranded mid-flight (every claimed in-flight status) by a
 // crash or a shutdown that outlived the 5s drain. Each recovery counts as an
 // attempt — an interruption is evidence — and requeues to its own leg with
 // the same spaced retry_at as transient failures, so a crash-looping poison
@@ -2901,8 +2988,7 @@ export async function recoverStuck(db, olderThanMs, maxAttempts = 3, excludeIds 
        attempts = attempts + 1,
        status = CASE
          WHEN attempts + 1 >= $2 THEN 'failed'
-         WHEN status = 'extracting' THEN 'pending_extract'
-         WHEN status = 'facing' THEN 'pending_face'
+         ${REQUEUE_ARMS}
          ELSE 'pending' END,
        error = CASE WHEN attempts + 1 >= $2
                     THEN 'interrupted mid-flight repeatedly (crash or shutdown)' ELSE error END,
@@ -2913,7 +2999,7 @@ export async function recoverStuck(db, olderThanMs, maxAttempts = 3, excludeIds 
        -- that rescues the item inherit it and tag one facet instead of nine.
        tag_facets = CASE WHEN attempts + 1 >= $2 THEN NULL ELSE tag_facets END,
        updated_at = $3
-     WHERE status IN ('processing','extracting','facing') AND updated_at < $1
+     WHERE status IN ${IN_FLIGHT_SQL} AND updated_at < $1
        AND id <> ALL($4::bigint[])`,
     [now - olderThanMs, maxAttempts + TRANSIENT_EXTRA, now, excludeIds]
   );
