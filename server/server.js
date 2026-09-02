@@ -3025,7 +3025,7 @@ app.get("/api/items/:id/chart", requireAuth, requireEntityAccess, wrap(async (re
     series = await connector.chartSeries(db, entity, payload?.source || null, {
       range: String(req.query.range || ""),
       kind: String(req.query.kind || ""),
-    });
+    }, req.entityBoardId);
   } catch (err) {
     console.error(`chart series error (${connectorName}/#${req.entityId}):`, err.message);
     return res.status(502).json({ error: err.message });
@@ -3055,7 +3055,7 @@ app.get("/api/boards/:id/connector-filters", requireAuth, wrap(async (req, res) 
   const connectorName = board.mapping?.input?.connector;
   const connector = connectorName ? getConnector(connectorName) : null;
   if (!connector) return res.status(400).json({ error: "this board has no connector input" });
-  res.json({ filters: await connector.browseFilters(db) });
+  res.json({ filters: await connector.browseFilters(db, board.id) });
 }));
 
 // Browse a connector board's catalog for the ingestion modal: a sorted,
@@ -3092,14 +3092,14 @@ app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => 
   // vocabulary — a metered fetch INSIDE this request, which is exactly the
   // I/O the sibling filters route exists to keep off the paging path.
   if ((browse.filters || []).some((f) => req.query[f.key] != null)) {
-    for (const f of await connector.browseFilters(db)) {
+    for (const f of await connector.browseFilters(db, board.id)) {
       const v = req.query[f.key];
       if (v != null && f.options.some((o) => o.value === String(v))) opts[f.key] = String(v);
     }
   }
   let rows;
   try {
-    rows = await connector.list(db, opts);
+    rows = await connector.list(db, opts, board.id);
   } catch (err) {
     console.error(`connector list error (${connectorName}):`, err.message);
     return res.status(502).json({ error: err.message });

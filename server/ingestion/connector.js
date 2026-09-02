@@ -305,9 +305,9 @@ export function feedAdapter(conn) {
     // Best-effort by contract, like the refresh sweep's prefetch leg: a failure
     // means the per-item path pays retail, which is exactly the old behaviour.
     // A provider without `prefetch` is a no-op all the way down.
-    async prewarm(db, _board, batch) {
+    async prewarm(db, board, batch) {
       if (!conn.prefetchIds) return;
-      await conn.prefetchIds(db, batch.map((c) => c.id))
+      await conn.prefetchIds(db, batch.map((c) => c.id), board?.id ?? null)
         .catch((e) => console.warn(`${conn.name} ingest prewarm failed (per-item fallback): ${e.message}`));
     },
 

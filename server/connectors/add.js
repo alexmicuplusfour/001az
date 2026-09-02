@@ -9,7 +9,7 @@ import { firstRefreshAt } from "./runtime.js";
 export async function addConnectorEntity(db, board, connector, connectorName, entityId) {
   let entity;
   try {
-    entity = await connector.fetchEntity(db, entityId);
+    entity = await connector.fetchEntity(db, entityId, board.id);
   } catch (err) { err.provider = true; throw err; }
 
   // Bound fields live on the entity; one file-less instance is the tag

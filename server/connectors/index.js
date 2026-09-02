@@ -30,18 +30,18 @@ function bind(name, mod) {
     manifest: mod.manifest,
     providers: mod.providers, // raw provider modules (rpm/burst defaults for the plugin registry)
     providerList: () => providerDescriptors(conn.providers), // live descriptors (single source)
-    search: (db, q) => runtime.search(db, conn, q),
-    list: (db, opts) => runtime.list(db, conn, opts),
-    browseFilters: (db) => runtime.browseFilters(db, conn),
-    fetchEntity: (db, id) => runtime.fetchEntity(db, conn, id),
+    search: (db, q, board) => runtime.search(db, conn, q, board),
+    list: (db, opts, board) => runtime.list(db, conn, opts, board),
+    browseFilters: (db, board) => runtime.browseFilters(db, conn, board),
+    fetchEntity: (db, id, board) => runtime.fetchEntity(db, conn, id, Date.now(), board),
     testConnection: (db, opts) => runtime.testConnection(db, conn, opts),
     activeProvider: (db) => runtime.activeProvider(db, conn),
     standing: (db) => runtime.standing(db, conn),
-    refresh: (db, entity, inst, mapping, now) => runtime.refresh(db, conn, entity, inst, mapping, now),
+    refresh: (db, entity, inst, mapping, now, board) => runtime.refresh(db, conn, entity, inst, mapping, now, board),
     prefetchRefresh: (db, rows) => runtime.prefetchRefresh(db, conn, rows),
-    prefetchIds: (db, ids) => runtime.prefetchIds(db, conn, ids),
-    produceFace: (db, entity, source, faceCfg) => runtime.produceFace(db, conn, entity, source, faceCfg),
-    chartSeries: (db, entity, source, opts) => runtime.chartSeries(db, conn, entity, source, opts),
+    prefetchIds: (db, ids, board) => runtime.prefetchIds(db, conn, ids, board),
+    produceFace: (db, entity, source, faceCfg, board) => runtime.produceFace(db, conn, entity, source, faceCfg, board),
+    chartSeries: (db, entity, source, opts, board) => runtime.chartSeries(db, conn, entity, source, opts, board),
     // Annotate the declared face producers for a given provider: `available`
     // = that provider can render it (exports the method named by `requires`),
     // `supportedBy` = every provider that can. A producer with no `requires`

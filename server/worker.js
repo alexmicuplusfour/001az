@@ -800,7 +800,7 @@ export async function refreshDueEntity(db, { entity, inst, board }, now = Date.n
   if (!conn?.refresh) { await setEntityRefreshAt(db, entity.id, null); return { moved: [], requeued: false, faced: false }; }
   const mapping = board.mapping;
   // Fields — live config from the board mapping (current), not the stamped one.
-  const r = await conn.refresh(db, entity, inst, mapping, now);
+  const r = await conn.refresh(db, entity, inst, mapping, now, board.id);
   const fields = r.merged || entity.fields;
   const moved = r.merged ? Object.keys(r.moved) : [];
 
@@ -861,7 +861,7 @@ export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, 
   const conn = getConnector(board.mapping?.input?.connector);
   const faceCfg = board.mapping?.face;
   if (!conn?.produceFace || faceCfg?.source !== "connector") return null;
-  const rendered = await conn.produceFace(db, entity, inst.payload?.source, faceCfg);
+  const rendered = await conn.produceFace(db, entity, inst.payload?.source, faceCfg, board.id);
   if (!rendered) { await setEntityFaceAt(db, entity.id, null); return null; } // no history → keep the tile
   const name = crypto.randomBytes(16).toString("hex");
   const stored = await storeFace({ galleryDir, thumbsDir }, name, rendered, { generated: true });

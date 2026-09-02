@@ -109,21 +109,26 @@ export const providerSignal = (kind) => AbortSignal.timeout(providerBudgetMs(kin
 // hands out at rpm/min, so one write per token is bounded by the provider's
 // own rate limit rather than by how hard a sweep pushes.
 //
-// APP SCOPE, always. Some callers know a board (refresh, faces) and some
-// don't (search, testConnection) — but prefetch batches up to 100 ids that
-// span boards into ONE request, deliberately, and dividing that request
-// between them would be apportionment. Stage 5a could partition the embed
-// sweep per board because splitting the batch cost nothing; splitting this one
-// would destroy the reason it exists. So no row claims a board rather than
-// some rows claiming one.
-const paceFor = (db, name, provider) => {
+// `board` is the scope the request files under: the board whose entity
+// refresh, chart, browse, add or admission batch CAUSED it, or null for work
+// no single board can honestly claim — the refresh sweep's prefetch (up to
+// 100 ids spanning boards in ONE request; dividing it would be apportionment,
+// and splitting the batch the way Stage 5a split the embed sweep would
+// destroy the reason it exists) and the admin Test button. This used to say
+// "APP SCOPE, always" and over-applied that batch argument to every path,
+// including the ones holding the board right there — causation is recorded
+// where it is known, and the shared remainder stays visible as the
+// "outside any board" row. Causation, not benefit: a shared-cache fill
+// (FMP's universe pull) files under whichever board's read tripped the
+// revalidate — one bulk request per TTL window, literally that board's doing.
+const paceFor = (db, name, provider, board = null) => {
   const rpm = Number(process.env.CONNECTOR_RPM) || provider.rpm || DEFAULT_RPM;
   const burst = Number(process.env.CONNECTOR_BURST) || provider.burst || DEFAULT_BURST;
   return async () => {
     await acquire(name, rpm, burst);
     // Never throws (meterWrite) — the cardinal rule: a metering blip must not
     // read as a connector failure to the sweep, the preview, or the health row.
-    await meterSpend(db, APP_SCOPE, { capability: "api", provider: name }, { api_requests: 1 });
+    await meterSpend(db, board ?? APP_SCOPE, { capability: "api", provider: name }, { api_requests: 1 });
   };
 };
 
@@ -151,8 +156,8 @@ const paceFor = (db, name, provider) => {
 // log, plugins health row). Still status-less, so withRetry above never
 // retried it and callers treat it as a plain failure. Providers may pre-wrap
 // with more context (FMP names the endpoint); this is the floor.
-export function callProvider(db, name, provider, fn) {
-  const pace = paceFor(db, name, provider);
+export function callProvider(db, name, provider, fn, board = null) {
+  const pace = paceFor(db, name, provider, board);
   const attempt = provider.pacesRequests ? fn : async () => { await pace(); return fn(); };
   return withRetry(attempt, name).catch((e) => {
     if (e?.name === "TimeoutError") throw new Error(`${name}: request timed out`);
@@ -163,8 +168,8 @@ export function callProvider(db, name, provider, fn) {
 // callProvider under the shared plugin health ledger: outcomes (post-retry)
 // land on the provider's plugins row (structured error or heal), feeding the
 // Plugins page dot and, later, the self-healing loop.
-const tracked = (db, conn, name, provider, fn) =>
-  withPluginHealth(db, `${conn.name}:${name}`, () => callProvider(db, name, provider, fn));
+const tracked = (db, conn, name, provider, fn, board = null) =>
+  withPluginHealth(db, `${conn.name}:${name}`, () => callProvider(db, name, provider, fn, board));
 
 // Resolve the active provider + its key. An unset or unknown provider name
 // falls back to the connector's default, and a NOT-INSTALLED provider falls
@@ -253,21 +258,21 @@ export function domainState({ setting, effective }, { label, providers = [] }) {
 // pacing handle (see callProvider — request-pacing providers await it before
 // each raw fetch). Built fresh per logical call; `pace` closes over the
 // merged rpm/burst so Plugins-page overrides flow everywhere from here.
-const ctxFor = (db, name, provider, apiKey) => ({ apiKey, pace: paceFor(db, name, provider) });
+const ctxFor = (db, name, provider, apiKey, board = null) => ({ apiKey, pace: paceFor(db, name, provider, board) });
 
-export async function search(db, conn, query) {
+export async function search(db, conn, query, board = null) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  return tracked(db, conn, name, provider, () => provider.search(query, ctxFor(db, name, provider, apiKey)));
+  return tracked(db, conn, name, provider, () => provider.search(query, ctxFor(db, name, provider, apiKey, board)), board);
 }
 
 // Browse a sorted, paginated page of the domain's catalog for the ingestion
 // modal. `opts` = { sort, order, page, pageSize, query }. A provider that can't
 // browse (no list()) yields [] — the modal degrades to "not supported", like a
 // missing history()/face producer.
-export async function list(db, conn, opts) {
+export async function list(db, conn, opts, board = null) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.list) return [];
-  return tracked(db, conn, name, provider, () => provider.list(opts, ctxFor(db, name, provider, apiKey)));
+  return tracked(db, conn, name, provider, () => provider.list(opts, ctxFor(db, name, provider, apiKey, board)), board);
 }
 
 // The browse filters a user can actually apply RIGHT NOW: the manifest's
@@ -286,7 +291,7 @@ export async function list(db, conn, opts) {
 // server will accept are the same list by construction. Provider failure
 // degrades to the static filters — a dead categories endpoint costs the
 // category control, never the whole modal.
-export async function browseFilters(db, conn) {
+export async function browseFilters(db, conn, board = null) {
   const declared = conn.manifest?.browse?.filters || [];
   if (!declared.length) return [];
   // One shape and one ordering for every vocabulary, whatever supplied it: a
@@ -307,7 +312,7 @@ export async function browseFilters(db, conn) {
       const { name, provider, apiKey } = await activeProvider(db, conn);
       if (provider.filterOptions)
         supplied = await tracked(db, conn, name, provider, () =>
-          provider.filterOptions(ctxFor(db, name, provider, apiKey))) || {};
+          provider.filterOptions(ctxFor(db, name, provider, apiKey, board)), board) || {};
     } catch (e) {
       console.warn(`${conn.name}: filter options unavailable (static filters only): ${e.message}`);
     }
@@ -327,9 +332,9 @@ export async function browseFilters(db, conn) {
 //  - src = provider name on every field (truthful provenance);
 //  - at = fetch time on every field (the liveness baseline; read in a later slice);
 //  - source = { provider, id } — the provider handle a future refresh re-fetches from.
-export async function fetchEntity(db, conn, id, now = Date.now()) {
+export async function fetchEntity(db, conn, id, now = Date.now(), board = null) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
-  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, ctxFor(db, name, provider, apiKey)));
+  const e = await tracked(db, conn, name, provider, () => provider.fetchEntity(id, ctxFor(db, name, provider, apiKey, board)), board);
   const symbol = e.symbol || null;
   const identity = (symbol || "").toLowerCase() || e.id;
   const fields = {};
@@ -363,10 +368,10 @@ export { liveFields, nextRefreshAt, faceSchedule, entityRefreshAt, firstRefreshA
 // Map a symbol back to a provider id under the active provider — provider ids
 // aren't portable (CoinGecko's "bitcoin" ≠ CoinMarketCap's "1"), so a refresh
 // after a provider switch re-resolves by ticker. Prefers an exact symbol match.
-export async function resolveBySymbol(db, conn, symbol) {
+export async function resolveBySymbol(db, conn, symbol, board = null) {
   if (!symbol) return null;
   const want = symbol.toLowerCase();
-  const hits = await search(db, conn, symbol);
+  const hits = await search(db, conn, symbol, board);
   const hit = hits.find((h) => (h.symbol || "").toLowerCase() === want) || hits[0];
   return hit ? hit.id : null;
 }
@@ -375,8 +380,8 @@ export async function resolveBySymbol(db, conn, symbol) {
 // source id when it names the active backend, else re-resolved by ticker.
 // Null when the symbol can't be found either. Refresh, faces and charts all
 // make this same call — one spelling for the three of them.
-const resolveProviderId = (db, conn, activeName, source, symbol) =>
-  activeName === source?.provider ? source.id : resolveBySymbol(db, conn, symbol);
+const resolveProviderId = (db, conn, activeName, source, symbol, board = null) =>
+  activeName === source?.provider ? source.id : resolveBySymbol(db, conn, symbol, board);
 
 // Batch-warm the active provider's quote cache for a set of provider ids (a
 // provider declares the capability by exporting prefetch(ids, ctx)). Purely an
@@ -388,17 +393,17 @@ const resolveProviderId = (db, conn, activeName, source, symbol) =>
 // ROWS (below), the ingestion sweep with an admission batch's ids straight off
 // the enumerated candidates. This is the seam they share; writing it twice is
 // how the quote-cache economics drifted the first time.
-async function warmIds(db, active, ids) {
+async function warmIds(db, active, ids, board = null) {
   const want = [...new Set((ids || []).filter((v) => v != null).map(String))];
   if (want.length < 2) return; // nothing a batch would save
   await callProvider(db, active.name, active.provider, () =>
-    active.provider.prefetch(want, ctxFor(db, active.name, active.provider, active.apiKey)));
+    active.provider.prefetch(want, ctxFor(db, active.name, active.provider, active.apiKey, board)), board);
 }
 
-export async function prefetchIds(db, conn, ids) {
+export async function prefetchIds(db, conn, ids, board = null) {
   const active = await activeProvider(db, conn).catch(() => null);
   if (!active?.provider.prefetch) return;
-  await warmIds(db, active, ids);
+  await warmIds(db, active, ids, board);
 }
 
 // The refresh sweep's shape: `rows` are its due entries ({ entity, inst, … }).
@@ -429,25 +434,25 @@ export async function prefetchRefresh(db, conn, rows) {
 // cover every due key or the runtime falls back to the whole-object
 // fetchEntity — a partial answer can never strand a field due-forever.
 // Providers without the capability get the whole-object path, unchanged.
-export async function refresh(db, conn, entity, inst, mapping, now = Date.now()) {
+export async function refresh(db, conn, entity, inst, mapping, now = Date.now(), board = null) {
   const live = liveFields(mapping);
   const due = live.filter((f) => now - (entity.fields?.[f.key]?.at ?? 0) >= f.every * 60000);
   if (!due.length) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
 
   const active = await activeProvider(db, conn);
-  const id = await resolveProviderId(db, conn, active.name, inst.payload?.source, entity.symbol);
+  const id = await resolveProviderId(db, conn, active.name, inst.payload?.source, entity.symbol, board);
   if (id == null) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
 
   const dueKeys = due.map((f) => f.key);
   let fetched = null;
   if (active.provider.fetchFields) {
     const partial = await tracked(db, conn, active.name, active.provider, () =>
-      active.provider.fetchFields(id, dueKeys, ctxFor(db, active.name, active.provider, active.apiKey)));
+      active.provider.fetchFields(id, dueKeys, ctxFor(db, active.name, active.provider, active.apiKey, board)), board);
     const fields = {};
     for (const [k, v] of Object.entries(partial?.fields || {})) fields[k] = { ...v, src: active.name, at: now };
     if (dueKeys.every((k) => fields[k])) fetched = { fields };
   }
-  if (!fetched) fetched = await fetchEntity(db, conn, id, now);
+  if (!fetched) fetched = await fetchEntity(db, conn, id, now, board);
 
   const merged = { ...entity.fields };
   const moved = {};
@@ -468,14 +473,14 @@ export async function refresh(db, conn, entity, inst, mapping, now = Date.now())
 // provider switch, like refresh. The connector's `faces` map NAMES a shared
 // producer (server/faces); the raw series comes from the active provider's
 // history().
-export async function produceFace(db, conn, entity, source, faceCfg) {
+export async function produceFace(db, conn, entity, source, faceCfg, board = null) {
   const producer = getFaceProducer(conn.faces?.[faceCfg?.producer]);
   if (!producer) return null;
   const { name, provider, apiKey } = await activeProvider(db, conn);
   if (!provider.history) return null; // provider can't supply history → fall back
-  const id = await resolveProviderId(db, conn, name, source, entity.symbol);
+  const id = await resolveProviderId(db, conn, name, source, entity.symbol, board);
   if (id == null) return null;
-  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, ctxFor(db, name, provider, apiKey)));
+  const series = await tracked(db, conn, name, provider, () => provider.history(id, faceCfg.period, ctxFor(db, name, provider, apiKey, board)), board);
   if (!series || !series.length) return null;
   return producer(series, { symbol: entity.symbol, name: entity.display_name, period: faceCfg.period });
 }
@@ -510,7 +515,7 @@ const REFUSED = Symbol("chart pair refused");
 // rejected — to what the deployment has proven servable. Returns null when
 // nothing can serve (no capability, no vocabulary, empty offer, unresolvable
 // id): the route answers 404 and the client keeps the static face.
-export async function chartSeries(db, conn, entity, source, { range, kind } = {}) {
+export async function chartSeries(db, conn, entity, source, { range, kind } = {}, board = null) {
   const { name, provider, apiKey } = await activeProvider(db, conn);
   const decl = conn.manifest?.chart;
   if (!provider.chart || !decl?.ranges?.length || !decl?.kinds?.length) return null;
@@ -521,7 +526,7 @@ export async function chartSeries(db, conn, entity, source, { range, kind } = {}
 
   // Resolved once — a switched-provider entity must not pay a metered
   // resolveBySymbol search per discovery attempt.
-  const id = await resolveProviderId(db, conn, name, source, entity.symbol);
+  const id = await resolveProviderId(db, conn, name, source, entity.symbol, board);
   if (id == null) return null;
 
   // The discovery loop. A refusal is an ANSWER, not an error: learn the exact
@@ -559,8 +564,8 @@ export async function chartSeries(db, conn, entity, source, { range, kind } = {}
     // catch instead of skipping the dance.
     const out = await tracked(db, conn, name, provider, () =>
       Promise.resolve()
-        .then(() => provider.chart(id, { range, kind }, ctxFor(db, name, provider, apiKey)))
-        .catch((e) => { if (e?.unsupported) return REFUSED; throw e; }));
+        .then(() => provider.chart(id, { range, kind }, ctxFor(db, name, provider, apiKey, board)))
+        .catch((e) => { if (e?.unsupported) return REFUSED; throw e; }), board);
     if (out !== REFUSED) {
       return out && { ...out, range, ranges, kind, kinds, provider: name,
                       attribution: provider.attribution || null,

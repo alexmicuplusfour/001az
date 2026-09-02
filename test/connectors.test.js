@@ -191,9 +191,12 @@ test("refresh: fetchFields serves the due keys; partial coverage falls back whol
   const now = 120000; // both fields due (at=0, every=1min)
 
   // Full coverage → fetchFields path, no whole-object fetch.
-  const r1 = await runtime.refresh(db, conn, entity, inst, live(["price", "volume"]), now);
+  const r1 = await runtime.refresh(db, conn, entity, inst, live(["price", "volume"]), now, "board-ref");
   assert.deepEqual(ffCalls, [["gg", ["price", "volume"]]]);
   assert.equal(feCalls.length, 0);
+  // Stage 5d attribution: the entity belongs to a board and the worker passes
+  // it, so this request is the board's own — not "outside any board".
+  assert.equal((await meterTotals(db, "board-ref", "api", "meter")).units.api_requests, 1);
   assert.deepEqual(r1.merged.price, { v: 2, kind: "number", src: "meter", at: now });
   assert.deepEqual(r1.moved.price, { v: 2, kind: "number", src: "meter", at: now }); // 1 → 2 moved
   assert.equal(r1.merged.sector.v, "old"); // non-due fields untouched
@@ -1142,6 +1145,14 @@ test("api quota: a fan-out meters per REQUEST, not per logical call", async () =
   assert.equal(await apiSpent("meterco") - before, 3, "three requests, not one logical call");
   assert.equal((await meterTotals(db, APP_SCOPE, "api")).calls, 0,
     "the AI `requests` unit is never written here — the two call families cannot sum together");
+
+  // The same call with its board stated files under THAT board — attribution
+  // rides the ctx the runtime already builds, so the provider fixture above
+  // needed no edit to become attributable. The shared row does not move:
+  // a request has exactly one scope, never two.
+  await runtime.search(db, conn, "gizmo", "board-att");
+  assert.equal((await meterTotals(db, "board-att", "api", "meterco")).units.api_requests, 3);
+  assert.equal(await apiSpent("meterco") - before, 3, "not double-filed at the app scope");
 });
 
 test("api quota: a retried attempt costs a request — quota is spent by what was SENT", async () => {
@@ -1160,6 +1171,34 @@ test("api quota: a retried attempt costs a request — quota is spent by what wa
   });
   assert.equal(tries, 2);
   assert.equal(await apiSpent("retry-co") - before, 2, "both attempts spent quota");
+});
+
+test("api quota: a feed's prewarm batch files under its board; sweep and probe work stays shared", async () => {
+  const prov = {
+    label: "Warm Co", rpm: 100000, burst: 100,
+    async prefetch() {}, // legacy pacing: callProvider itself takes (and meters) the token
+    async testConnection() { return true; },
+  };
+  const conn = { name: "warms", providers: { warmco: prov }, defaultProvider: "warmco", manifest: {} };
+  await installConnectors(db, "warms:warmco");
+
+  // A feed's admission batch is ONE board's items, so prefetchIds carries the
+  // board — this is the call whose board arrived as `_board` and was discarded
+  // until the attribution slice.
+  await runtime.prefetchIds(db, conn, ["a", "b"], "board-warm");
+  assert.equal((await meterTotals(db, "board-warm", "api", "warmco")).units.api_requests, 1);
+
+  // The refresh sweep's warm spans boards in one request — nobody claims it —
+  const shared = await apiSpent("warmco");
+  await runtime.prefetchRefresh(db, conn, [
+    { inst: { payload: { source: { provider: "warmco", id: "a" } } } },
+    { inst: { payload: { source: { provider: "warmco", id: "b" } } } },
+  ]);
+  assert.equal(await apiSpent("warmco") - shared, 1, "the cross-board batch stays outside any board");
+
+  // — and so does the admin Test button: no board exists to blame it on.
+  await runtime.testConnection(db, conn, {});
+  assert.equal(await apiSpent("warmco") - shared, 2);
 });
 
 test("api quota: the usage feed names the provider and calls the work API", async () => {
