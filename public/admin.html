@@ -102,9 +102,16 @@
 
       /* usage tab — the headline strip; everything below it is stock .section
          + table + .pill-row */
-      .usage-kpis { display: flex; flex-wrap: wrap; gap: 34px; margin: 22px 0 4px; }
+      .usage-kpis { display: flex; flex-wrap: wrap; gap: 24px; margin: 22px 0 4px; }
+      /* the counts row distributes evenly; min-width keeps a wrapped column readable */
+      .usage-kpis .usage-kpi { flex: 1 1 0; min-width: 110px; }
       .usage-kpi .v { font-size: 20px; font-weight: 600; }
       .usage-kpi .k { color: #6b6b72; font-size: 12px; margin-top: 2px; }
+      /* the money row: figures at natural width, the deal sentence takes the rest
+         (wears .muted for its colour and states only size — the .price-note rule) */
+      .usage-money { margin-top: 18px; align-items: center; }
+      .usage-money .usage-kpi { flex: 0 0 auto; min-width: 0; }
+      .usage-deal { flex: 1 1 260px; margin: 0; font-size: 12px; max-width: 560px; }
       /* the prices editor. The dim lines WEAR .muted for their colour and
          state only their size, the way .boards-chip wears .p-note. */
       .price-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }

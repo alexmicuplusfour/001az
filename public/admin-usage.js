@@ -61,7 +61,7 @@ async function draw() {
   const head = document.createElement("div");
   head.className = "section";
   head.innerHTML = `<h2>Usage</h2>
-    <p class="sub">Every metered call across the app, priced at the rates known when each one ran.</p>`;
+    <p class="sub">Every metered call across the app, over the picked window.</p>`;
 
   const pills = document.createElement("div");
   pills.className = "pill-row";
@@ -87,41 +87,58 @@ async function draw() {
   const qty = (unit) => totals[unit]?.quantity || 0;
   const inQ = qty("input_tokens"), outQ = qty("output_tokens"), cacheQ = qty("cache_read_tokens");
 
+  // Row 1 — the counts, one equal-width column each (the CSS distributes).
+  // The two call families stay side by side and NEVER summed: separate units,
+  // so keeping them apart costs a second call rather than a filter. Input and
+  // output tokens are their own columns for the same reason the meter keeps
+  // them apart — they bill at different rates, and the old pair-in-one-cell
+  // reading dressed two figures as one. Every name is the SERVED one: any
+  // unit with a quantity is in `defs` by construction (the response's `units`
+  // is built from the units its own rows used), so a fallback string here
+  // could never render — and the one written first said "requests" where the
+  // server says "calls". Titles carry what a short label can't.
   const kpis = [];
-  kpis.push(kpi(cost ? fmtCost(cost) : "—", "spend",
-    cost?.unpriced?.length ? `not in the $ figure: ${fmtUnpriced(cost.unpriced)}`
-    : cost ? "" : "no rate was known for any call in this window"));
-  // The two call families, side by side and NEVER summed. They are separate
-  // units for exactly that reason, so keeping them apart costs a second call
-  // rather than a filter — nothing downstream has to remember the distinction.
-  // Both names are the SERVED ones: any unit with a quantity is in `defs` by
-  // construction (the response's `units` is built from the units its own rows
-  // used), so a fallback string here could never render — and the one written
-  // first said "requests" where the server says "calls". The titles carry the
-  // distinction the two labels can't, since an AI call is an API call too.
   const countKpi = (unit, title) => {
     const q = totals[unit]?.quantity;
     if (q) kpis.push(kpi(fmtQty(q, defs[unit].format), defs[unit].label, title));
   };
   countKpi("requests", "calls to an AI model that answered");
   countKpi("api_requests", "requests sent to a data provider — retried and refused ones included, because a quota charges for those too");
-  if (inQ || outQ) kpis.push(kpi(tokPair(inQ, outQ), "tokens"));
-  // The two ratios show only when their inputs exist — absence, not 0%.
+  countKpi("input_tokens");
+  countKpi("output_tokens");
+  // The ratio shows only when its inputs exist — absence, not 0%.
   if (cacheQ) {
     const d = defs.cache_read_tokens;
     kpis.push(kpi(`${Math.round((cacheQ / (inQ + cacheQ)) * 100)}%`, "cache hit rate",
       `${fmtQty(cacheQ, d?.format)} ${d?.label ?? "cache reads"} vs ${fmtTok(inQ)} billed input`));
   }
-  if (cost && inQ + outQ > 0) {
-    // micros ÷ tokens IS dollars per million tokens (micros-per-unit ≡ $/M).
-    // Inherits the ≈ whenever the spend it divides wears one.
-    kpis.push(kpi(`${cost.unpriced?.length ? "≈" : ""}${fmtUsd(cost.micros / (inQ + outQ))}`,
-      "blended $ / M tokens", "total spend ÷ total input+output tokens"));
-  }
   const strip = document.createElement("div");
   strip.className = "usage-kpis";
   strip.innerHTML = kpis.join("");
   head.appendChild(strip);
+
+  // Row 2 — the money, on its own line, with the deal stated in words instead
+  // of a symbol. The ≈ used to carry "this figure excludes what nobody has
+  // priced" on its back, which is a lot to ask of one glyph a reader has to
+  // hover to unpack — the sentence beside the row now says it outright, and
+  // NAMES the excluded quantities when there are any. Both figures drop the
+  // symbol because the sentence qualifies the whole row at once.
+  const money = [];
+  money.push(kpi(cost ? fmtUsd(cost.micros / 1e6) : "—", "spend"));
+  if (cost && inQ + outQ > 0) {
+    // micros ÷ tokens IS dollars per million tokens (micros-per-unit ≡ $/M).
+    money.push(kpi(fmtUsd(cost.micros / (inQ + outQ)), "blended $ / M tokens",
+      "total spend ÷ total input+output tokens"));
+  }
+  const deal = !cost
+    ? "No call in this window ran at a known rate — quantities are still metered, and a rate set in Prices applies to new calls."
+    : cost.unpriced.length
+      ? `Stamped when each call ran, at the rate known then — never re-priced. Not yet priced, so not in these figures: ${fmtUnpriced(cost.unpriced)}.`
+      : "Stamped when each call ran, at the rate known then — never re-priced. Everything in this window ran at a known rate.";
+  const moneyRow = document.createElement("div");
+  moneyRow.className = "usage-kpis usage-money";
+  moneyRow.innerHTML = money.join("") + `<p class="muted usage-deal">${deal}</p>`;
+  head.appendChild(moneyRow);
 
   // --- the day chart: the shared day-bars component, at chart size ---
   const chartCount = Math.min(winDays ?? 90, 90);

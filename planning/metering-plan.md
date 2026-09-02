@@ -1261,6 +1261,59 @@ changes.
       `facet-diagnosis` meters `"diagnose"`, which isn't a CAPABILITY_DEF
       either — the literal is the house pattern).
 
+  - **5d addendum — board attribution (2026-09-02; suite 1323/1323, +1 test
+    file-net; shipped after the user read the Usage tab and asked why
+    "outside any board" held every API call while crypto and stocks were
+    plainly the boards making them).** The uniform-APP_SCOPE decision was too
+    blunt and is PARTLY REVERSED: the batch/apportionment argument was real
+    but covered only the refresh sweep's cross-board prefetch — it was
+    over-applied to every path, including the ones holding the board right
+    there (entity refresh, faces, charts, adds, board-scoped browse routes,
+    and the feed prewarm whose `_board` parameter arrived and was DISCARDED
+    WITH AN UNDERSCORE).
+    - Mechanism: scope rides the per-call ctx the runtime already builds —
+      `ctxFor`/`paceFor`/`callProvider`/`tracked` carry an optional `board`,
+      entry points state what they know, and the meter files under
+      `board ?? APP_SCOPE`. Providers untouched (verified: they only ever call
+      `pace?.()`), so provider agnosticism holds by construction. Bind
+      wrappers in connectors/index.js thread it; five callers pass what they
+      already held (worker refresh+face, chart route via req.entityBoardId,
+      board-scoped browse/list/filters routes, add.js, ingestion prewarm).
+    - STAYS shared, deliberately: the refresh sweep's prefetch (one request
+      spanning boards — dividing it is apportionment) and the admin Test
+      button (no board exists). Causation, not benefit: a shared-cache fill
+      (FMP's SWR universe pull captures the triggering call's pace) files
+      under whichever board tripped the revalidate — one bulk request per TTL
+      window, accepted and documented; the provider-declared "shared pace"
+      escape (precedent: the `bulk` timeout class) is noted, not built.
+    - Expectations set: rows stamped before this deploy stay at the app scope
+      forever (costs are never rewritten, and nobody knows retroactively);
+      board rows count requests the board DIRECTLY caused, so they will not
+      sum to the provider totals — the shared row keeps the batches.
+    - Surfaces that lit up with zero client edits (the vocabulary mechanisms):
+      Usage tab board rows, /api/boards/:id/usage (board managers now see
+      connector burn), the gallery toolbar chip on connector boards, the
+      admin Boards cell appendix.
+    - `prewarm` takes `board?.id ?? null` — best-effort by contract, so a
+      missing board files the warm at the app scope instead of failing the
+      admission it exists to cheapen (a bare `.id` escaped prewarm's own
+      catch by throwing synchronously; caught by the existing survivability
+      test, which passes null).
+
+  - **Strip rework (2026-09-02, user-directed; suite 1323/1323).** The
+    headline splits into two rows: counts (calls, API calls, input tokens,
+    output tokens, cache hit rate — the in/out pair became two served-label
+    columns, equal-width via CSS) and money (spend, blended $/M) on its own
+    line. THE ≈ COMES OFF on this row only: the glyph carried "this figure
+    excludes what nobody has priced" on its back, hover-to-unpack — the row
+    now states the deal in words beside the figures ("stamped when each call
+    ran, at the rate known then — never re-priced") and NAMES the excluded
+    quantities when there are any, via fmtUnpriced. The 3c conditional-≈
+    convention still holds everywhere else (board chips, table spend cells,
+    the day tooltip ride fmtCost unchanged) — a lone symbol is the right
+    qualifier where there is no room for a sentence, and the sentence is the
+    right one where there is.
+
 ## API
 
 - `GET /api/usage` — admin. Query: `from`, `to`, `group` (comma-separated
