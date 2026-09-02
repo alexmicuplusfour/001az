@@ -20,7 +20,7 @@
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
 import { ICONS } from "./utils.js";
-import { createModal, sectionHeading, provBand, keepPlace } from "./modal.js";
+import { createModal, sectionHeading, provBand, keepPlace, busy } from "./modal.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
@@ -999,7 +999,10 @@ export async function openBoardModal(boardId, opts = {}) {
   if (isNew) document.getElementById("board-modal-name").focus();
 
   document.getElementById("board-modal-cancel").onclick = close;
-  document.getElementById("board-modal-save").onclick = async () => {
+  // busy() is also the double-submit guard this handler never had: an
+  // unguarded double-click on a slow save could POST two new boards.
+  const saveBtn = document.getElementById("board-modal-save");
+  saveBtn.onclick = busy(saveBtn, async () => {
     const name = document.getElementById("board-modal-name").value.trim();
     if (!name) return toast.warn("Name required");
     const context = contextTextarea.value.trim();
@@ -1056,5 +1059,5 @@ export async function openBoardModal(boardId, opts = {}) {
       onSaved?.(saved);
       toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);
     } catch (err) { toast.error(err.message); }
-  };
+  });
 }

@@ -8,7 +8,7 @@
 import { state } from './state.js';
 import { ICONS, fmtDuration, relTime } from './utils.js';
 import { toast } from './toast.js';
-import { createModal, sectionHeadingEl } from './modal.js';
+import { createModal, sectionHeadingEl, busy } from './modal.js';
 import { ddRow, ddSep, ddEmpty } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { switchRow } from './board-modal.js';
@@ -324,8 +324,7 @@ export function openAlertEditor(existing) {
     };
     urlInput.addEventListener("input", syncTest);
     syncTest();
-    testBtn.addEventListener("click", async () => {
-      testBtn.disabled = true;
+    testBtn.addEventListener("click", busy(testBtn, async () => {
       try {
         const r = await fetch(`/api/alerts/${existing.id}/test`, { method: "POST" });
         const data = await r.json().catch(() => ({}));
@@ -334,8 +333,7 @@ export function openAlertEditor(existing) {
       } catch {
         toast.error("Webhook test failed");
       }
-      testBtn.disabled = false;
-    });
+    }));
     hookSection.appendChild(testBtn);
   }
   body.appendChild(hookSection);
@@ -351,7 +349,7 @@ export function openAlertEditor(existing) {
   // ── save ──
   const saveBtn = document.createElement("button");
   saveBtn.textContent = isNew ? "Create alert" : "Save";
-  saveBtn.addEventListener("click", async () => {
+  saveBtn.addEventListener("click", busy(saveBtn, async () => {
     const name = nameInput.value.trim();
     if (!name) return toast.error("Give the alert a name");
     if (!Object.keys(condition).length) return toast.error("The condition is empty");
@@ -370,7 +368,6 @@ export function openAlertEditor(existing) {
     // client ever sees, so absent must not mean clear).
     if (secretInput.value) payload.webhook_secret = secretInput.value;
     else if (secretCleared) payload.webhook_secret = "";
-    saveBtn.disabled = true;
     try {
       const r = isNew
         ? await fetch("/api/alerts", {
@@ -386,7 +383,6 @@ export function openAlertEditor(existing) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         toast.error(data.error || "Couldn't save alert");
-        saveBtn.disabled = false;
         return;
       }
       const saved = data.alert;
@@ -402,9 +398,8 @@ export function openAlertEditor(existing) {
       document.dispatchEvent(new Event('app:render'));
     } catch {
       toast.error("Couldn't save alert");
-      saveBtn.disabled = false;
     }
-  });
+  }));
   footer.appendChild(saveBtn);
 }
 

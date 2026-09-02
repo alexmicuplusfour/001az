@@ -10,7 +10,7 @@
 // this file owns no state of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { createModal, sectionHeading, sectionHeadingEl } from "/modal.js";
+import { createModal, sectionHeading, sectionHeadingEl, busy } from "/modal.js";
 import { syncModelPicker, switchRow } from "/board-modal.js";
 import { fillSelect, isUnset } from "/select.js";
 import { fmtDuration, relTime } from "/utils.js";
@@ -33,14 +33,6 @@ function labeled(label, el) {
   row.appendChild(el);
   return row;
 }
-
-// Exported: the Capabilities tab's buttons share it rather than keeping a copy.
-export const busy = (btn, label, fn) => async () => {
-  btn.disabled = true;
-  const prev = btn.textContent;
-  btn.textContent = label;
-  try { await fn(); } finally { btn.disabled = false; btn.textContent = prev; }
-};
 
 // A slot's promote button, always labelled "Make default {slot}" and always
 // ghost — the same weight as the connector's "Make default for {domain}".
@@ -65,7 +57,7 @@ function slotButton(label, isDefault, sels, apply) {
   };
   sels.forEach((s) => s.addEventListener("change", sync));
   sync();
-  btn.onclick = busy(btn, "Saving…", apply);
+  btn.onclick = busy(btn, apply);
   return btn;
 }
 
@@ -246,7 +238,7 @@ function connectorSection(p, ctx, reload) {
         rm.className = "danger";
         rm.style.cssText = "margin-top:6px;padding:4px 10px;font-size:12px;";
         rm.textContent = "remove stored key";
-        rm.onclick = busy(rm, "Removing…", async () => {
+        rm.onclick = busy(rm, async () => {
           if (!confirm(`Remove the stored ${f.label}?`)) return;
           try {
             await saveField(f.key, ""); // "" clears the secret store
@@ -307,7 +299,7 @@ function connectorSection(p, ctx, reload) {
     // naming the old provider until a page reload. Nothing that only redresses
     // this modal should be able to strand the page on a state the server no
     // longer holds.
-    star.onclick = busy(star, "Saving…", async () => {
+    star.onclick = busy(star, async () => {
       try {
         await api("POST", `/api/admin/plugins/slots/${p.connector.domain}`, { provider: p.name });
         ctx.refresh(); // repaint the default badge on every card behind the modal
@@ -326,7 +318,7 @@ function connectorSection(p, ctx, reload) {
   test.className = "ghost";
   test.style.alignSelf = "flex-start";
   test.textContent = "Test";
-  test.onclick = busy(test, "Testing…", async () => {
+  test.onclick = busy(test, async () => {
     const typed = secretInput?.value.trim();
     try {
       const body = typed ? { api_key: typed } : undefined;
@@ -410,7 +402,7 @@ function keysSection(p, ctx, reload) {
       const testBtn = document.createElement("button");
       testBtn.className = "ghost";
       testBtn.textContent = "test";
-      testBtn.onclick = busy(testBtn, "testing…", async () => {
+      testBtn.onclick = busy(testBtn, async () => {
         try {
           await api("POST", `/api/admin/ai-keys/${k.id}/test`);
           toast(`✓ "${k.name}" ${noun} works`);
@@ -519,9 +511,8 @@ function keysSection(p, ctx, reload) {
     cancelBtn.hidden = true;
   };
 
-  addForm.onsubmit = async (e) => {
+  addForm.onsubmit = busy(addBtn, async (e) => {
     e.preventDefault();
-    addBtn.disabled = true;
     try {
       if (editingId) {
         await api("PATCH", `/api/admin/ai-keys/${editingId}`, {
@@ -539,12 +530,12 @@ function keysSection(p, ctx, reload) {
         });
         toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" added`);
       }
-      reload(); // rebuilds the section — form state resets with it
+      // awaited so the button stays held until the rebuild replaces it
+      await reload(); // rebuilds the section — form state resets with it
     } catch (err) {
       toast.error(err.message);
-      addBtn.disabled = false;
     }
-  };
+  });
   sec.appendChild(addForm);
   return sec;
 }
@@ -626,7 +617,7 @@ function capabilitySection(cap, p, ctx, reload) {
       const t = document.createElement("button");
       t.className = "ghost";
       t.textContent = "Test";
-      t.onclick = busy(t, "Testing…", async () => {
+      t.onclick = busy(t, async () => {
         try {
           const r = await api("POST", `/api/admin/capabilities/${cap.id}/probe`);
           toast(fmtProbe(r));
@@ -638,7 +629,7 @@ function capabilitySection(cap, p, ctx, reload) {
       const btn = document.createElement("button");
       btn.className = "danger";
       btn.textContent = b.label;
-      btn.onclick = busy(btn, "Saving…", post(b.payload, b.toast));
+      btn.onclick = busy(btn, post(b.payload, b.toast));
       actions.appendChild(btn);
     }
   }
@@ -708,7 +699,7 @@ function sourceSection(p, ctx, reload) {
       const testBtn = document.createElement("button");
       testBtn.className = "ghost";
       testBtn.textContent = "test";
-      testBtn.onclick = busy(testBtn, "testing…", async () => {
+      testBtn.onclick = busy(testBtn, async () => {
         try { await api("POST", "/api/admin/source-connections/test", { id: c.id }); toast(`✓ "${c.label}" reachable`); }
         catch (err) { toast.error(`"${c.label}": ${err.message}`); }
       });
@@ -790,7 +781,7 @@ function sourceSection(p, ctx, reload) {
     actions.style.cssText = "display:flex;gap:8px;align-items:center;";
     const saveBtn = document.createElement("button");
     saveBtn.textContent = editing ? "Save changes" : "Add connection";
-    saveBtn.onclick = busy(saveBtn, "Saving…", async () => {
+    saveBtn.onclick = busy(saveBtn, async () => {
       const { label, config } = collect();
       if (!label) { toast.error("Name required"); return; }
       try {
@@ -803,7 +794,7 @@ function sourceSection(p, ctx, reload) {
     const testBtn = document.createElement("button");
     testBtn.className = "ghost";
     testBtn.textContent = "Test";
-    testBtn.onclick = busy(testBtn, "Testing…", async () => {
+    testBtn.onclick = busy(testBtn, async () => {
       const { config } = collect();
       try {
         await api("POST", "/api/admin/source-connections/test", editing ? { id: editing.id, config } : { type: p.name, config });

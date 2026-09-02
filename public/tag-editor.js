@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { ICONS, refreshEntityTags } from './utils.js';
 import { toast } from './toast.js';
 import { kindFor, thumbUrl } from './kinds.js';
-import { mountModal } from './modal.js';
+import { mountModal, busy } from './modal.js';
 
 // Tags live on instances. The grid's edit affordance targets the first
 // instance (the common case is a single-instance entity, where that's
@@ -87,14 +87,12 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
   closeBtn.onclick = close;
   cancelBtn.onclick = close;
 
-  saveBtn.addEventListener("click", async () => {
+  saveBtn.addEventListener("click", busy(saveBtn, async () => {
     const tags = [];
     for (const f of state.facets) {
       const cbMap = checkMap.get(f.key) || {};
       for (const [v, cb] of Object.entries(cbMap)) if (cb.checked) tags.push(`${f.key}/${v}`);
     }
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Saving…";
     try {
       if (!inst) throw new Error();
       const r = await fetch(`/api/instances/${inst.id}/tags`, {
@@ -121,8 +119,6 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
       document.dispatchEvent(new Event('app:render'));
     } catch {
       toast.error("Couldn't save tags");
-      saveBtn.disabled = false;
-      saveBtn.textContent = "Save";
     }
-  });
+  }));
 }

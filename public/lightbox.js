@@ -6,7 +6,7 @@ import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
 import { fullUrl, kindFor } from './kinds.js';
 import { ensurePolling } from './data.js';
-import { sectionHeading } from './modal.js';
+import { sectionHeading, busy, claim } from './modal.js';
 
 import { selectFace } from './face-select.js';
 import { mountDetail } from './detail-view.js';
@@ -380,9 +380,8 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
       rmBtn.textContent = "×";
-      rmBtn.addEventListener("click", async (e) => {
+      rmBtn.addEventListener("click", busy(rmBtn, async (e) => {
         e.stopPropagation();
-        rmBtn.disabled = true;
         try {
           const r = await fetch(`/api/instances/${f.id}`, { method: "DELETE" });
           if (!r.ok) throw new Error();
@@ -397,8 +396,8 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
           toast("File removed");
         } catch {
           toast.error("Couldn't remove file");
-        } finally { rmBtn.disabled = false; }
-      });
+        }
+      }));
       row.append(thumb, fname, rmBtn);
       fileList.appendChild(row);
     });
@@ -446,32 +445,35 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   }
   elLightboxPanelBody.appendChild(instMeta);
 
-  // The selected instance's extracted fields, with per-instance re-extract.
-  const reextractBtn = document.createElement("button");
-  reextractBtn.className = "lbp-reextract";
-  reextractBtn.textContent = "Re-extract";
-  reextractBtn.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (!inst) return;
-    reextractBtn.disabled = true;
-    try {
-      const r = await fetch(`/api/instances/${inst.id}/reextract`, { method: "POST" });
-      if (r.ok) {
-        inst.status = "pending_extract";
-        img.status = "pending_extract";
-        reextractBtn.textContent = "Queued";
+  // A queue-this-leg button (re-extract, retag): POST the instance route,
+  // flip the instance + entity into the leg's waiting status, and claim the
+  // button as "Queued" — one shape, two consumers.
+  function queueLegBtn(label, path, status, { queued, failed }) {
+    const btn = document.createElement("button");
+    btn.className = "lbp-reextract";
+    btn.textContent = label;
+    btn.addEventListener("click", busy(btn, async (e) => {
+      e.stopPropagation();
+      if (!inst) return;
+      try {
+        const r = await fetch(`/api/instances/${inst.id}/${path}`, { method: "POST" });
+        if (!r.ok) throw new Error();
+        inst.status = status;
+        img.status = status;
+        claim(btn, "Queued");
         document.dispatchEvent(new Event('app:render'));
         ensurePolling();
-        toast("Re-extraction queued");
-      } else {
-        reextractBtn.disabled = false;
-        toast.error("Re-extract failed");
+        toast(queued);
+      } catch {
+        toast.error(failed);
       }
-    } catch {
-      reextractBtn.disabled = false;
-      toast.error("Re-extract failed");
-    }
-  });
+    }));
+    return btn;
+  }
+
+  // The selected instance's extracted fields, with per-instance re-extract.
+  const reextractBtn = queueLegBtn("Re-extract", "reextract", "pending_extract",
+    { queued: "Re-extraction queued", failed: "Re-extract failed" });
   const fileFields = {};
   const aiFields = {};
   for (const [key, field] of Object.entries(fields || {})) {
@@ -498,30 +500,8 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
     const tagsHead = document.createElement("div");
     tagsHead.className = "lbp-fields-head";
     tagsHead.innerHTML = sectionHeading("Tags");
-    const retagBtn = document.createElement("button");
-    retagBtn.className = "lbp-reextract";
-    retagBtn.textContent = "Retag";
-    retagBtn.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      retagBtn.disabled = true;
-      try {
-        const r = await fetch(`/api/instances/${inst.id}/retag`, { method: "POST" });
-        if (r.ok) {
-          inst.status = "pending";
-          img.status = "pending";
-          retagBtn.textContent = "Queued";
-          document.dispatchEvent(new Event('app:render'));
-          ensurePolling();
-          toast("Retag queued");
-        } else {
-          retagBtn.disabled = false;
-          toast.error("Retag failed");
-        }
-      } catch {
-        retagBtn.disabled = false;
-        toast.error("Retag failed");
-      }
-    });
+    const retagBtn = queueLegBtn("Retag", "retag", "pending",
+      { queued: "Retag queued", failed: "Retag failed" });
     tagsHead.appendChild(retagBtn);
     elLightboxPanelBody.appendChild(tagsHead);
   }

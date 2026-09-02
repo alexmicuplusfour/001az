@@ -16,7 +16,7 @@
 // established. Self-guards on /api/me, so it no-ops for non-admins.
 import { api } from "/api.js";
 import { toast } from "/toast.js";
-import { busy } from "/plugin-modal.js";
+import { busy } from "/modal.js";
 import { pill, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
 import { sparkline, dayKey } from "/sparkline.js";
 import { openPricesModal } from "/prices-modal.js";
@@ -312,7 +312,7 @@ function renderPrices({ wanted, freshness }) {
   refreshBtn.className = "ghost sm";
   refreshBtn.textContent = "refresh prices";
   refreshBtn.title = "Pull the community table and ask connected providers now, skipping the weekly pacing";
-  refreshBtn.onclick = busy(refreshBtn, "refreshing…", async () => {
+  refreshBtn.onclick = busy(refreshBtn, async () => {
     try {
       const { learned } = await api("POST", "/api/admin/prices/refresh");
       toast(`Learned ${learned} price(s)`);

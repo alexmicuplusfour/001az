@@ -11,7 +11,8 @@
 // the tab (admin.js) and flashes the card (here).
 import { api } from "/api.js";
 import { toast } from "/toast.js";
-import { openPluginModal, busy } from "/plugin-modal.js";
+import { openPluginModal } from "/plugin-modal.js";
+import { busy } from "/modal.js";
 import { refreshPluginSurfaces, loadPluginState } from "/admin-plugins.js";
 import { presentChip, presentLines, presentSupported, configureTarget, fmtProbe } from "/capability-present.js";
 import { fillSelect } from "/select.js";
@@ -158,7 +159,7 @@ function capCard(c) {
     const test = document.createElement("button");
     test.className = "ghost";
     test.textContent = "Test";
-    test.onclick = busy(test, "Testing…", async () => {
+    test.onclick = busy(test, async () => {
       try {
         toast(fmtProbe(await api("POST", `/api/admin/capabilities/${c.id}/probe`)));
       } catch (err) { toast.error(err.message); }
@@ -169,7 +170,7 @@ function capCard(c) {
     const cfg = document.createElement("button");
     cfg.className = "ghost";
     cfg.textContent = configureTarget(c) ? "Configure" : "Add a provider";
-    cfg.onclick = busy(cfg, "Opening…", () => openConfigure(c));
+    cfg.onclick = busy(cfg, () => openConfigure(c));
     actions.appendChild(cfg);
   }
   if (actions.children.length) card.appendChild(actions);

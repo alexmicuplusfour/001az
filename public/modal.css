@@ -167,6 +167,32 @@
 .modal-footer button.ghost:hover,
 .drawer-foot button.ghost:hover { background: #e6e6ea; }
 
+/* The shared busy state (modal.js `busy`): the wrapped label keeps reserving
+   the button's width — hidden by opacity, not visibility, so the
+   accessibility tree keeps it too — while a ring overlays it, centered. The
+   ring borrows currentColor, so one rule reads on the dark primary, the white
+   ghost, and every body button between; :disabled's opacity dims the whole
+   button the same way the old preview spinner dimmed. The keyframes are
+   declared HERE, under their own name, because admin.html loads modal.css
+   without styles.css — where the global `spin` lives — and a spinner that
+   only spins on pages that happen to load a second stylesheet is the trap
+   this comment exists to spring. */
+button.is-busy { position: relative; }
+button.is-busy .busy-label { opacity: 0; }
+button.is-busy .busy-spin {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: busy-spin 0.8s linear infinite;
+}
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+
 /* toggle switch */
 .switch {
   position: relative;
@@ -573,10 +599,11 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-filter-val input { width: 100%; font-size: 13px; padding: 6px 8px; }
 .im-hint { font-size: 12px; color: #9aa0aa; margin: 8px 0 0; line-height: 1.4; }
 /* shared modal-body button component (the gallery page has no global button
-   styles, so body buttons would otherwise render native). im-preview-btn layers
-   its loading spinner on top of this base. */
-.im-btn, .im-preview-btn {
-  position: relative;
+   styles, so body buttons would otherwise render native). Busy feedback comes
+   from the shared .is-busy ring above (modal.js `busy`), which absorbed the
+   overlay spinner the preview button used to carry privately — .im-preview-btn
+   dissolved into this class along with it. */
+.im-btn {
   font: inherit;
   font-size: 12px;
   padding: 6px 14px;
@@ -585,26 +612,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   background: #fff;
   cursor: pointer;
 }
-.im-btn:hover, .im-preview-btn:hover { background: #111; color: #fff; border-color: #111; }
-.im-btn:disabled, .im-preview-btn:disabled { opacity: .55; cursor: default; }
-/* keep the button neutral while loading so the dark spinner stays visible */
-.im-preview-btn.loading:hover { background: #fff; color: #111; border-color: #d3d3dc; }
-/* label reserves the width; spinner sits centered over it (spin keyframe is global) */
-.im-preview-btn.loading .im-btn-label { visibility: hidden; }
-.im-btn-spin { display: none; }
-.im-preview-btn.loading .im-btn-spin {
-  display: block;
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 12px;
-  height: 12px;
-  margin: -6px 0 0 -6px;
-  border: 2px solid rgba(0, 0, 0, 0.2);
-  border-top-color: rgba(0, 0, 0, 0.6);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
+.im-btn:hover { background: #111; color: #fff; border-color: #111; }
+.im-btn:disabled { opacity: .55; cursor: default; }
 /* the count doubles as the door into the results view */
 .im-preview-count {
   font: inherit;

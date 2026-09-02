@@ -13,7 +13,7 @@
 import { state } from './state.js';
 import { fmtDuration, glyphEl, fmtUsd, relTime } from './utils.js';
 import { toast } from './toast.js';
-import { createModal, sectionHeadingEl, createDrawer, tileRow } from './modal.js';
+import { createModal, sectionHeadingEl, createDrawer, tileRow, busy } from './modal.js';
 import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
@@ -615,16 +615,8 @@ export function openIngestModal() {
     prevRow.className = "im-row";
     const previewBtn = document.createElement("button");
     previewBtn.type = "button";
-    previewBtn.className = "im-preview-btn";
-    // Label + spinner as siblings: while loading the label goes hidden (keeping
-    // the button's width so it can't jump) and the spinner shows centered.
-    const previewLabel = document.createElement("span");
-    previewLabel.className = "im-btn-label";
-    previewLabel.textContent = "Preview";
-    const previewSpin = document.createElement("span");
-    previewSpin.className = "im-btn-spin";
-    previewSpin.setAttribute("aria-hidden", "true");
-    previewBtn.append(previewLabel, previewSpin);
+    previewBtn.className = "im-btn";
+    previewBtn.textContent = "Preview";
     const countBtn = document.createElement("button");
     countBtn.type = "button";
     countBtn.className = "im-preview-count";
@@ -655,7 +647,7 @@ export function openIngestModal() {
       countBtn.style.display = "none";
     }
 
-    previewBtn.addEventListener("click", async () => {
+    previewBtn.addEventListener("click", busy(previewBtn, async () => {
       // No source added = nothing to scan. Without this gate the preview
       // would fall through to "blank path" and scan the whole ingest root —
       // the exact presumption the add step exists to kill.
@@ -664,8 +656,6 @@ export function openIngestModal() {
         return;
       }
       const mySeq = ++previewSeq;
-      previewBtn.disabled = true;
-      previewBtn.classList.add("loading");
       try {
         const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
           method: "POST",
@@ -688,11 +678,8 @@ export function openIngestModal() {
         countBtn.style.display = "";
       } catch {
         if (mySeq === previewSeq) toast.error("Preview failed");
-      } finally {
-        previewBtn.disabled = false;
-        previewBtn.classList.remove("loading");
       }
-    });
+    }));
     countBtn.addEventListener("click", showResults);
 
     // Only send filters the user has finished typing (a value-less filter

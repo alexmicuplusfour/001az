@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { toItem, sentence, plural, fmtUsd } from './utils.js';
 import { toast } from './toast.js';
-import { createModal } from './modal.js';
+import { createModal, busy } from './modal.js';
 import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { fillSelect } from './select.js';
 import { ensurePolling } from './data.js';
@@ -180,7 +180,7 @@ export function openConnectorBrowse(connectorName) {
     btn.type = "button";
     btn.className = "cb-add";
     btn.textContent = "Add";
-    btn.addEventListener("click", () => addIds([ctx.data.id], btn));
+    btn.addEventListener("click", busy(btn, () => addIds([ctx.data.id])));
     ctx.addCell.appendChild(btn);
   }
 
@@ -197,20 +197,19 @@ export function openConnectorBrowse(connectorName) {
   }
 
   // The server's bulk route admits at most 100 per request — a larger
-  // selection goes in slices, each chunk's rows flipped as it lands so a long
-  // add shows progress instead of a frozen button. A failed chunk stops the
-  // run (don't hammer a failing endpoint); everything already added stays.
+  // selection goes in slices, each chunk's rows flipped to on-board as it
+  // lands. A failed chunk stops the run (don't hammer a failing endpoint);
+  // everything already added stays. Both entry buttons arrive wrapped in
+  // busy() (modal.js); the finally's syncFooter re-renders the footer
+  // button's label + disabled, claiming it out of busy's restore.
   const BULK_CHUNK = 100;
-  async function addIds(ids, btn) {
+  async function addIds(ids) {
     if (!ids.length) return;
-    if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
-    addSelectedBtn.disabled = true;
+    addSelectedBtn.disabled = true; // a row add locks the footer too
     let addedCount = 0;
     const skipped = [];
     try {
       for (let i = 0; i < ids.length; i += BULK_CHUNK) {
-        if (ids.length > BULK_CHUNK)
-          addSelectedBtn.textContent = `Adding ${i + 1}–${Math.min(i + BULK_CHUNK, ids.length)} of ${ids.length}…`;
         const res = await fetch(`/api/boards/${state.boardId}/entities/bulk`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -237,12 +236,10 @@ export function openConnectorBrowse(connectorName) {
       }
       const errs = skipped.filter((s) => s.reason !== "duplicate");
       if (errs.length) toast.error(`${errs.length} couldn't be added`);
-      syncFooter();
       updateSelectAll();
     } catch {
       toast.error("Failed to add");
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = "Add"; }
       syncFooter();
     }
   }
@@ -320,7 +317,7 @@ export function openConnectorBrowse(connectorName) {
   sortSel.addEventListener("change", () => { opts.sort = sortSel.value; reset(); });
   orderBtn.addEventListener("click", () => { opts.order = opts.order === "asc" ? "desc" : "asc"; renderOrder(); reset(); });
   moreBtn.addEventListener("click", () => { opts.page += 1; fetchPage(true); });
-  addSelectedBtn.addEventListener("click", () => addIds([...selected]));
+  addSelectedBtn.addEventListener("click", busy(addSelectedBtn, () => addIds([...selected])));
 
   // Load the connector descriptor, then the first page.
   (async () => {

@@ -7,7 +7,8 @@
 // GET /api/admin/plugins; this module holds no catalog knowledge of its own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { openPluginModal, busy } from "/plugin-modal.js";
+import { openPluginModal } from "/plugin-modal.js";
+import { busy } from "/modal.js";
 import { openAddPluginModal } from "/plugin-add-modal.js";
 import { renderCapabilities } from "/admin-capabilities.js";
 import { servingRoles, roleBadge } from "/capability-present.js";
@@ -337,7 +338,7 @@ function erroredRow(p, ctx) {
   retry.textContent = "Retry";
   retry.disabled = !p.source?.url;
   retry.title = p.source?.url ? "Re-download and load from the stored source" : "No source URL on record";
-  retry.onclick = busy(retry, "Retrying…", () => retryInstall(p, ctx));
+  retry.onclick = busy(retry, () => retryInstall(p, ctx));
   row.appendChild(retry);
 
   const remove = document.createElement("button");

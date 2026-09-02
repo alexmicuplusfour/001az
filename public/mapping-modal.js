@@ -17,7 +17,7 @@ import { toast } from "./toast.js";
 import { openDropdown, ddRow, ddNote, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
 import { ICONS, glyphEl, sentence } from "./utils.js";
 import { switchRow } from "./board-modal.js";
-import { sectionHeadingEl, provBand, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group } from "./modal.js";
+import { sectionHeadingEl, provBand, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, busy } from "./modal.js";
 import { fillSelect } from "./select.js";
 
 // Refresh cadence choices (minutes) this pane OFFERS. 0 = once: the field is
@@ -311,8 +311,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         : "This board already has items, so a template can't be applied — its items came from file uploads. Create a new board to start from a template.";
       templateBtn.title = why;
       templateRow.title = why;
-    } else templateBtn.addEventListener("click", async () => {
-      templateBtn.disabled = true;
+    } else templateBtn.addEventListener("click", busy(templateBtn, async () => {
       let connectors;
       try {
         // Both checks earn their keep: fetch resolves on a 4xx/5xx just as
@@ -327,8 +326,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       } catch {
         toast.error("Failed to load connectors");
         return;
-      } finally {
-        templateBtn.disabled = false;
       }
       openDropdown(templateBtn, {
         align: "end",
@@ -367,7 +364,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
           }
         },
       });
-    });
+    }));
     templateRow.append(templateLabel, templateBtn);
     body.appendChild(templateRow);
   }

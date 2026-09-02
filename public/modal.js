@@ -117,6 +117,56 @@ export function createModal({ title = "", id, bodyStyle = "", onClose } = {}) {
   return { overlay, dialog, header, titleEl, body, footer, closeBtn, close };
 }
 
+// ─── One busy state for every action button (any page that loads modal.css) ─
+// busy(btn, fn) returns a click handler that runs fn with the button visibly
+// working: disabled, its label kept in place but hidden (the label goes on
+// reserving the button's width, so nothing jumps — including tiny buttons like
+// the lightbox ×) under a centered currentColor ring (.is-busy in modal.css).
+// The label is wrapped, not replaced, so composite buttons (the mapping pane's
+// template trigger carries a value span + caret) survive, and code that writes
+// into those inner spans mid-flight still lands.
+//
+// The restore rule is a CLAIM contract: the finally puts the label back and
+// re-enables only when fn left the button's content alone. A handler that
+// re-labels the button mid-run — plugin-add's "Added", the lightbox's
+// "Queued", the browse footer's synced count — has claimed it, and both the
+// label and the disabled state stay exactly as that handler set them.
+// Detected structurally (is our wrapper still the button's child) so call
+// sites pass no flags. A button detached mid-run (its modal closed on
+// success) restores into the void, harmlessly.
+export const busy = (btn, fn) => async (...args) => {
+  if (btn.classList.contains("is-busy")) return; // re-entrancy guard
+  const label = document.createElement("span");
+  label.className = "busy-label";
+  label.append(...btn.childNodes);
+  const spin = document.createElement("span");
+  spin.className = "busy-spin";
+  spin.setAttribute("aria-hidden", "true");
+  btn.append(label, spin);
+  btn.disabled = true;
+  btn.classList.add("is-busy");
+  btn.setAttribute("aria-busy", "true");
+  try { await fn(...args); }
+  finally {
+    btn.classList.remove("is-busy");
+    btn.removeAttribute("aria-busy");
+    if (label.parentNode === btn) { // unclaimed — restore
+      spin.remove();
+      label.replaceWith(...label.childNodes);
+      btn.disabled = false;
+    }
+  }
+};
+
+// The claim contract's explicit spelling, for handlers whose success is a
+// terminal state: label + stays-disabled land in ONE call, instead of the
+// site setting the text and silently leaning on busy's disabled for the
+// other half.
+export const claim = (btn, label) => {
+  btn.textContent = label;
+  btn.disabled = true;
+};
+
 // ─── Keeping the reader's place across a rebuild ────────────────────────────
 // The editors in these modals rebuild their whole list on every structural edit
 // — remove a value, tick a field, apply a template — because one render that is

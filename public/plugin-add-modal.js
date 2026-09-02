@@ -7,7 +7,7 @@
 // tarball); the browse list below is the catalog that ships with the app.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { createModal } from "/modal.js";
+import { createModal, busy } from "/modal.js";
 import { tagFor } from "/admin-plugins.js";
 
 export function openAddPluginModal(connections, ctx) {
@@ -64,21 +64,16 @@ export function openAddPluginModal(connections, ctx) {
     } else {
       addBtn.className = "sm";
       addBtn.textContent = "Add";
-      addBtn.onclick = async () => {
-        addBtn.disabled = true;
-        addBtn.textContent = "Adding…";
+      addBtn.onclick = busy(addBtn, async () => {
         try {
           await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
           toast(`${p.label} added`);
-          asAdded(); // keep the row; flip the button in place (no list reshuffle)
+          asAdded(); // claims the button (busy leaves it "Added", disabled)
           ctx.refresh(); // refresh the page underneath so the new card appears
         } catch (err) {
-          addBtn.disabled = false;
-          addBtn.className = "sm";
-          addBtn.textContent = "Add";
           toast.error(err.message);
         }
-      };
+      });
     }
     r.appendChild(addBtn);
     return r;
@@ -118,12 +113,6 @@ function installFromUrlZone(ctx, close) {
   err.hidden = true;
   zone.appendChild(err);
 
-  const setBusy = (busy) => {
-    input.disabled = busy;
-    btn.disabled = busy;
-    btn.textContent = busy ? "Installing…" : "Install";
-  };
-
   async function install() {
     const url = input.value.trim();
     err.hidden = true;
@@ -133,20 +122,21 @@ function installFromUrlZone(ctx, close) {
       "This downloads and runs code from the internet with the server's full " +
       "access — there is no sandbox. Only install sources you trust.",
     )) return;
-    setBusy(true);
+    input.disabled = true; // busy() can only restore the element it wraps
     try {
       const { plugin } = await api("POST", "/api/admin/plugins/install", { url });
       toast(`${plugin?.label || "Plugin"} installed`);
       ctx.refresh();  // the new card appears on the page underneath
       close();
     } catch (e) {
-      setBusy(false);
+      input.disabled = false;
       err.textContent = e.message;
       err.hidden = false;
     }
   }
 
-  btn.onclick = install;
-  input.onkeydown = (e) => { if (e.key === "Enter") install(); };
+  const run = busy(btn, install);
+  btn.onclick = run;
+  input.onkeydown = (e) => { if (e.key === "Enter") run(); };
   return zone;
 }
