@@ -1,6 +1,6 @@
 # Local-dev extras. Compose auto-loads this beside docker-compose.yml, so a
 # bare `docker compose up` gets everything here; production is untouched
-# because deploy.ps1 merges an explicit -f list that never names this file.
+# because deployment merges an explicit -f list that never names this file.
 services:
   db:
     ports:

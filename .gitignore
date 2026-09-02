@@ -31,3 +31,6 @@ deploy.local.json
 ui-redesign-taxonomy.md
 tags.json
 *.zip
+
+# personal deploy tooling — stays local
+deploy.ps1
