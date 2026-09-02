@@ -1,35 +1,30 @@
 # Droplet override. Host Caddy (which also serves itsalex.me) keeps 80/443 and
 # terminates TLS, proxying 001.itsalex.me -> 127.0.0.1:3001, so the compose
-# caddy service is not started in production (the deploy names its services explicitly).
-# The app image is built locally and shipped with `docker save`/`docker load`;
-# APP_TAG is pinned in /opt/001az/.env by the deploy script.
+# caddy service is not started in production (the deploy names its services
+# explicitly, and the `edge` profile below keeps a bare `up` honest too).
+# Images come from GHCR — built on push by .github/workflows/images.yml —
+# and APP_TAG pins the commit being run; the deploy script sets it in .env.
 services:
   extractor:
-    image: 001az-extractor:${APP_TAG:-latest}
+    image: ghcr.io/alexmicuplusfour/001az-extractor:${APP_TAG:-latest}
     build: !reset null
-    pull_policy: never
 
   transcriber:
-    image: 001az-transcriber:${APP_TAG:-latest}
+    image: ghcr.io/alexmicuplusfour/001az-transcriber:${APP_TAG:-latest}
     build: !reset null
-    pull_policy: never
 
   object-detector:
-    image: 001az-object-detector:${APP_TAG:-latest}
+    image: ghcr.io/alexmicuplusfour/001az-object-detector:${APP_TAG:-latest}
     build: !reset null
-    pull_policy: never
 
   app:
-    image: 001az-app:${APP_TAG:-latest}
+    image: ghcr.io/alexmicuplusfour/001az-app:${APP_TAG:-latest}
     build: !reset null
-    pull_policy: never
     ports:
       - "127.0.0.1:3001:3001"
 
   caddy:
-    # Prod hosts front the stack with their own proxy (the droplet's host
-    # Caddy owns 80/443 and terminates TLS), so the compose caddy must not
-    # start here — not even from a bare `up`, which is what this profile
-    # guards. A host that wants the compose caddy adds `edge` to
-    # COMPOSE_PROFILES in its .env.
+    # Prod hosts front the stack with their own proxy; the profile keeps a
+    # bare `up` from binding 80/443 against it. A host that wants the compose
+    # caddy adds `edge` to COMPOSE_PROFILES in its .env.
     profiles: ["edge"]

@@ -4,6 +4,7 @@ name: 001az
 
 services:
   app:
+    image: ghcr.io/alexmicuplusfour/001az-app:latest
     build: .
     restart: unless-stopped
     env_file: .env
@@ -42,6 +43,7 @@ services:
       - app
 
   extractor: # PDF/docx text + OCR
+    image: ghcr.io/alexmicuplusfour/001az-extractor:latest
     build: ./extractor
     restart: unless-stopped
 
@@ -49,6 +51,7 @@ services:
   # in .env. Their models are baked into the image at build time.
 
   transcriber: # speech-to-text + speaker diarization (whisper)
+    image: ghcr.io/alexmicuplusfour/001az-transcriber:latest
     profiles: ["transcribe"]
     build:
       context: ./transcriber
@@ -63,6 +66,7 @@ services:
       WHISPER_DIARIZE_THRESHOLD: ${WHISPER_DIARIZE_THRESHOLD:-}
 
   object-detector: # open-vocabulary object detection (LLMDet)
+    image: ghcr.io/alexmicuplusfour/001az-object-detector:latest
     profiles: ["detect"]
     build:
       context: ./object-detector

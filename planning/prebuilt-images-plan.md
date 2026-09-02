@@ -1,7 +1,9 @@
 # Prebuilt images — GitHub builds on push, GHCR serves the pulls (2026-09-02)
 
-**Status: PLANNED — Stage 1 ready to implement. Written the day the repo went
-public (bd019d8), which is what makes all of this free.**
+**Status: COMPLETE — all three stages shipped 2026-09-02 (Stage 1 in 99616f7,
+Stages 2+3 same day; see the addendum at the bottom for what implementation
+taught the design). Written the day the repo went public (bd019d8), which is
+what makes all of this free.**
 Self-contained for a fresh session. Design agreed in-session 2026-09-02;
 the sidecar-presence plan named prebuilt images its one deferred adoption win
 ("would turn the remaining ~3GB build into a ~2-minute pull — after this
@@ -148,3 +150,44 @@ Stages 1+2 deliver the public value without touching it.
   `workflow_dispatch`, and the bake-at-build design is load-bearing
   (offline runtime, healthcheck-verified models) per the transcriber's
   Dockerfile comments.
+
+## Addendum — what implementation taught the design (2026-09-02, same day)
+
+**Stage 2's experiment (compose v5.1.4, measured):** with BOTH `image:` and
+`build:` and NO `pull_policy` — image absent → plain `up` PULLS (the feared
+build-by-default never happened); image present → reused, no network;
+`up --build` → builds and tags the result under the image name; a local
+build is never clobbered by a later plain `up`. So option (a) landed in its
+simplest form: four `image: ghcr.io/...:latest` lines, nothing else.
+Verified live: the author's stack recreated under the GHCR names from LOCAL
+builds, custom transcriber bake intact (/health reports small+medium).
+
+**Stage 1 had a correctness hole, fixed before Stage 3 could stand on it:**
+path-filtered builds mean each image's newest `sha-` tag differs, so no
+single APP_TAG existed to pin — and diffing against `event.before` silently
+skips a cancelled/failed run's changes (push A cancelled by push B → B's
+diff never contains A's files). images.yml v2: the diff base is the LAST
+GREEN run's head sha (`gh run list --status success`, `actions: read`
+permission; no base found → build everything), change detection is plain
+`git diff` in a script (dorny/paths-filter dropped — one less third-party
+action), and a `retag` job stamps this commit's sha tag onto every image it
+did NOT rebuild via `docker buildx imagetools create` from `:latest`
+(manifest-only, no rebuild). Invariant: EVERY green run leaves all four
+images addressable at `sha-<short of its commit>`.
+
+**Stage 3 (deploy.ps1 rewritten, local-only file):** build/digest-compare/
+save/scp/load all deleted — the deploy verifies HEAD == origin/main (push
+first), waits for that commit's Images run to go green, uploads the compose
+files, stamps `APP_TAG=sha-<short>` + COMPOSE_PROFILES, `compose pull`,
+`up -d --wait`, then prunes: excluded repos to zero tags, the pre-GHCR
+legacy image names to zero (one-time disk reclaim, idempotent), deployed
+repos keep two tags. Rollback = `.\deploy.ps1 -Sha <short>` for any green
+commit. SEMANTICS CHANGE, deliberate: the deploy ships the PUSHED commit,
+never the working tree — a dirty tree gets a warning, an unpushed HEAD a
+refusal. The old script survives in git history before ca03cf2.
+
+**Not yet exercised:** the first real pull-deploy to the droplet (downloads
+a full generation, ~3.1GB for its app+extractor set — no shared layers with
+the locally-built images it replaces; 13G free, fits) and the path-filter
+skip/retag behavior on a natural docs-only push. Both prove themselves on
+next use.
