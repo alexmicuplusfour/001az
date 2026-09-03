@@ -146,7 +146,7 @@ import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, s
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
 import { refreshRateTable, setModelPrice, wantedModels, priceState } from "./pricing.js";
-import { meterAiCall } from "./metering.js";
+import { meterAiCall, priceUnpricedHistory } from "./metering.js";
 import { validRate, unitList, unitVocabulary } from "./units.js";
 import { learnPrices } from "./price-learner.js";
 import { MODEL_CAPABILITIES, kindList, capabilityLabel } from "./capabilities.js";
@@ -1628,8 +1628,8 @@ app.get("/api/admin/storage", requireAdmin, wrap(async (_req, res) => {
 // not just what's present: an editor declares new facts, so its vocabulary
 // can't be limited to the old ones.
 app.get("/api/admin/prices", requireAdmin, wrap(async (_req, res) => {
-  // Independent reads of the same table — concurrent for the reason
-  // learnPrices already states over the identical pair (price-learner.js).
+  // Independent reads of the same table, so they run concurrently rather
+  // than one behind the other — neither answer feeds the other.
   const [models, freshness] = await Promise.all([priceState(db), modelPriceFreshness(db)]);
   res.json({
     models,
@@ -1662,6 +1662,14 @@ app.post("/api/admin/prices/refresh", requireAdmin, wrap(async (_req, res) => {
   const learned = await learnPrices(db, { force: true });
   if (learned == null) return res.status(502).json({ error: "price refresh failed — see the server log" });
   res.json({ learned });
+}));
+
+// "Price past usage" — the plan's additive escape hatch, an admin's explicit
+// act (metering.js priceUnpricedHistory). Stamps TODAY's rates onto the
+// unpriced remainder only; priced history never moves. Idempotent by nature:
+// a second click finds no remainder left that any rung can price.
+app.post("/api/admin/prices/history", requireAdmin, wrap(async (_req, res) => {
+  res.json(await priceUnpricedHistory(db));
 }));
 
 // The content-editable board fields shared by every board save surface —

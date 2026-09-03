@@ -7,7 +7,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard } from "./helpers.js";
 import { meter, meterWrite, boardAiUsage, pruneUsageMeter, deleteBoard, addModelPrice } from "../server/db.js";
-import { meterAiCall, meterAiCalls } from "../server/metering.js";
+import { meterAiCall, meterAiCalls, priceUnpricedHistory } from "../server/metering.js";
 import { refreshRateTable, ratesFor, setModelPrice, wantedModels } from "../server/pricing.js";
 import { registerProvider, unregisterProvider, PROVIDERS } from "../server/providers.js";
 
@@ -277,6 +277,46 @@ test("rates: a descriptor's prices are validated at the one registry write", asy
   assert.doesNotThrow(() => registerProvider("free-co", { label: "Free", keyless: true, prices: { "*": { "*": 0 } } }));
   unregisterProvider("free-co");
   assert.ok(!PROVIDERS["bad-price"], "a rejected descriptor never enters the registry");
+});
+
+test("price unpriced history: the remainder gets today's rate; priced history never moves", async () => {
+  const b = await seedBoard(db, "price-history");
+  registerProvider("history-co", { label: "History", keyless: true });
+  try {
+    await refreshRateTable(db);
+    // Metered before any rung knew a rate — the $22-invisible shape.
+    await meter(db, { boardId: b, capability: "tag", provider: "history-co", model: "late" },
+      { input_tokens: 1000, requests: 2 }, ratesFor("history-co", "late"));
+    // Metered at a rate that was KNOWN then — the write-time stamp this
+    // action must never touch, however the rate moves afterwards.
+    await meter(db, { boardId: b, capability: "tag", provider: "history-co", model: "early" },
+      { input_tokens: 500 }, { input_tokens: 1 });
+
+    // Rates arrive after the fact: a per-model rate for the latecomer, a
+    // provider-wide $0 for its requests (the wildcard is the same one a
+    // write resolves), and a REPRICING of the already-stamped model.
+    await setModelPrice(db, { provider: "history-co", model: "late", unit: "input_tokens", microsPerUnit: 5 });
+    await setModelPrice(db, { provider: "history-co", model: "*", unit: "requests", microsPerUnit: 0 });
+    await setModelPrice(db, { provider: "history-co", model: "early", unit: "input_tokens", microsPerUnit: 9 });
+
+    const first = await priceUnpricedHistory(db);
+    assert.ok(first.rows >= 2 && first.micros >= 5000, "the action reports what it priced");
+    const rows = (await db.query(
+      "SELECT model, unit, quantity, priced_quantity, cost_micros FROM usage_meter WHERE board_id=$1 ORDER BY model, unit", [b]
+    )).rows.map((r) => ({ model: r.model, unit: r.unit, q: Number(r.quantity), pq: Number(r.priced_quantity), cm: Number(r.cost_micros) }));
+    assert.deepEqual(rows, [
+      { model: "early", unit: "input_tokens", q: 500, pq: 500, cm: 500 }, // stamped at 1 then, 9 now — still 500
+      { model: "late", unit: "input_tokens", q: 1000, pq: 1000, cm: 5000 }, // the remainder, at today's 5
+      { model: "late", unit: "requests", q: 2, pq: 2, cm: 0 }, // $0 via the wildcard — priced, a knowledge claim
+    ]);
+
+    // Idempotent by nature: everything a rung can price is priced, and what
+    // no rung can price (the ''-provider backfill, rateless pairs) is never
+    // touched — so a second click finds nothing.
+    assert.deepEqual(await priceUnpricedHistory(db), { rows: 0, micros: 0 });
+  } finally {
+    unregisterProvider("history-co");
+  }
 });
 
 test("meter: the rates parameter is generic — a non-AI unit prices the same way", async () => {

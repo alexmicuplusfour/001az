@@ -72,6 +72,17 @@ export function requireValidImages(name, desc) {
 // descriptor; a falsified billing record is not. So it gets the same
 // enforcement point as the other two contracts — the one registry write, which
 // is what holds built-ins and plugins to it identically.
+// Its companion, `priceNamespace`: the community map's own name for this
+// vendor, and the whole of what a descriptor says about that rung. Declaring
+// one asserts "the models this provider serves ARE that vendor's models, at
+// that vendor's prices" — so since 2026-09-04 one pull stores that
+// namespace's ENTIRE catalog against this provider id, not merely the models
+// someone happened to use (price-learner.js). Two descriptors may name the
+// same namespace and both price from it. Declaring none is the self-hosted
+// answer: the rung then never looks this provider up at all, which is the
+// trap metering-plan.md names — a box serving "llama3" must not inherit
+// hosted llama3 prices. Nothing to validate here; an unknown namespace simply
+// never matches an entry.
 export function requireValidPrices(name, desc) {
   const prices = desc.prices;
   if (prices === undefined) return;

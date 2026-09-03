@@ -3069,9 +3069,17 @@ export const APP_SCOPE_LABEL = "outside any board";
 // carries the row, and "OpenAI · unattributed" would read as a claim).
 export const UNATTRIBUTED_LABEL = "unattributed";
 
+// What a rates map answers for ONE unit: its own rate, else the whole-subject
+// '*' wildcard (pricing.js builds both axes; a '*' UNIT is honored here). One
+// spelling, because two stampers now read it — meter() at write time and
+// priceUnpricedMeter() over history — and a rate precedence that drifted
+// between them would bill the same rate table two ways into a cost_micros
+// nothing recomputes.
+export const rateOf = (rates, unit) => rates[unit] ?? rates["*"];
+
 export async function meter(db, { boardId = "", capability, provider = "", model = "" }, units = {}, rates = {}) {
   const rows = Object.entries(units)
-    .map(([unit, n]) => [unit, Math.round(Number(n)), rates[unit] ?? rates["*"]])
+    .map(([unit, n]) => [unit, Math.round(Number(n)), rateOf(rates, unit)])
     .filter(([, q]) => q > 0)
     .map(([unit, q, rate]) => ({
       unit, q,
@@ -3167,6 +3175,48 @@ export async function meterWrite(fn) {
 export async function pruneUsageMeter(db, cutoffMs) {
   const { rowCount } = await db.query(`DELETE FROM usage_meter WHERE day < $1`, [day(cutoffMs)]);
   return rowCount;
+}
+
+// Stamp rates onto history that metered before any rung knew one — the
+// mechanism under the plan's additive "price unpriced history" admin action
+// (metering.js joins the rates in; a route owns the asking). ONLY the
+// unpriced remainder moves: quantity − priced_quantity is multiplied at the
+// handed-in rate and ADDED to cost_micros, and priced_quantity catches up.
+// Rows whose units were already priced are untouched by construction, so
+// write-time stamping stays the law for priced history — this prices what
+// was never priced, at the rate known NOW, which the surface that offers the
+// action says out loud. Same shape as meter(): rates are caller DATA (here as
+// (provider, model, unit, micros) ROWS, since one call spans many subjects),
+// and ROUND matches meter()'s Math.round for the non-negative values a rate
+// can be.
+//
+// The money is computed ONCE, in `tgt`, and the UPDATE hands that same number
+// back through RETURNING — so the report and the stamp are provably the one
+// figure rather than two identical expressions that could drift, and the
+// count is of rows that actually moved.
+export async function priceUnpricedMeter(db, rateRows) {
+  if (!rateRows.length) return { rows: 0, micros: 0 };
+  const { rows: [r] } = await db.query(
+    `WITH tgt AS (
+       SELECT m.day, m.board_id, m.capability, m.provider, m.model, m.unit,
+              ROUND((m.quantity - m.priced_quantity) * r.micros) AS add_micros
+       FROM usage_meter m
+       JOIN jsonb_to_recordset($1::jsonb) AS r(provider text, model text, unit text, micros numeric)
+         ON m.provider = r.provider AND m.model = r.model AND m.unit = r.unit
+       WHERE m.quantity > m.priced_quantity
+     ), upd AS (
+       UPDATE usage_meter m
+       SET cost_micros = m.cost_micros + t.add_micros,
+           priced_quantity = m.quantity
+       FROM tgt t
+       WHERE m.day = t.day AND m.board_id = t.board_id AND m.capability = t.capability
+         AND m.provider = t.provider AND m.model = t.model AND m.unit = t.unit
+       RETURNING t.add_micros
+     )
+     SELECT COUNT(*) AS n, COALESCE(SUM(add_micros), 0) AS micros FROM upd`,
+    [JSON.stringify(rateRows)]
+  );
+  return { rows: Number(r.n), micros: Number(r.micros) };
 }
 
 // Per-board paid-call usage, all-time + today, plus the last 14 days broken
@@ -3321,7 +3371,12 @@ const unpricedList = (byUnit) =>
 // priced — the durable half of pricing.js's want list (refreshRateTable seeds
 // from it, so a restart can't orphan a new model's unpriced history; cost is
 // write-time and never recomputed, which is how a $22 opus-5 run stayed
-// invisible across a restart, 2026-09-03). Rides usageRows, the one
+// invisible across a restart, 2026-09-03). The '' guard is about FETCHING a
+// price, not about pricing: a bare model id is nothing to look up in a
+// community map. metering.js's priceUnpricedHistory deliberately keeps no
+// such guard — a connector's requests meter with no model at all and are
+// priced by a provider-wide rate, so the two filters differ on purpose.
+// Rides usageRows, the one
 // dimensioned reader, for the same reason boardUsageSummary below does.
 export async function unpricedMeterModels(db) {
   return (await usageRows(db, { group: ["provider", "model"] }))

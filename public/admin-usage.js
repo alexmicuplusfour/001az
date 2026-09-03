@@ -133,8 +133,8 @@ async function draw() {
   const deal = !cost
     ? "No call in this window ran at a known rate — quantities are still metered, and a rate set in Prices applies to new calls."
     : cost.unpriced.length
-      ? `Stamped when each call ran, at the rate known then — never re-priced. Not yet priced, so not in these figures: ${fmtUnpriced(cost.unpriced)}.`
-      : "Stamped when each call ran, at the rate known then — never re-priced. Everything in this window ran at a known rate.";
+      ? `Stamped when each call ran, at the rate known then — priced figures are never rewritten. Not yet priced, so not in these figures: ${fmtUnpriced(cost.unpriced)}. “Price past usage” below stamps what a rate now covers.`
+      : "Stamped when each call ran, at the rate known then — priced figures are never rewritten. Everything in this window ran at a known rate.";
   const moneyRow = document.createElement("div");
   moneyRow.className = "kpi-row usage-money";
   moneyRow.innerHTML = money.join("") + `<p class="muted usage-deal">${deal}</p>`;
@@ -314,6 +314,24 @@ function renderPrices({ wanted, freshness }) {
       loadPrices(); // rebuilds this section, button included
     } catch (err) { toast.error(err.message); }
   });
+  // "Price past usage" — the plan's additive escape hatch as a person's
+  // explicit act (never automatic: today's rate stamped onto yesterday's
+  // usage is a choice, so a person makes it). Additive only — the remainder
+  // gets priced; already-priced history never moves.
+  const historyBtn = document.createElement("button");
+  historyBtn.className = "ghost sm";
+  historyBtn.textContent = "price past usage";
+  historyBtn.title = "Stamp today's rates onto usage that was metered before a rate was known — already-priced history is never rewritten";
+  historyBtn.onclick = busy(historyBtn, async () => {
+    try {
+      const { rows, micros } = await api("POST", "/api/admin/prices/history");
+      toast(rows ? `Priced ${fmtUsd(micros / 1e6)} of past usage` : "Nothing to price — no unpriced usage has a known rate");
+      // Only the METER moved: this action stores no rate and rebuilds no
+      // table, so the fetch list and freshness line in this section are
+      // unchanged and it does not refetch. The figures above are the news.
+      draw();
+    } catch (err) { toast.error(err.message); }
+  });
   // The editor itself is a dialog: a resolved catalog runs to hundreds of rows
   // by the unit columns, which is a table to work in rather than one to scroll
   // past on the way to the rest of the tab. `onChange` because a save can
@@ -323,7 +341,7 @@ function renderPrices({ wanted, freshness }) {
   editBtn.textContent = "edit prices";
   editBtn.title = "The resolved rate for every provider and model — and where to type one in";
   editBtn.onclick = () => openPricesModal({ onChange: loadPrices });
-  controls.append(freshEl, refreshBtn, editBtn);
+  controls.append(freshEl, refreshBtn, historyBtn, editBtn);
   pricesSec.appendChild(controls);
 
   // What the learners are still hunting — models seen by the meter, no rate yet.

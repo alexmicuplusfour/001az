@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, req, jsonBox } from "./helpers.js";
 import { ratesFor, setModelPrices } from "../server/pricing.js";
 import { registerProvider, unregisterProvider } from "../server/providers.js";
+import { meter } from "../server/db.js";
 
 let srv, db, base, admin, member, mapBox, envBefore;
 before(async () => {
@@ -29,8 +30,8 @@ after(() => {
   return srv.close();
 });
 
-test("admin prices: all three routes are admin-only", async () => {
-  for (const [method, path] of [["GET", "/api/admin/prices"], ["PUT", "/api/admin/prices"], ["POST", "/api/admin/prices/refresh"]]) {
+test("admin prices: every route is admin-only", async () => {
+  for (const [method, path] of [["GET", "/api/admin/prices"], ["PUT", "/api/admin/prices"], ["POST", "/api/admin/prices/refresh"], ["POST", "/api/admin/prices/history"]]) {
     const r = await req(base, method, path, { sid: member.sid, ...(method === "GET" ? {} : { body: {} }) });
     assert.equal(r.status, 403, `${method} ${path} must not answer a non-admin`);
   }
@@ -125,4 +126,23 @@ test("admin prices: refresh forces a learner pass and answers with what it learn
   assert.ok(!get.json.wanted.some((w) => w.model === "learnable-model"));
   // …and the pull left its timestamp: the freshness line has something to say.
   assert.ok(get.json.freshness.some((f) => f.source === "community" && f.at > 0));
+});
+
+test("admin prices: the history route prices the unpriced remainder and reports the money", async () => {
+  // Usage metered before the rate existed (rates: {} — nothing known then),
+  // then the admin types one in: the shape the action exists for.
+  await meter(db, { capability: "tag", provider: "admin-price-co", model: "before-its-time" }, { input_tokens: 1000 });
+  await req(base, "PUT", "/api/admin/prices", {
+    sid: admin.sid,
+    body: { provider: "admin-price-co", model: "before-its-time", unit: "input_tokens", microsPerUnit: 4 },
+  });
+  const r = await req(base, "POST", "/api/admin/prices/history", { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.ok(r.json.rows >= 1 && r.json.micros >= 4000, "rows touched and micros added come back");
+  const { rows } = await db.query(
+    "SELECT quantity, priced_quantity, cost_micros FROM usage_meter WHERE provider='admin-price-co' AND model='before-its-time'");
+  assert.deepEqual(rows.map((x) => [Number(x.quantity), Number(x.priced_quantity), Number(x.cost_micros)]), [[1000, 1000, 4000]]);
+  // A second click finds nothing left that any rung can price.
+  const again = await req(base, "POST", "/api/admin/prices/history", { sid: admin.sid });
+  assert.deepEqual(again.json, { rows: 0, micros: 0 });
 });

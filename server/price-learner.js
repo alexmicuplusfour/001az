@@ -1,10 +1,10 @@
 // The learners (planning/metering-plan.md, Stage 3b): the two rungs that
-// FETCH. The community learner pulls LiteLLM's public price map and resolves
-// the models pricing.js wants; the provider learner asks each connected
-// provider's wire what its models cost (listPrices — OpenRouter answers, most
-// return null). Both hand rows to setModelPrices, which owns the
-// store-then-rebuild consequence; rating itself stays in pricing.js and this
-// module never answers a rate to anyone.
+// FETCH. The community learner pulls LiteLLM's public price map and stores
+// every entry under a configured namespace; the provider learner asks each
+// connected provider's wire what its models cost (listPrices — OpenRouter
+// answers, most return null). Both hand rows to setModelPrices, which owns
+// the store-then-rebuild consequence; rating itself stays in pricing.js and
+// this module never answers a rate to anyone.
 //
 // Runs on the worker's hourly maintenance tick and gates its own network:
 // the map is pulled when a wanted model hasn't been looked up yet, or when
@@ -93,55 +93,77 @@ const LITELLM_FIELDS = {
 // public JSON file at worst, and `now` is a parameter so tests drive the
 // clock instead of resetting module state.
 let mapPulledAt = 0; // last SUCCESSFUL pull — a failure retries next tick
-let tried = new Set(); // wanted keys looked up in the last pull: a model the map lacks must not re-trigger hourly pulls
+let tried = new Set(); // wanted keys COVERED by the last pull (which stores whole namespaces; wants only TRIGGER it) — a model the map lacks must not re-trigger hourly pulls
 const askedAt = new Map(); // provider -> last listPrices attempt (success or not — a flaky box is re-asked next period, not next tick)
 
 const wantKey = (w) => `${w.provider}\u0000${w.model}`;
 
-// One wanted model against the map: its bare id, or namespaced under the
-// descriptor's declared community namespace — and in either spelling the
-// entry must BELONG to that namespace. A self-hosted box serving "llama3"
-// has no namespace, is never even looked up, and can't inherit hosted llama3
-// prices (the trap, metering-plan.md).
-function communityRows(map, wants) {
+// The whole map against the configured namespaces: every entry BELONGING to a
+// namespace some descriptor declared becomes rows for the providers that
+// declared it — not just the models anyone wanted. The provider rung set the
+// posture (OpenRouter's ~300-model catalog is stored whole so a newly-picked
+// model is priced from its first paid call, 3b); this rung inherits it:
+// measured 2026-09-04, the four stock namespaces cover ~440 entries ≈ 900
+// rows, a size dropUnchanged turns into zero writes on an unchanged weekly
+// refresh — and next year's models are priced before anyone types them in.
+// The trap holds by the same membership test as before: an entry prices a
+// provider only through that provider's OWN declared namespace, so a
+// self-hosted box serving "llama3" (no namespace) still inherits nothing.
+function communityRows(map) {
+  // namespace -> the provider ids that declared it. Rows are stored per
+  // PROVIDER — the meter's key — and nothing says two descriptors can't
+  // share a namespace (providers.js states what declaring one means).
+  const byNs = new Map();
+  for (const [id, desc] of Object.entries(PROVIDERS)) {
+    if (!desc.priceNamespace) continue;
+    if (!byNs.has(desc.priceNamespace)) byNs.set(desc.priceNamespace, []);
+    byNs.get(desc.priceNamespace).push(id);
+  }
+  // A model can appear under BOTH its bare key and `ns/`-prefixed (13 pairs
+  // live, 2026-09-04) and one pair disagrees — gemini-exp-1206's bare entry
+  // carries the real rate while the prefixed one says free. So bare
+  // OVERWRITES and a prefixed key only fills a gap, which is the preference
+  // the wanted-model lookup always had. A collision is only ever possible
+  // WITHIN a namespace, since the namespace comes off the entry itself —
+  // which is what lets one keyed pass settle it.
+  const best = new Map(); // ns\u0000model -> { ns, model, entry }
+  for (const [k, entry] of Object.entries(map)) {
+    const ns = entry?.litellm_provider;
+    if (!byNs.has(ns)) continue; // an imposter or foreign namespace is nobody's price
+    const prefixed = k.startsWith(`${ns}/`);
+    const model = prefixed ? k.slice(ns.length + 1) : k;
+    const bk = `${ns}\u0000${model}`;
+    if (!prefixed || !best.has(bk)) best.set(bk, { ns, model, entry });
+  }
   const rows = [];
-  for (const w of wants) {
-    const ns = PROVIDERS[w.provider]?.priceNamespace;
-    if (!ns) continue;
-    const entry = [map[w.model], map[`${ns}/${w.model}`]].find((e) => e && e.litellm_provider === ns);
-    if (!entry) continue;
-    for (const [field, unit] of Object.entries(LITELLM_FIELDS)) {
-      // typeof, not Number(): a null or string cost is schema drift, and
-      // coercing it would turn "we don't know" into a $0 knowledge claim.
-      // validRate is the shared rule (units.js) — same one the descriptor
-      // rung and the admin route hold.
-      if (typeof entry[field] === "number" && validRate(entry[field]))
-        rows.push({ provider: w.provider, model: w.model, unit, microsPerUnit: dollarsToMicros(entry[field]) });
-    }
+  for (const { ns, model, entry } of best.values()) {
+    // typeof, not Number(): a null or string cost is schema drift, and
+    // coercing it would turn "we don't know" into a $0 knowledge claim.
+    // validRate is the shared rule (units.js) — same one the descriptor
+    // rung and the admin route hold. Resolved once per MODEL rather than
+    // once per provider sharing the namespace.
+    const priced = Object.entries(LITELLM_FIELDS)
+      .filter(([field]) => typeof entry[field] === "number" && validRate(entry[field]));
+    for (const provider of byNs.get(ns))
+      for (const [field, unit] of priced)
+        rows.push({ provider, model, unit, microsPerUnit: dollarsToMicros(entry[field]) });
   }
   return rows;
 }
 
-async function pullCommunity(freshness, current, now, force) {
+async function pullCommunity(freshness, now, force) {
   const url = sourceUrl();
   if (!url) return [];
-  // Resolve wanted models AND every model already community-priced — a priced
-  // model leaves the wanted set (that's the drain), so without the second half
-  // a weekly refresh would pull the map and then update nothing. The wanted
-  // set carries both halves of the concept: live lookups (ratesFor) and the
-  // durable meter-seeded pairs (pricing.js refreshRateTable) — a pair the map
-  // permanently lacks is untried again after every restart, costing one map
-  // pull per boot: the module's accepted worst case ("a restart re-pulls one
-  // public JSON file"), retired for good only when the plan's additive
-  // "price unpriced history" admin action drains the row itself.
-  const communityPriced = current.filter((r) => r.source === "community");
-  const priced = new Set(communityPriced.map(wantKey));
-  const wants = new Map([...wantedModels(), ...communityPriced].map((w) => [wantKey(w), w]));
-  // "Untried" means never LOOKED UP and not already priced. Without the second
-  // half, a restart (which empties `tried`) would re-pull the whole map on its
-  // first tick forever, since the stored rows themselves put every priced
-  // model back into `wants`. Being already priced IS having been tried.
-  const untried = [...wants.keys()].some((k) => !tried.has(k) && !priced.has(k));
+  // The want list is only the TRIGGER, never a filter: an untried wanted
+  // model (a board picked something the table lacks) pulls off-cadence, and
+  // what the pull stores is the whole configured-namespace catalog. A model
+  // the map permanently lacks stays wanted-but-tried — re-tried after a
+  // restart or when the weekly refresh pulls anyway, not hourly — which is
+  // the module's accepted worst case ("a restart re-pulls one public JSON
+  // file"); typing an admin rate is what retires such a pair for good, since
+  // any rung answering drains the want (pricing.js refreshRateTable).
+  const wants = wantedModels().map(wantKey);
+  const untried = wants.some((k) => !tried.has(k));
   // Two clocks, and both are needed: `mapPulledAt` because an unchanged
   // refresh writes nothing and so never advances fetched_at, `storedAt`
   // because mapPulledAt is per-process and must not re-pull after a restart.
@@ -151,8 +173,8 @@ async function pullCommunity(freshness, current, now, force) {
   if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`);
   const map = await r.json();
   mapPulledAt = now;
-  tried = new Set(wants.keys());
-  return communityRows(map, wants.values());
+  tried = new Set(wants);
+  return communityRows(map);
 }
 
 // Ask every CONNECTED provider whose wire can answer — no reason to poll a
@@ -213,20 +235,26 @@ function dropUnchanged(current, rows) {
 // deserves the difference between "nothing new" and "it broke".
 export async function learnPrices(db, { now = Date.now(), force = false } = {}) {
   try {
-    const [freshness, current] = await Promise.all([modelPriceFreshness(db), loadModelPrices(db)]);
+    const freshness = await modelPriceFreshness(db);
     // Each rung fetches independently — community being offline must not stop
     // a provider from answering for itself — and the two are concurrent for
     // the same reason. `source`/`fetchedAt` are stamped once, here, so a rung
     // returns plain rates and a third rung can't get the convention wrong.
     const [community, provider] = await Promise.all([
-      pullCommunity(freshness, current, now, force).catch((e) => {
+      pullCommunity(freshness, now, force).catch((e) => {
         console.warn(`price learner: community pull failed (kept last good rows): ${e.message}`);
         return [];
       }),
       askProviders(db, freshness, now, force),
     ]);
     const stamp = (rs, source) => rs.map((r) => ({ ...r, source, fetchedAt: now }));
-    const fresh = dropUnchanged(current, [...stamp(community, "community"), ...stamp(provider, "provider")]);
+    const learned = [...stamp(community, "community"), ...stamp(provider, "provider")];
+    // The stored rows are read only when a rung actually answered: both are
+    // gated, so the ordinary tick learns nothing and has no reason to pay for
+    // a DISTINCT ON over the whole price history — an answer the
+    // whole-namespace import just made a good deal bigger.
+    if (!learned.length) return 0;
+    const fresh = dropUnchanged(await loadModelPrices(db), learned);
     if (fresh.length) {
       await setModelPrices(db, fresh);
       console.log(`price learner: ${fresh.length} rate(s) learned`);

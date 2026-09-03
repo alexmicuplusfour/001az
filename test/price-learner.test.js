@@ -43,6 +43,11 @@ const LITELLM_MAP = {
   // it would bill the image and the tokens that already contain it. Both image
   // fields stay unmapped — see LITELLM_FIELDS.
   "m-vision": { litellm_provider: "hostedns", mode: "chat", input_cost_per_token: 3e-6, input_cost_per_image: 0.0048, output_cost_per_image: 0.04 },
+  // One model under BOTH spellings, and they disagree — the live map's
+  // gemini-exp-1206 (bare carries the real rate, prefixed says free). The
+  // bare key must win, same preference the wanted-model lookup always had.
+  "m-dup": { litellm_provider: "hostedns", mode: "chat", input_cost_per_token: 3e-7 },
+  "hostedns/m-dup": { litellm_provider: "hostedns", mode: "chat", input_cost_per_token: 0 },
 };
 
 // An OpenRouter-shaped /models listing: dollars-per-unit STRINGS, zero kept
@@ -136,9 +141,12 @@ test("air-gapped: an empty MODEL_PRICE_SOURCE_URL disables the community rung �
   assert.equal(mapBox.hits.length, 0);
 });
 
-test("community: wanted models price from the map — bare and namespaced keys, dollars ×1e6", async () => {
+test("community: one pull prices the WHOLE namespace — wanted or not, bare and namespaced keys, dollars ×1e6", async () => {
   process.env.MODEL_PRICE_SOURCE_URL = mapBox.url("/prices.json");
-  for (const m of ["m-bare", "m-prefixed", "m-imposter", "m-embed", "m-per-call", "m-whisper", "m-vision"]) ratesFor("hosted-co", m);
+  // Two wants only: m-bare (left over from the air-gap test) is the trigger,
+  // m-imposter pins the trap. Every other model below is one NOBODY asked
+  // for — the catalog posture: stored because its namespace is configured.
+  ratesFor("hosted-co", "m-imposter");
   await learnPrices(db, { now: clock });
   assert.equal(mapBox.hits.length, 1);
   assert.deepEqual(ratesFor("hosted-co", "m-bare"), { input_tokens: 3, output_tokens: 15, cache_read_tokens: 0.3 });
@@ -155,6 +163,8 @@ test("community: wanted models price from the map — bare and namespaced keys, 
   assert.deepEqual(ratesFor("hosted-co", "m-embed"), { input_tokens: 0.02 });
   // the imposter belongs to another namespace: still unpriced, never a guess
   assert.deepEqual(ratesFor("hosted-co", "m-imposter"), {});
+  // both spellings present and disagreeing: the bare key's rate is stored
+  assert.deepEqual(ratesFor("hosted-co", "m-dup"), { input_tokens: 0.3 });
   // priced models drained from the fetch list; the miss stays wanted
   const wanted = wantedModels().map((w) => w.model);
   assert.ok(!wanted.includes("m-bare") && wanted.includes("m-imposter"));

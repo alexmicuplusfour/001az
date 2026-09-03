@@ -9,7 +9,7 @@
 // meterAiCall/meterAiCalls/spentDetail projections below it are the AI-shaped
 // ones. Stage 5d made that distinction load-bearing rather than theoretical —
 // the connector runtime spends here too, and it has no wire `usage` at all.
-import { meter, meterWrite } from "./db.js";
+import { meter, meterWrite, usageRows, priceUnpricedMeter, rateOf } from "./db.js";
 import { ratesFor } from "./pricing.js";
 import { meterAs } from "./capabilities.js";
 
@@ -98,6 +98,37 @@ export function meterAiCalls(db, boardId, dims, usages = [], extra = {}) {
 // so there is exactly one answer to "one or many" in this file.
 export const meterAiCall = (db, boardId, dims, usage = {}, extra = {}) =>
   meterAiCalls(db, boardId, dims, [usage], extra);
+
+// The plan's "price unpriced history" admin action (metering-plan.md — the
+// additive escape hatch it reserved "if the pain is real"; a $22 opus-5 run
+// reading ≈$0 was the pain, 2026-09-04). Stamp the rates known NOW onto
+// usage that metered before any rung knew one. Additive only: priced history
+// is never rewritten (write-time stamping stays the law), and pairs no rung
+// prices stay honestly unpriced — a rate row is built only where one exists,
+// so the pre-meter backfill's ''-provider rows resolve to nothing and are
+// never touched. The unit fallback is meter()'s own `rateOf`, called rather
+// than restated, so a provider-wide wildcard prices history exactly as it
+// would have priced the call — including at 0, the knowledge claim. NOT
+// routed through meterWrite: this is a person's explicit act, and a failure
+// belongs in their face, not a server log.
+export async function priceUnpricedHistory(db) {
+  const rows = [];
+  for (const r of await usageRows(db, { group: ["provider", "model"] })) {
+    // Pairs with nothing owing are skipped BEFORE the rate lookup: ratesFor is
+    // not a pure read — it records a want for any namespaced pair carrying no
+    // rates of its own — and a fully-priced pair has no business teaching the
+    // learner anything. It also keeps the rate list down to rows the
+    // statement can actually use.
+    if (!Object.values(r.units).some((u) => u.quantity > u.priced_quantity)) continue;
+    const rates = ratesFor(r.provider, r.model);
+    for (const [unit, u] of Object.entries(r.units)) {
+      const micros = rateOf(rates, unit);
+      if (u.quantity > u.priced_quantity && micros != null)
+        rows.push({ provider: r.provider, model: r.model, unit, micros });
+    }
+  }
+  return priceUnpricedMeter(db, rows);
+}
 
 // Projection 2 — what served a paid call and what it cost, in the shape the
 // job row's `detail` carries it (metering-plan.md Stage 2). The legs that bill

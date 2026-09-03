@@ -201,8 +201,13 @@ community map is the last rung, not the answer:
 5. **Nothing** — the row is metered and unpriced. Not an error, not a guess.
 
 **Fetch as needed, not vendored.** An unrecognized `(provider, model)` is the
-trigger: pull the map, find the row, store it, never look again. A scheduled
-re-pull refreshes what's already stored. A failed fetch keeps the last good rows.
+trigger: pull the map, store it, never look again. Since 2026-09-04 a pull
+stores EVERY entry under a configured namespace, not just the wanted models —
+the provider rung's whole-catalog posture (OpenRouter's ~300 models), adopted
+after claude-opus-5 spent $22 unpriced: ~440 entries ≈ 900 rows across the four
+stock namespaces, and next year's models are priced before anyone types them
+in. A scheduled re-pull refreshes what's already stored. A failed fetch keeps
+the last good rows.
 Same posture as model discovery — live where possible, cached fallback, never an
 error and never an empty answer.
 
@@ -397,8 +402,13 @@ changes.
   via runtime fetch (nothing vendored or redistributed; empty URL disables).
   Decisions: **no retroactive repricing** (write-time stamping, strictly; an
   additive "price unpriced history" admin action is possible later if the
-  pain is real); GLM ships without a `priceNamespace` until community
-  coverage is verified — unpriced-but-metered beats wrongly-priced.
+  pain is real — the pain got real 2026-09-04, a $22 opus-5 run reading ≈$0,
+  and the action shipped: `POST /api/admin/prices/history` + the Usage tab's
+  "price past usage" button. Additive and remainder-only — priced history
+  still never moves; the unpriced remainder is stamped at the rates known at
+  click time, a person's explicit act, never automatic); GLM ships without a
+  `priceNamespace` until community coverage is verified —
+  unpriced-but-metered beats wrongly-priced.
   - **3a — mechanism + stamping. ✅ DONE (2026-08-31, suite 1267/1267 incl. 7
     new pricing tests).** Migration 0041 (`model_prices`: micros-per-unit
     NUMERIC — numerically the $-per-million a pricing page states; source +
