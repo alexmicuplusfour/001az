@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { PROVIDERS } from "../server/providers.js";
 import { compatRequest as buildRequest } from "../server/ai-providers/wires/compat.js";
 import { OUTPUT_BUDGET } from "../server/ai-providers/wires/tool.js";
+import { rejectsTemperature, temperatureRejected } from "../server/ai-providers/wires/temperature.js";
 
 // compatRequest takes the descriptor's `compat` quirk block, not a provider
 // name — the wire never reaches into the registry. These tests still pin the
@@ -251,7 +252,7 @@ const tagOk = () => new Response(JSON.stringify({
 }), { status: 200 });
 
 test("compat wire: a refused temperature is dropped and re-sent, not failed", async () => {
-  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   temperatureRejected.clear();
   // gpt-5.4-mini passes the noTemperature regex, so the first call really does
   // carry temperature 0 — this is the unknown-id path the regex can't cover.
@@ -271,7 +272,7 @@ test("compat wire: a refused temperature is dropped and re-sent, not failed", as
 });
 
 test("compat wire: the refusal is learned, so only the first item pays for it", async () => {
-  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   temperatureRejected.clear();
   const { fetch, bodies } = recorder((_n, body) => ("temperature" in body ? tempRefusal() : tagOk()));
   const tag = () => compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5.4-mini" });
@@ -283,7 +284,7 @@ test("compat wire: the refusal is learned, so only the first item pays for it", 
 });
 
 test("compat wire: an unrelated 400 still fails, and fails once", async () => {
-  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   temperatureRejected.clear();
   const { fetch, bodies } = recorder(() => new Response(JSON.stringify({
     error: { message: "Invalid API key provided", code: "invalid_api_key" },
@@ -300,7 +301,7 @@ test("compat wire: an unrelated 400 still fails, and fails once", async () => {
 // model) a 400 that happens to mention the word is somebody else's fault, and
 // re-sending the identical request would just buy the same rejection twice.
 test("compat wire: no retry when the request carried no temperature", async () => {
-  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   temperatureRejected.clear();
   const { fetch, bodies } = recorder(() => tempRefusal());
   await withFetch(fetch, () => assert.rejects(
@@ -315,7 +316,7 @@ test("compat wire: no retry when the request carried no temperature", async () =
 // Vendors other than OpenAI have no structured `param`, only prose — the
 // recovery must read either. (Any compat plugin can hit this.)
 test("compat wire: a prose-only refusal is recognised too", async () => {
-  const { compatWire, temperatureRejected } = await import("../server/ai-providers/wires/compat.js");
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
   temperatureRejected.clear();
   const proseOnly = () => new Response(JSON.stringify({
     error: { message: "temperature is not supported for this model" },
@@ -326,6 +327,73 @@ test("compat wire: a prose-only refusal is recognised too", async () => {
   assert.deepEqual(result.input, { kind: ["a"] });
   assert.equal(bodies.length, 2);
   temperatureRejected.clear();
+});
+
+// ─── the Anthropic twin ──────────────────────────────────────────────────────
+// Anthropic deprecated non-default sampling from Opus 4.7 onward, and this
+// wire used to send temperature 0 unconditionally — on 2026-09-03 a fable-5.1
+// tagging board failed every item first-attempt on it (400 is permanent-
+// shaped). Same recovery as compat, exercised through the real SDK against
+// the stubbed fetch; the refusal body is Anthropic's real error shape.
+const anthropicRefusal = () => new Response(JSON.stringify({
+  type: "error",
+  error: { type: "invalid_request_error", message: "`temperature` is deprecated for this model." },
+  request_id: "req_test",
+}), { status: 400, headers: { "content-type": "application/json" } });
+const anthropicTagOk = () => new Response(JSON.stringify({
+  id: "msg_1", type: "message", role: "assistant", model: "claude-fable-5-1",
+  content: [{ type: "tool_use", id: "tu_1", name: "record_tags", input: { kind: ["a"] } }],
+  stop_reason: "tool_use", stop_sequence: null, usage: { input_tokens: 10, output_tokens: 5 },
+}), { status: 200, headers: { "content-type": "application/json" } });
+
+test("anthropic wire: a refused temperature is dropped, re-sent and learned", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  temperatureRejected.clear();
+  const { fetch, bodies } = recorder((_n, body) => ("temperature" in body ? anthropicRefusal() : anthropicTagOk()));
+  // A key this test alone uses: the wire caches SDK clients per (base, key)
+  // and the SDK captures globalThis.fetch at CONSTRUCTION — a fresh key means
+  // the client is built inside withFetch and holds the stub.
+  const opts = { ...tagOpts({ name: "record_tags", description: "d" }), apiKey: "k-anthropic-temp-recovery", model: "claude-fable-5-1" };
+  const result = await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
+  // The item is tagged — the whole point. Failing here killed a real board.
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].temperature, 0);
+  assert.ok(!("temperature" in bodies[1]), "the retry must omit the field, not send another value");
+  assert.deepEqual(bodies[1].messages, bodies[0].messages);
+  // …and the refusal is learned: the next item omits the field up front
+  await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
+  assert.equal(bodies.length, 3);
+  assert.ok(!("temperature" in bodies[2]), "later items must omit the field up front");
+  temperatureRejected.clear();
+});
+
+test("anthropic wire: an unrelated 400 still fails, and fails once", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  temperatureRejected.clear();
+  const { fetch, bodies } = recorder(() => new Response(JSON.stringify({
+    type: "error",
+    error: { type: "invalid_request_error", message: "max_tokens: field required" },
+  }), { status: 400, headers: { "content-type": "application/json" } }));
+  const opts = { ...tagOpts({ name: "record_tags", description: "d" }), apiKey: "k-anthropic-unrelated-400", model: "claude-fable-5-1" };
+  await withFetch(fetch, () => assert.rejects(
+    anthropicWire.tag(PROVIDERS.anthropic, opts),
+    (e) => Number(e.status) === 400 && /max_tokens/.test(e.message)
+  ));
+  assert.equal(bodies.length, 1, "a non-temperature failure must not be re-paid");
+  temperatureRejected.clear();
+});
+
+// The shared vocabulary, pinned pure: rejection verbs, not mere mention. Each
+// vendor phrases the refusal its own way (OpenAI: structured param + prose
+// "Unsupported value"; Anthropic since 5.1: "deprecated") — and a 400 that
+// merely QUOTES the word, or a non-400 naming it, stays fatal.
+test("temperature vocabulary: rejection verbs, not mere mention", () => {
+  assert.ok(rejectsTemperature({ status: 400, message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}' }));
+  assert.ok(rejectsTemperature({ status: 400, param: "temperature" }));
+  assert.ok(rejectsTemperature({ status: 400, message: "temperature is not supported for this model" }));
+  assert.ok(!rejectsTemperature({ status: 400, message: "schema property `temperature` must be a number" }));
+  assert.ok(!rejectsTemperature({ status: 401, message: "temperature is not supported" }));
 });
 
 test("compat wire: the right-name call is found past an invented one", async () => {

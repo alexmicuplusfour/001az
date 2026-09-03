@@ -105,18 +105,21 @@ test("anthropicRequest: default tool is still record_tags when no tool arg", () 
   assert.deepEqual(r.tool_choice, { type: "tool", name: "record_tags" });
 });
 
-// Unconditional on this wire (unlike compat's guarded quirk): every Claude
-// model accepts temperature, and the app never enables extended thinking — the
-// one mode that would forbid a non-default value. Same rationale as the compat
-// side: closed-vocabulary classification wants the mode, not a sample.
-test("anthropicRequest: tagging samples at temperature 0, research included", () => {
+// Compat's convention on this wire too: `temperature` is the value to send,
+// undefined (or absent) omits the field. The wire owns the decision — 0 until
+// the model refuses; the drop-and-retry itself is tested at wire level in
+// compat.test.js, beside its compat twin.
+test("anthropicRequest: temperature carried verbatim, omitted when undefined", () => {
   const args = {
     model: "m", systemText: "s",
     schema: { type: "object", properties: {}, required: [] },
     parts: [{ kind: "text", text: "t" }],
   };
-  assert.equal(anthropicRequest(args).temperature, 0);
-  assert.equal(anthropicRequest({ ...args, research: true }).temperature, 0);
+  assert.equal(anthropicRequest({ ...args, temperature: 0 }).temperature, 0);
+  assert.equal(anthropicRequest({ ...args, temperature: 0, research: true }).temperature, 0);
+  // Omitted means ABSENT — sending any other value would just re-reject
+  for (const r of [anthropicRequest(args), anthropicRequest({ ...args, temperature: undefined })])
+    assert.ok(!("temperature" in r));
 });
 
 // ─── integration ─────────────────────────────────────────────────────────────

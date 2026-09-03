@@ -9,6 +9,7 @@
 // to a 10-min per-try timeout, and research tagging legitimately runs minutes.
 import Anthropic from "@anthropic-ai/sdk";
 import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
+import { rejectsTemperature, temperatureRejected, temperatureKey, learnTemperatureRejection } from "./temperature.js";
 
 // Per-item bound on web searches; each one bills on top of tokens.
 const MAX_SEARCHES = 5;
@@ -31,7 +32,11 @@ function anthropicClient(apiKey, base) {
 // Anthropic tool-use request. Research relaxes tool_choice to auto — a forced
 // tool call would block the server-side web_search tool — so the model must be
 // trusted (and validated downstream) to finish with record_tags.
-export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
+// `temperature` follows compat's convention: the value to send, undefined (or
+// absent) to omit the field. The WIRE decides per model — no id list in the
+// builder, because no static list stays right (the compat wire learned that
+// on gpt-5-mini, this wire on fable-5.1).
+export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL, temperature }) {
   const content = parts.map((p) => {
     if (p.kind === "image") return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     if (p.kind === "document") return { type: "document", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
@@ -45,11 +50,10 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
     // research floor was the same guess one rung higher.
     max_tokens: OUTPUT_BUDGET,
     // Closed-vocabulary classification wants the mode, not a sample — see the
-    // measurement in compatRequest. Unconditional here: every Claude model
-    // accepts it, and the app never enables extended thinking (which is the one
-    // mode that forbids a non-default temperature). Live-probed 2026-08-06 on
-    // claude-sonnet-4-6.
-    temperature: 0,
+    // measurement in compatRequest. Unconditional 0 until 2026-09-03, when
+    // fable-5.1 refused the field and failed a whole board first-attempt;
+    // provenance and the shared recovery vocabulary live in temperature.js.
+    ...(temperature !== undefined ? { temperature } : {}),
     system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
     tools: research
       ? [{ type: "web_search_20250305", name: "web_search", max_uses: MAX_SEARCHES }, toolDef]
@@ -61,8 +65,27 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
 
 export const anthropicWire = {
   async tag(desc, { apiKey, model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
-    const request = anthropicRequest({ model, systemText, schema, parts, research, tool });
-    let msg = await anthropicClient(apiKey, desc.base).messages.create(request);
+    // Same recovery contract as the compat wire (see temperature.js): when a
+    // model refuses temperature, drop it, re-send, and remember — the refusal
+    // costs one unbilled round trip per (endpoint, model) per process, which
+    // is cheaper than any attempt to know the catalog in advance.
+    const client = anthropicClient(apiKey, desc.base);
+    const learned = temperatureKey(desc.base || "", model);
+    const sent = !temperatureRejected.has(learned);
+    let request = anthropicRequest({ model, systemText, schema, parts, research, tool, temperature: sent ? 0 : undefined });
+    let msg;
+    try {
+      msg = await client.messages.create(request);
+    } catch (e) {
+      // Recoverable only if THIS request carried the field — a 400 on a
+      // request that sent none is a different fault and must surface. (SDK
+      // errors carry .status and embed the body in .message, which is what
+      // rejectsTemperature reads.)
+      if (!sent || !rejectsTemperature(e)) throw e;
+      learnTemperatureRejection(learned, desc.label, model);
+      request = anthropicRequest({ model, systemText, schema, parts, research, tool });
+      msg = await client.messages.create(request);
+    }
     const usage = { input: 0, output: 0, cacheRead: 0, searches: 0 };
     const addUsage = (u = {}) => {
       // cache writes bill as (slightly dearer) input, so fold them in
@@ -77,7 +100,7 @@ export const anthropicWire = {
     // call below turns it into a retryable failure).
     for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
       request.messages.push({ role: "assistant", content: msg.content });
-      msg = await anthropicClient(apiKey, desc.base).messages.create(request);
+      msg = await client.messages.create(request);
       addUsage(msg.usage);
     }
     const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);

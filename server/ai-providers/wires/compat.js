@@ -7,6 +7,7 @@
 // compatRequest is exported as the pure request-builder test seam — it reads
 // the quirk block it's handed and never touches the registry.
 import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
+import { rejectsTemperature, temperatureRejected, temperatureKey, learnTemperatureRejection } from "./temperature.js";
 
 // A keyless connection (a self-hosted Ollama, …) carries no secret — send no
 // Authorization header at all rather than a literal "Bearer null". A keyless
@@ -80,23 +81,12 @@ async function compatError(r, label) {
 // failOrRequeue failed each item on its FIRST attempt — one board, every item
 // dead, with a provider error most users can do nothing about.
 //
-// So the regex is now only an optimisation, and this is the correctness path:
-// when the provider says the parameter is unsupported, drop it and re-send. A
+// So the regex is only an optimisation; the correctness path — recognising
+// the refusal and re-sending without the field — is shared with the Anthropic
+// wire (which grew the same recovery when fable-5.1 refused the field,
+// 2026-09-03) and lives in temperature.js: the rejection vocabulary, the
+// learned (endpoint, model) set, and the key both wires derive it by. A
 // tagging call is worth more than the 4 points of stability temperature buys.
-const rejectsTemperature = (e) =>
-  Number(e?.status) === 400 &&
-  (e.param === "temperature" ||
-    (/temperature/i.test(e.message || "") &&
-      /unsupported|not support|invalid|only the default/i.test(e.message || "")));
-
-// Learned per (endpoint, model), so the board pays the extra round trip once
-// rather than on every item. Not locked: the worker runs AI_INFLIGHT items at a
-// time, so the first WAVE can each discover it independently — a rejected call
-// bills nothing and every one of them still recovers, which is cheaper than
-// serialising the wire for it. Keyed by endpoint too: two connections of one
-// provider can point at different boxes. Bounded by the number of distinct
-// models actually used. Exported as a test seam.
-export const temperatureRejected = new Set();
 
 // Would a request for this model carry a temperature at all? The one definition
 // — compatRequest builds from it, and the recovery above uses it to tell "the
@@ -135,7 +125,7 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
     // family both 400 on it). It's an optimisation — it saves the doomed first
     // call — not the guarantee: the tagging model comes from a live /models
     // list, so an unlisted id can always turn up, and the wire recovers from
-    // the rejection at call time. See `rejectsTemperature`.
+    // the rejection at call time. See `rejectsTemperature` in temperature.js.
     ...(temperatureAsked(compat, model) ? { temperature: compat.temperature } : {}),
     messages: [
       { role: "system", content: systemText },
@@ -197,7 +187,7 @@ export const compatWire = {
     // Sending the field is conditional on this model never having refused it.
     // `undefined` is how compatRequest is told to omit a quirk, so dropping it
     // needs no second code path.
-    const learned = `${url}|${model}`;
+    const learned = temperatureKey(url, model);
     const dropped = { ...desc.compat, temperature: undefined };
     const sent = !temperatureRejected.has(learned) && temperatureAsked(desc.compat, model);
     let r = await send(sent ? desc.compat : dropped);
@@ -207,10 +197,7 @@ export const compatWire = {
       // that sent none is a different fault and must surface — retrying an
       // identical call would just re-pay for the same rejection.
       if (!sent || !rejectsTemperature(err)) throw err;
-      temperatureRejected.add(learned);
-      // Once per model per process, not per item — this is a provider fact worth
-      // seeing in the logs, not noise.
-      console.warn(`${desc.label}: ${model} rejects temperature — re-sending without it (tagging keeps working, minus ~4 points of run-to-run stability)`);
+      learnTemperatureRejection(learned, desc.label, model);
       r = await send(dropped);
       if (!r.ok) throw await compatError(r, desc.label);
     }
