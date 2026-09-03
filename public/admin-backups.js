@@ -3,16 +3,12 @@
 // archive, and reboots the server (the overlay walks the admin through it).
 import { toast } from "/toast.js";
 import { api } from "/api.js";
+import { fmtSize } from "/utils.js";
 
 const content = document.getElementById("backups-content");
 let pollTimer = null;
 let jobWasRunning = false; // running→done transition = toast once, this page only
 
-const fmtSize = (n) => {
-  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + " GB";
-  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + " MB";
-  return Math.max(1, Math.round(n / 1024)) + " KB";
-};
 const fmtWhen = (ms) => new Date(ms).toLocaleString();
 
 export async function renderBackups() {

@@ -6,6 +6,7 @@ import { ICONS } from "/utils.js";
 import { renderMembers } from "/admin-members.js";
 import { renderBoards } from "/admin-boards.js";
 import { renderUsage } from "/admin-usage.js";
+import { renderStorage } from "/admin-storage.js";
 import { renderPluginSurfaces } from "/admin-plugins.js";
 import { renderBackups } from "/admin-backups.js";
 import { renderLogs, setLogsActive } from "/admin-logs.js";
@@ -18,7 +19,7 @@ for (const el of document.querySelectorAll("[data-icon]")) {
   el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon]);
 }
 
-const TAB_NAMES = ["members", "boards", "usage", "capabilities", "plugins", "backups", "logs"];
+const TAB_NAMES = ["members", "boards", "usage", "storage", "capabilities", "plugins", "backups", "logs"];
 const tabBtns = [...document.querySelectorAll(".tab")];
 function selectTab(name) {
   tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -28,6 +29,10 @@ function selectTab(name) {
   const keep = location.hash.startsWith("#" + name + "/") ? location.hash : "#" + name;
   history.replaceState(null, "", name === "members" ? location.pathname : keep);
   setLogsActive(name === "logs"); // the SSE stream follows tab visibility
+  // Storage renders on SELECT, not at boot like its siblings: its GET walks
+  // the filesystem server-side and exists to be live — the user looking IS
+  // the sample (storage-plan.md). Re-opening re-measures; that's the point.
+  if (name === "storage") renderStorage().catch(() => {});
 }
 tabBtns.forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
 // The tab is the hash's first segment — in-page links (the Plugins tab's

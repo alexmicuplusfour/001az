@@ -14,6 +14,7 @@ import { drawerHeadParts, dwGroup } from './modal.js';
 import { pagedTableScaffold } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { fillSelect } from './select.js';
+import { fmtSize } from './utils.js';
 
 // Where a source keeps its base path on cfg.source: the local folder kept
 // its historical `folder` key; every remote source uses `path`. The ONE
@@ -52,11 +53,6 @@ export const sourceRootLabel = (source, connectionId, rootPath) =>
     ? (source.connections?.find((c) => String(c.id) === String(connectionId))?.label || "")
     : (rootPath || "");
 
-const fmtBytes = (n) =>
-  n == null ? "—"
-  : n < 1024 ? `${n} B`
-  : n < 1048576 ? `${(n / 1024).toFixed(0)} KB`
-  : `${(n / 1048576).toFixed(1)} MB`;
 
 // opts: { drawer, boardId, source, rootPath, draft, onCommit }
 //   drawer    the ingest modal's createDrawer instance — one task opens here
@@ -327,7 +323,7 @@ export function openSourceChooser({ drawer, boardId, source, rootPath = "", draf
     }
     const sizeTd = document.createElement("td");
     sizeTd.className = "cb-end";
-    sizeTd.textContent = e.type === "dir" ? "—" : fmtBytes(e.size);
+    sizeTd.textContent = e.type === "dir" || e.size == null ? "—" : fmtSize(e.size);
     const modTd = document.createElement("td");
     modTd.textContent = e.modified ? new Date(e.modified).toLocaleDateString() : "—";
     tr.append(nameTd, sizeTd, modTd);

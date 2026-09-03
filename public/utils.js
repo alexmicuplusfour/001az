@@ -266,6 +266,7 @@ export const ICONS = {
   users: glyph('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
   user: glyph('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
   database: glyph('<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>'),
+  hardDrive: glyph('<path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01"/><path d="M10 16h.01"/>'),
   // A shell prompt, >_ — the logs tab. Was a <polyline> and a <line>; paths
   // say the same thing and keep every entry here the same kind of object.
   terminal: glyph('<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>'),
@@ -349,6 +350,27 @@ export const fmtTok = (n) =>
 // The in/out pair as one phrase — the app says a token bill this way
 // everywhere it says one (admin usage cell, its sparkline hover, job rows).
 export const tokPair = (input, output) => `${fmtTok(input)} in / ${fmtTok(output)} out`;
+
+// A byte count — promoted from admin-backups.js when the Storage tab became
+// its second caller, growing the two rungs backups never needed: TB (a disk
+// can be one; an archive can't) and the truthful bottom end. The old KB floor
+// rounded everything up to "1 KB", which was harmless under archives but
+// renders an EMPTY store as holding something — 0 is "0 B", exactly.
+export const fmtSize = (n) => {
+  if (!n) return "0 B";
+  if (n >= 2 ** 40) return (n / 2 ** 40).toFixed(1) + " TB";
+  if (n >= 2 ** 30) return (n / 2 ** 30).toFixed(1) + " GB";
+  if (n >= 2 ** 20) return (n / 2 ** 20).toFixed(1) + " MB";
+  if (n >= 1024) return Math.round(n / 1024) + " KB";
+  return n + " B";
+};
+
+// One stat on a KPI strip: the figure, its name under it, detail on hover.
+// Wears .kpi inside a .kpi-row — grown on the Usage tab, promoted (and the
+// classes renamed neutral) when Storage became the second wearer.
+export function kpi(value, label, title = "") {
+  return `<div class="kpi"${title ? ` title="${title}"` : ""}><div class="v">${value}</div><div class="k">${label}</div></div>`;
+}
 
 // A dollar amount — promoted from paged-table.js (which re-exports it) when
 // the metering chip and the admin usage cell became its third and fourth

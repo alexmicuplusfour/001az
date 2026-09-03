@@ -55,8 +55,16 @@ export function unregisterFaceProducer(name) {
 // (the card face) and, for a `generated` face (a connector chart — it is its own
 // original, there's no uploaded file), also to galleryDir/<name>. Returns the
 // { name, w, h } fragment the caller merges into its file entry.
+//
+// `size` rides along ONLY for a generated face, because that is the one case
+// where the bytes written here ARE the original — the writer is what knows how
+// many original bytes landed, so it says so rather than leaving the call site
+// to re-derive it (storage-plan.md, Stage 2). A non-generated face is a
+// thumbnail beside an upload whose `size` belongs to that upload, and this
+// function has nothing true to say about it.
 export async function storeFace({ galleryDir, thumbsDir }, name, rendered, { generated = false } = {}) {
   await fs.promises.writeFile(path.join(thumbsDir, name + ".webp"), rendered.webp);
-  if (generated) await fs.promises.writeFile(path.join(galleryDir, name), rendered.webp);
-  return { name, w: rendered.w, h: rendered.h };
+  if (!generated) return { name, w: rendered.w, h: rendered.h };
+  await fs.promises.writeFile(path.join(galleryDir, name), rendered.webp);
+  return { name, w: rendered.w, h: rendered.h, size: rendered.webp.length };
 }

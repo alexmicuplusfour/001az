@@ -17,7 +17,7 @@
 import { api } from "/api.js";
 import { toast } from "/toast.js";
 import { busy } from "/modal.js";
-import { pill, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
+import { pill, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
 import { sparkline, dayKey } from "/sparkline.js";
 import { openPricesModal } from "/prices-modal.js";
 
@@ -113,7 +113,7 @@ async function draw() {
       `${fmtQty(cacheQ, d?.format)} ${d?.label ?? "cache reads"} vs ${fmtTok(inQ)} billed input`));
   }
   const strip = document.createElement("div");
-  strip.className = "usage-kpis";
+  strip.className = "kpi-row";
   strip.innerHTML = kpis.join("");
   head.appendChild(strip);
 
@@ -136,7 +136,7 @@ async function draw() {
       ? `Stamped when each call ran, at the rate known then — never re-priced. Not yet priced, so not in these figures: ${fmtUnpriced(cost.unpriced)}.`
       : "Stamped when each call ran, at the rate known then — never re-priced. Everything in this window ran at a known rate.";
   const moneyRow = document.createElement("div");
-  moneyRow.className = "usage-kpis usage-money";
+  moneyRow.className = "kpi-row usage-money";
   moneyRow.innerHTML = money.join("") + `<p class="muted usage-deal">${deal}</p>`;
   head.appendChild(moneyRow);
 
@@ -266,11 +266,6 @@ function named(units, defs, unit) {
   if (!q) return "";
   const d = defs[unit] || { label: unit, format: "count" };
   return `${fmtQty(q, d.format)} ${d.label}`;
-}
-
-// One stat on the strip: the figure, its name under it, detail on hover.
-function kpi(value, label, title = "") {
-  return `<div class="usage-kpi"${title ? ` title="${title}"` : ""}><div class="v">${value}</div><div class="k">${label}</div></div>`;
 }
 
 // ── Prices: the status, not the editor ────────────────────────────

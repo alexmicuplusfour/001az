@@ -387,6 +387,31 @@ export async function getItemBoard(db, id) {
   return rows[0] || null;
 }
 
+// Originals held per board, from the sizes upload stamped on payload file
+// entries (storage-plan.md, Stage 2). ATTRIBUTION, not disk truth: thumbnails,
+// sidecars and embeddings belong to no cheap per-board sum, and the tab that
+// draws this says so beside the walk's numbers. `unsized` carries the entries
+// with no recorded size — legacy uploads the enrich backfill hasn't reached
+// and old generated faces — because folding them into a silent 0 would render
+// "0 B" as a claim about sizes that are simply unknown. The LATERAL drops
+// fileless rows (connector tag vehicles), which hold no bytes. SUM(bigint) is
+// NUMERIC, which the int8 parser doesn't cover — the ::bigint casts are what
+// keep this reader shipping numbers like everything else.
+export async function boardFileBytes(db) {
+  const { rows } = await db.query(
+    `SELECT i.board_id AS id, b.name AS label,
+            COALESCE(SUM((f->>'size')::bigint), 0)::bigint AS bytes,
+            COUNT(*)::bigint AS files,
+            (COUNT(*) FILTER (WHERE f->>'size' IS NULL))::bigint AS unsized
+     FROM items i
+     JOIN boards b ON b.id = i.board_id
+     CROSS JOIN LATERAL jsonb_array_elements(COALESCE(i.payload->'files', '[]'::jsonb)) f
+     GROUP BY i.board_id, b.name
+     ORDER BY bytes DESC, label`
+  );
+  return rows;
+}
+
 // Group "facet/value" tag strings into { facetKey: Set(values) }.
 function tagsByFacet(tags) {
   const map = new Map();

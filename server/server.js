@@ -106,6 +106,7 @@ import {
   boardUsageSummary,
   usageRows,
   USAGE_DIMS,
+  boardFileBytes,
   day,
   APP_SCOPE,
   modelPriceFreshness,
@@ -165,6 +166,7 @@ import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
 import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
+import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
 import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, ENUM_CAP } from "./ingestion/index.js";
 import { applyFilters, applySort } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
@@ -181,6 +183,15 @@ const STATIC_DIR = process.env.STATIC_DIR || path.join(ROOT, "public"); // front
 const GALLERY_DIR = process.env.GALLERY_DIR || path.join(ROOT, "gallery");
 const THUMBS_DIR = process.env.THUMBS_DIR || path.join(ROOT, "thumbnails");
 const BACKUPS_DIR = process.env.BACKUPS_DIR || path.join(ROOT, "backups");
+// The storage gauge's stores (storage-plan.md) — ONE object, read by both the
+// admin route's live measure and the worker's daily sample, so the two callers
+// of measureStorage cannot drift on what the stores are. NPM_CACHE_DIR, never
+// npm_config_cache: npm injects the latter under `npm run`, pointing at the
+// developer's personal cache — unset means the store isn't measured.
+const STORAGE_DIRS = {
+  galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR, backupsDir: BACKUPS_DIR,
+  pluginsDir: pluginsDir(), npmCacheDir: process.env.NPM_CACHE_DIR || null,
+};
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 
@@ -1582,6 +1593,27 @@ app.get("/api/boards/:id/usage", requireAuth, requireBoardManager, wrap(async (r
   // The board comes from the ROUTE, so a `?board=` in the query cannot widen
   // the scope — it is not consulted at all.
   res.json(await usageResponse(req.query, { board: req.board.id }));
+}));
+
+// --- storage (storage-plan.md, Stage 2) ---
+// The gauge's read: the LEVEL, measured live — the walk is sub-second at this
+// app's scale, and a stale answer to "how full is my server" would be a
+// self-inflicted wound. The measurement is recorded under today before the
+// series is read, so the trend the tab draws always includes the point it is
+// standing on (the user looking IS a sample). `boards` is attribution of
+// originals, `now` is disk truth; they don't add up and the tab says so —
+// boardFileBytes carries the why.
+app.get("/api/admin/storage", requireAdmin, wrap(async (_req, res) => {
+  // The board attribution shares nothing with the walk, so it runs beside it
+  // rather than behind it — awaited in the same expression, so a failing
+  // measure rejects it here instead of surfacing as an unhandled rejection.
+  // Only the series genuinely waits on the write.
+  const [now, boards] = await Promise.all([measureStorage(db, STORAGE_DIRS), boardFileBytes(db)]);
+  await writeSample(db, day(), now);
+  // Wide enough for the tab's 30 bars and the days-until-full slope that will
+  // read the same payload — not "everything ever", which has no ceiling.
+  const series = await readSeries(db, day(Date.now() - 89 * 86400000));
+  res.json({ now, series, boards, stores: STORE_DEFS });
 }));
 
 // --- model prices (metering-plan.md, Stage 3c) ---
@@ -3181,6 +3213,7 @@ if (isMain) {
   const launchWorker = () => startWorker({
     db, thumbsDir: THUMBS_DIR, galleryDir: GALLERY_DIR, sources,
     autoBackup: backups.autoBackupSweep, // daily DB dump into BACKUPS_DIR (see backup.js)
+    sampleStorage: () => sampleStorageDue(db, STORAGE_DIRS), // daily storage-level sample (storage-plan.md)
   });
   let stopWorker = launchWorker();
   runtime.stopWorker = () => stopWorker();

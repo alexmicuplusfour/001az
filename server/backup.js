@@ -156,7 +156,8 @@ async function dumpTable(client, table, cols, outPath, j) {
 
 // Regular files under root, relative paths posix-style. Missing root = empty
 // (dev machines have no /data/plugins; an empty tree is a valid answer).
-async function collectFiles(root) {
+// Exported for the storage gauge (storage.js) — same walk, summed not tarred.
+export async function collectFiles(root) {
   const out = [];
   async function walk(dir, rel) {
     let entries;

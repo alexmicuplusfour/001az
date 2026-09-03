@@ -40,6 +40,11 @@ ENV HOST=0.0.0.0 \
     BACKUPS_DIR=/data/backups \
     npm_config_cache=/data/.npm
 
+# Mirrors npm_config_cache for the storage gauge, which must not read the
+# npm_config_* name: `npm run` injects that one on dev machines, pointing at
+# the developer's PERSONAL cache (storage.js measures only what it names).
+ENV NPM_CACHE_DIR=/data/.npm
+
 EXPOSE 3001
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 CMD ["node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 

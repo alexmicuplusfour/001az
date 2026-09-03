@@ -868,6 +868,8 @@ export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, 
   if (!rendered) { await setEntityFaceAt(db, entity.id, null); return null; } // no history → keep the tile
   const name = crypto.randomBytes(16).toString("hex");
   const stored = await storeFace({ galleryDir, thumbsDir }, name, rendered, { generated: true });
+  // `stored` carries `size` here and only here: storeFace reports it when the
+  // webp it wrote IS the original, which is exactly the generated case.
   const face = { ...stored, kind: "image", generated: true };
   const old = inst.payload?.files?.[0];
   await updateItemPayload(db, inst.id, { files: [face] });
@@ -1670,7 +1672,7 @@ export async function resolveIdentity(db, boardId, key, display, reusable, resol
   }
 }
 
-export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBackup = null }) {
+export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBackup = null, sampleStorage = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
   // The diagnose loop's own cadence. Its settle gate is ten minutes wide, so
   // ticking it at POLL_MS would re-fail that gate two hundred times to no end.
@@ -2754,6 +2756,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // Scheduled DB-only backup (server/backup.js) — it no-ops unless due
         // and skips itself while any backup/restore job is running.
         if (autoBackup) await autoBackup();
+        // Daily storage sample (server/storage.js) — self-gated and
+        // self-catching; last, so this shared try's earlier sweeps never
+        // lose their turn to a failed walk.
+        if (sampleStorage) await sampleStorage();
       } catch (e) { console.error("worker maintain error:", e.message); }
       if (!running) break;
       wake();
