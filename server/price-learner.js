@@ -127,9 +127,16 @@ async function pullCommunity(freshness, current, now, force) {
   if (!url) return [];
   // Resolve wanted models AND every model already community-priced — a priced
   // model leaves the wanted set (that's the drain), so without the second half
-  // a weekly refresh would pull the map and then update nothing.
-  const priced = new Set(current.filter((r) => r.source === "community").map(wantKey));
-  const wants = new Map([...wantedModels(), ...current.filter((r) => r.source === "community")].map((w) => [wantKey(w), w]));
+  // a weekly refresh would pull the map and then update nothing. The wanted
+  // set carries both halves of the concept: live lookups (ratesFor) and the
+  // durable meter-seeded pairs (pricing.js refreshRateTable) — a pair the map
+  // permanently lacks is untried again after every restart, costing one map
+  // pull per boot: the module's accepted worst case ("a restart re-pulls one
+  // public JSON file"), retired for good only when the plan's additive
+  // "price unpriced history" admin action drains the row itself.
+  const communityPriced = current.filter((r) => r.source === "community");
+  const priced = new Set(communityPriced.map(wantKey));
+  const wants = new Map([...wantedModels(), ...communityPriced].map((w) => [wantKey(w), w]));
   // "Untried" means never LOOKED UP and not already priced. Without the second
   // half, a restart (which empties `tried`) would re-pull the whole map on its
   // first tick forever, since the stored rows themselves put every priced

@@ -14,20 +14,27 @@ export default (wires) => ({
   ],
   // Author-time price data (metering-plan.md, the descriptor rung): micro-
   // dollars per unit, which is numerically the $-per-million a pricing page
-  // states. Anthropic list prices, surveyed 2026-08-31; cache reads bill at
-  // 0.1× input. Web searches bill per search on top of tokens but their rate
-  // isn't stated machine-readably — left unpriced rather than guessed.
-  // Models absent from this map (a typed-in id) meter unpriced; an admin
-  // price row overrides any entry here.
+  // states. Anthropic list prices — surveyed 2026-08-31, current generation
+  // added 2026-09-04 (Anthropic docs + the LiteLLM map). Hand-maintained,
+  // and this rung OUTRANKS the community one: a repricing Anthropic ships
+  // reaches the meter only when this map (or an admin row) moves too. Cache
+  // reads bill at 0.1× input. Web searches bill per search on top of tokens
+  // but their rate isn't stated machine-readably — left unpriced rather
+  // than guessed. Models absent from this map (a typed-in id) meter
+  // unpriced; an admin price row overrides any entry here.
   prices: {
     // The '*' entry is what this provider charges for EVERY model it serves:
     // Anthropic bills tokens, not calls, so a request costs $0 — known-free,
     // said once here rather than inferred elsewhere. Per-model entries below
     // override it unit by unit.
     "*":                 { requests: 0 },
-    "claude-haiku-4-5":  { input_tokens: 1, output_tokens: 5,  cache_read_tokens: 0.1 },
-    "claude-sonnet-4-6": { input_tokens: 3, output_tokens: 15, cache_read_tokens: 0.3 },
-    "claude-opus-4-8":   { input_tokens: 5, output_tokens: 25, cache_read_tokens: 0.5 },
+    "claude-haiku-4-5":  { input_tokens: 1,  output_tokens: 5,  cache_read_tokens: 0.1 },
+    "claude-sonnet-4-6": { input_tokens: 3,  output_tokens: 15, cache_read_tokens: 0.3 },
+    "claude-sonnet-5":   { input_tokens: 3,  output_tokens: 15, cache_read_tokens: 0.3 },
+    "claude-opus-4-8":   { input_tokens: 5,  output_tokens: 25, cache_read_tokens: 0.5 },
+    "claude-opus-5":     { input_tokens: 5,  output_tokens: 25, cache_read_tokens: 0.5 },
+    "claude-fable-5":    { input_tokens: 10, output_tokens: 50, cache_read_tokens: 1 },
+    "claude-fable-5-1":  { input_tokens: 10, output_tokens: 50, cache_read_tokens: 1 },
   },
   // Models beyond the map above (a typed-in id) may be priced from the LiteLLM
   // community map under this litellm_provider value (verified live 2026-08-31).

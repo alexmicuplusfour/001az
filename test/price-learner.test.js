@@ -8,8 +8,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { startServer, jsonBox } from "./helpers.js";
-import { createAiKey } from "../server/db.js";
-import { ratesFor, wantedModels, setModelPrice } from "../server/pricing.js";
+import { createAiKey, meter } from "../server/db.js";
+import { ratesFor, wantedModels, wantedGeneration, setModelPrice, refreshRateTable } from "../server/pricing.js";
 import { learnPrices } from "../server/price-learner.js";
 import { registerProvider, unregisterProvider, WIRES } from "../server/providers.js";
 
@@ -217,4 +217,57 @@ test("provider rung: a CONNECTED provider's listPrices lands as source='provider
 test("provider rung sits above community: the provider's own answer wins", async () => {
   await setModelPrice(db, { provider: "router-co", model: "a/b", unit: "input_tokens", microsPerUnit: 999, source: "community", fetchedAt: clock });
   assert.equal(ratesFor("router-co", "a/b").input_tokens, 3, "community can't override what the provider said");
+});
+
+// ─── the meter as the durable half of the want list ─────────────────────────
+// See db.js unpricedMeterModels: refreshRateTable re-seeds `wanted` from the
+// meter's unpriced pairs on every rebuild, so a restart can't orphan a new
+// model's unpriced history (a $22 opus-5 run stayed invisible exactly that
+// way before 2026-09-04).
+
+test("meter seed: an unpriced pair survives restart via refreshRateTable, prices, and drains", async () => {
+  // A model NO ratesFor call ever recorded (the post-restart shape): its only
+  // trace is an unpriced meter row.
+  mapBox.payload = { ...LITELLM_MAP, "m-meter": { litellm_provider: "hostedns", mode: "chat", input_cost_per_token: 2e-6 } };
+  await meter(db, { capability: "tag", provider: "hosted-co", model: "m-meter" }, { input_tokens: 1000 });
+  assert.ok(!wantedModels().some((w) => w.model === "m-meter"), "premise: the in-memory set has never heard of it");
+  await refreshRateTable(db); // what boot does
+  assert.ok(wantedModels().some((w) => w.model === "m-meter"), "the rebuild seeds the want from the meter");
+  const hits = mapBox.hits.length;
+  await learnPrices(db, { now: clock });
+  assert.equal(mapBox.hits.length, hits + 1, "the seeded want pulls the map");
+  assert.equal(ratesFor("hosted-co", "m-meter").input_tokens, 2, "the NEXT run stamps priced");
+  // The history row stays unpriced (write-time stamping, no retro-repricing) —
+  // but a seeded want drains exactly like a looked-up one the moment rates
+  // land, and the priced-set gate keeps the immortal history row from
+  // re-pulling on every pass.
+  assert.ok(!wantedModels().some((w) => w.model === "m-meter"), "priced means drained, seed included");
+  await learnPrices(db, { now: clock });
+  assert.equal(mapBox.hits.length, hits + 1, "a learned model's unpriced history never re-pulls");
+});
+
+test("meter seed: a provider without a namespace stays outside the want list", async () => {
+  // The llama3 trap, meter edition: a self-hosted box's unpriced usage must
+  // not pull a map it can never be priced from.
+  await meter(db, { capability: "tag", provider: "local", model: "m-nons" }, { input_tokens: 1000 });
+  await refreshRateTable(db);
+  assert.ok(!wantedModels().some((w) => w.model === "m-nons"), "no namespace, no want");
+  const hits = mapBox.hits.length;
+  await learnPrices(db, { now: clock });
+  assert.equal(mapBox.hits.length, hits, "no want, no pull");
+});
+
+// ─── the want generation, the worker's now-signal ────────────────────────────
+// The worker's maintenance tick runs the learner hourly for refreshes, but a
+// model seen for the FIRST time can't wait an hour of unpriced stamping — it
+// reads this counter each tick and learns immediately when a lookup records
+// a model not wanted before.
+test("wantedGeneration: bumps once per NEW want — not on repeats, not without a namespace", () => {
+  const g0 = wantedGeneration();
+  ratesFor("hosted-co", "m-gen");
+  assert.equal(wantedGeneration(), g0 + 1, "a new want bumps");
+  ratesFor("hosted-co", "m-gen");
+  assert.equal(wantedGeneration(), g0 + 1, "the same want again does not");
+  ratesFor("local", "m-gen-other");
+  assert.equal(wantedGeneration(), g0 + 1, "no namespace means no wanting, so no bump");
 });

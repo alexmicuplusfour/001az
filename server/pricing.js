@@ -22,7 +22,7 @@
 // module meter-blind. Rebuilds happen at boot and through setModelPrice;
 // between rebuilds the table is immutable, so reads need no locking.
 import { PROVIDERS } from "./providers.js";
-import { loadModelPrices, addModelPrices } from "./db.js";
+import { loadModelPrices, addModelPrices, unpricedMeterModels } from "./db.js";
 import { validRate } from "./units.js";
 
 // "provider\0model" -> { unit: microsPerUnit }. BOTH axes take '*': a
@@ -43,6 +43,18 @@ const key = (provider, model) => `${provider}\u0000${model}`;
 // works through. Recorded on lookup, dropped once a price arrives.
 const wanted = new Map();
 export const wantedModels = () => [...wanted.values()];
+
+// Bumped once per model never wanted before — the worker's maintenance tick
+// reads it as a free synchronous proxy for the learner's own untried gate,
+// to learn NOW rather than on the hourly cadence (the rationale lives at the
+// tick, worker.js). One entry point for both want sources: ratesFor's
+// lookups and refreshRateTable's meter seed.
+let wantedGen = 0;
+export const wantedGeneration = () => wantedGen;
+const want = (provider, model) => {
+  const k = key(provider, model);
+  if (!wanted.has(k)) { wantedGen++; wanted.set(k, { provider, model }); }
+};
 
 // ONE resolution walk — stored rows + the descriptor registry, layers applied
 // worst-first so each better rung's per-unit write wins by plain overwrite:
@@ -89,6 +101,17 @@ export async function refreshRateTable(db) {
     // A model whose price just arrived stops being wanted — otherwise 3b's
     // fetcher re-requests it on every sweep, forever.
     for (const k of wanted.keys()) if (next.has(k)) wanted.delete(k);
+    // …and the meter re-seeds the durable half of the want list: pairs whose
+    // metered usage nothing fully priced (db.js unpricedMeterModels). The
+    // in-memory set dies with the process and a pair only re-enters it on
+    // that model's NEXT paid call, so without this seed a restart orphaned a
+    // new model's unpriced history until someone happened to use it again.
+    // Same wanting rule as ratesFor below: a namespace to fetch under, and
+    // no rates of its own yet — so a seeded want drains exactly like a
+    // looked-up one, the moment any rung answers.
+    for (const w of await unpricedMeterModels(db)) {
+      if (!next.has(key(w.provider, w.model)) && PROVIDERS[w.provider]?.priceNamespace) want(w.provider, w.model);
+    }
   } catch (e) {
     console.warn(`price table refresh failed (usage meters unpriced): ${e.message}`);
   }
@@ -111,7 +134,7 @@ export function ratesFor(provider, model) {
     // prices, so no namespace means no wanting (metering-plan.md, the trap).
     // A provider-wide rate doesn't settle it: it's a default, not this model's
     // price, and the model's own rates are still worth learning.
-    wanted.set(key(provider, model), { provider, model });
+    want(provider, model);
   }
   // The model's own rates override the provider-wide default, unit by unit.
   return { ...table.get(key(provider, "*")), ...own };

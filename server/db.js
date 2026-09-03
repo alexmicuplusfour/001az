@@ -3317,6 +3317,19 @@ const unpricedList = (byUnit) =>
 // computed for every caller and DISCLOSED by the route (spend is
 // management-visible); it is one query either way, so the gate stays a
 // disclosure rule rather than becoming a second query path.
+// Every (provider, model) the meter recorded usage for that nothing fully
+// priced — the durable half of pricing.js's want list (refreshRateTable seeds
+// from it, so a restart can't orphan a new model's unpriced history; cost is
+// write-time and never recomputed, which is how a $22 opus-5 run stayed
+// invisible across a restart, 2026-09-03). Rides usageRows, the one
+// dimensioned reader, for the same reason boardUsageSummary below does.
+export async function unpricedMeterModels(db) {
+  return (await usageRows(db, { group: ["provider", "model"] }))
+    .filter((r) => r.provider && r.model &&
+      Object.values(r.units).some((u) => u.quantity > u.priced_quantity))
+    .map(({ provider, model }) => ({ provider, model }));
+}
+
 export async function boardUsageSummary(db, boardId) {
   // The ungrouped read of the dimensioned reader IS this query — one board,
   // every unit. Calling it rather than spelling the same SELECT again is what

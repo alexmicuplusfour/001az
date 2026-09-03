@@ -58,6 +58,7 @@ import {
 import { CAPABILITY } from "./capabilities.js";
 import { meterAiCall, meterAiCalls, spentDetail } from "./metering.js";
 import { learnPrices } from "./price-learner.js";
+import { wantedGeneration } from "./pricing.js";
 import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
@@ -1919,11 +1920,30 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // is that recovery can't be delayed by slow work — which is why the heavy
   // sweeps got their own loops. A pending pass is tracked so ticks can't pile
   // passes up on each other.
+  // Hourly-unless-nudged, one clock. The hourly cadence paces refreshes of
+  // rates we already hold; a model seen for the FIRST time can't wait on it —
+  // cost is stamped at write and never recomputed, so every unpriced tick of
+  // a new model is money the Usage tab will never show (a $22 opus-5 run
+  // metered ≈$0 this way, 2026-09-03). wantedGeneration (pricing.js) is the
+  // free synchronous proxy for the learner's own untried gate: a new want —
+  // a stamping lookup or refreshRateTable's meter seed — runs the pass on
+  // the next tick, and that pass advances the SAME clock the hour uses, so
+  // a nudge at minute 59 doesn't buy a second pass at minute 60. Not the
+  // shared hourly() wrapper: this gate composes the nudge and the
+  // single-flight check, and bending the helper around one caller's extra
+  // condition is the wrong trade. The generation is re-read only when a
+  // pass actually launches, so a nudge landing mid-pass is retried next
+  // tick rather than lost.
   let priceLearnInFlight = null;
-  const learnPricesDue = hourly(() => {
+  let learnedAtGen = wantedGeneration(), nextLearnAt = 0;
+  const learnPricesDue = () => {
     if (priceLearnInFlight) return;
+    const gen = wantedGeneration();
+    if (gen === learnedAtGen && Date.now() < nextLearnAt) return;
+    learnedAtGen = gen;
+    nextLearnAt = Date.now() + 3600000;
     priceLearnInFlight = learnPrices(db).finally(() => { priceLearnInFlight = null; });
-  });
+  };
 
   async function refreshDue() {
     if (Date.now() < refreshBackoffUntil) return false;
