@@ -122,6 +122,19 @@ test("anthropicRequest: temperature carried verbatim, omitted when undefined", (
     assert.ok(!("temperature" in r));
 });
 
+// The second refusable parameter (fable-5.1's "compiled grammar is too large",
+// 2026-09-03): strict defaults on, and dropped means the flag is ABSENT from
+// the tool def, same rule as temperature above.
+test("anthropicRequest: strict rides the tool def until told off", () => {
+  const args = {
+    model: "m", systemText: "s",
+    schema: { type: "object", properties: {}, required: [] },
+    parts: [{ kind: "text", text: "t" }],
+  };
+  assert.equal(anthropicRequest(args).tools[0].strict, true);
+  assert.ok(!("strict" in anthropicRequest({ ...args, strict: false }).tools[0]));
+});
+
 // ─── integration ─────────────────────────────────────────────────────────────
 
 const MAPPING = {

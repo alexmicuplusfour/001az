@@ -9,7 +9,7 @@
 // to a 10-min per-try timeout, and research tagging legitimately runs minutes.
 import Anthropic from "@anthropic-ai/sdk";
 import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
-import { rejectsTemperature, temperatureRejected, temperatureKey, learnTemperatureRejection } from "./temperature.js";
+import { askFor, refusedFeature, refusalKey, learnRefusal } from "./refusals.js";
 
 // Per-item bound on web searches; each one bills on top of tokens.
 const MAX_SEARCHES = 5;
@@ -32,17 +32,18 @@ function anthropicClient(apiKey, base) {
 // Anthropic tool-use request. Research relaxes tool_choice to auto — a forced
 // tool call would block the server-side web_search tool — so the model must be
 // trusted (and validated downstream) to finish with record_tags.
-// `temperature` follows compat's convention: the value to send, undefined (or
-// absent) to omit the field. The WIRE decides per model — no id list in the
-// builder, because no static list stays right (the compat wire learned that
-// on gpt-5-mini, this wire on fable-5.1).
-export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL, temperature }) {
+// `temperature` follows compat's convention (the value to send, undefined
+// omits the field) and `strict` is the tool-def flag by the same rule: the
+// WIRE decides per model/schema — no id list in the builder, because no
+// static list stays right (the compat wire learned that on gpt-5-mini, this
+// wire on fable-5.1; provenance in refusals.js).
+export function anthropicRequest({ model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL, temperature, strict = true }) {
   const content = parts.map((p) => {
     if (p.kind === "image") return { type: "image", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     if (p.kind === "document") return { type: "document", source: { type: "base64", media_type: p.mediaType, data: p.b64 } };
     return { type: "text", text: p.text };
   });
-  const toolDef = { name: tool.name, description: tool.description, strict: true, input_schema: schema };
+  const toolDef = { name: tool.name, description: tool.description, ...(strict ? { strict: true } : {}), input_schema: schema };
   return {
     model,
     // A runaway guard, not a size estimate — see OUTPUT_BUDGET. Flat across
@@ -52,7 +53,7 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
     // Closed-vocabulary classification wants the mode, not a sample — see the
     // measurement in compatRequest. Unconditional 0 until 2026-09-03, when
     // fable-5.1 refused the field and failed a whole board first-attempt;
-    // provenance and the shared recovery vocabulary live in temperature.js.
+    // provenance and the shared recovery vocabulary live in refusals.js.
     ...(temperature !== undefined ? { temperature } : {}),
     system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }],
     tools: research
@@ -65,26 +66,30 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
 
 export const anthropicWire = {
   async tag(desc, { apiKey, model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
-    // Same recovery contract as the compat wire (see temperature.js): when a
-    // model refuses temperature, drop it, re-send, and remember — the refusal
-    // costs one unbilled round trip per (endpoint, model) per process, which
-    // is cheaper than any attempt to know the catalog in advance.
+    // The refusal negotiation (see refusals.js): ask for everything not yet
+    // refused; when the model 400s naming a feature this request carried,
+    // drop it, re-send, remember. Each refusal costs one unbilled round trip
+    // per learned key per process — cheaper than any attempt to know the
+    // catalog in advance. The loop is bounded by the feature count: every
+    // pass turns one sent flag off, and refusedFeature only matches sent
+    // ones, so an unrelated (or repeat) 400 throws.
     const client = anthropicClient(apiKey, desc.base);
-    const learned = temperatureKey(desc.base || "", model);
-    const sent = !temperatureRejected.has(learned);
-    let request = anthropicRequest({ model, systemText, schema, parts, research, tool, temperature: sent ? 0 : undefined });
+    const endpoint = desc.base || "";
+    let sent = askFor(endpoint, model, { schema });
+    const build = () => anthropicRequest({ model, systemText, schema, parts, research, tool, temperature: sent.temperature ? 0 : undefined, strict: sent.strict });
+    let request = build();
     let msg;
-    try {
-      msg = await client.messages.create(request);
-    } catch (e) {
-      // Recoverable only if THIS request carried the field — a 400 on a
-      // request that sent none is a different fault and must surface. (SDK
-      // errors carry .status and embed the body in .message, which is what
-      // rejectsTemperature reads.)
-      if (!sent || !rejectsTemperature(e)) throw e;
-      learnTemperatureRejection(learned, desc.label, model);
-      request = anthropicRequest({ model, systemText, schema, parts, research, tool });
-      msg = await client.messages.create(request);
+    for (;;) {
+      try {
+        msg = await client.messages.create(request);
+        break;
+      } catch (e) {
+        const feature = refusedFeature(e, sent);
+        if (!feature) throw e;
+        learnRefusal(feature, refusalKey(feature, endpoint, model, { schema }), desc.label, model);
+        sent = { ...sent, [feature]: false };
+        request = build();
+      }
     }
     const usage = { input: 0, output: 0, cacheRead: 0, searches: 0 };
     const addUsage = (u = {}) => {

@@ -7,7 +7,7 @@
 // compatRequest is exported as the pure request-builder test seam — it reads
 // the quirk block it's handed and never touches the registry.
 import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
-import { rejectsTemperature, temperatureRejected, temperatureKey, learnTemperatureRejection } from "./temperature.js";
+import { askFor, refusedFeature, refusalKey, learnRefusal } from "./refusals.js";
 
 // A keyless connection (a self-hosted Ollama, …) carries no secret — send no
 // Authorization header at all rather than a literal "Bearer null". A keyless
@@ -72,7 +72,7 @@ async function compatError(r, label) {
   return err;
 }
 
-// ─── temperature: a parameter the provider may refuse, per MODEL ─────────────
+// ─── parameters the provider may refuse ──────────────────────────────────────
 // `noTemperature` (descriptor data) is a best-effort list of families known to
 // reject it — but on OpenAI the tagging model comes from a LIVE /models list, so
 // any id can appear and no static regex stays right. gpt-5-mini is exactly that
@@ -82,11 +82,11 @@ async function compatError(r, label) {
 // dead, with a provider error most users can do nothing about.
 //
 // So the regex is only an optimisation; the correctness path — recognising
-// the refusal and re-sending without the field — is shared with the Anthropic
-// wire (which grew the same recovery when fable-5.1 refused the field,
-// 2026-09-03) and lives in temperature.js: the rejection vocabulary, the
-// learned (endpoint, model) set, and the key both wires derive it by. A
-// tagging call is worth more than the 4 points of stability temperature buys.
+// the refusal and re-sending without the feature — is shared with the
+// Anthropic wire and lives in refusals.js: the per-feature rejection
+// vocabulary (temperature AND strict, since fable-5.1 refused both in one day,
+// 2026-09-03), the learned set, and the keys both wires derive by. A tagging
+// call is worth more than what either optimistic extra buys.
 
 // Would a request for this model carry a temperature at all? The one definition
 // — compatRequest builds from it, and the recovery above uses it to tell "the
@@ -125,7 +125,7 @@ export function compatRequest({ compat, model, systemText, schema, parts, tool =
     // family both 400 on it). It's an optimisation — it saves the doomed first
     // call — not the guarantee: the tagging model comes from a live /models
     // list, so an unlisted id can always turn up, and the wire recovers from
-    // the rejection at call time. See `rejectsTemperature` in temperature.js.
+    // the rejection at call time. See REFUSABLE.temperature in refusals.js.
     ...(temperatureAsked(compat, model) ? { temperature: compat.temperature } : {}),
     messages: [
       { role: "system", content: systemText },
@@ -184,22 +184,32 @@ export const compatWire = {
       body: JSON.stringify(compatRequest({ compat, model, systemText, schema, parts, tool })),
       signal: chatSignal(),
     });
-    // Sending the field is conditional on this model never having refused it.
-    // `undefined` is how compatRequest is told to omit a quirk, so dropping it
-    // needs no second code path.
-    const learned = temperatureKey(url, model);
-    const dropped = { ...desc.compat, temperature: undefined };
-    const sent = !temperatureRejected.has(learned) && temperatureAsked(desc.compat, model);
-    let r = await send(sent ? desc.compat : dropped);
-    if (!r.ok) {
+    // The refusal negotiation (see refusals.js): what to ask for is the
+    // learned set intersected with this descriptor's own data — a quirk block
+    // that never carried temperature, or a noTemperature-exempt model, sends
+    // none regardless. `undefined`/false is how compatRequest is told to omit
+    // a quirk, so dropping needs no second code path. The loop is bounded by
+    // the feature count: every pass turns one sent flag off, and
+    // refusedFeature only matches sent ones, so an unrelated (or repeat) 400
+    // throws.
+    const ask = askFor(url, model, { schema });
+    let sent = {
+      temperature: ask.temperature && temperatureAsked(desc.compat, model),
+      strict: ask.strict && !!desc.compat.strictTools,
+    };
+    const quirks = () => ({
+      ...desc.compat,
+      ...(sent.temperature ? {} : { temperature: undefined }),
+      strictTools: sent.strict,
+    });
+    let r = await send(quirks());
+    while (!r.ok) {
       const err = await compatError(r, desc.label);
-      // Recoverable only if THIS request carried the field. A 400 on a request
-      // that sent none is a different fault and must surface — retrying an
-      // identical call would just re-pay for the same rejection.
-      if (!sent || !rejectsTemperature(err)) throw err;
-      learnTemperatureRejection(learned, desc.label, model);
-      r = await send(dropped);
-      if (!r.ok) throw await compatError(r, desc.label);
+      const feature = refusedFeature(err, sent);
+      if (!feature) throw err;
+      learnRefusal(feature, refusalKey(feature, url, model, { schema }), desc.label, model);
+      sent = { ...sent, [feature]: false };
+      r = await send(quirks());
     }
     const data = await r.json();
     const choice = data.choices?.[0];

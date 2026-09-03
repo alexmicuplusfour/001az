@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { PROVIDERS } from "../server/providers.js";
 import { compatRequest as buildRequest } from "../server/ai-providers/wires/compat.js";
 import { OUTPUT_BUDGET } from "../server/ai-providers/wires/tool.js";
-import { rejectsTemperature, temperatureRejected } from "../server/ai-providers/wires/temperature.js";
+import { refused, refusedFeature } from "../server/ai-providers/wires/refusals.js";
 
 // compatRequest takes the descriptor's `compat` quirk block, not a provider
 // name — the wire never reaches into the registry. These tests still pin the
@@ -253,7 +253,7 @@ const tagOk = () => new Response(JSON.stringify({
 
 test("compat wire: a refused temperature is dropped and re-sent, not failed", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
-  temperatureRejected.clear();
+  refused.clear();
   // gpt-5.4-mini passes the noTemperature regex, so the first call really does
   // carry temperature 0 — this is the unknown-id path the regex can't cover.
   const { fetch, bodies } = recorder((n) => (n === 1 ? tempRefusal() : tagOk()));
@@ -268,24 +268,24 @@ test("compat wire: a refused temperature is dropped and re-sent, not failed", as
   assert.equal(bodies[1].model, "gpt-5.4-mini");
   assert.equal(bodies[1].tool_choice, "required");
   assert.deepEqual(bodies[1].messages, bodies[0].messages);
-  temperatureRejected.clear();
+  refused.clear();
 });
 
 test("compat wire: the refusal is learned, so only the first item pays for it", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
-  temperatureRejected.clear();
+  refused.clear();
   const { fetch, bodies } = recorder((_n, body) => ("temperature" in body ? tempRefusal() : tagOk()));
   const tag = () => compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5.4-mini" });
   await withFetch(fetch, async () => { await tag(); await tag(); await tag(); });
   // 2 calls for the first item (discovery), then 1 each — not 2 forever.
   assert.equal(bodies.length, 4);
   assert.ok(bodies.slice(1).every((b) => !("temperature" in b)), "later items must omit the field up front");
-  temperatureRejected.clear();
+  refused.clear();
 });
 
 test("compat wire: an unrelated 400 still fails, and fails once", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
-  temperatureRejected.clear();
+  refused.clear();
   const { fetch, bodies } = recorder(() => new Response(JSON.stringify({
     error: { message: "Invalid API key provided", code: "invalid_api_key" },
   }), { status: 401 }));
@@ -294,7 +294,7 @@ test("compat wire: an unrelated 400 still fails, and fails once", async () => {
     (e) => /Invalid API key/.test(e.message) && e.status === 401
   ));
   assert.equal(bodies.length, 1, "a non-temperature failure must not be re-paid");
-  temperatureRejected.clear();
+  refused.clear();
 });
 
 // The loop guard: if we sent no temperature (the regex already exempted the
@@ -302,7 +302,7 @@ test("compat wire: an unrelated 400 still fails, and fails once", async () => {
 // re-sending the identical request would just buy the same rejection twice.
 test("compat wire: no retry when the request carried no temperature", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
-  temperatureRejected.clear();
+  refused.clear();
   const { fetch, bodies } = recorder(() => tempRefusal());
   await withFetch(fetch, () => assert.rejects(
     compatWire.tag(PROVIDERS.openai, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gpt-5-mini" }),
@@ -310,14 +310,14 @@ test("compat wire: no retry when the request carried no temperature", async () =
   ));
   assert.ok(!("temperature" in bodies[0]), "gpt-5-mini is exempt by regex — nothing to drop");
   assert.equal(bodies.length, 1);
-  temperatureRejected.clear();
+  refused.clear();
 });
 
 // Vendors other than OpenAI have no structured `param`, only prose — the
 // recovery must read either. (Any compat plugin can hit this.)
 test("compat wire: a prose-only refusal is recognised too", async () => {
   const { compatWire } = await import("../server/ai-providers/wires/compat.js");
-  temperatureRejected.clear();
+  refused.clear();
   const proseOnly = () => new Response(JSON.stringify({
     error: { message: "temperature is not supported for this model" },
   }), { status: 400 });
@@ -326,7 +326,7 @@ test("compat wire: a prose-only refusal is recognised too", async () => {
     compatWire.tag(PROVIDERS.gemini, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gemini-3.5-flash" }));
   assert.deepEqual(result.input, { kind: ["a"] });
   assert.equal(bodies.length, 2);
-  temperatureRejected.clear();
+  refused.clear();
 });
 
 // ─── the Anthropic twin ──────────────────────────────────────────────────────
@@ -348,7 +348,7 @@ const anthropicTagOk = () => new Response(JSON.stringify({
 
 test("anthropic wire: a refused temperature is dropped, re-sent and learned", async () => {
   const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
-  temperatureRejected.clear();
+  refused.clear();
   const { fetch, bodies } = recorder((_n, body) => ("temperature" in body ? anthropicRefusal() : anthropicTagOk()));
   // A key this test alone uses: the wire caches SDK clients per (base, key)
   // and the SDK captures globalThis.fetch at CONSTRUCTION — a fresh key means
@@ -365,12 +365,12 @@ test("anthropic wire: a refused temperature is dropped, re-sent and learned", as
   await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
   assert.equal(bodies.length, 3);
   assert.ok(!("temperature" in bodies[2]), "later items must omit the field up front");
-  temperatureRejected.clear();
+  refused.clear();
 });
 
 test("anthropic wire: an unrelated 400 still fails, and fails once", async () => {
   const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
-  temperatureRejected.clear();
+  refused.clear();
   const { fetch, bodies } = recorder(() => new Response(JSON.stringify({
     type: "error",
     error: { type: "invalid_request_error", message: "max_tokens: field required" },
@@ -381,19 +381,82 @@ test("anthropic wire: an unrelated 400 still fails, and fails once", async () =>
     (e) => Number(e.status) === 400 && /max_tokens/.test(e.message)
   ));
   assert.equal(bodies.length, 1, "a non-temperature failure must not be re-paid");
-  temperatureRejected.clear();
+  refused.clear();
 });
 
-// The shared vocabulary, pinned pure: rejection verbs, not mere mention. Each
-// vendor phrases the refusal its own way (OpenAI: structured param + prose
-// "Unsupported value"; Anthropic since 5.1: "deprecated") — and a 400 that
-// merely QUOTES the word, or a non-400 naming it, stays fatal.
-test("temperature vocabulary: rejection verbs, not mere mention", () => {
-  assert.ok(rejectsTemperature({ status: 400, message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}' }));
-  assert.ok(rejectsTemperature({ status: 400, param: "temperature" }));
-  assert.ok(rejectsTemperature({ status: 400, message: "temperature is not supported for this model" }));
-  assert.ok(!rejectsTemperature({ status: 400, message: "schema property `temperature` must be a number" }));
-  assert.ok(!rejectsTemperature({ status: 401, message: "temperature is not supported" }));
+// The SECOND refusable parameter, hours after the first (fable-5.1,
+// 2026-09-03): a facet-heavy board's schema compiles to a grammar the server
+// deems too large, and strict: true 400s. Safe to drop — parseRun filters
+// answers against the vocabulary downstream (it always did, for the
+// strictTools:false providers).
+const grammarRefusal = () => new Response(JSON.stringify({
+  type: "error",
+  error: { type: "invalid_request_error", message: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." },
+  request_id: "req_test",
+}), { status: 400, headers: { "content-type": "application/json" } });
+
+test("anthropic wire: a too-large grammar drops strict — learned per SCHEMA, not per model", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  refused.clear();
+  const { fetch, bodies } = recorder((_n, body) => (body.tools[0].strict ? grammarRefusal() : anthropicTagOk()));
+  const opts = { ...tagOpts({ name: "record_tags", description: "d" }), apiKey: "k-anthropic-strict-recovery", model: "claude-fable-5-1" };
+  const result = await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].tools[0].strict, true);
+  assert.ok(!("strict" in bodies[1].tools[0]), "the retry must omit the flag entirely");
+  assert.equal(bodies[1].temperature, 0, "dropping strict must not also drop temperature");
+  // Learned, so the next item on the SAME board skips the doomed call…
+  await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, opts));
+  assert.equal(bodies.length, 3);
+  assert.ok(!("strict" in bodies[2].tools[0]));
+  // …but the grammar is a property of the schema, not the model: a leaner
+  // board on the very same model still asks for strict (and pays its own
+  // discovery when the stub refuses again).
+  const leaner = { ...opts, schema: { type: "object", properties: {}, required: [] } };
+  await withFetch(fetch, () => anthropicWire.tag(PROVIDERS.anthropic, leaner));
+  assert.equal(bodies.length, 5, "a different schema pays its own discovery round trip");
+  assert.equal(bodies[3].tools[0].strict, true, "the leaner schema must still ask for strict");
+  assert.ok(!("strict" in bodies[4].tools[0]));
+  refused.clear();
+});
+
+test("compat wire: the grammar refusal drops strict for compat providers too", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  refused.clear();
+  const compatGrammar = () => new Response(JSON.stringify({
+    error: { message: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." },
+  }), { status: 400 });
+  const { fetch, bodies } = recorder((_n, body) => (body.tools[0].function.strict ? compatGrammar() : tagOk()));
+  const result = await withFetch(fetch, () =>
+    compatWire.tag(PROVIDERS.gemini, { ...tagOpts({ name: "record_tags", description: "d" }), model: "gemini-3.5-flash" }));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].tools[0].function.strict, true);
+  assert.ok(!("strict" in bodies[1].tools[0].function), "the retry must omit the flag entirely");
+  assert.equal(bodies[1].temperature, 0, "strict alone is dropped, temperature rides on");
+  refused.clear();
+});
+
+// The shared vocabulary, pinned pure: rejection verbs against a SENT feature,
+// not mere mention. Each vendor phrases each refusal its own way (OpenAI:
+// structured param + prose "Unsupported value"; Anthropic since 5.1:
+// "deprecated" for temperature, "compiled grammar is too large … strict
+// tools" for strict) — and a 400 that merely quotes a word, a non-400, or a
+// refusal of a feature the request never carried, all stay fatal.
+test("refusal vocabulary: rejection verbs against a sent feature, not mere mention", () => {
+  const sentBoth = { temperature: true, strict: true };
+  const f = (e, sent = sentBoth) => refusedFeature(e, sent);
+  assert.equal(f({ status: 400, message: '400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}' }), "temperature");
+  assert.equal(f({ status: 400, param: "temperature" }), "temperature");
+  assert.equal(f({ status: 400, message: "temperature is not supported for this model" }), "temperature");
+  assert.equal(f({ status: 400, message: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." }), "strict");
+  assert.equal(f({ status: 400, message: "schema property `temperature` must be a number" }), null);
+  assert.equal(f({ status: 401, message: "temperature is not supported" }), null);
+  // a word that merely CONTAINS "strict" is not the strict refusal
+  assert.equal(f({ status: 400, message: "access to restricted tool denied" }), null);
+  // refusing what we never sent is somebody else's fault — must surface
+  assert.equal(f({ status: 400, param: "temperature" }, { temperature: false, strict: true }), null);
 });
 
 test("compat wire: the right-name call is found past an invented one", async () => {
