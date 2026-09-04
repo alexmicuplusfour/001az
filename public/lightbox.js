@@ -519,7 +519,10 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   if (subject.status === "held") {
     const note = document.createElement("div");
     note.className = "warn-box lbp-undecided";
-    note.textContent = "Not tagged yet — this board's auto-tagging is off. Tag it by hand, or turn auto-tagging back on.";
+    // Status-honest: held means PARKED, whatever parked it — auto-tagging off
+    // at upload, or a cancelled queue. Claiming a reason here was a lie for
+    // the cancel case (job-control-plan.md Stage 2 ride-along).
+    note.textContent = "Not tagged — parked. Tag it by hand, or retag it to queue it again.";
     elLightboxPanelBody.appendChild(note);
   } else if (subject.undecided) {
     const note = document.createElement("div");

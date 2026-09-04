@@ -18,7 +18,7 @@ import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-ta
 import { switchRow } from './board-modal.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
 import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
-import { stampBoardIngest, ensurePolling } from './data.js';
+import { stampBoard, ensurePolling } from './data.js';
 
 const OP_LABELS = {
   contains: "contains", equals: "equals", starts_with: "starts with",
@@ -897,7 +897,7 @@ export function openIngestModal() {
           // stored, with no second derivation here and no confirming refetch.
           // Only stamp if the pair actually arrived: a 200 whose body didn't
           // survive the trip would otherwise blank a chip the save just kept.
-          if (data.ingest_mode !== undefined) stampBoardIngest(data);
+          if (data.ingest_mode !== undefined) stampBoard(data);
           ensurePolling();
           document.dispatchEvent(new Event("app:render"));
           toast(okToast);
@@ -917,9 +917,11 @@ export function openIngestModal() {
           if (!r.ok) return toast.error(data.error || "Run failed");
           // The route just armed next_run_at = now — no refetch needed. The
           // chip flips to "now" on its next tick, and its own expiry refetch
-          // follows the sweep from there.
+          // follows the sweep from there. On a paused board the arm DEFERS
+          // (the sweep's single choke point, job-control-plan.md Stage 1):
+          // nothing is confiscated, the run fires on resume — say so.
           state.boardIngestNextRun = Date.now();
-          toast("Ingestion run queued");
+          toast(state.boardPaused ? "Board paused — run queued for resume" : "Ingestion run queued");
         } catch {
           toast.error("Run failed");
         }

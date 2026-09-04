@@ -40,6 +40,7 @@ export const state = {
   // semantic search: server-enabled flag, the input's draft text, the last
   // submitted query, and its results (Map id -> score; null = not searching)
   boardMapping: null,
+  boardPaused: false,   // board pause: automatic work held — the jobs chip dims, the delta poll slows
   boardIngestMode: null, // null | "manual" | "paused" | "scheduled" — drives the toolbar chip
   boardIngestNextRun: null, // ms timestamp of the next ingestion run (chip countdown; also what keeps the slow delta poll alive)
   boardUnits: null, // { unit: quantity } — every unit metered on this board, never summed across them

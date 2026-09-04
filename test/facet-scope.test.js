@@ -328,7 +328,7 @@ test("reprocessEntity clears an armed scope", async () => {
 test("cancelBoardQueue clears an armed scope on both branches", async () => {
   const { board, id } = await armed("c4.png");        // has tags -> `restored`
   const bare = await insertItem(db, board, { identity: "c5.png", files: [], fields: {} }, "pending");
-  await db.query("UPDATE items SET tag_facets=ARRAY['mood']::text[] WHERE id=$1", [bare]); // no tags -> `cleared`
+  await db.query("UPDATE items SET tag_facets=ARRAY['mood']::text[] WHERE id=$1", [bare]); // no tags -> `parked`
   await cancelBoardQueue(db, board);
   assert.equal((await itemOf(id)).tag_facets, null, "restored branch");
   assert.equal((await itemOf(bare)).tag_facets, null, "cleared branch");

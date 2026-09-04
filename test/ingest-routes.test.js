@@ -138,8 +138,9 @@ test("PATCH bookkeeping: arming, rearming on trigger change, disarming", async (
   assert.equal(norm.status, 200);
   // ingest_error false: an ingest save clears last_error at the save seam
   // (superseded — the next run judges the new config), so the echo and
-  // storage agree.
-  assert.deepEqual(norm.json, { ok: true, ingest_mode: "manual", ingest_next_run_at: null, ingest_error: false });
+  // storage agree. paused false: every board save echoes the pause flag, since
+  // the client stamps board payloads through one funnel that resets it.
+  assert.deepEqual(norm.json, { ok: true, ingest_mode: "manual", ingest_next_run_at: null, ingest_error: false, paused: false });
   b = await getBoard(db, boardId);
   assert.equal(b.ingest.enabled, true, "manual + enabled:false is normalized, not stored");
 

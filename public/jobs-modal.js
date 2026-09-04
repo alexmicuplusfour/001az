@@ -9,10 +9,12 @@
 // while the modal is open — history only re-pulls page one, so a reader deep
 // in Load-more pages isn't yanked back to the top.
 import { state } from './state.js';
-import { createModal, sectionHeadingEl } from './modal.js';
-import { ACTIVE, QUEUED } from './data.js';
+import { createModal, sectionHeadingEl, busy } from './modal.js';
+import { ACTIVE, QUEUED, setBoardPaused } from './data.js';
 import { fmtDuration, pill, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
 import { unseen, markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
+import { toast } from './toast.js';
+import { api } from './api.js';
 
 // ── the chip's attention dot ──
 // "A job failed while you weren't looking." The count on the chip already says
@@ -62,6 +64,24 @@ const STATUS_LABELS = {
   pending_extract: "queued to extract",
   pending_face: "queued for chart",
   pending_fetch: "queued to fetch",
+};
+
+// The cancel control's two strengths, in one place — copy, request and past
+// tense together, so re-wording a verb (or adding a third) is one entry rather
+// than a hunt through the handler and the renderer.
+const CANCEL_VERBS = {
+  queued: {
+    label: "Cancel queued",
+    title: "Pull queued work out of the pipeline — items already being processed finish",
+    past: "Cancelled",
+    confirm: "Cancel this board's queued work? Items already being processed will finish; tagged items keep their tags, never-tagged ones are parked, queued adds are removed.",
+  },
+  abort: {
+    label: "Abort",
+    title: "Settle everything now — running calls finish in the background and their results are discarded",
+    past: "Aborted",
+    confirm: "Abort this board's running work? Already-launched calls finish in the background and their results are DISCARDED — the spend is committed, the outcome isn't. Vehicles mid-fetch are removed. (Running feed scans and transcriptions are not queue items; pause the board to stop their next tick.)",
+  },
 };
 
 const REFRESH_MS = 5000;
@@ -139,6 +159,20 @@ export function summaryFor(j) {
       return bits.join(" · ");
     }
     if (j.kind === "retag") return d.skipped ? `skipped (${d.skipped})` : `queued ${d.queued ?? 0} item${d.queued === 1 ? "" : "s"}`;
+    if (j.kind === "cancel") {
+      // Name the verb: both strengths come through one route, so this row is
+      // the only place an abort is distinguishable from a cancel — with
+      // nothing in flight their counts are identical.
+      const did = d.mode === "abort" ? "aborted" : "cancelled";
+      const bits = [
+        d.restored ? `${d.restored} restored` : "",
+        d.parked ? `${d.parked} parked` : "",
+        d.removed ? `${d.removed} removed` : "",
+        d.finishing ? `${d.finishing} left to finish` : "",
+        d.discarding ? `${d.discarding} discarding` : "",
+      ].filter(Boolean);
+      return `${did}${bits.length ? `: ${bits.join(" · ")}` : " — nothing was queued"}`;
+    }
     if (j.kind === "diagnose") {
       // The RUN belongs in the ledger; the finding itself does not — it is a
       // standing assessment of a definition, keyed by facet and replaced rather
@@ -272,7 +306,10 @@ export const jobsModalOpen = () => !!modalEl;
 export function openJobsModal({ kind } = {}) {
   if (modalEl) return; // already open
   let timer = null;
-  const onRender = () => renderLive();
+  // Everything pause repaints rides the app's render tick, so setBoardPaused's
+  // dispatch is the single path whether the flip came from this button or from
+  // another manager landing on the 5s pull.
+  const onRender = () => { renderPause(); renderScheduled(); renderLive(); };
   const { body, overlay } = createModal({
     title: "Jobs",
     id: "jobs-modal",
@@ -300,6 +337,91 @@ export function openJobsModal({ kind } = {}) {
   const liveHead = document.createElement("div");
   liveHead.className = "jobs-head";
   liveHead.appendChild(sectionHeadingEl("In progress"));
+  // Board pause (job-control-plan.md Stage 1). No local mirror — state.boardPaused
+  // is the one copy, and setBoardPaused carries the flag, the poll cadence and the
+  // repaint together. The endpoint echoes the flag on every 5s pull, so a pause
+  // flipped by another manager reaches this modal without a reload. Managers get
+  // the toggle — reading is for every member, holding the board is management
+  // (the Clear button's line, and the PATCH enforces it server-side).
+  let lastSched = null;
+  let pauseLabel = null;
+  let cancelBtn = null;
+  let cancelLabel = null;
+  // Is the hard verb on offer? A board fact, not this tab's: the newest cancel
+  // row said it had to leave work running, and work is still running. Same
+  // answer in every tab, and it survives a reload.
+  const abortOffered = () =>
+    state.items.some((i) => ACTIVE.has(i.status)) &&
+    (jobs.find((j) => j.kind === "cancel")?.detail?.finishing ?? 0) > 0;
+  const renderPause = () => {
+    if (!pauseLabel) return;
+    pauseLabel.textContent = state.boardPaused ? "Resume" : "Pause";
+    pauseLabel.parentElement.title = state.boardPaused
+      ? "Resume this board's automatic work"
+      : "Pause this board's automatic work — running jobs finish, the queue and schedules wait";
+  };
+  const syncPaused = (d) => {
+    if (d.paused !== undefined && !!d.paused !== state.boardPaused) setBoardPaused(d.paused);
+  };
+  if (state.boardManage) {
+    const pauseBtn = document.createElement("button");
+    pauseBtn.type = "button";
+    pauseBtn.className = "tool-btn jobs-pause";
+    // The label lives in a span because renderPause writes it from INSIDE the
+    // busy() handler: busy wraps the button's children and restores only while
+    // its wrapper is still the button's child, so re-labelling the button
+    // itself would eat the wrapper and leave the button disabled forever.
+    // Writing into an inner span is the composite-button case busy documents.
+    pauseLabel = document.createElement("span");
+    pauseBtn.appendChild(pauseLabel);
+    pauseBtn.addEventListener("click", busy(pauseBtn, async () => {
+      const to = !state.boardPaused;
+      const r = await fetch(`/api/boards/${state.boardId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: to }),
+      });
+      if (r.ok) setBoardPaused(to); // else: the 5s pull re-syncs whatever is true
+    }));
+    renderPause();
+    liveHead.appendChild(pauseBtn);
+
+    // Soft cancel + Abort (job-control-plan.md Stages 2/3): ONE button, two
+    // strengths, and which one it offers is DERIVED from the board rather than
+    // latched in this tab. Abort shows when the newest cancel row reports work
+    // it had to leave running AND something is still running to catch — the
+    // GitHub shape, Force cancel appearing when Cancel wasn't enough. Reading
+    // that off the ledger (page one, re-pulled every 5s) rather than off "did
+    // *I* just press Cancel" is what makes the hard verb reachable by a second
+    // manager, and by the first after a reload: a latch hid it from exactly
+    // the session that needed it, because with the queue emptied there was no
+    // button left to press. An abort's own row reports nothing left running,
+    // so it disarms itself. The label lives in a span for busy()'s
+    // composite-button contract, like Pause's above.
+    cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "tool-btn jobs-danger";
+    cancelLabel = document.createElement("span");
+    cancelBtn.appendChild(cancelLabel);
+    cancelBtn.style.display = "none";
+    cancelBtn.addEventListener("click", busy(cancelBtn, async () => {
+      const abort = abortOffered();
+      const verb = CANCEL_VERBS[abort ? "abort" : "queued"];
+      if (!confirm(verb.confirm)) return;
+      try {
+        const c = await api("POST", `/api/boards/${state.boardId}/jobs/cancel-queued`, { abort });
+        // The same sentence the History row will carry — summaryFor owns the
+        // wording, so the toast and the ledger can't drift.
+        const said = summaryFor({ kind: "cancel", outcome: "ok", detail: c });
+        const any = c.restored || c.parked || c.removed || c.finishing || c.discarding;
+        toast(any ? `${verb.past} — ${said}` : "Nothing was queued");
+        load(true); // pull the cancel row in now; the queue rows clear on the delta poll
+      } catch (e) {
+        toast.error(e.message || "Cancel failed");
+      }
+    }));
+    liveHead.appendChild(cancelBtn);
+  }
   liveSec.appendChild(liveHead);
   const liveList = document.createElement("div");
   liveList.className = "jobs-list";
@@ -323,19 +445,20 @@ export function openJobsModal({ kind } = {}) {
   if (state.boardManage) {
     clearBtn = document.createElement("button");
     clearBtn.type = "button";
-    clearBtn.className = "tool-btn jobs-clear";
+    clearBtn.className = "tool-btn jobs-danger";
     clearBtn.textContent = "Clear";
     clearBtn.title = "Delete this board's job history (in-flight rows are kept)";
     clearBtn.style.display = "none"; // shown once there's history to clear
     clearBtn.addEventListener("click", async () => {
       if (!confirm("Clear this board's job history? This can't be undone.")) return;
       try {
-        const r = await fetch(`/api/boards/${state.boardId}/jobs`, { method: "DELETE" });
-        if (!r.ok) throw new Error(String(r.status));
+        await api("DELETE", `/api/boards/${state.boardId}/jobs`);
         seenKinds.clear();
         activeKind = "all";
         load(true); // repopulates from what survives: running rows, refresh history
-      } catch {} // leave the list as-is; the interval re-syncs either way
+      } catch (e) {
+        toast.error(e.message || "Clear failed"); // the list stands; the interval re-syncs
+      }
     });
     histHead.appendChild(clearBtn);
   }
@@ -372,8 +495,19 @@ export function openJobsModal({ kind } = {}) {
     el.appendChild(p);
   };
 
-  function renderScheduled(sched) {
-    if (!sched) return;
+  // Called with a fresh `scheduled` block, or bare (from the render tick) to
+  // redraw the last one — pause rewrites this line, so it has to be repaintable
+  // without a fetch.
+  function renderScheduled(sched = lastSched) {
+    lastSched = sched;
+    // While paused the stamps go overdue by design and "due now" would be a
+    // standing lie — say the true thing instead.
+    if (state.boardPaused) {
+      schedLine.hidden = false;
+      schedLine.textContent = "Paused — running jobs finish; queued work and schedules resume on unpause";
+      return;
+    }
+    if (!sched) { schedLine.hidden = true; return; }
     const when = (ts) => (ts - Date.now() <= 0 ? "due now" : `in ${fmtDuration(ts - Date.now())}`);
     const bits = [];
     if (sched.ingest_next_run_at) bits.push(`next feed run ${when(sched.ingest_next_run_at)}`);
@@ -400,6 +534,17 @@ export function openJobsModal({ kind } = {}) {
     for (const img of queued.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(img));
     if (queued.length > QUEUED_SHOWN) note(liveList, `…and ${queued.length - QUEUED_SHOWN} more queued`);
     if (!liveList.children.length) note(liveList, "Nothing in flight.");
+    // The client can't see mid_pass, so "queued" here is an upper bound on what
+    // a cancel would touch — the button's honesty lives in the confirm copy and
+    // the counts the server answers with, not in this visibility test.
+    if (cancelBtn) {
+      const abort = abortOffered();
+      const verb = CANCEL_VERBS[abort ? "abort" : "queued"];
+      const n = abort ? active.length : queued.length;
+      cancelBtn.style.display = n ? "" : "none";
+      cancelLabel.textContent = abort ? `${verb.label} — ${n} still running` : verb.label;
+      cancelBtn.title = verb.title;
+    }
   }
 
   function renderFilters() {
@@ -513,6 +658,7 @@ export function openJobsModal({ kind } = {}) {
       // Refresh history lives outside job_log (field_snapshots) — the flag is
       // how its pill appears before the kind is ever fetched.
       if (data.has_refresh) seenKinds.add("refresh");
+      syncPaused(data);
       renderScheduled(data.scheduled);
       renderLive();
       renderFilters();
@@ -543,6 +689,7 @@ export function openJobsModal({ kind } = {}) {
     fetchPage(null).then((d) => {
       running = d.running;
       const moved = noteStamp(d);
+      syncPaused(d);
       renderScheduled(d.scheduled);
       renderLive();
       if (moved) document.dispatchEvent(new Event('app:render'));

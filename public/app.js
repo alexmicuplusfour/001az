@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl, activeCount } from './filters.js';
-import { inProgress, reconcile, ensurePolling, drainItems, stampBoardIngest } from './data.js';
+import { inProgress, reconcile, ensurePolling, drainItems, stampBoard } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid, dropAllCards } from './grid.js';
 import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
 import { resolveView, restoreView } from './view.js';
@@ -120,7 +120,7 @@ async function main() {
   // than showing none.
   state.facetStats = null;
   state.boardMapping = boardData?.mapping || null;
-  stampBoardIngest(boardData || {});
+  stampBoard(boardData || {});
   state.boardUnits = boardData?.units ?? null;
   state.boardUnitDefs = boardData?.unitDefs ?? null;
   state.boardCost = boardData?.cost ?? null; // manager-only key; absent = nothing priced or not ours to see

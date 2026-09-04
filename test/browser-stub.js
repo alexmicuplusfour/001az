@@ -23,8 +23,14 @@ globalThis.localStorage = {
   removeItem: (k) => store.delete(k),
 };
 
+// `body` is here for the same reason `addEventListener` is: toast.js builds
+// its container at module scope, and jobs-modal.js imports it — so a module
+// that only wanted summaryFor drags a document.body.appendChild into the
+// import. Absorbing that here is the settled answer (data.js's listener was
+// absorbed, not made lazy); the production modules stay eager.
 globalThis.document ||= {
   addEventListener() {},
   dispatchEvent() { return true; },
+  body: { appendChild() {} },
   createElement: () => ({ appendChild() {}, setAttribute() {} }),
 };

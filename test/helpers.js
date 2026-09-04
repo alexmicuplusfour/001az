@@ -185,6 +185,20 @@ export async function seedItem(db, boardId, filename = crypto.randomBytes(6).toS
   return { id, instanceId, filename };
 }
 
+// One entity + one instance in a chosen pipeline state — the seeder for queue
+// tests, where the point is which STATUS a row sits in rather than its files.
+// `payload` merges over the empty-file shape; `tags`/`midPass` are stamped
+// after the insert because insertItem owns neither.
+let seedSeq = 0;
+export async function seedInstance(db, boardId, status, { tags = null, midPass = false, payload = {} } = {}) {
+  const identity = `seed${++seedSeq}`;
+  const eid = await createEntity(db, boardId, { identity });
+  const id = await insertItem(db, boardId, { identity, files: [], fields: {}, ...payload }, status, eid);
+  if (tags) await db.query("UPDATE items SET tags=$1 WHERE id=$2", [JSON.stringify(tags), id]);
+  if (midPass) await db.query("UPDATE items SET mid_pass=TRUE WHERE id=$1", [id]);
+  return { eid, id };
+}
+
 // --- request helper ---
 
 export async function req(base, method, pathname, { sid, body } = {}) {

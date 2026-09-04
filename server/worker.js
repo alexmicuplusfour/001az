@@ -36,6 +36,7 @@ import {
   pruneFieldSnapshots,
   pruneTagSnapshots,
   addJobLog,
+  jobLogWrite,
   stampJobLog,
   deleteJobLog,
   latestSettledJob,
@@ -1406,18 +1407,6 @@ export async function imageForDetection(buf) {
     );
   } catch {
     return buf; // let the sidecar decode (and 422-park) a truly undecodable image
-  }
-}
-
-// The job log observes; it must never break the job it observes. Every ledger
-// write goes through here — a failure is a warn, never a throw into the leg
-// or sweep being recorded. Returns the write's result, or null on failure.
-async function jobLogWrite(fn) {
-  try {
-    return await fn();
-  } catch (e) {
-    console.warn("job log write failed:", e.message);
-    return null;
   }
 }
 

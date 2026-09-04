@@ -42,7 +42,7 @@ export async function renderBoards() {
       : "";
     tr.innerHTML = `
       <td><span class="name-cell">${ICONS.grid}<a href="${url}" target="_blank" style="color:inherit;text-decoration:none;font-weight:600">${b.name}</a></span></td>
-      <td>${b.item_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="uploads waiting while auto-tagging is off">(${b.held_count} held)</span>` : ""}</td>
+      <td>${b.item_count}${b.pending_count ? ` <span style="color:#9aa0aa">(${b.pending_count} queued)</span>` : ""}${b.held_count ? ` <span style="color:#9aa0aa" title="parked items — uploads waiting for tagging, or a cancelled queue">(${b.held_count} held)</span>` : ""}</td>
       <td></td>`;
 
     const actCell = tr.querySelector("td:last-child");
@@ -142,11 +142,11 @@ export async function renderBoards() {
       stopBtn.innerHTML = ICONS.stop + "<span>stop</span>";
       stopBtn.title = "Cancel queued AI tagging for this board";
       stopBtn.onclick = async () => {
-        if (!confirm(`Stop the tagging queue for "${b.name}"? ${b.pending_count} queued item(s) will be pulled out — ones with previous tags keep them, the rest show as untagged for review.`)) return;
+        if (!confirm(`Stop the queued work for "${b.name}"? Items already being processed will finish — ones with previous tags keep them, the rest are parked as held, queued adds are removed.`)) return;
         try {
           stopBtn.disabled = true;
           stopBtn.textContent = "stopping…";
-          await api("POST", `/api/admin/boards/${b.id}/retag/cancel`);
+          await api("POST", `/api/boards/${b.id}/jobs/cancel-queued`);
           toast("Tagging queue stopped");
           renderBoards();
         } catch (err) {

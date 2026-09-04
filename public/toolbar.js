@@ -165,13 +165,18 @@ function jobsChip() {
   const failed = jobsUnseen();
   const chip = document.createElement("button");
   chip.type = "button";
-  chip.className = "mapping-chip jobs-chip" + (n > 0 ? " busy" : "");
-  const busyNote = n > 0 ? `${n} item${n === 1 ? "" : "s"} in the pipeline` : "";
-  // Both facts when both hold — a queue draining while an earlier item failed
-  // is the ordinary case, and the tooltip is the only place either is named.
-  chip.title = [busyNote, failed ? "something failed since you last looked" : ""]
-    .filter(Boolean).join(" — ") || "Job log";
-  if (busyNote || failed) chip.title += " — click for the job log";
+  chip.className = "mapping-chip jobs-chip" + (n > 0 ? " busy" : "") + (state.boardPaused ? " paused" : "");
+  // Every fact that holds, in one list — a queue draining while an earlier item
+  // failed is the ordinary case, and the tooltip is the only place any of them
+  // is named. Paused keeps the count (the queue is intact, which is the point)
+  // but stops the note claiming motion; .paused stops the pulse to match.
+  const notes = [
+    n > 0 ? `${n} item${n === 1 ? "" : "s"} ${state.boardPaused ? "waiting" : "in the pipeline"}` : "",
+    state.boardPaused ? "board paused" : "",
+    failed ? "something failed since you last looked" : "",
+  ].filter(Boolean);
+  chip.title = notes.join(" — ") || "Job log";
+  if (notes.length) chip.title += " — click for the job log";
   chip.setAttribute("aria-label", failed ? "Job log — new errors" : "Job log");
   const icon = document.createElement("span");
   icon.className = "jobs-chip-icon";

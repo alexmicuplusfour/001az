@@ -1,0 +1,27 @@
+-- Mid-pipeline marker (planning/job-control-plan.md, Stage 2): TRUE while an
+-- item is between its first leg landing and its tag landing — i.e. work was
+-- already spent on it THIS pass. Soft cancel ("Cancel queued") touches only
+-- rows where this IS NOT TRUE: started items run their remaining legs to
+-- tagging and settle coherently, not-started ones are restored or parked.
+--
+-- A column, not a payload key, despite park/extracted_at setting the
+-- transient-flag precedent — facet-addressable-tagging-plan.md ~122 already
+-- litigated this for tag_facets: payload is the item's DEFINITION (identity,
+-- files, fields) and this is queue state. It rides claimFairBatch's
+-- RETURNING * for free and stays out of backup.js's way.
+--
+-- Nullable with no default (the tag_facets/0030 restore argument): NULL is
+-- "unmarked", archives written before this column restore as unmarked, and
+-- the three fenced leg landings (markExtracted / advanceFetched /
+-- advanceFaced) are the only writers of TRUE. Every queuer that pulls a row
+-- out of a settled status clears it beside the attempts/error/retry_at reset
+-- triple; failOrRequeue and recoverStuck deliberately leave it alone — a
+-- bounced mid-pipeline row is still mid-pipeline.
+--
+-- DELIBERATELY UNINDEXED, and it must stay that way. The three landings above
+-- are the pipeline's hottest UPDATE path, and they stay HOT (heap-only tuple)
+-- updates precisely because nothing indexes this column; an index would cost
+-- an index insert on every leg landing forever to save nothing on a
+-- manager-pressed button, whose only reader already has the row narrowed to
+-- one board's queue.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS mid_pass BOOLEAN;

@@ -101,6 +101,9 @@ import {
   retagItem,
   retagItemFacets,
   rescheduleEntityRefreshes,
+  floorOverdueRefreshes,
+  addJobLog,
+  jobLogWrite,
   boardEntityIdentities,
   boardUsageSummary,
   usageRows,
@@ -1034,6 +1037,7 @@ app.get("/api/boards/:id", requireAuth, wrap(async (req, res) => {
     mapping: board.mapping || null,
     search: embeddingOk,
     manage: canManage,
+    paused: board.paused === true,
     // The board's all-time spend, per unit and never summed across them
     // (metering-plan.md Stage 0 — input and output bill at different rates),
     // with the vocabulary beside it so the chip renders what it is handed.
@@ -1140,6 +1144,10 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
       retag_next_run_at: board.auto_tag !== false && board.auto_tag_periodic ? board.auto_tag_next_run_at ?? null : null,
       refresh_next_at: nextRefreshAt,
     },
+    // The modal renders pause state it fetched, not state it hopes the board
+    // payload had — this endpoint is its own 5s heartbeat, so a pause flipped
+    // by another manager shows up here first.
+    paused: board.paused === true,
     now: Date.now(),
   });
 }));
@@ -1167,6 +1175,30 @@ app.get("/api/boards/:id/jobs/errors", requireAuth, wrap(async (req, res) => {
 // this ledger — both survive.
 app.delete("/api/boards/:id/jobs", requireAuth, requireBoardManager, wrap(async (req, res) => {
   res.json({ cleared: await clearJobLog(db, req.board.id) });
+}));
+
+// Soft cancel — "Cancel queued" (job-control-plan.md Stage 2), shared by the
+// Jobs modal button below and the admin stop button's route. One board-run
+// job-log row per cancel, whatever the counts came to — somebody asked, so
+// "nothing was queued" is the answer — and the ledger never breaks the job:
+// a log failure is a warn, the cancel itself already committed.
+async function cancelQueued(boardId, { abort = false } = {}) {
+  const t0 = Date.now();
+  const counts = await cancelBoardQueue(db, boardId, { abort });
+  await jobLogWrite(() => addJobLog(db, {
+    boardId, kind: "cancel", outcome: "ok",
+    detail: { mode: abort ? "abort" : "queued", ...counts },
+    startedAt: t0, endedAt: Date.now(),
+  }), `cancel row, board ${boardId}`);
+  console.log(`cancel ${abort ? "ABORT" : "queued"}: board ${boardId} — ${counts.restored} restored, ${counts.parked} parked, ${counts.removed} removed, ${abort ? `${counts.discarding} discarding` : `${counts.finishing} left to finish`}`);
+  return counts;
+}
+
+// Manager-gated like Clear above and for the same reason: reading the queue is
+// for every member, emptying it is holding the board. `{ abort: true }` in the
+// body is the hard verb (Stage 3) — same door, wider blast radius.
+app.post("/api/boards/:id/jobs/cancel-queued", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  res.json({ ok: true, ...(await cancelQueued(req.board.id, { abort: req.body?.abort === true })) });
 }));
 
 // Board-manager content editing — the gallery's "edit board" modal. A global
@@ -1284,6 +1316,14 @@ const saveBoardPatch = wrap(async (req, res) => {
     const m = update.mapping;
     if (m === null || !m.input) await backfillFileFields(prev.id, m);
   }
+  // Unpausing floors the board's overdue refresh stamps to now: a days-paused
+  // board otherwise owns the deep past of dueLiveEntities' soonest-first order
+  // and monopolizes the refresh sweep for its whole drain (job-control-plan.md
+  // Stage 1). Pausing needs no side-effect — the gates read the flag live.
+  // It lives here, beside its sibling second-statement effects, because this
+  // route is the ONLY unpause path; give `paused` a second writer (a bulk
+  // "resume all", a restore) and this belongs in a setBoardPaused db helper.
+  if (update.paused === false && prev.paused) await floorOverdueRefreshes(db, prev.id);
   // The moment auto-tagging comes back on, sweep the board: queue everything
   // untagged — held uploads, AI-undecided, failed. Turning it off queues
   // nothing — uploads pile up as 'held', untagged, until tagging returns.
@@ -1309,6 +1349,11 @@ const saveBoardPatch = wrap(async (req, res) => {
       ingest_next_run_at: update.ingestNextRunAt !== undefined ? update.ingestNextRunAt : prev.ingest_next_run_at,
       ...(update.ingest === undefined ? { ingest_state: prev.ingest_state } : {}),
     }),
+    // Echoed for the same reason as the trio above, and load-bearing for the
+    // client's single stamping funnel: stampBoard resets `paused` from whatever
+    // payload it is handed, so a save response that omitted it would read as
+    // "unpaused" and silently resume the board on the client.
+    paused: (update.paused ?? prev.paused) === true,
   });
 });
 
@@ -1743,6 +1788,12 @@ async function buildBoardContentUpdate(body = {}, prev) {
   }
   if (body.auto_tag_skip_weekends !== undefined) update.autoTagSkipWeekends = !!body.auto_tag_skip_weekends;
   if (body.retag_on_refresh !== undefined) update.retagOnRefresh = !!body.retag_on_refresh;
+  // Board pause (job-control-plan.md Stage 1): manager-level like the rest of
+  // this trunk — the Jobs modal's Pause button PATCHes it. Just a flag here;
+  // the worker's due/claim queries are where it bites, and the route handles
+  // the one resume side-effect (the refresh floor) beside its sibling
+  // second-statement effects (sweep, demote).
+  if (body.paused !== undefined) update.paused = !!body.paused;
   // Board-scoped capability knobs (tagging's image detail) — here, not in the
   // admin-only pin patch, because a manager may set them. The validator throws
   // (it is shared with the capability bind route, whose contract is a thrown
@@ -2182,13 +2233,10 @@ app.post("/api/admin/boards/:id/tag-held", requireAdmin, wrap(async (req, res) =
   res.json({ ok: true, released });
 }));
 
-app.post("/api/admin/boards/:id/retag/cancel", requireAdmin, wrap(async (req, res) => {
-  const board = await getBoard(db, req.params.id);
-  if (!board) return res.status(404).json({ error: "not found" });
-  const { restored, cleared } = await cancelBoardQueue(db, req.params.id);
-  console.log(`retag cancelled: board ${req.params.id} — ${restored} restored, ${cleared} left untagged (undecided)`);
-  res.json({ ok: true, cancelled: restored + cleared, restored, cleared });
-}));
+// (The old admin-only POST /api/admin/boards/:id/retag/cancel is gone — its
+// path named the retag leg while the operation grew to cancel every queue and
+// delete queued adds, and canManageBoard passes every global admin, so the
+// admin panel now calls the member-facing /jobs/cancel-queued route above.)
 
 app.delete("/api/admin/boards/:id", requireAdmin, wrap(async (req, res) => {
   const payloads = await deleteBoard(db, req.params.id);

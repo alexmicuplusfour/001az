@@ -1459,6 +1459,13 @@ body.bulk-mode .heart {
    (it IS the retry), red says it's failing. Composes with .paused below: a
    held schedule whose last run failed is both. */
 .mapping-chip.error { color: #b4232a; }
+/* held state, family-wide for the same reason: any toolbar chip can wear
+   .paused. Today the ingest chip does for a held schedule and the jobs chip
+   for a paused board — both mean "still a live control (it's how you resume),
+   just visibly not counting down", so both dim rather than grey. What each
+   chip stops SAYING while held is its own (the glyph rules below). */
+.mapping-chip.paused { opacity: 0.6; }
+.mapping-chip.paused:hover { opacity: 1; }
 /* ingestion chip — the mapping chip's clickable sibling: a refresh glyph +
    countdown to the next run; opens the ingestion modal */
 .ingest-chip {
@@ -1471,10 +1478,8 @@ body.bulk-mode .heart {
 .ingest-chip:hover { background: var(--pill-bg-hover); }
 .ingest-chip-icon { display: inline-flex; }
 .ingest-chip-icon svg { width: 12px; height: 12px; }
-/* held schedule: still a live control (it's how you resume), just visibly not
-   counting down — dimmed rather than greyed, and the glyph stops implying motion */
-.ingest-chip.paused { opacity: 0.6; }
-.ingest-chip.paused:hover { opacity: 1; }
+/* held schedule: the glyph stops implying motion (the dimming is family-wide,
+   on .mapping-chip.paused above) */
 .ingest-chip.paused .ingest-chip-icon { opacity: 0.7; }
 /* token usage chip in the board-group — coin icon + formatted count */
 .token-chip {
@@ -1509,6 +1514,8 @@ body.bulk-mode .heart {
 .jobs-chip-icon svg { width: 12px; height: 12px; }
 .jobs-chip.busy { color: var(--text); }
 .jobs-chip.busy .jobs-chip-icon svg { animation: jobs-pulse 1.6s ease-in-out infinite; }
+/* the count stays (the queue is intact), the pulse stops (nothing is moving) */
+.jobs-chip.busy.paused .jobs-chip-icon svg { animation: none; }
 @keyframes jobs-pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {
   .jobs-chip.busy .jobs-chip-icon svg { animation: none; }
@@ -1519,11 +1526,17 @@ body.bulk-mode .heart {
 /* Section spacing lives on the head row, not the heading — inside a flex row
    the heading's margins don't collapse, they inflate the row and shove the
    text off-center against the Clear button. */
-.jobs-head { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 6px; }
+/* gap + margin-left:auto rather than space-between: the In progress head
+   carries TWO buttons (Pause, Cancel queued), and space-between would strand
+   the first one mid-row and slide it sideways every time the second shows or
+   hides. This pins the group right and keeps it still. */
+.jobs-head { display: flex; align-items: center; gap: 8px; margin: 16px 0 6px; }
+.jobs-head > :first-child { margin-right: auto; }
 .jobs-section:first-child .jobs-head { margin-top: 0; }
-/* the History section's Clear — red like .job-outcome-failed: it destroys */
-.jobs-clear { color: #b3261e; border-color: #ecc7c5; }
-.jobs-clear:hover { background: #fdeaea; }
+/* destructive buttons in a jobs head — History's Clear and In progress's
+   Cancel queued — red like .job-outcome-failed: they destroy */
+.jobs-danger { color: #b3261e; border-color: #ecc7c5; }
+.jobs-danger:hover { background: #fdeaea; }
 .jobs-filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 8px; }
 .jobs-list { display: flex; flex-direction: column; }
 .job-row {

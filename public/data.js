@@ -48,6 +48,16 @@ function needsPoll() {
   );
 }
 
+// needsPoll's stricter sibling: work actually MOVING, not merely queued —
+// an upload mid-flight or a row a worker is holding. The pair is what lets a
+// paused board tell "the queue is waiting" from "something is still running".
+function moving() {
+  return (
+    state.uploading.length > 0 ||
+    state.items.some((img) => ACTIVE.has(img.status))
+  );
+}
+
 // First-time tags (no tags yet) show at the top; retags stay in the grid.
 // Ordered by aliveness — upload placeholders, then actively-worked items,
 // then the waiting queue — so the grid's budgeted lane shows real work first.
@@ -73,8 +83,10 @@ export function reconcile(data, presentIds = null) {
     if (ex) {
       const list = Array.isArray(d.tags) ? d.tags : [];
       ex.status = d.status;
-      // Server clears tags while re-queuing; keep stale tags until a result lands.
-      if (d.status === "tagged" || d.status === "failed" || list.length) {
+      // Server clears tags while re-queuing; keep stale tags until a result
+      // lands. held is terminal too (a parked row — e.g. a cancelled retag —
+      // may sit indefinitely), so an empty list is its truth, not a transit.
+      if (d.status === "tagged" || d.status === "failed" || d.status === "held" || list.length) {
         ex.tags = list;
         ex.tagSet = new Set(list);
       }
@@ -225,7 +237,11 @@ function liveBoard() {
 // matter, and the arrivals themselves are items. (The dot is signals.js's, on
 // its own timer — it lights whether this poll runs or not.)
 export function pollDelay() {
-  if (needsPoll()) return 4000;
+  // A paused board's QUEUE is intact but nothing is on the way, so it doesn't
+  // earn the fast tier — only work genuinely moving does: an upload landing
+  // (pause gates execution, never intake) or a row pause let finish. Without
+  // this a paused backlog would hold the 4s poll open indefinitely.
+  if (needsPoll()) return state.boardPaused && !moving() ? 30000 : 4000;
   if (liveBoard() || state.boardIngestNextRun != null || state.alerts.length) return 30000;
   return 0;
 }
@@ -286,10 +302,10 @@ export function ensurePolling() {
   }
 }
 
-// The board payload's ingestion flags, stamped into state in exactly one
+// The board payload's cadence flags, stamped into state in exactly one
 // place — the boot path, the ingest modal and the toolbar chip all funnel
 // through here so they can't drift on what "refreshed" means.
-export function stampBoardIngest(b) {
+export function stampBoard(b) {
   state.boardIngestMode = b.ingest_mode ?? null;
   state.boardIngestNextRun = b.ingest_next_run_at ?? null;
   // ?? false covers payloads without the flag (the boot fallback {}). A save
@@ -297,6 +313,20 @@ export function stampBoardIngest(b) {
   // last_error server-side (superseded — the next run judges the new config),
   // so the chip clearing on save agrees with every other surface.
   state.boardIngestError = b.ingest_error ?? false;
+  // Board pause rides the same funnel and for the same reason: it drives the
+  // jobs chip AND pollDelay below, so a payload arriving anywhere must reach
+  // both. Reset semantics like ingest_error — which is why the board PATCH
+  // echoes `paused` back, so a save response can't read as "unpaused".
+  state.boardPaused = b.paused ?? false;
+}
+
+// The user (or another manager's poll) flipped the pause. One setter so the
+// three consequences travel together: the flag, the poll cadence it feeds,
+// and the render that repaints the chip. refreshBoardIngest's shape exactly.
+export function setBoardPaused(v) {
+  state.boardPaused = !!v;
+  ensurePolling(); // resume drops us back to the fast tier without waiting out the slow timer
+  document.dispatchEvent(new Event("app:render"));
 }
 
 // Re-learn the flags after something changed them server-side (save, run-now,
@@ -306,7 +336,7 @@ export async function refreshBoardIngest() {
   try {
     const b = await fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
     if (!b) return false;
-    stampBoardIngest(b);
+    stampBoard(b);
     ensurePolling(); // the slow poll follows the flag
     document.dispatchEvent(new Event("app:render"));
     return true;

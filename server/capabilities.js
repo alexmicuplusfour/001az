@@ -286,6 +286,7 @@ export const KIND_DEFS = [
   { id: "extract", label: "Extraction", capability: "extract" },
   { id: "face", label: "Chart", capability: null },
   { id: "retag", label: "Retag pass", capability: "tag" },
+  { id: "cancel", label: "Cancel", capability: null },
   { id: "embed", label: "Embedding", capability: "embed" },
   { id: "refresh", label: "Refresh", capability: null },
   { id: "diagnose", label: "Facet review", capability: "diagnose" },

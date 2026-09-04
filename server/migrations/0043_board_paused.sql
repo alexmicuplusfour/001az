@@ -1,0 +1,14 @@
+-- Board pause (planning/job-control-plan.md, Stage 1): one flag that gates
+-- EXECUTION, never intake. Every queue keeps filling while it is set — uploads,
+-- retags, queued adds all still land in items.status — and the worker's due/claim
+-- queries are where the flag bites, so resume continues exactly where the queue
+-- left off. Durable across restarts because it's a column, which is the whole
+-- point: the queue itself is durable, so its brake has to be too.
+--
+-- On boards, not settings: the board is the app's unit of work, spend
+-- attribution and scheduling, and the fair-claim query already joins it.
+--
+-- NOT NULL with a default, for the reason 0029/0031/0039 give: an archive
+-- written before this column doesn't name it, and loadTable only inserts the
+-- columns a manifest lists — the default keeps every existing backup restorable.
+ALTER TABLE boards ADD COLUMN IF NOT EXISTS paused BOOLEAN NOT NULL DEFAULT FALSE;
