@@ -154,7 +154,9 @@ test("transcribeOne: meters the clip's measured duration to its board, priced at
   // zero: a KNOWN $0.00, not an absence.
   const m = await meterTotals(db, boardId, "transcribe");
   assert.deepEqual([m.calls, m.audio, m.provider, m.model], [1, 90, "whisper", "small"]);
-  const { cost } = await boardUsageSummary(db, boardId);
+  const { units, cost } = await boardUsageSummary(db, boardId);
+  assert.equal(units.audio_seconds, 90);
+  assert.equal(units.requests, 1);
   assert.deepEqual(cost, { micros: 0, unpriced: [] });
 
   // The transcript landed, and the job row states seconds beside its
@@ -166,17 +168,6 @@ test("transcribeOne: meters the clip's measured duration to its board, priced at
   assert.equal(job.detail.seconds, 90);
   assert.equal(job.detail.engine, "whisper:small");
   assert.ok(!("tokens" in job.detail));
-
-  // The admin ledger serves the units map WITH its vocabulary — the cell
-  // renders a unit it never hard-coded, label and format from the wire.
-  const admin = await adminSession(db);
-  const r = await req(srv.base, "GET", "/api/admin/boards", { sid: admin.sid });
-  const b = r.json.boards.find((x) => x.id === boardId);
-  assert.equal(b.ai_usage.units.audio_seconds, 90);
-  assert.equal(b.ai_usage.units.requests, 1);
-  const units = Object.fromEntries(r.json.units.map((u) => [u.unit, u]));
-  assert.deepEqual(units.audio_seconds,
-    { unit: "audio_seconds", label: "audio", format: "duration", rate: { per: 60, label: "$/min" } });
 });
 
 test("whisper client: a pinned model rides the submit; unpinned asks for nothing", async (t) => {

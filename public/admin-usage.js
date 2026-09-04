@@ -17,7 +17,7 @@
 import { api } from "/api.js";
 import { toast } from "/toast.js";
 import { busy } from "/modal.js";
-import { pill, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
+import { ICONS, pill, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
 import { sparkline, dayKey } from "/sparkline.js";
 import { openPricesModal } from "/prices-modal.js";
 
@@ -186,8 +186,8 @@ async function draw() {
       // The admin boards table's link, so "which board is this" is one click —
       // and the drill-down: #jobs opens the board's own jobs modal (app.js),
       // where each row carries what it spent. No admin job viewer to keep.
-      ? `<a href="/?board=${r.board}" target="_blank" style="color:inherit;text-decoration:none">${dims.board.values[r.board]}</a>`
-        + `<a class="muted" href="/?board=${r.board}#jobs" target="_blank" style="margin-left:9px;font-size:12px">jobs</a>`
+      ? `<span class="name-cell">${ICONS.grid}<a href="/?board=${r.board}" target="_blank" style="color:inherit;text-decoration:none">${dims.board.values[r.board]}</a>`
+        + `<a class="muted" href="/?board=${r.board}#jobs" target="_blank" style="font-size:12px">jobs</a></span>`
       // '' is the app scope — a value, named by the server, linking nowhere.
       : `<span class="muted">${dims.board.values[r.board]}</span>`),
     breakdown(byCap, "capability", (r, dims) => dims.capability.values[r.capability]),

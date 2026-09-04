@@ -3219,57 +3219,6 @@ export async function priceUnpricedMeter(db, rateRows) {
   return { rows: Number(r.n), micros: Number(r.micros) };
 }
 
-// Per-board paid-call usage, all-time + today, plus the last 14 days broken
-// out for the admin sparkline:
-// { boardId: { units: { unit: quantity }, today: { unit: quantity },
-//              days: [{ day, units }] } }  (days ascending, gaps omitted)
-// Every capability's spend rolls up together here (that is what the admin cell
-// shows); the per-capability breakdown is Stage 4's query, not this one.
-//
-// Every half is a UNITS MAP (Stage 5b): which units to feature, and how, is
-// the cell's display choice, so a unit this query never heard of rides
-// through to the client with no edit here — the route serves the vocabulary
-// beside it. Both halves ride `usageRows`, the one dimensioned reader, rather
-// than spelling its GROUP BY a third time; the day half just windows and
-// groups by day as well.
-export async function boardAiUsage(db) {
-  // Independent — the day window is not a subset of the all-time aggregate's
-  // work, and the admin page waits on both.
-  const [allTime, dayRows] = await Promise.all([
-    usageRows(db, { group: ["board"] }),
-    usageRows(db, { group: ["board", "day"], from: day(Date.now() - 13 * 86400000) }),
-  ]);
-  const out = Object.fromEntries(
-    allTime
-      // The app scope is not a board — the admin table has no row for it (the
-      // Usage tab is where app-level spend is read).
-      .filter((r) => r.board !== APP_SCOPE)
-      .map((r) => [
-        r.board,
-        {
-          units: Object.fromEntries(Object.entries(r.units).map(([u, x]) => [u, x.quantity])),
-          // Spend, when any is known — one fold, shared with the board's own
-          // reader (boardUsageSummary): micros sum legally across units, the
-          // remainder never does.
-          cost: costOf(r.units),
-          today: {},
-          days: [],
-        },
-      ])
-  );
-  // Today is always inside the 14-day window, so it is one of these rows —
-  // read it off rather than making the aggregate above compute it a second time.
-  const t = day();
-  for (const r of dayRows) {
-    const b = out[r.board];
-    if (!b) continue;
-    const units = Object.fromEntries(Object.entries(r.units).map(([u, x]) => [u, x.quantity]));
-    b.days.push({ day: r.day, units });
-    if (r.day === t) b.today = units;
-  }
-  return out;
-}
-
 // The dimensioned usage read (metering-plan.md, Mechanism 3): group by any
 // subset of the meter's dimensions over any day window. `group` names are the
 // API's, mapped here onto columns — the allowlist is what makes interpolating

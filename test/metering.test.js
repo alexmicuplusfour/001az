@@ -6,7 +6,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard } from "./helpers.js";
-import { meter, meterWrite, boardAiUsage, pruneUsageMeter, deleteBoard, addModelPrice } from "../server/db.js";
+import { meter, meterWrite, boardUsageSummary, pruneUsageMeter, deleteBoard, addModelPrice } from "../server/db.js";
 import { meterAiCall, meterAiCalls, priceUnpricedHistory } from "../server/metering.js";
 import { refreshRateTable, ratesFor, setModelPrice, wantedModels } from "../server/pricing.js";
 import { registerProvider, unregisterProvider, PROVIDERS } from "../server/providers.js";
@@ -89,35 +89,21 @@ test("meterAiCalls: N passes fold into one write, and `requests` still counts N"
   assert.deepEqual(await rowsFor(b2), []);
 });
 
-test("boardAiUsage: reads the meter back in the admin shape, today and days included", async () => {
+test("boardUsageSummary: reads the meter back as one board's units map", async () => {
   const b = await seedBoard(db, "meter-read");
   await meterAiCall(db, b, { capability: "tag", provider: "p", model: "m" },
     { input: 100, output: 20, searches: 2 });
   await meterAiCall(db, b, { capability: "diagnose", provider: "p", model: "m" },
     { input: 30, output: 5 });
 
-  const u = (await boardAiUsage(db))[b];
-  // Every capability's spend rolls up together here — the admin cell's
-  // numbers, as a UNITS MAP (Stage 5b): which units the cell features inline
-  // is its display choice, and a unit this reader never heard of rides
-  // through untouched. Zero-quantity units are absent, not zeroed.
+  const u = await boardUsageSummary(db, b);
+  // Every capability's spend rolls up together here, as a UNITS MAP (Stage
+  // 5b): which units a surface features inline is its display choice, and a
+  // unit this reader never heard of rides through untouched. Zero-quantity
+  // units are absent, not zeroed.
   assert.deepEqual(u.units, { requests: 2, input_tokens: 130, output_tokens: 25, web_searches: 2 });
   // Provider "p" has no rates anywhere → nothing priced → no cost CLAIM.
   assert.equal(u.cost, null);
-  // `today` is read off the day rows rather than aggregated a second time,
-  // and both halves are units maps too — the sparkline picks what it draws.
-  assert.deepEqual(u.today, { requests: 2, input_tokens: 130, output_tokens: 25, web_searches: 2 });
-  assert.equal(u.days.length, 1);
-  assert.deepEqual(u.days[0].units, u.today);
-});
-
-test("boardAiUsage: a board whose spend is all older than the window keeps its totals, and today stays zero", async () => {
-  const b = await seedBoard(db, "meter-old");
-  await db.query("INSERT INTO usage_meter (day, board_id, capability, provider, model, unit, quantity) VALUES ('2000-01-01', $1, 'tag', 'p', 'm', 'input_tokens', 42)", [b]);
-  const u = (await boardAiUsage(db))[b];
-  assert.equal(u.units.input_tokens, 42);
-  assert.deepEqual(u.today, {});
-  assert.deepEqual(u.days, []);
 });
 
 test("deleteBoard purges the board's meter rows (no FK to cascade)", async () => {
@@ -158,10 +144,10 @@ test("rates: stamping math is cost = round(quantity × rate), priced in full", a
     // one thing everywhere: not-yet-known, never an implied $0.
     { unit: "requests", q: 1, pq: 0, cm: 0 },
   ]);
-  // The admin roll-up: micros sum legally across units (one currency); the
+  // The roll-up: micros sum legally across units (one currency); the
   // remainder is only a FLAG at this grade — per-unit detail is the board's
   // own endpoint.
-  assert.deepEqual((await boardAiUsage(db))[b].cost, {
+  assert.deepEqual((await boardUsageSummary(db, b)).cost, {
     micros: 3031,
     unpriced: [{ unit: "requests", label: "calls", format: "count", quantity: 1 }],
   });

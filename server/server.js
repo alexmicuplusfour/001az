@@ -70,7 +70,6 @@ import {
   boardEntityCounts,
   boardPreviewFaces,
   boardHasItems,
-  boardAiUsage,
   retagBoard,
   retagBoardFacets,
   supersedeFacetDiagnostics,
@@ -1472,7 +1471,6 @@ app.post("/api/boards/:id/ingest/run", requireAuth, requireBoardManager, wrap(as
 app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
   const boards = await listBoards(db);
   const stats = await boardItemStats(db);
-  const usage = await boardAiUsage(db);
   res.json({
     boards: await Promise.all(
       boards.map(async (b) => ({
@@ -1480,15 +1478,10 @@ app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {
         item_count: stats[b.id]?.c || 0,
         pending_count: stats[b.id]?.p || 0,
         held_count: stats[b.id]?.h || 0,
-        ai_usage: usage[b.id] || null,
         memberIds: await getBoardMemberIds(db, b.id),
         adminIds: await getBoardAdminIds(db, b.id),
       }))
     ),
-    // The vocabulary for every ai_usage units map above — labels and format
-    // kinds, so the cell can render a unit it has no name for (Mechanism 3;
-    // Stage 5b reshaped the bare array into this envelope).
-    units: unitList(Object.values(usage).flatMap((u) => Object.keys(u.units))),
   });
 }));
 
