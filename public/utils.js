@@ -99,6 +99,17 @@ export const mappingHasAiWork = (mapping) =>
   (Array.isArray(mapping?.fields) &&
     mapping.fields.some((f) => f.source === "extract" || f.source === "detect"));
 
+// Mirrors the server's scoped-retag fence (retagItemFacets/retagEntityFacets):
+// a scoped pass needs tags to preserve AND a verdict it can leave alone, so
+// the routes 409 on anything else. Read by the lightbox's Retag button and the
+// card caret to decide whether to offer the scope picker at all.
+export const scopableInstance = (i) => i.status === "tagged" && !i.undecided;
+
+// A facet is named by its human label, falling back to its machine key —
+// one spelling for the scope pop, its toasts, and anything else that shows a
+// facet to a person.
+export const facetName = (f) => f.label || f.key;
+
 // An item has a mapped identity when extraction (or a connector) gave it an
 // entity key distinct from its stored filename — mirrors displayLabel priority.
 export const hasIdentity = (item) => !!(item.display_name || item.identity !== item.name);

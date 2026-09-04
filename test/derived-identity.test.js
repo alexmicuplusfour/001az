@@ -6,7 +6,7 @@
 // verify; the DB mechanics they compose are covered here.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedBoard, seedItem, req } from "./helpers.js";
+import { startServer, adminSession, seedBoard, seedItem, req, routedStatus } from "./helpers.js";
 import { buildFieldsPrompt, resolveIdentity } from "../server/worker.js";
 import {
   createEntity,
@@ -23,6 +23,7 @@ import {
   reapEmptyEntities,
   withTx,
   insertItem,
+  createBoard,
 } from "../server/db.js";
 
 // ─── pure: buildFieldsPrompt with derived identity ───────────────────────────
@@ -597,7 +598,7 @@ test("retag resets one instance to the tag leg, leaving the entity identity inta
 
   const r = await req(base, "POST", `/api/instances/${instId}/retag`, { sid: admin.sid });
   assert.equal(r.status, 200);
-  assert.equal(r.json.status, "pending");
+  assert.equal(routedStatus(r, eid), "pending");
 
   const { rows: [item] } = await db.query("SELECT status, tags FROM items WHERE id=$1", [instId]);
   assert.equal(item.status, "pending");
@@ -606,4 +607,76 @@ test("retag resets one instance to the tag leg, leaving the entity identity inta
   const { rows: [ent] } = await db.query("SELECT identity, display_name FROM entities WHERE id=$1", [eid]);
   assert.equal(ent.identity, "volvo amazon");
   assert.equal(ent.display_name, "Volvo Amazon");
+});
+
+test("entity retag (3c): every instance re-enters the tag leg; scoped takes only settled+decided", async () => {
+  // Two facets on purpose: readFacetScope normalises an every-facet scope to a
+  // full pass, so a one-facet board can never exercise the scoped arm.
+  const boardId = await createBoard(db, "retag-entity", [
+    { key: "category", label: "Category", values: ["blue", "red"] },
+    { key: "mood", label: "Mood", values: ["calm", "loud"] },
+  ], "", true, null, null, { enabled: true });
+  const eid = await createEntity(db, boardId, { identity: "card", displayName: "Card" });
+  const settled = await seedInstance(boardId, eid, { name: "a.png", kind: "image" });
+  await db.query("UPDATE items SET tags='[\"category/blue\"]'::jsonb WHERE id=$1", [settled]);
+  const inflight = await seedInstance(boardId, eid, { name: "b.png", kind: "image" });
+  await db.query("UPDATE items SET status='processing' WHERE id=$1", [inflight]);
+
+  // Scoped: only the settled, decided instance moves; the in-flight one is untouched.
+  const scoped = await req(base, "POST", `/api/items/${eid}/retag`, { sid: admin.sid, body: { facets: ["category"] } });
+  assert.equal(scoped.status, 200);
+  assert.deepEqual(scoped.json.facets, ["category"]);
+  const st = async (id) => (await db.query("SELECT status, tag_facets FROM items WHERE id=$1", [id])).rows[0];
+  assert.deepEqual(await st(settled), { status: "pending", tag_facets: ["category"] });
+  assert.equal((await st(inflight)).status, "processing", "an in-flight instance is not yanked");
+
+  // Full: everything re-enters the tag leg (no status fence — scope dies too).
+  const full = await req(base, "POST", `/api/items/${eid}/retag`, { sid: admin.sid });
+  assert.equal(full.status, 200);
+  assert.equal(full.json.entities.find((e) => e.id === eid).status, "pending");
+  assert.deepEqual(await st(settled), { status: "pending", tag_facets: null });
+
+  // Scoped with nothing settled+decided → 409, matching the instance route.
+  const none = await req(base, "POST", `/api/items/${eid}/retag`, { sid: admin.sid, body: { facets: ["category"] } });
+  assert.equal(none.status, 409);
+});
+
+test("tag edit reports the server aggregate — a failed sibling outranks the fresh tag", async () => {
+  const boardId = await seedBoard(db, "tagedit-agg");
+  const eid = await createEntity(db, boardId, { identity: "agg" });
+  const a = await seedInstance(boardId, eid, { name: "a.png", kind: "image" });
+  const b = await seedInstance(boardId, eid, { name: "b.png", kind: "image" });
+  await db.query("UPDATE items SET status='failed' WHERE id=$1", [b]);
+
+  const r = await req(base, "PATCH", `/api/instances/${a}/tags`, { sid: admin.sid, body: { tags: ["kind/a"] } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.tags, ["kind/a"]);
+  // STATUS_PRIORITY says failed outranks tagged; the client rule this route's
+  // report replaced called all-tagged-plus-one-failed "tagged".
+  assert.equal(routedStatus(r, eid), "failed");
+});
+
+test("retag: the routed report covers every entity sharing the instance (classify mode)", async () => {
+  // One instance claimed by two entities: re-queuing it moves BOTH cards'
+  // aggregates, and the response must say so — reporting one card would
+  // rebuild the client's status guessing one level up.
+  const boardId = await seedBoard(db, "retag-shared");
+  const e1 = await createEntity(db, boardId, { identity: "sedan", displayName: "Sedan" });
+  const e2 = await createEntity(db, boardId, { identity: "blue", displayName: "Blue" });
+  const shared = await seedInstance(boardId, e1, { name: "s1.png", kind: "image" });
+  await setItemEntities(db, shared, [e1, e2]); // the write classify mode itself uses
+  // A second, settled instance only on e2 — its status must ride into e2's report untouched.
+  await seedInstance(boardId, e2, { name: "s2.png", kind: "image" });
+
+  const r = await req(base, "POST", `/api/instances/${shared}/retag`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  const byId = new Map(r.json.entities.map((e) => [e.id, e]));
+  assert.deepEqual([...byId.keys()].sort(), [e1, e2].sort(), "both sharing entities are reported");
+  assert.equal(byId.get(e1).status, "pending");
+  assert.equal(byId.get(e2).status, "pending", "an in-flight instance outranks a settled sibling");
+  assert.deepEqual(
+    byId.get(e2).instances.map((i) => i.status).sort(),
+    ["pending", "tagged"],
+    "e2's report carries the untouched sibling too"
+  );
 });

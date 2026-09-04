@@ -13,6 +13,14 @@ import {
   deleteInstance,
   deleteEntityIfEmpty,
   reprocessEntity,
+  retagEntity,
+  retagEntityFacets,
+  reextractEntity,
+  entityHasTranscriptStamp,
+  retranscribeItem,
+  retranscribeEntity,
+  refreshEntityData,
+  routedEntities,
   getEntityBoard,
   entityInstanceCount,
   cancelBoardQueue,
@@ -142,7 +150,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, resolveTranscriber, engineStamp, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -2874,10 +2882,16 @@ app.patch("/api/instances/:id/tags", requireAuth, requireItemAccess, wrap(async 
   const allowed = new Set();
   if (board) for (const f of board.facets) for (const v of f.values) allowed.add(`${f.key}/${v}`);
   const clean = tags.filter((t) => typeof t === "string" && allowed.has(t));
-  await setItemTags(db, req.itemId, clean);
+  const affected = await setItemTags(db, req.itemId, clean);
   // A human tagging an entity into a watched set is an arrival too.
   await evaluateItemAlerts(db, req.itemId); // never throws
-  res.json({ ok: true, tags: clean });
+  // A tag edit flips the instance to 'tagged' — report the affected cards on
+  // the re-queue contract so the client's aggregates come from the server's
+  // rule, not a hand-rolled one (Stage 4 ride-along). Unlike the re-queue
+  // routes this does NOT 404 on a null: the save itself succeeded, and a row
+  // that vanished under it just has no card left to report (routedEntities
+  // answers [] for the empty seed).
+  res.json({ ok: true, tags: clean, entities: await routedEntities(db, affected) });
 }));
 
 // Delete the whole entity: instances cascade, all their files are cleaned.
@@ -2889,43 +2903,130 @@ app.delete("/api/items/:id", requireAuth, requireEntityAccess, wrap(async (req, 
   res.json({ ok: true });
 }));
 
-// Card-level reprocess: re-run the whole pipeline for every instance. Mapped
-// instances restart at extraction (re-derive identity + fields, then re-tag);
-// the rest restart at tagging.
+// Card-level reprocess: re-run the whole pipeline for every instance. Each
+// instance restarts at the leg its payload calls for (fetch/face/extract/tag
+// — reprocessEntity routes); the response is the routedEntities report —
+// where every instance actually landed and each affected card's fresh
+// aggregate (classify mode: re-routing this entity's instances can move
+// OTHER cards that share them) — so the client mirrors the truth instead of
+// guessing "pending".
 app.post("/api/items/:id/reprocess", requireAuth, requireEntityAccess, wrap(async (req, res) => {
-  if (!(await reprocessEntity(db, req.entityId))) return res.status(404).json({ error: "not found" });
+  // Stage 3b: a kept transcript is only stale if the engine that would
+  // transcribe TODAY is known and differs from its stamp. Resolution failure
+  // or an incomplete identity (whisper learns its model per call) means
+  // unknown — transcripts stay, nothing re-bills by accident. Asked only when
+  // some instance actually carries a stamp: the staleness arm reads no other
+  // row, and resolving walks the capability ladder, so every image, document
+  // and connector card would pay for an answer it can't use.
+  let engine = null;
+  try {
+    if (await entityHasTranscriptStamp(db, req.entityId)) {
+      const t = await resolveTranscriber(db, await getBoard(db, req.entityBoardId));
+      if (t?.id && t?.model) engine = engineStamp(t);
+    }
+  } catch {}
+  const affected = await reprocessEntity(db, req.entityId, engine);
+  if (!affected) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued entity #${req.entityId}`);
-  res.json({ ok: true });
+  res.json({ ok: true, entities: await routedEntities(db, affected) });
+}));
+
+// Card-level retag (Stage 3c): re-tag every instance from its existing
+// material and fields — the tag-only slice of reprocess, for the split
+// button's caret. Takes the same optional `facets` scope as the instance
+// route; scoped passes only touch settled, decided instances (409 when none
+// qualify).
+app.post("/api/items/:id/retag", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  // The board is read only to validate a scope — readFacetScope ignores it
+  // when the body carries no `facets`, which is every plain "Retag" click.
+  const board = req.body?.facets === undefined ? null : await getBoard(db, req.entityBoardId);
+  const { scope, error } = readFacetScope(req.body, board || { facets: [] });
+  if (error) return res.status(400).json({ error });
+  let affected;
+  if (scope) {
+    affected = await retagEntityFacets(db, req.entityId, scope);
+    if (!affected) return res.status(409).json({ error: "no tagged, decided instance to re-tag on some facets" });
+  } else {
+    affected = await retagEntity(db, req.entityId);
+    if (!affected) return res.status(404).json({ error: "not found" });
+  }
+  console.log(`retag queued entity #${req.entityId}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
+  res.json({ ok: true, entities: await routedEntities(db, affected), ...(scope ? { facets: scope } : {}) });
+}));
+
+// Card-level re-extract (Stage 3c): every instance re-enters the extract leg.
+// 409 when no instance has a stamped mapping and the board has no AI mapping
+// to apply — nothing to extract anywhere on the card.
+app.post("/api/items/:id/reextract", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const affected = await reextractEntity(db, req.entityId);
+  if (!affected) return res.status(409).json({ error: "nothing to extract on this item" });
+  console.log(`reextract queued entity #${req.entityId}`);
+  res.json({ ok: true, entities: await routedEntities(db, affected) });
+}));
+
+// Card-level re-transcribe (Stage 4): every audio instance forgets its
+// transcript and re-enters the tag leg; the absence-keyed lane refills the
+// text. 409 when the card has no audio. Re-bills transcription — the point.
+app.post("/api/items/:id/retranscribe", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const affected = await retranscribeEntity(db, req.entityId);
+  if (!affected) return res.status(409).json({ error: "only audio can be re-transcribed" });
+  console.log(`retranscribe queued entity #${req.entityId}`);
+  res.json({ ok: true, entities: await routedEntities(db, affected) });
+}));
+
+// Refresh a connector card's data on demand (Stage 4): fetch → face → tag
+// with the tags kept until the fresh pass lands — reprocess without the
+// clear. 409 on anything that isn't a connector vehicle.
+app.post("/api/items/:id/refresh", requireAuth, requireEntityAccess, wrap(async (req, res) => {
+  const affected = await refreshEntityData(db, req.entityId);
+  if (!affected) return res.status(409).json({ error: "not a connector item" });
+  console.log(`refresh queued entity #${req.entityId}`);
+  res.json({ ok: true, entities: await routedEntities(db, affected) });
 }));
 
 // Re-run extraction for one instance that has a stamped mapping (409 without
 // one). Identity re-derivation may re-parent the instance — merge or split.
 app.post("/api/instances/:id/reextract", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  if (!(await reextractItem(db, req.itemId))) return res.status(409).json({ error: "item has no stamped mapping" });
+  const affected = await reextractItem(db, req.itemId);
+  if (!affected) return res.status(409).json({ error: "item has no stamped mapping" });
   console.log(`reextract queued instance #${req.itemId}`);
-  res.json({ ok: true, status: "pending_extract" });
+  res.json({ ok: true, entities: await routedEntities(db, affected) });
+}));
+
+// Force a fresh transcription (Stage 3b) — the one artifact reprocess
+// deliberately keeps. One verb: drop the transcript (turns, engine stamp and
+// any parked error with it) and re-enter the tag leg; the absence-keyed
+// transcription lane refills the text on its own, and the tag leg's
+// awaiting-transcription wait does the sequencing. Audio-only (the verb's
+// WHERE → 409). This re-bills transcription — which is exactly what the
+// caller asked for.
+app.post("/api/instances/:id/retranscribe", requireAuth, requireItemAccess, wrap(async (req, res) => {
+  const affected = await retranscribeItem(db, req.itemId);
+  if (!affected) return res.status(409).json({ error: "only audio can be re-transcribed" });
+  console.log(`retranscribe queued instance #${req.itemId}`);
+  res.json({ ok: true, entities: await routedEntities(db, affected) });
 }));
 
 // Re-tag one instance from its existing material and fields — the per-instance,
 // tag-only counterpart to the card-level reprocess. Leaves identity/fields as-is.
 app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async (req, res) => {
-  const { rows: [item] } = await db.query("SELECT board_id FROM items WHERE id=$1", [req.itemId]);
-  const board = item && (await getBoard(db, item.board_id));
+  const board = await getBoard(db, req.itemBoardId);
   if (!board) return res.status(404).json({ error: "not found" });
   const { scope, error } = readFacetScope(req.body, board);
   if (error) return res.status(400).json({ error });
   // A scoped retag needs something to preserve AND a verdict it can leave alone,
   // so it only takes settled, decided rows — a 409 rather than a 404 says "this
   // item, wrong state", not "no such item".
+  let affected;
   if (scope) {
-    if (!(await retagItemFacets(db, req.itemId, scope))) {
-      return res.status(409).json({ error: "only a tagged, decided item can be re-tagged on some facets" });
-    }
-  } else if (!(await retagItem(db, req.itemId))) {
-    return res.status(404).json({ error: "not found" });
+    affected = await retagItemFacets(db, req.itemId, scope);
+    if (!affected) return res.status(409).json({ error: "only a tagged, decided item can be re-tagged on some facets" });
+  } else {
+    affected = await retagItem(db, req.itemId);
+    if (!affected) return res.status(404).json({ error: "not found" });
   }
   console.log(`retag queued instance #${req.itemId}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
-  res.json({ ok: true, status: "pending", ...(scope ? { facets: scope } : {}) });
+  res.json({ ok: true, entities: await routedEntities(db, affected), ...(scope ? { facets: scope } : {}) });
 }));
 
 // Remove one instance from its entity (file included). The last instance

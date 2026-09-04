@@ -390,7 +390,7 @@ test("reextract: instance with stamped mapping resets to pending_extract", async
 
   const r = await req(base, "POST", `/api/instances/${instId}/reextract`, { sid: admin.sid });
   assert.equal(r.status, 200);
-  assert.equal(r.json.status, "pending_extract");
+  assert.equal(r.json.entities.find((e) => e.id === item.id).status, "pending_extract");
 
   const { rows } = await db.query("SELECT status FROM items WHERE id=$1", [instId]);
   assert.equal(rows[0].status, "pending_extract");
@@ -439,6 +439,22 @@ test("reextract: re-stamps the current board mapping over a stale stamp", async 
   assert.deepEqual(row.payload.mapping, edited);
 });
 
+test("entity reextract (3c): every instance re-enters the extract leg; 409 with nothing to extract", async () => {
+  const boardId = await seedBoard(db, "reextract-entity");
+  const { uploaded: [item] } = await uploadTxt(boardId); // no stamp, board unmapped
+
+  const r0 = await req(base, "POST", `/api/items/${item.id}/reextract`, { sid: admin.sid });
+  assert.equal(r0.status, 409, "no mapping anywhere → nothing to extract");
+
+  await patchBoard(boardId, { mapping: MAPPING });
+  const r = await req(base, "POST", `/api/items/${item.id}/reextract`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.entities.find((e) => e.id === item.id).status, "pending_extract");
+  const row = await itemStatus(item);
+  assert.equal(row.status, "pending_extract");
+  assert.deepEqual(row.payload.mapping, MAPPING, "the current board mapping is re-stamped");
+});
+
 test("reprocess: entity adopts a board mapping added after upload", async () => {
   const boardId = await seedBoard(db, "reprocess-adopt");
   const { uploaded: [item] } = await uploadTxt(boardId); // no stamp
@@ -446,6 +462,11 @@ test("reprocess: entity adopts a board mapping added after upload", async () => 
 
   const r = await req(base, "POST", `/api/items/${item.id}/reprocess`, { sid: admin.sid });
   assert.equal(r.status, 200);
+  // The response is the routedEntities report (reprocess formalization) —
+  // the client mirrors these statuses instead of guessing "pending".
+  const ent = r.json.entities.find((e) => e.id === item.id);
+  assert.equal(ent.status, "pending_extract");
+  assert.deepEqual(ent.instances.map((i) => i.status), ["pending_extract"]);
 
   const row = await itemStatus(item);
   assert.equal(row.status, "pending_extract");

@@ -6,6 +6,7 @@ import {
   claimFairBatch,
   setEntityFaceAt,
   updateItemPayload,
+  landTranscript,
   markTagged,
   markExtracted,
   objectKeysOf,
@@ -1095,6 +1096,12 @@ export function transcribeFailurePolicy(err, attempts, maxAttempts = TRANSCRIBE_
 // bound — audio then WAITS to become taggable (blocked semantics), it is never
 // failed. `board` is the item's board row (slice 5) — its pin outranks the app
 // default. Exported for tests + server.
+// The transcript's engine identity ("whisper:large-v3") — stamped onto the
+// payload at landing AND compared by reprocessEntity's staleness arm ($4), so
+// both sides MUST build it here: a drifted spelling on either end would
+// silently make the comparison never (or always) fire, with no error anywhere.
+export const engineStamp = (t) => [t?.id, t?.model].filter(Boolean).join(":");
+
 export async function resolveTranscriber(db, board = null) {
   const b = await resolveCapability(db, "transcribe", { board });
   // Null since the floor became presence-gated: no provider bound and the
@@ -1195,8 +1202,11 @@ export async function transcribeOne(db, galleryDir, row, retry) {
     await meterAiCall(db, row.board_id, dims, usage, { audio_seconds: secs });
     // turns ([] included) land beside the flat transcript; the key is
     // absent when the engine gave none (legacy sidecar image, plain
-    // provider model) and readers fall back to the flat text.
-    await updateItemPayload(db, row.id, { transcript: text, ...(turns ? { transcript_turns: turns } : {}) });
+    // provider model) and readers fall back to the flat text. The engine
+    // stamp is the job log's spelling, taken post-call so it names what
+    // actually produced the text (whisper self-reports its model).
+    const engine = engineStamp(transcriber);
+    await landTranscript(db, row.id, { text, turns, engine });
     retry.delete(row.id);
     // Distinct speaker count for the job log — engine-agnostic (any
     // diarizing engine's labels count); omitted when zero so
@@ -1211,7 +1221,7 @@ export async function transcribeOne(db, galleryDir, row, retry) {
       chars: text.length, turns: turns?.length, speakers: speakers || undefined,
       ...(secs ? { seconds: Math.round(secs) } : {}),
       ...(tokens ? { tokens } : {}),
-      engine: [transcriber.id, transcriber.model].filter(Boolean).join(":"),
+      engine,
     } });
     console.log(`transcribed #${row.id} "${file.original_name}" -> ${text.length} chars`);
     return "ok";
@@ -2656,7 +2666,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         }
         throw err;
       }
-      const to = connectorLanding(board).status;
+      // A row without the 'unfetched' stamp is a reprocess re-buying its data —
+      // connectorLanding's refetch rule lands it explicit (never held).
+      const to = connectorLanding(board, { refetch: !row.payload?.unfetched }).status;
       const detail = { connector: connectorName, provider: fetched.source?.provider ?? null };
       if (await advanceFetched(db, row.id, to, { identity: fetched.identity, source: fetched.source })) {
         await legLog(row, "fetch", t0, "ok", null, detail);

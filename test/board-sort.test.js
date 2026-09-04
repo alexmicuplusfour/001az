@@ -3,6 +3,7 @@
 // all three listItems modes, and the client sort module — catalog assembly per
 // identity mode, the comparator's nulls-last stable semantics, and per-board
 // persistence/restore with connector defaultSort seeding.
+import { localStore as store } from "./browser-stub.js";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard, seedItem, adminSession } from "./helpers.js";
@@ -13,13 +14,10 @@ import { listItems, createEntity, insertItem } from "../server/db.js";
 // sort.js touches localStorage, document.dispatchEvent, and fetches the two
 // static catalogs. The fetch stub serves fixtures for the catalog paths only
 // and delegates everything else (helpers' HTTP requests) to the real fetch.
-const store = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (store.has(k) ? store.get(k) : null),
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: (k) => store.delete(k),
-};
-globalThis.document ||= { addEventListener() {}, dispatchEvent() { return true; } };
+// The SHARED stub, not a local copy — browser-stub's own header predicted
+// exactly this: a second copy drifts the day a client module reaches for a
+// method it lacks (data.js now imports toast.js, which builds its container
+// at module scope), and the failure reads as a bug in the module under test.
 
 const MEDIA_FIELDS = [
   { key: "file_size", fn: "file_size", kind: "number", label: "File size", group: "All files", appliesTo: "*" },

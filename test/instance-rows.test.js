@@ -2,22 +2,14 @@
 // phase 1's tag-pop per-tag instance counts, phase 2's view-mode selection
 // and per-board persistence. The board-sort pattern — shims, then dynamic
 // import of the public modules.
+import { localStore as store } from "./browser-stub.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const store = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (store.has(k) ? store.get(k) : null),
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: (k) => store.delete(k),
-};
-// filters.js grabs its container elements at module level; data.js registers
-// an upload listener. Nothing the pure functions under test touch.
-globalThis.document ||= {
-  addEventListener() {},
-  dispatchEvent() { return true; },
-  getElementById: () => null,
-};
+// The SHARED stub, not a local copy (its header explains why). filters.js
+// also grabs container elements at module level — none of it touched by the
+// pure functions under test.
+globalThis.document.getElementById ||= () => null;
 
 const { state } = await import("../public/state.js");
 const { toItem, toInstance, instanceTagCounts, mappingHasAiWork } = await import("../public/utils.js");

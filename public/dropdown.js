@@ -14,6 +14,7 @@
 // helpers plus any custom elements.
 
 import { createCheckbox } from "./checkbox.js";
+import { facetName } from "./utils.js";
 
 const MARGIN = 8; // gap kept between the pop and the viewport edges
 const GAP = 6;    // gap between the anchor and the pop
@@ -431,4 +432,39 @@ export function ddInput({ placeholder = "", onSubmit } = {}) {
     if (value) onSubmit?.(value, inp);
   });
   return inp;
+}
+
+// The facet-scope picker: "Everything", then one row per facet — the shape
+// behind every "re-roll the AI's judgment" control (the admin board retag, the
+// lightbox's per-instance one). `run(facet)` gets the chosen facet, or null for
+// Everything; the caller owns what queuing means.
+//
+// Lives here rather than in either caller because it is a component with a
+// shape, not just a use of the shell: the placement, the width, the separator's
+// position and the label-over-key rule are decisions this menu makes, and two
+// copies of them drifted apart the moment a second surface wanted the pop.
+// (A facet is picked by its human name, but the KEY is what the call sends —
+// worth seeing together, hence the sublabel.)
+export function openFacetScopePop(anchor, facets, run, { onClose } = {}) {
+  return openDropdown(anchor, {
+    variant: "light",
+    align: "end",
+    minWidth: 220,
+    onClose,
+    build: (body, { close }) => {
+      body.appendChild(ddRow({
+        label: "Everything",
+        onClick: () => { close(); run(null); },
+      }));
+      body.appendChild(ddSep());
+      for (const f of facets) {
+        if (!f?.key) continue;
+        body.appendChild(ddRow({
+          label: facetName(f),
+          sublabel: f.key,
+          onClick: () => { close(); run(f); },
+        }));
+      }
+    },
+  });
 }

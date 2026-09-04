@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { toast } from './toast.js';
-import { ensurePolling } from './data.js';
+import { ensurePolling, applyRoutedEntities } from './data.js';
 
 let bar = null;
 let countEl = null;
@@ -35,7 +35,7 @@ function ensureBar() {
     barBtn("x", "clear", "Clear selection", clearBulk),
     countEl,
     sep,
-    barBtn("redo", "reprocess", "Reprocess selected (re-tag with AI)", doBulkReprocess),
+    barBtn("redo", "reprocess", "Reprocess selected — redo everything", doBulkReprocess),
     barBtn("trash", "delete", "Delete selected", doBulkDelete),
     crateBtn,
   );
@@ -90,8 +90,7 @@ async function doBulkReprocess() {
   const results = await Promise.allSettled(imgs.map(async (img) => {
     const r = await fetch(`/api/items/${img.id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
-    img.status = "pending";
-    if (!img.tags.length) img.tagSet = new Set();
+    applyRoutedEntities((await r.json()).entities);
   }));
   const failed = results.filter((r) => r.status === "rejected").length;
   clearBulk();

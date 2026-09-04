@@ -233,12 +233,16 @@ header.header-collapsed #toolbar-fold {
   flex: none;
 }
 
-/* split button (Filters + saved-filters chevron): two tool-btns fused into
-   one control, sharing the middle border */
+/* split button: two buttons fused into one control. Child-generic on purpose
+   — the toolbar wears it with .tool-btn halves (Filters + saved-filters
+   chevron), the card actions with .act halves (Reprocess + the verbs caret).
+   The seam rules below are the BORDERED flavor's: .act is border-less, so it
+   gets flush halves (see .card-actions .split-arrow) rather than a shared
+   middle border. */
 .split-btn {
   display: inline-flex;
 }
-.split-btn .tool-btn:first-child:not(:only-child) {
+.split-btn > :first-child:not(:only-child) {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
@@ -247,6 +251,14 @@ header.header-collapsed #toolbar-fold {
   border-bottom-left-radius: 0;
   margin-left: -1px;
   padding: 0 5px;
+}
+/* the card flavor: .act pins width 28px (too wide for a caret-only half) and
+   has no border, so the bordered seam's -1px pull would just overlap two
+   translucent backgrounds into a dark hairline — the halves sit flush. */
+.card-actions .split-arrow {
+  width: auto;
+  padding: 0 4px;
+  margin-left: 0;
 }
 /* Sizing is .dd-caret's (dropdown.css). An icon-only trigger carries the caret
    alone, so it reads brighter than one sitting next to a label. */
@@ -2534,6 +2546,9 @@ body.bulk-mode .heart {
 }
 .lbp-reextract {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px; /* label + optional scope chevron, the user-menu spacing */
   background: none;
   border: 1px solid #d0d0d8;
   border-radius: 5px;

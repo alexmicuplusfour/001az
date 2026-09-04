@@ -1,5 +1,7 @@
 import { state } from './state.js';
 import { ICONS, refreshEntityTags } from './utils.js';
+import { applyRoutedEntities } from './data.js';
+import { api } from './api.js';
 import { toast } from './toast.js';
 import { kindFor, thumbUrl } from './kinds.js';
 import { mountModal, busy } from './modal.js';
@@ -95,13 +97,7 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
     }
     try {
       if (!inst) throw new Error();
-      const r = await fetch(`/api/instances/${inst.id}/tags`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tags }),
-      });
-      if (!r.ok) throw new Error();
-      const { tags: saved } = await r.json();
+      const { tags: saved, entities } = await api("PATCH", `/api/instances/${inst.id}/tags`, { tags });
       // The modal can outlive a poll tick, and reconcile swaps img.instances
       // for fresh objects — write the server's answer onto the entity's
       // CURRENT instance, not the captured one, or refreshEntityTags below
@@ -111,10 +107,12 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
       const live = img.instances?.find((x) => x.id === inst.id) || inst;
       live.tags = saved;
       live.tagSet = new Set(saved);
-      live.status = "tagged";
       live.undecided = false;
       refreshEntityTags(img);
-      if (img.instances.every((i) => i.status === "tagged" || i.status === "failed")) img.status = "tagged";
+      // Statuses come from the routed report — the server's aggregate rule,
+      // not a client re-derivation (the old every() here called all-tagged-
+      // plus-one-failed "tagged" where STATUS_PRIORITY says "failed").
+      applyRoutedEntities(entities);
       close();
       document.dispatchEvent(new Event('app:render'));
     } catch {

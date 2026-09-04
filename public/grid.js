@@ -1,9 +1,9 @@
 import { state } from './state.js';
-import { ICONS, actionBtn, hasIdentity, instanceTagCounts } from './utils.js';
-import { openDropdown, ddAction } from './dropdown.js';
+import { ICONS, actionBtn, hasIdentity, instanceTagCounts, mappingHasAiWork, scopableInstance, facetName } from './utils.js';
+import { openDropdown, ddAction, openFacetScopePop } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, needsTags } from './filters.js';
-import { ensurePolling, dropPendingUploadId, ACTIVE, QUEUED } from './data.js';
+import { dropPendingUploadId, requeueToast, ACTIVE, QUEUED } from './data.js';
 import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
@@ -133,31 +133,88 @@ async function doDelete(id) {
   }
 }
 
-async function doReprocess(id) {
-  try {
-    const r = await fetch(`/api/items/${id}/reprocess`, { method: "POST" });
-    if (!r.ok) throw new Error();
-    const img = state.items.find((i) => i.id === id);
-    if (img) {
-      img.status = "pending";
-      // Reprocess re-queues every instance (the route's contract) — mirror
-      // that on the instances too, so rows-mode tiles show the whole strip
-      // queued now rather than at the first poll.
-      for (const i of img.instances || []) i.status = "pending";
-      if (!img.tags.length) img.tagSet = new Set();
+// The split button's caret: the granular slices of reprocess, each an entry
+// only when it applies to THIS card — absence is the honest state, no
+// disabled ghosts. Applicability rides fields the client already holds
+// (instance kind/status/undecided, state.facets, state.boardMapping) through
+// the same mirrors rows-mode already gates with; the plan's close look is
+// explicit that a server-shipped can[] waits until these mirrors multiply.
+// Which caret entries apply to THIS card. Absence is the honest state — an
+// entry that can't run isn't shown, and a card with no entries gets no caret
+// at all (cardActions asks the same question). Applicability rides fields the
+// client already holds (instance kind/status/undecided, state.facets,
+// state.boardMapping) through the same mirrors rows-mode gates with; the
+// plan's close look is explicit that a server-shipped can[] waits until those
+// mirrors multiply. A wrong guess fails soft — requeueToast shows the route's
+// own 409 sentence.
+function verbsFor(img) {
+  const insts = img.instances || [];
+  const u = (verb) => `/api/items/${img.id}/${verb}`;
+  const out = [];
+  if (state.facets.length) {
+    out.push({ label: "Retag", icon: ICONS.tag, url: u("retag"), ok: "Retag queued", fail: "Retag failed" });
+    if (insts.some(scopableInstance)) {
+      out.push({ label: "Retag one facet…", icon: ICONS.tag, url: u("retag"), ok: "Retag queued", fail: "Retag failed", scoped: true });
     }
-    document.dispatchEvent(new Event('app:render'));
-    ensurePolling();
-    toast("Reprocessing…", { duration: "short" });
-  } catch {
-    toast.error("Reprocess failed");
   }
+  if (mappingHasAiWork(state.boardMapping)) {
+    out.push({ label: "Re-extract fields", icon: ICONS.srcSparkle, url: u("reextract"), ok: "Re-extraction queued", fail: "Re-extract failed" });
+  }
+  if (state.boardMapping?.input?.connector) {
+    out.push({ label: "Refresh data + chart", icon: ICONS.srcGlobe, url: u("refresh"), ok: "Refresh queued", fail: "Refresh failed" });
+  }
+  if (insts.some((i) => i.kind === "audio")) {
+    out.push({ label: "Re-transcribe (re-bills)", icon: ICONS.srcWave, url: u("retranscribe"), ok: "Re-transcription queued", fail: "Re-transcribe failed" });
+  }
+  return out;
+}
+
+// The split button's caret: the granular slices of reprocess.
+function openVerbsPop(anchor, img) {
+  const pin = pinWhileOpen(anchor);
+  const ctx = openDropdown(anchor, {
+    variant: "light",
+    align: "end",
+    minWidth: 210,
+    onClose: pin.release,
+    build: (body, { close }) => {
+      for (const v of verbsFor(img)) {
+        body.appendChild(ddAction({ label: v.label, icon: v.icon, onClick: (e) => {
+          e.stopPropagation();
+          // A scoped row hands the card off to the facet pop over the SAME
+          // anchor — "keep-card" is the app's existing word for that (crates'
+          // re-open uses it), so pin.release leaves the chrome standing.
+          close(v.scoped ? "keep-card" : "manual");
+          if (!v.scoped) return requeueToast(v.url, v.ok, v.fail);
+          openFacetScopePop(anchor, state.facets, (f) =>
+            requeueToast(v.url, f ? `${v.ok} on ${facetName(f)}` : v.ok, v.fail,
+              f ? { facets: [f.key] } : undefined),
+            { onClose: pin.release });
+        } }));
+      }
+    },
+  });
+  pin.hold(ctx);
 }
 
 function cardActions(img) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
-  actions.appendChild(actionBtn("redo", "reprocess", "Reprocess (re-identify + re-tag)", () => doReprocess(img.id)));
+  // Reprocess is a split control: main click = the whole shebang, the caret
+  // opens the granular verbs (the reprocess formalization plan's Stage 4).
+  const split = document.createElement("div");
+  split.className = "split-btn";
+  split.appendChild(actionBtn("redo", "reprocess", "Reprocess — redo everything for this item",
+    () => requeueToast(`/api/items/${img.id}/reprocess`, "Reprocessing…", "Reprocess failed")));
+  // No caret when the menu would be empty (no facets, no AI mapping, no
+  // connector, no audio) — the same honesty the entries themselves get.
+  // `.dd-caret` on the button, the spelling the toolbar's split arrow uses.
+  if (verbsFor(img).length) {
+    const caret = actionBtn("chevron", "split-arrow dd-caret", "More processing actions",
+      () => openVerbsPop(caret, img));
+    split.appendChild(caret);
+  }
+  actions.appendChild(split);
   actions.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(img.id)));
   const cb = document.createElement("button");
   cb.className = "act crate";
@@ -217,7 +274,7 @@ const { favorited, count: n } = await r.json();
 }
 
 function openTagPop(chip, img) {
-  const card = chip.closest(".card");
+  const pin = pinWhileOpen(chip);
   const ctx = openDropdown(chip, {
     className: "tag-pop",
     hover: true,
@@ -262,13 +319,9 @@ function openTagPop(chip, img) {
         },
       }));
     } : undefined,
-    onClose: () => {
-      if (!card) return;
-      card.classList.remove("pop-open");
-      if (!card.matches(":hover")) teardownCardHover(card);
-    },
+    onClose: pin.release,
   });
-  if (ctx && card) card.classList.add("pop-open");
+  pin.hold(ctx);
 }
 
 function tagChip(img) {
@@ -338,6 +391,25 @@ function progressCard(p) {
   }
   stageObserver.observe(card);
   return card;
+}
+
+// Pin an element's hover chrome while a pop owns it. Four surfaces need the
+// same three moves — add .pop-open on open, drop it on close, and tear the
+// chrome down only if the pointer has since left — and they differ solely in
+// which element and which teardown. `release` takes the dropdown's close
+// REASON: "keep-card" means the pop handed off to another pop over the same
+// anchor (crates' re-open, the caret's facet-scope chain), so the chrome must
+// survive or the second pop is placed against an element that just vanished.
+export function pinWhileOpen(anchor, { sel = ".card", teardown = teardownCardHover } = {}) {
+  const el = anchor.closest(sel);
+  return {
+    hold: (ctx) => { if (ctx && el) el.classList.add("pop-open"); },
+    release: (reason) => {
+      if (!el || reason === "keep-card") return;
+      el.classList.remove("pop-open");
+      if (!el.matches(":hover")) teardown(el);
+    },
+  };
 }
 
 export function teardownCardHover(card) {

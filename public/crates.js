@@ -3,7 +3,7 @@ import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { createCheckbox } from './checkbox.js';
 import { toast } from './toast.js';
-import { teardownCardHover } from './grid.js';
+import { pinWhileOpen } from './grid.js';
 
 let crateState = null; // { close, card } for the currently open crate pop
 
@@ -205,14 +205,11 @@ export function openCratePop(anchorEl, img = null) {
     } : undefined,
     onClose: (reason) => {
       crateState = null;
-      if (card) {
-        card.classList.remove("pop-open");
-        if (reason !== "keep-card" && !card.matches(":hover")) teardownCardHover(card);
-      }
+      pin.release(reason);
     },
   });
 
   if (!ctx) return; // second click on the same anchor: toggled closed
-  if (card) card.classList.add("pop-open");
-  crateState = { close: ctx.close, card };
+  pin.hold(ctx);
+  crateState = { close: ctx.close, card: pin.el };
 }

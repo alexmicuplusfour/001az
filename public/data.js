@@ -1,5 +1,7 @@
 import { state } from './state.js';
 import { toItem, toInstance } from './utils.js';
+import { api } from './api.js';
+import { toast } from './toast.js';
 
 // Batches of uploaded items we're waiting to see fully tagged.
 const pendingBatches = []; // [{ ids: Set<id>, n: number }]
@@ -68,6 +70,55 @@ export function inProgress() {
     ...mine.filter((img) => ACTIVE.has(img.status)),
     ...mine.filter((img) => QUEUED.has(img.status)),
   ];
+}
+
+// Mirror a routed-status report onto the loaded cards. Every re-queue route
+// (reprocess, retag, re-extract) answers `entities: [{id, status, instances}]`
+// saying where each instance actually landed (fetch/face/extract/tag differ
+// per payload) plus each card's aggregate — and in classify mode ONE click
+// can move several cards, since an instance belongs to every entity that
+// claimed it. The status pills, poll tiers and lane ordering above all read
+// these statuses before the first reconcile, so the guessed "pending" this
+// replaces put a fetching stock in the wrong bucket.
+export function applyRoutedEntities(entities = []) {
+  for (const { id, status, instances = [] } of entities) {
+    const img = state.items.find((i) => i.id === id);
+    if (!img) continue;
+    img.status = status;
+    const byId = new Map(instances.map((i) => [i.id, i.status]));
+    for (const i of img.instances || []) i.status = byId.get(i.id) ?? i.status;
+  }
+}
+
+// The whole re-queue click, one call: POST, mirror the report, repaint, and
+// make sure the poll is running to follow the work. Every surface that queues
+// AI work for a card or instance goes through here — the grid's reprocess,
+// rows-mode retag/re-extract, the lightbox's leg buttons — so the contract
+// and its mirror stay in one place as Stage 4 adds more entries. Throws on
+// failure (api unwraps the server's `{error}`); callers own the toast.
+export async function requeue(url, body) {
+  const { entities } = await api("POST", url, body);
+  applyRoutedEntities(entities);
+  document.dispatchEvent(new Event('app:render'));
+  ensurePolling();
+}
+
+// requeue + the two toasts — the whole click, for every surface that queues
+// AI work (card actions and their caret, rows-mode tiles, lightbox buttons).
+// The error toast is the SERVER's sentence: `api` throws the route's `{error}`
+// message, so a 409 says "not a connector item" / "only audio can be
+// re-transcribed" rather than a generic failure. That matters beyond
+// politeness — the caret decides which verbs to offer from client-side
+// mirrors, and this sentence is what makes a wrong guess self-explaining
+// instead of mysterious. A bare status code (no JSON body) falls back to the
+// caller's phrasing.
+export async function requeueToast(url, okMsg, failMsg, body) {
+  try {
+    await requeue(url, body);
+    toast(okMsg, { duration: "short" });
+  } catch (e) {
+    toast.error(/^\d+$/.test(e.message) ? failMsg : e.message);
+  }
 }
 
 // `presentIds` is every entity id currently on the server — used to tell

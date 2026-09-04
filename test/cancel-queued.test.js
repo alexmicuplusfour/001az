@@ -66,6 +66,9 @@ test("cancel: the status-uniform rule across every queued shape", async () => {
   const restoredFace = await seedInstance(db, bid, "pending_face", { tags: ["sector/tech"] });
   const parkedFace = await seedInstance(db, bid, "pending_face");
   const removedFetch = await seedInstance(db, bid, "pending_fetch", { payload: { unfetched: true, source: { id: "x" } } });
+  // A FETCHED vehicle re-buying its data (Stage 3a reprocess): real fields and
+  // history, not a name-only shell — it must pull back like any leg, never delete.
+  const refetching = await seedInstance(db, bid, "pending_fetch", { payload: { source: { id: "y" } } });
   const startedQueued = await seedInstance(db, bid, "pending", { midPass: true });
   const inFlight = await seedInstance(db, bid, "processing");
   // An armed scope on a cancellable row must die with the cancel (0030's
@@ -73,7 +76,7 @@ test("cancel: the status-uniform rule across every queued shape", async () => {
   await db.query("UPDATE items SET tag_facets=ARRAY['sector'] WHERE id=$1", [restoredPending.id]);
 
   const counts = await cancelBoardQueue(db, bid);
-  assert.deepEqual(counts, { restored: 2, parked: 3, removed: 1, finishing: 2, discarding: 0 });
+  assert.deepEqual(counts, { restored: 2, parked: 4, removed: 1, finishing: 2, discarding: 0 });
 
   for (const { id } of [restoredPending, restoredFace]) {
     const row = await rowOf(id);
@@ -87,6 +90,8 @@ test("cancel: the status-uniform rule across every queued shape", async () => {
   }
   assert.equal(await rowOf(removedFetch.id), undefined, "the queued add's vehicle is gone");
   assert.equal(await getEntity(db, removedFetch.eid), null, "and its placeholder entity with it");
+  assert.equal((await rowOf(refetching.id)).status, "held", "a fetched vehicle survives the cancel, parked");
+  assert.ok(await getEntity(db, refetching.eid), "and keeps its entity");
   const started = await rowOf(startedQueued.id);
   assert.equal(started.status, "pending", "a started (mid_pass) row is left to finish");
   assert.equal(started.mid_pass, true, "its marker survives — still mid-pipeline");

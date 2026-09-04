@@ -6,9 +6,10 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { startServer, adminSession, req, installConnectors } from "./helpers.js";
+import { startServer, adminSession, req, installConnectors, routedStatus } from "./helpers.js";
 import { createEntity, insertItem, getEntity, getBoard, setSetting, advanceFaced, listItems } from "../server/db.js";
 import { selectFace } from "../server/faces/select.js";
+import { connectorLanding } from "../server/connectors/add.js";
 import { renderChart } from "../server/faces/price-chart.js";
 import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from "../server/faces/index.js";
 import * as runtime from "../server/connectors/runtime.js";
@@ -435,10 +436,26 @@ test("POST entities with auto-tag off → face leg anyway, parked", async () => 
   } finally { globalThis.fetch = original; }
 });
 
-test("reprocess: a connector vehicle restarts at the face leg (rendered or not)", async () => {
-  // The chart is part of the definition — the card-level "full pipeline"
-  // reprocess must re-enter the face leg, not skip to extract/tag. This is
-  // also the only manual re-render path for a non-live face.
+test("connectorLanding: the refetch rule — explicit runs never park", () => {
+  const face = { mapping: { face: { source: "connector" } } };
+  const plain = { mapping: {} };
+  // First fetch (the add path): the board flags rule, unchanged.
+  assert.equal(connectorLanding({ ...plain, auto_tag: true }).status, "pending");
+  assert.equal(connectorLanding({ ...plain, auto_tag: false }).status, "held");
+  assert.equal(connectorLanding({ ...face, auto_tag: false }).status, "pending_face");
+  assert.equal(connectorLanding({ ...face, auto_tag: false }).park, true);
+  // Re-fetch (Stage 3a reprocess): park was already stripped by the explicit
+  // run — the landing never re-parks, and face boards still render first.
+  assert.equal(connectorLanding({ ...plain, auto_tag: false }, { refetch: true }).status, "pending");
+  assert.equal(connectorLanding({ ...face, auto_tag: false }, { refetch: true }).status, "pending_face");
+  assert.equal(connectorLanding({ ...face, auto_tag: false }, { refetch: true }).park, false);
+});
+
+test("reprocess: a connector vehicle restarts at the FETCH leg (rendered or not)", async () => {
+  // Stage 3a: a full redo re-buys the provider data — the fetch landing then
+  // routes onward (chart-face boards re-render), so fresh fields feed a fresh
+  // chart feed fresh tags. Before 3a these restarted at the face leg and kept
+  // stale fields forever.
   const board = await faceBoard("face-reprocess");
   const { mapping } = await getBoard(db, board.id);
 
@@ -450,11 +467,37 @@ test("reprocess: a connector vehicle restarts at the face leg (rendered or not)"
   const rendered = await insertItem(db, board.id, { identity: "rp2", files: [{ name: "x", kind: "image", generated: true }], fields: {}, mapping, extracted_at: 1, source: { provider: "coingecko", id: "rp2" } }, "tagged", eid2);
 
   for (const eid of [eid1, eid2]) {
-    assert.equal((await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid })).status, 200);
+    const r = await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid });
+    assert.equal(r.status, 200);
+    assert.equal(routedStatus(r, eid), "pending_fetch",
+      "the response reports the routed leg, not a generic pending");
   }
   const status = async (id) => (await db.query("SELECT status FROM items WHERE id=$1", [id])).rows[0].status;
-  assert.equal(await status(bare), "pending_face");
-  assert.equal(await status(rendered), "pending_face");
+  assert.equal(await status(bare), "pending_fetch");
+  assert.equal(await status(rendered), "pending_fetch");
+});
+
+test("refresh (Stage 4): re-buys the data but KEEPS the tags; 409 off-vehicle", async () => {
+  const board = await faceBoard("face-refresh");
+  const { mapping } = await getBoard(db, board.id);
+  const eid = await createEntity(db, board.id, { identity: "rf1", displayName: "RF1" });
+  const iid = await insertItem(db, board.id,
+    { identity: "rf1", files: [{ name: "x", kind: "image", generated: true }], fields: {}, mapping, extracted_at: 1, park: true, source: { provider: "coingecko", id: "rf1" } },
+    "tagged", eid);
+  await db.query(`UPDATE items SET tags='["kind/a"]'::jsonb WHERE id=$1`, [iid]);
+
+  const r = await req(base, "POST", `/api/items/${eid}/refresh`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(routedStatus(r, eid), "pending_fetch");
+  const { rows: [row] } = await db.query("SELECT status, tags, payload FROM items WHERE id=$1", [iid]);
+  assert.equal(row.status, "pending_fetch");
+  assert.deepEqual(row.tags, ["kind/a"], "refresh is the keep-tags variant — they stay until the fresh pass lands");
+  assert.equal(row.payload.park, undefined, "explicit run — park stripped");
+
+  // A card that isn't a connector vehicle has no data to refresh.
+  const eid2 = await createEntity(db, board.id, { identity: "plain.png" });
+  await insertItem(db, board.id, { identity: "plain.png", files: [{ name: "p.png", kind: "image" }], fields: {} }, "tagged", eid2);
+  assert.equal((await req(base, "POST", `/api/items/${eid2}/refresh`, { sid: admin.sid })).status, 409);
 });
 
 test("advanceFaced: parked item returns to held; unparked flows to tagging", async () => {

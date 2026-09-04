@@ -4,7 +4,7 @@
 import { toast } from "/toast.js";
 import { api } from "/api.js";
 import { openBoardModal } from "/board-modal.js";
-import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddSep, ddAction, ddEmpty } from "/dropdown.js";
+import { openDropdown, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty, openFacetScopePop } from "/dropdown.js";
 import { ICONS } from "/utils.js";
 
 const boardsContent = document.getElementById("boards-content");
@@ -109,7 +109,7 @@ export async function renderBoards() {
 
     // No facets: nothing to scope to, so the button stays a plain action.
     retagBtn.onclick = facets.length
-      ? (e) => { e.stopPropagation(); openRetagPop(facets, retagBtn, runRetag); }
+      ? (e) => { e.stopPropagation(); openFacetScopePop(retagBtn, facets, runRetag); }
       : () => runRetag(null);
     wrap.appendChild(retagBtn);
 
@@ -193,42 +193,8 @@ export async function renderBoards() {
   boardsContent.replaceChildren(sec);
 }
 
-// The retag scope picker. Purely local — the board row already carries `facets`
-// (BOARD_COLS selects it and /api/admin/boards spreads the row), so opening this
-// costs no fetch.
-//
-// The shell is the app's dropdown component in its light variant: it brings the
-// viewport-aware placement this menu needs most, since the boards table runs
-// long and a picker on the last row used to open straight off the bottom of the
-// window. Scroll cap, Escape, re-click-to-close, one-open-at-a-time and arrow
-// keys come with it.
-function openRetagPop(facets, anchorEl, run) {
-  openDropdown(anchorEl, {
-    variant: "light",
-    align: "end",
-    minWidth: 220,
-    build: (body, { close }) => {
-      body.appendChild(ddRow({
-        label: "Everything",
-        onClick: () => { close(); run(null); },
-      }));
-      body.appendChild(ddSep());
-      for (const f of facets) {
-        if (!f?.key) continue;
-        // label over key: a facet is picked by its human name, but the key is
-        // what the retag call sends, and they are worth seeing together
-        body.appendChild(ddRow({
-          label: f.label || f.key,
-          sublabel: f.key,
-          onClick: () => { close(); run(f); },
-        }));
-      }
-    },
-  });
-}
-
 // The board access picker: who can see this board, and which of them may edit
-// it from the gallery. Same shell as the retag picker.
+// it from the gallery. Same shell as the facet-scope picker.
 //
 // It opens BEFORE its data arrives, on purpose. The user list is a fetch, and
 // awaiting it first would both delay the popover and hand openDropdown a stale

@@ -12,12 +12,20 @@ import { firstRefreshAt } from "./runtime.js";
 // advance target from a fresh board read). The park flag is decided at
 // enqueue time and the status it pairs with at land time, so the two halves
 // living in one function is what keeps them from drifting apart.
-export function connectorLanding(board) {
+//
+// `refetch` (Stage 3a): a fetched vehicle re-entering the fetch leg is a
+// reprocess — an EXPLICIT run whose park the reprocess already stripped — so
+// it never re-parks: the add rule's auto-tag-off 'held' landing would break
+// the promise every other leg keeps for explicit runs. Face boards land at
+// the face leg either way (the fresh chart is the point); park stays an
+// enqueue-time decision, so a refetch never stamps one.
+export function connectorLanding(board, { refetch = false } = {}) {
   const wantsFace = board.mapping?.face?.source === "connector";
+  const parked = !refetch && !board.auto_tag; // an automatic run on a no-auto-tag board
   return {
     wantsFace,
-    status: wantsFace ? "pending_face" : board.auto_tag ? "pending" : "held",
-    park: wantsFace && !board.auto_tag,
+    status: wantsFace ? "pending_face" : parked ? "held" : "pending",
+    park: wantsFace && parked,
   };
 }
 

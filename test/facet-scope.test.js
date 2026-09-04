@@ -169,7 +169,8 @@ test("a scoped retag rewrites one facet and leaves the other alone", async () =>
   assert.deepEqual(before.tags, ["kind/a", "mood/calm"]);
 
   // The model now answers differently on BOTH facets; only `mood` may land.
-  assert.equal(await retagItemFacets(db, id, ["mood"]), true);
+  // Returns the touched rows' entity ids (the routed-report seed), null on a refusal.
+  assert.ok(await retagItemFacets(db, id, ["mood"]));
   assert.deepEqual((await itemOf(id)).tag_facets, ["mood"]);
   await drain(tagger("b", "loud"), id);
 
@@ -461,7 +462,7 @@ test("a scoped retag skips undecided items — they have nothing to preserve", a
 test("the per-instance scoped route refuses an undecided item with a 409", async () => {
   const admin = await adminSession(db);
   const { id } = await seedUndecided("u2.png");
-  assert.equal(await retagItemFacets(db, id, ["mood"]), false);
+  assert.equal(await retagItemFacets(db, id, ["mood"]), null);
   const r = await req(srv.base, "POST", `/api/instances/${id}/retag`, { sid: admin.sid, body: { facets: ["mood"] } });
   assert.equal(r.status, 409);
   // …but an unscoped retag of the same item is still fine.

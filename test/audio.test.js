@@ -10,10 +10,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { startServer, adminSession, seedBoard, req, meterTotals, primeSidecars } from "./helpers.js";
+import { startServer, adminSession, seedBoard, req, meterTotals, primeSidecars, routedStatus } from "./helpers.js";
 import { setPluginState, createAiKey, setSetting, getSetting, oneAudioNeedingTranscription,
-  createEntity, insertItem, reprocessEntity, boardUsageSummary } from "../server/db.js";
+  createEntity, insertItem, reprocessEntity, landTranscript, boardUsageSummary } from "../server/db.js";
 import { boardBindingPatch } from "../server/capability-bind.js";
+import { engineStamp } from "../server/worker.js";
 import { audioSource } from "../server/sources/audio.js";
 import { createSources } from "../server/sources/index.js";
 import { getFaceProducer } from "../server/faces/index.js";
@@ -527,6 +528,91 @@ test("reprocess clears a transcript_error so a failed transcription retries; a g
   // Only the cleared clip re-enters the transcription queue (the good one is done).
   const nextUp = await oneAudioNeedingTranscription(db);
   assert.equal(Number(nextUp.id), badItem);
+});
+
+test("engine-stamped transcripts: reprocess drops only a stamped, differing one (3b)", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  const board = await seedBoard(db, "engine-stamp");
+  const mk = async (name, extra) => {
+    const e = await createEntity(db, board, { identity: name });
+    const i = await insertItem(db, board, { files: [{ name, kind: "audio" }], ...extra }, "tagged", e);
+    return { e, i };
+  };
+  // Stamps and the comparison value both go through engineStamp — the same
+  // builder the landing and the reprocess route use, so this test pins their
+  // agreement (a drifted spelling would break the diff-detection silently).
+  const base = engineStamp({ id: "whisper", model: "base" });
+  const legacy = await mk("legacy.mp3", { transcript: "old text" }); // pre-stamp backlog
+  const same = await mk("same.mp3", { transcript: "t", transcript_engine: base });
+  const diff = await mk("diff.mp3", { transcript: "t", transcript_turns: [], transcript_engine: engineStamp({ id: "whisper", model: "tiny" }) });
+
+  for (const { e } of [legacy, same, diff]) await reprocessEntity(db, e, base);
+  const p = async (id) => (await db.query("SELECT payload FROM items WHERE id=$1", [id])).rows[0].payload;
+  assert.equal((await p(legacy.i)).transcript, "old text", "unstamped legacy never re-bills");
+  assert.equal((await p(same.i)).transcript, "t", "same engine → same answer → kept");
+  const d = await p(diff.i);
+  assert.equal(d.transcript, undefined, "a different engine can answer differently → dropped");
+  assert.equal(d.transcript_turns, undefined);
+  assert.equal(d.transcript_engine, undefined);
+
+  // Unknown engine (null — nothing resolvable right now) never drops.
+  const unknown = await mk("unknown.mp3", { transcript: "t", transcript_engine: "whisper:tiny" });
+  await reprocessEntity(db, unknown.e, null);
+  assert.equal((await p(unknown.i)).transcript, "t");
+});
+
+test("landTranscript stamps the engine and clears the embedding trio (3b)", async (t) => {
+  const { db, close } = await startServer();
+  t.after(close);
+  const board = await seedBoard(db, "land-transcript");
+  const e = await createEntity(db, board, { identity: "clip.mp3" });
+  const i = await insertItem(db, board, { files: [{ name: "clip.mp3", kind: "audio" }] }, "pending", e);
+  await db.query("UPDATE items SET embedding=$1, embedding_model='m', embed_error='x' WHERE id=$2",
+    [Buffer.from([0, 0, 0, 0]), i]);
+
+  await landTranscript(db, i, { text: "fresh words", turns: [{ start: 0, end: 1, text: "fresh words" }], engine: "whisper:base" });
+  const { rows: [row] } = await db.query("SELECT payload, embedding, embedding_model, embed_error FROM items WHERE id=$1", [i]);
+  assert.equal(row.payload.transcript, "fresh words");
+  assert.equal(row.payload.transcript_engine, "whisper:base");
+  assert.equal(row.payload.transcript_turns.length, 1);
+  assert.equal(row.embedding, null, "the transcript is an embed input — the old vector is stale");
+  assert.equal(row.embedding_model, null);
+  assert.equal(row.embed_error, null);
+});
+
+test("retranscribe route: audio-only, drops the transcript and routes to the tag leg (3b)", async (t) => {
+  const { db, base, close } = await startServer();
+  t.after(close);
+  const admin = await adminSession(db);
+  const board = await seedBoard(db, "retranscribe");
+  const e = await createEntity(db, board, { identity: "clip.mp3" });
+  const i = await insertItem(db, board,
+    { files: [{ name: "clip.mp3", kind: "audio" }], transcript: "old", transcript_engine: "whisper:tiny" }, "tagged", e);
+  const e2 = await createEntity(db, board, { identity: "pic.png" });
+  const pic = await insertItem(db, board, { files: [{ name: "pic.png", kind: "image" }] }, "tagged", e2);
+
+  assert.equal((await req(base, "POST", `/api/instances/${pic}/retranscribe`, { sid: admin.sid })).status, 409,
+    "only audio can be re-transcribed");
+
+  const r = await req(base, "POST", `/api/instances/${i}/retranscribe`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(routedStatus(r, e), "pending");
+  const { rows: [row] } = await db.query("SELECT status, payload FROM items WHERE id=$1", [i]);
+  assert.equal(row.status, "pending", "queued to tag — the tag leg waits out the fresh transcription");
+  assert.equal(row.payload.transcript, undefined);
+  assert.equal(row.payload.transcript_engine, undefined);
+  // …and the absence-keyed lane picks the clip up again on its own.
+  assert.equal(Number((await oneAudioNeedingTranscription(db)).id), i);
+
+  // The card-level sibling (Stage 4's caret): same verb, entity-scoped.
+  await db.query(`UPDATE items SET status='tagged', payload = payload || '{"transcript":"old2"}'::jsonb WHERE id=$1`, [i]);
+  const r2 = await req(base, "POST", `/api/items/${e}/retranscribe`, { sid: admin.sid });
+  assert.equal(r2.status, 200);
+  assert.equal(routedStatus(r2, e), "pending");
+  assert.equal((await db.query("SELECT payload FROM items WHERE id=$1", [i])).rows[0].payload.transcript, undefined);
+  assert.equal((await req(base, "POST", `/api/items/${e2}/retranscribe`, { sid: admin.sid })).status, 409,
+    "a card with no audio has nothing to re-transcribe");
 });
 
 test("GET /api/instances/:id/transcript: flat text + structured turns, each nullable on its own", async (t) => {

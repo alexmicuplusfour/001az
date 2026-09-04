@@ -164,6 +164,11 @@ export async function installConnectors(db, ...ids) {
   for (const id of ids) await setPluginState(db, id, { installed: true });
 }
 
+// The routed-status report's answer for one card: every re-queue route (and
+// the tag-edit PATCH) replies `{ entities: [{id, status, instances}] }`.
+export const routedStatus = (r, entityId) =>
+  r.json.entities.find((e) => e.id === entityId)?.status;
+
 export async function seedBoard(db, name, memberIds = []) {
   const id = await createBoard(db, name, FACETS, "", true, null, null, { enabled: true });
   if (memberIds.length) await setBoardMembers(db, id, memberIds);

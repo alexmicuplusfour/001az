@@ -111,12 +111,14 @@ const IN_FLIGHT_SQL = `(${Object.values(IN_FLIGHT_FOR).map((s) => `'${s}'`).join
 // with their siblings for the same reason — a fifth leg lands in both verbs
 // without anyone remembering cancelBoardQueue exists. One rule, applied per
 // leg: soft cancel takes a leg's QUEUED half, abort takes both halves. The
-// fetch leg is the one that DELETES (a vehicle whose provider data never
-// landed is a name-only shell); every other leg pulls back to a settled state.
-// Under abort the two lists therefore partition IN_FLIGHT_STATES exactly —
-// which is why nothing is left running after one.
+// fetch lane (cancelFetchLane) is the one whose UNFETCHED rows DELETE (a
+// vehicle whose provider data never landed is a name-only shell); fetched
+// vehicles re-buying their data (Stage 3a reprocess) and every other leg pull
+// back to a settled state — cancelBoardQueue splits the lane on the payload
+// flag. Under abort the lists still cover IN_FLIGHT_STATES exactly, so
+// nothing is left running.
 const legHalves = (abort) => ([queued, inFlight]) => (abort ? [queued, inFlight] : [queued]);
-const cancelDeletes = (abort) => legHalves(abort)(["pending_fetch", IN_FLIGHT_FOR.pending_fetch]);
+const cancelFetchLane = (abort) => legHalves(abort)(["pending_fetch", IN_FLIGHT_FOR.pending_fetch]);
 const cancelPulls = (abort) =>
   Object.entries(IN_FLIGHT_FOR).filter(([queued]) => queued !== "pending_fetch").flatMap(legHalves(abort));
 
@@ -165,6 +167,49 @@ export function aggregateStatus(instances) {
   for (const s of STATUS_PRIORITY) if (instances.some((i) => i.status === s)) return s;
   return "tagged";
 }
+
+// The routed-status report behind every per-card / per-instance re-queue
+// response (`{ ok, entities: [{ id, status, instances }] }` — reprocess,
+// retag, re-extract): each affected entity with its fresh aggregate and
+// instance statuses, read AFTER the re-route landed.
+//
+// `affected` comes from the caller's own UPDATE — every re-queue statement
+// RETURNs the entity_ids of the rows it moved, and their union IS the set of
+// cards whose aggregate changed (an entity's aggregate moves only if one of
+// ITS instances moved). That covers classify mode exactly: an instance can
+// belong to several entities, so re-queuing it moves every one of those
+// cards, and answering for just the clicked one would rebuild the client's
+// status guessing a level up. Deriving it from the UPDATE rather than
+// re-deriving it here is also what keeps this to ONE query.
+//
+// The read is after the write on purpose: an affected entity's OTHER
+// instances were not touched and their statuses are part of its aggregate.
+// If a worker claimed a row in the gap (pending → processing) the report is
+// simply more current, and every status it can carry is already in the
+// client's vocabulary.
+export async function routedEntities(db, affected) {
+  if (!affected?.length) return [];
+  const { rows } = await db.query(
+    `SELECT id, status, entity_ids FROM items WHERE entity_ids && $1::bigint[]
+     ORDER BY created_at ASC, id ASC`, [affected]);
+  const byEntity = new Map(affected.map((id) => [id, []]));
+  for (const r of rows)
+    for (const eid of r.entity_ids || [])
+      // Second-degree entities — ones sharing a sibling instance with an
+      // affected entity but holding nothing that moved — are outside the
+      // report, so this is the report's boundary, not defensiveness.
+      if (byEntity.has(eid)) byEntity.get(eid).push({ id: r.id, status: r.status });
+  return [...byEntity].map(([id, instances]) => ({ id, status: aggregateStatus(instances), instances }));
+}
+
+// The entity ids an UPDATE's RETURNed rows touched — every re-queue route
+// feeds this to routedEntities. [] when nothing moved.
+export const affectedEntityIds = (rows) => [...new Set(rows.flatMap((r) => r.entity_ids || []))];
+
+// What a re-queue verb returns: the entity ids its UPDATE touched, or null
+// when it moved nothing (every route turns that null into its own 404/409).
+// One spelling, so ten verbs can't drift on the empty case.
+const touched = (result) => (result.rowCount ? affectedEntityIds(result.rows) : null);
 
 // The field KEYS holding ≥1 stored detection box (a non-empty array `v` is
 // the object-field discriminator, the same one the lightbox overlay reads).
@@ -383,6 +428,42 @@ export async function updateItemPayload(db, id, patch) {
   await db.query("UPDATE items SET payload = payload || $1::jsonb WHERE id=$2", [JSON.stringify(patch || {}), id]);
 }
 
+// The counter reset every explicit re-queue performs: forget the in-flight
+// bookkeeping so the row enters its new leg clean.
+const REQUEUE_RESET = `tag_facets=NULL, mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1`;
+
+// "Throw away the AI's verdict" — the tag columns a redo clears. Its ABSENCE
+// is the distinction refreshEntityData exists to make (that verb re-buys the
+// data but keeps the verdict until the fresh pass lands), so keeping it a
+// named fragment makes "keeps tags" a one-token difference rather than an
+// eyeball diff of two SQL walls.
+const CLEARED_VERDICT =
+  `tags='[]'::jsonb, tag_reasoning='{}'::jsonb, tag_confidence='{}'::jsonb, undecided=FALSE`;
+
+// "This item's text-derived vector is stale" — one spelling for every writer
+// that changes embed input text (transcript landing, AI tag landing, human
+// tag edit), so the embedding sweep re-embeds it.
+const CLEAR_EMBEDDING = `embedding=NULL, embedding_model=NULL, embed_error=NULL`;
+
+// Land a transcript (the transcription lane's one writer): the text, the
+// per-segment turns when the engine gave them, and the engine stamp that lets
+// a later reprocess tell "same answer twice" from "a different engine would
+// answer differently". Clears the embedding trio in the same statement — the
+// transcript is an embed input (untagged audio embeds from it directly), and
+// an item re-transcribed on a no-tag board never passes through markTagged's
+// clear, so without this its stale vector would sit in search forever.
+export async function landTranscript(db, id, { text, turns = null, engine = null }) {
+  const patch = {
+    transcript: text,
+    ...(turns ? { transcript_turns: turns } : {}),
+    ...(engine ? { transcript_engine: engine } : {}),
+  };
+  await db.query(
+    `UPDATE items SET payload = payload || $1::jsonb, ${CLEAR_EMBEDDING} WHERE id=$2`,
+    [JSON.stringify(patch), id]
+  );
+}
+
 // Bulk form of updateItemPayload: shallow-merge a per-item patch into many items
 // in a single round-trip. `patches` is [{ id, patch }]. The file-field backfill
 // uses this so a mapping change touching every item is one write, not one per row.
@@ -472,11 +553,14 @@ export async function setItemTags(db, id, tags) {
   }
   // tag_facets=NULL: a human just settled this item, so any pending scoped pass
   // is moot. This UPDATE has no status fence, so it CAN land on a scoped row.
-  await db.query(
-    "UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, tag_facets=NULL, undecided=FALSE, mid_pass=NULL, embedding=NULL, embedding_model=NULL, embed_error=NULL, updated_at=$4 WHERE id=$5",
+  const result = await db.query(
+    `UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, tag_facets=NULL, undecided=FALSE, mid_pass=NULL, ${CLEAR_EMBEDDING}, updated_at=$4 WHERE id=$5 RETURNING entity_ids`,
     [JSON.stringify(tags), JSON.stringify(reasoning), JSON.stringify(confidence), Date.now(), id]
   );
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
+  // A tag edit is a status mutation too (→ 'tagged') — the route reports the
+  // affected cards on the same contract as every re-queue verb.
+  return touched(result);
 }
 
 // Order-insensitive tag comparison for the snapshot dedupe below.
@@ -851,68 +935,192 @@ function aiMappingJson(mapping) {
   return aiWork(mapping) ? JSON.stringify(mapping) : null;
 }
 
-// The stamped-face routing predicate shared VERBATIM by retagBoard /
-// releaseHeld / queueUntagged: an unfaced connector tag-vehicle (chart face in
-// the stamp, no files) re-enters the face leg before tagging. One string so
-// the three can't drift. reprocessEntity's variant differs ON PURPOSE — it
-// prefers the fresh re-stamp (COALESCE) and also re-faces rendered charts
-// (generated file) — so it is not folded in here.
+// The stamped-face routing predicate in requeueSettledSql (the template
+// behind retagBoard / releaseHeld / queueUntagged): an unfaced connector
+// tag-vehicle (chart face in the stamp, no files) re-enters the face leg
+// before tagging. reprocessEntity's variant differs ON PURPOSE — it prefers
+// the fresh re-stamp (COALESCE) and also re-faces rendered charts (generated
+// file) — so it is not folded in here.
 const STAMPED_CONNECTOR_FACE =
   `payload->'mapping'->'face'->>'source' = 'connector'
                 AND jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0`;
 
-// Its sibling, shared by the same three routers AND reprocessEntity: an
-// enqueued connector vehicle whose provider fetch never landed (bulk add's
-// queued path — connectors/add.js enqueueConnectorEntity) re-enters the FETCH
-// leg, and this arm must come FIRST in every CASE that uses it: an unfetched
-// vehicle on a chart-face board satisfies STAMPED_CONNECTOR_FACE too, and the
-// face arm would swallow it — rendering a chart from empty fields and then
-// tagging on nothing, which lands as ordinary-looking tags (the tagger does
-// not fail on an empty field set; it just isn't told anything).
+// The mark of an enqueued connector vehicle whose provider fetch never
+// landed (bulk add's queued path — connectors/add.js enqueueConnectorEntity).
+// Two readers: requeueSettledSql's fetch arm re-enters it into the FETCH
+// leg, and cancelBoardQueue splits the fetch lane on it (only these
+// name-only shells delete; fetched vehicles pull back).
 const UNFETCHED = `payload ? 'unfetched'`;
+
+// The mapping that will APPLY after a reprocess statement lands: $3 (the
+// re-stamp) when the board has AI work, else the instance's stamp. $3 is
+// reprocessEntity's parameter — predicates built on this are bound to that
+// verb's $-order and must not be reused under different numbering.
+const APPLYING_MAPPING = `COALESCE($3::jsonb, payload->'mapping')`;
+
+// reprocessEntity's fetch-arm predicate: EVERY connector vehicle, fetched or
+// not — a full redo re-buys the provider data (Stage 3a), and the fetch
+// LANDING then routes onward (face/tag) per connectorLanding's refetch rule.
+// Vehicles are the only items carrying payload.source (admitFile builds
+// none), and the applying mapping names the connector input.
+const CONNECTOR_VEHICLE =
+  `payload->'source'->>'id' IS NOT NULL
+                AND ${APPLYING_MAPPING}->'input'->>'connector' IS NOT NULL`;
+
+// The canonical queue-routing CASE: every router walks the SAME arms in the
+// SAME mandatory order — fetch first (an unfetched vehicle on a chart-face
+// board satisfies the face predicate too, and the face arm would swallow it:
+// rendering a chart from empty fields and then tagging on nothing, which
+// lands as ordinary-looking tags), then face, then the requeue family's
+// already-extracted shortcut, then extract, else tag. The ARMS are fixed
+// here; the PREDICATES are the intent (requeueSettledSql vs reprocessEntity
+// differ on purpose — see each). A fifth leg gets added in this one builder
+// or not at all, which is the IN_FLIGHT_FOR lesson applied to routing.
+const routingCase = ({ fetch, face, shortCircuit = null, extract }) => [
+  "CASE",
+  `WHEN ${fetch} THEN 'pending_fetch'`,
+  `WHEN ${face} THEN 'pending_face'`,
+  ...(shortCircuit ? [`WHEN ${shortCircuit} THEN 'pending'`] : []),
+  `WHEN ${extract} THEN 'pending_extract'`,
+  "ELSE 'pending' END",
+].join("\n           ");
+
+// Re-stamp $3 over `expr` when the board has AI work, else `expr` as-is —
+// the payload half every re-stamping verb (reextract, reprocess) shares.
+const restamped = (expr) =>
+  `CASE WHEN $3::jsonb IS NULL THEN ${expr} ELSE jsonb_set(${expr}, '{mapping}', $3::jsonb) END`;
 
 async function boardAiMappingJson(db, boardId) {
   const { rows } = await db.query("SELECT mapping FROM boards WHERE id=$1", [boardId]);
   return rows.length ? aiMappingJson(rows[0].mapping) : null;
 }
 
-// Reset an item to the extract leg. User-initiated, so the CURRENT board
-// mapping is what applies — it's re-stamped onto the instance (the stamp an
-// instance was built with only governs automatic replay, e.g. error retries).
-// A board with no AI mapping falls back to replaying the instance's stamp;
-// with neither there is nothing to extract.
+// The per-instance and per-entity spellings of one scope — every re-queue
+// verb below ships an item form (`WHERE id=$2`, the lightbox/rows routes) and
+// an entity form (`WHERE entity_ids @> ...`, the card routes), same SET, same
+// $-order, RETURNING entity_ids for the routed report. One pair of strings so
+// a verb can't grow a third scope with a drifted SET clause.
+const ITEM_SCOPE = `id=$2`;
+const ENTITY_SCOPE = `entity_ids @> ARRAY[$2]::bigint[]`;
+
+// Reset to the extract leg. User-initiated, so the CURRENT board mapping is
+// what applies — it's re-stamped ($3; the stamp an instance was built with
+// only governs automatic replay, e.g. error retries). A board with no AI
+// mapping falls back to replaying the stamp; with neither there is nothing to
+// extract (the WHERE — null return).
+// `- 'park'`: an explicit re-extract runs the full pipeline through tagging,
+// even on an auto-tag-off board — park only gates the automatic ingest flow.
+// `- 'transcript_error'`: for audio the extracted text IS the transcript, so a
+// re-extract retries a failed transcription (a good transcript is kept).
+const reextractSql = (scope) => `
+  UPDATE items
+     SET payload = ${restamped(`payload - 'park' - 'transcript_error'`)},
+         status='pending_extract', ${REQUEUE_RESET}
+   WHERE ${scope} AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')
+   RETURNING entity_ids`;
+
 export async function reextractItem(db, id) {
   const { rows } = await db.query(
     "SELECT b.mapping FROM items i JOIN boards b ON b.id = i.board_id WHERE i.id=$1", [id]);
-  if (!rows.length) return false;
-  const current = aiMappingJson(rows[0].mapping);
-  // `- 'park'`: an explicit re-extract runs the full pipeline through tagging,
-  // even on an auto-tag-off board — park only gates the automatic ingest flow.
-  // `- 'transcript_error'`: for audio the extracted text IS the transcript, so a
-  // re-extract retries a failed transcription (a good transcript is kept).
-  const result = await db.query(
-    `UPDATE items
-     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
-                        ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
-         status='pending_extract', tag_facets=NULL, mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE id=$2 AND ($3::jsonb IS NOT NULL OR payload ? 'mapping')`,
-    [Date.now(), id, current]
-  );
-  return result.rowCount > 0;
+  if (!rows.length) return null;
+  return touched(await db.query(reextractSql(ITEM_SCOPE), [Date.now(), id, aiMappingJson(rows[0].mapping)]));
 }
 
-// Reset one instance to the tag leg — re-tag it from its existing material and
-// fields, without re-deriving identity/fields. The per-instance counterpart to
-// the card-level full reprocess (reprocessEntity); the lightbox exposes it next
-// to Re-extract since a single instance is what's in focus there.
+// The card-level form (Stage 3c): every instance of the entity re-enters the
+// extract leg. 409-shaped null when NO instance has anything to extract.
+export async function reextractEntity(db, entityId) {
+  const { rows } = await db.query(
+    "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
+  if (!rows.length) return null;
+  return touched(await db.query(reextractSql(ENTITY_SCOPE), [Date.now(), entityId, aiMappingJson(rows[0].mapping)]));
+}
+
+// Reset to the tag leg — re-tag from existing material and fields, without
+// re-deriving identity/fields (the tag-only slice of reprocess).
+// tag_facets=NULL: this is an explicit FULL retag. No status fence here, so
+// it can land on a row already queued for a scoped pass — that scope dies.
+const retagSql = (scope) => `
+  UPDATE items
+     SET status='pending', ${CLEARED_VERDICT}, ${REQUEUE_RESET}
+   WHERE ${scope}
+   RETURNING entity_ids`;
+
+// The lightbox exposes this next to Re-extract — a single instance is what's
+// in focus there.
 export async function retagItem(db, id) {
+  return touched(await db.query(retagSql(ITEM_SCOPE), [Date.now(), id]));
+}
+
+// The card-level form (Stage 3c): re-tag every instance, leaving
+// identity/fields as-is — the tag-only counterpart of reprocessEntity.
+export async function retagEntity(db, entityId) {
+  return touched(await db.query(retagSql(ENTITY_SCOPE), [Date.now(), entityId]));
+}
+
+// Re-transcribe (Stage 3b): forget the transcript — text, turns, engine
+// stamp, and any parked error (fresh attempts) — and re-enter the tag leg in
+// ONE statement. The absence-keyed transcription lane refills the text on its
+// own, and the tag leg's awaiting-transcription wait does the sequencing.
+// Audio-only by WHERE, so the null return doubles as the route's 409; both
+// scopes below share this SQL.
+const retranscribeSql = (scope) => `
+  UPDATE items
+     SET payload = payload - 'transcript' - 'transcript_turns' - 'transcript_engine' - 'transcript_error',
+         status='pending', ${CLEARED_VERDICT}, ${REQUEUE_RESET}
+   WHERE ${scope} AND payload->'files'->0->>'kind' = 'audio'
+   RETURNING entity_ids`;
+
+export async function retranscribeItem(db, id) {
+  return touched(await db.query(retranscribeSql(ITEM_SCOPE), [Date.now(), id]));
+}
+
+// The card-level form (Stage 4, the caret): an entity route beats a
+// client-side loop over instances, and audio entities are usually one clip.
+export async function retranscribeEntity(db, entityId) {
+  return touched(await db.query(retranscribeSql(ENTITY_SCOPE), [Date.now(), entityId]));
+}
+
+// Refresh a connector card's data on demand (Stage 4, the caret's "Refresh
+// data + chart"): the vehicle re-enters the fetch leg — fresh fields, then a
+// fresh chart via the refetch landing, then a fresh tag pass — but KEEPS its
+// tags/reasoning/confidence until that pass lands. Retag optics, where
+// reprocess is the clear-first variant of the same trip. Vehicles only, by
+// WHERE (CONNECTOR_VEHICLE — the $3 contract holds: $3 is this verb's
+// re-stamp mapping too), so the null return doubles as the route's 409; no
+// routingCase needed since everything admitted goes to the fetch leg.
+// NO CLEARED_VERDICT — that omission IS this verb: refresh re-buys the data
+// and keeps the card's tags until the fresh pass lands, where reprocess is
+// the clear-first trip. (REQUEUE_RESET still clears tag_facets: a queued
+// scoped pass dies here like on every explicit re-queue. `- 'park'`: an
+// explicit run tags even on an auto-tag-off board.)
+export async function refreshEntityData(db, entityId) {
+  const { rows } = await db.query(
+    "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
+  if (!rows.length) return null;
+  const current = aiMappingJson(rows[0].mapping);
   const result = await db.query(
-    // tag_facets=NULL: this is an explicit FULL retag. No status fence here, so
-    // it can land on a row already queued for a scoped pass — that scope dies.
-    "UPDATE items SET status='pending', tags='[]'::jsonb, tag_reasoning='{}'::jsonb, tag_confidence='{}'::jsonb, tag_facets=NULL, undecided=FALSE, mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2",
-    [Date.now(), id]
+    `UPDATE items
+     SET payload = ${restamped(`payload - 'park'`)},
+         status='pending_fetch', ${REQUEUE_RESET}
+     WHERE ${ENTITY_SCOPE} AND ${CONNECTOR_VEHICLE}
+     RETURNING entity_ids`,
+    [Date.now(), entityId, current]
   );
-  return result.rowCount > 0;
+  return touched(result);
+}
+
+// Does any instance of this entity carry a transcript engine stamp? The
+// reprocess route asks this BEFORE resolving the transcriber: reprocessEntity's
+// staleness arm only fires on rows that HAVE a stamp, so with none the resolved
+// engine is provably irrelevant — and resolving walks the whole capability
+// ladder (several uncached settings reads) on a click that, for every
+// image/doc/connector card, could never use the answer.
+export async function entityHasTranscriptStamp(db, entityId) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM items WHERE entity_ids @> ARRAY[$1]::bigint[] AND payload ? 'transcript_engine' LIMIT 1`,
+    [entityId]
+  );
+  return rows.length > 0;
 }
 
 // --- users / invites / sessions / favorites ---
@@ -1571,33 +1779,49 @@ export async function boardPreviewFaces(db, boardIds, n = 8) {
   return out;
 }
 
+// The ONE routing computation behind the three settled-item requeuers.
+// retagBoard, releaseHeld and queueUntagged differ only in WHO they sweep —
+// the WHERE each one passes — never in where an item goes next or which held
+// item adopts the board's mapping, and their SET clauses had already been
+// kept identical by hand (releaseHeld merely omitted the `status='held'`
+// guards its own WHERE makes tautological — the shared spelling keeps one
+// template). Same $1=now, $2=boardId, $3=mapping in all three.
+//
+// The routing itself: an unfetched connector vehicle re-enters the FETCH leg
+// (and that arm must stay first — see UNFETCHED above); an unfaced vehicle
+// the face leg; an already-extracted item goes straight to tagging (these
+// requeuers re-JUDGE, they don't re-derive); an item with AI work still owed
+// enters the extract leg; everything else tags. A held item with no stamp
+// adopts the current board mapping — the board may have gained one since
+// upload. reprocessEntity is NOT a fourth caller: its variant differs on
+// purpose (see its comment) — a full redo re-stamps unconditionally and
+// skips the extracted_at shortcut, because "requeue settled work under the
+// current definition" and "redo everything" are different intents.
+const requeueSettledSql = (where) => `
+  UPDATE items
+     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
+                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
+         status = ${routingCase({
+           fetch: UNFETCHED,
+           face: STAMPED_CONNECTOR_FACE,
+           shortCircuit: `payload ? 'extracted_at'`,
+           extract: `(payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL)`,
+         })},
+         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+   WHERE board_id=$2 AND ${where}`;
+
 // Queue a board's settled items for a fresh tagging pass (held ones included —
 // retag is an explicit "tag now"). Returns the count. Only terminal states are
 // touched: items still in the pipeline (any waiting or claimed leg status)
 // already end in the tag leg when their legs finish, so flipping them here
-// would only skip their definition legs and tag them with no fields,
-// identity or face. Touched items resume the RIGHT leg,
-// with the same routing as releaseHeld: an unfaced connector vehicle re-enters
-// the face leg (another shot at the chart), anything already extracted goes
-// straight to tagging, anything not yet extracted — a failed extraction, or a
-// tagged item that never got its definition — re-enters the extract leg. Held
-// items with no stamp adopt the current board mapping (the board may have
-// gained one since they were uploaded); other unstamped items stay tag-only,
-// so retag never turns into a surprise extraction sweep over a whole board.
+// would only skip their definition legs and tag them with no fields, identity
+// or face. Unstamped items stay tag-only (bar the held ones the template
+// re-stamps), so retag never turns into a surprise extraction sweep over a
+// whole board.
 export async function retagBoard(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
-    `UPDATE items
-     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
-                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
-         status = CASE
-           WHEN ${UNFETCHED} THEN 'pending_fetch'
-           WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
-           WHEN payload ? 'extracted_at' THEN 'pending'
-           WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
-           ELSE 'pending' END,
-         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE board_id=$2 AND status IN ('tagged','failed','held')`,
+    requeueSettledSql(`status IN ('tagged','failed','held')`),
     [Date.now(), boardId, current]
   );
   return result.rowCount;
@@ -1628,42 +1852,39 @@ export async function retagBoardFacets(db, boardId, facetKeys) {
   return rowCount;
 }
 
-// The per-instance counterpart, for the lightbox. Same settled-and-decided rule:
-// picking one item by hand does not make a partial verdict any more coherent, and
-// the route turns the miss into a 409 rather than a silent no-op.
+// The per-instance and per-entity counterparts, for the lightbox and the card
+// caret. Same settled-and-decided rule: picking an item by hand does not make
+// a partial verdict any more coherent, and the routes turn the miss into a
+// 409 rather than a silent no-op. The entity form takes whichever instances
+// qualify (a card with one settled and one in-flight instance re-rolls the
+// settled one) — null only when NONE do.
+const retagFacetsSql = (scope) => `
+  UPDATE items
+     SET status='pending', tag_facets=$3::text[],
+         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+   WHERE ${scope} AND status='tagged' AND NOT undecided
+   RETURNING entity_ids`;
+// NOT REQUEUE_RESET: a scoped pass ARMS tag_facets, where every other verb
+// clears it.
+
 export async function retagItemFacets(db, id, facetKeys) {
-  const { rowCount } = await db.query(
-    `UPDATE items SET status='pending', tag_facets=$3::text[],
-       mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE id=$2 AND status='tagged' AND NOT undecided`,
-    [Date.now(), id, facetKeys]
-  );
-  return rowCount > 0;
+  return touched(await db.query(retagFacetsSql(ITEM_SCOPE), [Date.now(), id, facetKeys]));
+}
+
+export async function retagEntityFacets(db, entityId, facetKeys) {
+  return touched(await db.query(retagFacetsSql(ENTITY_SCOPE), [Date.now(), entityId, facetKeys]));
 }
 
 // --- periodic auto-tagging ---
 
-// Release a board's held items. Connector entities awaiting a chart face enter
-// the face leg (pending_face); already-extracted items (the extract leg runs
-// even with auto-tag off and parks them back in held) go straight to the tag
-// leg; items with AI extraction still to do enter the extract leg. Held items
-// with no stamp adopt the current board mapping — the board may have gained
-// one since they were uploaded.
+// Release a board's held items — the held slice of the shared requeue
+// routing. (The "already extracted → straight to tagging" arm matters most
+// here: the extract leg runs even with auto-tag off and parks items back in
+// held, so a release must not re-derive what that pass already produced.)
 export async function releaseHeld(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
-    `UPDATE items
-     SET payload = CASE WHEN NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
-                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
-         status = CASE
-           WHEN ${UNFETCHED} THEN 'pending_fetch'
-           WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
-           WHEN payload ? 'extracted_at' THEN 'pending'
-           WHEN (payload ? 'mapping') OR $3::jsonb IS NOT NULL THEN 'pending_extract'
-           ELSE 'pending' END,
-         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL,
-         updated_at = $1
-     WHERE board_id = $2 AND status = 'held'`,
+    requeueSettledSql(`status = 'held'`),
     [Date.now(), boardId, current]
   );
   return result.rowCount;
@@ -1672,25 +1893,11 @@ export async function releaseHeld(db, boardId) {
 // Queue everything untagged in a board: held uploads, AI-undecided items,
 // and failed ones (fresh attempts). Fired when auto-tagging turns on — the
 // point of the board is tags, so nothing untagged is left behind. In-flight
-// ('processing') and human-tagged items are untouched. Everything routes
-// through the face/extract legs exactly like releaseHeld/retagBoard:
-// already-extracted items go straight to tagging, ones whose definition never
-// ran — including an extraction that FAILED — resume the extract leg, and
-// unstamped held items adopt the board mapping.
+// ('processing') and human-tagged items are untouched.
 export async function queueUntagged(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
-    `UPDATE items
-     SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
-                        THEN jsonb_set(payload, '{mapping}', $3::jsonb) ELSE payload END,
-         status = CASE
-           WHEN ${UNFETCHED} THEN 'pending_fetch'
-           WHEN ${STAMPED_CONNECTOR_FACE} THEN 'pending_face'
-           WHEN payload ? 'extracted_at' THEN 'pending'
-           WHEN (payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL) THEN 'pending_extract'
-           ELSE 'pending' END,
-         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE board_id=$2 AND status IN ('held','tagged','failed') AND tags='[]'::jsonb`,
+    requeueSettledSql(`status IN ('held','tagged','failed') AND tags='[]'::jsonb`),
     [Date.now(), boardId, current]
   );
   return result.rowCount;
@@ -2831,43 +3038,54 @@ export async function floorOverdueRefreshes(db, boardId, now = Date.now()) {
 // Re-run the full pipeline for every instance of an entity (the card-level
 // "reprocess"). User-initiated, so the CURRENT board mapping is re-stamped and
 // applied — a mapping edited after upload (or added to a board that had none)
-// actually takes effect here; connector vehicles restart at the face leg (the
-// chart is part of the definition, and this is the only manual path that can
-// re-render a non-live face — e.g. after a period change), other instances at
-// the extract leg when there is AI work (current or stamped), else at tagging.
+// actually takes effect here. Connector vehicles restart at the FETCH leg
+// (Stage 3a): a full redo re-buys the provider data, and the fetch landing
+// routes them onward — chart-face boards re-render (connectorLanding's
+// refetch rule), so fresh fields feed a fresh chart feed fresh tags. Other
+// instances restart at the extract leg when there is AI work (current or
+// stamped), else at tagging.
+// Returns the touched rows' entity ids (affectedEntityIds → routedEntities
+// reports where everything landed), or null when the entity is gone.
 // Tags are cleared up front so the card shows a clean reprocessing state
-// either way. The face check reads the mapping that will apply ($3 when
-// re-stamped, else the stamp — $3 is null for connector-only mappings, which
-// carry no AI work); a vehicle is zero-files (unrendered) or generated-file
+// either way. The face arm still exists for the no-vehicle edge (a chart face
+// in the applying mapping on a non-connector item — $3 when re-stamped, else
+// the stamp); a vehicle is zero-files (unrendered) or generated-file
 // (rendered chart), never a user upload.
-export async function reprocessEntity(db, entityId) {
+export async function reprocessEntity(db, entityId, currentEngine = null) {
   const { rows } = await db.query(
     "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
-  if (!rows.length) return false;
+  if (!rows.length) return null;
   const current = aiMappingJson(rows[0].mapping);
   // `- 'park'`: an explicit reprocess runs the full pipeline through tagging,
   // even on an auto-tag-off board — park only gates the automatic ingest flow.
   // `- 'transcript_error'`: a reprocess retries a failed transcription (the loop
   // re-queues any audio item lacking both transcript + error). A successful
-  // `transcript` is kept — no needless re-transcription / provider re-billing.
+  // `transcript` is kept — same bytes in, same text out, so redoing it only
+  // re-bills — UNLESS the engine that would transcribe today ($4, resolved by
+  // the route; null when unknown) differs from the stamp the transcript
+  // carries: a different engine can genuinely answer differently, so the
+  // trio drops and the absence-keyed lane re-transcribes. Unstamped legacy
+  // transcripts and a null $4 never drop — no surprise re-billing.
+  const STRIPPED = `(CASE WHEN $4::text IS NOT NULL AND payload ? 'transcript_engine'
+                               AND payload->>'transcript_engine' <> $4::text
+                          THEN payload - 'transcript' - 'transcript_turns' - 'transcript_engine'
+                          ELSE payload END) - 'park' - 'transcript_error'`;
   const result = await db.query(
     `UPDATE items
-     SET payload = CASE WHEN $3::jsonb IS NULL THEN payload - 'park' - 'transcript_error'
-                        ELSE jsonb_set(payload - 'park' - 'transcript_error', '{mapping}', $3::jsonb) END,
-         status = CASE
-           WHEN ${UNFETCHED} THEN 'pending_fetch'
-           WHEN COALESCE($3::jsonb, payload->'mapping')->'face'->>'source' = 'connector'
+     SET payload = ${restamped(STRIPPED)},
+         status = ${routingCase({
+           fetch: CONNECTOR_VEHICLE,
+           face: `${APPLYING_MAPPING}->'face'->>'source' = 'connector'
                 AND (jsonb_array_length(COALESCE(payload->'files','[]'::jsonb)) = 0
-                     OR payload->'files'->0->>'generated' = 'true') THEN 'pending_face'
-           WHEN $3::jsonb IS NOT NULL OR payload ? 'mapping' THEN 'pending_extract'
-           ELSE 'pending' END,
-         tags='[]'::jsonb, tag_reasoning='{}'::jsonb, tag_confidence='{}'::jsonb,
-         tag_facets=NULL, undecided=FALSE,
-         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-     WHERE entity_ids @> ARRAY[$2]::bigint[]`,
-    [Date.now(), entityId, current]
+                     OR payload->'files'->0->>'generated' = 'true')`,
+           extract: `$3::jsonb IS NOT NULL OR payload ? 'mapping'`,
+         })},
+         ${CLEARED_VERDICT}, ${REQUEUE_RESET}
+     WHERE ${ENTITY_SCOPE}
+     RETURNING entity_ids`,
+    [Date.now(), entityId, current, currentEngine]
   );
-  return result.rowCount > 0;
+  return touched(result);
 }
 
 // Value-fenced (`AND status='processing'`): the stamp lands only while the row
@@ -2900,7 +3118,7 @@ export async function markTagged(db, id, tags, undecided = false, reasoning = {}
   const sets = [
     "status='tagged'", "tags=$1", "tag_reasoning=$2", "tag_confidence=$3",
     "tag_facets=NULL", "mid_pass=NULL", "error=NULL", "retry_at=NULL",
-    "embedding=NULL", "embedding_model=NULL", "embed_error=NULL", "updated_at=$4",
+    CLEAR_EMBEDDING, "updated_at=$4",
   ];
   if (!scoped) { vals.push(undecided); sets.push(`undecided=$${vals.length}`); }
   vals.push(id); // last, so the fence's placeholder is always vals.length
@@ -3487,8 +3705,12 @@ function costOf(units) {
 //                              at pending_extract)
 //   never-tagged → 'held'     (parked; the routers' shared CASE — UNFETCHED
 //                              first, then face/extract/tag — resumes any
-//                              held shape correctly on release)
-//   pending_fetch → DELETE    (item + sole-home placeholder entity: no
+//                              held shape correctly on release. Since Stage 3a
+//                              this also catches FETCHED vehicles a reprocess
+//                              put back in the fetch lane — real data, so they
+//                              pull, never delete)
+//   unfetched pending_fetch → DELETE
+//                             (item + sole-home placeholder entity: no
 //                              provider data ever landed, so what's removed is
 //                              a name-only shell — including, accepted with
 //                              eyes open in the plan, an old failed-fetch
@@ -3516,7 +3738,7 @@ export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
   // Which statuses each branch touches — the rule and its drift guard live at
   // the top of this file, with the other IN_FLIGHT_FOR derivations.
   const pulls = cancelPulls(abort);
-  const deletes = cancelDeletes(abort);
+  const fetchLane = cancelFetchLane(abort);
   return withTx(db, async (client) => {
     const now = Date.now();
     // Abort's own count, taken BEFORE the flips: the rows a worker is holding
@@ -3532,11 +3754,16 @@ export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
           [boardId]
         )).rows[0].c)
       : 0;
+    // UNFETCHED: only a vehicle whose provider data NEVER landed is a
+    // name-only shell. A fetched vehicle in the fetch lane is a reprocess
+    // re-buying its data (Stage 3a) — real fields, hearts, history — and it
+    // pulls back below like every other leg's row instead of being deleted.
     const del = await client.query(
       `DELETE FROM items
-       WHERE board_id=$1 AND status = ANY($2::text[]) AND ($3 OR mid_pass IS NOT TRUE)
+       WHERE board_id=$1 AND status = ANY($2::text[]) AND ${UNFETCHED}
+         AND ($3 OR mid_pass IS NOT TRUE)
        RETURNING entity_ids`,
-      [boardId, deletes, abort]
+      [boardId, fetchLane, abort]
     );
     // Sole-home placeholders go with their vehicles (no files exist pre-fetch,
     // so there is nothing to hand to sources.cleanup); an entity that somehow
@@ -3549,23 +3776,29 @@ export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
     // read out of order. (Two statements worked only because the parked one ran
     // second, on what the restored one had already moved out of the status set;
     // nothing said so, and swapping them would have parked every restorable row.)
+    // The second status list ($5, the fetch lane) catches the fetched
+    // vehicles the delete arm's unfetched guard spared — they pull back with
+    // everyone else, so the two statements stay exact per-row complements.
     const { rows: [pulled] } = await client.query(
       `WITH pulled AS (
          UPDATE items
             SET status = CASE WHEN tags != '[]'::jsonb THEN 'tagged' ELSE 'held' END,
                 mid_pass=NULL, tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-          WHERE board_id=$2 AND status = ANY($3::text[])
+          WHERE board_id=$2
+            AND (status = ANY($3::text[])
+                 OR (status = ANY($5::text[]) AND NOT ${UNFETCHED}))
             AND ($4 OR mid_pass IS NOT TRUE)
           RETURNING status)
        SELECT COUNT(*) FILTER (WHERE status='tagged')::int AS restored,
               COUNT(*) FILTER (WHERE status='held')::int AS parked
          FROM pulled`,
-      [now, boardId, pulls, abort]
+      [now, boardId, pulls, abort, fetchLane]
     );
     // What the cancel LEFT RUNNING: in-flight rows plus the mid_pass queued
     // ones it skipped. Not derivable from the counts above — they report what
     // was touched. Abort skips the query rather than asking a question it has
-    // already answered: its two lists partition IN_FLIGHT_STATES, so it leaves
+    // already answered: its two statements cover IN_FLIGHT_STATES between them
+    // (the fetch lane splits per-row on the unfetched flag), so it leaves
     // nothing behind by construction.
     const finishing = abort
       ? 0

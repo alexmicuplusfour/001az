@@ -1,12 +1,13 @@
 import { state } from './state.js';
-import { ICONS, refreshEntityTags, fmtDuration } from './utils.js';
+import { ICONS, refreshEntityTags, fmtDuration, scopableInstance, facetName } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
 import { fullUrl, kindFor } from './kinds.js';
-import { ensurePolling } from './data.js';
+import { requeueToast } from './data.js';
 import { sectionHeading, busy, claim } from './modal.js';
+import { openFacetScopePop } from './dropdown.js';
 
 import { selectFace } from './face-select.js';
 import { mountDetail } from './detail-view.js';
@@ -445,35 +446,39 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   }
   elLightboxPanelBody.appendChild(instMeta);
 
-  // A queue-this-leg button (re-extract, retag): POST the instance route,
-  // flip the instance + entity into the leg's waiting status, and claim the
-  // button as "Queued" — one shape, two consumers.
-  function queueLegBtn(label, path, status, { queued, failed }) {
+  // A queue-this-leg button (re-extract, retag, re-transcribe). `facets`
+  // non-null puts the scope picker behind it instead of a bare click — one
+  // button, one request path either way, so the two shapes can't drift apart.
+  // Both arms wear busy(), so neither can be double-fired.
+  function queueLegBtn(label, path, queued, { facets = null } = {}) {
     const btn = document.createElement("button");
     btn.className = "lbp-reextract";
-    btn.textContent = label;
-    btn.addEventListener("click", busy(btn, async (e) => {
-      e.stopPropagation();
+    btn.innerHTML = `<span>${label}</span>` +
+      (facets ? `<span class="dd-caret">${ICONS.chevron}</span>` : "");
+    // `facet` scopes a retag to one facet — the route reads `facets` from the
+    // body and leaves every other facet's tags alone, so the toast names what
+    // moved. requeue mirrors the routed report onto every affected card; inst
+    // IS img.instances[i], so the panel's own subject updates with them.
+    const run = busy(btn, async (facet = null) => {
       if (!inst) return;
-      try {
-        const r = await fetch(`/api/instances/${inst.id}/${path}`, { method: "POST" });
-        if (!r.ok) throw new Error();
-        inst.status = status;
-        img.status = status;
-        claim(btn, "Queued");
-        document.dispatchEvent(new Event('app:render'));
-        ensurePolling();
-        toast(queued);
-      } catch {
-        toast.error(failed);
-      }
-    }));
+      await requeueToast(
+        `/api/instances/${inst.id}/${path}`,
+        queued + (facet ? ` on ${facetName(facet)}` : ""),
+        `${label} failed`,
+        facet ? { facets: [facet.key] } : undefined,
+      );
+      claim(btn, "Queued");
+    });
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (facets) openFacetScopePop(btn, facets, run);
+      else run();
+    });
     return btn;
   }
 
   // The selected instance's extracted fields, with per-instance re-extract.
-  const reextractBtn = queueLegBtn("Re-extract", "reextract", "pending_extract",
-    { queued: "Re-extraction queued", failed: "Re-extract failed" });
+  const reextractBtn = queueLegBtn("Re-extract", "reextract", "Re-extraction queued");
   const fileFields = {};
   const aiFields = {};
   for (const [key, field] of Object.entries(fields || {})) {
@@ -494,15 +499,33 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
 
   // The selected instance's tags + reasoning (per-instance judgment), with a
   // per-instance Retag: re-tag just this file, leaving identity/fields as-is
-  // (the tag-only counterpart to the card-level full reprocess).
+  // (the tag-only counterpart to the card-level full reprocess). A tagged,
+  // decided instance can also be re-rolled on ONE facet — the same scope pop
+  // the admin board retag wears — so the picker appears exactly when the
+  // scoped route would accept it (it 409s on anything else, and not offering
+  // the choice beats offering an error). A scoped pass preserves the other
+  // facets, so nothing is cleared here: the tags on screen stay until the new
+  // ones land.
   const subject = inst || img;
+  // The one verb reprocess deliberately withholds: forcing a fresh
+  // transcription. Its own head, not the tags head — it is a transcript verb,
+  // and the tags block is gated on the board having facets, which would make
+  // it unreachable on a facetless audio board.
+  if (inst && state.me && inst.kind === "audio") {
+    const head = document.createElement("div");
+    head.className = "lbp-fields-head";
+    head.innerHTML = sectionHeading("Transcript");
+    const rt = queueLegBtn("Re-transcribe", "retranscribe", "Re-transcription queued");
+    rt.title = "Transcribe this clip again — re-bills transcription";
+    head.appendChild(rt);
+    elLightboxPanelBody.appendChild(head);
+  }
   if (inst && state.me && state.facets.length) {
     const tagsHead = document.createElement("div");
     tagsHead.className = "lbp-fields-head";
     tagsHead.innerHTML = sectionHeading("Tags");
-    const retagBtn = queueLegBtn("Retag", "retag", "pending",
-      { queued: "Retag queued", failed: "Retag failed" });
-    tagsHead.appendChild(retagBtn);
+    tagsHead.appendChild(queueLegBtn("Retag", "retag", "Retag queued",
+      { facets: scopableInstance(inst) ? state.facets : null }));
     elLightboxPanelBody.appendChild(tagsHead);
   }
   const byFacet = new Map();

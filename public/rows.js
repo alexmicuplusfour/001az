@@ -9,13 +9,13 @@
 // boards, and remove; hearts/crates stay on the card — they reference
 // entities(id) in the schema.
 import { state } from './state.js';
-import { cardFor, cardSig, releaseCard, progressLane } from './grid.js';
+import { cardFor, cardSig, releaseCard, progressLane, pinWhileOpen } from './grid.js';
 import { thumbUrl } from './kinds.js';
 import { openLightboxAt } from './lightbox.js';
 import { selectFace } from './face-select.js';
 import { taggedFiltered, instanceMatches } from './filters.js';
 import { effectiveView } from './view.js';
-import { ACTIVE, QUEUED, ensurePolling } from './data.js';
+import { ACTIVE, QUEUED, requeueToast } from './data.js';
 import { ICONS, actionBtn, refreshEntityTags, mappingHasAiWork } from './utils.js';
 import { openDropdown, ddAction } from './dropdown.js';
 import { openTagEditor } from './tag-editor.js';
@@ -72,42 +72,15 @@ async function once(key, fn) {
 }
 
 function doRetag(img, inst) {
-  return once(`retag:${inst.id}`, async () => {
-    inst = liveInst(img, inst);
-    try {
-      const r = await fetch(`/api/instances/${inst.id}/retag`, { method: "POST" });
-      if (!r.ok) throw new Error();
-      inst.status = "pending";
-      img.status = "pending"; // aggregate approximation; the poll corrects it
-      document.dispatchEvent(new Event('app:render'));
-      ensurePolling();
-      toast("Retag queued");
-    } catch {
-      toast.error("Retag failed");
-    }
-  });
+  return once(`retag:${inst.id}`, () =>
+    requeueToast(`/api/instances/${liveInst(img, inst).id}/retag`, "Retag queued", "Retag failed"));
 }
 
 function doReextract(img, inst) {
-  return once(`reextract:${inst.id}`, async () => {
-    inst = liveInst(img, inst);
-    try {
-      const r = await fetch(`/api/instances/${inst.id}/reextract`, { method: "POST" });
-      if (!r.ok) {
-        // 409 = no stamped mapping (an instance older than the board's mapping).
-        const { error } = await r.json().catch(() => ({}));
-        toast.error(error || "Re-extract failed");
-        return;
-      }
-      inst.status = "pending_extract";
-      img.status = "pending_extract";
-      document.dispatchEvent(new Event('app:render'));
-      ensurePolling();
-      toast("Re-extraction queued");
-    } catch {
-      toast.error("Re-extract failed");
-    }
-  });
+  // A 409 here (an instance older than the board's mapping) reaches the user
+  // as the server's own sentence — requeueToast prefers it over the fallback.
+  return once(`reextract:${inst.id}`, () =>
+    requeueToast(`/api/instances/${liveInst(img, inst).id}/reextract`, "Re-extraction queued", "Re-extract failed"));
 }
 
 function doRemoveInstance(img, inst) {
@@ -142,7 +115,7 @@ function doRemoveInstance(img, inst) {
 // pop-open pins the hover chrome while the pop is up (the card's pattern).
 function openInstTagPop(chip, img, inst) {
   inst = liveInst(img, inst); // freshest tags for the list about to render
-  const tile = chip.closest(".inst-tile");
+  const pin = pinWhileOpen(chip, { sel: ".inst-tile", teardown: teardownTileHover });
   const ctx = openDropdown(chip, {
     className: "tag-pop",
     align: "start",
@@ -188,13 +161,9 @@ function openInstTagPop(chip, img, inst) {
         }),
       );
     } : undefined,
-    onClose: () => {
-      if (!tile) return;
-      tile.classList.remove("pop-open");
-      if (!tile.matches(":hover")) teardownTileHover(tile);
-    },
+    onClose: pin.release,
   });
-  if (ctx && tile) tile.classList.add("pop-open");
+  pin.hold(ctx);
 }
 
 // Tile chrome is mounted on hover, exactly like the card's — a 60-instance
