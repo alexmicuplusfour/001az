@@ -209,6 +209,28 @@ export async function req(base, method, pathname, { sid, body } = {}) {
 
 // --- local HTTP stand-ins ---
 
+// Swap globalThis.fetch for one call and restore on the way out, pass or
+// throw — the wire tests' seam (jsonBox below is the other: a real HTTP
+// server for code that needs a URL). Promoted here when research.test.js
+// became its second copy-holder alongside compat.test.js.
+export async function withFetch(handler, fn) {
+  const real = globalThis.fetch;
+  globalThis.fetch = handler;
+  try { return await fn(); } finally { globalThis.fetch = real; }
+}
+
+// A fetch stub recording each parsed request body, answering by a per-call
+// rule (call number + body in, Response out) — the refusal-negotiation
+// tests' seam, promoted alongside withFetch for the same reason.
+export const recorder = (reply) => {
+  const bodies = [];
+  const fetch = async (_url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return reply(bodies.length, bodies[bodies.length - 1]);
+  };
+  return { fetch, bodies };
+};
+
 // A throwaway JSON server: records every request URL on `hits`, serves
 // `payload` (mutable, so a test can change the answer without a second box)
 // with `status` (also mutable — flip a box from erroring to healthy in place).

@@ -7,6 +7,7 @@ import { PROVIDERS } from "../server/providers.js";
 import { compatRequest as buildRequest } from "../server/ai-providers/wires/compat.js";
 import { OUTPUT_BUDGET } from "../server/ai-providers/wires/tool.js";
 import { refused, refusedFeature } from "../server/ai-providers/wires/refusals.js";
+import { withFetch, recorder } from "./helpers.js";
 
 // compatRequest takes the descriptor's `compat` quirk block, not a provider
 // name — the wire never reaches into the registry. These tests still pin the
@@ -144,11 +145,6 @@ const chatResponse = (toolCalls) => async () =>
     usage: { prompt_tokens: 10, completion_tokens: 5 },
   }), { status: 200 });
 
-async function withFetch(handler, fn) {
-  const real = globalThis.fetch;
-  globalThis.fetch = handler;
-  try { return await fn(); } finally { globalThis.fetch = real; }
-}
 
 const tagOpts = (tool) => ({ apiKey: "k", model: "m", systemText: "s", schema, parts, tool });
 
@@ -229,15 +225,6 @@ test("compat wire: hidden thinking tokens are billed as output", async () => {
 // 400'd, and a 400 is permanent-shaped: failOrRequeue failed every item on its
 // FIRST attempt. The wire must drop the field and re-send instead.
 
-// A fetch stub recording each request body, answering 400/200 by a per-call rule.
-const recorder = (reply) => {
-  const bodies = [];
-  const fetch = async (_url, opts) => {
-    bodies.push(JSON.parse(opts.body));
-    return reply(bodies.length, bodies[bodies.length - 1]);
-  };
-  return { fetch, bodies };
-};
 // The exact body OpenAI returns (verified against the upstream bug reports):
 // HTTP 400, param names the field, code says why.
 const tempRefusal = () => new Response(JSON.stringify({

@@ -179,7 +179,7 @@ export function buildPrompt(facets, context = "", withReasoning = true, subject 
   const contextBlock = context.trim() ? `\n${context.trim()}\n` : "";
   // Phrased conditionally on purpose: the systemText is cached per board, but
   // the provider is resolved per item (per-board key with app-default
-  // fallback), and only Anthropic actually gets a web_search tool.
+  // fallback), and only providers that declare research get a search tool.
   const researchPara = withResearch
     ? `\nIf a web search tool is available, you may use it to check recent real-world facts about the item before judging. Always finish by calling record_tags exactly once.\n`
     : "";

@@ -41,3 +41,37 @@ export function clippedError(cap) {
   e.status = 422;
   return e;
 }
+
+// The clip rule's other half: was the tool call WHOLE when the turn stopped?
+// Completeness is the schema's required keys — a turn cut mid-call leaves
+// them missing, and parseRun reads a missing facet as "no tags", not as
+// damage — so a max-tokens stop is fatal only when this says no. Shared by
+// the wires that receive parsed args (anthropic, google); the compat wire's
+// variant is parse-survival, the same question asked of a JSON string.
+export const wholeCall = (input, schema) =>
+  !!input && (schema?.required || []).every((k) => k in input);
+
+// Document (PDF) input is Anthropic-only. The chat-completions protocol has
+// no document block at all; Gemini's native leg could take one, but research
+// is a MODIFIER — flipping it must never change which boards can tag — so the
+// google family throws this on both its paths. Fail loud with the fix rather
+// than degrading silently; one owner for the guard and its operator-facing
+// sentence, which two wires used to copy.
+export function rejectDocuments(label, parts) {
+  if (parts.some((p) => p.kind === "document"))
+    throw new Error(`${label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
+}
+
+// The shared half of a failed provider response: HTTP status and Retry-After
+// ride the error so the queue can tell a rate limit from a bad request (the
+// Anthropic SDK's errors carry .status already; this brings the fetch-shaped
+// wires up to par). Each wire's error mapper reads its vendor's BODY itself —
+// compat: metadata.raw/param/code, google: RetryInfo in details — and builds
+// on this, so the contract has one owner instead of one mirror per wire.
+export const providerError = (r, message) => {
+  const err = new Error(message || `HTTP ${r.status}`);
+  err.status = r.status;
+  const ra = r.headers?.get?.("retry-after");
+  if (ra != null) err.retryAfter = ra;
+  return err;
+};

@@ -64,10 +64,17 @@ test("capabilities-as-data: compat quirks match what the wire code reads", () =>
     priceFields: { prompt: "input_tokens", completion: "output_tokens", input_cache_read: "cache_read_tokens", web_search: "web_searches", request: "requests" },
   });
   for (const name of ["openai", "gemini", "glm"]) assert.equal(PROVIDERS[name].compat.priceFields, undefined);
-  // Anthropic is the only research-capable provider and has no compat block
+  // Two research-capable built-ins: Anthropic (its own SDK wire, no compat
+  // block) and Gemini (the google family's native branch — the compat layer
+  // has no grounding, wires/google.js). The compat-only rest stay false.
   assert.equal(PROVIDERS.anthropic.research, true);
   assert.equal(PROVIDERS.anthropic.compat, undefined);
-  for (const name of ["openai", "gemini", "glm", "openrouter"]) assert.equal(PROVIDERS[name].research, false);
+  assert.equal(PROVIDERS.gemini.research, true);
+  // The descriptor rung prices Gemini's searches — Google states the rate
+  // ($14/1k executed queries, surveyed 2026-09-04); Anthropic's stay unpriced
+  // (no machine-readable rate to state).
+  assert.equal(PROVIDERS.gemini.prices["*"].web_searches, 14000);
+  for (const name of ["openai", "glm", "openrouter"]) assert.equal(PROVIDERS[name].research, false);
 });
 
 test("defaults and embed capability read straight off the descriptor", () => {
@@ -84,10 +91,16 @@ test("defaults and embed capability read straight off the descriptor", () => {
   }
 });
 
-test("wire family shared: gemini and glm ride the same compat code as openai", () => {
-  assert.equal(PROVIDERS.gemini.wire, PROVIDERS.openai.wire);
+test("wire family shared: glm rides the same compat code as openai; gemini shares all but tag", () => {
   assert.equal(PROVIDERS.glm.wire, PROVIDERS.openai.wire);
   assert.notEqual(PROVIDERS.anthropic.wire, PROVIDERS.openai.wire);
+  // gemini rides the google family: a delegating spread over compat, so every
+  // non-tag method is the compat one BY REFERENCE (a wire bug fix reaches it
+  // from one spot) while tag branches to the native protocol for research
+  assert.notEqual(PROVIDERS.gemini.wire, PROVIDERS.openai.wire);
+  for (const m of ["embed", "testKey", "listModels", "listPrices", "transcribe"])
+    assert.equal(PROVIDERS.gemini.wire[m], PROVIDERS.openai.wire[m], `${m} is the compat implementation`);
+  assert.notEqual(PROVIDERS.gemini.wire.tag, PROVIDERS.openai.wire.tag);
   // the compat family has embeddings; the anthropic family does not
   assert.equal(typeof PROVIDERS.openai.wire.embed, "function");
   assert.equal(PROVIDERS.anthropic.wire.embed, null);

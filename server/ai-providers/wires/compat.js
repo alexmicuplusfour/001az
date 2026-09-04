@@ -6,8 +6,8 @@
 // only composes this into WIRES and dispatches through descriptor.wire.
 // compatRequest is exported as the pure request-builder test seam — it reads
 // the quirk block it's handed and never touches the registry.
-import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
-import { askFor, refusedFeature, refusalKey, learnRefusal } from "./refusals.js";
+import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, providerError, rejectDocuments } from "./tool.js";
+import { askFor, negotiate } from "./refusals.js";
 
 // A keyless connection (a self-hosted Ollama, …) carries no secret — send no
 // Authorization header at all rather than a literal "Bearer null". A keyless
@@ -50,16 +50,12 @@ function modelId(desc, m) {
 // A failed compat response, turned into a readable error. OpenRouter buries
 // the useful upstream detail under error.metadata.raw and leaves error.message
 // as a generic "Provider returned error", so prefer the raw when present; other
-// providers only have message. The HTTP status (and Retry-After, when sent)
-// ride on the error so the queue can tell a rate limit from a bad request —
-// the Anthropic SDK's errors carry .status already; this brings the compat
-// wire up to par.
+// providers only have message. Status and Retry-After ride via providerError
+// (tool.js), the shared half of the contract every wire's mapper builds on.
 async function compatError(r, label) {
   const body = await r.json().catch(() => ({}));
   const e = body.error || {};
-  const msg = e.metadata?.raw || e.message;
-  const err = new Error(msg || `${label} HTTP ${r.status}`);
-  err.status = r.status;
+  const err = providerError(r, (e.metadata?.raw || e.message) || `${label} HTTP ${r.status}`);
   // OpenAI names the offending field and the reason in structured form
   // (param:"temperature", code:"unsupported_value") alongside the prose. Keep
   // both — the parameter-rejection recovery below reads them, and they're
@@ -67,8 +63,6 @@ async function compatError(r, label) {
   // app reads .code off a provider error (it's Postgres/fs errors that use it).
   if (e.param) err.param = e.param;
   if (e.code) err.code = e.code;
-  const ra = r.headers?.get?.("retry-after");
-  if (ra != null) err.retryAfter = ra;
   return err;
 }
 
@@ -91,7 +85,9 @@ async function compatError(r, label) {
 // Would a request for this model carry a temperature at all? The one definition
 // — compatRequest builds from it, and the recovery above uses it to tell "the
 // provider refused what we sent" from "we sent none and something else broke".
-const temperatureAsked = (compat, model) =>
+// Exported: the google family's native path answers the same question from
+// the same quirk block.
+export const temperatureAsked = (compat, model) =>
   compat.temperature !== undefined &&
   !(compat.noTemperature && new RegExp(compat.noTemperature).test(model));
 
@@ -157,7 +153,8 @@ const baseOf = (desc, base) => base || desc.base;
 // health ledger) says "ECONNREFUSED http://…" instead of shrugging —
 // load-bearing for self-hosted connections, where a wrong IP/port/firewall is
 // the common failure. HTTP-level errors never reach this (compatError).
-async function compatFetch(label, url, opts) {
+// Exported: protocol-neutral, so the google family wraps its native calls too.
+export async function compatFetch(label, url, opts) {
   try {
     return await fetch(url, opts);
   } catch (e) {
@@ -173,10 +170,7 @@ async function compatFetch(label, url, opts) {
 
 export const compatWire = {
   async tag(desc, { apiKey, model, systemText, schema, parts, base, tool = DEFAULT_TOOL }) {
-    // Document blocks are Anthropic-only: the chat-completions path has no PDF
-    // input. Fail loud with the fix, rather than degrading silently.
-    if (parts.some((p) => p.kind === "document"))
-      throw new Error(`${desc.label} taggers can't read PDF documents — use an Anthropic tagger for this board`);
+    rejectDocuments(desc.label, parts);
     const url = `${baseOf(desc, base)}/chat/completions`;
     const send = (compat) => compatFetch(desc.label, url, {
       method: "POST",
@@ -184,33 +178,27 @@ export const compatWire = {
       body: JSON.stringify(compatRequest({ compat, model, systemText, schema, parts, tool })),
       signal: chatSignal(),
     });
-    // The refusal negotiation (see refusals.js): what to ask for is the
-    // learned set intersected with this descriptor's own data — a quirk block
-    // that never carried temperature, or a noTemperature-exempt model, sends
-    // none regardless. `undefined`/false is how compatRequest is told to omit
-    // a quirk, so dropping needs no second code path. The loop is bounded by
-    // the feature count: every pass turns one sent flag off, and
-    // refusedFeature only matches sent ones, so an unrelated (or repeat) 400
-    // throws.
+    // The refusal negotiation (negotiate in refusals.js): what to ask for is
+    // the learned set intersected with this descriptor's own data — a quirk
+    // block that never carried temperature, or a noTemperature-exempt model,
+    // sends none regardless. `undefined`/false is how compatRequest is told to
+    // omit a quirk, so the rebuild from the surviving flags needs no second
+    // code path.
     const ask = askFor(url, model, { schema });
-    let sent = {
-      temperature: ask.temperature && temperatureAsked(desc.compat, model),
-      strict: ask.strict && !!desc.compat.strictTools,
-    };
-    const quirks = () => ({
+    const quirksOf = (sent) => ({
       ...desc.compat,
       ...(sent.temperature ? {} : { temperature: undefined }),
       strictTools: sent.strict,
     });
-    let r = await send(quirks());
-    while (!r.ok) {
-      const err = await compatError(r, desc.label);
-      const feature = refusedFeature(err, sent);
-      if (!feature) throw err;
-      learnRefusal(feature, refusalKey(feature, url, model, { schema }), desc.label, model);
-      sent = { ...sent, [feature]: false };
-      r = await send(quirks());
-    }
+    const r = await negotiate({
+      sent: {
+        temperature: ask.temperature && temperatureAsked(desc.compat, model),
+        strict: ask.strict && !!desc.compat.strictTools,
+      },
+      sendFromSent: (sent) => send(quirksOf(sent)),
+      errOf: (res) => compatError(res, desc.label),
+      endpoint: url, model, ctx: { schema }, label: desc.label,
+    });
     const data = await r.json();
     const choice = data.choices?.[0];
     // Find the call BY NAME, like the Anthropic wire: a provider whose tool

@@ -8,7 +8,7 @@
 // No outbound-deadline plumbing here (unlike the compat wire): the SDK defaults
 // to a 10-min per-try timeout, and research tagging legitimately runs minutes.
 import Anthropic from "@anthropic-ai/sdk";
-import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError } from "./tool.js";
+import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, wholeCall } from "./tool.js";
 import { askFor, refusedFeature, refusalKey, learnRefusal } from "./refusals.js";
 
 // Per-item bound on web searches; each one bills on top of tokens.
@@ -110,14 +110,11 @@ export const anthropicWire = {
     }
     const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);
     // Checked after the pause_turn loop, so a continued-then-clipped turn is
-    // caught too — but only when the clip actually cost us the answer. A turn
-    // can stop at max_tokens with the tool call already whole (the compat wire
-    // documents Gemini doing exactly that), and failing that item would discard
-    // a usable result. Completeness is the required keys: a turn cut mid-call
-    // leaves them missing, and parseRun reads a missing facet as "no tags"
-    // rather than as damage.
-    const whole = block && (schema?.required || []).every((k) => k in (block.input || {}));
-    if (!whole && msg.stop_reason === "max_tokens") throw clippedError(request.max_tokens);
+    // caught too — but only when the clip actually cost us the answer: a turn
+    // can stop at max_tokens with the tool call already whole, and failing
+    // that item would discard a usable result (why wholeness is the required
+    // keys lives on wholeCall in tool.js).
+    if (!wholeCall(block?.input, schema) && msg.stop_reason === "max_tokens") throw clippedError(request.max_tokens);
     if (!block) throw new Error(`model did not call ${tool.name}`);
     return { input: block.input, usage };
   },

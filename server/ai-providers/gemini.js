@@ -1,11 +1,19 @@
-// Gemini — Google's models through their OpenAI-compatible endpoint, so it rides
-// the shared compat wire with its own base + quirks. Tags and embeds; no grounding
-// exposed on the compat layer (research false).
+// Gemini — Google's models through their OpenAI-compatible endpoint for
+// everything except web research, which that layer does not expose (probed
+// 2026-09-04: chat extra_body.google takes only cached_content/thinking_config;
+// the grounding-via-extra_body doc tip is image-generation-scoped). So the
+// google wire family rides the shared compat wire with this base + quirks for
+// tagging and embeds, and speaks the native generateContent protocol — from
+// nativeBase below — when research is on.
 export default (wires) => ({
   label: "Gemini",
   description: "Google models for tagging + embeddings — bring a key",
-  wire: wires.compat,
+  wire: wires.google,
   base: "https://generativelanguage.googleapis.com/v1beta/openai",
+  // The native generateContent root — the research path's endpoint (grounding
+  // never made it to the compat layer). A gateway descriptor overriding `base`
+  // must override this too, or not declare research.
+  nativeBase: "https://generativelanguage.googleapis.com/v1beta",
   // Rate limit: Free tier — 10 RPM for flash-class models (Google AI docs, 2026-07).
   // Paid Tier 1 is far higher (~1,000+ RPM) — raise per key once billing is on.
   rpm: 10, burst: 5,
@@ -28,7 +36,19 @@ export default (wires) => ({
     { id: "gemini-3.5-flash", note: "balanced" },
     { id: "gemini-3.1-pro-preview", note: "sharpest, most expensive · preview id" },
   ],
-  research: false, // the compat layer exposes no grounding
+  // Grounding with Google Search before tagging, via the native protocol
+  // (wires/google.js) — Gemini-3-family models; an older id 400s loudly there.
+  research: true,
+  // Author-time price data (metering-plan.md, the descriptor rung) for what
+  // the community map can't answer: requests are known-free (Google bills
+  // tokens), and research searches bill $14 per 1,000 executed queries after
+  // 5,000 free search requests/month across the Gemini-3 family (pricing
+  // page, surveyed 2026-09-04). µ$ per unit. The free allowance makes ≈$ an
+  // over-estimate early in the month — ≈ is the honest answer, and an admin
+  // row overrides. 2.5-era models billed per grounded PROMPT instead, but
+  // they can't run the combined-tools research shape at all, so they never
+  // meter a search. Token prices arrive via the community map (below).
+  prices: { "*": { requests: 0, web_searches: 14000 } },
   // LiteLLM community-map namespace (verified live 2026-08-31). Its gemini
   // entries are keyed "gemini/<model>" — the learner's ns-prefixed match.
   priceNamespace: "gemini",

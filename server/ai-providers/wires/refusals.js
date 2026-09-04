@@ -7,9 +7,13 @@
 // temperature in the morning and strict by the afternoon).
 //
 // What lives here is what the wires must agree on: what each refusal looks
-// like on the wire, how a learned refusal is keyed, and the learned set
-// itself. HOW to drop a feature stays wire-local — compat rebuilds from its
-// quirk block, the Anthropic wire re-invokes its builder.
+// like on the wire, how a learned refusal is keyed, the learned set itself —
+// and, for the fetch-shaped wires (compat, google), the negotiation loop
+// (negotiate, below). HOW to rebuild a request from the surviving features
+// stays wire-local: compat re-derives its quirk block, google a temperature
+// value, and the Anthropic wire — whose failures arrive as SDK exceptions
+// mid-await, not as !r.ok responses — keeps its own exception-shaped copy of
+// the loop around its builder.
 import { createHash } from "node:crypto";
 
 // Two scopes of learned fact. Temperature refusal is a property of the MODEL
@@ -94,3 +98,24 @@ export const learnRefusal = (feature, key, label, model) => {
   refused.add(key);
   console.warn(`${label}: ${model} rejects ${feature} — re-sending without it (${REFUSABLE[feature].note})`);
 };
+
+// The negotiation loop for fetch-shaped wires: send what `sent` says, and
+// when a 400 refuses a SENT feature, learn it, turn the flag off, re-send.
+// Bounded by the feature count — every pass flips one flag off, and
+// refusedFeature matches sent features only, so an unrelated (or repeat) 400
+// throws. `sendFromSent` is the wire-local rebuild (the surviving flags back
+// into a protocol request); `errOf` maps the wire's failed Response onto the
+// shared error contract (.status et al) this module's predicates read.
+// Returns the ok Response for the wire to consume.
+export async function negotiate({ sent, sendFromSent, errOf, endpoint, model, ctx = {}, label }) {
+  let r = await sendFromSent(sent);
+  while (!r.ok) {
+    const err = await errOf(r);
+    const feature = refusedFeature(err, sent);
+    if (!feature) throw err;
+    learnRefusal(feature, refusalKey(feature, endpoint, model, ctx), label, model);
+    sent = { ...sent, [feature]: false };
+    r = await sendFromSent(sent);
+  }
+  return r;
+}
