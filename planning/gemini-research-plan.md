@@ -1,8 +1,15 @@
 # Gemini web research — a native wire branch, not a flag flip (2026-09-04)
 
-**Status: Stage 1 SHIPPED 2026-09-04 + simplify pass applied (suite
-1351/1351, uncommitted). Stage 2 (live verification on local compose)
-pending.** One touch-list addition found while building:
+**Status: ARC COMPLETE — Stage 1 + simplify pass PUSHED (e747bec, suite
+1351/1351); Stage 2 live verification EXERCISED GREEN 2026-09-04 on the
+rebuilt local compose.** Measured, gemini-3.5-flash research tag: 11.9s
+end-to-end, 1,965 in / 1,466 out (thoughts folded), 2 searches → the meter
+grew `tag/gemini web_searches 2, priced 2, 28000µ$` ($0.014/query, priced on
+arrival by the descriptor rung) with board attribution and an ok job_log row.
+Research OFF on the same board: compat path, tagged, searches stayed at 2.
+Anthropic research board through the reworked negotiate/wholeCall code: 33.2s,
+tagged, its 1 search metered `priced 0, $0` — unpriced by design (no stated
+rate), the intended contrast with Gemini's priced rows. One touch-list addition found while building:
 [providers.test.js:94](../test/providers.test.js#L94) pinned gemini's wire
 reference-equal to openai's — flipped to state the new truth (every non-tag
 method compat by reference, tag its own). The simplify pass (4 agents) then
