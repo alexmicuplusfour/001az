@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { ICONS, actionBtn, hasIdentity, instanceTagCounts, mappingHasAiWork, scopableInstance, facetName } from './utils.js';
-import { openDropdown, ddAction, openFacetScopePop } from './dropdown.js';
+import { openDropdown, ddRow, openFacetScopePop } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, needsTags } from './filters.js';
 import { dropPendingUploadId, requeueToast, ACTIVE, QUEUED } from './data.js';
@@ -173,13 +173,15 @@ function verbsFor(img) {
 function openVerbsPop(anchor, img) {
   const pin = pinWhileOpen(anchor);
   const ctx = openDropdown(anchor, {
-    variant: "light",
     align: "end",
     minWidth: 210,
     onClose: pin.release,
     build: (body, { close }) => {
       for (const v of verbsFor(img)) {
-        body.appendChild(ddAction({ label: v.label, icon: v.icon, onClick: (e) => {
+        const icon = document.createElement("span");
+        icon.className = "dd-icon";
+        icon.innerHTML = v.icon;
+        body.appendChild(ddRow({ label: v.label, leading: icon, onClick: (e) => {
           e.stopPropagation();
           // A scoped row hands the card off to the facet pop over the SAME
           // anchor — "keep-card" is the app's existing word for that (crates'

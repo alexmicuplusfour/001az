@@ -109,7 +109,7 @@ export async function renderBoards() {
 
     // No facets: nothing to scope to, so the button stays a plain action.
     retagBtn.onclick = facets.length
-      ? (e) => { e.stopPropagation(); openFacetScopePop(retagBtn, facets, runRetag); }
+      ? (e) => { e.stopPropagation(); openFacetScopePop(retagBtn, facets, runRetag, { variant: "light" }); }
       : () => runRetag(null);
     wrap.appendChild(retagBtn);
 

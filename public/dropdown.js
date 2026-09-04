@@ -445,9 +445,9 @@ export function ddInput({ placeholder = "", onSubmit } = {}) {
 // copies of them drifted apart the moment a second surface wanted the pop.
 // (A facet is picked by its human name, but the KEY is what the call sends —
 // worth seeing together, hence the sublabel.)
-export function openFacetScopePop(anchor, facets, run, { onClose } = {}) {
+export function openFacetScopePop(anchor, facets, run, { onClose, variant } = {}) {
   return openDropdown(anchor, {
-    variant: "light",
+    variant,
     align: "end",
     minWidth: 220,
     onClose,
