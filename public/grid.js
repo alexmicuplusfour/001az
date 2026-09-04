@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { ICONS, actionBtn, hasIdentity, instanceTagCounts, mappingHasAiWork, scopableInstance, facetName } from './utils.js';
-import { openDropdown, ddRow, openFacetScopePop } from './dropdown.js';
+import { openDropdown, ddRow, ddAction, openFacetScopePop } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, needsTags } from './filters.js';
 import { dropPendingUploadId, requeueToast, ACTIVE, QUEUED } from './data.js';
@@ -405,6 +405,7 @@ function progressCard(p) {
 export function pinWhileOpen(anchor, { sel = ".card", teardown = teardownCardHover } = {}) {
   const el = anchor.closest(sel);
   return {
+    el,
     hold: (ctx) => { if (ctx && el) el.classList.add("pop-open"); },
     release: (reason) => {
       if (!el || reason === "keep-card") return;

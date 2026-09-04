@@ -156,7 +156,7 @@ async function createCrateWithItem(name, img, anchorEl) {
 }
 
 export function openCratePop(anchorEl, img = null) {
-  const card = img ? anchorEl.closest(".card") : null;
+  const pin = pinWhileOpen(anchorEl);
   const crates = img ? ownCrates() : state.crates;
 
   const ctx = openDropdown(anchorEl, {
