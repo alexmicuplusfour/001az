@@ -398,7 +398,6 @@ header.header-collapsed #toolbar-fold {
 }
 
 .pill .count,
-.pill .mult,
 .tool-btn .count {
   color: var(--text-dim);
   font-size: 11px;
@@ -411,13 +410,40 @@ header.header-collapsed #toolbar-fold {
   margin-left: 5px;
 }
 
-/* The odds lens (patterns.js): ×N after the count on chips whose context
-   count is salient. Full text color where the count is dimmed — the ratio is
-   the signal, the count is bookkeeping. */
+/* The odds lens (patterns.js). The count is bookkeeping and wears the dim
+   ink; the ratio is the FIND, so it gets the one thing nothing else in the
+   rail has — a filled shape. Square-ish against the pill's 999px capsule so
+   it reads as a stamp ON the chip rather than another chip.
+   Set in the pill's own 12px rather than the count's 11px: this is the number
+   the eye is hunting, and a tabular figure keeps the columns of ×-values
+   aligned down a facet row. */
 .pill .mult {
-  color: var(--text);
+  display: inline-block;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  /* the pill's own line-height, so a badged chip is exactly as tall as a bare
+     one and a facet row doesn't ripple when the lens comes on */
+  line-height: 16px;
+  vertical-align: baseline;
 }
+
+/* Six steps, two arms, fixed anchors (oddsTone): ×2/×4/×10 out and the same
+   three distances back. Blue for over-represented, orange for under- — the
+   validated diverging pair, deliberately NOT the green/red this app already
+   spends on price direction (detail-chart.js), which on a board of stock
+   charts would read as "up" and "down" instead of "more" and "less".
+   Every step clears 4.5:1 on the pill and on its hover tint; the arms sit
+   ΔE 24 apart under protanopia — and the badge always prints its own number,
+   so the color is reinforcement, never the only carrier. */
+.pill .mult-up-1 { background: rgba(42, 120, 214, 0.12); color: #1c5fae; }
+.pill .mult-up-2 { background: rgba(42, 120, 214, 0.22); color: #17508f; }
+.pill .mult-up-3 { background: #1b62b8; color: #fff; }
+.pill .mult-down-1 { background: rgba(235, 104, 52, 0.14); color: #a8400f; }
+.pill .mult-down-2 { background: rgba(235, 104, 52, 0.26); color: #8f360c; }
+.pill .mult-down-3 { background: #b8460f; color: #fff; }
 
 .pill.active {
   background: var(--pill-active);

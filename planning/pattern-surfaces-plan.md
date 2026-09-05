@@ -185,8 +185,22 @@ its own mechanism-design pass before any code.
   expected ≥3 / result floor): they should scale with board size, and want
   retuning the first time the lens runs on a small board, where they may
   never fire.
-- How the `×N` renders on the pill without crowding the count — same slot,
-  second slot, or replacing the count while the lens is on.
+- ~~How the `×N` renders on the pill without crowding the count~~ — SETTLED
+  2026-09-05: a filled badge in a second slot after the count (plain text was
+  unspottable against ~80 chips). Rounded-square against the pill's capsule so
+  it reads as a stamp ON the chip; six fixed steps, two arms (×2/×4/×10 out,
+  ×0.5/×0.25/×0.1 back — symmetric in log space). Colors are the validated
+  blue↔orange diverging pair, NOT green/red: this app already spends those on
+  price direction (detail-chart.js `UP`/`DOWN`), and on a board of stock charts
+  a green ×4 would read as "up". Every step clears 4.5:1 on the pill and its
+  hover tint; the arms sit ΔE 24 apart under protanopia. No warm hue can
+  separate from the price red under red-green CVD (they collapse onto one
+  axis), which is why the badge always prints its own number — the color is
+  reinforcement, never the sole carrier.
+- Steps are FIXED, not scaled to the visible set (the user asked): a
+  set-relative ramp repaints every chip when the selection changes and paints
+  a mild ×2.1 as loudly as a ×40 on a quiet board — the color would describe
+  the board, not the chip. Fixed steps are learnable.
 - Chip floor for rarity (≥12 is right for 15-facet stocks-test; needs to
   derive from the board's facet count, e.g. ~80% of single-valued facets).
 - Whether the patterns door (Stage 2) and the diagnostics door merge into one

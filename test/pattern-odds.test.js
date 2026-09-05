@@ -14,16 +14,16 @@ const { computeFacetStats } = await import("../public/filters.js");
 
 // ── oddsLabel: gates and rounding ────────────────────────────────────────────
 
-test("oddsLabel: the gates and the rounding", () => {
+test("oddsLabel: the gates, the rounding, and the step each ratio lands on", () => {
   for (const [want, args, why] of [
     // The flagship, from the real board: select dilution-grind (36 of 503)
     // and lottery-like holds 13 of them against an expectation of 1.4. A flat
     // "expected >= N" floor would hide the strongest signal on the board.
-    ["×9.6", { obs: 13, ctx: 36, total: 19, n: 503 }, "strong signal on a tiny expected count"],
-    ["×18", { obs: 24, ctx: 36, total: 19, n: 503 }, "past ×10 the decimal is noise"],
+    [{ text: "×9.6", tone: "up-2" }, { obs: 13, ctx: 36, total: 19, n: 503 }, "strong signal on a tiny expected count"],
+    [{ text: "×18", tone: "up-3" }, { obs: 24, ctx: 36, total: 19, n: 503 }, "past ×10 the decimal is noise"],
     // A single decimal would round this to a flat ×0.1 — three times the truth.
-    ["×0.05", { obs: 2, ctx: 100, total: 200, n: 500 }, "near zero keeps the second decimal"],
-    ["×0.2", { obs: 4, ctx: 100, total: 100, n: 500 }, "one decimal is enough at this magnitude"],
+    [{ text: "×0.05", tone: "down-3" }, { obs: 2, ctx: 100, total: 200, n: 500 }, "near zero keeps the second decimal"],
+    [{ text: "×0.2", tone: "down-2" }, { obs: 4, ctx: 100, total: 100, n: 500 }, "one decimal is enough at this magnitude"],
     [null, { obs: 20, ctx: 100, total: 100, n: 500 }, "exactly ×1.0 — inside the band"],
     [null, { obs: 35, ctx: 100, total: 100, n: 500 }, "×1.75 — inside the band"],
     [null, { obs: 9, ctx: 9, total: 10, n: 500 }, "a jumpy context, whatever the ratio"],
@@ -31,7 +31,20 @@ test("oddsLabel: the gates and the rounding", () => {
     [null, { obs: 0, ctx: 50, total: 10, n: 500 }, "nobody in context holds it"],
     [null, { obs: 5, ctx: 50, total: 0, n: 500 }, "no board-wide count — null, not NaN"],
     [null, { obs: 5, ctx: 50, total: 10, n: 0 }, "no board — null, not Infinity"],
-  ]) assert.equal(oddsLabel(args), want, why);
+  ]) assert.deepEqual(oddsLabel(args), want, why);
+});
+
+test("oddsLabel: the arms step at the same three distances from parity", () => {
+  // ×2/×4/×10 out and ×0.5/×0.25/×0.1 back — symmetric in log space, so a
+  // badge's weight means the same thing whichever way the chip leans. Each
+  // pair below sits just inside its step's edge.
+  const at = (m, ctx = 400) => oddsLabel({ obs: Math.round(m * ctx * 0.1), ctx, total: 40, n: 400 })?.tone;
+  assert.equal(at(2.5), "up-1");
+  assert.equal(at(5), "up-2");
+  assert.equal(at(12), "up-3");
+  assert.equal(at(0.4), "down-1");
+  assert.equal(at(0.2), "down-2");
+  assert.equal(at(0.08), "down-3");
 });
 
 // ── chipOdds over computeFacetStats: the leave-one-out denominator ───────────
@@ -113,7 +126,7 @@ test("chipOdds: a cross-facet skew reads its multiplier; the context floor outra
   state.selected = new Map([["size", new Set(["big"])]]);
   const s = computeFacetStats();
   assert.equal(s.ctxAll, 20);
-  assert.equal(chipOdds(s, "color", "color/red"), "×4.0", "8 of 20 big are red vs 10 of 100 board-wide");
+  assert.deepEqual(chipOdds(s, "color", "color/red"), { text: "×4.0", tone: "up-2" }, "8 of 20 big are red vs 10 of 100 board-wide");
   // Blue's complement barely moves: a rare chip's concentration cannot deplete
   // a chip that holds most of the board. Inside the band, so silent.
   assert.equal(chipOdds(s, "color", "color/blue"), null);

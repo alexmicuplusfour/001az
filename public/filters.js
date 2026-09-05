@@ -382,7 +382,8 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const ctxCount = counts.get(t) || 0;
     const active = state.selected.get(facetKey)?.has(value) || false;
     const el = pill(label, ctxCount, active, !active && ctxCount === 0, () => toggle(facetKey, value));
-    if (state.showOdds && !active) appendCount(el, chipOdds(stats, facetKey, t), "mult");
+    const odds = state.showOdds && !active && chipOdds(stats, facetKey, t);
+    if (odds) appendCount(el, odds.text, `mult mult-${odds.tone}`);
     return el;
   };
   // The status row: Untagged plus the two queue pills (Processing = actively
