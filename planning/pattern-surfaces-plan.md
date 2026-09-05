@@ -394,6 +394,15 @@ caveat any 1a reading should carry.
   from the seeded condition, or refuse the save with a reason. (Shipped
   as-is 2026-09-06: the alert modal shows the condition chips, so the dead
   chip is at least visible.)
+  The likely real fix is an explicit "harden into a filter" action on a
+  cluster chip — expand to its signature chips as an ordinary selection —
+  which trades exact membership for a durable, shareable, alertable filter.
+  It must stay an explicit act, never a silent substitution: measured
+  2026-09-06, AND-of-signature is NOT the membership (85-member cluster →
+  33-item filter dropping 58 members; another keeps its count but swaps in
+  50% strangers). The signature describes the group; the centroid over all
+  chips defines it. A partition also can't be expressed as selections at
+  all (overlap, gaps, no "unclassified").
 
 ## Deep dive for 1a (2026-09-05, pre-build)
 
