@@ -9,6 +9,11 @@ Watchdog, Mixpanel Flows). Mockups of all five surfaces, drawn in the app's
 own vocabulary with the real numbers below:
 https://claude.ai/code/artifact/dbc6ee29-3ca0-4783-b1bf-0e31f48f4a86
 
+**The mockup is stale in two places** and the text below wins: 1a shipped as
+in-place multipliers rather than a separate "travels with" strip, and Stage 3
+became a stateless nameless lens rather than AI-named archetypes stored as
+tags. Both revisions are recorded in their own sections.
+
 ## What the data says (measured, not guessed)
 
 A board's tags are a joint distribution the app currently reads only one
@@ -92,9 +97,10 @@ Everything needed already exists as vocabulary or precedent:
 3. **Reuse the shells.** New chips are `pill()`, new panel blocks are
    `panel-chip` cells, new modals ride the diagnostics-door pattern, menus
    are `dd-*` rows. No new component vocabulary.
-4. **Derived surfaces never write.** Stages 1–2 are read-only computation
-   over existing data. (Stage 3 stores type membership as tags — its own
-   decision, taken there.)
+4. **Derived surfaces never write.** Stages 1 and 3 are pure computation over
+   data already in the browser — the only persisted state in either is a
+   per-viewer boolean. Stage 2 reads a table nothing else reads. Nothing in
+   this arc writes to a board.
 5. **Unset ≠ weird.** Entities below a chip floor are excluded from rarity
    ranking and relatives denominators, not penalized. Absence stays absence.
 
@@ -163,21 +169,188 @@ the UI ships this month.
   this dance for field_snapshots under `kind=refresh`); an aggregate
   per-facet flow view (Mixpanel-style) only if the feed proves appetite.
 
-## Stage 3 — types (the big one, last)
+## Stage 3 — clusters (a second lens, NOT the heavyweight feature)
 
-Archetypes become a system facet row (`~types`): a worker job clusters
-entities by chip profile, one AI call names each cluster from its
-differential evidence, membership lands as ordinary tags so filtering,
-counts, alerts, and URLs all work unchanged. The honesty device is the
-evidence card: over/under-represented chips vs board average (×N per chip),
-name editable, cluster dissolvable. Machine finds, human names — never the
-reverse presented as truth.
+**Rewritten 2026-09-06 after a deep dive. The mockup page still shows the old
+version — named AI archetypes stored as tags — and that design is abandoned.**
+It was going to be "the big one"; it is now roughly 1a's size, because
+dropping one thing removed everything hard about it.
 
-Deliberately unresolved until the trio has proven appetite: clustering
-algorithm (greedy growth around high-lift pair cores vs k-modes), stability
-across retags (clusters must not churn names every cycle), whether `~types`
-is per-board opt-in, and where re-clustering triggers live. This stage gets
-its own mechanism-design pass before any code.
+### The reframe: no names, therefore no state, therefore no lifecycle
+
+The old design's whole cost sat in the *names*: an AI call per cluster, a
+stored string, membership persisted as tags — and from that, drift (new items
+unclassified, retags moving items out from under their label), a regenerate
+button, a staleness signal, name-stability matching across re-clusters, and
+metering. All of it downstream of wanting a pretty label.
+
+Measured on the real boards, the names were carrying nothing. A cluster reads
+perfectly well as its own signature — the highest-lift chips a majority of its
+members hold:
+
+```
+[ stable-orbit · plateau-normalcy · not-fallen ]      78   most typical: MCO
+[ deep-shadow · recent-vintage · hype-hangover ]      73   most typical: CABA
+[ wordmark · linear-horizontal · isolated-mark ]     448   (logos board)
+[ vintage-retro · sans-serif · combination-mark ]    279   (logos board)
+```
+
+Nobody needs a model to read the first as "the stable compounders", and the
+chips have two advantages a generated name can't: they are literally true, and
+they are words the user already wrote. **The chips are the name.**
+
+So clusters become a LENS, the same species as 1a: computed from
+`state.items`, nothing stored but one boolean, no AI, no server, no drift.
+New items classify themselves; a retag moves them automatically; there is
+nothing to go stale because nothing is saved.
+
+Names are not gone forever — they are demoted to an optional cosmetic layer
+that can be added later *on top of a working stateless feature*. Drift arrives
+only with them, scoped to a label rather than the mechanism. Only build it if
+someone asks.
+
+### Naming (the term): "clusters", not "types"
+
+The word tracked the design change. "Types" implies an authored, stable
+taxonomy sitting alongside SECTOR and SCALE; what this actually is, is a
+recomputed statistical grouping with no permanence, and the row label should
+set that expectation. "Clusters" reads as *found, not defined* — and now that
+the chips are the representation, naming the mechanism is honesty rather than
+a leak. ("Groups" is the fallback if it ever tests as jargon; it says less —
+every facet makes groups.)
+
+### Mechanism (measured, not assumed)
+
+Spherical k-means over L2-normalised binary chip vectors (cosine similarity).
+Chosen over the plan's earlier "greedy growth around high-lift pair cores"
+because it yields a clean partition, which is what a facet row wants.
+
+**Cost** (`Float64Array`, flat vectors, ~30 iterations, measured on the real
+boards): stocks 496 items/88 chips **17ms**; logos 2406/68 **46ms**; ui
+4586/33 **68ms**. Fine cached; NOT fine per render — see the cache below.
+
+**Determinism is a hard requirement, and the naive form fails it.** k-means
+seeded from `vecs[0]` gives identical output on identical input but a
+DIFFERENT partition when the input array is reordered — which would ship as
+"the clusters changed and I didn't touch anything", since `state.items` grows
+by `unshift`/`push` on every delta. Fix: seed from the DATA, never from array
+position — first seed is the item farthest from the global centroid, each
+next is farthest from all chosen seeds, ties broken by `identity` string.
+Verified: identical partition on all three boards with the input reversed.
+
+**Signature** per cluster = among chips ≥50% of members hold, the three with
+the highest lift vs the board. **Medoid** ("most typical") = the member with
+the highest summed similarity to its own group.
+
+### How many clusters — the honest answer
+
+The plan's earlier instinct ("sweep k, pick the best score") **does not
+survive the data**. Separation (mean own-centroid minus best-rival similarity)
+falls monotonically with k on all three boards — stocks .30/.20/.18/.16…,
+logos .16/.16/.16…, ui .21/.17/.14… — so "pick the best k" always degenerates
+to **k=2**, i.e. two giant useless halves. Any automatic pick would be an
+arbitrary threshold dressed as science, which the plan's rule 1 forbids.
+
+So: **a fixed default k (8 measures well) plus a granularity control**, and
+let the DATA decide how many clusters are *shown* rather than how many are
+computed. Two floors, both applied after clustering:
+
+- support: a group under ~3% of the board is not a cluster;
+- signature: a group whose best majority-held chip is under ~×1.5 has nothing
+  to say.
+
+Anything dropped lands in an honest **unclassified** chip. Measured at k=8
+every group on all three boards clears both floors (sizes 4–23%, best lifts
+×1.8–×16.9), which is exactly what a safety net should look like — silent on
+healthy boards, and firing on the thin ones (few facets, correlated axes)
+this is meant to protect against.
+
+### The cache (the deep dive's main find)
+
+`app:render` fires **unconditionally on every poll tick** — every 4s while
+anything is in flight, every 20–30s on an idle board with alerts
+([data.js:308-341](../public/data.js#L308), plus signals.js's 20s ticker). An
+uncached 68ms cluster would run every four seconds. It must be cached, and the
+cache key must be exact.
+
+Reference equality on `state.items` is NOT usable: inserts mutate the array in
+place (`unshift` at [data.js:179](../public/data.js#L179), `push` at
+[data.js:405](../public/data.js#L405)), so the array stays `===` while its
+contents change.
+
+But there is an exact, allocation-free signal. **Every writer REPLACES an
+item's `tags` array rather than mutating it** — the delta reconcile
+([data.js:140-143](../public/data.js#L140)), the tag editor
+([tag-editor.js:108](../public/tag-editor.js#L108)) and `refreshEntityTags`
+([utils.js:69-78](../public/utils.js#L69)) all assign a fresh array. So:
+
+```
+keep the previous list of `item.tags` ARRAY REFERENCES; recompute when the
+length differs or any reference differs at its index.
+```
+
+O(items) pointer comparisons, no strings, no hashing, and no collision class
+at all — strictly better than the content-signature approach `cardSig`
+([grid.js:45](../public/grid.js#L45)) uses, which needs strings only because
+it compares one item across renders. Order is safe: `state.items` is never
+re-sorted in place (`taggedFiltered` sorts a copy).
+
+Two further gates, both cheap: compute only when the lens is ON, and **don't
+recompute while the board has items in flight** — a board mid-tagging would
+otherwise pay 68ms every 4s to re-cluster data that is still moving. Settle
+first, then compute once; the codebase already reasons this way
+(`SETTLE_MS`, [facet-diagnosis.js](../server/facet-diagnosis.js)). Nothing
+needs clearing on board switch — board changes are full page navigations
+([data.js:411-413](../public/data.js#L411)), so module state dies with the
+page.
+
+### Where it lands
+
+- `~clusters` joins the [SYSTEM_FACETS registry](../public/filters.js#L30)
+  beside `~objects`/`~uploaders`, so chips, counts, `?f=` URLs, saved filter
+  configs and alerts all work unchanged — a registry entry, not a new concept.
+  The one imperfect fit: those entries are pure functions of one item
+  (`entity: (x) => x.objectSet`), while a cluster assignment is a precomputed
+  map, so this entry closes over module state. Acceptable; worth a comment.
+- The chip renders through the existing `chip()` constructor with a display
+  label distinct from its value — exactly how uploader chips already work
+  (`chip("~clusters", "c3", "stable-orbit · plateau-normalcy · not-fallen")`).
+- Toggle: a second `ddCheckRow` in the Filter options footer beside "Show
+  pattern odds", off by default, `boardClusters:<id>` in localStorage.
+- The row renders with the other system rows, above the authored facets: it
+  is the most compressed view of the board, so it reads first.
+
+### Traps
+
+- **Cluster over the whole board, never over the current selection.** Otherwise
+  selecting a cluster narrows the set, which re-clusters, which changes the
+  chip just clicked. (Cluster-the-current-filter is a legitimately different
+  feature — an explicit mode, never the default.)
+- **Determinism** — see above; the naive seeding is order-dependent.
+- **Thin boards**: with 2–4 facets the clusters just restate one facet. The
+  signature floor catches it after the fact; a warning before generating
+  would be kinder. `emma` (2 facets) and `cars` (2) are the local examples.
+- Cluster quality tracks facet independence — see the redundancy note below.
+
+### Free consequence: the evidence card already exists
+
+Selecting a cluster chip with the 1a odds lens ON shows every other chip's
+multiplier given that cluster — which IS the over/under-represented evidence
+table the old design was going to build as a bespoke component. Stage 3's
+explanation UI fell out of Stage 1. Ship the two lenses composable and there
+is nothing else to build for it.
+
+### Aside: facet independence, measured (2026-09-05)
+
+Normalised mutual information over the stocks board says the 15 axes are not
+equally independent — `price_ghost`↔`fall_autopsy` share **46%**,
+`sector`↔`story_fuel` 37%, `scale`↔`price_ghost` 35%, `crowd_phase`↔
+`price_ghost` 32%; while `tension_clock`↔`story_fuel`, `street_presence`↔
+`crowd_phase` and `sector`↔`scale` sit at 4–5%. Most of the correlated
+cluster is price-derived (the tagger reads the chart), so a strong odds
+reading *within* it is close to a tautology. This matters for two surfaces:
+it bounds how interesting clusters can be on a given board, and it is the
+caveat any 1a reading should carry.
 
 ## Open questions
 
@@ -205,6 +378,15 @@ its own mechanism-design pass before any code.
   derive from the board's facet count, e.g. ~80% of single-valued facets).
 - Whether the patterns door (Stage 2) and the diagnostics door merge into one
   "board intelligence" door once both exist.
+- Stage 3's default k (8 measures well on three boards, but all three are
+  ≥7 facets) and the shape of the granularity control — a "fewer/more" pair
+  beside the toggle, or a number in the pop.
+- Whether the cluster chip should carry the medoid's THUMBNAIL on image
+  boards. `[ wordmark · linear-horizontal ]` is legible, but a picture would
+  be better, and the board already renders that face. Needs `pill()` to take
+  more than a text label — the reason it is not in the first cut.
+- Whether Stage 3's row belongs above the authored facets (proposed) or
+  directly under the status row.
 
 ## Deep dive for 1a (2026-09-05, pre-build)
 
