@@ -34,7 +34,7 @@ export const SYSTEM_FACETS = {
   // module state instead of reading its argument. refreshClusters() runs at
   // the top of render(), so by the time anything asks, the map is current.
   // Entity-level (a cluster is a judgment about the whole entity's answers).
-  "~clusters": { label: "CLUSTERS", entity: (x) => clusterSet(x), instance: null },
+  "~clusters": { label: "CLUSTERS", entity: clusterSet, instance: null },
   "~objects": { label: "OBJECTS", entity: (x) => x.objectSet, instance: (x) => x.objectSet },
   // Uploaders were the original separate-slot filter (selectedUploaderIds +
   // ?u=); folded here so saved configs stop dropping them and every consumer
@@ -392,6 +392,24 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     if (odds) appendCount(el, odds.text, `mult mult-${odds.tone}`);
     return el;
   };
+  // ...and ONE labeled row: the scaffold every band row shares, appended to
+  // the container on creation (every caller gates visibility before building).
+  // Returns the pills box; filling it — the universe rules — is the only
+  // thing that actually differs per row. The status row keeps its hand-built
+  // spacer variant.
+  const rowInto = (labelText) => {
+    const row = document.createElement("div");
+    row.className = "facet";
+    const label = document.createElement("div");
+    label.className = "facet-label";
+    label.textContent = labelText;
+    row.appendChild(label);
+    const pills = document.createElement("div");
+    pills.className = "pills";
+    row.appendChild(pills);
+    container.appendChild(row);
+    return pills;
+  };
   // The status row: Untagged plus the two queue pills (Processing = actively
   // worked, Unprocessed = waiting in line). Each shows only while it has items
   // or is switched on, so the row disappears entirely on a quiet board.
@@ -434,14 +452,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const sel = state.selected.get("~clusters") || new Set();
     const values = clusterValues();
     if (values.length || sel.size) {
-      const row = document.createElement("div");
-      row.className = "facet";
-      const label = document.createElement("div");
-      label.className = "facet-label";
-      label.textContent = SYSTEM_FACETS["~clusters"].label;
-      row.appendChild(label);
-      const pills = document.createElement("div");
-      pills.className = "pills";
+      const pills = rowInto(SYSTEM_FACETS["~clusters"].label);
       const shown = new Set();
       for (const v of values) {
         shown.add(v.value);
@@ -452,11 +463,9 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       for (const value of sel) {
         if (!shown.has(value)) pills.appendChild(chip("~clusters", value));
       }
-      row.appendChild(pills);
-      container.appendChild(row);
     }
   }
-  // The OBJECTS row — the `~objects` system facet, heading the labeled band
+  // The OBJECTS row — the `~objects` system facet
   // (planning/objects-filter-row-plan.md). Chip universe is the mapping's
   // DECLARED object fields (so a removed field's lingering data can't grow
   // chips — the state.facets discipline), plus any selected-but-gone key so an
@@ -473,17 +482,8 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       (key) => (totals.get(tag("~objects", key)) || 0) > 0 || sel.has(key)
     );
     if (chips.length) {
-      const row = document.createElement("div");
-      row.className = "facet";
-      const label = document.createElement("div");
-      label.className = "facet-label";
-      label.textContent = SYSTEM_FACETS["~objects"].label;
-      row.appendChild(label);
-      const pills = document.createElement("div");
-      pills.className = "pills";
+      const pills = rowInto(SYSTEM_FACETS["~objects"].label);
       for (const key of chips) pills.appendChild(chip("~objects", key));
-      row.appendChild(pills);
-      container.appendChild(row);
     }
   }
   // Uploader row — the `~uploaders` system facet (entity-level: never dims
@@ -494,14 +494,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const sel = state.selected.get("~uploaders") || new Set();
     if (uploaderTotals.size >= 2 || sel.size > 0) {
       const uploaderItems = [...uploaderTotals.entries()].sort((a, b) => b[1] - a[1]);
-      const row = document.createElement("div");
-      row.className = "facet";
-      const label = document.createElement("div");
-      label.className = "facet-label";
-      label.textContent = SYSTEM_FACETS["~uploaders"].label;
-      row.appendChild(label);
-      const pills = document.createElement("div");
-      pills.className = "pills";
+      const pills = rowInto(SYSTEM_FACETS["~uploaders"].label);
       const shown = new Set();
       for (const [uid, total] of uploaderItems) {
         const key = String(uid);
@@ -515,29 +508,18 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       for (const key of sel) {
         if (!shown.has(key)) pills.appendChild(chip("~uploaders", key));
       }
-      row.appendChild(pills);
-      container.appendChild(row);
     }
   }
 
   for (const facet of state.facets) {
     const sel = state.selected.get(facet.key) || new Set();
     if (!facetsWithData.has(facet.key) && sel.size === 0) continue;
-    const row = document.createElement("div");
-    row.className = "facet";
-    const label = document.createElement("div");
-    label.className = "facet-label";
-    label.textContent = facet.label;
-    row.appendChild(label);
-    const pills = document.createElement("div");
-    pills.className = "pills";
+    const pills = rowInto(facet.label);
     for (const value of facet.values) {
       const total = totals.get(tag(facet.key, value)) || 0;
       if (total === 0 && !sel.has(value)) continue;
       pills.appendChild(chip(facet.key, value));
     }
-    row.appendChild(pills);
-    container.appendChild(row);
   }
 }
 

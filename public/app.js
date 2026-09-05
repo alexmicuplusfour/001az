@@ -23,7 +23,10 @@ const elGridRoot = document.getElementById("grid");
 function render() {
   // Before anything reads the board: taggedFiltered and the rail both go
   // through the ~clusters membership map, so it refreshes first (a no-op
-  // unless the lens is on AND the tag data moved — see patterns.js).
+  // unless the lens is on AND the tag data moved — see patterns.js). This
+  // one line is also what keeps the map fresh for taggedFiltered's callers
+  // OUTSIDE render (lightbox, rows): every data mutation dispatches
+  // app:render synchronously, so nothing reads between a mutation and this.
   refreshClusters();
   const key = filterKey();
   const tagged = taggedFiltered();

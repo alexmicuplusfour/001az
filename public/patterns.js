@@ -1,9 +1,10 @@
 // patterns.js — derived pattern numbers over the board's tags
-// (planning/pattern-surfaces-plan.md). Stage 1a: the odds lens — a chip's
-// count already says how many items you'd have after clicking it; the odds
-// say whether that number is a lot or a little FOR THIS CHIP, given what's
-// selected. The rail's leave-one-out counts are the co-occurrence numbers;
-// this module only normalizes them and decides when the result is worth ink.
+// (planning/pattern-surfaces-plan.md): both lenses. The ODDS lens (stage 1a)
+// — a chip's count already says how many items you'd have after clicking it;
+// the odds say whether that number is a lot or a little FOR THIS CHIP, given
+// what's selected. The CLUSTERS lens (stage 3) — found groups of items that
+// keep answering alike, worn as a rail row. Same species: computed from the
+// tags in memory, nothing persisted but a per-viewer boolean each.
 
 import { state } from "./state.js";
 import { ACTIVE, QUEUED } from "./data.js";
@@ -69,33 +70,43 @@ export function chipOdds(stats, facetKey, t) {
   });
 }
 
-// The lens's one action: flip, persist, repaint. Callers pass the new state
-// (a checkbox's own `checked`) rather than asking this to derive it — the
-// view.js toggleView shape, so no caller assembles the three steps itself.
-export function toggleOdds(on) {
-  state.showOdds = on;
-  saveOdds();
-  document.dispatchEvent(new Event("app:render"));
+// --- the lens trio: flip/persist/restore, per viewer per board -------------
+// Both lenses need the same three actions over the same shape (a boolean
+// under `prefix:<boardId>`), so the trio is written once — the clusters copy
+// was already the file's second and the app's fourth (sort.js, view.js;
+// sparkline.js records where a fourth copy of a block leads). Sort and view
+// keep their own blocks on purpose: they persist richer shapes (validated
+// JSON, an enum) behind the same key convention. Toggle callers pass the new
+// state (a checkbox's own `checked`) rather than asking it to derive one —
+// the view.js toggleView shape, so no caller assembles the steps itself.
+function boardLens(prefix, field, onOff) {
+  const key = () => `${prefix}:${state.boardId}`;
+  const save = () => {
+    try {
+      if (state[field]) localStorage.setItem(key(), "1");
+      else localStorage.removeItem(key());
+    } catch { /* private mode / quota — the lens just won't stick */ }
+  };
+  return {
+    toggle(on) {
+      state[field] = on;
+      if (!on) onOff?.();
+      save();
+      document.dispatchEvent(new Event("app:render"));
+    },
+    save,
+    restore() {
+      try {
+        state[field] = localStorage.getItem(key()) === "1";
+      } catch {
+        state[field] = false;
+      }
+    },
+  };
 }
 
-// --- persistence: per viewer, per board (the boardSort pattern) ---
-
-const storeKey = () => `boardOdds:${state.boardId}`;
-
-export function saveOdds() {
-  try {
-    if (state.showOdds) localStorage.setItem(storeKey(), "1");
-    else localStorage.removeItem(storeKey());
-  } catch { /* private mode / quota — the lens just won't stick */ }
-}
-
-export function restoreOdds() {
-  try {
-    state.showOdds = localStorage.getItem(storeKey()) === "1";
-  } catch {
-    state.showOdds = false;
-  }
-}
+export const { toggle: toggleOdds, save: saveOdds, restore: restoreOdds } =
+  boardLens("boardOdds", "showOdds");
 
 // ── clusters: the second lens (plan Stage 3) ────────────────────────────────
 // Groups of items that keep answering alike, shown as a system facet row.
@@ -203,29 +214,35 @@ function computeClusters() {
   const values = [];
   const sets = new Map();
   const unclassified = new Set(["unclassified"]);
+  let anyUnclassified = false;
   for (let c = 0; c < k; c++) {
     const mem = [];
     for (let i = 0; i < N; i++) if (assign[i] === c) mem.push(i);
     if (!mem.length) continue;
-    const sig = (() => {
-      if (mem.length < floor) return null;
+    let sig = null;
+    if (mem.length >= floor) {
       const local = new Map();
       for (const i of mem) for (const t of participants[i].tags) local.set(t, (local.get(t) || 0) + 1);
       const top = [...local.entries()]
         .filter(([, n]) => n >= mem.length / 2)
         .map(([t, n]) => ({ t, lift: (n / mem.length) / (base.get(t) / N) }))
         .sort((a, b) => b.lift - a.lift);
-      return top.length && top[0].lift >= MIN_SIGNATURE ? top.slice(0, SIG_CHIPS) : null;
-    })();
+      if (top.length && top[0].lift >= MIN_SIGNATURE) sig = top.slice(0, SIG_CHIPS);
+    }
     if (!sig) {
+      anyUnclassified = true;
       for (const i of mem) sets.set(participants[i].id, unclassified);
       continue;
     }
-    // most typical member = highest summed similarity to its own group
-    let medoid = mem[0], bestSum = -1;
+    // most typical member = closest to the group's converged centroid, which
+    // by linearity IS the summed-similarity argmax: Σo dot(i,o) = dot(i, Σo o),
+    // seeds row c holds exactly that sum after the final M-step, and its
+    // normalization is a positive scalar that can't move an argmax. The
+    // written-out pairwise form of this was O(|group|²·D) — measured ~1.4s
+    // for a single 3.3k-member group, vs ~1ms here, same winner.
+    let medoid = mem[0], bestSum = -Infinity;
     for (const i of mem) {
-      let s = 0;
-      for (const o of mem) s += dot(i * D, vecs, o * D);
+      const s = dot(i * D, seeds, c * D);
       if (s > bestSum || (s === bestSum && key[i] < key[medoid])) { bestSum = s; medoid = i; }
     }
     const value = `c${c}`;
@@ -241,9 +258,7 @@ function computeClusters() {
   }
   if (!values.length) return null;
   values.sort((a, b) => b.size - a.size || (a.value < b.value ? -1 : 1));
-  if ([...sets.values()].includes(unclassified)) {
-    values.push({ value: "unclassified", label: "unclassified", title: "" });
-  }
+  if (anyUnclassified) values.push({ value: "unclassified", label: "unclassified" });
   return { values, sets };
 }
 
@@ -270,28 +285,8 @@ export function refreshClusters() {
 export const clusterValues = () => cache?.result?.values || [];
 export const clusterSet = (img) => cache?.result?.sets.get(img.id);
 
-export function toggleClusters(on) {
-  state.showClusters = on;
-  // A left-behind cluster selection can never match once the lens stops
-  // computing — it would silently filter the board to nothing.
-  if (!on) state.selected.delete("~clusters");
-  saveClusters();
-  document.dispatchEvent(new Event("app:render"));
-}
-
-const clustersKey = () => `boardClusters:${state.boardId}`;
-
-export function saveClusters() {
-  try {
-    if (state.showClusters) localStorage.setItem(clustersKey(), "1");
-    else localStorage.removeItem(clustersKey());
-  } catch { /* private mode / quota — the lens just won't stick */ }
-}
-
-export function restoreClusters() {
-  try {
-    state.showClusters = localStorage.getItem(clustersKey()) === "1";
-  } catch {
-    state.showClusters = false;
-  }
-}
+// Off also clears the lens's own selection: a left-behind ~clusters chip can
+// never match once the lens stops computing — it would silently filter the
+// board to nothing.
+export const { toggle: toggleClusters, save: saveClusters, restore: restoreClusters } =
+  boardLens("boardClusters", "showClusters", () => state.selected.delete("~clusters"));

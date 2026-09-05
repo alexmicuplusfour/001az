@@ -103,11 +103,9 @@ export function openFilterConfigPop(anchorEl) {
           onSubmit: (name) => saveCurrentAs(name, close),
         }));
       }
-      // The odds lens (planning/pattern-surfaces-plan.md, 1a): a per-viewer
-      // way of looking, so it lives with the other per-viewer filter things
-      // rather than in board settings. Toggling closes the pop first — the
-      // render it triggers rebuilds the toolbar, and this pop's anchor (the
-      // chevron) with it.
+      // The lenses (planning/pattern-surfaces-plan.md): per-viewer ways of
+      // looking, so they live with the other per-viewer filter things rather
+      // than in board settings.
       foot.appendChild(ddSep());
       // Both lenses close BEFORE toggling: the render a toggle triggers
       // rebuilds the toolbar, and this pop's anchor (the chevron) with it.
