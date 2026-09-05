@@ -193,8 +193,9 @@ function jobsChip() {
 }
 
 // A mode chip: the inert labeled pill announcing what derived set the
-// gallery is showing (its × is a separate crates-clear button beside it).
-function modeChip(iconMarkup, text) {
+// gallery is showing, plus the × that ends the mode. The pair IS the
+// grammar, so the helper places both.
+function modeChip(iconMarkup, text, onClear) {
   const el = document.createElement("span");
   el.className = "tool-btn mode-chip active";
   const icon = document.createElement("span");
@@ -203,7 +204,9 @@ function modeChip(iconMarkup, text) {
   const lbl = document.createElement("span");
   lbl.textContent = text;
   el.append(icon, lbl);
-  return el;
+  const clear = toolBtn(ICONS.x, "crates-clear", onClear);
+  clear.title = "Show all items";
+  elToolbarSub.append(el, clear);
 }
 
 function openUserMenu(anchorEl) {
@@ -598,22 +601,11 @@ export function renderToolbar(resultCount) {
   }
 
   // The mode chips: the gallery is showing a derived result set, and the
-  // chip says which one — an alert firing's entities, or one item's
-  // similars (plan stage 1b; rendered whether or not the search box is,
-  // since similarity needs no embeddings). Same grammar each: an inert
-  // labeled pill plus the × that ends the mode.
-  if (state.searchSimilarTo) {
-    elToolbarSub.appendChild(modeChip(ICONS.search, `Similar to ${state.searchSimilarTo}`));
-    const clearSimBtn = toolBtn(ICONS.x, "crates-clear", clearSearch);
-    clearSimBtn.title = "Show all items";
-    elToolbarSub.appendChild(clearSimBtn);
-  }
-  if (state.alertEvent) {
-    elToolbarSub.appendChild(modeChip(ICONS.bell, `${state.alertEvent.name} — ${state.alertEvent.count} new`));
-    const clearEvBtn = toolBtn(ICONS.x, "crates-clear", clearAlertEvent);
-    clearEvBtn.title = "Show all items";
-    elToolbarSub.appendChild(clearEvBtn);
-  }
+  // chip says which one — one item's similars (plan stage 1b; rendered
+  // whether or not the search box is, since similarity needs no
+  // embeddings), or an alert firing's entities.
+  if (state.searchSimilarTo) modeChip(ICONS.search, `Similar to ${state.searchSimilarTo}`, clearSearch);
+  if (state.alertEvent) modeChip(ICONS.bell, `${state.alertEvent.name} — ${state.alertEvent.count} new`, clearAlertEvent);
 
   const count = document.createElement("span");
   count.className = "result-count";
