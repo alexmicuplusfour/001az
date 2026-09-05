@@ -33,4 +33,8 @@ globalThis.document ||= {
   dispatchEvent() { return true; },
   body: { appendChild() {} },
   createElement: () => ({ appendChild() {}, setAttribute() {} }),
+  // filters.js caches its rail containers at module scope, so every importer
+  // of it needs this — two test files had grown their own copy of the line,
+  // which is the drift this file's header exists to prevent.
+  getElementById: () => null,
 };

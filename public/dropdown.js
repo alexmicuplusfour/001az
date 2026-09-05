@@ -344,10 +344,11 @@ export function ddAction({ label, icon, href, onClick, disabled = false } = {}) 
 // `.checked` and set `.disabled` exactly as they would on a bare one.
 // `child: true` indents a row that belongs to the one above it, to the column
 // where the parent's text starts.
-export function ddCheckRow({ label, checked, disabled, variant = "dark", child = false, onChange } = {}) {
+export function ddCheckRow({ label, checked, disabled, variant = "dark", child = false, title, onChange } = {}) {
   const cb = createCheckbox({ variant, checked, disabled, label, onChange });
   cb.el.classList.add("dd-row", "dd-check");
   if (child) cb.el.classList.add("dd-row--child");
+  if (title) cb.el.title = title;
   cb.el.setAttribute("role", "menuitemcheckbox");
   cb.el.tabIndex = -1; // joins the arrow-key walk; Enter/Space clicks the label
   return cb;
@@ -361,8 +362,7 @@ export function ddCheckRow({ label, checked, disabled, variant = "dark", child =
 // admin-members.js by member) each stated it and each had to keep stating it
 // the same way. The relationship is the component's to enforce.
 export function ddChildCheckRow(parent, { label, checked, variant = "dark", title } = {}) {
-  const child = ddCheckRow({ variant, child: true, label, checked, disabled: !parent.checked });
-  if (title) child.el.title = title;
+  const child = ddCheckRow({ variant, child: true, label, checked, title, disabled: !parent.checked });
   parent.addEventListener("change", () => {
     child.disabled = !parent.checked;
     if (!parent.checked) child.checked = false;

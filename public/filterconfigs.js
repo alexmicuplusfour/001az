@@ -1,15 +1,19 @@
-// filterconfigs.js — the saved-filters half of the split Filters button.
+// filterconfigs.js — the caret half of the split Filters button.
 //
 // A saved config is a named snapshot of the facet selection, per user per
 // board. Clicking one applies it one-shot (replaces the current pills) —
 // there's no lingering "active view", the pills are the whole truth.
+//
+// The pop's footer also carries the odds lens toggle (patterns.js): the app's
+// only per-viewer filter-adjacent menu, which is what that switch is. It owns
+// the ROW, not the behavior — the flip/persist/repaint is toggleOdds'.
 
 import { state } from './state.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput, ddEmpty, ddCheckRow } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
-import { saveOdds } from './patterns.js';
+import { toggleOdds } from './patterns.js';
 
 async function doDeleteConfig(cfg, onClose) {
   try {
@@ -108,14 +112,11 @@ export function openFilterConfigPop(anchorEl) {
       const cb = ddCheckRow({
         label: "Show pattern odds",
         checked: state.showOdds,
-        onChange: () => {
-          state.showOdds = cb.checked;
-          saveOdds();
-          close();
-          document.dispatchEvent(new Event("app:render"));
-        },
+        title: "Mark filter values that pair with the current selection far more (or less) often than chance",
+        // Close BEFORE the toggle: its render rebuilds the toolbar, and this
+        // pop's anchor (the chevron) with it.
+        onChange: () => { close(); toggleOdds(cb.checked); },
       });
-      cb.el.title = "Mark filter values that pair with the current selection far more (or less) often than chance";
       foot.appendChild(cb.el);
     },
   });

@@ -10,7 +10,7 @@ import { state } from "./state.js";
 // The salience gates. Ink is the scarce resource: at ~80 chips a number on
 // every pill is noise, so a multiplier renders only when all three pass.
 // Guesses off one 503-item board — small boards may need these scaled
-// (plan's open question) — env-of-the-client equivalent: just constants.
+// (plan's open question).
 const MIN_RATIO = 2;     // meaningful distance from ×1, either direction
 const MIN_DEVIATION = 4; // (obs−exp)²/exp — χ²-ish, ≈ p<.05 at 1 dof
 const MIN_CONTEXT = 10;  // below this many matching items every ratio is jumpy
@@ -21,24 +21,45 @@ const MIN_CONTEXT = 10;  // below this many matching items every ratio is jumpy
 // the chip's board-wide count, n = the board size. Pure — the gates and the
 // rounding are the behavior worth pinning in tests.
 export function oddsLabel({ obs, ctx, total, n }) {
-  if (!ctx || !total || !n || ctx < MIN_CONTEXT) return null;
+  // A chip nobody in context holds, or nobody holds at all, has no ratio to
+  // report; `n` keeps the function total over its own inputs rather than
+  // trusting every future caller to have items. ctx's floor subsumes ctx=0.
+  if (!obs || !total || !n || ctx < MIN_CONTEXT) return null;
   const exp = (ctx * total) / n;
   const m = obs / exp;
   if (m < MIN_RATIO && m > 1 / MIN_RATIO) return null;
   if ((obs - exp) ** 2 / exp < MIN_DEVIATION) return null;
-  // Rounding keeps the honesty of the extreme ends: big ratios don't need a
-  // decimal, tiny ones would round to a flat lie at one ("×0.0").
-  if (m >= 10) return `×${Math.round(m)}`;
-  if (m >= 0.1) return `×${m.toFixed(1)}`;
-  return `×${m.toFixed(2)}`;
+  // Two significant figures, which at the extremes means dropping the decimal
+  // a big ratio doesn't need and keeping the second one a tiny ratio would
+  // round into a flat lie ("×0.0").
+  return `×${m.toFixed(m >= 10 ? 0 : m >= 0.1 ? 1 : 2)}`;
 }
 
-// The lens is on only while it can condition on something: a facet selection
-// (system facets included — they sit in state.selected like any other).
-export function oddsActive() {
-  if (!state.showOdds) return false;
-  for (const values of state.selected.values()) if (values.size) return true;
-  return false;
+// The lens applied to one chip, off the rail's own stats. The leave-one-out
+// denominator — "facet F's context is everything that fails no facet, plus
+// what fails only F" — lives HERE and nowhere else: filters.js counts, this
+// assembles, oddsLabel judges.
+//
+// With nothing selected this is self-silencing rather than special-cased:
+// every item fails nothing, so ctx is the whole board and counts equal
+// totals, making m exactly 1 — inside the band, so null. Same reason a chip
+// under the only selected facet reads ×1.
+export function chipOdds(stats, facetKey, t) {
+  return oddsLabel({
+    obs: stats.counts.get(t) || 0,
+    ctx: stats.ctxAll + (stats.ctxFail.get(facetKey) || 0),
+    total: stats.totals.get(t) || 0,
+    n: state.items.length,
+  });
+}
+
+// The lens's one action: flip, persist, repaint. Callers pass the new state
+// (a checkbox's own `checked`) rather than asking this to derive it — the
+// view.js toggleView shape, so no caller assembles the three steps itself.
+export function toggleOdds(on) {
+  state.showOdds = on;
+  saveOdds();
+  document.dispatchEvent(new Event("app:render"));
 }
 
 // --- persistence: per viewer, per board (the boardSort pattern) ---

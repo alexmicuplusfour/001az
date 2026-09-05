@@ -495,8 +495,8 @@ export function renderToolbar(resultCount) {
   if (state.me) {
     const arrow = document.createElement("button");
     arrow.className = "tool-btn split-arrow dd-caret" + (ac > 0 ? " active" : "");
-    arrow.title = "Saved filters";
-    arrow.setAttribute("aria-label", "Saved filters");
+    arrow.title = "Filter options";
+    arrow.setAttribute("aria-label", "Filter options");
     arrow.innerHTML = ICONS.chevron;
     arrow.addEventListener("click", () => openFilterConfigPop(arrow));
     filtersWrap.appendChild(arrow);

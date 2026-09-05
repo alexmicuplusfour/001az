@@ -1,8 +1,8 @@
 import { state } from './state.js';
-import { tag, pill, ICONS } from './utils.js';
+import { tag, pill, appendCount, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
-import { oddsLabel, oddsActive } from './patterns.js';
+import { chipOdds } from './patterns.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -203,8 +203,6 @@ export function computeFacetStats() {
       }
       if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
-    if (fails === 0) ctxAll++;
-    else if (fails === 1) ctxFail.set(failKey, (ctxFail.get(failKey) || 0) + 1);
 
     // An uploader selection rides `fails` like any facet (the `~uploaders`
     // system key sits in activeSel), so no separate uploader gate.
@@ -223,6 +221,10 @@ export function computeFacetStats() {
     }
 
     if (fails > 1) continue;
+    // Riding the early-out above: an item counts toward the context its chips
+    // count in — everything's, or only the one facet it fails.
+    if (fails) ctxFail.set(failKey, (ctxFail.get(failKey) || 0) + 1);
+    else ctxAll++;
     for (const t of img.tags) {
       const slash = t.indexOf("/");
       if (slash <= 0) continue;
@@ -363,25 +365,24 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     totalQueued, queuedInContext,
     uploaderTotals,
   } = stats;
-  // The odds lens (patterns.js): a small ×N after a chip's count when that
-  // count is a lot — or a little — for this chip, given the selection.
-  // Active chips are chosen and muted ones impossible; both already say
-  // everything the number would, so neither carries one.
-  const lens = oddsActive();
-  const withOdds = (el, facetKey, t, ctxCount, active) => {
-    if (!lens || active || ctxCount === 0) return el;
-    const label = oddsLabel({
-      obs: ctxCount,
-      ctx: ctxAll + (ctxFail.get(facetKey) || 0),
-      total: totals.get(t) || 0,
-      n: state.items.length,
-    });
-    if (label) {
-      const s = document.createElement("span");
-      s.className = "mult";
-      s.textContent = label;
-      el.appendChild(s);
-    }
+  // ONE chip, wherever it comes from. A facet value, an object key and an
+  // uploader differ only in where the universe and the label come from —
+  // the tag string, the context count, the active/muted rules, the toggle and
+  // the odds mark are the same three lines each time, and were written out
+  // three times until the lens needed a fourth thing said in all three places
+  // (planning/objects-filter-row-plan.md folded MEMBERSHIP and COUNTING into
+  // the system-facet registry and stopped short of construction; this is the
+  // rest of that fold).
+  //
+  // The odds (patterns.js) ride here for the same reason: active chips are
+  // chosen and muted ones impossible, so neither carries a number — one rule,
+  // one place.
+  const chip = (facetKey, value, label = value) => {
+    const t = tag(facetKey, value);
+    const ctxCount = counts.get(t) || 0;
+    const active = state.selected.get(facetKey)?.has(value) || false;
+    const el = pill(label, ctxCount, active, !active && ctxCount === 0, () => toggle(facetKey, value));
+    if (state.showOdds && !active) appendCount(el, chipOdds(stats, facetKey, t), "mult");
     return el;
   };
   // The status row: Untagged plus the two queue pills (Processing = actively
@@ -440,14 +441,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       row.appendChild(label);
       const pills = document.createElement("div");
       pills.className = "pills";
-      for (const key of chips) {
-        const active = sel.has(key);
-        const t = tag("~objects", key);
-        const ctxCount = counts.get(t) || 0;
-        pills.appendChild(
-          withOdds(pill(key, ctxCount, active, !active && ctxCount === 0, () => toggle("~objects", key)), "~objects", t, ctxCount, active)
-        );
-      }
+      for (const key of chips) pills.appendChild(chip("~objects", key));
       row.appendChild(pills);
       container.appendChild(row);
     }
@@ -471,17 +465,15 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       const shown = new Set();
       for (const [uid, total] of uploaderItems) {
         const key = String(uid);
-        const active = sel.has(key);
-        if (total === 0 && !active) continue;
+        if (total === 0 && !sel.has(key)) continue;
         shown.add(key);
-        const t = tag("~uploaders", key);
-        const ctxCount = counts.get(t) || 0;
         const uploader = state.items.find((img) => img.uploadedBy?.id === uid)?.uploadedBy;
-        const name = uploader ? (uploader.name || uploader.email) : key;
-        pills.appendChild(withOdds(pill(name, ctxCount, active, !active && ctxCount === 0, () => toggle("~uploaders", key)), "~uploaders", t, ctxCount, active));
+        pills.appendChild(chip("~uploaders", key, uploader ? (uploader.name || uploader.email) : key));
       }
+      // Selected but gone from the board — chip() lands the same pill by
+      // arithmetic (no items means no context count, so: active, unmuted).
       for (const key of sel) {
-        if (!shown.has(key)) pills.appendChild(pill(key, 0, true, false, () => toggle("~uploaders", key)));
+        if (!shown.has(key)) pills.appendChild(chip("~uploaders", key));
       }
       row.appendChild(pills);
       container.appendChild(row);
@@ -500,14 +492,9 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const pills = document.createElement("div");
     pills.className = "pills";
     for (const value of facet.values) {
-      const t = tag(facet.key, value);
-      const total = totals.get(t) || 0;
-      const active = sel.has(value);
-      if (total === 0 && !active) continue;
-      const ctxCount = counts.get(t) || 0;
-      pills.appendChild(
-        withOdds(pill(value, ctxCount, active, !active && ctxCount === 0, () => toggle(facet.key, value)), facet.key, t, ctxCount, active)
-      );
+      const total = totals.get(tag(facet.key, value)) || 0;
+      if (total === 0 && !sel.has(value)) continue;
+      pills.appendChild(chip(facet.key, value));
     }
     row.appendChild(pills);
     container.appendChild(row);

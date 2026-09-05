@@ -1,64 +1,40 @@
 // The odds lens (planning/pattern-surfaces-plan.md, stage 1a), the pure
-// pieces: oddsLabel's salience gates and rounding, computeFacetStats'
-// leave-one-out context counters, and the per-board persistence. The
-// board-sort pattern — shared browser stub, then dynamic import of the
-// public modules.
+// pieces: oddsLabel's salience gates and rounding, chipOdds' leave-one-out
+// denominator over computeFacetStats' counters, and the per-board
+// persistence. The board-sort pattern — shared browser stub, then dynamic
+// import of the public modules.
 import { localStore as store } from "./browser-stub.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-// filters.js grabs container elements at module level — none of it touched
-// by the pure functions under test.
-globalThis.document.getElementById ||= () => null;
-
 const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
-const { oddsLabel, oddsActive, saveOdds, restoreOdds } = await import("../public/patterns.js");
+const { oddsLabel, chipOdds, saveOdds, restoreOdds } = await import("../public/patterns.js");
 const { computeFacetStats } = await import("../public/filters.js");
 
 // ── oddsLabel: gates and rounding ────────────────────────────────────────────
 
-test("oddsLabel: the flagship signal shows despite a tiny expected count", () => {
-  // The real numbers that killed the flat expected-floor design: select
-  // dilution-grind (36 of 503), lottery-like holds 19 board-wide, 13 in
-  // context — expected 1.4, ratio ×9.6. A flat "expected >= 3" hides it;
-  // the deviation gate must not.
-  assert.equal(oddsLabel({ obs: 13, ctx: 36, total: 19, n: 503 }), "×9.6");
+test("oddsLabel: the gates and the rounding", () => {
+  for (const [want, args, why] of [
+    // The flagship, from the real board: select dilution-grind (36 of 503)
+    // and lottery-like holds 13 of them against an expectation of 1.4. A flat
+    // "expected >= N" floor would hide the strongest signal on the board.
+    ["×9.6", { obs: 13, ctx: 36, total: 19, n: 503 }, "strong signal on a tiny expected count"],
+    ["×18", { obs: 24, ctx: 36, total: 19, n: 503 }, "past ×10 the decimal is noise"],
+    // A single decimal would round this to a flat ×0.1 — three times the truth.
+    ["×0.05", { obs: 2, ctx: 100, total: 200, n: 500 }, "near zero keeps the second decimal"],
+    ["×0.2", { obs: 4, ctx: 100, total: 100, n: 500 }, "one decimal is enough at this magnitude"],
+    [null, { obs: 20, ctx: 100, total: 100, n: 500 }, "exactly ×1.0 — inside the band"],
+    [null, { obs: 35, ctx: 100, total: 100, n: 500 }, "×1.75 — inside the band"],
+    [null, { obs: 9, ctx: 9, total: 10, n: 500 }, "a jumpy context, whatever the ratio"],
+    [null, { obs: 1, ctx: 30, total: 5, n: 500 }, "×3.3 off one item — fails the deviation gate"],
+    [null, { obs: 0, ctx: 50, total: 10, n: 500 }, "nobody in context holds it"],
+    [null, { obs: 5, ctx: 50, total: 0, n: 500 }, "no board-wide count — null, not NaN"],
+    [null, { obs: 5, ctx: 50, total: 10, n: 0 }, "no board — null, not Infinity"],
+  ]) assert.equal(oddsLabel(args), want, why);
 });
 
-test("oddsLabel: ratios inside the ×0.5–×2 band stay silent", () => {
-  assert.equal(oddsLabel({ obs: 20, ctx: 100, total: 100, n: 500 }), null); // exactly ×1.0
-  assert.equal(oddsLabel({ obs: 35, ctx: 100, total: 100, n: 500 }), null); // ×1.75
-});
-
-test("oddsLabel: the depleted side shows, with honest rounding near zero", () => {
-  // exp 40, obs 2 → ×0.05: one decimal would round to a flat ×0.1 lie.
-  assert.equal(oddsLabel({ obs: 2, ctx: 100, total: 200, n: 500 }), "×0.05");
-  // exp 20, obs 4 → ×0.2: one decimal is enough at this magnitude.
-  assert.equal(oddsLabel({ obs: 4, ctx: 100, total: 100, n: 500 }), "×0.2");
-});
-
-test("oddsLabel: big ratios drop the decimal", () => {
-  // exp 1.36, obs 24 → ×17.65 → ×18.
-  assert.equal(oddsLabel({ obs: 24, ctx: 36, total: 19, n: 503 }), "×18");
-});
-
-test("oddsLabel: a jumpy context shows nothing regardless of ratio", () => {
-  assert.equal(oddsLabel({ obs: 9, ctx: 9, total: 10, n: 500 }), null);
-});
-
-test("oddsLabel: a big ratio on thin evidence fails the deviation gate", () => {
-  // exp 0.3, obs 1 → ×3.3 but (obs−exp)²/exp ≈ 1.6 < 4: one item proves nothing.
-  assert.equal(oddsLabel({ obs: 1, ctx: 30, total: 5, n: 500 }), null);
-});
-
-test("oddsLabel: degenerate inputs are null, not NaN", () => {
-  assert.equal(oddsLabel({ obs: 5, ctx: 50, total: 0, n: 500 }), null);
-  assert.equal(oddsLabel({ obs: 5, ctx: 0, total: 10, n: 500 }), null);
-  assert.equal(oddsLabel({ obs: 5, ctx: 50, total: 10, n: 0 }), null);
-});
-
-// ── computeFacetStats: the leave-one-out context counters ────────────────────
+// ── chipOdds over computeFacetStats: the leave-one-out denominator ───────────
 
 const item = (id, tags) => toItem({ id, name: `${id}.webp`, status: "tagged", tags });
 
@@ -90,19 +66,6 @@ test("computeFacetStats: one selected facet — ctxAll is its matches, ctxFail i
   assert.equal(s.counts.get("color/blue"), 4);
 });
 
-test("computeFacetStats: chips in the only-selected facet neutralize to ×1", () => {
-  seedBoard();
-  state.selected = new Map([["color", new Set(["red"])]]);
-  const s = computeFacetStats();
-  // blue's context is color's leave-one-out = the whole board, so its share
-  // equals its board share exactly — the lens self-silences without a
-  // special case.
-  const ctx = s.ctxAll + s.ctxFail.get("color");
-  const m = (s.counts.get("color/blue") / ctx) / (s.totals.get("color/blue") / state.items.length);
-  assert.equal(ctx, state.items.length);
-  assert.equal(m, 1);
-});
-
 test("computeFacetStats: two selected facets split the refusers by which one they fail", () => {
   seedBoard();
   state.selected = new Map([
@@ -118,17 +81,50 @@ test("computeFacetStats: two selected facets split the refusers by which one the
   assert.equal(s.counts.get("color/blue"), 1);
 });
 
-// ── oddsActive: flag AND a selection to condition on ─────────────────────────
+test("chipOdds: chips under the only selected facet read against the whole board, so ×1", () => {
+  seedBoard();
+  state.selected = new Map([["color", new Set(["red"])]]);
+  const s = computeFacetStats();
+  // color's leave-one-out context IS the board, so blue's share can only
+  // equal its board share — the lens self-silences with no special case.
+  assert.equal(s.ctxAll + s.ctxFail.get("color"), state.items.length);
+  assert.equal(chipOdds(s, "color", "color/blue"), null);
+});
 
-test("oddsActive: needs the flag and a non-empty selection", () => {
-  state.showOdds = true;
-  state.selected = new Map([["color", new Set(["red"])]]);
-  assert.equal(oddsActive(), true);
-  state.selected = new Map([["color", new Set()]]);
-  assert.equal(oddsActive(), false);
-  state.selected = new Map([["color", new Set(["red"])]]);
-  state.showOdds = false;
-  assert.equal(oddsActive(), false);
+test("chipOdds: with nothing selected every chip is exactly ×1", () => {
+  // What lets the render path gate on state.showOdds alone: no selection
+  // means no item fails anything, so counts equal totals for every chip.
+  seedBoard();
+  state.selected = new Map();
+  const s = computeFacetStats();
+  for (const t of ["color/red", "color/blue", "size/big", "size/small"]) {
+    assert.equal(chipOdds(s, t.slice(0, t.indexOf("/")), t), null, t);
+  }
+});
+
+test("chipOdds: a cross-facet skew reads its multiplier; the context floor outranks it", () => {
+  // The shape the lens exists for, at board scale: red is rare (10 of 100)
+  // but concentrated in big (8 of the 20) — expectation 2, observed 8.
+  state.items = [];
+  for (let i = 0; i < 8; i++) state.items.push(item(i, ["color/red", "size/big"]));
+  for (let i = 8; i < 20; i++) state.items.push(item(i, ["color/blue", "size/big"]));
+  for (let i = 20; i < 22; i++) state.items.push(item(i, ["color/red", "size/small"]));
+  for (let i = 22; i < 100; i++) state.items.push(item(i, ["color/blue", "size/small"]));
+  state.selected = new Map([["size", new Set(["big"])]]);
+  const s = computeFacetStats();
+  assert.equal(s.ctxAll, 20);
+  assert.equal(chipOdds(s, "color", "color/red"), "×4.0", "8 of 20 big are red vs 10 of 100 board-wide");
+  // Blue's complement barely moves: a rare chip's concentration cannot deplete
+  // a chip that holds most of the board. Inside the band, so silent.
+  assert.equal(chipOdds(s, "color", "color/blue"), null);
+
+  // The same proportions on a small board say nothing at all — with 6 items
+  // in context the floor speaks before any ratio does.
+  seedBoard();
+  state.selected = new Map([["size", new Set(["big"])]]);
+  const small = computeFacetStats();
+  assert.equal(small.ctxAll, 6);
+  assert.equal(chipOdds(small, "color", "color/red"), null, "under the context floor");
 });
 
 // ── persistence: per viewer, per board ───────────────────────────────────────

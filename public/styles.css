@@ -398,14 +398,16 @@ header.header-collapsed #toolbar-fold {
 }
 
 .pill .count,
+.pill .mult,
 .tool-btn .count {
   color: var(--text-dim);
   font-size: 11px;
 }
-/* a pill is not a flex row, so its count buys the same 5px the button's gap
-   already gives — this used to stack on top of that gap and space the
-   toolbar's counts twice as wide as the pills' */
-.pill .count {
+/* a pill is not a flex row, so its trailing notes buy the same 5px the
+   button's gap already gives — this used to stack on top of that gap and
+   space the toolbar's counts twice as wide as the pills' */
+.pill .count,
+.pill .mult {
   margin-left: 5px;
 }
 
@@ -414,8 +416,6 @@ header.header-collapsed #toolbar-fold {
    the signal, the count is bookkeeping. */
 .pill .mult {
   color: var(--text);
-  font-size: 11px;
-  margin-left: 5px;
   font-variant-numeric: tabular-nums;
 }
 

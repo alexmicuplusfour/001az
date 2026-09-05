@@ -6,11 +6,8 @@ import { localStore as store } from "./browser-stub.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-// The SHARED stub, not a local copy (its header explains why). filters.js
-// also grabs container elements at module level — none of it touched by the
-// pure functions under test.
-globalThis.document.getElementById ||= () => null;
-
+// The SHARED stub, not a local copy (its header explains why) — including
+// the getElementById filters.js needs for its module-scope containers.
 const { state } = await import("../public/state.js");
 const { toItem, toInstance, instanceTagCounts, mappingHasAiWork } = await import("../public/utils.js");
 const { effectiveView, resolveView, rowsRelevant, saveView, restoreView } = await import("../public/view.js");
