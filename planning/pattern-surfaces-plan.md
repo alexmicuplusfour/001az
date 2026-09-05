@@ -132,18 +132,83 @@ pair matrix — 1a needs only a division on numbers the rail already has, and
   With nothing selected the rail is unchanged. The whole lens sits behind a
   **toggle in the Filters caret menu, off by default**, persisted per viewer
   like sort (localStorage) — a way of looking, not a board property.
-- **1b. Relatives + Rarity blocks** in the lightbox panel: top ~5 relatives
-  as rows (ticker/name, overlap bar, "shares N of M"), then a rarity block —
-  rank among floor-qualified entities plus the one or two rarest pairs this
-  entity holds ("only item holding X with Y" / "1 of 3 holding…"). Computed
-  for the opened entity only; O(board) per open.
+- **1b. ~~Relatives + Rarity blocks in the lightbox panel~~** — REVISED
+  2026-09-06, see "1b revised" below: relatives became a similarity SEARCH
+  riding the meaning-search plumbing, no dedicated surface. Only the rarity
+  one-liner ("only item holding X with Y") still wants a home in the item
+  view someday.
 - **1c. "Unusualness" sort** — one catalog entry in
   [sort.js](../public/sort.js#L67) (facet boards only); below-floor entities
   sort to the end regardless of direction. The 1b rarity block is what makes
   the ordering answerable.
 
-Ships as one coherent change; suite gets a patterns unit file (pair lift,
-floor behavior, relatives ordering pinned against a small fixture board).
+Status: 1a SHIPPED 2026-09-05 (odds lens; badges 09-06), 1c pending, 1b
+revised below.
+
+### 1b revised (2026-09-06): similarity is a search, not a surface
+
+Same reframe that shrank clusters, applied again — find the existing
+mechanism whose DATA SHAPE the feature already produces, and ship the data
+instead of a surface. Meaning-search hands the gallery a ranked
+`Map<id, score>` (`state.searchResults`, [search.js:26](../public/search.js#L26));
+the grid filters to the map and orders by score
+([filters.js](../public/filters.js#L132), search order beats the board
+sort); `filterKey` carries `searchQuery` so the render caches key correctly;
+clearing restores the board sort. Chip similarity produces exactly that map.
+So "find similar" is A SEARCH THE USER DIDN'T TYPE — no panel, no new
+lifecycle, and it needs no embeddings, so it works on boards where the
+search box itself is hidden.
+
+**Scoring** (patterns.js, one-shot per invocation, O(items × tags)): shared
+chips weighted by rarity (−log2 of board share), expressed as a fraction of
+the target's own total weight — "how much of this item's identity does the
+candidate share". Measured on the stocks board, ranking quality is excellent
+(GPRO → SNAP 68%, HOOD 50%, OPEN, PINS, AMC; NVDA → GOOGL, SMH, TSM, ASML),
+but a ratio floor ALONE does not bound the result:
+
+| target | ≥25% | ≥33% | ≥40% | character |
+|---|---|---|---|---|
+| GPRO | 64 | 20 | 9 | distinctive — floor suffices |
+| GPUS | 43 | 24 | 12 | distinctive |
+| NVDA | 165 | 82 | 45 | mixed |
+| GLW | 387 | 312 | 219 | typical — floor useless |
+
+GLW is the board's most typical item; its identity is made of common chips,
+so a third of the board legitimately shares a third of it. "Similar to the
+most average item" IS most of the board — honest, but not a useful search.
+Therefore: **floor ≥ ⅓ of self AND a top-N cap (~50)**, the movers-list
+convention. Both are display bounds, tunable at build time; items with fewer
+than MIN_TAGS chips don't offer the action at all (too little identity to
+match on — the clusters participation rule, same constant).
+
+**Trigger — the tag pop** ([openTagPop, grid.js:278](../public/grid.js#L278)):
+a second `ddAction` ("Find similar") beside "Edit tags" in the footer. Right
+weight by construction: nothing new on the card face, one row in a hover pop
+only reached through the tag badge — and semantically exact, since the
+similarity is computed from precisely the chips the pop is showing. Note the
+footer's current gate is `state.me && state.facets.length` (editing needs a
+user); Find similar needs neither — restructure to per-row gates. Later, the
+same row can ride the lightbox tags panel; not needed to ship.
+
+**Mode lifecycle** (search.js owns it, scoring imported from patterns.js):
+`runSimilar(img)` sets `searchResults` + a unique `searchQuery`
+(`similar:<identity>`, feeds filterKey), leaves `searchDraft` alone (the
+input stays clean), and sets a new `state.searchSimilarTo` display label.
+The indicator is the [alert-event-chip pattern](../public/toolbar.js#L583)
+— a labeled toolbar chip "Similar to DVLT ×" rendered whenever
+`searchSimilarTo` is set, independent of `searchAvailable`; its × calls
+`clearSearch`. `clearSearch` and a successful `runSearch` both clear
+`searchSimilarTo` (typing a real query gracefully replaces the mode). No
+spinner — scoring is synchronous. Like meaning-search, the mode is
+deliberately not URL-persisted, and new items arriving mid-mode aren't in
+the map, exactly as with a typed search.
+
+Open at build time: whether the search box's `active` class + clear button
+should suppress while `searchSimilarTo` is set (two clear affordances
+otherwise — cosmetic), and the exact floor/cap constants.
+
+The suite's patterns unit file grows the scoring tests (ratio math, floor +
+cap, MIN_TAGS gate) against the fixture board.
 
 ## Stage 2 — movement (needs history depth)
 
