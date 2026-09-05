@@ -13,7 +13,7 @@ import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput, ddEmpty, ddCheckRow } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
-import { toggleOdds } from './patterns.js';
+import { toggleOdds, toggleClusters } from './patterns.js';
 
 async function doDeleteConfig(cfg, onClose) {
   try {
@@ -109,15 +109,22 @@ export function openFilterConfigPop(anchorEl) {
       // render it triggers rebuilds the toolbar, and this pop's anchor (the
       // chevron) with it.
       foot.appendChild(ddSep());
+      // Both lenses close BEFORE toggling: the render a toggle triggers
+      // rebuilds the toolbar, and this pop's anchor (the chevron) with it.
       const cb = ddCheckRow({
         label: "Show pattern odds",
         checked: state.showOdds,
         title: "Mark filter values that pair with the current selection far more (or less) often than chance",
-        // Close BEFORE the toggle: its render rebuilds the toolbar, and this
-        // pop's anchor (the chevron) with it.
         onChange: () => { close(); toggleOdds(cb.checked); },
       });
       foot.appendChild(cb.el);
+      const cl = ddCheckRow({
+        label: "Show clusters",
+        checked: state.showClusters,
+        title: "Find groups of items that keep answering alike, and show them as a filter row",
+        onChange: () => { close(); toggleClusters(cl.checked); },
+      });
+      foot.appendChild(cl.el);
     },
   });
 }

@@ -15,12 +15,16 @@ import { openJobsModal } from './jobs-modal.js';
 import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
-import { restoreOdds } from './patterns.js';
+import { restoreOdds, restoreClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
 
 const elGridRoot = document.getElementById("grid");
 
 function render() {
+  // Before anything reads the board: taggedFiltered and the rail both go
+  // through the ~clusters membership map, so it refreshes first (a no-op
+  // unless the lens is on AND the tag data moved — see patterns.js).
+  refreshClusters();
   const key = filterKey();
   const tagged = taggedFiltered();
   // Resolve the gallery mode before the toolbar renders — its toggle
@@ -149,6 +153,7 @@ async function main() {
   // The viewer's per-board sort — needs boardMapping (identity mode) in place.
   restoreSort();
   restoreOdds();
+  restoreClusters();
   restoreView();
   render();
   ensurePolling();

@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { tag, pill, appendCount, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
-import { chipOdds } from './patterns.js';
+import { chipOdds, clusterSet, clusterValues } from './patterns.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -29,6 +29,12 @@ export function filterKey() {
 // field keys match /^[a-z][a-z0-9_]*$/ and the admin facet UI produces
 // word-like keys.
 export const SYSTEM_FACETS = {
+  // The clusters lens (patterns.js): membership is a per-render computed map
+  // rather than a field on the item — the one entry here that closes over
+  // module state instead of reading its argument. refreshClusters() runs at
+  // the top of render(), so by the time anything asks, the map is current.
+  // Entity-level (a cluster is a judgment about the whole entity's answers).
+  "~clusters": { label: "CLUSTERS", entity: (x) => clusterSet(x), instance: null },
   "~objects": { label: "OBJECTS", entity: (x) => x.objectSet, instance: (x) => x.objectSet },
   // Uploaders were the original separate-slot filter (selectedUploaderIds +
   // ?u=); folded here so saved configs stop dropping them and every consumer
@@ -416,6 +422,39 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     }
     row.appendChild(pills);
     container.appendChild(row);
+  }
+  // The CLUSTERS row — the `~clusters` lens, first of the labeled band when
+  // it's on: it is the most compressed view of the board, so it reads first.
+  // A chip is a found group wearing its own signature (its highest-lift
+  // majority chips) as the label — value and label differ, the uploader-row
+  // pattern. The second loop is the escape hatch for a selection whose
+  // cluster no longer exists (a URL from an older partition): a click-off
+  // chip, same as a gone uploader.
+  {
+    const sel = state.selected.get("~clusters") || new Set();
+    const values = clusterValues();
+    if (values.length || sel.size) {
+      const row = document.createElement("div");
+      row.className = "facet";
+      const label = document.createElement("div");
+      label.className = "facet-label";
+      label.textContent = SYSTEM_FACETS["~clusters"].label;
+      row.appendChild(label);
+      const pills = document.createElement("div");
+      pills.className = "pills";
+      const shown = new Set();
+      for (const v of values) {
+        shown.add(v.value);
+        const el = chip("~clusters", v.value, v.label);
+        if (v.title) el.title = v.title;
+        pills.appendChild(el);
+      }
+      for (const value of sel) {
+        if (!shown.has(value)) pills.appendChild(chip("~clusters", value));
+      }
+      row.appendChild(pills);
+      container.appendChild(row);
+    }
   }
   // The OBJECTS row — the `~objects` system facet, heading the labeled band
   // (planning/objects-filter-row-plan.md). Chip universe is the mapping's

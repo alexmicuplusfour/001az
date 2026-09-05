@@ -6,6 +6,7 @@
 // this module only normalizes them and decides when the result is worth ink.
 
 import { state } from "./state.js";
+import { ACTIVE, QUEUED } from "./data.js";
 
 // The salience gates. Ink is the scarce resource: at ~80 chips a number on
 // every pill is noise, so a multiplier renders only when all three pass.
@@ -93,5 +94,204 @@ export function restoreOdds() {
     state.showOdds = localStorage.getItem(storeKey()) === "1";
   } catch {
     state.showOdds = false;
+  }
+}
+
+// ── clusters: the second lens (plan Stage 3) ────────────────────────────────
+// Groups of items that keep answering alike, shown as a system facet row.
+// No names, no storage, no AI: a cluster reads as its own signature — the
+// highest-lift chips a majority of its members hold — which is truer than a
+// generated label and made of words the user already wrote. Recomputed from
+// state.items like every other rail number, so new arrivals classify
+// themselves and a retag moves items automatically; the only persisted state
+// is the toggle.
+
+const K = 8;             // fixed; a granularity control is the plan's open question
+const MIN_TAGS = 3;      // fewer and an item has too little signal to place — absent, not "unclassified"
+const MIN_GROUP = 8;     // a group smaller than this (or under 3% of participants)
+const MIN_SHARE = 0.03;  //   is not a cluster on any board
+const MIN_SIGNATURE = 1.5; // a group whose best majority-held chip is weaker has nothing to say
+const SIG_CHIPS = 3;
+
+// Spherical k-means over unit chip vectors. Everything about the seeding is
+// in service of one requirement: THE SAME BOARD MUST ALWAYS GIVE THE SAME
+// PARTITION, whatever order the items arrived in — state.items grows by
+// unshift/push on every delta, and a partition seeded from array position
+// re-shuffles under the viewer as "the clusters changed by themselves".
+// So seeds come from the data: first the item farthest from the global
+// centroid, then repeatedly the item farthest from every chosen seed, ties
+// broken by the identity string. (Centroid sums still add in array order,
+// but a 1e-16 rounding difference flipping an argmax was never observed —
+// pattern-clusters.test.js pins reversed-input equality.)
+function computeClusters() {
+  const participants = state.items.filter((i) => i.tags.length >= MIN_TAGS);
+  const N = participants.length;
+  if (N < MIN_GROUP * 2) return null;
+  const chips = [...new Set(participants.flatMap((i) => i.tags))].sort();
+  const D = chips.length;
+  const idx = new Map(chips.map((c, i) => [c, i]));
+  const k = Math.min(K, N);
+
+  const vecs = new Float64Array(N * D);
+  for (let i = 0; i < N; i++) {
+    const inv = 1 / Math.sqrt(participants[i].tags.length);
+    for (const t of participants[i].tags) vecs[i * D + idx.get(t)] = inv;
+  }
+  const dot = (ao, B, bo) => {
+    let s = 0;
+    for (let j = 0; j < D; j++) s += vecs[ao + j] * B[bo + j];
+    return s;
+  };
+  const key = participants.map((p) => p.identity);
+  const pick = (score) => {
+    let best = 0, bs = -Infinity;
+    for (let i = 0; i < N; i++) {
+      const s = score(i);
+      if (s > bs || (s === bs && key[i] < key[best])) { bs = s; best = i; }
+    }
+    return best;
+  };
+
+  const centroid = new Float64Array(D);
+  for (let i = 0; i < N; i++) for (let j = 0; j < D; j++) centroid[j] += vecs[i * D + j];
+  {
+    let n = 0;
+    for (let j = 0; j < D; j++) n += centroid[j] ** 2;
+    n = Math.sqrt(n) || 1;
+    for (let j = 0; j < D; j++) centroid[j] /= n;
+  }
+  const seeds = new Float64Array(k * D);
+  const s0 = pick((i) => 1 - dot(i * D, centroid, 0));
+  for (let j = 0; j < D; j++) seeds[j] = vecs[s0 * D + j];
+  for (let c = 1; c < k; c++) {
+    const si = pick((i) => {
+      let mx = -1;
+      for (let s = 0; s < c; s++) { const d = dot(i * D, seeds, s * D); if (d > mx) mx = d; }
+      return 1 - mx;
+    });
+    for (let j = 0; j < D; j++) seeds[c * D + j] = vecs[si * D + j];
+  }
+
+  const assign = new Int32Array(N);
+  for (let iter = 0; iter < 30; iter++) {
+    let moved = 0;
+    for (let i = 0; i < N; i++) {
+      let bi = 0, bs = -1;
+      for (let c = 0; c < k; c++) { const s = dot(i * D, seeds, c * D); if (s > bs) { bs = s; bi = c; } }
+      if (assign[i] !== bi) { assign[i] = bi; moved++; }
+    }
+    seeds.fill(0);
+    for (let i = 0; i < N; i++) { const o = assign[i] * D; for (let j = 0; j < D; j++) seeds[o + j] += vecs[i * D + j]; }
+    for (let c = 0; c < k; c++) {
+      let n = 0;
+      for (let j = 0; j < D; j++) n += seeds[c * D + j] ** 2;
+      n = Math.sqrt(n) || 1; // an emptied group's zero centroid stays zero
+      for (let j = 0; j < D; j++) seeds[c * D + j] /= n;
+    }
+    if (!moved) break;
+  }
+
+  // The floors decide how many clusters are SHOWN — never how many were
+  // computed. Auto-picking k was measured and rejected (separation falls
+  // monotonically with k, so "best k" always degenerates to two useless
+  // halves — see the plan); instead every group must earn its chip: enough
+  // members, and a majority-held signature meaningfully above base rate.
+  // Members of groups that don't make it land in an honest "unclassified".
+  const base = new Map();
+  for (const p of participants) for (const t of p.tags) base.set(t, (base.get(t) || 0) + 1);
+  const floor = Math.max(MIN_GROUP, N * MIN_SHARE);
+  const values = [];
+  const sets = new Map();
+  const unclassified = new Set(["unclassified"]);
+  for (let c = 0; c < k; c++) {
+    const mem = [];
+    for (let i = 0; i < N; i++) if (assign[i] === c) mem.push(i);
+    if (!mem.length) continue;
+    const sig = (() => {
+      if (mem.length < floor) return null;
+      const local = new Map();
+      for (const i of mem) for (const t of participants[i].tags) local.set(t, (local.get(t) || 0) + 1);
+      const top = [...local.entries()]
+        .filter(([, n]) => n >= mem.length / 2)
+        .map(([t, n]) => ({ t, lift: (n / mem.length) / (base.get(t) / N) }))
+        .sort((a, b) => b.lift - a.lift);
+      return top.length && top[0].lift >= MIN_SIGNATURE ? top.slice(0, SIG_CHIPS) : null;
+    })();
+    if (!sig) {
+      for (const i of mem) sets.set(participants[i].id, unclassified);
+      continue;
+    }
+    // most typical member = highest summed similarity to its own group
+    let medoid = mem[0], bestSum = -1;
+    for (const i of mem) {
+      let s = 0;
+      for (const o of mem) s += dot(i * D, vecs, o * D);
+      if (s > bestSum || (s === bestSum && key[i] < key[medoid])) { bestSum = s; medoid = i; }
+    }
+    const value = `c${c}`;
+    const one = new Set([value]);
+    for (const i of mem) sets.set(participants[i].id, one);
+    const m = participants[medoid];
+    values.push({
+      value,
+      size: mem.length,
+      label: sig.map((x) => x.t.slice(x.t.indexOf("/") + 1)).join(" · "),
+      title: `most typical: ${m.symbol || m.displayLabel || m.identity}`,
+    });
+  }
+  if (!values.length) return null;
+  values.sort((a, b) => b.size - a.size || (a.value < b.value ? -1 : 1));
+  if ([...sets.values()].includes(unclassified)) {
+    values.push({ value: "unclassified", label: "unclassified", title: "" });
+  }
+  return { values, sets };
+}
+
+// The cache. app:render fires unconditionally on every poll tick (4s while
+// anything is in flight), and the compute is ~70ms on a 4.5k board — so it
+// runs only when the tag data actually changed. The change signal is exact
+// and allocation-free: every writer REPLACES an item's tags array rather
+// than mutating it (data.js reconcile, tag-editor.js, refreshEntityTags), so
+// comparing the array references per index catches every retag, insert and
+// delete. And while the board is mid-churn, the stale partition is served
+// rather than re-clustering data that is still moving — settle, then compute
+// once (the facet-diagnosis posture). Board switches are full page
+// navigations, so nothing here needs clearing.
+let cache = null; // { refs: [tags arrays], result: { values, sets } | null }
+
+export function refreshClusters() {
+  if (!state.showClusters) { cache = null; return; }
+  const items = state.items;
+  if (cache && cache.refs.length === items.length && cache.refs.every((r, i) => r === items[i].tags)) return;
+  if (cache && items.some((i) => ACTIVE.has(i.status) || QUEUED.has(i.status))) return;
+  cache = { refs: items.map((i) => i.tags), result: computeClusters() };
+}
+
+export const clusterValues = () => cache?.result?.values || [];
+export const clusterSet = (img) => cache?.result?.sets.get(img.id);
+
+export function toggleClusters(on) {
+  state.showClusters = on;
+  // A left-behind cluster selection can never match once the lens stops
+  // computing — it would silently filter the board to nothing.
+  if (!on) state.selected.delete("~clusters");
+  saveClusters();
+  document.dispatchEvent(new Event("app:render"));
+}
+
+const clustersKey = () => `boardClusters:${state.boardId}`;
+
+export function saveClusters() {
+  try {
+    if (state.showClusters) localStorage.setItem(clustersKey(), "1");
+    else localStorage.removeItem(clustersKey());
+  } catch { /* private mode / quota — the lens just won't stick */ }
+}
+
+export function restoreClusters() {
+  try {
+    state.showClusters = localStorage.getItem(clustersKey()) === "1";
+  } catch {
+    state.showClusters = false;
   }
 }
