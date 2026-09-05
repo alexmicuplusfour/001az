@@ -10,7 +10,7 @@
 
 import { state } from './state.js';
 import { ICONS } from './utils.js';
-import { openDropdown, ddRow, ddSep, ddInput, ddEmpty, ddCheckRow } from './dropdown.js';
+import { openDropdown, ddRow, ddHead, ddSep, ddInput, ddEmpty, ddCheckRow } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
 import { toggleOdds, toggleClusters } from './patterns.js';
@@ -77,9 +77,13 @@ export function openFilterConfigPop(anchorEl) {
     align: "start",
     minWidth: 190,
     build: (body, { close }) => {
+      // Two tenants live here now (saved filters + the lenses below), so the
+      // section wears its name permanently instead of relying on being the
+      // only thing in the pop.
+      body.appendChild(ddHead("Saved filters"));
       if (!state.filterConfigs.length) {
         body.appendChild(ddEmpty(activeCount() > 0
-          ? "No saved filters yet — name the current ones below."
+          ? "None yet — name the current ones below."
           : "Pick some filters, then save them here for reuse."));
         return;
       }
@@ -96,9 +100,15 @@ export function openFilterConfigPop(anchorEl) {
       }
     },
     footer: (foot, { close }) => {
+      // The section head above does the segmenting — no divider between the
+      // list and its input; they're one thing. And a selection that's
+      // already saved says so instead of offering a second name for the same
+      // pills: the matching row is lit, this line is why there's nothing to
+      // type. Change any pill and the input returns.
       if (activeCount() > 0) {
-        if (state.filterConfigs.length) foot.appendChild(ddSep());
-        foot.appendChild(ddInput({
+        const saved = state.filterConfigs.find((c) => configMatchesCurrent(c.config));
+        if (saved) foot.appendChild(ddEmpty(`Saved as "${saved.name}"`));
+        else foot.appendChild(ddInput({
           placeholder: "Save current filters…",
           onSubmit: (name) => saveCurrentAs(name, close),
         }));
