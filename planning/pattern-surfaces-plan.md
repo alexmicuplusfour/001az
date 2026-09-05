@@ -387,6 +387,13 @@ caveat any 1a reading should carry.
   more than a text label — the reason it is not in the first cut.
 - Whether Stage 3's row belongs above the authored facets (proposed) or
   directly under the status row.
+- An alert saved while a `~clusters` chip is selected carries a condition the
+  server can never satisfy — cluster values aren't tags, and the lens is
+  client-only, so the alert just never fires. `~objects` has server-side
+  handling; `~clusters` can't. Options when it matters: strip `~clusters`
+  from the seeded condition, or refuse the save with a reason. (Shipped
+  as-is 2026-09-06: the alert modal shows the condition chips, so the dead
+  chip is at least visible.)
 
 ## Deep dive for 1a (2026-09-05, pre-build)
 
