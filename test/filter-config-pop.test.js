@@ -72,3 +72,40 @@ test('an already-saved selection is told so instead of offered a duplicate', () 
   assert.ok(rows.find((r) => r.textContent.includes('kept'))?.className.includes('active'));
   drop();
 });
+test('the lens rows are toggles, and flipping one leaves the pop open', () => {
+  state.filterConfigs = [];
+  state.selected = new Map();
+  state.showOdds = false;
+  const pop = openPop();
+  const toggles = pop.querySelectorAll('.dd-check.cb--toggle');
+  assert.equal(toggles.length, 2, 'both lens rows wear the toggle costume');
+  assert.equal(toggles[0].querySelector('.cb-input').getAttribute('role'), 'switch');
+  toggles[0].querySelector('.cb-input').click();
+  assert.equal(state.showOdds, true, 'the flip landed');
+  assert.ok(document.querySelector('.filter-config-pop'), 'and the pop is still open');
+  drop();
+  state.showOdds = false;
+});
+
+test('an accessor anchor keeps the pop through a re-render, and closes it when the anchor is gone', () => {
+  state.filterConfigs = [];
+  state.selected = new Map();
+  const arrow = document.createElement('button');
+  arrow.id = 'test-arrow';
+  document.body.appendChild(arrow);
+  openFilterConfigPop(() => document.getElementById('test-arrow'));
+  const pop = document.querySelector('.filter-config-pop');
+  assert.ok(pop && arrow.classList.contains('dd-open'));
+  // the toolbar's move: the anchor is replaced by an identical twin mid-open
+  const twin = document.createElement('button');
+  twin.id = 'test-arrow';
+  arrow.replaceWith(twin);
+  document.dispatchEvent(new Event('app:render'));
+  assert.ok(pop.isConnected, 'the pop survived the swap');
+  assert.ok(twin.classList.contains('dd-open'), 'and dressed the replacement');
+  assert.equal(twin.getAttribute('aria-expanded'), 'true');
+  // a render that REMOVES the anchor rather than replacing it takes the pop with it
+  twin.remove();
+  document.dispatchEvent(new Event('app:render'));
+  assert.equal(pop.isConnected, false, 'nothing to hang from — closed');
+});

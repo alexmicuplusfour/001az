@@ -10,7 +10,7 @@
 
 import { state } from './state.js';
 import { ICONS } from './utils.js';
-import { openDropdown, ddRow, ddHead, ddSep, ddInput, ddEmpty, ddCheckRow } from './dropdown.js';
+import { openDropdown, ddRow, ddHead, ddSep, ddInput, ddEmpty, ddToggleRow } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
 import { toggleOdds, toggleClusters } from './patterns.js';
@@ -71,8 +71,8 @@ export function initFilterConfigsUI() {
   btn.addEventListener("click", () => openFilterConfigPop(btn));
 }
 
-export function openFilterConfigPop(anchorEl) {
-  openDropdown(anchorEl, {
+export function openFilterConfigPop(anchor) { // an element, or the toolbar's accessor (see dropdown.js anchor contract)
+  openDropdown(anchor, {
     className: "filter-config-pop",
     align: "start",
     minWidth: 190,
@@ -115,22 +115,23 @@ export function openFilterConfigPop(anchorEl) {
       }
       // The lenses (planning/pattern-surfaces-plan.md): per-viewer ways of
       // looking, so they live with the other per-viewer filter things rather
-      // than in board settings.
+      // than in board settings. Toggle rows, and the pop stays open through
+      // the flip — the effect lands on the rail below, and the menu holding
+      // still is what lets the eye go compare (the render this triggers is
+      // survived by the accessor anchor the toolbar opens this with).
       foot.appendChild(ddSep());
-      // Both lenses close BEFORE toggling: the render a toggle triggers
-      // rebuilds the toolbar, and this pop's anchor (the chevron) with it.
-      const cb = ddCheckRow({
+      const cb = ddToggleRow({
         label: "Show pattern odds",
         checked: state.showOdds,
         title: "Mark filter values that pair with the current selection far more (or less) often than chance",
-        onChange: () => { close(); toggleOdds(cb.checked); },
+        onChange: () => toggleOdds(cb.checked),
       });
       foot.appendChild(cb.el);
-      const cl = ddCheckRow({
+      const cl = ddToggleRow({
         label: "Show clusters",
         checked: state.showClusters,
         title: "Find groups of items that keep answering alike, and show them as a filter row",
-        onChange: () => { close(); toggleClusters(cl.checked); },
+        onChange: () => toggleClusters(cl.checked),
       });
       foot.appendChild(cl.el);
     },

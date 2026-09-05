@@ -89,3 +89,15 @@ export function createCheckbox({
 
   return handle;
 }
+
+// A toggle is the same control as a checkbox — one hidden binary input with
+// the same variants, the same handle, the same disabled math — wearing motion
+// instead of a mark. CSS does the costume (.cb--toggle); the one real
+// difference is the ARIA role. Indeterminate has no switch shape, so callers
+// wanting it want a checkbox.
+export function createToggle(opts = {}) {
+  const t = createCheckbox(opts);
+  t.el.classList.add("cb--toggle");
+  t.input.setAttribute("role", "switch");
+  return t;
+}

@@ -515,7 +515,10 @@ export function renderToolbar(resultCount) {
     arrow.title = "Filter options";
     arrow.setAttribute("aria-label", "Filter options");
     arrow.innerHTML = ICONS.chevron;
-    arrow.addEventListener("click", () => openFilterConfigPop(arrow));
+    // Anchored by accessor, not by this element: the pop's lens toggles
+    // re-render this toolbar (chevron included) with the pop still open, and
+    // the accessor is how it hangs onto the chevron's replacement.
+    arrow.addEventListener("click", () => openFilterConfigPop(() => elToolbarSub.querySelector(".split-arrow")));
     filtersWrap.appendChild(arrow);
   }
   elToolbarSub.appendChild(filtersWrap);
