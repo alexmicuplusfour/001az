@@ -409,6 +409,16 @@ header.header-collapsed #toolbar-fold {
   margin-left: 5px;
 }
 
+/* The odds lens (patterns.js): ×N after the count on chips whose context
+   count is salient. Full text color where the count is dimmed — the ratio is
+   the signal, the count is bookkeeping. */
+.pill .mult {
+  color: var(--text);
+  font-size: 11px;
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .pill.active {
   background: var(--pill-active);
   color: #fff;

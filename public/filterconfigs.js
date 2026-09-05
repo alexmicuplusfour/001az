@@ -6,9 +6,10 @@
 
 import { state } from './state.js';
 import { ICONS } from './utils.js';
-import { openDropdown, ddRow, ddSep, ddInput, ddEmpty } from './dropdown.js';
+import { openDropdown, ddRow, ddSep, ddInput, ddEmpty, ddCheckRow } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
+import { saveOdds } from './patterns.js';
 
 async function doDeleteConfig(cfg, onClose) {
   try {
@@ -90,12 +91,32 @@ export function openFilterConfigPop(anchorEl) {
         }));
       }
     },
-    footer: activeCount() > 0 ? (foot, { close }) => {
-      if (state.filterConfigs.length) foot.appendChild(ddSep());
-      foot.appendChild(ddInput({
-        placeholder: "Save current filters…",
-        onSubmit: (name) => saveCurrentAs(name, close),
-      }));
-    } : undefined,
+    footer: (foot, { close }) => {
+      if (activeCount() > 0) {
+        if (state.filterConfigs.length) foot.appendChild(ddSep());
+        foot.appendChild(ddInput({
+          placeholder: "Save current filters…",
+          onSubmit: (name) => saveCurrentAs(name, close),
+        }));
+      }
+      // The odds lens (planning/pattern-surfaces-plan.md, 1a): a per-viewer
+      // way of looking, so it lives with the other per-viewer filter things
+      // rather than in board settings. Toggling closes the pop first — the
+      // render it triggers rebuilds the toolbar, and this pop's anchor (the
+      // chevron) with it.
+      foot.appendChild(ddSep());
+      const cb = ddCheckRow({
+        label: "Show pattern odds",
+        checked: state.showOdds,
+        onChange: () => {
+          state.showOdds = cb.checked;
+          saveOdds();
+          close();
+          document.dispatchEvent(new Event("app:render"));
+        },
+      });
+      cb.el.title = "Mark filter values that pair with the current selection far more (or less) often than chance";
+      foot.appendChild(cb.el);
+    },
   });
 }

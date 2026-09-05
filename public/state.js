@@ -28,6 +28,7 @@ export const state = {
   showUntagged: false,
   showProcessing: false,   // status pill: actively worked (processing/extracting/facing/fetching)
   showUnprocessed: false,  // status pill: queued, not started (pending*)
+  showOdds: false,         // odds lens: ×N on salient chips while filtering (patterns.js; per viewer per board)
   // Active board sort: null = server default (newest first), else { by, dir }.
   // `by` is namespaced: "name"/"created"/"updated"/"hearts"/"instances"
   // (universal), "media:<fn>" (file metadata), "field:<key>" (connector-bound).

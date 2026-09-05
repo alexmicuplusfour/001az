@@ -15,6 +15,7 @@ import { openJobsModal } from './jobs-modal.js';
 import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
+import { restoreOdds } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
 
 const elGridRoot = document.getElementById("grid");
@@ -147,6 +148,7 @@ async function main() {
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   // The viewer's per-board sort — needs boardMapping (identity mode) in place.
   restoreSort();
+  restoreOdds();
   restoreView();
   render();
   ensurePolling();

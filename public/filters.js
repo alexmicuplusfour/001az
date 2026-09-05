@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { tag, pill, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
+import { oddsLabel, oddsActive } from './patterns.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -150,10 +151,16 @@ export function taggedFiltered() {
 // active facet, but not necessarily its own. Tags are split at the first
 // "/" to find their facet, so facet keys must not contain slashes (the
 // facet/value tag convention already requires this).
-function computeFacetStats() {
+export function computeFacetStats() {
   const activeSel = [...state.selected].filter(([, v]) => v.size);
   const totals = new Map(); // "facet/value" -> count over all items
   const counts = new Map(); // "facet/value" -> count in the current filter context
+  // The sizes of the leave-one-out contexts `counts` live in: a chip under
+  // facet F counts items that match every OTHER active facet, so its context
+  // holds ctxAll (items failing no facet) plus ctxFail[F] (items failing only
+  // F). The odds lens divides by these; nothing else reads them.
+  let ctxAll = 0;
+  const ctxFail = new Map();
   const facetsWithData = new Set();
   let totalUntagged = 0;
   let untaggedInContext = 0;
@@ -196,6 +203,8 @@ function computeFacetStats() {
       }
       if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
+    if (fails === 0) ctxAll++;
+    else if (fails === 1) ctxFail.set(failKey, (ctxFail.get(failKey) || 0) + 1);
 
     // An uploader selection rides `fails` like any facet (the `~uploaders`
     // system key sits in activeSel), so no separate uploader gate.
@@ -229,7 +238,7 @@ function computeFacetStats() {
     }
   }
   return {
-    totals, counts, facetsWithData,
+    totals, counts, ctxAll, ctxFail, facetsWithData,
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
@@ -348,12 +357,33 @@ export function syncFiltersToUrl() {
 export function renderFacetsInto(container, stats = computeFacetStats()) {
   container.replaceChildren();
   const {
-    totals, counts, facetsWithData,
+    totals, counts, ctxAll, ctxFail, facetsWithData,
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
     uploaderTotals,
   } = stats;
+  // The odds lens (patterns.js): a small ×N after a chip's count when that
+  // count is a lot — or a little — for this chip, given the selection.
+  // Active chips are chosen and muted ones impossible; both already say
+  // everything the number would, so neither carries one.
+  const lens = oddsActive();
+  const withOdds = (el, facetKey, t, ctxCount, active) => {
+    if (!lens || active || ctxCount === 0) return el;
+    const label = oddsLabel({
+      obs: ctxCount,
+      ctx: ctxAll + (ctxFail.get(facetKey) || 0),
+      total: totals.get(t) || 0,
+      n: state.items.length,
+    });
+    if (label) {
+      const s = document.createElement("span");
+      s.className = "mult";
+      s.textContent = label;
+      el.appendChild(s);
+    }
+    return el;
+  };
   // The status row: Untagged plus the two queue pills (Processing = actively
   // worked, Unprocessed = waiting in line). Each shows only while it has items
   // or is switched on, so the row disappears entirely on a quiet board.
@@ -412,9 +442,10 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       pills.className = "pills";
       for (const key of chips) {
         const active = sel.has(key);
-        const ctxCount = counts.get(tag("~objects", key)) || 0;
+        const t = tag("~objects", key);
+        const ctxCount = counts.get(t) || 0;
         pills.appendChild(
-          pill(key, ctxCount, active, !active && ctxCount === 0, () => toggle("~objects", key))
+          withOdds(pill(key, ctxCount, active, !active && ctxCount === 0, () => toggle("~objects", key)), "~objects", t, ctxCount, active)
         );
       }
       row.appendChild(pills);
@@ -443,10 +474,11 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
         const active = sel.has(key);
         if (total === 0 && !active) continue;
         shown.add(key);
-        const ctxCount = counts.get(tag("~uploaders", key)) || 0;
+        const t = tag("~uploaders", key);
+        const ctxCount = counts.get(t) || 0;
         const uploader = state.items.find((img) => img.uploadedBy?.id === uid)?.uploadedBy;
         const name = uploader ? (uploader.name || uploader.email) : key;
-        pills.appendChild(pill(name, ctxCount, active, !active && ctxCount === 0, () => toggle("~uploaders", key)));
+        pills.appendChild(withOdds(pill(name, ctxCount, active, !active && ctxCount === 0, () => toggle("~uploaders", key)), "~uploaders", t, ctxCount, active));
       }
       for (const key of sel) {
         if (!shown.has(key)) pills.appendChild(pill(key, 0, true, false, () => toggle("~uploaders", key)));
@@ -474,7 +506,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       if (total === 0 && !active) continue;
       const ctxCount = counts.get(t) || 0;
       pills.appendChild(
-        pill(value, ctxCount, active, !active && ctxCount === 0, () => toggle(facet.key, value))
+        withOdds(pill(value, ctxCount, active, !active && ctxCount === 0, () => toggle(facet.key, value)), facet.key, t, ctxCount, active)
       );
     }
     row.appendChild(pills);
