@@ -192,6 +192,20 @@ function jobsChip() {
   return chip;
 }
 
+// A mode chip: the inert labeled pill announcing what derived set the
+// gallery is showing (its × is a separate crates-clear button beside it).
+function modeChip(iconMarkup, text) {
+  const el = document.createElement("span");
+  el.className = "tool-btn mode-chip active";
+  const icon = document.createElement("span");
+  icon.className = "mode-chip-icon";
+  icon.innerHTML = iconMarkup;
+  const lbl = document.createElement("span");
+  lbl.textContent = text;
+  el.append(icon, lbl);
+  return el;
+}
+
 function openUserMenu(anchorEl) {
   openDropdown(anchorEl, {
     className: "user-menu-pop",
@@ -506,8 +520,12 @@ export function renderToolbar(resultCount) {
   // Semantic search (only when the server has embeddings configured).
   // Submits on Enter — every query is one paid embedding call server-side.
   if (state.searchAvailable) {
+    // While the Find-similar mode is up, the box stays quiet even though
+    // searchResults is set — the mode chip below owns the display and the
+    // one clear affordance; a lit box would offer a second ×.
+    const typedSearch = state.searchResults && !state.searchSimilarTo;
     const box = document.createElement("div");
-    box.className = "search-box" + (state.searchResults ? " active" : "");
+    box.className = "search-box" + (typedSearch ? " active" : "");
     const input = document.createElement("input");
     input.type = "search";
     input.placeholder = "Search by meaning…";
@@ -524,7 +542,7 @@ export function renderToolbar(resultCount) {
       spin.className = "search-spinner";
       spin.setAttribute("aria-label", "Searching…");
       box.appendChild(spin);
-    } else if (state.searchResults) {
+    } else if (typedSearch) {
       const clearBtn = document.createElement("button");
       clearBtn.className = "search-clear";
       clearBtn.title = "Clear search";
@@ -579,17 +597,19 @@ export function renderToolbar(resultCount) {
     }
   }
 
-  // The ?event= view chip: the gallery is showing one alert firing's entities.
+  // The mode chips: the gallery is showing a derived result set, and the
+  // chip says which one — an alert firing's entities, or one item's
+  // similars (plan stage 1b; rendered whether or not the search box is,
+  // since similarity needs no embeddings). Same grammar each: an inert
+  // labeled pill plus the × that ends the mode.
+  if (state.searchSimilarTo) {
+    elToolbarSub.appendChild(modeChip(ICONS.search, `Similar to ${state.searchSimilarTo}`));
+    const clearSimBtn = toolBtn(ICONS.x, "crates-clear", clearSearch);
+    clearSimBtn.title = "Show all items";
+    elToolbarSub.appendChild(clearSimBtn);
+  }
   if (state.alertEvent) {
-    const ev = document.createElement("span");
-    ev.className = "tool-btn alert-event-chip active";
-    const icon = document.createElement("span");
-    icon.className = "alert-event-icon";
-    icon.innerHTML = ICONS.bell;
-    const lbl = document.createElement("span");
-    lbl.textContent = `${state.alertEvent.name} — ${state.alertEvent.count} new`;
-    ev.append(icon, lbl);
-    elToolbarSub.appendChild(ev);
+    elToolbarSub.appendChild(modeChip(ICONS.bell, `${state.alertEvent.name} — ${state.alertEvent.count} new`));
     const clearEvBtn = toolBtn(ICONS.x, "crates-clear", clearAlertEvent);
     clearEvBtn.title = "Show all items";
     elToolbarSub.appendChild(clearEvBtn);

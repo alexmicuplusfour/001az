@@ -142,8 +142,8 @@ pair matrix — 1a needs only a division on numbers the rail already has, and
   sort to the end regardless of direction. The 1b rarity block is what makes
   the ordering answerable.
 
-Status: 1a SHIPPED 2026-09-05 (odds lens; badges 09-06), 1c pending, 1b
-revised below.
+Status: 1a SHIPPED 2026-09-05 (odds lens; badges 09-06), 1b SHIPPED
+2026-09-06 (as revised below), 1c pending.
 
 ### 1b revised (2026-09-06): similarity is a search, not a surface
 
@@ -207,8 +207,14 @@ Open at build time: whether the search box's `active` class + clear button
 should suppress while `searchSimilarTo` is set (two clear affordances
 otherwise — cosmetic), and the exact floor/cap constants.
 
-The suite's patterns unit file grows the scoring tests (ratio math, floor +
-cap, MIN_TAGS gate) against the fixture board.
+BUILT 2026-09-06, as specced. Resolutions of the open points: floor ⅓ and
+cap 50 kept as-is; the search box DOES stay quiet while the mode is up (the
+chip owns the one clear affordance); ties at the cap break anchor-first then
+by identity, so the target always leads its own results. One promote along
+the way: the alert-event chip's classes generalized to `.mode-chip` /
+`.mode-chip-icon` — two wearers now (alert view, similar view), one grammar.
+Scoring tests live in test/pattern-similar.test.js (ratio math, floor, cap +
+anchor survival, MIN_TAGS gate, all-universal-chips null).
 
 ## Stage 2 — movement (needs history depth)
 

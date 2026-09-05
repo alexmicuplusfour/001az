@@ -3,6 +3,7 @@
 // (Map id -> score); taggedFiltered() intersects them with the tag filters.
 import { state } from './state.js';
 import { toast } from './toast.js';
+import { similarTo } from './patterns.js';
 
 let searchReq = 0; // stale-response guard, same pattern as the lightbox reasoning fetch
 
@@ -24,6 +25,7 @@ export async function runSearch(q) {
     state.searchQuery = q;
     state.searchDraft = q;
     state.searchResults = new Map(results.map((x) => [x.id, x.score]));
+    state.searchSimilarTo = null; // a typed search gracefully replaces the similar mode
     document.dispatchEvent(new Event('app:render'));
   } catch (err) {
     if (token !== searchReq) return;
@@ -33,6 +35,25 @@ export async function runSearch(q) {
   }
 }
 
+// "Find similar" (plan stage 1b): a search the user didn't type. Chip
+// similarity (patterns.js) produces the same ranked map a typed query does,
+// so the mode rides this file's plumbing wholesale — searchResults filters
+// and orders the grid, searchQuery keys the render caches. Differences:
+// synchronous (no fetch, no spinner), needs no embeddings (works where the
+// search box itself is hidden), and it leaves searchDraft alone — the
+// input stays the user's; the toolbar's mode chip announces this mode and
+// its × lands back in clearSearch.
+export function runSimilar(img) {
+  const results = similarTo(img);
+  if (!results) return; // the action is gated on MIN_TAGS, so only a degenerate board lands here
+  searchReq++; // supersedes any in-flight typed search
+  state.searchLoading = false;
+  state.searchQuery = `similar:${img.identity}`; // feeds filterKey; never displayed
+  state.searchResults = results;
+  state.searchSimilarTo = img.symbol || img.displayLabel || img.identity;
+  document.dispatchEvent(new Event('app:render'));
+}
+
 export function clearSearch() {
   searchReq++; // invalidates any in-flight search
   if (!state.searchResults && !state.searchDraft && !state.searchLoading) return;
@@ -40,5 +61,6 @@ export function clearSearch() {
   state.searchDraft = "";
   state.searchQuery = "";
   state.searchResults = null;
+  state.searchSimilarTo = null;
   document.dispatchEvent(new Event('app:render'));
 }

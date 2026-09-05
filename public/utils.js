@@ -210,6 +210,7 @@ export const ICONS = {
   chevronLeft: glyph('<path d="m15 18-6-6 6-6"/>', { stroke: 2.6 }),
   chevronRight: glyph('<path d="m9 18 6-6-6-6"/>', { stroke: 2.6 }),
   pencil: glyph('<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>'),
+  search: glyph('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>'),
   // A tick, a cross and a plus are two or three bare strokes with no drawing
   // around them to give them presence, so they carry more than the shared 2.
   // The × in particular: every one of the five places it lands had already

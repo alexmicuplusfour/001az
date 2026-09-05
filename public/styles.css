@@ -1438,12 +1438,12 @@ body.bulk-mode .heart {
   top: -1px;
 }
 /* the ?event= view chip: one alert firing's entities in the grid */
-.tool-btn.alert-event-chip {
+.tool-btn.mode-chip {
   cursor: default;
 }
 /* icon wrappers: a <span> is blockified as a flex item, so the svg inside it
    would otherwise sit on a text baseline and push the button taller */
-.alert-event-icon {
+.mode-chip-icon {
   display: inline-flex;
   line-height: 0;
 }

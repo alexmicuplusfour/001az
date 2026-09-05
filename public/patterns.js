@@ -118,7 +118,7 @@ export const { toggle: toggleOdds, save: saveOdds, restore: restoreOdds } =
 // is the toggle.
 
 const K = 8;             // fixed; a granularity control is the plan's open question
-const MIN_TAGS = 3;      // fewer and an item has too little signal to place — absent, not "unclassified"
+export const MIN_TAGS = 3; // fewer and an item has too little signal to place or match — absent, not "unclassified"; also gates the Find-similar action (grid.js)
 const MIN_GROUP = 8;     // a group smaller than this (or under 3% of participants)
 const MIN_SHARE = 0.03;  //   is not a cluster on any board
 const MIN_SIGNATURE = 1.5; // a group whose best majority-held chip is weaker has nothing to say
@@ -290,3 +290,45 @@ export const clusterSet = (img) => cache?.result?.sets.get(img.id);
 // board to nothing.
 export const { toggle: toggleClusters, save: saveClusters, restore: restoreClusters } =
   boardLens("boardClusters", "showClusters", () => state.selected.delete("~clusters"));
+
+// ── similar items: the third lens verb (plan stage 1b) ──────────────────────
+// "Find similar" ranks the board against one item's chips — a search the
+// user didn't type. Shared chips are weighted by rarity (a chip everyone
+// holds says nothing about kinship, and log2(n/holders) is zero exactly
+// there), and the sum is read as a fraction of the target's own weight: how
+// much of THIS item's identity does the candidate share. search.js owns the
+// mode's lifecycle; this is just the scorer, one shot per invocation.
+//
+// Two display bounds, both measured on the plan's stocks board: a ratio
+// floor alone is enough for a distinctive target but unbounded for a typical
+// one — the board's most average item legitimately shares a third of its
+// identity with a third of the board — so the floor pairs with the
+// movers-list cap. The target itself scores 1 and outranks its ties, so the
+// anchor always survives the cap.
+const SIM_FLOOR = 1 / 3;
+const SIM_CAP = 50;
+
+export function similarTo(img) {
+  if (img.tags.length < MIN_TAGS) return null; // too little identity to match on (the clusters rule)
+  const n = state.items.length;
+  const totals = new Map();
+  for (const it of state.items) for (const t of it.tags) totals.set(t, (totals.get(t) || 0) + 1);
+  const want = new Map();
+  let self = 0;
+  for (const t of img.tags) {
+    const w = Math.log2(n / totals.get(t));
+    want.set(t, w);
+    self += w;
+  }
+  if (!self) return null; // every chip universal — nothing distinguishes anything
+  const scored = [];
+  for (const it of state.items) {
+    let shared = 0;
+    for (const t of it.tags) shared += want.get(t) || 0;
+    const score = shared / self;
+    if (score >= SIM_FLOOR) scored.push([it, score]);
+  }
+  scored.sort((a, b) =>
+    b[1] - a[1] || (b[0] === img) - (a[0] === img) || (a[0].identity < b[0].identity ? -1 : 1));
+  return new Map(scored.slice(0, SIM_CAP).map(([it, s]) => [it.id, s]));
+}

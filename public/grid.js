@@ -9,6 +9,8 @@ import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
 import { kindFor } from './kinds.js';
 import { effectiveView } from './view.js';
+import { runSimilar } from './search.js';
+import { MIN_TAGS } from './patterns.js';
 
 const elGrid = document.getElementById("grid");
 const elGridSentinel = document.getElementById("grid-sentinel");
@@ -277,6 +279,12 @@ const { favorited, count: n } = await r.json();
 
 function openTagPop(chip, img) {
   const pin = pinWhileOpen(chip);
+  // The footer's actions gate one by one — they want different things.
+  // Editing needs a logged-in user and a taxonomy; Find similar (the 1b
+  // search, computed from exactly the chips this pop shows) needs neither,
+  // just enough identity to match on.
+  const canEdit = state.me && state.facets.length;
+  const canSimilar = img.tags.length >= MIN_TAGS;
   const ctx = openDropdown(chip, {
     className: "tag-pop",
     hover: true,
@@ -310,14 +318,23 @@ function openTagPop(chip, img) {
         body.appendChild(s);
       }
     },
-    footer: (state.me && state.facets.length) ? (foot, { close }) => {
-      foot.appendChild(ddAction({
+    footer: (canEdit || canSimilar) ? (foot, { close }) => {
+      if (canEdit) foot.appendChild(ddAction({
         label: "Edit tags",
         icon: ICONS.pencil,
         onClick: (e) => {
           e.stopPropagation();
           close();
           openTagEditor(img);
+        },
+      }));
+      if (canSimilar) foot.appendChild(ddAction({
+        label: "Find similar",
+        icon: ICONS.search,
+        onClick: (e) => {
+          e.stopPropagation();
+          close();
+          runSimilar(img);
         },
       }));
     } : undefined,

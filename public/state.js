@@ -53,4 +53,8 @@ export const state = {
   searchQuery: "",
   searchResults: null,
   searchLoading: false,
+  // "Find similar" rides the same results/query plumbing; this label being
+  // set is what marks the mode (and feeds the toolbar's chip). searchDraft
+  // stays untouched — the input remains whatever the user typed.
+  searchSimilarTo: null,
 };
