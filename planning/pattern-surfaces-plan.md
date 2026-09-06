@@ -195,8 +195,10 @@ same row can ride the lightbox tags panel; not needed to ship.
 
 **Mode lifecycle** (search.js owns it, scoring imported from patterns.js):
 `runSimilar(img)` sets `searchResults` + a unique `searchQuery`
-(`similar:<identity>`, feeds filterKey), leaves `searchDraft` alone (the
-input stays clean), and sets a new `state.searchSimilarTo` display label.
+(`similar:<identity>`, feeds filterKey), sets a new `state.searchSimilarTo` display label,
+and clears `searchDraft` (corrected 2026-09-07: the first cut left the
+typed text in the box, which then claimed a search that was no longer the
+one showing — the supersede is total).
 The indicator is the [alert-event-chip pattern](../public/toolbar.js#L583)
 — a labeled toolbar chip "Similar to DVLT ×" rendered whenever
 `searchSimilarTo` is set, independent of `searchAvailable`; its × calls

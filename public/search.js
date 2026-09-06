@@ -47,9 +47,10 @@ export async function runSearch(q) {
 // so the mode rides this file's plumbing wholesale — searchResults filters
 // and orders the grid, searchQuery keys the render caches. Differences:
 // synchronous (no fetch, no spinner), needs no embeddings (works where the
-// search box itself is hidden), and it leaves searchDraft alone — the
-// input stays the user's; the toolbar's mode chip announces this mode and
-// its × lands back in clearSearch.
+// search box itself is hidden); the toolbar's mode chip announces the mode
+// and its × lands back in clearSearch. The supersede is TOTAL, draft
+// included — a typed query left sitting in the box would claim a search
+// that is no longer the one showing.
 const anchorLabel = (item) => item.symbol || item.displayLabel || item.identity;
 
 export function runSimilar(item) {
@@ -57,6 +58,7 @@ export function runSimilar(item) {
   if (!results) return; // the action is gated on MIN_TAGS, so only a degenerate board lands here
   searchReq++; // supersedes any in-flight typed search
   state.searchLoading = false;
+  state.searchDraft = "";
   state.searchQuery = `similar:${item.identity}`; // feeds filterKey; never displayed
   state.searchResults = results;
   state.searchSimilarTo = anchorLabel(item);
@@ -76,6 +78,7 @@ export async function runSimilarMeaning(item) {
   try {
     const results = await fetchResults(`/api/search/similar?board=${state.boardId}&item=${item.id}`);
     if (token !== searchReq) return; // superseded
+    state.searchDraft = ""; // the supersede is total — see runSimilar
     state.searchQuery = `similar-meaning:${item.id}`;
     state.searchResults = results;
     state.searchSimilarTo = anchorLabel(item);
