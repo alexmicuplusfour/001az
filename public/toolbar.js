@@ -194,11 +194,14 @@ function jobsChip() {
 
 // A mode chip: the inert labeled pill announcing what derived set the
 // gallery is showing, plus the × that ends the mode. The pair IS the
-// grammar, so the helper places both.
-function modeChip(iconMarkup, text, onClear) {
+// grammar, so the helper places both. `tail` is a short marker that must
+// SURVIVE the clipping (the CSS ellipsis lives on the text span alone — an
+// anchor's name can be a whole filename, and end-clipping one string would
+// eat exactly the part that tells the modes apart).
+function modeChip(iconMarkup, text, onClear, tail = "") {
   const el = document.createElement("span");
   el.className = "tool-btn mode-chip active";
-  el.title = text; // the label clips (CSS) — an identity can be a whole filename
+  el.title = tail ? `${text} ${tail}` : text;
   const icon = document.createElement("span");
   icon.className = "mode-chip-icon";
   icon.innerHTML = iconMarkup;
@@ -206,6 +209,7 @@ function modeChip(iconMarkup, text, onClear) {
   lbl.className = "mode-chip-label";
   lbl.textContent = text;
   el.append(icon, lbl);
+  if (tail) el.appendChild(Object.assign(document.createElement("span"), { textContent: tail }));
   const clear = toolBtn(ICONS.x, "crates-clear", onClear);
   clear.title = "Show all items";
   elToolbarSub.append(el, clear);
@@ -609,7 +613,10 @@ export function renderToolbar(resultCount) {
   // chip says which one — one item's similars (plan stage 1b; rendered
   // whether or not the search box is, since similarity needs no
   // embeddings), or an alert firing's entities.
-  if (state.searchSimilarTo) modeChip(ICONS.search, `Similar to ${state.searchSimilarTo}`, clearSearch);
+  if (state.searchSimilarTo) {
+    const flavor = state.searchQuery.startsWith("similar-meaning:") ? "· meaning" : "";
+    modeChip(ICONS.search, `Similar to ${state.searchSimilarTo}`, clearSearch, flavor);
+  }
   if (state.alertEvent) modeChip(ICONS.bell, `${state.alertEvent.name} — ${state.alertEvent.count} new`, clearAlertEvent);
 
   const count = document.createElement("span");
