@@ -63,7 +63,8 @@ export function runSimilar(img) {
 // mode chip carries the flavor in its label, so the two similars stay
 // tellable apart after the fact.
 export async function runSimilarMeaning(img) {
-  const token = ++searchReq;
+  const token = ++searchReq; // supersedes any in-flight typed search…
+  state.searchLoading = false; // …spinner included, or a failure here would leave it spinning forever
   try {
     const r = await fetch(`/api/search/similar?board=${state.boardId}&item=${img.id}`);
     if (!r.ok) {
@@ -72,13 +73,13 @@ export async function runSimilarMeaning(img) {
     }
     const { results } = await r.json();
     if (token !== searchReq) return; // superseded
-    state.searchLoading = false;
     state.searchQuery = `similar-meaning:${img.id}`;
     state.searchResults = new Map(results.map((x) => [x.id, x.score]));
     state.searchSimilarTo = `${anchorLabel(img)} · meaning`;
     document.dispatchEvent(new Event('app:render'));
   } catch (err) {
     if (token !== searchReq) return;
+    document.dispatchEvent(new Event('app:render')); // repaint the spinner cleared above
     toast.error(err.message || "Search failed");
   }
 }

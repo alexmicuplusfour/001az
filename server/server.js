@@ -2868,7 +2868,10 @@ app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
     if (!best.has(eid) || best.get(eid) < s) best.set(eid, s);
   }
   const scored = [...best].map(([id, score]) => ({ id, score }));
-  scored.sort((a, b) => b.score - a.score);
+  // The id tiebreak matters only for EXACT score ties — duplicated embed
+  // texts — but a tie straddling the cap would otherwise flicker membership
+  // between calls (map order is arrival order).
+  scored.sort((a, b) => b.score - a.score || (String(a.id) < String(b.id) ? -1 : 1));
   res.json({ results: scored.slice(0, 50) });
 }));
 

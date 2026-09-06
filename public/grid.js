@@ -322,33 +322,14 @@ function openTagPop(chip, img) {
       }
     },
     footer: (canEdit || canSimilar || canMeaning) ? (foot, { close }) => {
-      if (canEdit) foot.appendChild(ddAction({
-        label: "Edit tags",
-        icon: ICONS.pencil,
-        onClick: (e) => {
-          e.stopPropagation();
-          close();
-          openTagEditor(img);
-        },
+      // One wrapper for every row: close the pop, then run the verb.
+      const act = (label, icon, fn) => foot.appendChild(ddAction({
+        label, icon,
+        onClick: (e) => { e.stopPropagation(); close(); fn(); },
       }));
-      if (canSimilar) foot.appendChild(ddAction({
-        label: "Find similar",
-        icon: ICONS.search,
-        onClick: (e) => {
-          e.stopPropagation();
-          close();
-          runSimilar(img);
-        },
-      }));
-      if (canMeaning) foot.appendChild(ddAction({
-        label: "Find similar by meaning",
-        icon: ICONS.sparkle,
-        onClick: (e) => {
-          e.stopPropagation();
-          close();
-          runSimilarMeaning(img);
-        },
-      }));
+      if (canEdit) act("Edit tags", ICONS.pencil, () => openTagEditor(img));
+      if (canSimilar) act("Find similar", ICONS.search, () => runSimilar(img));
+      if (canMeaning) act("Find similar by meaning", ICONS.sparkle, () => runSimilarMeaning(img));
     } : undefined,
     onClose: pin.release,
   });

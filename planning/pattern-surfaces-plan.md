@@ -143,7 +143,10 @@ pair matrix — 1a needs only a division on numbers the rail already has, and
   the ordering answerable.
 
 Status: 1a SHIPPED 2026-09-05 (odds lens; badges 09-06), 1b SHIPPED
-2026-09-06 (as revised below), 1c pending.
+2026-09-06 (as revised below; + meaning flavor same day, see 1b-meaning),
+1c pending. Known trigger gap: rows mode has no Find-similar entry — its
+tag pop (openInstTagPop, rows.js) is per-instance and mutation-focused;
+both flavors WORK in rows mode once triggered, only the trigger is absent.
 
 ### 1b revised (2026-09-06): similarity is a search, not a surface
 
