@@ -4,9 +4,9 @@
 // board. Clicking one applies it one-shot (replaces the current pills) —
 // there's no lingering "active view", the pills are the whole truth.
 //
-// The pop's footer also carries the odds lens toggle (patterns.js): the app's
-// only per-viewer filter-adjacent menu, which is what that switch is. It owns
-// the ROW, not the behavior — the flip/persist/repaint is toggleOdds'.
+// The pop's footer also carries the lens toggles (patterns.js): the app's
+// only per-viewer filter-adjacent menu, which is what those switches are. It
+// owns the ROWS, not the behavior — the flip/persist/repaint is the lenses'.
 
 import { state } from './state.js';
 import { ICONS } from './utils.js';

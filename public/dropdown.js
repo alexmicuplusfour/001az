@@ -381,17 +381,13 @@ export function ddAction({ label, icon, href, onClick, disabled = false } = {}) 
   return el;
 }
 
-// A checkbox as a menu row. The row IS the <label>, so the hit target is the
-// whole row rather than a 16px box, and it carries dd-row's metrics — a menu of
-// choices should not be packed tighter than a menu of actions just because the
-// choices happen to be checkboxes.
-//
-// Returns createCheckbox's handle with the row as its `el`, so callers read
-// `.checked` and set `.disabled` exactly as they would on a bare one.
-// `child: true` indents a row that belongs to the one above it, to the column
-// where the parent's text starts.
-// The row dressing shared by the two binary rows: the dd-check metrics, an
-// optional child indent, and a place in the menu's arrow-key walk.
+// A binary control as a menu row — the shared dressing under ddCheckRow and
+// ddToggleRow. The row IS the control's <label>, so the hit target is the
+// whole row rather than a 16px box, and it carries dd-row's metrics — a menu
+// of choices should not be packed tighter than a menu of actions just because
+// the choices happen to be checkboxes. Each returns its control's handle with
+// the row as its `el`, so callers read `.checked` and set `.disabled` exactly
+// as they would on a bare one.
 function binaryRow(handle, { child = false, title } = {}) {
   handle.el.classList.add("dd-row", "dd-check");
   if (child) handle.el.classList.add("dd-row--child");
@@ -401,6 +397,8 @@ function binaryRow(handle, { child = false, title } = {}) {
   return handle;
 }
 
+// `child: true` indents a row that belongs to the one above it, to the column
+// where the parent's text starts.
 export function ddCheckRow({ label, checked, disabled, variant = "dark", child = false, title, onChange } = {}) {
   return binaryRow(createCheckbox({ variant, checked, disabled, label, onChange }), { child, title });
 }

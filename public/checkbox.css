@@ -115,7 +115,7 @@
 /* ─── toggle costume (createToggle): same control, motion instead of a mark.
    The box becomes the track (borderless, so the un-checked state is a fill
    rather than an outline — the variant border rules go inert), the mark
-   icons go dark, and the knob is the box's own ::after. Checked-state track
+   icons switch off, and the knob is the box's own ::after. Checked-state track
    colors, focus rings and disabled dimming all arrive from the base variant
    rules untouched. ─── */
 
@@ -147,12 +147,11 @@
   background: rgba(255, 255, 255, 0.28);
 }
 
-.cb--dark.cb--toggle:hover:not(.is-disabled) .cb-box {
+/* hover brightens only the un-checked track — the checked state is already
+   at full contrast, and scoping it here keeps the base checked rules the
+   sole owners of that color */
+.cb--dark.cb--toggle:hover:not(.is-disabled) .cb-input:not(:checked) + .cb-box {
   background: rgba(255, 255, 255, 0.4);
-}
-
-.cb--dark.cb--toggle .cb-input:checked + .cb-box {
-  background: #fff; /* restated over the hover rule above, which now outspecifies the base checked rule */
 }
 
 .cb--dark.cb--toggle .cb-box::after {
@@ -167,12 +166,8 @@
   background: rgba(17, 17, 17, 0.22);
 }
 
-.cb--light.cb--toggle:hover:not(.is-disabled) .cb-box {
+.cb--light.cb--toggle:hover:not(.is-disabled) .cb-input:not(:checked) + .cb-box {
   background: rgba(17, 17, 17, 0.34);
-}
-
-.cb--light.cb--toggle .cb-input:checked + .cb-box {
-  background: #111;
 }
 
 .cb--light.cb--toggle .cb-box::after {
