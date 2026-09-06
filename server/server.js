@@ -102,9 +102,7 @@ import {
   deleteAiKey,
   boardEmbeddings,
   listItemPayloads,
-  boardItemPayloads,
   updateItemPayload,
-  updateItemPayloads,
   reextractItem,
   retagItem,
   retagItemFacets,
@@ -170,8 +168,9 @@ import { hashPassword, verifyPassword, dummyVerify, MIN_PASSWORD_LEN } from "./p
 import { createSources } from "./sources/index.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { addConnectorEntity, enqueueConnectorEntity } from "./connectors/add.js";
-import { liveFields, faceSchedule, domainState } from "./connectors/runtime.js";
-import { mediaCatalog, getMediaField, extractFileFields } from "./media/index.js";
+import { wantedFields, faceSchedule, domainState } from "./connectors/runtime.js";
+import { mediaCatalog, getMediaField } from "./media/index.js";
+import { createFieldReconciler } from "./field-reconcile.js";
 import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
 import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
@@ -261,6 +260,11 @@ if (!(await anyPasswordSet(db))) {
 // Source handlers (server/sources/): store originals + faces (thumbnails)
 // and clean them up on delete. The upload route itself is core (ingest.js).
 const sources = createSources({ galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR });
+
+// The mapping-save reconcile (field-reconcile.js): stored fields re-converge
+// on a saved mapping, per source policy. Built here because the file arm
+// re-derives legacy metadata through the sources instance above.
+const reconcileFields = createFieldReconciler({ metaFor: (entry) => sources.metaFor(entry) });
 
 const app = express();
 app.disable("x-powered-by");
@@ -1311,18 +1315,18 @@ const saveBoardPatch = wrap(async (req, res) => {
   // written against the old adapter means nothing to the new one.
   if (inputSwitched) await setIngestState(db, prev.id, null);
   else if (update.ingest !== undefined) await clearIngestSuperseded(db, prev.id);
-  // A mapping change can turn fields live/idle, move their cadence, or turn the
-  // face on — recompute every entity's next refresh (an empty live set clears
-  // their schedules; a newly-configured face marks unrendered entities due now,
-  // which is what backfills charts onto cards that predate the face), and
-  // re-project deterministic file metadata for existing instances (file boards
-  // only; connector items have no file entry so they'd no-op anyway). Only
+  // A mapping change redraws what every item/entity should be carrying:
+  // reconcile stored fields to the new declaration (strip removed keys per
+  // source policy, re-project file metadata — field-reconcile.js), THEN
+  // recompute every entity's next refresh from the post-strip maps (an empty
+  // wanted set clears schedules; an entity missing a newly-mapped connector
+  // field, or a newly-configured face, is stamped due now — that's what
+  // backfills new fields and charts onto cards that predate them). Only
   // reachable when the admin leg accepted a mapping — update.mapping stays
   // undefined for managers.
   if (update.mapping !== undefined) {
-    await rescheduleEntityRefreshes(db, prev.id, liveFields(update.mapping), faceSchedule(update.mapping));
-    const m = update.mapping;
-    if (m === null || !m.input) await backfillFileFields(prev.id, m);
+    await reconcileFields(db, prev.id, update.mapping);
+    await rescheduleEntityRefreshes(db, prev.id, wantedFields(update.mapping), faceSchedule(update.mapping));
   }
   // Unpausing floors the board's overdue refresh stamps to now: a days-paused
   // board otherwise owns the deep past of dueLiveEntities' soonest-first order
@@ -2082,11 +2086,17 @@ function validateMapping(mapping) {
       return `file field "${f.key}" is only valid on a files board`;
     if (def.connectorOnly && filesBoard)
       return `${def.id} field "${f.key}" requires a connector input`;
-    // Media-catalog fields: fn must exist and the kind is the catalog's.
-    if (def.catalog === "media") {
-      const desc = getMediaField(f.fn);
-      if (!desc) return `unknown file field fn "${f.fn}" for "${f.key}"`;
-      if (f.kind !== desc.kind) return `file field "${f.key}" must have kind "${desc.kind}"`;
+    // Catalog fields: the fn must name a field the catalog declares, and the
+    // kind is the catalog's, not the caller's — ONE rule however many catalogs
+    // exist (it was only ever written for media before; a bad connector fn
+    // would now be silently dropped by land-time projection, so refuse it at
+    // save). connectorOnly above guarantees the input exists and was resolved.
+    if (def.catalog) {
+      const desc = def.catalog === "media"
+        ? getMediaField(f.fn)
+        : (getConnector(mapping.input.connector)?.manifest?.fields || []).find((c) => c.fn === f.fn);
+      if (!desc) return `unknown ${def.id} field fn "${f.fn}" for "${f.key}"`;
+      if (f.kind !== desc.kind) return `${def.id} field "${f.key}" must have kind "${desc.kind}"`;
     }
     if (f.instruction !== undefined) {
       if (!def.takesInstruction) return `${def.id} field "${f.key}" takes no instruction`;
@@ -2138,56 +2148,6 @@ function validateMapping(mapping) {
     }
   }
   return null;
-}
-
-// Re-project file-metadata fields (server/media) over a board's existing
-// instances after its file-field set changes: strip the previously-projected
-// file fields, add the current ones, leave AI fields alone. Pure projection of
-// each stored payload entry — no file is re-opened. Writes only on a real change.
-async function backfillFileFields(boardId, mapping) {
-  const mappingFields = (mapping && mapping.fields) || [];
-  const wantsFileFields = mappingFields.some((f) => f.source === "file");
-  const items = await boardItemPayloads(db, boardId);
-
-  // Legacy entries (uploaded before file fields) carry no size/meta; re-derive it
-  // once from the stored file (header-only reads) so their file fields aren't all
-  // null. The reads are independent, so run them concurrently rather than one at a
-  // time — this is the bulk of the wait on a board's first file-field save.
-  const needsEnrich = items.map((it) => {
-    const entry = it.payload?.files?.[0];
-    return wantsFileFields && !!entry && entry.meta === undefined;
-  });
-  const metas = await Promise.all(items.map((it, i) =>
-    needsEnrich[i] ? sources.metaFor(it.payload.files[0]) : null
-  ));
-
-  const patches = []; // [{ id, patch }] — flushed in a single bulk write below.
-  items.forEach((it, i) => {
-    let entry = it.payload?.files?.[0];
-    if (!entry) return; // fileless (connector tag vehicle) — nothing to project
-    // The enriched entry is persisted, so the header read is paid once. `added`
-    // falls back to the item's created_at (modified/created were never captured).
-    let enrichedEntry = false;
-    if (needsEnrich[i]) {
-      const m = metas[i];
-      entry = { ...entry, size: m?.size ?? null, meta: m?.meta || {}, addedAt: entry.addedAt ?? it.created_at ?? null };
-      enrichedEntry = true;
-    }
-    const existing = it.payload?.fields || {};
-    const kept = {};
-    for (const [k, v] of Object.entries(existing)) if (v?.src !== "file") kept[k] = v;
-    const merged = { ...kept, ...extractFileFields(entry, mappingFields) };
-    if (enrichedEntry) {
-      const files = [...it.payload.files];
-      files[0] = entry;
-      patches.push({ id: it.id, patch: { files, fields: merged } });
-    } else if (JSON.stringify(merged) !== JSON.stringify(existing)) {
-      patches.push({ id: it.id, patch: { fields: merged } });
-    }
-  });
-
-  // One bulk write instead of a round-trip per changed item.
-  await updateItemPayloads(db, patches);
 }
 
 // The admin-page alias of the board save — the SAME handler as PATCH

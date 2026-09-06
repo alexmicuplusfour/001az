@@ -200,7 +200,9 @@ test("refresh: fetchFields serves the due keys; partial coverage falls back whol
   assert.equal((await meterTotals(db, "board-ref", "api", "meter")).units.api_requests, 1);
   assert.deepEqual(r1.merged.price, { v: 2, kind: "number", src: "meter", at: now });
   assert.deepEqual(r1.moved.price, { v: 2, kind: "number", src: "meter", at: now }); // 1 → 2 moved
-  assert.equal(r1.merged.sector.v, "old"); // non-due fields untouched
+  // A refresh IS the projection: sector isn't in this mapping, so the stray
+  // stored key converges out of the entity instead of persisting unrefreshed.
+  assert.equal(r1.merged.sector, undefined);
   assert.equal(r1.next, now + 60000);
 
   // sector due too, but fetchFields doesn't produce it → whole-object fallback.

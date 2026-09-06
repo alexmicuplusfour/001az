@@ -37,6 +37,20 @@
 //                    carries no kind at all (its output is located hits, not a
 //                    scalar).
 //   cap              per-board ceiling on fields of this source.
+//   refill           how a field ADDED to the mapping gets its value onto
+//                    existing items/entities, and whether a REMOVED field's
+//                    stored data is stripped (field-reconcile.js runs both on
+//                    every mapping save):
+//                      "local"  — strip + re-project synchronously from stored
+//                                 material (file metadata: free, no I/O beyond
+//                                 the db).
+//                      "sweep"  — strip now; missing keys are stamped due and
+//                                 the refresh sweep buys them at its own pace
+//                                 (connector data: metered, paced, batched).
+//                      "manual" — reconcile touches NOTHING; values cost money
+//                                 (a model ran) and refill is an explicit
+//                                 re-extract. The declared form of what was
+//                                 silently true before this column existed.
 //   capability       which CAPABILITY_DEFS entry runs it; null = deterministic
 //                    (no model, no key, no provenance band). This is what
 //                    makes the mapping pane's provenance generic.
@@ -52,6 +66,7 @@ export const FIELD_SOURCE_DEFS = [
     catalog: "connector", needsFn: true, connectorOnly: true,
     refreshable: true,
     capability: null,
+    refill: "sweep",
     slots: ["identity", "face"],
     output: "scalar",
   },
@@ -61,6 +76,7 @@ export const FIELD_SOURCE_DEFS = [
     catalog: "media", needsFn: true, filesOnly: true,
     refreshable: false,
     capability: null,
+    refill: "local",
     slots: ["face"],
     output: "scalar",
   },
@@ -70,6 +86,7 @@ export const FIELD_SOURCE_DEFS = [
     catalog: null, takesInstruction: true,
     refreshable: false,
     capability: "extract",
+    refill: "manual",
     kinds: ["text", "number", "url", "date"],
     cap: 12, // extract fields generate the record_fields schema — the cap is a schema-size bound
     slots: ["identity"],
@@ -81,6 +98,7 @@ export const FIELD_SOURCE_DEFS = [
     catalog: null, takesInstruction: true,
     refreshable: false,
     capability: "detect",
+    refill: "manual",
     appliesTo: ["image"],
     cap: 12, // each field adds detector queries; same order of sanity as extract
     output: "occurrences", locator: "box",

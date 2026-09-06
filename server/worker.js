@@ -71,7 +71,7 @@ import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector, prefetchDueRefreshes, prefetchClaimedFetches } from "./connectors/index.js";
 import { entityRefreshAt, faceSchedule, firstRefreshAt } from "./connectors/runtime.js";
-import { connectorLanding } from "./connectors/add.js";
+import { connectorLanding, fetchProjectedEntity } from "./connectors/add.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
 import { aiWork } from "./field-sources.js";
@@ -2644,7 +2644,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       const connectorName = board.mapping?.input?.connector;
       const conn = connectorName ? getConnector(connectorName) : null;
       if (!conn) throw new Error("board no longer has a connector input");
-      const fetched = await conn.fetchEntity(db, row.payload?.source?.id, board.id);
+      const fetched = await fetchProjectedEntity(db, conn, row.payload?.source?.id, board);
       // Land fields + the corrected identity/name/symbol in one statement.
       // A 23505 here is a LATE duplicate — the enqueue lacked the symbol (or
       // the provider disagrees with its own list) and the true identity is

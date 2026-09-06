@@ -5,6 +5,7 @@
 // (identity already on the board), `.provider` for a fetch/provider error.
 import { createEntity, insertItem, setEntityRefreshAt, withTx } from "../db.js";
 import { firstRefreshAt } from "./runtime.js";
+import { projectConnectorFields } from "./project.js";
 
 // Where a connector vehicle goes once its definition data is in hand, and
 // whether it carries the park stamp — ONE encoding of the landing rule, read
@@ -57,10 +58,21 @@ const asDuplicate = (err) => {
   throw err;
 };
 
+// Fetch a connector entity FOR LANDING: the provider answers its whole
+// catalog, the returned fields are what the board's mapping declares (stored =
+// declared — connectors/project.js owns the rule). The only exported way to
+// fetch-for-landing, so a future land site can't forget the projection — the
+// same one-encoding role connectorLanding plays for the landing rule, used by
+// the same two callers (the synchronous add below, the worker's fetch leg).
+export async function fetchProjectedEntity(db, connector, entityId, board) {
+  const entity = await connector.fetchEntity(db, entityId, board.id);
+  return { ...entity, fields: projectConnectorFields(entity, board.mapping?.fields) };
+}
+
 export async function addConnectorEntity(db, board, connector, connectorName, entityId) {
   let entity;
   try {
-    entity = await connector.fetchEntity(db, entityId, board.id);
+    entity = await fetchProjectedEntity(db, connector, entityId, board);
   } catch (err) { err.provider = true; throw err; }
 
   // Bound fields live on the entity; one file-less instance is the tag

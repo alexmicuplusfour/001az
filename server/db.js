@@ -4,7 +4,7 @@ import { runMigrations } from "./migrate.js";
 import { selectFace } from "./faces/select.js";
 // Pure scheduling rules — safe to import here (schedule.js imports nothing),
 // unlike connectors/runtime.js, which imports THIS module.
-import { liveFields, nextRefreshAt, faceSchedule } from "./connectors/schedule.js";
+import { wantedFields, nextRefreshAt, faceSchedule } from "./connectors/schedule.js";
 import { aiWork } from "./field-sources.js"; // pure data + one predicate, no imports
 import { projectEntry } from "./media/index.js";
 import { CAPABILITY_DEFS, bindingSettings } from "./capabilities.js";
@@ -45,17 +45,20 @@ export async function initDb(db) {
   await reconcileLiveSchedules(db);
 }
 
-// Ensure every entity on a board with live connector fields has a refresh_at.
-// Covers boards configured live before this feature deployed (or before a build
+// Ensure every entity on a board with wanted connector fields has a refresh_at.
+// Covers boards configured before this feature deployed (or before a build
 // that scheduled them) — otherwise their entities sit with refresh_at NULL and
 // the sweep never sees them until the mapping is re-saved. Idempotent: it just
-// recomputes min(field.at + every*60000), the correct next-due, each boot.
+// recomputes the correct next-due each boot — which, since the absent-key term
+// (schedule.js nextRefreshAt), also stamps due-now any entity missing a mapped
+// field, so a static field added while a build without this rule ran still
+// backfills on the next boot.
 async function reconcileLiveSchedules(db) {
   const { rows } = await db.query("SELECT id, mapping FROM boards WHERE mapping IS NOT NULL");
   for (const b of rows) {
-    const live = liveFields(b.mapping);
+    const wanted = wantedFields(b.mapping);
     const faceSched = faceSchedule(b.mapping);
-    if (live.length || faceSched) await rescheduleEntityRefreshes(db, b.id, live, faceSched);
+    if (wanted.length || faceSched) await rescheduleEntityRefreshes(db, b.id, wanted, faceSched);
   }
 }
 
@@ -2981,23 +2984,25 @@ export async function requeueItemForTag(db, id) {
 }
 
 // Recompute refresh_at for every entity on a board after its mapping changes
-// (a field or the face turned live/idle, or a cadence moved). `live` = the
-// mapping's live connector fields [{ key, every }]; `faceSched` = the face's
-// schedule from connectors/schedule.js ({ every } live / { first: true }
-// one-shot / null none). Empty/null both clear that term.
-export async function rescheduleEntityRefreshes(db, boardId, live, faceSched = null, now = Date.now()) {
-  // Nothing live and no face to render → every entity's next refresh is null. Clear
-  // the whole board in one statement instead of a write per entity. This is the common
-  // case on a file board, where no field can be live — so the mapping save that
-  // used to fan out N no-op writes now does a single targeted one.
-  if (!live.length && !faceSched) {
+// (a field added/removed, turned live/idle, a cadence moved, the face turned
+// on). `wanted` = the mapping's connector fields [{ key, every? }] — an entity
+// missing one is stamped due-now (schedule.js's absent-key term), which is how
+// a field added to the mapping backfills onto existing entities via the sweep;
+// `faceSched` = the face's schedule from connectors/schedule.js ({ every }
+// live / { first: true } one-shot / null none). Empty/null both clear that term.
+export async function rescheduleEntityRefreshes(db, boardId, wanted, faceSched = null, now = Date.now()) {
+  // No wanted fields and no face to render → every entity's next refresh is null.
+  // Clear the whole board in one statement instead of a write per entity. This is
+  // the common case on a file board, where no field can be wanted — so the mapping
+  // save that used to fan out N no-op writes now does a single targeted one.
+  if (!wanted.length && !faceSched) {
     await db.query("UPDATE entities SET refresh_at=NULL WHERE board_id=$1 AND refresh_at IS NOT NULL", [boardId]);
     return;
   }
   const { rows } = await db.query("SELECT id, fields, face_at FROM entities WHERE board_id=$1", [boardId]);
   const sched = [];
   for (const e of rows) {
-    let next = nextRefreshAt(e.fields, live, now);
+    let next = nextRefreshAt(e.fields, wanted, now);
     if (faceSched) {
       // A never-rendered face (face_at null) is due NOW — this is the urgency
       // path that backfills every existing entity when a board's face turns on,
@@ -3017,6 +3022,26 @@ export async function rescheduleEntityRefreshes(db, boardId, live, faceSched = n
      FROM jsonb_to_recordset($1::jsonb) AS u(id bigint, nx bigint)
      WHERE e.id = u.id`,
     [JSON.stringify(sched)]
+  );
+}
+
+// Strip every entity on a board to the given field keys — the connector arm of
+// the mapping-save reconcile (field-reconcile.js). The strip rule's ONE live
+// encoding: keep mapped keys as stored, add nothing — absence is what makes
+// the scheduler buy a newly-mapped key (migration 0045 carries a frozen copy,
+// by migration policy). One statement; rows already inside the key set are
+// left untouched (updated_at included — the WHERE is what keeps a no-op save
+// from marking every entity changed to delta pollers).
+export async function stripBoardEntityFields(db, boardId, keys, now = Date.now()) {
+  await db.query(
+    `UPDATE entities SET
+       fields = COALESCE(
+         (SELECT jsonb_object_agg(key, value) FROM jsonb_each(fields) WHERE key = ANY($2::text[])),
+         '{}'::jsonb),
+       updated_at = $3
+     WHERE board_id = $1
+       AND EXISTS (SELECT 1 FROM jsonb_each(fields) WHERE NOT key = ANY($2::text[]))`,
+    [boardId, keys, now]
   );
 }
 

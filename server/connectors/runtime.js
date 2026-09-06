@@ -13,7 +13,8 @@ import { meterSpend } from "../metering.js";
 import { getFaceProducer } from "../faces/index.js";
 import { acquire, throttled } from "../provider-pacing.js";
 import { createTtlCache, keyFingerprint, CHART_LEARN_TTL } from "./chart-series.js";
-import { liveFields, nextRefreshAt } from "./schedule.js";
+import { wantedFields, nextRefreshAt, fieldDueAt } from "./schedule.js";
+import { absentField } from "./project.js";
 
 const providerKey = (db, conn, name) => getSetting(db, `${conn.name}_key_${name}`);
 
@@ -363,7 +364,7 @@ export async function testConnection(db, conn, { provider: pOverride, apiKey: kO
 // needs them and can't import this module — it's the other way round). Re-
 // exported here so every caller keeps one connector-runtime import; `refresh`
 // below uses two of them directly, hence the import alongside.
-export { liveFields, nextRefreshAt, faceSchedule, entityRefreshAt, firstRefreshAt } from "./schedule.js";
+export { wantedFields, nextRefreshAt, faceSchedule, entityRefreshAt, firstRefreshAt } from "./schedule.js";
 
 // Map a symbol back to a provider id under the active provider — provider ids
 // aren't portable (CoinGecko's "bitcoin" ≠ CoinMarketCap's "1"), so a refresh
@@ -418,13 +419,14 @@ export async function prefetchRefresh(db, conn, rows) {
     .map((s) => s.id));
 }
 
-// Re-fetch one entity and return the fields to write back — only those live
-// fields whose cadence has elapsed. Live config comes from `mapping` (the board
-// mapping — the current source of truth an admin edits), NOT the instance's
-// stamped mapping, which is frozen at creation and would ignore later liveness
-// edits. `inst` carries the provider `source`. `at` is always bumped on a
-// refresh (last-checked, not last-changed) so an unchanged field doesn't read
-// "due" forever. `moved` holds only value changes.
+// Re-fetch one entity and return the fields to write back — the wanted fields
+// that are DUE: never fetched (key absent — a field added to the mapping after
+// this entity landed), or live with the cadence elapsed. Config comes from
+// `mapping` (the board mapping — the current source of truth an admin edits),
+// NOT the instance's stamped mapping, which is frozen at creation and would
+// ignore later edits. `inst` carries the provider `source`. `at` is always
+// bumped on a refresh (last-checked, not last-changed) so an unchanged field
+// doesn't read "due" forever. `moved` holds only value changes.
 //
 // The fetch itself is field-aware when the provider allows: a provider may
 // export fetchFields(id, keys, ctx) → { fields } serving just the requested
@@ -435,34 +437,53 @@ export async function prefetchRefresh(db, conn, rows) {
 // fetchEntity — a partial answer can never strand a field due-forever.
 // Providers without the capability get the whole-object path, unchanged.
 export async function refresh(db, conn, entity, inst, mapping, now = Date.now(), board = null) {
-  const live = liveFields(mapping);
-  const due = live.filter((f) => now - (entity.fields?.[f.key]?.at ?? 0) >= f.every * 60000);
-  if (!due.length) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
+  const wanted = wantedFields(mapping);
+  const dueNow = (f) => {
+    const at = fieldDueAt(f, entity.fields?.[f.key], now);
+    return at !== null && at <= now;
+  };
+  const due = wanted.filter(dueNow);
+  if (!due.length) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, wanted, now) };
 
   const active = await activeProvider(db, conn);
   const id = await resolveProviderId(db, conn, active.name, inst.payload?.source, entity.symbol, board);
-  if (id == null) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, live, now) };
+  if (id == null) return { merged: null, moved: {}, next: nextRefreshAt(entity.fields, wanted, now) };
 
-  const dueKeys = due.map((f) => f.key);
   let fetched = null;
   if (active.provider.fetchFields) {
+    // Providers speak the CATALOG's names (fn), never the mapping's keys —
+    // the two coincide today (the modal locks catalog keys) but the seam is
+    // what lets a mapping rename a field without providers learning about it.
+    const dueFns = [...new Set(due.map((f) => f.fn))];
     const partial = await tracked(db, conn, active.name, active.provider, () =>
-      active.provider.fetchFields(id, dueKeys, ctxFor(db, active.name, active.provider, active.apiKey, board)), board);
+      active.provider.fetchFields(id, dueFns, ctxFor(db, active.name, active.provider, active.apiKey, board)), board);
     const fields = {};
     for (const [k, v] of Object.entries(partial?.fields || {})) fields[k] = { ...v, src: active.name, at: now };
-    if (dueKeys.every((k) => fields[k])) fetched = { fields };
+    if (dueFns.every((fn) => fields[fn])) fetched = { fields };
   }
   if (!fetched) fetched = await fetchEntity(db, conn, id, now, board);
 
-  const merged = { ...entity.fields };
+  // Rebuilt from the wanted set only — a refresh IS the projection, so a
+  // stray stored key (a mapping edit this entity slept through, drift of any
+  // kind) converges out on the entity's next pass instead of persisting. A
+  // due key the provider still didn't answer keeps its old value — a flaky
+  // enrichment endpoint must not null out a live reading — unless there IS no
+  // old value, where `{v:null}` lands so a field the provider can't serve
+  // doesn't read "due" forever (the totality rule fieldDueAt relies on).
+  const merged = {};
   const moved = {};
-  for (const f of due) {
-    const nv = fetched.fields[f.key];
-    if (!nv) continue;
-    if (merged[f.key]?.v !== nv.v) moved[f.key] = nv;
-    merged[f.key] = nv; // always rewritten so `at` advances → refresh_at recomputes
+  for (const f of wanted) {
+    const cur = entity.fields?.[f.key];
+    if (!dueNow(f)) { merged[f.key] = cur; continue; }
+    const nv = fetched.fields[f.fn];
+    if (nv) {
+      if (cur?.v !== nv.v) moved[f.key] = nv;
+      merged[f.key] = nv; // always rewritten so `at` advances → refresh_at recomputes
+    } else {
+      merged[f.key] = cur ?? absentField(f, active.name, now);
+    }
   }
-  return { merged, moved, next: nextRefreshAt(merged, live, now), provider: active.name };
+  return { merged, moved, next: nextRefreshAt(merged, wanted, now), provider: active.name };
 }
 
 // --- faces (slice 5d) ---

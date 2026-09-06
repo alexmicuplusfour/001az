@@ -25,19 +25,24 @@ before(async () => {
 });
 after(() => srv.close());
 
-// ── pure: live-field selection + scheduling ──────────────────────────────────
+// ── pure: wanted-field selection + scheduling ────────────────────────────────
 
-test("liveFields selects live connector fields; nextRefreshAt = soonest due", () => {
+test("wantedFields selects connector fields; nextRefreshAt = soonest due, absent = now", () => {
   const mapping = { fields: [
     { key: "price", source: "connector", fn: "price", refresh: { every: 1 } },
     { key: "cap",   source: "connector", fn: "market_cap", refresh: { every: 60 } },
-    { key: "url",   source: "connector", fn: "url" },               // not live
+    { key: "url",   source: "connector", fn: "url" },               // static — wanted, no cadence
     { key: "note",  source: "extract", refresh: { every: 5 } },     // not connector → excluded
   ]};
-  const live = runtime.liveFields(mapping);
-  assert.deepEqual(live.map((f) => f.key), ["price", "cap"]);
-  const fields = { price: { at: 1000 }, cap: { at: 1000 } };
-  assert.equal(runtime.nextRefreshAt(fields, live, 0), 61000); // min(1000+60000, 1000+3.6e6)
+  const wanted = runtime.wantedFields(mapping);
+  assert.deepEqual(wanted.map((f) => f.key), ["price", "cap", "url"]);
+  assert.deepEqual(wanted.map((f) => f.every), [1, 60, undefined]);
+  // All present → only the live cadences contribute; the static url is done.
+  const fields = { price: { at: 1000 }, cap: { at: 1000 }, url: { v: "x" } };
+  assert.equal(runtime.nextRefreshAt(fields, wanted, 0), 61000); // min(1000+60000, 1000+3.6e6)
+  // An ABSENT wanted key (mapping grew after the entity landed) is due NOW —
+  // even a static one; that's the sweep's only path to a first fetch.
+  assert.equal(runtime.nextRefreshAt({ price: { at: 1000 }, cap: { at: 1000 } }, wanted, 500), 500);
   assert.equal(runtime.nextRefreshAt({}, [], 0), null);
 });
 

@@ -8,27 +8,46 @@
 // the first time one changed. This module is the single copy; runtime.js
 // re-exports it, so its importers (add.js, server.js, worker.js) are unchanged.
 
-// A mapping's live connector fields. The stored shape carries the cadence as
-// `refresh: { every }`; this is the ONE place it's decoded — consumers get
-// `every` flattened onto the field, so none of them learn the wire shape.
-export const liveFields = (mapping) =>
+// A mapping's connector fields — the set the board WANTS stored (the stored =
+// declared invariant, planning/field-projection-plan.md). The wire shape
+// carries the cadence as `refresh: { every }`; this is the ONE place it's
+// decoded — consumers get `every` flattened onto the field (undefined for a
+// static, fetch-once field), so none of them learn the wire shape.
+export const wantedFields = (mapping) =>
   (mapping?.fields || [])
-    .filter((f) => f.source === "connector" && f.refresh)
-    .map((f) => ({ ...f, every: f.refresh.every }));
+    .filter((f) => f.source === "connector")
+    .map((f) => ({ ...f, every: f.refresh?.every }));
 
-// Soonest time any live field comes due: min(field.at + every*60000), or null
-// when nothing is live. `fields` is the entity's stored field map; a field with
-// no `at` yet is treated as due now.
-export function nextRefreshAt(fields, live, now = Date.now()) {
+// When one wanted field needs work, given its stored value (`cur` —
+// `fields[f.key]`, possibly undefined). THE due rule, in one place — the
+// scheduler takes the min over it, runtime.refresh filters on it, and the two
+// reading different rules is how a field gets refreshed forever-or-never.
+// Three cases:
+//   absent key     → due NOW. It has never been fetched — the field-side
+//                    mirror of faceSchedule's `first`: a field added to the
+//                    mapping after the entity landed has no other path to a
+//                    first fetch. (Land-time projection is TOTAL — a provider
+//                    that can't answer still lands `{v:null}` — so presence
+//                    means "asked", and this term can't re-buy forever.)
+//   live key       → at + every (a value with no `at` yet counts from now).
+//   static, present → null; its work is done.
+export const fieldDueAt = (f, cur, now = Date.now()) =>
+  cur === undefined ? now
+  : f.every ? (cur.at ?? now) + f.every * 60000
+  : null;
+
+// Soonest time any wanted field needs work, or null when none does. `fields`
+// is the entity's stored field map.
+export function nextRefreshAt(fields, wanted, now = Date.now()) {
   let next = null;
-  for (const f of live) {
-    const due = (fields?.[f.key]?.at ?? now) + f.every * 60000;
-    if (next === null || due < next) next = due;
+  for (const f of wanted) {
+    const due = fieldDueAt(f, fields?.[f.key], now);
+    if (due !== null && (next === null || due < next)) next = due;
   }
   return next;
 }
 
-// How a mapping's face is scheduled, the face-side mirror of liveFields:
+// How a mapping's face is scheduled, the face-side mirror of wantedFields:
 //   { every }       — a connector face marked live: re-render on that cadence.
 //   { first: true } — a connector face that isn't live: render ONCE, then never.
 //   null            — no connector face (a file face / the tile): nothing to render.
@@ -48,7 +67,7 @@ export const faceSchedule = (mapping) => {
 // has no history()), where every retry is a guaranteed no-op.
 const FIRST_FACE_RETRY_MIN = 60;
 
-// An entity's next refresh time across BOTH its live fields and its face.
+// An entity's next refresh time across BOTH its wanted fields and its face.
 // `faceAt` is entities.face_at (null until the face is first rendered). This
 // runs right after a render attempt, so a still-null faceAt here means the
 // render was unavailable (e.g. the active provider has no history) — retry
@@ -58,7 +77,7 @@ const FIRST_FACE_RETRY_MIN = 60;
 // (First-render URGENCY is separate: rescheduleEntityRefreshes/boot reconcile
 // treat a null faceAt as due-now, so enabling a face still backfills at once.)
 export function entityRefreshAt(fields, faceAt, mapping, now = Date.now()) {
-  let next = nextRefreshAt(fields, liveFields(mapping), now);
+  let next = nextRefreshAt(fields, wantedFields(mapping), now);
   const sched = faceSchedule(mapping);
   if (sched) {
     // Rendered → one cadence out, or never for a one-shot face (its work is
@@ -71,10 +90,12 @@ export function entityRefreshAt(fields, faceAt, mapping, now = Date.now()) {
   return next;
 }
 
-// The next refresh for an entity that has just been ADDED: its live fields only
-// (a fresh entity's face is rendered by the face leg, not scheduled). null when
-// nothing is live — the common case for a chart-faced board with static fields.
+// The next refresh for an entity that has just been ADDED: its wanted fields
+// only (a fresh entity's face is rendered by the face leg, not scheduled).
+// Birth projection is total, so every wanted key exists and only live fields
+// contribute a term — null (off the sweep) stays the common case for a
+// chart-faced board with static fields.
 export const firstRefreshAt = (fields, mapping) => {
-  const live = liveFields(mapping);
-  return live.length ? nextRefreshAt(fields, live) : null;
+  const wanted = wantedFields(mapping);
+  return wanted.length ? nextRefreshAt(fields, wanted) : null;
 };
