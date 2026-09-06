@@ -324,7 +324,19 @@ arbitrary threshold dressed as science, which the plan's rule 1 forbids.
 
 So: **a fixed default k (8 measures well) plus a granularity control**, and
 let the DATA decide how many clusters are *shown* rather than how many are
-computed. Two floors, both applied after clustering:
+computed. (The control SHIPPED 2026-09-06: "more"/"fewer" chips at the tail
+of the clusters row step a per-viewer LEVEL — K = 8 + 4·(level−1), capped at
+level 5 / K 24 since the floors bound what can ever be shown anyway. The
+level rides the same boardClusters storage the toggle uses ("1" is exactly
+what the boolean era stored), a step re-carves the whole row and clears the
+lens's own selection like toggle-off does, and a step recomputes even
+mid-churn — the stale-serve gate holds only within a level. Prompted by the
+real board doubling to 1,115 items: 8 centers re-formed around the bigger
+population and a liked niche cluster lost its seat. Deliberately NOT gated
+on a saturation heuristic — an all-centers-earned check misses boards whose
+unclassified bucket would resolve at higher K; the viewer sees whether a
+step found structure, and overshoot is one "fewer" away.) Two floors, both
+applied after clustering:
 
 - support: a group under ~3% of the board is not a cluster;
 - signature: a group whose best majority-held chip is under ~×1.5 has nothing
@@ -450,8 +462,10 @@ caveat any 1a reading should carry.
 - Whether the patterns door (Stage 2) and the diagnostics door merge into one
   "board intelligence" door once both exist.
 - Stage 3's default k (8 measures well on three boards, but all three are
-  ≥7 facets) and the shape of the granularity control — a "fewer/more" pair
-  beside the toggle, or a number in the pop.
+  ≥7 facets). ~~The shape of the granularity control~~ — resolved 2026-09-06:
+  "more"/"fewer" chips in the row itself (see Stage 3).
+- "Keep this cluster": a liked cluster is still ephemeral at every level —
+  only the harden-into-a-saved-filter action (above) would let one be kept.
 - Whether the cluster chip should carry the medoid's THUMBNAIL on image
   boards. `[ wordmark · linear-horizontal ]` is legible, but a picture would
   be better, and the board already renders that face. Needs `pill()` to take

@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 
 const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
-const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters } =
+const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters, stepClusters, LEVEL_MAX } =
   await import("../public/patterns.js");
 
 const item = (id, tags, status = "tagged") => toItem({ id, name: `${id}.webp`, status, tags });
@@ -133,15 +133,83 @@ test("clusters: toggling off clears the lens's own selection", () => {
 
   toggleClusters(true);
   assert.equal(store.get("boardClusters:b1"), "1");
-  state.showClusters = false;
+  state.showClusters = 0;
   restoreClusters();
-  assert.equal(state.showClusters, true);
+  assert.equal(state.showClusters, 1);
 
   state.boardId = "b2";
   restoreClusters();
-  assert.equal(state.showClusters, false);
+  assert.equal(state.showClusters, 0);
   state.boardId = "b1";
   state.showClusters = false;
   saveClusters();
   assert.equal(store.has("boardClusters:b1"), false);
+});
+
+test("clusters: 'more' buys centers — a carving too coarse at level 1 resolves at level 2", () => {
+  // Ten blocks with nothing in common and only eight centers: the leftover
+  // blocks land somewhere they can't win a majority, so level 1 shows fewer
+  // than ten groups. Level 2 (K=12) has a center to spare for every block.
+  state.items = [];
+  for (let b = 0; b < 10; b++) {
+    for (let i = 0; i < 12; i++) {
+      state.items.push(item(b * 12 + i, [`f1/a${b}`, `f2/b${b}`, `f3/c${b}`]));
+    }
+  }
+  state.showClusters = 1;
+  refreshClusters();
+  const coarse = clusterValues().filter((v) => v.value !== "unclassified");
+  assert.ok(coarse.length <= 8, `at most k groups (got ${coarse.length})`);
+  assert.ok(coarse.length < 10, "ten blocks cannot all have their own group at K=8");
+
+  state.showClusters = 2;
+  refreshClusters();
+  const fine = clusterValues();
+  assert.equal(fine.length, 10, "every block earns its own group, none unclassified");
+  // same board, same level: still deterministic
+  state.items = [...state.items].reverse();
+  refreshClusters();
+  assert.equal(clusterValues().length, 10);
+});
+
+test("clusters: a level change recomputes even while the board churns", () => {
+  // The stale-serve gate holds WITHIN a level; a step is the viewer asking
+  // for a different carving right now.
+  state.showClusters = 1;
+  state.items = seedBlocks();
+  refreshClusters();
+  const before = clusterValues().length;
+  state.items.push(item(900, [], "processing"));
+  state.showClusters = 2;
+  refreshClusters();
+  assert.ok(clusterValues().length >= before, "recomputed at the new level, not served stale");
+});
+
+test("stepClusters: clamps to [1, LEVEL_MAX], clears only the lens's selection, persists the level", () => {
+  store.clear();
+  state.boardId = "b1";
+  state.items = seedBlocks();
+  state.showClusters = 1;
+  state.selected = new Map([["~clusters", new Set(["c0"])], ["color", new Set(["red"])]]);
+  stepClusters(1);
+  assert.equal(state.showClusters, 2);
+  assert.equal(state.selected.has("~clusters"), false, "old group names no longer name those groups");
+  assert.ok(state.selected.has("color"), "real facets untouched");
+  assert.equal(store.get("boardClusters:b1"), "2", "the level IS the stored lens value");
+
+  for (let i = 0; i < 10; i++) stepClusters(1);
+  assert.equal(state.showClusters, LEVEL_MAX, "clamped high");
+  for (let i = 0; i < 10; i++) stepClusters(-1);
+  assert.equal(state.showClusters, 1, "clamped low — stepping down never turns the lens off");
+
+  state.showClusters = 0;
+  stepClusters(1);
+  assert.equal(state.showClusters, 0, "no stepping while the lens is off");
+
+  // a stored level round-trips
+  state.showClusters = 3;
+  saveClusters();
+  state.showClusters = 0;
+  restoreClusters();
+  assert.equal(state.showClusters, 3);
 });

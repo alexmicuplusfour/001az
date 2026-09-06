@@ -151,11 +151,11 @@ test("odds persistence: sticks per board, absence restores to off", () => {
 
   state.showOdds = false;
   restoreOdds();
-  assert.equal(state.showOdds, true);
+  assert.equal(state.showOdds, 1); // lenses restore as numbers (patterns.js boardLens)
 
   state.boardId = "b2"; // nothing stored here
   restoreOdds();
-  assert.equal(state.showOdds, false);
+  assert.equal(state.showOdds, 0);
 
   state.boardId = "b1";
   state.showOdds = false;

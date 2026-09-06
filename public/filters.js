@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { tag, pill, appendCount, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
-import { chipOdds, clusterSet, clusterValues } from './patterns.js';
+import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters, LEVEL_MAX } from './patterns.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -447,7 +447,10 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   // majority chips) as the label — value and label differ, the uploader-row
   // pattern. The second loop is the escape hatch for a selection whose
   // cluster no longer exists (a URL from an older partition): a click-off
-  // chip, same as a gone uploader.
+  // chip, same as a gone uploader. The tail chips are the granularity knob
+  // (stepClusters): plain steps, offered whenever there's room to step —
+  // whether another carving finds more structure is the viewer's to see,
+  // and an overshoot is one "fewer" away.
   {
     const sel = state.selected.get("~clusters") || new Set();
     const values = clusterValues();
@@ -462,6 +465,16 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
       }
       for (const value of sel) {
         if (!shown.has(value)) pills.appendChild(chip("~clusters", value));
+      }
+      if (clusterLevel() > 1) {
+        const fewer = pill("fewer", null, false, false, () => stepClusters(-1));
+        fewer.title = "Carve the board into fewer groups";
+        pills.appendChild(fewer);
+      }
+      if (clusterLevel() < LEVEL_MAX && values.length) {
+        const more = pill("more", null, false, false, () => stepClusters(1));
+        more.title = "Carve the board into more groups";
+        pills.appendChild(more);
       }
     }
   }

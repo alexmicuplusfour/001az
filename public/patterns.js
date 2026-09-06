@@ -4,7 +4,8 @@
 // the odds say whether that number is a lot or a little FOR THIS CHIP, given
 // what's selected. The CLUSTERS lens (stage 3) — found groups of items that
 // keep answering alike, worn as a rail row. Same species: computed from the
-// tags in memory, nothing persisted but a per-viewer boolean each.
+// tags in memory, nothing persisted but a per-viewer number each (the odds
+// lens an on/off, the clusters lens its granularity level).
 
 import { state } from "./state.js";
 import { ACTIVE, QUEUED } from "./data.js";
@@ -71,25 +72,29 @@ export function chipOdds(stats, facetKey, t) {
 }
 
 // --- the lens trio: flip/persist/restore, per viewer per board -------------
-// Both lenses need the same three actions over the same shape (a boolean
-// under `prefix:<boardId>`), so the trio is written once — the clusters copy
-// was already the file's second and the app's fourth (sort.js, view.js;
-// sparkline.js records where a fourth copy of a block leads). Sort and view
-// keep their own blocks on purpose: they persist richer shapes (validated
-// JSON, an enum) behind the same key convention. Toggle callers pass the new
-// state (a checkbox's own `checked`) rather than asking it to derive one —
-// the view.js toggleView shape, so no caller assembles the steps itself.
+// Both lenses need the same three actions over the same shape (a small
+// number under `prefix:<boardId>`; 0 = off), so the trio is written once —
+// the clusters copy was already the file's second and the app's fourth
+// (sort.js, view.js; sparkline.js records where a fourth copy of a block
+// leads). Sort and view keep their own blocks on purpose: they persist
+// richer shapes (validated JSON, an enum) behind the same key convention.
+// A number rather than a boolean because a lens can have DEPTH: the odds
+// lens only ever stores 1, the clusters lens stores its granularity level
+// (stepClusters below) — and "1" is exactly what the boolean era stored, so
+// old keys restore unchanged. Toggle callers pass the new state (a
+// checkbox's own `checked`) rather than asking it to derive one — the
+// view.js toggleView shape, so no caller assembles the steps itself.
 function boardLens(prefix, field, onOff) {
   const key = () => `${prefix}:${state.boardId}`;
   const save = () => {
     try {
-      if (state[field]) localStorage.setItem(key(), "1");
+      if (state[field]) localStorage.setItem(key(), String(+state[field]));
       else localStorage.removeItem(key());
     } catch { /* private mode / quota — the lens just won't stick */ }
   };
   return {
     toggle(on) {
-      state[field] = on;
+      state[field] = +on;
       if (!on) onOff?.();
       save();
       document.dispatchEvent(new Event("app:render"));
@@ -97,9 +102,9 @@ function boardLens(prefix, field, onOff) {
     save,
     restore() {
       try {
-        state[field] = localStorage.getItem(key()) === "1";
+        state[field] = +localStorage.getItem(key()) || 0;
       } catch {
-        state[field] = false;
+        state[field] = 0;
       }
     },
   };
@@ -117,7 +122,15 @@ export const { toggle: toggleOdds, save: saveOdds, restore: restoreOdds } =
 // themselves and a retag moves items automatically; the only persisted state
 // is the toggle.
 
-const K = 8;             // fixed; a granularity control is the plan's open question
+// How many groups to carve. Auto-picking k was measured and rejected (see
+// computeClusters); instead the viewer holds the knob: the rail's "more" /
+// "fewer" chips step the LEVEL (stepClusters), and each level buys K_STEP
+// more centers. Capped, because the display floors mean a board can only
+// ever SHOW so many groups — past the cap the extra centers just mint
+// floor-failures.
+const K = 8;             // level 1
+const K_STEP = 4;
+export const LEVEL_MAX = 5; // K 8..24 (exported for the rail's "more" gate)
 export const MIN_TAGS = 3; // fewer and an item has too little signal to place or match — absent, not "unclassified"; also gates the Find-similar action (grid.js)
 const MIN_GROUP = 8;     // a group smaller than this (or under 3% of participants)
 const MIN_SHARE = 0.03;  //   is not a cluster on any board
@@ -134,14 +147,14 @@ const SIG_CHIPS = 3;
 // broken by the identity string. (Centroid sums still add in array order,
 // but a 1e-16 rounding difference flipping an argmax was never observed —
 // pattern-clusters.test.js pins reversed-input equality.)
-function computeClusters() {
+function computeClusters(level) {
   const participants = state.items.filter((i) => i.tags.length >= MIN_TAGS);
   const N = participants.length;
   if (N < MIN_GROUP * 2) return null;
   const chips = [...new Set(participants.flatMap((i) => i.tags))].sort();
   const D = chips.length;
   const idx = new Map(chips.map((c, i) => [c, i]));
-  const k = Math.min(K, N);
+  const k = Math.min(K + K_STEP * (level - 1), N);
 
   const vecs = new Float64Array(N * D);
   for (let i = 0; i < N; i++) {
@@ -272,18 +285,41 @@ function computeClusters() {
 // rather than re-clustering data that is still moving — settle, then compute
 // once (the facet-diagnosis posture). Board switches are full page
 // navigations, so nothing here needs clearing.
-let cache = null; // { refs: [tags arrays], result: { values, sets } | null }
+let cache = null; // { level, refs: [tags arrays], result: { values, sets } | null }
 
 export function refreshClusters() {
-  if (!state.showClusters) { cache = null; return; }
+  const level = clusterLevel();
+  if (!level) { cache = null; return; }
   const items = state.items;
-  if (cache && cache.refs.length === items.length && cache.refs.every((r, i) => r === items[i].tags)) return;
-  if (cache && items.some((i) => ACTIVE.has(i.status) || QUEUED.has(i.status))) return;
-  cache = { refs: items.map((i) => i.tags), result: computeClusters() };
+  // The stale-serve gates apply only within a level: a level change is the
+  // viewer asking for a different carving right now, so it recomputes even
+  // mid-churn.
+  if (cache && cache.level === level) {
+    if (cache.refs.length === items.length && cache.refs.every((r, i) => r === items[i].tags)) return;
+    if (items.some((i) => ACTIVE.has(i.status) || QUEUED.has(i.status))) return;
+  }
+  cache = { level, refs: items.map((i) => i.tags), result: computeClusters(level) };
 }
 
 export const clusterValues = () => cache?.result?.values || [];
 export const clusterSet = (img) => cache?.result?.sets.get(img.id);
+
+// The granularity knob, clamped: showClusters holds the level (0 = lens
+// off), and out-of-range stored values just pin to the nearest end.
+export const clusterLevel = () => Math.min(state.showClusters, LEVEL_MAX);
+
+// One step up or down the levels — the rail's "more"/"fewer" chips. A step
+// re-carves the WHOLE row (k-means with more centers isn't the old groups
+// plus new ones), so the lens's own selection clears like it does on
+// toggle-off: the old names no longer name those groups.
+export function stepClusters(delta) {
+  const next = Math.max(1, Math.min(LEVEL_MAX, clusterLevel() + delta));
+  if (!state.showClusters || next === state.showClusters) return;
+  state.showClusters = next;
+  state.selected.delete("~clusters");
+  saveClusters();
+  document.dispatchEvent(new Event("app:render"));
+}
 
 // Off also clears the lens's own selection: a left-behind ~clusters chip can
 // never match once the lens stops computing — it would silently filter the

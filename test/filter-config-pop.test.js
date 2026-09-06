@@ -81,7 +81,7 @@ test('the lens rows are toggles, and flipping one leaves the pop open', () => {
   assert.equal(toggles.length, 2, 'both lens rows wear the toggle costume');
   assert.equal(toggles[0].querySelector('.cb-input').getAttribute('role'), 'switch');
   toggles[0].querySelector('.cb-input').click();
-  assert.equal(state.showOdds, true, 'the flip landed');
+  assert.equal(state.showOdds, 1, 'the flip landed (lenses hold numbers — patterns.js boardLens)');
   assert.ok(document.querySelector('.filter-config-pop'), 'and the pop is still open');
   drop();
   state.showOdds = false;
