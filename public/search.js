@@ -53,6 +53,16 @@ export async function runSearch(q) {
 // that is no longer the one showing.
 const anchorLabel = (item) => item.symbol || item.displayLabel || item.identity;
 
+// The similar modes answer from the WHOLE board, so the standing views that
+// intersect the grid — favorites, a picked crate — clear when one takes
+// over: left up, they'd strangle the ranking to whatever tiny overlap
+// remains (often just the anchor). Facet pills stay on purpose — narrowing
+// a similarity by chips is composition, not contradiction.
+function leaveViews() {
+  state.showFavorites = false;
+  state.selectedCrateId = null;
+}
+
 export function runSimilar(item) {
   const results = similarTo(item);
   if (!results) return; // the action is gated on MIN_TAGS, so only a degenerate board lands here
@@ -62,6 +72,7 @@ export function runSimilar(item) {
   state.searchQuery = `similar:${item.identity}`; // feeds filterKey; never displayed
   state.searchResults = results;
   state.searchSimilarTo = anchorLabel(item);
+  leaveViews();
   document.dispatchEvent(new Event('app:render'));
 }
 
@@ -82,6 +93,7 @@ export async function runSimilarMeaning(item) {
     state.searchQuery = `similar-meaning:${item.id}`;
     state.searchResults = results;
     state.searchSimilarTo = anchorLabel(item);
+    leaveViews();
     document.dispatchEvent(new Event('app:render'));
   } catch (err) {
     if (token !== searchReq) return;
