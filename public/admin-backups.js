@@ -133,7 +133,7 @@ function paint({ backups, job, settings }) {
     if (!file) return;
     const fd = new FormData();
     fd.append("file", file);
-    toast(`Uploading ${file.name}…`);
+    const uploading = toast(`Uploading ${file.name}…`, { loading: true });
     try {
       const r = await fetch("/api/admin/backups/upload", { method: "POST", body: fd });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
@@ -141,6 +141,8 @@ function paint({ backups, job, settings }) {
       load();
     } catch (err) {
       toast.error(String(err.message || err));
+    } finally {
+      uploading?.remove();
     }
     e.target.value = "";
   };
