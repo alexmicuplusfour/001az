@@ -106,28 +106,28 @@ const FALLBACK_WHY = {
   "byte-cap": "too large to send",
 };
 const why = (f) => FALLBACK_WHY[f] || f;
-const imageNote = (img) => (img?.fallback ? `thumbnail fallback (${why(img.fallback)})` : "");
+const imageNote = (image) => (image?.fallback ? `thumbnail fallback (${why(image.fallback)})` : "");
 
 // The full render facts for the hover: "is this board getting the detail I set
 // it to" is answered by any one of its rows, and ms/waitMs are the measurement
 // the rendition cache (§8) is gated on — a cache hit would skip both the render
 // AND the queue, so the queue is reported when there was one.
-export const imageTitle = (img) => {
-  if (!img) return "";
+export const imageTitle = (image) => {
+  if (!image) return "";
   const bits = [];
   // The preset ASKED for, ahead of what was delivered. Not redundant with the
   // size: on a provider whose ceiling is 1568px a clamped `max` and a plain
   // `high` render byte-for-byte alike, so the outcome cannot name the setting
   // the board is on — which is the question "is this board using what I chose"
   // actually asks.
-  if (img.preset) bits.push(img.preset);
+  if (image.preset) bits.push(image.preset);
   bits.push(
-    img.source === "thumb"
-      ? `thumbnail${img.fallback ? ` (${why(img.fallback)})` : ""}`
-      : `${img.edge}px q${img.quality}`
+    image.source === "thumb"
+      ? `thumbnail${image.fallback ? ` (${why(image.fallback)})` : ""}`
+      : `${image.edge}px q${image.quality}`
   );
-  if (img.bytes != null) bits.push(`${Math.round(img.bytes / 1024)} KB`);
-  if (img.ms != null) bits.push(`${img.ms}ms${img.waitMs ? ` (${img.waitMs}ms queued)` : ""}`);
+  if (image.bytes != null) bits.push(`${Math.round(image.bytes / 1024)} KB`);
+  if (image.ms != null) bits.push(`${image.ms}ms${image.waitMs ? ` (${image.waitMs}ms queued)` : ""}`);
   return bits.join(" · ");
 };
 
@@ -274,7 +274,7 @@ function runningRow(j) {
 }
 
 // A client-side in-flight item (the pipeline legs — live via the delta poll).
-function liveItemRow(img) {
+function liveItemRow(item) {
   const row = document.createElement("div");
   row.className = "job-row job-running";
   const badge = document.createElement("span");
@@ -282,10 +282,10 @@ function liveItemRow(img) {
   badge.textContent = "Pipeline";
   const label = document.createElement("span");
   label.className = "job-label";
-  label.textContent = img.displayLabel || img.name;
+  label.textContent = item.displayLabel || item.name;
   const status = document.createElement("span");
-  status.className = "job-outcome " + (ACTIVE.has(img.status) ? "job-outcome-running" : "job-outcome-queued");
-  status.textContent = STATUS_LABELS[img.status] || img.status;
+  status.className = "job-outcome " + (ACTIVE.has(item.status) ? "job-outcome-running" : "job-outcome-queued");
+  status.textContent = STATUS_LABELS[item.status] || item.status;
   row.append(badge, label, status);
   return row;
 }
@@ -530,8 +530,8 @@ export function openJobsModal({ kind } = {}) {
     // line) rather than the next up — the rows that feed into tagging are the
     // ones on screen.
     const queued = inFlight.filter((i) => QUEUED.has(i.status)).reverse();
-    for (const img of active) liveList.appendChild(liveItemRow(img));
-    for (const img of queued.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(img));
+    for (const item of active) liveList.appendChild(liveItemRow(item));
+    for (const item of queued.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(item));
     if (queued.length > QUEUED_SHOWN) note(liveList, `…and ${queued.length - QUEUED_SHOWN} more queued`);
     if (!liveList.children.length) note(liveList, "Nothing in flight.");
     // The client can't see mid_pass, so "queued" here is an upper bound on what

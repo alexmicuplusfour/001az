@@ -36,12 +36,12 @@ let rowCache = new Map(); // entity id -> { el, sig }
 // state (a facet toggle that moves the dim pattern repaints the row), and
 // which instance is the face. Per-instance tags ride in (not just the union)
 // so a tile tag edit that doesn't move the union still repaints its row.
-function rowSig(img) {
-  const face = selectFace(img.instances, state.boardMapping?.face);
-  const insts = img.instances
+function rowSig(item) {
+  const face = selectFace(item.instances, state.boardMapping?.face);
+  const insts = item.instances
     .map((i) => `${i.id}:${i.status}:${i.undecided ? 1 : 0}:${instanceMatches(i) ? 1 : 0}:${i.tags.join("+")}`)
     .join("|");
-  return `${cardSig(img)}~${insts}~${face?.id ?? ""}`;
+  return `${cardSig(item)}~${insts}~${face?.id ?? ""}`;
 }
 
 // ── per-instance verbs (the lightbox's, relocated to the tile) ──────────────
@@ -54,7 +54,7 @@ function rowSig(img) {
 // lost, an optimistic status would never paint). The captured object is the
 // fallback (instance deleted in another tab): the request still fires and
 // the server's 404/409 surfaces as the toast.
-const liveInst = (img, inst) => img.instances.find((x) => x.id === inst.id) || inst;
+const liveInst = (item, inst) => item.instances.find((x) => x.id === inst.id) || inst;
 
 // The lightbox disables its buttons mid-flight; tile buttons are recreated on
 // every row rebuild, so the latch lives here instead. Without it a double
@@ -71,19 +71,19 @@ async function once(key, fn) {
   }
 }
 
-function doRetag(img, inst) {
+function doRetag(item, inst) {
   return once(`retag:${inst.id}`, () =>
-    requeueToast(`/api/instances/${liveInst(img, inst).id}/retag`, "Retag queued", "Retag failed"));
+    requeueToast(`/api/instances/${liveInst(item, inst).id}/retag`, "Retag queued", "Retag failed"));
 }
 
-function doReextract(img, inst) {
+function doReextract(item, inst) {
   // A 409 here (an instance older than the board's mapping) reaches the user
   // as the server's own sentence — requeueToast prefers it over the fallback.
   return once(`reextract:${inst.id}`, () =>
-    requeueToast(`/api/instances/${liveInst(img, inst).id}/reextract`, "Re-extraction queued", "Re-extract failed"));
+    requeueToast(`/api/instances/${liveInst(item, inst).id}/reextract`, "Re-extraction queued", "Re-extract failed"));
 }
 
-function doRemoveInstance(img, inst) {
+function doRemoveInstance(item, inst) {
   return once(`remove:${inst.id}`, async () => {
     try {
       const r = await fetch(`/api/instances/${inst.id}`, { method: "DELETE" });
@@ -97,10 +97,10 @@ function doRemoveInstance(img, inst) {
       }
       // The lightbox removal's follow-up, verbatim: drop the instance,
       // re-derive the union, re-pick the face per the board's config.
-      img.instances = img.instances.filter((x) => x.id !== inst.id);
-      refreshEntityTags(img);
-      const face = selectFace(img.instances, state.boardMapping?.face);
-      if (face) { img.name = face.name; img.w = face.w; img.h = face.h; img.kind = face.kind; img.label = face.label; }
+      item.instances = item.instances.filter((x) => x.id !== inst.id);
+      refreshEntityTags(item);
+      const face = selectFace(item.instances, state.boardMapping?.face);
+      if (face) { item.name = face.name; item.w = face.w; item.h = face.h; item.kind = face.kind; item.label = face.label; }
       document.dispatchEvent(new Event('app:render'));
       toast("File removed");
     } catch {
@@ -113,8 +113,8 @@ function doRemoveInstance(img, inst) {
 // story), with Edit/Retag in the footer. Click-open, unlike the card's
 // hover pop — tiles are small and their overlay buttons sit millimetres away.
 // pop-open pins the hover chrome while the pop is up (the card's pattern).
-function openInstTagPop(chip, img, inst) {
-  inst = liveInst(img, inst); // freshest tags for the list about to render
+function openInstTagPop(chip, item, inst) {
+  inst = liveInst(item, inst); // freshest tags for the list about to render
   const pin = pinWhileOpen(chip, { sel: ".inst-tile", teardown: teardownTileHover });
   const ctx = openDropdown(chip, {
     className: "tag-pop",
@@ -147,7 +147,7 @@ function openInstTagPop(chip, img, inst) {
             close();
             // Re-resolve at click, not pop-open — the pop can sit open across a
             // poll tick, and the editor's save mutates what it's handed.
-            openTagEditor(img, liveInst(img, inst));
+            openTagEditor(item, liveInst(item, inst));
           },
         }),
         ddAction({
@@ -156,7 +156,7 @@ function openInstTagPop(chip, img, inst) {
           onClick: (e) => {
             e.stopPropagation();
             close();
-            doRetag(img, inst);
+            doRetag(item, inst);
           },
         }),
       );
@@ -174,15 +174,15 @@ function teardownTileHover(tile) {
   tile.querySelector(".inst-actions")?.remove();
 }
 
-function mountTileChrome(tile, img, inst) {
-  inst = liveInst(img, inst); // the chip count reads tags at mount time
+function mountTileChrome(tile, item, inst) {
+  inst = liveInst(item, inst); // the chip count reads tags at mount time
   const tagChip = document.createElement("div");
   tagChip.className = "inst-tag-chip";
   tagChip.title = "Tags for this file";
   tagChip.innerHTML = ICONS.tag + `<span class="tc">${inst.tags.length}</span>`;
   tagChip.addEventListener("click", (e) => {
     e.stopPropagation();
-    openInstTagPop(tagChip, img, inst);
+    openInstTagPop(tagChip, item, inst);
   });
   tile.appendChild(tagChip);
 
@@ -190,14 +190,14 @@ function mountTileChrome(tile, img, inst) {
     const acts = document.createElement("div");
     acts.className = "inst-actions";
     if (mappingHasAiWork(state.boardMapping)) {
-      acts.appendChild(actionBtn("redo", "reextract", "Re-extract (re-derive identity + fields for this file)", () => doReextract(img, inst)));
+      acts.appendChild(actionBtn("redo", "reextract", "Re-extract (re-derive identity + fields for this file)", () => doReextract(item, inst)));
     }
-    acts.appendChild(actionBtn("trash", "delete", "Remove this file from the entity", () => doRemoveInstance(img, inst)));
+    acts.appendChild(actionBtn("trash", "delete", "Remove this file from the entity", () => doRemoveInstance(item, inst)));
     tile.appendChild(acts);
   }
 }
 
-function tileFor(img, inst, faceId) {
+function tileFor(item, inst, faceId) {
   const tile = document.createElement("div");
   tile.className = "inst-tile";
   tile.dataset.instId = inst.id;
@@ -208,12 +208,12 @@ function tileFor(img, inst, faceId) {
     // aspect-ratio makes the tile's width resolve BEFORE the lazy image
     // loads: no strip reflow as thumbs land, and scrollFlaggedStrips (one
     // frame after insert) measures real offsets, not collapsed ones.
-    const im = document.createElement("img");
-    im.loading = "lazy";
-    im.style.aspectRatio = `${inst.w} / ${inst.h}`;
-    im.src = thumbUrl(inst.name);
-    im.alt = inst.label || inst.name;
-    tile.appendChild(im);
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.style.aspectRatio = `${inst.w} / ${inst.h}`;
+    img.src = thumbUrl(inst.name);
+    img.alt = inst.label || inst.name;
+    tile.appendChild(img);
   } else {
     const badge = document.createElement("div");
     badge.className = "inst-badge";
@@ -237,15 +237,15 @@ function tileFor(img, inst, faceId) {
     // exactly like a card click (the tile chrome is CSS-hidden in bulk mode).
     if (state.bulkSelected.size) {
       const card = tile.closest(".entity-row")?.querySelector(".card");
-      if (card) toggleBulkSelect(img, card);
+      if (card) toggleBulkSelect(item, card);
       return;
     }
-    openLightboxAt(img, inst.id);
+    openLightboxAt(item, inst.id);
   });
 
   tile.addEventListener("pointerenter", () => {
     if (state.bulkSelected.size) return;
-    if (!tile.querySelector(".inst-tag-chip")) mountTileChrome(tile, img, inst);
+    if (!tile.querySelector(".inst-tag-chip")) mountTileChrome(tile, item, inst);
   });
   tile.addEventListener("pointerleave", () => {
     if (tile.classList.contains("pop-open")) return;
@@ -254,16 +254,16 @@ function tileFor(img, inst, faceId) {
   return tile;
 }
 
-function rowFor(img) {
+function rowFor(item) {
   const row = document.createElement("div");
   row.className = "entity-row";
-  row.dataset.eid = img.id;
-  row.appendChild(cardFor(img));
-  if (img.instances.length > 1) {
+  row.dataset.eid = item.id;
+  row.appendChild(cardFor(item));
+  if (item.instances.length > 1) {
     const strip = document.createElement("div");
     strip.className = "inst-strip";
-    const faceId = selectFace(img.instances, state.boardMapping?.face)?.id ?? null;
-    for (const inst of img.instances) strip.appendChild(tileFor(img, inst, faceId));
+    const faceId = selectFace(item.instances, state.boardMapping?.face)?.id ?? null;
+    for (const inst of item.instances) strip.appendChild(tileFor(item, inst, faceId));
     // A mixed strip (some tiles match the filter, some dimmed) gets flagged
     // to scroll its first match into view once it's in the DOM — the reason
     // the row surfaced shouldn't be off-screen right. Fresh and filter-
@@ -299,12 +299,12 @@ function scrollFlaggedStrips() {
   });
 }
 
-function rowEl(img, keyChanged = false) {
-  const sig = rowSig(img);
-  const hit = rowCache.get(img.id);
+function rowEl(item, keyChanged = false) {
+  const sig = rowSig(item);
+  const hit = rowCache.get(item.id);
   if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
   if (hit) releaseCard(hit.el.querySelector(".card"));
-  const el = rowFor(img);
+  const el = rowFor(item);
   // A same-key rebuild is data churn (status poll, tag save, a heart on the
   // card), not a new presentation: the strip inherits its predecessor's
   // scroll position instead of snapping to 0, and never re-yanks to the
@@ -323,7 +323,7 @@ function rowEl(img, keyChanged = false) {
       if (prev) el.dataset.scrollKeep = prev;
     }
   }
-  rowCache.set(img.id, { el, sig });
+  rowCache.set(item.id, { el, sig });
   return el;
 }
 
@@ -364,7 +364,7 @@ export function renderRows(key, progressItems, items) {
     return;
   }
 
-  for (const img of items.slice(0, renderLimit)) children.push(rowEl(img, keyChanged));
+  for (const item of items.slice(0, renderLimit)) children.push(rowEl(item, keyChanged));
 
   const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
   for (const [id, { el }] of rowCache) {
@@ -385,10 +385,10 @@ export function renderRows(key, progressItems, items) {
 function appendMoreRows() {
   const items = taggedFiltered();
   let appended = 0;
-  for (const img of items) {
+  for (const item of items) {
     if (appended >= RENDER_BATCH) break;
-    if (rowCache.has(img.id)) continue;
-    elGrid.appendChild(rowEl(img));
+    if (rowCache.has(item.id)) continue;
+    elGrid.appendChild(rowEl(item));
     appended++;
   }
   if (!appended) return;

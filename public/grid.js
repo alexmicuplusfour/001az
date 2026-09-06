@@ -44,8 +44,8 @@ const stageObserver = new IntersectionObserver((entries) => {
 // name + instance count: a merge/split can swap the face file or change the
 // stack badge without touching anything else. Exported for rows.js, whose
 // row signature embeds it (a row re-renders when its card would).
-export function cardSig(img) {
-  return `${img.status}|${img.undecided}|${img.hearts}|${img.favoritedByMe}|${img.w}|${img.name}|${img.instances?.length || 0}|${img.displayLabel}|${img.tags.join(",")}`;
+export function cardSig(item) {
+  return `${item.status}|${item.undecided}|${item.hearts}|${item.favoritedByMe}|${item.w}|${item.name}|${item.instances?.length || 0}|${item.displayLabel}|${item.tags.join(",")}`;
 }
 
 // Drop a card element rows.js (or any cache owner) is done with — the stage
@@ -66,15 +66,15 @@ export function dropAllCards() {
   lastFilterKey = "";
 }
 
-function cardEl(img) {
-  const sig = cardSig(img);
-  const hit = cardCache.get(img.id);
+function cardEl(item) {
+  const sig = cardSig(item);
+  const hit = cardCache.get(item.id);
   // isConnected: a card that removed itself (broken image) must not be
   // resurrected from the cache — recreate so the error path runs again.
   if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
   if (hit) stageObserver.unobserve(hit.el);
-  const el = cardFor(img);
-  cardCache.set(img.id, { el, sig });
+  const el = cardFor(item);
+  cardCache.set(item.id, { el, sig });
   return el;
 }
 
@@ -149,9 +149,9 @@ async function doDelete(id) {
 // plan's close look is explicit that a server-shipped can[] waits until those
 // mirrors multiply. A wrong guess fails soft — requeueToast shows the route's
 // own 409 sentence.
-function verbsFor(img) {
-  const insts = img.instances || [];
-  const u = (verb) => `/api/items/${img.id}/${verb}`;
+function verbsFor(item) {
+  const insts = item.instances || [];
+  const u = (verb) => `/api/items/${item.id}/${verb}`;
   const out = [];
   if (state.facets.length) {
     out.push({ label: "Retag", icon: ICONS.tag, url: u("retag"), ok: "Retag queued", fail: "Retag failed" });
@@ -172,14 +172,14 @@ function verbsFor(img) {
 }
 
 // The split button's caret: the granular slices of reprocess.
-function openVerbsPop(anchor, img) {
+function openVerbsPop(anchor, item) {
   const pin = pinWhileOpen(anchor);
   const ctx = openDropdown(anchor, {
     align: "end",
     minWidth: 210,
     onClose: pin.release,
     build: (body, { close }) => {
-      for (const v of verbsFor(img)) {
+      for (const v of verbsFor(item)) {
         const icon = document.createElement("span");
         icon.className = "dd-icon";
         icon.innerHTML = v.icon;
@@ -201,7 +201,7 @@ function openVerbsPop(anchor, img) {
   pin.hold(ctx);
 }
 
-function cardActions(img) {
+function cardActions(item) {
   const actions = document.createElement("div");
   actions.className = "card-actions";
   // Reprocess is a split control: main click = the whole shebang, the caret
@@ -209,36 +209,36 @@ function cardActions(img) {
   const split = document.createElement("div");
   split.className = "split-btn";
   split.appendChild(actionBtn("redo", "reprocess", "Reprocess — redo everything for this item",
-    () => requeueToast(`/api/items/${img.id}/reprocess`, "Reprocessing…", "Reprocess failed")));
+    () => requeueToast(`/api/items/${item.id}/reprocess`, "Reprocessing…", "Reprocess failed")));
   // No caret when the menu would be empty (no facets, no AI mapping, no
   // connector, no audio) — the same honesty the entries themselves get.
   // `.dd-caret` on the button, the spelling the toolbar's split arrow uses.
-  if (verbsFor(img).length) {
+  if (verbsFor(item).length) {
     const caret = actionBtn("chevron", "split-arrow dd-caret", "More processing actions",
-      () => openVerbsPop(caret, img));
+      () => openVerbsPop(caret, item));
     split.appendChild(caret);
   }
   actions.appendChild(split);
-  actions.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(img.id)));
+  actions.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(item.id)));
   const cb = document.createElement("button");
   cb.className = "act crate";
   cb.title = "Add to crate";
   cb.innerHTML = ICONS.crate;
-  cb.addEventListener("click", (e) => { e.stopPropagation(); openCratePop(cb, img); });
+  cb.addEventListener("click", (e) => { e.stopPropagation(); openCratePop(cb, item); });
   actions.appendChild(cb);
   return actions;
 }
 
-function heartControl(img) {
+function heartControl(item) {
   const wrap = document.createElement("div");
-  wrap.className = "heart" + (img.favoritedByMe ? " on" : "") + (img.hearts > 0 ? " has" : "");
+  wrap.className = "heart" + (item.favoritedByMe ? " on" : "") + (item.hearts > 0 ? " has" : "");
   wrap.title = "Favorite";
   const icon = document.createElement("span");
   icon.className = "hi";
   icon.innerHTML = ICONS.heart;
   const count = document.createElement("span");
   count.className = "hc";
-  count.textContent = img.hearts || "";
+  count.textContent = item.hearts || "";
   wrap.append(icon, count);
 
   const pop = document.createElement("div");
@@ -247,10 +247,10 @@ function heartControl(img) {
 
   let loaded = false;
   wrap.addEventListener("mouseenter", async () => {
-    if (loaded || !img.hearts) { if (!img.hearts) pop.textContent = "no hearts yet"; return; }
+    if (loaded || !item.hearts) { if (!item.hearts) pop.textContent = "no hearts yet"; return; }
     loaded = true;
     try {
-      const { names } = await fetch(`/api/items/${img.id}/hearts`).then((r) => r.json());
+      const { names } = await fetch(`/api/items/${item.id}/hearts`).then((r) => r.json());
       pop.textContent = names && names.length ? names.join(", ") : "no hearts yet";
     } catch { loaded = false; }
   });
@@ -258,12 +258,12 @@ function heartControl(img) {
   wrap.addEventListener("click", async (e) => {
     e.stopPropagation();
     try {
-      const r = await fetch(`/api/items/${img.id}/favorite`, { method: "POST" });
+      const r = await fetch(`/api/items/${item.id}/favorite`, { method: "POST" });
       // Session gone (expired, or revoked by a password change elsewhere).
       if (r.status === 401) return location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
 const { favorited, count: n } = await r.json();
-      img.favoritedByMe = favorited;
-      img.hearts = n;
+      item.favoritedByMe = favorited;
+      item.hearts = n;
       wrap.classList.toggle("on", favorited);
       wrap.classList.toggle("has", n > 0);
       count.textContent = n || "";
@@ -277,7 +277,7 @@ const { favorited, count: n } = await r.json();
   return wrap;
 }
 
-function openTagPop(chip, img) {
+function openTagPop(chip, item) {
   const pin = pinWhileOpen(chip);
   // The footer's actions gate one by one — they want different things.
   // Editing needs a logged-in user and a taxonomy; Find similar (the 1b
@@ -286,7 +286,7 @@ function openTagPop(chip, img) {
   // board's embeddings (no tag floor — a barely-tagged item with a rich
   // description is exactly where it shines).
   const canEdit = state.me && state.facets.length;
-  const canSimilar = img.tags.length >= MIN_TAGS;
+  const canSimilar = item.tags.length >= MIN_TAGS;
   const canMeaning = state.searchAvailable;
   const ctx = openDropdown(chip, {
     className: "tag-pop",
@@ -296,12 +296,12 @@ function openTagPop(chip, img) {
     maxWidth: 250,
     maxItems: 0, // tags wrap freely; only the viewport caps the height
     build: (body) => {
-      if (img.tags.length) {
+      if (item.tags.length) {
         // The union across a multi-instance entity is a distribution — each
         // tag carries how many instances hold it. Single-instance entities
         // (every raw board) render without counts, exactly as before.
-        const counts = img.instances.length > 1 ? instanceTagCounts(img) : null;
-        for (const t of img.tags) {
+        const counts = item.instances.length > 1 ? instanceTagCounts(item) : null;
+        for (const t of item.tags) {
           const s = document.createElement("span");
           s.className = "tp";
           s.textContent = t;
@@ -327,16 +327,16 @@ function openTagPop(chip, img) {
         label, icon,
         onClick: (e) => { e.stopPropagation(); close(); fn(); },
       }));
-      if (canEdit) act("Edit tags", ICONS.pencil, () => openTagEditor(img));
-      if (canSimilar) act("Find similar", ICONS.search, () => runSimilar(img));
-      if (canMeaning) act("Find similar by meaning", ICONS.sparkle, () => runSimilarMeaning(img));
+      if (canEdit) act("Edit tags", ICONS.pencil, () => openTagEditor(item));
+      if (canSimilar) act("Find similar", ICONS.search, () => runSimilar(item));
+      if (canMeaning) act("Find similar by meaning", ICONS.sparkle, () => runSimilarMeaning(item));
     } : undefined,
     onClose: pin.release,
   });
   pin.hold(ctx);
 }
 
-function tagChip(img) {
+function tagChip(item) {
   const chip = document.createElement("div");
   chip.className = "tag-chip";
   chip.addEventListener("click", (e) => e.stopPropagation());
@@ -345,9 +345,9 @@ function tagChip(img) {
   icon.innerHTML = ICONS.tag;
   const count = document.createElement("span");
   count.className = "tc";
-  count.textContent = img.tags.length;
+  count.textContent = item.tags.length;
   chip.append(icon, count);
-  chip.addEventListener("pointerenter", () => openTagPop(chip, img));
+  chip.addEventListener("pointerenter", () => openTagPop(chip, item));
   return chip;
 }
 
@@ -432,14 +432,14 @@ export function teardownCardHover(card) {
   if (heart && !heart.classList.contains("on") && !heart.classList.contains("has")) heart.remove();
 }
 
-export function scrollToCard(img) {
-  if (!img) return;
-  let card = elGrid.querySelector(`[data-id="${img.id}"]`);
+export function scrollToCard(item) {
+  if (!item) return;
+  let card = elGrid.querySelector(`[data-id="${item.id}"]`);
   // The backfill below builds masonry cards — grid-mode machinery. In rows
   // mode an off-screen row (past the render limit) is just not scrolled to.
   if (!card && effectiveView() !== "rows") {
     const items = taggedFiltered();
-    const targetIdx = items.indexOf(img);
+    const targetIdx = items.indexOf(item);
     if (targetIdx < 0) return;
     for (let i = 0; i <= targetIdx; i++) {
       if (cardCache.has(items[i].id)) continue;
@@ -448,7 +448,7 @@ export function scrollToCard(img) {
     renderLimit = Math.max(renderLimit, targetIdx + 1);
     layoutGrid();
     pokeSentinel();
-    card = elGrid.querySelector(`[data-id="${img.id}"]`);
+    card = elGrid.querySelector(`[data-id="${item.id}"]`);
   }
   if (card) card.scrollIntoView({ behavior: "instant", block: "center" });
 }
@@ -462,33 +462,33 @@ function faceOverlay(card) {
 // an instance strip beside it. rows.js keeps its own element cache; cards
 // created here are masonry-positioned only by layoutGrid, which rows mode
 // never runs, so the same builder serves both layouts.
-export function cardFor(img) {
+export function cardFor(item) {
   const card = document.createElement("div");
   card.className = "card";
-  card.dataset.id = img.id;
+  card.dataset.id = item.id;
   // Lets layoutGrid compute the height (cardW / ratio) instead of measuring.
   // Only valid while the body is a pinned-ratio image and no card state adds
   // layout height (selected/undecided use outline + inner padding, which
   // don't). Bodies with content-dependent height (doc faces and identity-titled
   // images carry a title strip) must leave this unset — they take the measured lane.
-  if (img.w && img.h && img.kind === "image" && !hasIdentity(img)) card.dataset.ratio = img.w / img.h;
+  if (item.w && item.h && item.kind === "image" && !hasIdentity(item)) card.dataset.ratio = item.w / item.h;
   // Anything in the grid without tags needs human attention — AI-undecided,
   // held (waiting for auto-tagging), failed, or hand-cleared — but only on a
   // board with a taxonomy; a board with no facets can't be tagged at all, so
   // the dotted "needs tags" treatment there would be a permanent false alarm.
-  if (needsTags(img)) card.classList.add("undecided");
+  if (needsTags(item)) card.classList.add("undecided");
   // The file kind owns the face (the media); grid owns the frame + chrome.
   // (The instance-count chip rides inside the face's title strip — kinds.js.)
-  card.appendChild(kindFor(img).face(img, card, scheduleLayout));
-  if (ACTIVE.has(img.status) || QUEUED.has(img.status)) {
+  card.appendChild(kindFor(item).face(item, card, scheduleLayout));
+  if (ACTIVE.has(item.status) || QUEUED.has(item.status)) {
     card.classList.add("loading");
     const sp = document.createElement("div");
     sp.className = "spinner";
     card.appendChild(sp);
   }
   card.addEventListener("click", () => {
-    if (state.bulkSelected.size) { toggleBulkSelect(img, card); return; }
-    kindFor(img).openDetail(img);
+    if (state.bulkSelected.size) { toggleBulkSelect(item, card); return; }
+    kindFor(item).openDetail(item);
   });
 
   if (state.me) {
@@ -496,19 +496,19 @@ export function cardFor(img) {
     cb.className = "sel-cb";
     cb.title = "Select";
     cb.innerHTML = ICONS.check;
-    cb.setAttribute("aria-pressed", String(state.bulkSelected.has(img.id)));
-    cb.addEventListener("click", (e) => { e.stopPropagation(); toggleBulkSelect(img, card); });
+    cb.setAttribute("aria-pressed", String(state.bulkSelected.has(item.id)));
+    cb.addEventListener("click", (e) => { e.stopPropagation(); toggleBulkSelect(item, card); });
     faceOverlay(card).appendChild(cb);
-    if (state.bulkSelected.has(img.id)) card.classList.add("selected");
+    if (state.bulkSelected.has(item.id)) card.classList.add("selected");
   }
 
-  if (state.me && (img.hearts > 0 || img.favoritedByMe)) faceOverlay(card).appendChild(heartControl(img));
+  if (state.me && (item.hearts > 0 || item.favoritedByMe)) faceOverlay(card).appendChild(heartControl(item));
 
   card.addEventListener("pointerenter", () => {
     if (state.bulkSelected.size) return;
-    if (state.me && !card.querySelector(".card-actions")) card.appendChild(cardActions(img));
-    if (!card.querySelector(".tag-chip")) card.appendChild(tagChip(img));
-    if (state.me && !card.querySelector(".heart")) faceOverlay(card).appendChild(heartControl(img));
+    if (state.me && !card.querySelector(".card-actions")) card.appendChild(cardActions(item));
+    if (!card.querySelector(".tag-chip")) card.appendChild(tagChip(item));
+    if (state.me && !card.querySelector(".heart")) faceOverlay(card).appendChild(heartControl(item));
   });
   card.addEventListener("pointerleave", () => {
     if (card.classList.contains("pop-open")) return;
@@ -557,7 +557,7 @@ export function renderGrid(key, progressItems, items) {
     return;
   }
 
-  for (const img of items.slice(0, renderLimit)) children.push(cardEl(img));
+  for (const item of items.slice(0, renderLimit)) children.push(cardEl(item));
 
   // Prune cards that fell out of view or were deleted.
   const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
@@ -586,10 +586,10 @@ function appendMoreCards() {
   if (effectiveView() === "rows") return;
   const items = taggedFiltered();
   let appended = 0;
-  for (const img of items) {
+  for (const item of items) {
     if (appended >= RENDER_BATCH) break;
-    if (cardCache.has(img.id)) continue;
-    elGrid.appendChild(cardEl(img));
+    if (cardCache.has(item.id)) continue;
+    elGrid.appendChild(cardEl(item));
     appended++;
   }
   if (!appended) return;

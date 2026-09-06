@@ -46,7 +46,7 @@ const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 function needsPoll() {
   return (
     state.uploading.length > 0 ||
-    state.items.some((img) => IN_FLIGHT.has(img.status))
+    state.items.some((item) => IN_FLIGHT.has(item.status))
   );
 }
 
@@ -56,7 +56,7 @@ function needsPoll() {
 function moving() {
   return (
     state.uploading.length > 0 ||
-    state.items.some((img) => ACTIVE.has(img.status))
+    state.items.some((item) => ACTIVE.has(item.status))
   );
 }
 
@@ -64,11 +64,11 @@ function moving() {
 // Ordered by aliveness — upload placeholders, then actively-worked items,
 // then the waiting queue — so the grid's budgeted lane shows real work first.
 export function inProgress() {
-  const mine = state.items.filter((img) => IN_FLIGHT.has(img.status) && !img.tags.length);
+  const mine = state.items.filter((item) => IN_FLIGHT.has(item.status) && !item.tags.length);
   return [
     ...state.uploading,
-    ...mine.filter((img) => ACTIVE.has(img.status)),
-    ...mine.filter((img) => QUEUED.has(img.status)),
+    ...mine.filter((item) => ACTIVE.has(item.status)),
+    ...mine.filter((item) => QUEUED.has(item.status)),
   ];
 }
 
@@ -82,11 +82,11 @@ export function inProgress() {
 // replaces put a fetching stock in the wrong bucket.
 export function applyRoutedEntities(entities = []) {
   for (const { id, status, instances = [] } of entities) {
-    const img = state.items.find((i) => i.id === id);
-    if (!img) continue;
-    img.status = status;
+    const item = state.items.find((i) => i.id === id);
+    if (!item) continue;
+    item.status = status;
     const byId = new Map(instances.map((i) => [i.id, i.status]));
-    for (const i of img.instances || []) i.status = byId.get(i.id) ?? i.status;
+    for (const i of item.instances || []) i.status = byId.get(i.id) ?? i.status;
   }
 }
 
@@ -214,14 +214,14 @@ export function reconcile(data, presentIds = null) {
   // optimistic insert raced ahead of, and one grace tick lets that resolve so we
   // never yank a live upload's card and flicker it back.
   const absentInFlight = new Set();
-  for (const img of state.items) {
-    if (IN_FLIGHT.has(img.status) && !freshIds.has(img.id)) absentInFlight.add(img.id);
+  for (const item of state.items) {
+    if (IN_FLIGHT.has(item.status) && !freshIds.has(item.id)) absentInFlight.add(item.id);
   }
   const drop = new Set();
   for (const id of absentInFlight) if (trackedGone.has(id) || ghostSeen.has(id)) drop.add(id);
   ghostSeen = absentInFlight;
   if (drop.size > 0) {
-    state.items = state.items.filter((img) => !drop.has(img.id));
+    state.items = state.items.filter((item) => !drop.has(item.id));
     document.dispatchEvent(new Event('app:uploads-pending-changed'));
   }
   if (mergedCount > 0) {
@@ -235,8 +235,8 @@ export function reconcile(data, presentIds = null) {
   for (let i = pendingBatches.length - 1; i >= 0; i--) {
     const { ids, n } = pendingBatches[i];
     const allDone = [...ids].every((id) => {
-      const img = state.items.find((m) => m.id === id);
-      return img && (img.status === 'tagged' || img.status === 'failed' || img.status === 'held');
+      const item = state.items.find((m) => m.id === id);
+      return item && (item.status === 'tagged' || item.status === 'failed' || item.status === 'held');
     });
     if (allDone) {
       pendingBatches.splice(i, 1);

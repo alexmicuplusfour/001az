@@ -41,7 +41,7 @@ async function doDeleteCrate(crate, onClose) {
     const r = await fetch(`/api/crates/${crate.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
     state.crates = state.crates.filter((c) => c.id !== crate.id);
-    for (const im of state.items) im.crateIds.delete(crate.id);
+    for (const item of state.items) item.crateIds.delete(crate.id);
     if (state.selectedCrateId === crate.id) state.selectedCrateId = null;
     onClose();
     document.dispatchEvent(new Event('app:render'));
@@ -100,15 +100,15 @@ function crateTrailing(crate) {
   return wrap;
 }
 
-async function toggleCrateItemApi(img, crateId, checkbox) {
+async function toggleCrateItemApi(item, crateId, checkbox) {
   const prev = checkbox.checked;
   try {
-    const r = await fetch(`/api/crates/${crateId}/items/${img.id}`, { method: "POST" });
+    const r = await fetch(`/api/crates/${crateId}/items/${item.id}`, { method: "POST" });
     if (!r.ok) throw new Error();
     const { added, count } = await r.json();
     checkbox.checked = added;
-    if (added) img.crateIds.add(crateId);
-    else img.crateIds.delete(crateId);
+    if (added) item.crateIds.add(crateId);
+    else item.crateIds.delete(crateId);
     const crate = state.crates.find((c) => c.id === crateId);
     if (crate) crate.item_count = count;
     if (state.selectedCrateId === crateId && !added) {
@@ -126,7 +126,7 @@ async function toggleCrateItemApi(img, crateId, checkbox) {
   }
 }
 
-async function createCrateWithItem(name, img, anchorEl) {
+async function createCrateWithItem(name, item, anchorEl) {
   try {
     const r = await fetch("/api/crates", {
       method: "POST",
@@ -136,10 +136,10 @@ async function createCrateWithItem(name, img, anchorEl) {
     if (!r.ok) { toast.error("Couldn't create crate"); return; }
     const { crate } = await r.json();
     if (!state.crates.find((c) => c.id === crate.id)) state.crates.push(crate);
-    const r2 = await fetch(`/api/crates/${crate.id}/items/${img.id}`, { method: "POST" });
+    const r2 = await fetch(`/api/crates/${crate.id}/items/${item.id}`, { method: "POST" });
     if (r2.ok) {
       const { added, count } = await r2.json();
-      if (added) img.crateIds.add(crate.id);
+      if (added) item.crateIds.add(crate.id);
       const found = state.crates.find((c) => c.id === crate.id);
       if (found) found.item_count = count;
     }
@@ -149,28 +149,28 @@ async function createCrateWithItem(name, img, anchorEl) {
     document.dispatchEvent(new Event('app:render'));
     // Reopen so the new crate shows up as a row; keep the card's hover chrome.
     closeCratePop(true);
-    openCratePop(anchorEl, img);
+    openCratePop(anchorEl, item);
   } catch {
     toast.error("Couldn't create crate");
   }
 }
 
-export function openCratePop(anchorEl, img = null) {
+export function openCratePop(anchorEl, item = null) {
   const pin = pinWhileOpen(anchorEl);
-  const crates = img ? ownCrates() : state.crates;
+  const crates = item ? ownCrates() : state.crates;
 
   const ctx = openDropdown(anchorEl, {
     className: "crate-pop",
     minWidth: 190,
-    focus: img ? ".dd-input" : undefined,
+    focus: item ? ".dd-input" : undefined,
     build: (body) => {
       for (const crate of crates) {
-        if (img) {
+        if (item) {
           // Assign mode: checkboxes to add/remove the item from crates.
           const cb = createCheckbox({
             variant: "dark",
-            checked: img.crateIds.has(crate.id),
-            onChange: () => toggleCrateItemApi(img, crate.id, cb),
+            checked: item.crateIds.has(crate.id),
+            onChange: () => toggleCrateItemApi(item, crate.id, cb),
           });
           body.appendChild(ddRow({
             label: crate.name,
@@ -178,7 +178,7 @@ export function openCratePop(anchorEl, img = null) {
             trailing: crateTrailing(crate),
             onClick: () => {
               cb.checked = !cb.checked;
-              toggleCrateItemApi(img, crate.id, cb);
+              toggleCrateItemApi(item, crate.id, cb);
             },
           }));
         } else {
@@ -196,11 +196,11 @@ export function openCratePop(anchorEl, img = null) {
         }
       }
     },
-    footer: img ? (foot) => {
+    footer: item ? (foot) => {
       if (crates.length) foot.appendChild(ddSep());
       foot.appendChild(ddInput({
         placeholder: "New crate…",
-        onSubmit: (name) => createCrateWithItem(name, img, anchorEl),
+        onSubmit: (name) => createCrateWithItem(name, item, anchorEl),
       }));
     } : undefined,
     onClose: (reason) => {

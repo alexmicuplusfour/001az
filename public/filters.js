@@ -45,10 +45,10 @@ const SYSTEM_FACET_ENTRIES = Object.entries(SYSTEM_FACETS);
 
 // Does the entity carry `value` under facet `key`? Tag strings for regular
 // facets, the system facet's own set otherwise.
-function entityHasValue(img, key, value) {
+function entityHasValue(item, key, value) {
   const sys = SYSTEM_FACETS[key];
-  if (sys) { const set = sys.entity(img); return !!set && set.has(value); }
-  return img.tagSet.has(tag(key, value));
+  if (sys) { const set = sys.entity(item); return !!set && set.has(value); }
+  return item.tagSet.has(tag(key, value));
 }
 
 function instanceHasValue(inst, key, value) {
@@ -57,12 +57,12 @@ function instanceHasValue(inst, key, value) {
   return inst.tagSet.has(tag(key, value));
 }
 
-function matchesExcept(img, exceptKey) {
+function matchesExcept(item, exceptKey) {
   for (const [key, values] of state.selected) {
     if (key === exceptKey || values.size === 0) continue;
     let ok = false;
     for (const v of values) {
-      if (entityHasValue(img, key, v)) { ok = true; break; }
+      if (entityHasValue(item, key, v)) { ok = true; break; }
     }
     if (!ok) return false;
   }
@@ -95,13 +95,13 @@ export function instanceMatches(inst) {
 
 // "Done" as far as the grid is concerned — held items (waiting for the
 // board's auto-tagging to come back on) show up like any other untagged item.
-export function isTagged(img) {
-  if (img.tags.length > 0) return true;
-  return img.status === "tagged" || img.status === "failed" || img.status === "held" || !img.status;
+export function isTagged(item) {
+  if (item.tags.length > 0) return true;
+  return item.status === "tagged" || item.status === "failed" || item.status === "held" || !item.status;
 }
 
-export function isUntagged(img) {
-  return img.tags.length === 0;
+export function isUntagged(item) {
+  return item.tags.length === 0;
 }
 
 // Does this board tag its items at all? No taxonomy means nothing to tag
@@ -116,8 +116,8 @@ export function boardHasTaxonomy() {
 // board that actually tags. AI-undecided (looked, couldn't decide), held
 // (waiting for auto-tagging to resume), or plain untagged (failed / hand-cleared
 // / never run) all qualify — but only where there's a taxonomy to tag against.
-export function needsTags(img) {
-  return boardHasTaxonomy() && (img.undecided || img.status === "held" || isUntagged(img));
+export function needsTags(item) {
+  return boardHasTaxonomy() && (item.undecided || item.status === "held" || isUntagged(item));
 }
 
 // Status pills OR together (an item has exactly one status), the same way
@@ -128,20 +128,20 @@ function statusFilter() {
   if (state.showProcessing) sets.push(ACTIVE);
   if (state.showUnprocessed) sets.push(QUEUED);
   if (!sets.length) return isTagged;
-  return (img) => sets.some((s) => s.has(img.status));
+  return (item) => sets.some((s) => s.has(item.status));
 }
 
 export function taggedFiltered() {
   const statusOk = statusFilter();
   const list = state.items.filter(
-    (img) =>
-      statusOk(img) &&
-      (state.searchResults == null || state.searchResults.has(img.id)) &&
-      (!state.showUntagged || isUntagged(img)) &&
-      (!state.showFavorites || img.favoritedByMe) &&
-      (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId)) &&
-      (state.alertEvent == null || state.alertEvent.ids.has(img.id)) &&
-      matchesExcept(img, null)
+    (item) =>
+      statusOk(item) &&
+      (state.searchResults == null || state.searchResults.has(item.id)) &&
+      (!state.showUntagged || isUntagged(item)) &&
+      (!state.showFavorites || item.favoritedByMe) &&
+      (state.selectedCrateId == null || item.crateIds.has(state.selectedCrateId)) &&
+      (state.alertEvent == null || state.alertEvent.ids.has(item.id)) &&
+      matchesExcept(item, null)
   );
   // While a search is active its similarity order wins outright — the chosen
   // board sort resumes when the search clears. Otherwise the attribute sort
@@ -178,8 +178,8 @@ export function computeFacetStats() {
   // the shared `counts` map via the `~uploaders` system-facet projection.
   const uploaderTotals = new Map();
 
-  for (const img of state.items) {
-    for (const t of img.tags) {
+  for (const item of state.items) {
+    for (const t of item.tags) {
       totals.set(t, (totals.get(t) || 0) + 1);
       const slash = t.indexOf("/");
       if (slash > 0) facetsWithData.add(t.slice(0, slash));
@@ -187,14 +187,14 @@ export function computeFacetStats() {
     // System-facet memberships project into the same maps as tags
     // ("~objects/car"), so the chip totals/counts machinery is shared verbatim.
     for (const [sk, sys] of SYSTEM_FACET_ENTRIES) {
-      for (const v of sys.entity(img) || []) {
+      for (const v of sys.entity(item) || []) {
         const t = tag(sk, v);
         totals.set(t, (totals.get(t) || 0) + 1);
       }
     }
 
-    if (img.uploadedBy) {
-      uploaderTotals.set(img.uploadedBy.id, (uploaderTotals.get(img.uploadedBy.id) || 0) + 1);
+    if (item.uploadedBy) {
+      uploaderTotals.set(item.uploadedBy.id, (uploaderTotals.get(item.uploadedBy.id) || 0) + 1);
     }
 
     // How many active facets does this item fail? It counts toward a
@@ -205,23 +205,23 @@ export function computeFacetStats() {
     for (const [key, values] of activeSel) {
       let ok = false;
       for (const v of values) {
-        if (entityHasValue(img, key, v)) { ok = true; break; }
+        if (entityHasValue(item, key, v)) { ok = true; break; }
       }
       if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
 
     // An uploader selection rides `fails` like any facet (the `~uploaders`
     // system key sits in activeSel), so no separate uploader gate.
-    const inContext = fails === 0 && (!state.showFavorites || img.favoritedByMe) && (state.selectedCrateId == null || img.crateIds.has(state.selectedCrateId));
+    const inContext = fails === 0 && (!state.showFavorites || item.favoritedByMe) && (state.selectedCrateId == null || item.crateIds.has(state.selectedCrateId));
 
-    if (isTagged(img) && isUntagged(img)) {
+    if (isTagged(item) && isUntagged(item)) {
       totalUntagged++;
       if (inContext) untaggedInContext++;
     }
-    if (ACTIVE.has(img.status)) {
+    if (ACTIVE.has(item.status)) {
       totalActive++;
       if (inContext) activeInContext++;
-    } else if (QUEUED.has(img.status)) {
+    } else if (QUEUED.has(item.status)) {
       totalQueued++;
       if (inContext) queuedInContext++;
     }
@@ -231,7 +231,7 @@ export function computeFacetStats() {
     // count in — everything's, or only the one facet it fails.
     if (fails) ctxFail.set(failKey, (ctxFail.get(failKey) || 0) + 1);
     else ctxAll++;
-    for (const t of img.tags) {
+    for (const t of item.tags) {
       const slash = t.indexOf("/");
       if (slash <= 0) continue;
       if (fails === 1 && t.slice(0, slash) !== failKey) continue;
@@ -239,7 +239,7 @@ export function computeFacetStats() {
     }
     for (const [sk, sys] of SYSTEM_FACET_ENTRIES) {
       if (fails === 1 && sk !== failKey) continue;
-      for (const v of sys.entity(img) || []) {
+      for (const v of sys.entity(item) || []) {
         const t = tag(sk, v);
         counts.set(t, (counts.get(t) || 0) + 1);
       }
@@ -266,7 +266,7 @@ export function activeCount() {
 // Favorites in the current filter context — reuses taggedFiltered so the
 // count stays in sync with facet chips, search, crate, and untagged filters.
 export function favoritesInContext() {
-  return taggedFiltered().filter((img) => img.favoritedByMe).length;
+  return taggedFiltered().filter((item) => item.favoritedByMe).length;
 }
 
 export function toggle(facetKey, value) {
@@ -509,7 +509,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
         const key = String(uid);
         if (total === 0 && !sel.has(key)) continue;
         shown.add(key);
-        const uploader = state.items.find((img) => img.uploadedBy?.id === uid)?.uploadedBy;
+        const uploader = state.items.find((item) => item.uploadedBy?.id === uid)?.uploadedBy;
         pills.appendChild(chip("~uploaders", key, uploader ? (uploader.name || uploader.email) : key));
       }
       // Selected but gone from the board — chip() lands the same pill by

@@ -50,16 +50,16 @@ export async function runSearch(q) {
 // search box itself is hidden), and it leaves searchDraft alone — the
 // input stays the user's; the toolbar's mode chip announces this mode and
 // its × lands back in clearSearch.
-const anchorLabel = (img) => img.symbol || img.displayLabel || img.identity;
+const anchorLabel = (item) => item.symbol || item.displayLabel || item.identity;
 
-export function runSimilar(img) {
-  const results = similarTo(img);
+export function runSimilar(item) {
+  const results = similarTo(item);
   if (!results) return; // the action is gated on MIN_TAGS, so only a degenerate board lands here
   searchReq++; // supersedes any in-flight typed search
   state.searchLoading = false;
-  state.searchQuery = `similar:${img.identity}`; // feeds filterKey; never displayed
+  state.searchQuery = `similar:${item.identity}`; // feeds filterKey; never displayed
   state.searchResults = results;
-  state.searchSimilarTo = anchorLabel(img);
+  state.searchSimilarTo = anchorLabel(item);
   document.dispatchEvent(new Event('app:render'));
 }
 
@@ -70,15 +70,15 @@ export function runSimilar(img) {
 // flavor rides searchQuery's prefix; the toolbar chip reads it from there
 // and wears it as an unclippable tail, so the two similars stay tellable
 // apart even when the anchor's name is a whole filename.
-export async function runSimilarMeaning(img) {
+export async function runSimilarMeaning(item) {
   const token = ++searchReq; // supersedes any in-flight typed search…
   state.searchLoading = false; // …spinner included, or a failure here would leave it spinning forever
   try {
-    const results = await fetchResults(`/api/search/similar?board=${state.boardId}&item=${img.id}`);
+    const results = await fetchResults(`/api/search/similar?board=${state.boardId}&item=${item.id}`);
     if (token !== searchReq) return; // superseded
-    state.searchQuery = `similar-meaning:${img.id}`;
+    state.searchQuery = `similar-meaning:${item.id}`;
     state.searchResults = results;
-    state.searchSimilarTo = anchorLabel(img);
+    state.searchSimilarTo = anchorLabel(item);
     document.dispatchEvent(new Event('app:render'));
   } catch (err) {
     if (token !== searchReq) return;

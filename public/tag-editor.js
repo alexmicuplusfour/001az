@@ -10,7 +10,7 @@ import { mountModal, busy } from './modal.js';
 // instance (the common case is a single-instance entity, where that's
 // everything); the lightbox and rows-mode tiles pass the instance the user
 // is looking at.
-export function openTagEditor(img, inst = img.instances?.[0]) {
+export function openTagEditor(item, inst = item.instances?.[0]) {
   const overlay = document.createElement("div");
   overlay.className = "te-overlay";
 
@@ -26,7 +26,7 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
   // entity face here would just be the wrong picture.
   const preview = inst
     ? (inst.w && inst.h ? thumbUrl(inst.name) : null)
-    : kindFor(img).previewUrl?.(img);
+    : kindFor(item).previewUrl?.(item);
   if (preview) thumb.src = preview;
   else thumb.hidden = true;
   thumb.className = "te-thumb";
@@ -54,7 +54,7 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
       pill.className = "te-val";
       const cb = document.createElement("input");
       cb.type = "checkbox";
-      cb.checked = (inst?.tagSet || img.tagSet).has(`${f.key}/${v}`);
+      cb.checked = (inst?.tagSet || item.tagSet).has(`${f.key}/${v}`);
       if (f.single) {
         cb.addEventListener("change", () => {
           if (cb.checked) {
@@ -98,17 +98,17 @@ export function openTagEditor(img, inst = img.instances?.[0]) {
     try {
       if (!inst) throw new Error();
       const { tags: saved, entities } = await api("PATCH", `/api/instances/${inst.id}/tags`, { tags });
-      // The modal can outlive a poll tick, and reconcile swaps img.instances
+      // The modal can outlive a poll tick, and reconcile swaps item.instances
       // for fresh objects — write the server's answer onto the entity's
       // CURRENT instance, not the captured one, or refreshEntityTags below
       // recomputes the union from objects that never saw the edit and the
       // save looks lost until a reload. Fallback to the captured object
       // (instance deleted elsewhere) keeps this a no-op on a dead entity.
-      const live = img.instances?.find((x) => x.id === inst.id) || inst;
+      const live = item.instances?.find((x) => x.id === inst.id) || inst;
       live.tags = saved;
       live.tagSet = new Set(saved);
       live.undecided = false;
-      refreshEntityTags(img);
+      refreshEntityTags(item);
       // Statuses come from the routed report — the server's aggregate rule,
       // not a client re-derivation (the old every() here called all-tagged-
       // plus-one-failed "tagged" where STATUS_PRIORITY says "failed").

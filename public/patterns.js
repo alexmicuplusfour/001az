@@ -302,7 +302,7 @@ export function refreshClusters() {
 }
 
 export const clusterValues = () => cache?.result?.values || [];
-export const clusterSet = (img) => cache?.result?.sets.get(img.id);
+export const clusterSet = (item) => cache?.result?.sets.get(item.id);
 
 // The granularity knob, clamped: showClusters holds the level (0 = lens
 // off), and out-of-range stored values just pin to the nearest end.
@@ -344,14 +344,14 @@ export const { toggle: toggleClusters, save: saveClusters, restore: restoreClust
 const SIM_FLOOR = 1 / 3;
 const SIM_CAP = 50;
 
-export function similarTo(img) {
-  if (img.tags.length < MIN_TAGS) return null; // too little identity to match on (the clusters rule)
+export function similarTo(item) {
+  if (item.tags.length < MIN_TAGS) return null; // too little identity to match on (the clusters rule)
   const n = state.items.length;
   const totals = new Map();
   for (const it of state.items) for (const t of it.tags) totals.set(t, (totals.get(t) || 0) + 1);
   const want = new Map();
   let self = 0;
-  for (const t of img.tags) {
+  for (const t of item.tags) {
     const w = Math.log2(n / totals.get(t));
     want.set(t, w);
     self += w;
@@ -365,6 +365,6 @@ export function similarTo(img) {
     if (score >= SIM_FLOOR) scored.push([it, score]);
   }
   scored.sort((a, b) =>
-    b[1] - a[1] || (b[0] === img) - (a[0] === img) || (a[0].identity < b[0].identity ? -1 : 1));
+    b[1] - a[1] || (b[0] === item) - (a[0] === item) || (a[0].identity < b[0].identity ? -1 : 1));
   return new Map(scored.slice(0, SIM_CAP).map(([it, s]) => [it.id, s]));
 }

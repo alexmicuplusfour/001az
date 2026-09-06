@@ -67,11 +67,11 @@ function cardWithCrateBtn() {
 
 test('creating a crate from the card pop: no false error toast, pop reopens with the row', async () => {
   state.crates = [];
-  const img = { id: 11, crateIds: new Set() };
+  const item = { id: 11, crateIds: new Set() };
   routes.set('POST /api/crates', { crate: { id: 5, name: 'rigs', owned: true, public: false, item_count: 0 } });
   routes.set('POST /api/crates/5/items/11', { added: true, count: 1 });
 
-  openCratePop(cardWithCrateBtn(), img);
+  openCratePop(cardWithCrateBtn(), item);
   const input = document.querySelector('.crate-pop .dd-input');
   assert.ok(input, 'crate pop should open with the New crate input');
   input.value = 'rigs';
@@ -79,7 +79,7 @@ test('creating a crate from the card pop: no false error toast, pop reopens with
   await settle();
 
   assert.equal(state.crates.length, 1, 'crate should land in state');
-  assert.ok(img.crateIds.has(5), 'item should join the new crate');
+  assert.ok(item.crateIds.has(5), 'item should join the new crate');
   noErrorToast();
   const reopened = document.querySelector('.crate-pop');
   assert.ok(reopened && reopened.textContent.includes('rigs'), 'pop should reopen listing the new crate');
@@ -112,12 +112,12 @@ test('deleting a crate from the filter pop: state drops it and a repaint fires',
 
 test('tag pop opens with its Edit tags footer', async () => {
   state.facets = [{ key: 'style', name: 'Style' }];
-  const img = {
+  const item = {
     id: 12, kind: 'image', url: 'x.jpg', thumb: 'x.jpg', w: 4, h: 3,
     tags: ['sleek'], instances: [{ id: 1, kind: 'image', status: 'tagged' }],
     status: 'tagged', undecided: false, crateIds: new Set(), hearts: 0, favoritedByMe: false,
   };
-  const card = cardFor(img);
+  const card = cardFor(item);
   document.getElementById('grid').appendChild(card);
   pointerenter(card); // hover chrome: card-actions + tag chip
   const chip = card.querySelector('.tag-chip');

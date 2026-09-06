@@ -64,7 +64,7 @@ const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
 const elLightboxDownload = document.getElementById("lightbox-download");
 
-let lightboxImg = null;
+let lightboxItem = null;
 let lightboxList = [];
 let lightboxIndex = -1;
 let panelOpen = false;
@@ -76,20 +76,20 @@ let currentInstIndex = 0; // which instance is shown in the main view (multi-ins
 // The instance on screen; entities always have at least one, but guard the
 // transient states (mid-reconcile) with the entity's own face fields.
 function selectedInst() {
-  const list = lightboxImg?.instances || [];
+  const list = lightboxItem?.instances || [];
   if (currentInstIndex >= list.length) currentInstIndex = 0;
   return list[currentInstIndex] || null;
 }
 
 function renderLightboxFav() {
-  if (!lightboxImg) return;
-  elLightboxFav.className = "lightbox-action lightbox-fav" + (lightboxImg.favoritedByMe ? " on" : "");
-  elLightboxFav.innerHTML = `${ICONS.heart}<span>${lightboxImg.hearts || 0}</span>`;
+  if (!lightboxItem) return;
+  elLightboxFav.className = "lightbox-action lightbox-fav" + (lightboxItem.favoritedByMe ? " on" : "");
+  elLightboxFav.innerHTML = `${ICONS.heart}<span>${lightboxItem.hearts || 0}</span>`;
 }
 
 function renderLightboxCrate() {
-  if (!lightboxImg) return;
-  const n = lightboxImg.crateIds.size;
+  if (!lightboxItem) return;
+  const n = lightboxItem.crateIds.size;
   elLightboxCrate.className = "lightbox-action lightbox-crate" + (n > 0 ? " on" : "");
   elLightboxCrate.innerHTML = n > 0 ? `${ICONS.crate}<span>${n}</span>` : ICONS.crate;
 }
@@ -97,7 +97,7 @@ function renderLightboxCrate() {
 // The info button carries an instance-count badge when the entity is multi-file,
 // so the "this has more inside" cue is visible without opening the panel.
 function renderLightboxInfo() {
-  const n = lightboxImg?.instances?.length || 0;
+  const n = lightboxItem?.instances?.length || 0;
   elLightboxInfo.innerHTML = n >= 2 ? `${ICONS.info}<span>${n}</span>` : ICONS.info;
 }
 
@@ -324,11 +324,11 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
 // the selected instance's zone (its extracted fields, its tags + reasoning).
 // reasoning/fields are null while the per-instance fetch is in flight — tags
 // render immediately, details fill in when it lands.
-function paintPanel(img, inst, reasoning, fields, confidence) {
+function paintPanel(item, inst, reasoning, fields, confidence) {
   // Same-origin link, so the download attribute names the saved file — the
   // instance's original name, not the hashed store name.
-  elLightboxDownload.href = fullUrl(inst?.name || img.name);
-  elLightboxDownload.download = inst?.label || inst?.name || img.label || img.name;
+  elLightboxDownload.href = fullUrl(inst?.name || item.name);
+  elLightboxDownload.download = inst?.label || inst?.name || item.label || item.name;
 
   elLightboxPanelBody.replaceChildren();
 
@@ -339,11 +339,11 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   meta.className = "lbp-meta";
   const metaName = document.createElement("div");
   metaName.className = "lbp-meta-name";
-  metaName.textContent = img.displayLabel;
-  metaName.title = img.displayLabel;
+  metaName.textContent = item.displayLabel;
+  metaName.title = item.displayLabel;
   meta.appendChild(metaName);
 
-  const instances = img.instances || [];
+  const instances = item.instances || [];
   if (instances.length >= 2) {
     const filesSec = document.createElement("div");
     filesSec.className = "lbp-files";
@@ -386,14 +386,14 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
         try {
           const r = await fetch(`/api/instances/${f.id}`, { method: "DELETE" });
           if (!r.ok) throw new Error();
-          img.instances = img.instances.filter((x) => x.id !== f.id);
-          refreshEntityTags(img);
+          item.instances = item.instances.filter((x) => x.id !== f.id);
+          refreshEntityTags(item);
           // The face may have changed; re-pick per the board's face config.
-          const face = selectFace(img.instances, state.boardMapping?.face);
-          if (face) { img.name = face.name; img.w = face.w; img.h = face.h; img.kind = face.kind; img.label = face.label; }
-          if (currentInstIndex >= img.instances.length) currentInstIndex = 0;
+          const face = selectFace(item.instances, state.boardMapping?.face);
+          if (face) { item.name = face.name; item.w = face.w; item.h = face.h; item.kind = face.kind; item.label = face.label; }
+          if (currentInstIndex >= item.instances.length) currentInstIndex = 0;
           document.dispatchEvent(new Event('app:render'));
-          showInstance(Math.min(currentInstIndex, img.instances.length - 1));
+          showInstance(Math.min(currentInstIndex, item.instances.length - 1));
           toast("File removed");
         } catch {
           toast.error("Couldn't remove file");
@@ -408,7 +408,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   elLightboxPanelBody.appendChild(meta);
 
   // Provisional identity warning — shown when the AI couldn't derive an identity.
-  if (img.identityProvisional) {
+  if (item.identityProvisional) {
     const warn = document.createElement("div");
     warn.className = "warn-box lbp-provisional-warn";
     warn.textContent = "Identity not derived — AI couldn't identify this entity. Re-extract or remove the item.";
@@ -416,7 +416,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   }
 
   // Connector-bound entity fields (live data — not extraction output).
-  const entityFields = fieldsSection(img.fields, { label: "Connector fields" });
+  const entityFields = fieldsSection(item.fields, { label: "Connector fields" });
   if (entityFields) {
     elLightboxPanelBody.appendChild(entityFields);
     const d = document.createElement("hr");
@@ -429,9 +429,9 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   const instMeta = document.createElement("div");
   instMeta.className = "lbp-meta";
   const metaRows = [
-    ["file", inst?.name || img.name],
-    ["kind", inst?.kind || img.kind || "image"],
-    ["id", String(inst?.id ?? img.id)],
+    ["file", inst?.name || item.name],
+    ["kind", inst?.kind || item.kind || "image"],
+    ["id", String(inst?.id ?? item.id)],
   ];
   for (const [k, v] of metaRows) {
     const row = document.createElement("div");
@@ -458,7 +458,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
     // `facet` scopes a retag to one facet — the route reads `facets` from the
     // body and leaves every other facet's tags alone, so the toast names what
     // moved. requeue mirrors the routed report onto every affected card; inst
-    // IS img.instances[i], so the panel's own subject updates with them.
+    // IS item.instances[i], so the panel's own subject updates with them.
     const run = busy(btn, async (facet = null) => {
       if (!inst) return;
       await requeueToast(
@@ -506,7 +506,7 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
   // the choice beats offering an error). A scoped pass preserves the other
   // facets, so nothing is cleared here: the tags on screen stay until the new
   // ones land.
-  const subject = inst || img;
+  const subject = inst || item;
   // The one verb reprocess deliberately withholds: forcing a fresh
   // transcription. Its own head, not the tags head — it is a transcript verb,
   // and the tags block is gated on the board having facets, which would make
@@ -635,11 +635,11 @@ function paintPanel(img, inst, reasoning, fields, confidence) {
 }
 
 async function renderPanel() {
-  if (!panelOpen || !lightboxImg) return;
-  const img = lightboxImg;
+  if (!panelOpen || !lightboxItem) return;
+  const item = lightboxItem;
   const inst = selectedInst();
-  if (!inst) { paintPanel(img, null, {}, {}, {}); clearDetOverlay(); return; }
-  paintPanel(img, inst, null, null, {});
+  if (!inst) { paintPanel(item, null, {}, {}, {}); clearDetOverlay(); return; }
+  paintPanel(item, inst, null, null, {});
   clearDetOverlay(); // drop the prior instance's boxes while this one's fields load
   const token = ++reasoningReq;
   let reasoning = {};
@@ -654,8 +654,8 @@ async function renderPanel() {
       confidence = data.confidence || {};
     }
   } catch { /* panel just shows tags without reasoning */ }
-  if (token !== reasoningReq || lightboxImg !== img || selectedInst() !== inst || !panelOpen) return;
-  paintPanel(img, inst, reasoning, fields, confidence);
+  if (token !== reasoningReq || lightboxItem !== item || selectedInst() !== inst || !panelOpen) return;
+  paintPanel(item, inst, reasoning, fields, confidence);
   drawDetOverlay(fields);
 }
 
@@ -674,8 +674,8 @@ const isDocItem = (it) => it.kind && it.kind !== "image";
 
 function preloadFull(i) {
   if (i >= 0 && i < lightboxList.length && !isDocItem(lightboxList[i])) {
-    const im = new Image();
-    im.src = fullUrl(lightboxList[i].name);
+    const img = new Image();
+    img.src = fullUrl(lightboxList[i].name);
   }
 }
 
@@ -687,7 +687,7 @@ function preloadFull(i) {
 function showMedia(f) {
   clearDetOverlay(); // any prior instance's boxes; redrawn by renderPanel for images
   currentHandle?.unmount?.();
-  currentHandle = mountDetail(elLightboxStage, f, lightboxImg, {
+  currentHandle = mountDetail(elLightboxStage, f, lightboxItem, {
     root: elLightbox,
     onImageLayout: positionDetOverlay,
   });
@@ -708,9 +708,9 @@ function showInstance(index) {
 }
 
 function showLightbox() {
-  lightboxImg = lightboxList[lightboxIndex];
+  lightboxItem = lightboxList[lightboxIndex];
   currentInstIndex = 0; // reset to the face instance on entity navigation
-  showMedia(selectedInst() || lightboxImg);
+  showMedia(selectedInst() || lightboxItem);
   if (state.me) {
     renderLightboxFav();
     elLightboxFav.hidden = false;
@@ -734,16 +734,16 @@ function showLightbox() {
 
 // Open on a specific instance (a rows-mode tile click). showLightbox resets
 // the selection to index 0, so the re-aim happens after.
-export function openLightboxAt(img, instId) {
-  openLightbox(img);
-  const i = (img.instances || []).findIndex((x) => x.id === instId);
+export function openLightboxAt(item, instId) {
+  openLightbox(item);
+  const i = (item.instances || []).findIndex((x) => x.id === instId);
   if (i > 0) showInstance(i);
 }
 
-export function openLightbox(img) {
+export function openLightbox(item) {
   lightboxList = taggedFiltered();
-  lightboxIndex = lightboxList.indexOf(img);
-  if (lightboxIndex < 0) { lightboxList = [img]; lightboxIndex = 0; }
+  lightboxIndex = lightboxList.indexOf(item);
+  if (lightboxIndex < 0) { lightboxList = [item]; lightboxIndex = 0; }
   showLightbox();
   elLightbox.hidden = false;
   document.body.style.overflow = "hidden";
@@ -760,14 +760,14 @@ export function navLightbox(delta) {
 export function closeLightbox() {
   closeCratePop();
   setPanel(false);
-  scrollToCard(lightboxImg);
+  scrollToCard(lightboxItem);
   elLightbox.hidden = true;
   document.body.style.overflow = "";
   elLightbox.classList.remove("loading");
   currentHandle?.unmount?.();
   currentHandle = null;
   elLightboxStage.replaceChildren();
-  lightboxImg = null;
+  lightboxItem = null;
   lightboxList = [];
   lightboxIndex = -1;
 }
@@ -791,14 +791,14 @@ export function initLightbox() {
 
   elLightboxFav.addEventListener("click", async (e) => {
     e.stopPropagation();
-    if (!lightboxImg) return;
+    if (!lightboxItem) return;
     try {
-      const r = await fetch(`/api/items/${lightboxImg.id}/favorite`, { method: "POST" });
+      const r = await fetch(`/api/items/${lightboxItem.id}/favorite`, { method: "POST" });
       // Session gone (expired, or revoked by a password change elsewhere).
       if (r.status === 401) return location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
       const { favorited, count } = await r.json();
-      lightboxImg.favoritedByMe = favorited;
-      lightboxImg.hearts = count;
+      lightboxItem.favoritedByMe = favorited;
+      lightboxItem.hearts = count;
       renderLightboxFav();
       document.dispatchEvent(new Event('app:render')); // keep grid card in sync
     } catch {
@@ -808,8 +808,8 @@ export function initLightbox() {
 
   elLightboxCrate.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (!lightboxImg) return;
-    openCratePop(elLightboxCrate, lightboxImg);
+    if (!lightboxItem) return;
+    openCratePop(elLightboxCrate, lightboxItem);
   });
 
   elLightboxInfo.innerHTML = ICONS.info;

@@ -55,10 +55,10 @@ export function updateBulkBar() {
   if (n === 0) closeBulkCratePop();
 }
 
-export function toggleBulkSelect(img, card) {
-  const on = !state.bulkSelected.has(img.id);
-  if (on) state.bulkSelected.add(img.id);
-  else state.bulkSelected.delete(img.id);
+export function toggleBulkSelect(item, card) {
+  const on = !state.bulkSelected.has(item.id);
+  if (on) state.bulkSelected.add(item.id);
+  else state.bulkSelected.delete(item.id);
   card.classList.toggle("selected", on);
   card.querySelector(".sel-cb")?.setAttribute("aria-pressed", on);
   updateBulkBar();
@@ -75,7 +75,7 @@ export function clearBulk() {
 
 export function selectAllVisible(items) {
   state.bulkSelected.clear();
-  for (const img of items) state.bulkSelected.add(img.id);
+  for (const item of items) state.bulkSelected.add(item.id);
   for (const card of document.querySelectorAll(".card[data-id]")) {
     const id = Number(card.dataset.id);
     const on = state.bulkSelected.has(id);
@@ -86,9 +86,9 @@ export function selectAllVisible(items) {
 }
 
 async function doBulkReprocess() {
-  const imgs = selectedItems();
-  const results = await Promise.allSettled(imgs.map(async (img) => {
-    const r = await fetch(`/api/items/${img.id}/reprocess`, { method: "POST" });
+  const items = selectedItems();
+  const results = await Promise.allSettled(items.map(async (item) => {
+    const r = await fetch(`/api/items/${item.id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
     applyRoutedEntities((await r.json()).entities);
   }));
@@ -96,48 +96,48 @@ async function doBulkReprocess() {
   clearBulk();
   document.dispatchEvent(new Event('app:render'));
   ensurePolling();
-  if (failed) toast.error(`Reprocess failed for ${failed} of ${imgs.length}`);
-  else toast(`Reprocessing ${imgs.length} item${imgs.length === 1 ? "" : "s"}…`, { duration: "short" });
+  if (failed) toast.error(`Reprocess failed for ${failed} of ${items.length}`);
+  else toast(`Reprocessing ${items.length} item${items.length === 1 ? "" : "s"}…`, { duration: "short" });
 }
 
 async function doBulkDelete() {
-  const imgs = selectedItems();
-  if (!confirm(`Delete ${imgs.length} item${imgs.length === 1 ? "" : "s"}?`)) return;
+  const items = selectedItems();
+  if (!confirm(`Delete ${items.length} item${items.length === 1 ? "" : "s"}?`)) return;
   const deleted = new Set();
-  await Promise.allSettled(imgs.map(async (img) => {
-    const r = await fetch(`/api/items/${img.id}`, { method: "DELETE" });
+  await Promise.allSettled(items.map(async (item) => {
+    const r = await fetch(`/api/items/${item.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
-    deleted.add(img.id);
+    deleted.add(item.id);
   }));
   state.items = state.items.filter((i) => !deleted.has(i.id));
-  const failed = imgs.length - deleted.size;
+  const failed = items.length - deleted.size;
   clearBulk();
   document.dispatchEvent(new Event('app:render'));
   // The error already implies the rest went through, so don't double-toast.
-  if (failed) toast.error(`Couldn't delete ${failed} of ${imgs.length}`);
+  if (failed) toast.error(`Couldn't delete ${failed} of ${items.length}`);
   else toast(`Deleted ${deleted.size} item${deleted.size === 1 ? "" : "s"}`);
 }
 
 async function addAllToCrate(crateId) {
   const crate = state.crates.find((c) => c.id === crateId);
   // The API toggles membership, so skip items already in the crate.
-  const imgs = selectedItems().filter((i) => !i.crateIds.has(crateId));
-  if (!imgs.length) {
+  const items = selectedItems().filter((i) => !i.crateIds.has(crateId));
+  if (!items.length) {
     toast.info(`Already in "${crate ? crate.name : "crate"}"`);
     return;
   }
   let counts = [];
-  await Promise.allSettled(imgs.map(async (img) => {
-    const r = await fetch(`/api/crates/${crateId}/items/${img.id}`, { method: "POST" });
+  await Promise.allSettled(items.map(async (item) => {
+    const r = await fetch(`/api/crates/${crateId}/items/${item.id}`, { method: "POST" });
     if (!r.ok) throw new Error();
     const { added, count } = await r.json();
-    if (added) img.crateIds.add(crateId);
+    if (added) item.crateIds.add(crateId);
     counts.push(count);
   }));
   if (crate && counts.length) crate.item_count = Math.max(crate.item_count || 0, ...counts);
-  const failed = imgs.length - counts.length;
+  const failed = items.length - counts.length;
   document.dispatchEvent(new Event('app:render'));
-  if (failed) toast.error(`Couldn't add ${failed} of ${imgs.length} to crate`);
+  if (failed) toast.error(`Couldn't add ${failed} of ${items.length} to crate`);
   else toast(`Added ${counts.length} to "${crate ? crate.name : "crate"}"`, { duration: "short" });
 }
 

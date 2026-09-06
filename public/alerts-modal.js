@@ -190,7 +190,7 @@ export function openAlertEditor(existing) {
         chip.className = "al-chip";
         const txt = document.createElement("span");
         const uploader = key === "~uploaders"
-          ? state.items.find((img) => String(img.uploadedBy?.id) === v)?.uploadedBy
+          ? state.items.find((item) => String(item.uploadedBy?.id) === v)?.uploadedBy
           : null;
         txt.textContent = uploader ? (uploader.name || uploader.email) : v;
         const rm = document.createElement("button");

@@ -176,9 +176,9 @@ async function main() {
   const itemId = Number(params.get("item"));
   if (itemId) {
     const tryOpen = () => {
-      const img = state.items.find((i) => i.id === itemId);
-      if (!img) return false;
-      openLightbox(img);
+      const item = state.items.find((i) => i.id === itemId);
+      if (!item) return false;
+      openLightbox(item);
       // Consumed — strip the param so browsing on (and a later reload)
       // doesn't keep re-opening the same lightbox.
       const url = new URL(location.href);

@@ -57,8 +57,8 @@ const kindMatches = (appliesTo, kind) =>
 // stays correct as the background drain lands.
 function kindsPresent() {
   const kinds = new Set();
-  for (const img of state.items)
-    for (const inst of img.instances) if (inst.kind !== "connector") kinds.add(inst.kind);
+  for (const item of state.items)
+    for (const inst of item.instances) if (inst.kind !== "connector") kinds.add(inst.kind);
   return kinds;
 }
 
@@ -110,7 +110,7 @@ export async function sortCatalog() {
     // it covers — a partial sort should read as intentional, not broken.
     const count =
       mixed && appliesTo !== "*"
-        ? state.items.filter((img) => kindMatches(appliesTo, img.kind)).length
+        ? state.items.filter((item) => kindMatches(appliesTo, item.kind)).length
         : null;
     sections.push({ label, count, entries });
   }

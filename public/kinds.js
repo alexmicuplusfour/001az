@@ -41,47 +41,47 @@ function faceMedia(...nodes) {
 const imageKind = {
   // The face inside the card frame.
   face(item, card, layout) {
-    const im = document.createElement("img");
-    im.src = thumbUrl(item.name);
-    im.loading = "lazy";
-    im.decoding = "async";
+    const img = document.createElement("img");
+    img.src = thumbUrl(item.name);
+    img.loading = "lazy";
+    img.decoding = "async";
     if (item.w && item.h) {
-      im.width = item.w;
-      im.height = item.h;
+      img.width = item.w;
+      img.height = item.h;
       // Pin the ratio to the border box (box-sizing: border-box) so selection
       // padding cover-crops the image without changing the card's height.
-      im.style.aspectRatio = `${item.w} / ${item.h}`;
+      img.style.aspectRatio = `${item.w} / ${item.h}`;
     }
-    im.alt = item.tags.length ? item.tags.join(", ") : item.name;
-    im.addEventListener("error", () => card.remove());
-    im.addEventListener("load", () => {
-      im.classList.add("loaded");
+    img.alt = item.tags.length ? item.tags.join(", ") : item.name;
+    img.addEventListener("error", () => card.remove());
+    img.addEventListener("load", () => {
+      img.classList.add("loaded");
       card.classList.add("loaded");
       // Ratio-stamped cards already have their exact height — the loaded
       // bytes can't move the masonry. Skipping the relayout matters when a
       // fresh board view trickles in hundreds of lazy thumbnails.
       if (!card.dataset.ratio) layout();
     });
-    if (im.complete && im.naturalWidth > 0) { im.classList.add("loaded"); card.classList.add("loaded"); }
-    if (!hasIdentity(item)) return faceMedia(im);
+    if (img.complete && img.naturalWidth > 0) { img.classList.add("loaded"); card.classList.add("loaded"); }
+    if (!hasIdentity(item)) return faceMedia(img);
     // Mapped identity: same title strip documents carry, under the media.
     const wrap = document.createElement("div");
     wrap.className = "image-face";
-    wrap.append(faceMedia(im), titleStrip(item.displayLabel, item.instances?.length));
+    wrap.append(faceMedia(img), titleStrip(item.displayLabel, item.instances?.length));
     return wrap;
   },
 
   // Upload placeholders: the local object URL until the server row exists.
   progressFace(p, card, layout) {
-    const im = document.createElement("img");
-    im.src = p.objURL || thumbUrl(p.name);
-    im.alt = p.name || "uploading";
-    im.addEventListener("error", () => card.remove());
+    const img = document.createElement("img");
+    img.src = p.objURL || thumbUrl(p.name);
+    img.alt = p.name || "uploading";
+    img.addEventListener("error", () => card.remove());
     // 'loaded' stops the card shimmer — an infinite background animation that
     // repaints every frame; the dimmed image + spinner already say "working".
-    im.addEventListener("load", () => { card.classList.add("loaded"); layout(); });
-    if (im.complete && im.naturalWidth > 0) card.classList.add("loaded");
-    return im;
+    img.addEventListener("load", () => { card.classList.add("loaded"); layout(); });
+    if (img.complete && img.naturalWidth > 0) card.classList.add("loaded");
+    return img;
   },
 
   openDetail(item) {
@@ -105,13 +105,13 @@ const docKind = {
     if (item.w && item.h) {
       const preview = document.createElement("div");
       preview.className = "doc-preview";
-      const im = document.createElement("img");
-      im.src = thumbUrl(item.name);
-      im.loading = "lazy";
-      im.decoding = "async";
-      im.alt = item.displayLabel;
-      im.addEventListener("load", () => { im.classList.add("loaded"); layout(); });
-      preview.appendChild(im);
+      const img = document.createElement("img");
+      img.src = thumbUrl(item.name);
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = item.displayLabel;
+      img.addEventListener("load", () => { img.classList.add("loaded"); layout(); });
+      preview.appendChild(img);
       wrap.appendChild(faceMedia(preview));
     } else {
       const badge = document.createElement("div");
@@ -158,13 +158,13 @@ const audioKind = {
     if (item.w && item.h) {
       const wave = document.createElement("div");
       wave.className = "audio-wave";
-      const im = document.createElement("img");
-      im.src = thumbUrl(item.name);
-      im.loading = "lazy";
-      im.decoding = "async";
-      im.alt = item.displayLabel;
-      im.addEventListener("load", () => { im.classList.add("loaded"); layout(); });
-      wave.appendChild(im);
+      const img = document.createElement("img");
+      img.src = thumbUrl(item.name);
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = item.displayLabel;
+      img.addEventListener("load", () => { img.classList.add("loaded"); layout(); });
+      wave.appendChild(img);
       wrap.appendChild(faceMedia(wave));
     } else {
       const badge = document.createElement("div");
