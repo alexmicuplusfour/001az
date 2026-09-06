@@ -101,6 +101,7 @@ import {
   updateAiKey,
   deleteAiKey,
   boardEmbeddings,
+  embeddingVec,
   listItemPayloads,
   updateItemPayload,
   reextractItem,
@@ -151,7 +152,7 @@ import {
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, resolveTranscriber, engineStamp, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 // The pure k-means both cluster flavors share — a dependency-free public
 // module, imported here the same way the test suite imports public modules.
-import { clusterVectors, medoidOf, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
+import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
 import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -2799,7 +2800,7 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   // so multiple matching instances collapse to their entity's best score.
   const best = new Map();
   for (const row of await boardEmbeddings(db, boardId, embedder.model)) {
-    const v = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+    const v = embeddingVec(row);
     if (v.length !== qv.length) continue; // stale dims mid-model-change
     let s = 0;
     for (let i = 0; i < v.length; i++) s += v[i] * qv[i];
@@ -2829,15 +2830,14 @@ app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
   if (!embedder) return res.status(404).json({ error: "semantic search is not enabled" });
   const itemId = String(req.query.item || "");
   const rows = await boardEmbeddings(db, boardId, embedder.model);
-  const vecOf = (r) => new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 4);
   // The anchor may be several instances of one entity; a candidate reads
   // against all of them and keeps its best, then collapses per entity like
   // any search result.
-  const anchors = rows.filter((r) => String(r.entity_id ?? r.id) === itemId).map(vecOf);
+  const anchors = rows.filter((r) => String(r.entity_id ?? r.id) === itemId).map(embeddingVec);
   if (!anchors.length) return res.status(404).json({ error: "item not embedded yet" });
   const best = new Map();
   for (const row of rows) {
-    const v = vecOf(row);
+    const v = embeddingVec(row);
     let s = -Infinity;
     for (const a of anchors) {
       if (v.length !== a.length) continue; // stale dims mid-model-change
@@ -2870,7 +2870,15 @@ app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
 // distinct by construction, stable while the group's heart holds, meaning
 // nothing so they can't lie or drift. The handle doubles as the ~clusters
 // VALUE, so a selection survives recomputes that keep the heart.
+// Two caches, split where the cost lives: the CORPUS (the full embedding
+// read + entity-mean collapse, level-independent — stepping the rail's
+// more/fewer knob must not re-read megabytes five times) and the CARVINGS
+// (per level, tiny). Both keyed to the fingerprint; both bounded, since
+// every board ever viewed would otherwise pin its corpus forever.
+const meaningCorpusCache = new Map();  // boardId -> { fp, ids, keys, vecs, dims, n }
 const meaningClusterCache = new Map(); // `${boardId}|${level}` -> { fp, body }
+const capCache = (map, max) => { while (map.size > max) map.delete(map.keys().next().value); };
+
 app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) => {
   const boardId = req.params.id;
   if (!(await canAccessBoard(db, boardId, req.user))) return res.status(404).json({ error: "not found" });
@@ -2885,30 +2893,25 @@ app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) =
   const hit = meaningClusterCache.get(cacheKey);
   if (hit?.fp === fp) return res.json(hit.body);
 
-  const { rows } = await db.query(
-    `SELECT id, entity_ids[1] AS entity_id, embedding, payload->>'identity' AS ident,
-            payload->'files'->0->>'original_name' AS fname
-     FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2`,
-    [boardId, embedder.model]);
-  // Entity = normalized mean of its instance vectors, collapsed BEFORE
-  // clustering so membership speaks entity ids like every search result.
-  const byEnt = new Map();
-  let dims = 0;
-  for (const row of rows) {
-    const v = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
-    if (!dims) dims = v.length;
-    if (v.length !== dims) continue; // stale dims mid-model-change
-    const eid = row.entity_id ?? row.id;
-    let e = byEnt.get(eid);
-    if (!e) byEnt.set(eid, e = { sum: new Float64Array(dims), name: String(row.ident || row.fname || eid) });
-    for (let j = 0; j < dims; j++) e.sum[j] += v[j];
-  }
-  const ids = [...byEnt.keys()];
-  const n = ids.length;
-  let body = { values: [], sets: [] };
-  if (n >= CLUSTER_MIN_GROUP * 2) {
+  let corpus = meaningCorpusCache.get(boardId);
+  if (corpus?.fp !== fp) {
+    // Entity = normalized mean of its instance vectors, collapsed BEFORE
+    // clustering so membership speaks entity ids like every search result.
+    const rows = await boardEmbeddings(db, boardId, embedder.model);
+    const byEnt = new Map();
+    let dims = 0;
+    for (const row of rows) {
+      const v = embeddingVec(row);
+      if (!dims) dims = v.length;
+      if (v.length !== dims) continue; // stale dims mid-model-change
+      const eid = row.entity_id ?? row.id;
+      let e = byEnt.get(eid);
+      if (!e) byEnt.set(eid, e = { sum: new Float64Array(dims), name: String(row.ident || row.fname || eid) });
+      for (let j = 0; j < dims; j++) e.sum[j] += v[j];
+    }
+    const ids = [...byEnt.keys()];
+    const n = ids.length;
     const vecs = new Float64Array(n * dims);
-    const keys = ids.map((id) => byEnt.get(id).name);
     ids.forEach((id, i) => {
       const { sum } = byEnt.get(id);
       let s = 0;
@@ -2916,33 +2919,31 @@ app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) =
       s = Math.sqrt(s) || 1;
       for (let j = 0; j < dims; j++) vecs[i * dims + j] = sum[j] / s;
     });
+    corpus = { fp, ids, keys: ids.map((id) => byEnt.get(id).name), vecs, dims, n };
+    meaningCorpusCache.set(boardId, corpus);
+    capCache(meaningCorpusCache, 16);
+  }
+
+  const { ids, keys, vecs, dims, n } = corpus;
+  let body = { values: [], sets: [] };
+  if (n >= CLUSTER_MIN_GROUP * 2) {
     const k = kFor(level, n);
     const { assign, dotSeed } = clusterVectors(vecs, n, dims, keys, k);
-    const floor = floorFor(n);
-    const values = [];
-    const sets = [];
     const taken = new Set(["unclassified"]);
-    let anyUnclassified = false;
-    for (let c = 0; c < k; c++) {
-      const mem = [];
-      for (let i = 0; i < n; i++) if (assign[i] === c) mem.push(i);
-      if (!mem.length) continue;
-      if (mem.length < floor) {
-        anyUnclassified = true;
-        for (const i of mem) sets.push([ids[i], "unclassified"]);
-        continue;
-      }
-      const medoid = medoidOf(mem, dotSeed, c, keys);
+    const { groups, unplaced } = carve(assign, n, k, floorFor(n), keys, dotSeed, (mem, medoid) => {
       const value = handleFor(keys[medoid], taken);
-      taken.add(value);
-      for (const i of mem) sets.push([ids[i], value]);
-      values.push({ value, size: mem.length, label: value, title: `most typical: ${keys[medoid]}` });
+      return { value, label: value, title: `most typical: ${keys[medoid]}` };
+    });
+    const values = groups.map(({ value, size, label, title }) => ({ value, size, label, title }));
+    const sets = groups.flatMap((g) => g.mem.map((i) => [ids[i], g.value]));
+    if (unplaced.length) {
+      values.push({ value: "unclassified", label: "unclassified" });
+      for (const i of unplaced) sets.push([ids[i], "unclassified"]);
     }
-    values.sort((a, b) => b.size - a.size || (a.value < b.value ? -1 : 1));
-    if (anyUnclassified) values.push({ value: "unclassified", label: "unclassified" });
     body = { values, sets };
   }
   meaningClusterCache.set(cacheKey, { fp, body });
+  capCache(meaningClusterCache, 64);
   res.json(body);
 }));
 

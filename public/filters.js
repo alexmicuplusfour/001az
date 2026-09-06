@@ -2,7 +2,8 @@ import { state } from './state.js';
 import { tag, pill, pillAction, appendCount, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
-import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters, LEVEL_MAX } from './patterns.js';
+import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters } from './patterns.js';
+import { LEVEL_MAX } from './cluster-core.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");

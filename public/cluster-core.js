@@ -50,16 +50,18 @@ export function clusterVectors(vecs, n, d, keys, k) {
     s = Math.sqrt(s) || 1;
     for (let j = 0; j < d; j++) centroid[j] /= s;
   }
+  // `best[i]` carries row i's similarity to its nearest chosen seed, updated
+  // once per new seed — the same scores (and so the same argmaxes and ties)
+  // as re-dotting every candidate against every prior seed, at 1/k the work.
   const seeds = new Float64Array(k * d);
+  const best = new Float64Array(n);
   const s0 = pick((i) => 1 - dot(i * d, centroid, 0));
   for (let j = 0; j < d; j++) seeds[j] = vecs[s0 * d + j];
+  for (let i = 0; i < n; i++) best[i] = dot(i * d, seeds, 0);
   for (let c = 1; c < k; c++) {
-    const si = pick((i) => {
-      let mx = -1;
-      for (let s = 0; s < c; s++) { const dd = dot(i * d, seeds, s * d); if (dd > mx) mx = dd; }
-      return 1 - mx;
-    });
+    const si = pick((i) => 1 - best[i]);
     for (let j = 0; j < d; j++) seeds[c * d + j] = vecs[si * d + j];
+    for (let i = 0; i < n; i++) { const dd = dot(i * d, seeds, c * d); if (dd > best[i]) best[i] = dd; }
   }
 
   const assign = new Int32Array(n);
@@ -94,12 +96,36 @@ export function medoidOf(mem, dotSeed, c, keys) {
   return best;
 }
 
+// The carving's shared semantics — what it means to be a GROUP in the rail,
+// regardless of flavor: the floor decides who is shown, an unshown group's
+// members go unplaced (the caller's "unclassified"), groups sort biggest
+// first with a value tie-break, and every shown group knows its medoid.
+// `describe(mem, medoid, c)` is the flavor: it returns the group's
+// { value, label, title } — or null to reject a SIZED group (the chip
+// flavor's no-signature rule), which also unplaces its members.
+export function carve(assign, n, k, floor, keys, dotSeed, describe) {
+  const groups = [];
+  const unplaced = [];
+  for (let c = 0; c < k; c++) {
+    const mem = [];
+    for (let i = 0; i < n; i++) if (assign[i] === c) mem.push(i);
+    if (!mem.length) continue;
+    const d = mem.length >= floor ? describe(mem, medoidOf(mem, dotSeed, c, keys), c) : null;
+    if (!d) { unplaced.push(...mem); continue; }
+    groups.push({ ...d, mem, size: mem.length });
+  }
+  groups.sort((a, b) => b.size - a.size || (a.value < b.value ? -1 : 1));
+  return { groups, unplaced };
+}
+
 // A gibberish HANDLE from a stable string (3-meaning's labels): pronounceable
 // syllables that mean nothing, so they can't lie and can't drift — you learn
 // what "damok" is by looking at what's in it. FNV-1a, then consonant/vowel
 // alternation. `taken` keeps one carving's handles distinct: on a collision
-// the hash rolls until free, deterministic because callers visit groups in
-// the partition's own deterministic order.
+// the hash rolls until free (deterministic because callers visit groups in
+// the partition's own deterministic order), and the chosen handle registers
+// ITSELF — a caller that had to remember the add could forget it, which is
+// exactly the duplicate the set exists to prevent.
 export function handleFor(str, taken) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
@@ -110,7 +136,10 @@ export function handleFor(str, taken) {
       out += C[x % 13]; x = (x / 13) | 0;
       if (s < 2) { out += V[x % 5]; x = (x / 5) | 0; }
     }
-    if (!taken || !taken.has(out)) return out;
+    if (!taken || !taken.has(out)) {
+      taken?.add(out);
+      return out;
+    }
     h = (Math.imul(h, 31) + 1) >>> 0;
   }
 }

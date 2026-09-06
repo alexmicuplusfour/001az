@@ -3246,14 +3246,23 @@ export async function oneAudioNeedingTranscription(db, excludeIds = [], served =
 
 // Current-model vectors for one board (the search corpus). Stale vectors are
 // excluded rather than compared wrongly; they reappear once re-embedded.
-// entity_id rides along so search results can speak in card (entity) ids.
+// entity_id rides along so search results can speak in card (entity) ids;
+// the identity/filename columns are for the meaning-clusters route's medoid
+// titles and handle hashes (search ignores them — two small strings a row).
 export async function boardEmbeddings(db, boardId, model) {
   const { rows } = await db.query(
-    "SELECT id, entity_ids[1] AS entity_id, embedding FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
+    `SELECT id, entity_ids[1] AS entity_id, embedding, payload->>'identity' AS ident,
+            payload->'files'->0->>'original_name' AS fname
+     FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2`,
     [boardId, model]
   );
   return rows;
 }
+
+// The stored vector, decoded once — the "this bytea is float32" fact has one
+// home instead of one per route.
+export const embeddingVec = (row) =>
+  new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
 
 // Backfill progress for the admin panel: how many tagged items exist, how
 // many already carry a current-model vector, and how many were skipped after

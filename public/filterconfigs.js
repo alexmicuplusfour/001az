@@ -127,17 +127,18 @@ export function openFilterConfigPop(anchor) { // an element, or the toolbar's ac
         onChange: () => toggleOdds(cb.checked),
       });
       foot.appendChild(cb.el);
-      // The two cluster carvings are mutually exclusive (patterns.js owns
-      // the state rule); the rows only mirror it visually, since the pop
+      // The two cluster carvings are mutually exclusive — patterns.js owns
+      // the rule; the rows just re-read the state it wrote, since the pop
       // stays open across the flip and doesn't rebuild.
+      const sync = () => {
+        cl.checked = !!state.showClusters;
+        if (cm) cm.checked = !!state.showMeaningClusters;
+      };
       const cl = ddToggleRow({
         label: "Clusters by tags",
         checked: state.showClusters,
         title: "Find groups of items that keep answering alike, and show them as a filter row",
-        onChange: () => {
-          if (cl.checked && cm) cm.checked = false;
-          toggleClusters(cl.checked);
-        },
+        onChange: () => { toggleClusters(cl.checked); sync(); },
       });
       foot.appendChild(cl.el);
       // Meaning needs the board's embeddings — same gate as the search box.
@@ -147,10 +148,7 @@ export function openFilterConfigPop(anchor) { // an element, or the toolbar's ac
           label: "Clusters by meaning",
           checked: state.showMeaningClusters,
           title: "Group items by how their stories read — the same meaning data search uses",
-          onChange: () => {
-            if (cm.checked) cl.checked = false;
-            toggleMeaningClusters(cm.checked);
-          },
+          onChange: () => { toggleMeaningClusters(cm.checked); sync(); },
         });
         foot.appendChild(cm.el);
       }

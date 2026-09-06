@@ -23,9 +23,10 @@ test("handleFor: deterministic, pronounceable, and collisions roll to distinct",
   const a = handleFor("TMUS");
   assert.equal(handleFor("TMUS"), a, "same string, same handle, forever");
   assert.match(a, /^[bdgklmnprstvz][aeiou][bdgklmnprstvz][aeiou][bdgklmnprstvz]$/);
-  const taken = new Set([a]);
+  const taken = new Set();
+  assert.equal(handleFor("TMUS", taken), a, "first ask claims the handle...");
   const b = handleFor("TMUS", taken);
-  assert.notEqual(b, a, "a taken handle rolls to a fresh one");
+  assert.notEqual(b, a, "...so the second rolls to a fresh one (self-registered, no caller bookkeeping)");
   assert.match(b, /^[bdgklmnprstvz][aeiou][bdgklmnprstvz][aeiou][bdgklmnprstvz]$/);
   assert.notEqual(handleFor("VOD"), handleFor("CHT"), "distinct strings, distinct handles (here)");
 });

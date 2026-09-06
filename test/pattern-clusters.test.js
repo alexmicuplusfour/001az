@@ -4,13 +4,15 @@
 // persistence. The board-sort pattern — shared browser stub, then dynamic
 // import of the public modules.
 import { localStore as store } from "./browser-stub.js";
+import { withFetch } from "./helpers.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
-const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters, stepClusters, toggleMeaningClusters, restoreMeaningClusters, LEVEL_MAX } =
+const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters, stepClusters, toggleMeaningClusters, restoreMeaningClusters } =
   await import("../public/patterns.js");
+const { LEVEL_MAX } = await import("../public/cluster-core.js");
 
 const item = (id, tags, status = "tagged") => toItem({ id, name: `${id}.webp`, status, tags });
 const valueOf = (id) => clusterSet({ id })?.values().next().value;
@@ -255,15 +257,13 @@ test("meaning flavor: the served carving honors the membership contract (id -> S
   // counts through the same sets — a raw string here breaks filtering the
   // moment a meaning chip is clicked. Served shape pinned via a stubbed
   // fetch; one shared Set per group, the chip flavor's own economy.
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({
+  await withFetch(async () => ({
     ok: true,
     json: async () => ({
       values: [{ value: "damok", size: 2, label: "damok", title: "most typical: a" }],
       sets: [[1, "damok"], [2, "damok"], [3, "unclassified"]],
     }),
-  });
-  try {
+  }), async () => {
     state.boardId = "b9";
     state.showMeaningClusters = 1;
     state.showClusters = 0;
@@ -274,9 +274,6 @@ test("meaning flavor: the served carving honors the membership contract (id -> S
     assert.equal(clusterSet({ id: 2 }), s, "one shared Set per group");
     assert.ok(clusterSet({ id: 3 }).has("unclassified"));
     assert.equal(clusterValues()[0].value, "damok");
-  } finally {
-    globalThis.fetch = realFetch;
-    state.showMeaningClusters = 0;
-    refreshClusters(); // clears the meaning cache now that the flavor is off
-  }
+  });
+  toggleMeaningClusters(false); // through the lens, so its cache slots clear too
 });
