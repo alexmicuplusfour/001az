@@ -328,8 +328,8 @@ function openTagPop(chip, item) {
         onClick: (e) => { e.stopPropagation(); close(); fn(); },
       }));
       if (canEdit) act("Edit tags", ICONS.pencil, () => openTagEditor(item));
-      if (canSimilar) act("Find similar", ICONS.search, () => runSimilar(item));
-      if (canMeaning) act("Find similar by meaning", ICONS.sparkle, () => runSimilarMeaning(item));
+      if (canSimilar) act("Find similar by tags", ICONS.search, () => runSimilar(item));
+      if (canMeaning) act("Find similar by meaning", ICONS.srcSparkle, () => runSimilarMeaning(item));
     } : undefined,
     onClose: pin.release,
   });
