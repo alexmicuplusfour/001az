@@ -274,6 +274,8 @@ untouched.
 
 ### 3-meaning (2026-09-07): clusters by meaning — the literal carving
 
+SHIPPED 2026-09-07, as revised below (server-side carving).
+
 The clusters lens grows a second flavor over the stored embeddings, as a
 THIRD toggle in the filter-options menu — "Clusters by tags" (the shipped
 lens, renamed) and "Clusters by meaning", MUTUALLY EXCLUSIVE: turning one on

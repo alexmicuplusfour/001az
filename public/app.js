@@ -15,7 +15,7 @@ import { openJobsModal } from './jobs-modal.js';
 import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
-import { restoreOdds, restoreClusters, refreshClusters } from './patterns.js';
+import { restoreOdds, restoreClusters, restoreMeaningClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
 
 const elGridRoot = document.getElementById("grid");
@@ -157,6 +157,7 @@ async function main() {
   restoreSort();
   restoreOdds();
   restoreClusters();
+  restoreMeaningClusters();
   restoreView();
   render();
   ensurePolling();

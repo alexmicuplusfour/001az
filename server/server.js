@@ -149,6 +149,9 @@ import {
   clearSessionCookie,
 } from "./auth.js";
 import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, resolveTranscriber, engineStamp, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+// The pure k-means both cluster flavors share — a dependency-free public
+// module, imported here the same way the test suite imports public modules.
+import { clusterVectors, medoidOf, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
 import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -2852,6 +2855,95 @@ app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
   // between calls (map order is arrival order).
   scored.sort((a, b) => b.score - a.score || (String(a.id) < String(b.id) ? -1 : 1));
   res.json({ results: scored.slice(0, 50) });
+}));
+
+// Clusters by meaning (plan 3-meaning): the server carves, the client gets
+// the carving — same deterministic k-means the chip flavor runs in the
+// browser (cluster-core.js, imported by both sides so the seeding rules
+// have one home), over the stored embeddings, wired as conclusions (tens of
+// KB) rather than raw vectors (~2.8MB and growing). Free like the similar
+// route: nothing embedded, nothing metered. Cached per (board, level)
+// against a corpus fingerprint — recomputed at most once per data change,
+// which is what absorbs the compute (~300ms at 1.8k items).
+//
+// Groups wear gibberish HANDLES hashed from their most typical member:
+// distinct by construction, stable while the group's heart holds, meaning
+// nothing so they can't lie or drift. The handle doubles as the ~clusters
+// VALUE, so a selection survives recomputes that keep the heart.
+const meaningClusterCache = new Map(); // `${boardId}|${level}` -> { fp, body }
+app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) => {
+  const boardId = req.params.id;
+  if (!(await canAccessBoard(db, boardId, req.user))) return res.status(404).json({ error: "not found" });
+  const embedder = await resolveEmbedder(db);
+  if (!embedder) return res.status(404).json({ error: "semantic search is not enabled" });
+  const level = Math.min(Math.max(parseInt(req.query.level, 10) || 1, 1), CLUSTER_LEVEL_MAX);
+  const { rows: [fpRow] } = await db.query(
+    "SELECT COUNT(*)::int AS n, COALESCE(MAX(updated_at), 0)::text AS t FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2",
+    [boardId, embedder.model]);
+  const fp = `${embedder.model}|${fpRow.n}|${fpRow.t}`;
+  const cacheKey = `${boardId}|${level}`;
+  const hit = meaningClusterCache.get(cacheKey);
+  if (hit?.fp === fp) return res.json(hit.body);
+
+  const { rows } = await db.query(
+    `SELECT id, entity_ids[1] AS entity_id, embedding, payload->>'identity' AS ident,
+            payload->'files'->0->>'original_name' AS fname
+     FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2`,
+    [boardId, embedder.model]);
+  // Entity = normalized mean of its instance vectors, collapsed BEFORE
+  // clustering so membership speaks entity ids like every search result.
+  const byEnt = new Map();
+  let dims = 0;
+  for (const row of rows) {
+    const v = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+    if (!dims) dims = v.length;
+    if (v.length !== dims) continue; // stale dims mid-model-change
+    const eid = row.entity_id ?? row.id;
+    let e = byEnt.get(eid);
+    if (!e) byEnt.set(eid, e = { sum: new Float64Array(dims), name: String(row.ident || row.fname || eid) });
+    for (let j = 0; j < dims; j++) e.sum[j] += v[j];
+  }
+  const ids = [...byEnt.keys()];
+  const n = ids.length;
+  let body = { values: [], sets: [] };
+  if (n >= CLUSTER_MIN_GROUP * 2) {
+    const vecs = new Float64Array(n * dims);
+    const keys = ids.map((id) => byEnt.get(id).name);
+    ids.forEach((id, i) => {
+      const { sum } = byEnt.get(id);
+      let s = 0;
+      for (let j = 0; j < dims; j++) s += sum[j] ** 2;
+      s = Math.sqrt(s) || 1;
+      for (let j = 0; j < dims; j++) vecs[i * dims + j] = sum[j] / s;
+    });
+    const k = kFor(level, n);
+    const { assign, dotSeed } = clusterVectors(vecs, n, dims, keys, k);
+    const floor = floorFor(n);
+    const values = [];
+    const sets = [];
+    const taken = new Set(["unclassified"]);
+    let anyUnclassified = false;
+    for (let c = 0; c < k; c++) {
+      const mem = [];
+      for (let i = 0; i < n; i++) if (assign[i] === c) mem.push(i);
+      if (!mem.length) continue;
+      if (mem.length < floor) {
+        anyUnclassified = true;
+        for (const i of mem) sets.push([ids[i], "unclassified"]);
+        continue;
+      }
+      const medoid = medoidOf(mem, dotSeed, c, keys);
+      const value = handleFor(keys[medoid], taken);
+      taken.add(value);
+      for (const i of mem) sets.push([ids[i], value]);
+      values.push({ value, size: mem.length, label: value, title: `most typical: ${keys[medoid]}` });
+    }
+    values.sort((a, b) => b.size - a.size || (a.value < b.value ? -1 : 1));
+    if (anyUnclassified) values.push({ value: "unclassified", label: "unclassified" });
+    body = { values, sets };
+  }
+  meaningClusterCache.set(cacheKey, { fp, body });
+  res.json(body);
 }));
 
 // Live server logs via Server-Sent Events.

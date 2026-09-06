@@ -13,7 +13,7 @@ import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddHead, ddSep, ddInput, ddEmpty, ddToggleRow } from './dropdown.js';
 import { toast } from './toast.js';
 import { activeCount, applyFilterConfig, selectedAsConfig, configMatchesCurrent } from './filters.js';
-import { toggleOdds, toggleClusters } from './patterns.js';
+import { toggleOdds, toggleClusters, toggleMeaningClusters } from './patterns.js';
 
 async function doDeleteConfig(cfg, onClose) {
   try {
@@ -127,13 +127,33 @@ export function openFilterConfigPop(anchor) { // an element, or the toolbar's ac
         onChange: () => toggleOdds(cb.checked),
       });
       foot.appendChild(cb.el);
+      // The two cluster carvings are mutually exclusive (patterns.js owns
+      // the state rule); the rows only mirror it visually, since the pop
+      // stays open across the flip and doesn't rebuild.
       const cl = ddToggleRow({
-        label: "Show clusters",
+        label: "Clusters by tags",
         checked: state.showClusters,
         title: "Find groups of items that keep answering alike, and show them as a filter row",
-        onChange: () => toggleClusters(cl.checked),
+        onChange: () => {
+          if (cl.checked && cm) cm.checked = false;
+          toggleClusters(cl.checked);
+        },
       });
       foot.appendChild(cl.el);
+      // Meaning needs the board's embeddings — same gate as the search box.
+      let cm = null;
+      if (state.searchAvailable) {
+        cm = ddToggleRow({
+          label: "Clusters by meaning",
+          checked: state.showMeaningClusters,
+          title: "Group items by how their stories read — the same meaning data search uses",
+          onChange: () => {
+            if (cm.checked) cl.checked = false;
+            toggleMeaningClusters(cm.checked);
+          },
+        });
+        foot.appendChild(cm.el);
+      }
     },
   });
 }

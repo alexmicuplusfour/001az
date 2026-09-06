@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 
 const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
-const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters, stepClusters, LEVEL_MAX } =
+const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters, stepClusters, toggleMeaningClusters, restoreMeaningClusters, LEVEL_MAX } =
   await import("../public/patterns.js");
 
 const item = (id, tags, status = "tagged") => toItem({ id, name: `${id}.webp`, status, tags });
@@ -212,4 +212,40 @@ test("stepClusters: clamps to [1, LEVEL_MAX], clears only the lens's selection, 
   state.showClusters = 0;
   restoreClusters();
   assert.equal(state.showClusters, 3);
+});
+
+test("the two cluster flavors are mutually exclusive, in state and in storage", () => {
+  store.clear();
+  state.boardId = "b1";
+  state.selected = new Map([["~clusters", new Set(["c0"])], ["color", new Set(["red"])]]);
+  toggleClusters(true);
+  toggleMeaningClusters(true); // flips tags OFF, itself ON
+  assert.equal(state.showClusters, 0);
+  assert.equal(state.showMeaningClusters, 1);
+  assert.equal(store.has("boardClusters:b1"), false, "the losing flavor's storage clears too");
+  assert.equal(store.get("boardClustersM:b1"), "1");
+  assert.equal(state.selected.has("~clusters"), false, "the other carving's values can't match");
+  assert.ok(state.selected.has("color"), "real facets untouched");
+
+  toggleClusters(true); // and back the other way
+  assert.equal(state.showMeaningClusters, 0);
+  assert.equal(state.showClusters, 1);
+  assert.equal(store.has("boardClustersM:b1"), false);
+
+  // a restore where both somehow stored a level (two tabs): meaning wins
+  store.set("boardClusters:b1", "2");
+  store.set("boardClustersM:b1", "3");
+  restoreClusters();
+  restoreMeaningClusters();
+  assert.equal(state.showMeaningClusters, 3);
+  assert.equal(state.showClusters, 0);
+
+  // stepping steps the ACTIVE flavor
+  state.selected = new Map();
+  stepClusters(-1);
+  assert.equal(state.showMeaningClusters, 2);
+  assert.equal(store.get("boardClustersM:b1"), "2");
+
+  toggleMeaningClusters(false);
+  state.showClusters = 0;
 });

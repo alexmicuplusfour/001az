@@ -314,3 +314,41 @@ test("similar route: instances collapse to their entity's best score, and the ca
     assert.equal(r.json.results.filter((x) => String(x.id) === "9001").length, 1);
   });
 });
+
+// ── clusters by meaning (plan 3-meaning): the server carves ─────────────────
+
+test("meaning-clusters route: carves deterministically, hands out distinct handles, caches, free", async () => {
+  const member = await seedUser(db, "carver@test.local");
+  const bC = await seedBoard(db, "carve-board", [member.id]);
+  await withEmbedderEnabled(async () => {
+    // two orthogonal blocks of 10 — every identity is the same string "x"
+    // (insertTagged's default), which drives BOTH medoid hashes to the same
+    // handle and exercises the collision roll
+    const ids = [];
+    for (let i = 0; i < 20; i++) {
+      const id = await insertTagged(`stock ${i}`, bC);
+      ids.push(id);
+      await setItemEmbedding(db, id, new Float32Array(i < 10 ? [1, 0] : [0, 1]), EMBEDDER.model);
+    }
+    const r = await req(srv.base, "GET", `/api/boards/${bC}/meaning-clusters?level=1`, { sid: member.sid });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.values.length, 2, "two real groups, no unclassified");
+    const [a, b] = r.json.values;
+    assert.match(a.value, /^[a-z]{5}$/);
+    assert.match(b.value, /^[a-z]{5}$/);
+    assert.notEqual(a.value, b.value, "identical medoid identities still get distinct handles");
+    assert.equal(a.label, a.value, "the handle IS the label");
+    assert.match(a.title, /^most typical: /);
+    assert.equal(r.json.sets.length, 20, "every embedded item is placed");
+    const byValue = new Map();
+    for (const [, v] of r.json.sets) byValue.set(v, (byValue.get(v) || 0) + 1);
+    assert.deepEqual([...byValue.values()].sort(), [10, 10]);
+    // the same ask serves the cached carving — same body, still 200
+    const r2 = await req(srv.base, "GET", `/api/boards/${bC}/meaning-clusters?level=1`, { sid: member.sid });
+    assert.deepEqual(r2.json, r.json);
+  });
+  const t = await meterTotals(db, bC, "embed");
+  assert.equal(Number(t?.calls || 0), 0, "free: nothing embedded, nothing metered");
+  const off = await req(srv.base, "GET", `/api/boards/${bC}/meaning-clusters?level=1`, { sid: member.sid });
+  assert.equal(off.status, 404, "no embedder, no carving — like /api/search");
+});
