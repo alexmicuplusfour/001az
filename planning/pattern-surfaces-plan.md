@@ -309,26 +309,40 @@ hover title keeps orientation duty: "most typical: TMUS". The hash token is
 also the `~clusters` VALUE for this flavor — so a selection survives
 recomputes that keep the group’s heart, which c0..c7 never could.
 
-**Vectors reach the client** via a new free route (resolveEmbedder-gated
-like /api/search, unmetered): binary framing, not JSON (~2.8MB Float32 at
-1.8k items; JSON would be ~15MB) — uint32 header length + JSON header
-{dims, ids} + concatenated Float32 payload. Entity with several instances =
-normalized mean of its instance vectors. Freshness contract mirrors typed
-search: vectors fetched when the lens turns on, clustered from that
-snapshot; items embedded later join on the next fetch — absent, not
-unclassified, exactly like sub-MIN_TAGS items in the chip flavor (rule 5).
+**The server carves; the client gets the carving** (revised 2026-09-07 —
+the first draft shipped raw vectors to the browser, ~2.8MB and growing
+linearly; rejected). The search-family precedent decides it: like
+/api/search and /api/search/similar, the compute runs where the data lives
+and the wire carries conclusions. New route
+`GET /api/boards/:id/meaning-clusters?level=N` (resolveEmbedder-gated,
+unmetered, free): runs the same deterministic k-means over
+boardEmbeddings server-side and returns `{ values: [{value, label, size,
+title}], sets: {itemId: value} }` — tens of KB at any board size. Entity
+with several instances = normalized mean of its instance vectors, collapsed
+BEFORE clustering so membership speaks entity ids. Server cache per
+(board, level, model, corpus fingerprint: embedded count + max updated_at)
+— recompute on the next ask after data moves, at most once per fingerprint;
+the ~300ms compute (seconds at 10k items) is absorbed there. Client
+contract unchanged from the chip flavor's spirit: fetched on lens-on and on
+level change, held until then; items embedded later join on the next fetch
+— absent, not unclassified (rule 5).
 
 **Floor fix, BOTH flavors**: the 3%-share floor scales unbounded and at
 1853 items (floor 56) it executed a genuinely good 29-member casino/travel
 cluster (LVS, RCL, CCL, EXPE, CZR). Cap it: floor = max(MIN_GROUP,
 min(N · MIN_SHARE, 30)).
 
-**Build shape**: factor computeClusters’ k-means core to take (vectors,
-keys) — chips prep and embeddings prep feed the same core, so determinism
-and the medoid/seeding math stay written once. Tests: exclusivity, handle
-determinism/distinctness, entity-mean vectors, floor cap, vectors-route
-framing + gating. Open niceties, not v1: a color dot from the same hash;
-Int8/Float16 quantization for 10k boards.
+**Build shape**: extract the pure k-means core (seeding, iterations,
+medoid — no state, no DOM) from computeClusters into a dependency-free
+shared module that BOTH sides import — patterns.js preps chip vectors and
+calls it in the browser; the route preps embedding vectors and calls it in
+node — so the determinism rules stay written exactly once (the pattern
+tests already import public modules into node; the server doing the same
+for a pure module is no stretch). Tests: exclusivity, handle
+determinism/distinctness, entity-mean collapse, floor cap, the route
+(payload shape, cache-hit behavior, gating 404s, nothing metered). Open
+niceties, not v1: a color dot from the same hash; a stale-serve variant of
+the cache for boards that churn constantly.
 
 ## Stage 2 — movement (needs history depth)
 
