@@ -64,6 +64,23 @@ adapter tests (incl. the never-called metered-resolve guard) + a route e2e
 through the registered widgets bind, whose manifest now declares a
 column-backed and a filter-only vocabulary.
 
+**2026-09-06 late — the round-trip hole, found live and closed at the root.**
+Saving "Keep top 1000" stuck server-side but reopening showed "all", and a
+re-save would have erased it: the modal rebuilt its working copy from a
+hand-picked field list that never learned `total`. The fix is structural, not
+another field: the working copy now starts as a wholesale `structuredClone`
+of the saved config (defaults underneath, only shaped fields overridden), and
+ONE `configPayload()` — cfg spread wholesale, filters narrowed to finished
+rows — feeds preview and Save both. A key this client build doesn't know (a
+newer server's) now survives open → Save untouched, and the server stores it
+verbatim (deliberate: an older client must not strip newer keys). Pinned by
+`test/ingest-modal.test.js` — the third jsdom harness: maximal config +
+`future_knob` round-trips open → Save byte-identical, knobs display saved
+values, enum/preset controls resolve, an edited knob writes through
+undisturbed; mutation-checked (removing the wholesale spread fails both
+tests) — and by a server PATCH → GET wholesale round-trip test in
+`ingest-routes.test.js`. Suite 1427.
+
 ## The three gaps
 
 **1. "Top 2000 stocks" cannot be said.** `#` (rank) is market-cap rank over

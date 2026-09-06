@@ -475,3 +475,26 @@ test("preview: a full membership suppresses `capped` — the count is no longer 
     delete process.env.INGEST_FEED_CAP;
   }
 });
+
+test("the ingest config round-trips PATCH → GET wholesale — unknown keys included", async () => {
+  // The full shape, plus a key this server build doesn't know. Storing it
+  // verbatim is deliberate, not accidental: an older client editing a newer
+  // config must not strip the keys it can't see (the modal holds the same
+  // contract from its side — test/ingest-modal.test.js), and validateIngest
+  // bounds what it knows rather than whitelisting what may exist.
+  const bid = await seedBoard(db, "roundtrip");
+  const full = {
+    enabled: true,
+    source: { folder: "pick", recursive: true },
+    filters: [{ fn: "extension", op: "equals", value: "txt" }],
+    sort: { by: "name", order: "asc" },
+    total: 123,
+    limit: 45,
+    trigger: { mode: "daily", at: "06:30" },
+    future_knob: { nested: 7 },
+  };
+  const r = await req(base, "PATCH", `/api/boards/${bid}`, { sid: admin.sid, body: { ingest: full } });
+  assert.equal(r.status, 200);
+  const info = await req(base, "GET", `/api/boards/${bid}/ingest`, { sid: admin.sid });
+  assert.deepEqual(info.json.config, full, "what was saved is what comes back — no key silently dropped");
+});

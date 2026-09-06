@@ -110,8 +110,18 @@ export function openIngestModal() {
     // Buffered config — edits stay local until Save. (Where a source keeps
     // its base path — `folder` vs `path` — is pathKeyFor, the source
     // module's one spelling of that rule.)
+    //
+    // Built by CLONING the saved config wholesale, with defaults underneath
+    // and only the fields that need shaping overridden — so a config key
+    // round-trips open → Save by default. A hand-picked field list here is
+    // exactly how `total` once vanished: saved fine, never loaded, and the
+    // next Save silently erased it. A key this build doesn't know (a newer
+    // server's) survives the same way.
     const saved = info.config;
     const cfg = {
+      total: null,
+      limit: null,
+      ...structuredClone(saved || {}),
       // An existing config keeps its saved state (only an explicit false =
       // paused); picking the "Off" trigger forces this true, since a board
       // with no timer has nothing to hold (see syncTriggerInputs).
@@ -119,7 +129,6 @@ export function openIngestModal() {
       source: { ...(saved?.source || {}) },
       filters: (saved?.filters || []).map((f) => ({ ...f })),
       sort: saved?.sort ? { ...saved.sort } : { by: desc.sorts?.[0]?.by, order: "desc" },
-      limit: saved?.limit ?? null,
       // A board with no saved config opens with the trigger OFF. Automatic
       // ingestion is opt-in, and the old default — Continuous pre-selected but
       // held Paused — read as saved state ("it's on and paused?!") on every
@@ -830,7 +839,7 @@ export function openIngestModal() {
         const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(previewConfig()),
+          body: JSON.stringify(configPayload()),
         });
         const data = await r.json().catch(() => ({}));
         if (mySeq !== previewSeq) return;
@@ -855,18 +864,14 @@ export function openIngestModal() {
     // Only send filters the user has finished typing (a value-less filter
     // matches nothing server-side, which reads as a broken preview).
     const unfinishedFilter = (f) => f.value === "" || f.value === null || f.value === undefined;
-    // The MATCH half of the config — what preview dry-runs. No trigger: the
-    // schedule has no bearing on what matches, and a half-typed "every N
-    // minutes" must not block a preview. Save adds it back (and the server
-    // validates it there).
-    function previewConfig() {
-      return {
-        source: cfg.source,
-        filters: cfg.filters.filter((f) => !unfinishedFilter(f)),
-        sort: cfg.sort,
-        ...(cfg.total ? { total: cfg.total } : {}),
-        ...(cfg.limit ? { limit: cfg.limit } : {}),
-      };
+    // ONE payload for preview and Save: the buffered config WHOLESALE,
+    // filters narrowed to the finished rows. Spreading cfg — never picking
+    // fields — is what lets every key that survived open survive the write
+    // (picking is how `total` once got erased on re-save). The preview route
+    // skips trigger validation server-side (trigger: false), so a half-typed
+    // schedule still previews fine.
+    function configPayload() {
+      return { ...cfg, filters: cfg.filters.filter((f) => !unfinishedFilter(f)) };
     }
 
     // ── Results view: read-only paged list, connector-browse chrome ──
@@ -948,7 +953,7 @@ export function openIngestModal() {
         const r = await fetch(`/api/boards/${state.boardId}/ingest/preview`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...previewConfig(), sample: { offset: resultOffset, limit: PAGE_SIZE } }),
+          body: JSON.stringify({ ...configPayload(), sample: { offset: resultOffset, limit: PAGE_SIZE } }),
         });
         const data = await r.json().catch(() => ({}));
         if (mySeq !== resultSeq) return;
@@ -1045,9 +1050,8 @@ export function openIngestModal() {
           }
           body = {
             ingest: {
-              ...previewConfig(),
+              ...configPayload(),
               trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" },
-              enabled: cfg.enabled,
             },
           };
         }
