@@ -198,10 +198,12 @@ function jobsChip() {
 function modeChip(iconMarkup, text, onClear) {
   const el = document.createElement("span");
   el.className = "tool-btn mode-chip active";
+  el.title = text; // the label clips (CSS) — an identity can be a whole filename
   const icon = document.createElement("span");
   icon.className = "mode-chip-icon";
   icon.innerHTML = iconMarkup;
   const lbl = document.createElement("span");
+  lbl.className = "mode-chip-label";
   lbl.textContent = text;
   el.append(icon, lbl);
   const clear = toolBtn(ICONS.x, "crates-clear", onClear);

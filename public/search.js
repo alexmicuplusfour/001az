@@ -43,7 +43,14 @@ export async function runSearch(q) {
 // search box itself is hidden), and it leaves searchDraft alone — the
 // input stays the user's; the toolbar's mode chip announces this mode and
 // its × lands back in clearSearch.
-const anchorLabel = (img) => img.symbol || img.displayLabel || img.identity;
+// The mode chip's anchor name, bounded: an identity can be a whole filename,
+// and end-clipping the chip would eat the "· meaning" flavor suffix — so the
+// NAME is clipped here and the suffix always survives (the chip's CSS
+// ellipsis stays as the backstop).
+const anchorLabel = (img) => {
+  const s = img.symbol || img.displayLabel || img.identity;
+  return s.length > 42 ? s.slice(0, 40) + "…" : s;
+};
 
 export function runSimilar(img) {
   const results = similarTo(img);

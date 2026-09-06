@@ -1453,6 +1453,14 @@ body.bulk-mode .heart {
 .tool-btn.mode-chip {
   cursor: default;
 }
+/* an anchor's name can be a whole filename — the chip states the mode, the
+   hover title carries the full text */
+.mode-chip-label {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* icon wrappers: a <span> is blockified as a flex item, so the svg inside it
    would otherwise sit on a text baseline and push the button taller */
 .mode-chip-icon {
