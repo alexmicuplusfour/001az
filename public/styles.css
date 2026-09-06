@@ -397,6 +397,18 @@ header.header-collapsed #toolbar-fold {
   background: var(--pill-bg);
 }
 
+/* the action pill (pillAction — utils.js): no fill and dim ink at rest, so
+   a command sits in a value row without claiming to be one of the values */
+.pill.pill-action {
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.pill.pill-action:hover {
+  background: var(--pill-bg);
+  color: var(--text);
+}
+
 .pill .count,
 .tool-btn .count {
   color: var(--text-dim);

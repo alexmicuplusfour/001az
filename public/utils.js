@@ -487,3 +487,17 @@ export function pill(label, count, active, muted, onClick) {
   return b;
 }
 
+// An ACTION riding a pill row — the clusters row's "more"/"fewer" steps. It
+// borrows the pill's shape so the row reads as one line, but not the white
+// fill: in the rail, the filled capsule means "a value you can select", and
+// an action is not one. `title` is required — with no count and no active
+// state, the one line of hover help is all the explanation these get.
+export function pillAction(label, title, onClick) {
+  const b = document.createElement("button");
+  b.className = "pill pill-action";
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener("click", onClick);
+  return b;
+}
+

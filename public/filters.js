@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { tag, pill, appendCount, ICONS } from './utils.js';
+import { tag, pill, pillAction, appendCount, ICONS } from './utils.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
 import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters, LEVEL_MAX } from './patterns.js';
@@ -467,14 +467,10 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
         if (!shown.has(value)) pills.appendChild(chip("~clusters", value));
       }
       if (clusterLevel() > 1) {
-        const fewer = pill("fewer", null, false, false, () => stepClusters(-1));
-        fewer.title = "Carve the board into fewer groups";
-        pills.appendChild(fewer);
+        pills.appendChild(pillAction("fewer", "Carve the board into fewer groups", () => stepClusters(-1)));
       }
       if (clusterLevel() < LEVEL_MAX && values.length) {
-        const more = pill("more", null, false, false, () => stepClusters(1));
-        more.title = "Carve the board into more groups";
-        pills.appendChild(more);
+        pills.appendChild(pillAction("more", "Carve the board into more groups", () => stepClusters(1)));
       }
     }
   }
