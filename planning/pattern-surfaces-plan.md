@@ -272,6 +272,64 @@ with a rich description is exactly where this flavor shines.
 first, 404s); scoring stays server-side so the patterns unit file is
 untouched.
 
+### 3-meaning (2026-09-07): clusters by meaning — the literal carving
+
+The clusters lens grows a second flavor over the stored embeddings, as a
+THIRD toggle in the filter-options menu — "Clusters by tags" (the shipped
+lens, renamed) and "Clusters by meaning", MUTUALLY EXCLUSIVE: turning one on
+turns the other off (patterns.js owns the rule — the wrapped toggles clear
+the sibling’s state and storage — not the menu). One rail row either way:
+same `~clusters` registry entry, same row code, same more/fewer level knob;
+patterns.js routes clusterValues/clusterSet to whichever flavor is active.
+Each flavor keeps its own boardLens key and level (boardClusters /
+boardClustersM); a flavor flip clears the `~clusters` selection like
+toggle-off does (the other carving’s values can’t match).
+
+**Measured (stocks test, 1853/1853 embedded, bge-small 384d).** The same
+deterministic k-means over embeddings produces strikingly literal groups:
+finance (BRK-B, BLK, banks/insurers), biotech (AMGN, AZN, NVS — "clinical
+stage"), REITs, aerospace/defense (GE, TDG, RTX + airlines), telecoms
+(TMUS, VOD, CHT), a crypto crowd (COIN, MSTR, GEMI), and hardware-vs-
+software tech split the sector facet can’t make. Cost: 173–324ms at K=8–16
+(one-shot per data/level change; heavier than chips’ ~70ms but fine).
+
+**Labels — two sources measured and REJECTED, one chosen.** Tag signatures
+describe the groups well but borrow the wrong vocabulary (and produced
+identical twin labels for the two tech clusters) — not kosher for groups
+found in meaning-space. Description-word lift labels split the board: half
+superb (reit×17, aerospace×22, clinical×8.7), half chart-narration mush
+("spike · followed · sharp") because many descriptions narrate the price
+chart, not the business. CHOSEN: the label is a HANDLE, not a description
+(the arc’s own founding insight) — a gibberish name derived
+deterministically from the medoid’s identity hash, rendered as pronounceable
+syllables ("damok"). Distinct by construction (one item hearts one group),
+stable exactly as long as the group’s heart holds (new arrivals churn the
+edges, the name survives; a real reorganization renames — honestly). The
+hover title keeps orientation duty: "most typical: TMUS". The hash token is
+also the `~clusters` VALUE for this flavor — so a selection survives
+recomputes that keep the group’s heart, which c0..c7 never could.
+
+**Vectors reach the client** via a new free route (resolveEmbedder-gated
+like /api/search, unmetered): binary framing, not JSON (~2.8MB Float32 at
+1.8k items; JSON would be ~15MB) — uint32 header length + JSON header
+{dims, ids} + concatenated Float32 payload. Entity with several instances =
+normalized mean of its instance vectors. Freshness contract mirrors typed
+search: vectors fetched when the lens turns on, clustered from that
+snapshot; items embedded later join on the next fetch — absent, not
+unclassified, exactly like sub-MIN_TAGS items in the chip flavor (rule 5).
+
+**Floor fix, BOTH flavors**: the 3%-share floor scales unbounded and at
+1853 items (floor 56) it executed a genuinely good 29-member casino/travel
+cluster (LVS, RCL, CCL, EXPE, CZR). Cap it: floor = max(MIN_GROUP,
+min(N · MIN_SHARE, 30)).
+
+**Build shape**: factor computeClusters’ k-means core to take (vectors,
+keys) — chips prep and embeddings prep feed the same core, so determinism
+and the medoid/seeding math stay written once. Tests: exclusivity, handle
+determinism/distinctness, entity-mean vectors, floor cap, vectors-route
+framing + gating. Open niceties, not v1: a color dot from the same hash;
+Int8/Float16 quantization for 10k boards.
+
 ## Stage 2 — movement (needs history depth)
 
 Prerequisite that costs nothing today: **turn the stocks board's daily retag
