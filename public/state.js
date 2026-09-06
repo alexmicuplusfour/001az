@@ -29,7 +29,7 @@ export const state = {
   showProcessing: false,   // status pill: actively worked (processing/extracting/facing/fetching)
   showUnprocessed: false,  // status pill: queued, not started (pending*)
   showOdds: false,         // odds lens: ×N on salient chips while filtering (patterns.js; per viewer per board)
-  showClusters: false,     // clusters lens: found-group row in the rail (patterns.js; per viewer per board; holds the granularity LEVEL, 0 = off)
+  showClusters: 0,         // clusters lens: found-group row in the rail (patterns.js; per viewer per board; holds the granularity LEVEL, 0 = off)
   showMeaningClusters: 0,  // the same lens carved from embeddings instead of chips — mutually exclusive with showClusters (patterns.js owns the rule)
   // Active board sort: null = server default (newest first), else { by, dir }.
   // `by` is namespaced: "name"/"created"/"updated"/"hearts"/"instances"

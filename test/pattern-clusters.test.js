@@ -249,3 +249,34 @@ test("the two cluster flavors are mutually exclusive, in state and in storage", 
   toggleMeaningClusters(false);
   state.showClusters = 0;
 });
+
+test("meaning flavor: the served carving honors the membership contract (id -> Set)", async () => {
+  // entityHasValue calls .has() on what clusterSet returns, and the rail
+  // counts through the same sets — a raw string here breaks filtering the
+  // moment a meaning chip is clicked. Served shape pinned via a stubbed
+  // fetch; one shared Set per group, the chip flavor's own economy.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      values: [{ value: "damok", size: 2, label: "damok", title: "most typical: a" }],
+      sets: [[1, "damok"], [2, "damok"], [3, "unclassified"]],
+    }),
+  });
+  try {
+    state.boardId = "b9";
+    state.showMeaningClusters = 1;
+    state.showClusters = 0;
+    refreshClusters();
+    await new Promise((r) => setTimeout(r, 0)); // the fetch chain settles
+    const s = clusterSet({ id: 1 });
+    assert.ok(s instanceof Set && s.has("damok"));
+    assert.equal(clusterSet({ id: 2 }), s, "one shared Set per group");
+    assert.ok(clusterSet({ id: 3 }).has("unclassified"));
+    assert.equal(clusterValues()[0].value, "damok");
+  } finally {
+    globalThis.fetch = realFetch;
+    state.showMeaningClusters = 0;
+    refreshClusters(); // clears the meaning cache now that the flavor is off
+  }
+});

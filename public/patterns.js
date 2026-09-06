@@ -239,7 +239,16 @@ function refreshMeaning(level) {
     .then((body) => {
       if (mPending !== key) return; // superseded by a level step or toggle
       mPending = null;
-      mServed = { key, result: { values: body.values, sets: new Map(body.sets) } };
+      // The membership contract is id -> SET (entityHasValue calls .has, the
+      // rail counts through it) — one shared Set per group, the chip
+      // flavor's own economy.
+      const group = new Map();
+      const sets = new Map(body.sets.map(([id, v]) => {
+        let s = group.get(v);
+        if (!s) group.set(v, s = new Set([v]));
+        return [id, s];
+      }));
+      mServed = { key, result: { values: body.values, sets } };
       document.dispatchEvent(new Event("app:render"));
     })
     .catch(() => {
