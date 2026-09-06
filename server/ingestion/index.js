@@ -167,6 +167,15 @@ export function validateIngest(ingest, descriptor, { hasRoot = false, trigger = 
     if (!Number.isInteger(ingest.limit) || ingest.limit < 1 || ingest.limit > SAFETY_CAP)
       return `limit must be an integer between 1 and ${SAFETY_CAP}`;
   }
+  // `total` is the other bound: MEMBERSHIP, not pacing. The board mirrors the
+  // first N of the filtered, sorted window — rows already ingested count
+  // toward N, which is what makes it "top N" rather than "N more per run"
+  // (that's `limit`, above). Same ceiling, same reason: past the enumeration
+  // cap a total couldn't be honored anyway. (null = "all", the default.)
+  if (ingest.total !== undefined && ingest.total !== null) {
+    if (!Number.isInteger(ingest.total) || ingest.total < 1 || ingest.total > SAFETY_CAP)
+      return `total must be an integer between 1 and ${SAFETY_CAP}`;
+  }
 
   // Trigger — skippable (`trigger: false`) for callers that only ask "what
   // would this MATCH": the preview route dry-runs source/filters/sort/limit,

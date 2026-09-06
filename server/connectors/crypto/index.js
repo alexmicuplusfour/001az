@@ -111,7 +111,15 @@ export const manifest = {
       { key: "price",      label: "Price",   kind: "usd", preview: true },
       { key: "change_24h", label: "24h",     kind: "percent" },
       { key: "change_7d",  label: "7d",      kind: "percent" },
-      { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true },
+      // Feed-filter presets, this domain's own scale (no Mega/Large names —
+      // that's equity vocabulary; see the stocks column for the mechanism).
+      { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true, presets: [
+        { label: "Over $10 billion",  op: "gte", value: 10e9 },
+        { label: "Over $1 billion",   op: "gte", value: 1e9 },
+        { label: "Over $100 million", op: "gte", value: 100e6 },
+        { label: "Over $10 million",  op: "gte", value: 10e6 },
+        { label: "Under $10 million", op: "lte", value: 10e6 },
+      ] },
       { key: "volume",     label: "Volume",  kind: "usd", preview: true },
     ],
     sorts: [

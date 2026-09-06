@@ -407,3 +407,71 @@ test("board payload: ingest_error flags a failing watch — boolean only, config
   r = await req(base, "GET", `/api/boards/${boardId}`, { sid: admin.sid });
   assert.equal(r.json.ingest_error, false, "no config, no flag");
 });
+
+test("preview: `total` caps membership; ingested members occupy slots; bounds validated", async () => {
+  const bid = await seedBoard(db, "total-preview");
+  const body = {
+    source: { folder: "pick", recursive: true },
+    filters: [{ fn: "extension", op: "equals", value: "txt" }],
+    sort: { by: "name", order: "asc" },
+    total: 2,
+  };
+  const r = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, { sid: admin.sid, body });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.count, 2, "membership = the first `total` of the sorted matches (3 txt exist)");
+  assert.equal(r.json.new, 2);
+
+  // Sample pages the CAPPED set — the run and the results view read one window.
+  const p = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, {
+    sid: admin.sid, body: { ...body, sample: { offset: 0, limit: 5 } },
+  });
+  assert.deepEqual(p.json.sample.map((c) => c.label), ["a.txt", "b.txt"]);
+  assert.equal(p.json.hasMore, false, "no pages past the membership");
+
+  // A ledgered member still occupies its slot: count holds, `new` drops —
+  // this is what makes `total` mean "top N" instead of "N more per run".
+  await recordIngest(db, bid, p.json.sample[0].key, Date.now());
+  const r2 = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, { sid: admin.sid, body });
+  assert.equal(r2.json.count, 2);
+  assert.equal(r2.json.new, 1);
+
+  // Bounds, same ceiling as `limit`.
+  for (const bad of [0, -1, 2.5, "x", 100001]) {
+    const rb = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, {
+      sid: admin.sid, body: { ...body, total: bad },
+    });
+    assert.equal(rb.status, 400, `total=${bad} refused`);
+    assert.match(rb.json.error, /total must be an integer/);
+  }
+});
+
+test("preview: a full membership suppresses `capped` — the count is no longer a lower bound", async () => {
+  const bid = await seedBoard(db, "total-capped");
+  for (let i = 1; i <= 5; i++) {
+    const p = path.join(root, `totals/t${i}.txt`);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, "content");
+    fs.utimesSync(p, new Date(OLD), new Date(OLD)); // past the settle window, like every fixture here
+  }
+  const body = { source: { folder: "totals" }, filters: [], sort: { by: "name", order: "asc" } };
+  // A rationed window (3 of 5) makes the walk truncate — the operator's knob,
+  // read at call time by ENUM_CAP.
+  process.env.INGEST_FEED_CAP = "3";
+  try {
+    const bare = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, { sid: admin.sid, body });
+    assert.equal(bare.json.count, 3);
+    assert.equal(bare.json.capped, true, "no total: a truncated walk keeps its honest +");
+    const above = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, {
+      sid: admin.sid, body: { ...body, total: 4 },
+    });
+    assert.equal(above.json.count, 3);
+    assert.equal(above.json.capped, true, "membership not reached: more COULD match — still a lower bound");
+    const full = await req(base, "POST", `/api/boards/${bid}/ingest/preview`, {
+      sid: admin.sid, body: { ...body, total: 3 },
+    });
+    assert.equal(full.json.count, 3);
+    assert.equal(full.json.capped, false, "membership full: the count cannot grow, the + would lie");
+  } finally {
+    delete process.env.INGEST_FEED_CAP;
+  }
+});

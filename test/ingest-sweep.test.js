@@ -197,3 +197,73 @@ test("continuous trigger reschedules itself on the continuous cadence", async ()
   assert.ok(board.ingest_next_run_at <= Date.now() + 35000, "on the continuous cadence, not a backoff");
   await setIngestNextRun(db, id, null);
 });
+
+// ── "Keep top N": total is MEMBERSHIP (first N of the sorted set), not pacing ──
+
+const names = async (id) => (await db.query(
+  "SELECT payload->'files'->0->>'original_name' AS name FROM items WHERE board_id=$1 ORDER BY 1", [id]
+)).rows.map((r) => r.name);
+
+// One manual run: arm the timer, wait for it to disarm with a fresh stamp.
+async function runOnce(id, after = 0) {
+  await setIngestNextRun(db, id, Date.now() - 1);
+  return until(async () => {
+    const b = await getBoard(db, id);
+    return b.ingest_next_run_at === null && (b.ingest_state?.last_run_at || 0) > after ? b : null;
+  });
+}
+
+test("keep top: first `total` in sort order; ingested rows occupy slots; newcomers join, fallen rows stay", async () => {
+  for (let i = 1; i <= 5; i++) put(`top/m${i}.txt`, `file ${i}`);
+  const id = await seedBoard(db, "keep-top");
+  await updateBoard(db, id, {
+    ingest: {
+      enabled: true,
+      source: { folder: "top", recursive: true },
+      filters: [],
+      sort: { by: "name", order: "asc" },
+      total: 3,
+      trigger: { mode: "manual" },
+    },
+  });
+  let board = await runOnce(id);
+  assert.deepEqual(await names(id), ["m1.txt", "m2.txt", "m3.txt"],
+    "exactly the first `total` of the sorted set — m4/m5 are outside the membership, not queued behind it");
+  assert.equal(board.ingest_state.drain_left ?? 0, 0);
+
+  // Run again: the membership is full and every member ledgered — admits 0.
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0, "a full membership admits nothing — ingested rows count toward the cap");
+
+  // A newcomer that sorts INTO the top 3 is admitted; m3 — now outside the
+  // top 3 — stays on the board (the ledger never evicts), and doesn't
+  // consume a slot.
+  put("top/a0.txt", "newcomer");
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 1);
+  assert.deepEqual(await names(id), ["a0.txt", "m1.txt", "m2.txt", "m3.txt"]);
+});
+
+test("keep top + per-run limit: the budget drains inside the membership, never past it", async () => {
+  for (let i = 1; i <= 5; i++) put(`topdrain/f${i}.txt`, `file ${i}`);
+  const id = await seedBoard(db, "keep-top-drain");
+  await updateBoard(db, id, {
+    ingest: {
+      enabled: true,
+      source: { folder: "topdrain", recursive: true },
+      filters: [],
+      sort: { by: "name", order: "asc" },
+      total: 4,
+      limit: 3, // per-run budget < membership, > the per-tick cap of 2 → forces a drain
+      trigger: { mode: "manual" },
+    },
+  });
+  let board = await runOnce(id);
+  assert.deepEqual(await names(id), ["f1.txt", "f2.txt", "f3.txt"],
+    "run 1: the per-run budget, drained across ticks, all inside the membership");
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 1, "run 2: the membership's remainder");
+  assert.deepEqual(await names(id), ["f1.txt", "f2.txt", "f3.txt", "f4.txt"]);
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0, "f5 is outside the membership, ever");
+});

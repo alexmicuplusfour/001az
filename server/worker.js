@@ -64,7 +64,7 @@ import { wantedGeneration } from "./pricing.js";
 import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
-import { applyFilters, applySort, applyLimit } from "./ingestion/filter-engine.js";
+import { applyLimit, membership } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
 import { sidecarUrl } from "./sidecar-catalog.js";
 import { pluginState } from "./plugins.js";
@@ -2006,9 +2006,21 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         const drainLeft = Number(b.ingest_state?.drain_left) || 0;
         const { candidates } = await adapter.enumerate(db, b, cfg, { drain: drainLeft > 0 });
         const known = await ingestedKeys(db, b.id);
-        const fresh = candidates.filter((c) => !known.has(c.key));
+        // `total` is MEMBERSHIP — the board mirrors the first N of the
+        // filtered, sorted window, and rows already ingested count toward N.
+        // So it caps BEFORE the known-subtraction (after, it would degenerate
+        // into another per-run limit). Without a total the two orders agree —
+        // the cap is the only reason to look at ingested rows — so subtract
+        // `known` first and spare the hot path: a mature continuous board
+        // then re-sorts its ~0 fresh rows per tick, not the full window for
+        // an identical result. `fresh` filters the sorted list, so order
+        // survives into the budget slice.
+        const total = Number(cfg.total) || 0;
+        const pool = total ? candidates : candidates.filter((c) => !known.has(c.key));
+        const matched = membership(pool, cfg, catalog);
+        const fresh = total ? matched.filter((c) => !known.has(c.key)) : matched;
         const budget = drainLeft > 0 ? drainLeft : (Number(cfg.limit) || Infinity);
-        const picked = applyLimit(applySort(applyFilters(fresh, cfg.filters, catalog), cfg.sort, catalog), budget);
+        const picked = applyLimit(fresh, budget);
         const batch = picked.slice(0, RUN_CAP(descriptor.runCap));
         // One batched warm ahead of the per-item admissions; the economics and
         // the best-effort contract live with it, in connector.js `prewarm`.

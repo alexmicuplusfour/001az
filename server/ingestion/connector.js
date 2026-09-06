@@ -18,6 +18,21 @@ import { SAFETY_CAP, cacheTtl, readWindow, writeWindow, resetWindow, ageWindow }
 // formatting); the filter engine only knows text/number/date.
 const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "number", date: "date" };
 
+// Contract-declared numeric presets ("Large — over $10 billion"), normalized
+// on the way into the catalog: plugin-domain loading validates no browse
+// shapes at all (plugin-loader validateBuilt), so this is the one gate
+// between a malformed plugin preset and the modal. Presentation sugar only —
+// picking one writes a plain { op, value } filter row; the engine, the
+// validator, and the saved config never know presets exist.
+const PRESET_OPS = new Set(["gte", "lte"]);
+function presetsOf(column) {
+  if ((FILTER_KIND[column.kind] || "text") !== "number") return null;
+  const clean = (Array.isArray(column.presets) ? column.presets : [])
+    .filter((p) => p && typeof p.label === "string" && PRESET_OPS.has(p.op) && Number.isFinite(p.value))
+    .map((p) => ({ label: p.label, op: p.op, value: p.value }));
+  return clean.length ? clean : null;
+}
+
 // How deep into the catalog a feed can see: ALL of it. There is no app-side
 // reach limit, for the reason files.js already spells out — a capped window
 // CLOGS. The ledger dedups downstream, not during the walk, so once the first
@@ -211,16 +226,20 @@ export function feedAdapter(conn) {
       // `kind` is the filter engine's vocabulary; `display` keeps the column's
       // richer browse kind (usd/percent) so the preview list can format values
       // the way the browse modal does instead of flattening to bare numbers.
-      filters: (browse.columns || []).map((c) => ({
-        fn: c.key,
-        kind: FILTER_KIND[c.kind] || "text",
-        label: c.label,
-        display: c.kind,
-        // `preview: true` opts a column into the ingest preview's column set
-        // (see ingest-modal). Kept off the object when unset so the catalog
-        // stays clean and a source that flags none falls back to showing all.
-        ...(c.preview ? { preview: true } : {}),
-      })),
+      filters: (browse.columns || []).map((c) => {
+        const presets = presetsOf(c);
+        return {
+          fn: c.key,
+          kind: FILTER_KIND[c.kind] || "text",
+          label: c.label,
+          display: c.kind,
+          // `preview: true` opts a column into the ingest preview's column set
+          // (see ingest-modal). Kept off the object when unset so the catalog
+          // stays clean and a source that flags none falls back to showing all.
+          ...(c.preview ? { preview: true } : {}),
+          ...(presets ? { presets } : {}),
+        };
+      }),
       sorts: (browse.sorts || []).map((s) => ({ by: s.key, label: s.label })),
       // No "continuous": that mode is the folder adapter's 30s rescan, which
       // would be rude against a metered API. Interval still allows 1 minute —
@@ -241,6 +260,27 @@ export function feedAdapter(conn) {
     // The preview route bounds its enumerate with this so its count and a
     // real run (which calls enumerate unbounded) read the same window.
     windowCap: () => ENUM_CAP(browse),
+
+    // Enum vocabularies for filter fields, where the browse modal already has
+    // them: `browse.filters` declarations whose key is also a COLUMN, resolved
+    // through the bind's browseFilters (static options, or provider-supplied —
+    // one resolver, so this dropdown and the browse modal's can't drift). The
+    // intersection runs on declared KEYS before resolving anything: a
+    // filter-only vocabulary (crypto's category) can never be a feed filter —
+    // candidate values bags carry column keys only — and resolving it anyway
+    // would buy a metered provider request for an answer this caller throws
+    // away. Null = nothing to offer; the route serves the catalog bare and the
+    // modal keeps free-text values. Vocabulary, not a whitelist — a value
+    // outside the list still saves, and simply matches nothing.
+    async filterOptions(db, board) {
+      const declared = browse.filters || [];
+      const columns = new Set((browse.columns || []).map((c) => c.key));
+      if (!conn.browseFilters || !declared.some((f) => columns.has(f.key))) return null;
+      const out = {};
+      for (const f of await conn.browseFilters(db, board?.id ?? null))
+        if (columns.has(f.key)) out[f.key] = f.options;
+      return Object.keys(out).length ? out : null;
+    },
 
     // Page the active provider's catalog into candidates, taken in the
     // configured sort order — boundedness makes the provider-side sort

@@ -18,6 +18,7 @@ import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-ta
 import { switchRow } from './board-modal.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
 import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
+import { fillSelect } from './select.js';
 import { stampBoard, ensurePolling } from './data.js';
 
 const OP_LABELS = {
@@ -30,6 +31,26 @@ const OPS_BY_KIND = {
   number: ["gte", "lte", "eq"],
   date: ["within_days", "before", "after"],
 };
+// The usd custom input's unit words (type 10, pick "billion") — the friendly
+// equivalent of shorthand nobody should have to know. The stored value is
+// always the plain product; these are input vocabulary, never a config shape.
+const UNITS = [
+  { label: "dollars", mul: 1 },
+  { label: "thousand", mul: 1e3 },
+  { label: "million", mul: 1e6 },
+  { label: "billion", mul: 1e9 },
+  { label: "trillion", mul: 1e12 },
+];
+// Decompose a saved value into the largest LOSSLESS unit: |v|/u ≥ 1 and the
+// float round-trip exact — rendering must never drift a saved value, so a
+// hairy 1234567891 falls through to plain dollars, ugly but exact.
+function unitFor(v) {
+  for (let i = UNITS.length - 1; i > 0; i--) {
+    const u = UNITS[i].mul;
+    if (Math.abs(v) / u >= 1 && (v / u) * u === v) return UNITS[i];
+  }
+  return UNITS[0];
+}
 const TRIGGER_LABELS = {
   // "Off" rather than "Manual only": in a modal about AUTOMATIC ingestion the
   // trigger is the automatic part, so no trigger is the feature switched off —
@@ -429,31 +450,156 @@ export function openIngestModal() {
         syncValueInput();
       }
 
-      function syncValueInput() {
+      // Custom mode for a preset field: transient, closure-local, never saved.
+      // Without it, a typed value that happens to equal a preset would snap
+      // the input back to the preset label mid-edit. Resets on field change;
+      // on modal reopen a preset-equal value honestly renders as the preset.
+      let customMode = false;
+
+      function buildValueInput() {
         const kind = catalogByFn[f.fn]?.kind || "text";
+        const display = catalogByFn[f.fn]?.display;
         const input = document.createElement("input");
         if (kind === "number" || f.op === "within_days") {
           input.type = "number";
+          input.step = "any"; // 2.5 billion, 2.5% — decimals are the point
           // Day counts can't be negative; plain number fields can (a feed
           // filtering 24h change ≤ -5 is the bread-and-butter case).
           if (f.op === "within_days") { input.min = "1"; input.placeholder = "days"; }
+          else if (display === "percent") input.placeholder = "e.g. 2.5";
         } else if (kind === "date") {
           input.type = "date";
         } else {
           input.type = "text";
         }
-        input.value = f.value ?? "";
         input.disabled = !canEdit;
+
+        // usd → input + spelled-out unit select. The input shows the value
+        // DECOMPOSED (2.5e9 renders as 2.5 | billion — unitFor guarantees the
+        // split is exact); typing or flipping the unit stores the plain
+        // product. A unit flip REINTERPRETS ("10 billion" → "10 million"
+        // means ten million now) — rescaling the input to preserve the value
+        // would make this a formatter, not an input. The unit needs no sticky
+        // state: typing never rebuilds the control, and a rebuild re-derives
+        // the unit from the value it just stored.
+        if (kind === "number" && display === "usd") {
+          const unit0 = unitFor(Number(f.value) || 0);
+          input.value = f.value === "" || f.value == null ? "" : Number(f.value) / unit0.mul;
+          const unitSel = document.createElement("select");
+          unitSel.className = "im-unit";
+          fillSelect(unitSel, UNITS.map((u, i) => ({ value: String(i), label: u.label })),
+            { value: String(UNITS.indexOf(unit0)) });
+          unitSel.disabled = !canEdit;
+          const commit = () => {
+            f.value = input.value === "" ? "" : Number(input.value) * UNITS[Number(unitSel.value)].mul;
+            invalidatePreview();
+          };
+          input.addEventListener("input", commit);
+          unitSel.addEventListener("change", commit);
+          const frag = document.createDocumentFragment();
+          frag.append(input, unitSel);
+          return frag;
+        }
+
+        input.value = f.value ?? "";
         input.addEventListener("input", () => {
           f.value = input.type === "number" ? (input.value === "" ? "" : Number(input.value)) : input.value;
           invalidatePreview();
         });
-        valWrap.replaceChildren(input);
+
+        // Plain big numbers (volume, file size) get a live thousands echo
+        // under the input once they're 5 digits — rank's four stay quiet.
+        // The value area is a flex ROW, so "under" means a column sub-wrap;
+        // the input opts out of the row's flex:1 (in a column that's height).
+        if (kind === "number" && display !== "percent") {
+          const wrap = document.createElement("span");
+          wrap.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;";
+          input.style.flex = "none";
+          const echo = document.createElement("span");
+          echo.className = "im-hint";
+          echo.style.margin = "0";
+          const syncEcho = () => {
+            const v = Number(input.value);
+            const show = input.value !== "" && Number.isFinite(v) && Math.abs(v) >= 10000;
+            echo.textContent = show ? `= ${fmtNumber(v)}` : "";
+            echo.style.display = show ? "" : "none";
+          };
+          input.addEventListener("input", syncEcho);
+          syncEcho();
+          wrap.append(input, echo);
+          return wrap;
+        }
+        return input;
+      }
+
+      function syncValueInput() {
+        // An enum vocabulary under `equals` renders as a select of the options
+        // (the browse modal's dropdown, arriving via the descriptor). Any
+        // other op keeps free text — "name contains x" stays possible on the
+        // same field. A saved value outside today's vocabulary (hand-typed
+        // config, stale options) is prepended and selected: rendering must
+        // never rewrite a saved config.
+        const options = catalogByFn[f.fn]?.options;
+        if (options?.length && f.op === "equals") {
+          const sel = document.createElement("select");
+          const known = !f.value || options.some((o) => o.value === f.value);
+          fillSelect(sel, known ? options : [{ value: f.value, label: f.value }, ...options],
+            { value: f.value || null, placeholder: "choose…" });
+          sel.disabled = !canEdit;
+          sel.addEventListener("change", () => { f.value = sel.value; invalidatePreview(); });
+          valWrap.replaceChildren(sel);
+          return;
+        }
+        // Contract presets ("Large — over $10 billion") render as one dropdown
+        // of every band + Custom… — a preset carries its own direction, so
+        // picking one writes op AND value and re-syncs the op select (the op
+        // chip keeps telling the truth; "≥" beside "over" is repetition, not
+        // conflict). A row whose (op, value) matches a preset renders as that
+        // preset — a hand-typed 2000000000 showing as "Mid — over $2 billion"
+        // is recognition, not rewriting. Custom… keeps the select beside the
+        // input: it is the way back to the bands, so it never disappears.
+        const presets = catalogByFn[f.fn]?.presets;
+        if (presets?.length && (f.op === "gte" || f.op === "lte")) {
+          const idx = customMode || f.value === "" ? -1
+            : presets.findIndex((p) => p.op === f.op && p.value === Number(f.value));
+          const isCustom = idx < 0 && (customMode || f.value !== "");
+          const sel = document.createElement("select");
+          fillSelect(sel,
+            [...presets.map((p, i) => ({ value: String(i), label: p.label })), { value: "custom", label: "Custom…" }],
+            { value: idx >= 0 ? String(idx) : isCustom ? "custom" : null, placeholder: "choose…" });
+          sel.disabled = !canEdit;
+          sel.addEventListener("change", () => {
+            if (sel.value === "custom") {
+              customMode = true;
+              syncValueInput(); // config untouched — just show the input
+              return;
+            }
+            customMode = false;
+            const p = presets[Number(sel.value)];
+            f.op = p.op;
+            f.value = p.value;
+            syncOps(); // rebuilds the op select around the new op, then re-renders
+            invalidatePreview();
+          });
+          valWrap.replaceChildren(sel);
+          if (isCustom) valWrap.appendChild(buildValueInput());
+          return;
+        }
+        valWrap.replaceChildren(buildValueInput());
       }
 
       fnSel.disabled = !canEdit;
       opSel.disabled = !canEdit;
-      fnSel.addEventListener("change", () => { f.fn = fnSel.value; f.value = ""; syncOps(); invalidatePreview(); });
+      fnSel.addEventListener("change", () => {
+        f.fn = fnSel.value;
+        f.value = "";
+        customMode = false;
+        // An options field starts on equals — the one op its select renders
+        // under. syncOps alone would keep a still-valid text op (contains).
+        if (catalogByFn[f.fn]?.options?.length) f.op = "equals";
+        syncOps();
+        invalidatePreview();
+      });
       opSel.addEventListener("change", () => { f.op = opSel.value; syncValueInput(); invalidatePreview(); });
 
       const rm = document.createElement("button");
@@ -480,7 +626,7 @@ export function openIngestModal() {
     addFilter.disabled = !canEdit;
     addFilter.addEventListener("click", () => {
       const first = desc.filters[0];
-      const f = { fn: first.fn, op: OPS_BY_KIND[first.kind][0], value: "" };
+      const f = { fn: first.fn, op: first.options?.length ? "equals" : OPS_BY_KIND[first.kind][0], value: "" };
       cfg.filters.push(f);
       filterList.appendChild(filterRow(f));
       invalidatePreview();
@@ -514,6 +660,15 @@ export function openIngestModal() {
       if (v === (cfg.sort?.order || "desc")) o.selected = true;
       orderSel.appendChild(o);
     }
+    const totalLbl = document.createElement("label");
+    totalLbl.textContent = "Keep top";
+    const totalInput = document.createElement("input");
+    totalInput.type = "number";
+    totalInput.min = "1";
+    totalInput.max = "100000"; // the enumeration safety cap — NOT limit's 500 nudge; "keep top 2000" must be typeable
+    totalInput.placeholder = "all";
+    totalInput.style.width = "80px";
+    if (cfg.total) totalInput.value = cfg.total;
     const limitLbl = document.createElement("label");
     limitLbl.textContent = "Limit per run";
     const limitInput = document.createElement("input");
@@ -523,17 +678,25 @@ export function openIngestModal() {
     limitInput.placeholder = "all";
     limitInput.style.width = "80px";
     if (cfg.limit) limitInput.value = cfg.limit;
-    sortSel.disabled = orderSel.disabled = limitInput.disabled = !canEdit;
+    sortSel.disabled = orderSel.disabled = totalInput.disabled = limitInput.disabled = !canEdit;
     sortSel.addEventListener("change", () => { cfg.sort = { ...cfg.sort, by: sortSel.value }; invalidatePreview(); });
     orderSel.addEventListener("change", () => { cfg.sort = { ...cfg.sort, order: orderSel.value }; invalidatePreview(); });
+    // Keep top changes WHAT MATCHES (membership: the first N of the sorted,
+    // filtered set, counting rows already ingested), so it invalidates the
+    // shown count. The per-run limit below deliberately does NOT — pacing has
+    // no bearing on the match set, and the asymmetry is the point, not a bug.
+    totalInput.addEventListener("input", () => {
+      cfg.total = totalInput.value === "" ? null : Number(totalInput.value);
+      invalidatePreview();
+    });
     limitInput.addEventListener("input", () => {
       cfg.limit = limitInput.value === "" ? null : Number(limitInput.value);
     });
-    sortRow.append(sortLbl, sortSel, orderSel, limitLbl, limitInput);
+    sortRow.append(sortLbl, sortSel, orderSel, totalLbl, totalInput, limitLbl, limitInput);
     sortSection.appendChild(sortRow);
     const limitHint = document.createElement("p");
     limitHint.className = "im-hint";
-    limitHint.textContent = "Sorting decides which items win when a per-run limit is set (e.g. 20 newest per day).";
+    limitHint.textContent = "Keep top mirrors the first N matching, in sort order (e.g. the top 2000 by market cap). Limit per run paces how many are admitted each run.";
     sortSection.appendChild(limitHint);
     settingsView.appendChild(sortSection);
 
@@ -694,6 +857,7 @@ export function openIngestModal() {
         source: cfg.source,
         filters: cfg.filters.filter((f) => !unfinishedFilter(f)),
         sort: cfg.sort,
+        ...(cfg.total ? { total: cfg.total } : {}),
         ...(cfg.limit ? { limit: cfg.limit } : {}),
       };
     }

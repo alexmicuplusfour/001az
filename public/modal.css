@@ -595,8 +595,16 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-filters { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .im-filter-row { display: flex; align-items: center; gap: 6px; }
 .im-filter-row select { font-size: 13px; padding: 6px 26px 6px 8px; }
-.im-filter-val { flex: 1; min-width: 0; }
-.im-filter-val input { width: 100%; font-size: 13px; padding: 6px 8px; }
+/* A flex row of its own: usually one control, but a preset field in Custom
+   mode keeps the band select beside the number input (the select is the way
+   back to the presets). Select type/padding come from .im-filter-row select
+   above (the 26px keeps the chevron clear). */
+.im-filter-val { flex: 1; min-width: 0; display: flex; gap: 6px; }
+.im-filter-val input { flex: 1; min-width: 0; font-size: 13px; padding: 6px 8px; }
+.im-filter-val select { flex: 1; min-width: 0; }
+/* the usd unit select ("billion") sizes to its word — flex:1 would hand it a
+   third of the value area */
+.im-filter-val select.im-unit { flex: 0 0 auto; width: auto; }
 .im-hint { font-size: 12px; color: #9aa0aa; margin: 8px 0 0; line-height: 1.4; }
 /* shared modal-body button component (the gallery page has no global button
    styles, so body buttons would otherwise render native). Busy feedback comes

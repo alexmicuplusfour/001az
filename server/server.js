@@ -177,7 +177,7 @@ import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
 import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, ENUM_CAP } from "./ingestion/index.js";
-import { applyFilters, applySort } from "./ingestion/filter-engine.js";
+import { membership } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
 import { invalidateSourceCache } from "./ingestion/files.js";
 
@@ -1378,9 +1378,22 @@ app.patch("/api/boards/:id", requireAuth, requireBoardManager, saveBoardPatch);
 // and the sweep-owned run status.
 app.get("/api/boards/:id/ingest", requireAuth, requireBoardManager, wrap(async (req, res) => {
   const adapter = resolveIngestAdapter(req.board);
+  const descriptor = adapter ? adapter.descriptor() : null;
+  // Enum vocabularies onto the filter catalog, merged at route time so
+  // descriptor() stays sync and the worker/preview/validator never see them —
+  // they are UI vocabulary, not a server whitelist. New entry objects rather
+  // than mutation: the file adapter serves a module-constant catalog through
+  // this same shape, and a merge that wrote in place would be one refactor
+  // away from poisoning it.
+  if (descriptor && adapter.filterOptions) {
+    const options = await adapter.filterOptions(db, req.board);
+    if (options)
+      descriptor.filters = descriptor.filters.map((f) =>
+        options[f.fn] ? { ...f, options: options[f.fn] } : f);
+  }
   res.json({
     available: !!adapter,
-    descriptor: adapter ? adapter.descriptor() : null,
+    descriptor,
     // File boards: the installed source backends (folder/ftp/s3) + their pickable
     // connections. Connector boards: null (their source is the connector itself).
     sources: adapter?.listSources ? await adapter.listSources(db) : null,
@@ -1461,9 +1474,10 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   const cfg = { ...body, enabled: true }; // preview ignores the toggle
   delete cfg.sample;
   const hasRoot = !!process.env.INGEST_ROOT;
+  const descriptor = adapter.descriptor();
   // trigger: false — preview answers "what matches", and the schedule has no
   // bearing on that; a half-typed "every N minutes" must not block it.
-  const err = validateIngest(cfg, adapter.descriptor(), { hasRoot, trigger: false });
+  const err = validateIngest(cfg, descriptor, { hasRoot, trigger: false });
   if (err) return res.status(400).json({ error: err });
   if (adapter.validateSource) {
     const srcErr = await adapter.validateSource(db, cfg.source || {}, { hasRoot });
@@ -1488,14 +1502,19 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
-  const catalog = adapter.descriptor().filters;
-  const matched = applySort(applyFilters(enumerated.candidates, cfg.filters, catalog), cfg.sort, catalog);
+  // The shared membership set (filter-engine.js) — the same function the
+  // sweep runs, so the count and a run read one set by construction. Once
+  // `total` is hit, `capped` must stop claiming the count is a lower bound —
+  // a full membership can't grow, however truncated the window — while a
+  // truncated window still below the total keeps its honest "+".
+  const matched = membership(enumerated.candidates, cfg, descriptor.filters);
+  const capped = !!enumerated.truncated && matched.length < (Number(cfg.total) || Infinity);
   if (sample) {
     const rows = matched.slice(sample.offset, sample.offset + sample.limit);
     const known = await ingestedAmong(db, req.board.id, rows.map((c) => c.key));
     return res.json({
       count: matched.length,
-      capped: !!enumerated.truncated,
+      capped,
       // How deep this actually went. Shipped because the client has to NAME
       // it ("showing the first N scanned") and it was never a constant it
       // could hardcode — it's the safety backstop, or whatever an operator
@@ -1509,7 +1528,7 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   res.json({
     count: matched.length,
     new: matched.filter((c) => !known.has(c.key)).length,
-    capped: !!enumerated.truncated,
+    capped,
     scanned: enumerated.candidates.length,
   });
 }));

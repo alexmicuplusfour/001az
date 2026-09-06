@@ -83,7 +83,18 @@ export const manifest = {
       { key: "rank",       label: "#",       kind: "number", width: 40 },
       { key: "name",       label: "Name",    kind: "text", primary: true },
       { key: "price",      label: "Price",   kind: "usd", preview: true },
-      { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true },
+      // Feed-filter presets: the standard cap bands as single-ended
+      // thresholds — one preset, one plain filter row (the ingest modal's
+      // value dropdown; see ingestion/connector.js presetsOf). Labels spell
+      // the words out: no "$10B" literacy assumed.
+      { key: "market_cap", label: "Mkt cap", kind: "usd", preview: true, presets: [
+        { label: "Mega — over $200 billion",   op: "gte", value: 200e9 },
+        { label: "Large — over $10 billion",   op: "gte", value: 10e9 },
+        { label: "Mid — over $2 billion",      op: "gte", value: 2e9 },
+        { label: "Small — over $300 million",  op: "gte", value: 300e6 },
+        { label: "Under $2 billion",           op: "lte", value: 2e9 },
+        { label: "Under $300 million",         op: "lte", value: 300e6 },
+      ] },
       { key: "volume",     label: "Volume",  kind: "number", preview: true },
       // The universe carries ETFs and funds alongside companies, so a row has
       // to say which it is — an ETF's blank Sector reads as missing data

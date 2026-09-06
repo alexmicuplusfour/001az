@@ -89,3 +89,15 @@ export function applyLimit(candidates, limit) {
   if (!Number.isFinite(limit) || limit <= 0) return candidates;
   return candidates.slice(0, limit);
 }
+
+// The membership set: what a config MATCHES — filters, then sort, then the
+// `total` cap ("keep top N"). One function so the preview's count and the
+// sweep's run can never disagree on the set; that promise held by two inline
+// copies staying character-identical is no promise at all. The per-run
+// admission budget (`limit`) is deliberately absent — that's pacing, the
+// sweep's own slice over the fresh remainder.
+export function membership(candidates, cfg, catalog, now = Date.now()) {
+  return applyLimit(
+    applySort(applyFilters(candidates, cfg.filters, catalog, now), cfg.sort, catalog),
+    Number(cfg.total) || Infinity);
+}

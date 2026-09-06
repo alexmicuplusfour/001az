@@ -96,6 +96,94 @@ test("crypto/stocks descriptors flag volume for the preview (regression: volume 
   }
 });
 
+test("descriptor: numeric presets ride normalized; malformed entries drop", () => {
+  const a = feedAdapter(stubConn({
+    browse: {
+      ...BROWSE,
+      columns: [
+        // A text column never carries presets, however loudly it declares them.
+        { key: "name", label: "Name", kind: "text", primary: true, presets: [{ label: "nope", op: "gte", value: 1 }] },
+        { key: "price", label: "Price", kind: "usd", presets: [
+          { label: "Over $1 billion", op: "gte", value: 1e9 },
+          { label: "bad op", op: "eq", value: 5 },
+          { label: "bad value", op: "gte", value: "big" },
+          { op: "lte", value: 2 }, // no label
+        ] },
+        { key: "rank", label: "#", kind: "number" },
+      ],
+    },
+  }));
+  const byFn = Object.fromEntries(a.descriptor().filters.map((x) => [x.fn, x]));
+  assert.deepEqual(byFn.price.presets, [{ label: "Over $1 billion", op: "gte", value: 1e9 }],
+    "the descriptor is the one gate between a malformed plugin preset and the modal");
+  assert.ok(!("presets" in byFn.name), "text column: dropped");
+  assert.ok(!("presets" in byFn.rank), "no declaration: no key, the catalog stays clean");
+});
+
+test("crypto/stocks manifests declare market-cap presets: single-ended, words spelled out", () => {
+  for (const [name, manifest] of [["crypto", cryptoManifest], ["stocks", stocksManifest]]) {
+    const d = feedAdapter({ name, manifest, activeProvider: async () => ({}) }).descriptor();
+    const presets = d.filters.find((x) => x.fn === "market_cap")?.presets || [];
+    assert.ok(presets.length >= 5, `${name}: market cap carries its bands`);
+    for (const p of presets) {
+      assert.ok(["gte", "lte"].includes(p.op), `${name} "${p.label}": one preset, one single-ended row`);
+      assert.ok(Number.isFinite(p.value) && p.value > 0);
+      assert.doesNotMatch(p.label, /\$\d+\s?[KMBT]\b/i,
+        `${name} "${p.label}": labels spell the words out — no shorthand literacy assumed`);
+    }
+  }
+});
+
+test("filterOptions: vocabulary reaches only column keys, resolved through browseFilters", async () => {
+  const conn = stubConn({
+    browse: {
+      ...BROWSE,
+      filters: [
+        { key: "name", label: "Name", options: ["Gadget", "Gizmo"] },
+        { key: "category", label: "Category", options: ["x"] }, // not a column
+      ],
+    },
+  });
+  let calls = 0;
+  conn.browseFilters = async (_db, boardId) => {
+    calls++;
+    assert.equal(boardId, 7, "the board id rides through for attribution");
+    return [
+      { key: "name", label: "Name", options: [{ value: "Gadget", label: "Gadget" }, { value: "Gizmo", label: "Gizmo" }] },
+      { key: "category", label: "Category", options: [{ value: "x", label: "x" }] },
+    ];
+  };
+  const out = await feedAdapter(conn).filterOptions(null, { id: 7 });
+  assert.deepEqual(out, { name: [{ value: "Gadget", label: "Gadget" }, { value: "Gizmo", label: "Gizmo" }] },
+    "column-backed vocabulary comes through keyed by fn; filter-only keys are dropped");
+  assert.equal(calls, 1);
+});
+
+test("filterOptions: a filter-only vocabulary never buys the resolve", async () => {
+  // The intersection runs on declared keys BEFORE resolving — crypto's shape:
+  // one declared filter (category), not a column, whose resolve is a metered
+  // provider request. Proving it was never CALLED is the point, not that its
+  // result was dropped.
+  const conn = stubConn({
+    browse: { ...BROWSE, filters: [{ key: "category", label: "Category", options: ["x"] }] },
+  });
+  let calls = 0;
+  conn.browseFilters = async () => { calls++; return []; };
+  assert.equal(await feedAdapter(conn).filterOptions(null, { id: 1 }), null);
+  assert.equal(calls, 0, "the metered resolve must not run for vocabulary the feed can't offer");
+});
+
+test("filterOptions: nothing declared, or a conn without the resolver → null", async () => {
+  // stubConn declares no browse.filters at all — the common case.
+  assert.equal(await feedAdapter(stubConn()).filterOptions(null, { id: 1 }), null);
+  // Declared and column-backed, but the conn carries no browseFilters (every
+  // real bind has one; the adapter contract doesn't require it).
+  const conn = stubConn({
+    browse: { ...BROWSE, filters: [{ key: "name", label: "Name", options: ["Gadget"] }] },
+  });
+  assert.equal(await feedAdapter(conn).filterOptions(null, { id: 1 }), null);
+});
+
 test("a domain without a browse catalog can't feed", () => {
   assert.equal(feedAdapter(stubConn({ browse: null })), null);
 });
@@ -569,6 +657,13 @@ const WIDGETS = {
     browse: {
       columns: [{ key: "name", label: "Name", kind: "text", primary: true }, { key: "rank", label: "#", kind: "number" }],
       sorts: [{ key: "rank", label: "Rank" }],
+      // A static vocabulary on a column key (served to the ingest modal as an
+      // enum filter) and one on a filter-only key (browse-modal-only — the
+      // feed catalog must not offer what candidates can't answer).
+      filters: [
+        { key: "name", label: "Name", options: ["w1", "w2"] },
+        { key: "flavor", label: "Flavor", options: ["sweet"] },
+      ],
       defaultSort: "rank",
       pageSize: 50,
     },
@@ -651,6 +746,18 @@ const entityIdentities = async (boardId) => {
   const { rows } = await db.query("SELECT identity FROM entities WHERE board_id=$1 ORDER BY identity", [boardId]);
   return rows.map((r) => r.identity);
 };
+
+test("ingest GET merges enum options onto column-backed filters, through the real bind", async () => {
+  const boardId = await seedBoard(db, "feed-options");
+  await updateBoard(db, boardId, { mapping: WIDGETS.manifest.template });
+  const info = await req(base, "GET", `/api/boards/${boardId}/ingest`, { sid: admin.sid });
+  assert.equal(info.status, 200);
+  const byFn = Object.fromEntries(info.json.descriptor.filters.map((f) => [f.fn, f]));
+  assert.deepEqual(byFn.name.options, [{ value: "w1", label: "w1" }, { value: "w2", label: "w2" }],
+    "a column-backed static vocabulary arrives normalized on the catalog entry");
+  assert.ok(!("options" in byFn.rank), "columns without vocabulary stay bare");
+  assert.ok(!byFn.flavor, "a filter-only key never joins the feed catalog");
+});
 
 test("admit: entity + tag vehicle + ledger row; a duplicate identity propagates tagged", async () => {
   const boardId = await seedBoard(db, "feed-admit");
