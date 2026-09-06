@@ -218,6 +218,8 @@ anchor survival, MIN_TAGS gate, all-universal-chips null).
 
 ### 1b-meaning (2026-09-06): a second flavor on the same rails
 
+SHIPPED 2026-09-06, as specced below.
+
 Keep chip-similar exactly as shipped, add a SECOND trigger — "Find similar
 by meaning" — riding the stored search embeddings. The two genuinely answer
 different questions (measured, stocks board): chip-similar finds items that

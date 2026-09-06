@@ -2832,6 +2832,46 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   res.json({ results: scored.filter((x) => x.score >= top - 0.15).slice(0, 60) });
 }));
 
+// Similar by meaning: rank the board against one item's OWN stored vectors —
+// the free half of semantic search. Nothing to embed means no provider call,
+// no limiter and nothing to meter; the scan is the one the route above does.
+// The relative cutoff is deliberately absent here: an item anchor's top hit
+// is itself at 1.0 while its best real neighbor sits far below (measured
+// ~0.79), and the score curves decay with no knee — so the bound is RANK,
+// top 50 with the anchor leading its own results, the Find-similar
+// convention (planning/pattern-surfaces-plan.md, 1b-meaning).
+app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
+  const boardId = req.query.board || "";
+  if (!boardId || !(await canAccessBoard(db, boardId, req.user))) return res.status(404).json({ error: "not found" });
+  const embedder = await resolveEmbedder(db);
+  if (!embedder) return res.status(404).json({ error: "semantic search is not enabled" });
+  const itemId = String(req.query.item || "");
+  const rows = await boardEmbeddings(db, boardId, embedder.model);
+  const vecOf = (r) => new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 4);
+  // The anchor may be several instances of one entity; a candidate reads
+  // against all of them and keeps its best, then collapses per entity like
+  // any search result.
+  const anchors = rows.filter((r) => String(r.entity_id ?? r.id) === itemId).map(vecOf);
+  if (!anchors.length) return res.status(404).json({ error: "item not embedded yet" });
+  const best = new Map();
+  for (const row of rows) {
+    const v = vecOf(row);
+    let s = -Infinity;
+    for (const a of anchors) {
+      if (v.length !== a.length) continue; // stale dims mid-model-change
+      let d = 0;
+      for (let i = 0; i < v.length; i++) d += v[i] * a[i];
+      if (d > s) s = d;
+    }
+    if (s === -Infinity) continue;
+    const eid = row.entity_id ?? row.id;
+    if (!best.has(eid) || best.get(eid) < s) best.set(eid, s);
+  }
+  const scored = [...best].map(([id, score]) => ({ id, score }));
+  scored.sort((a, b) => b.score - a.score);
+  res.json({ results: scored.slice(0, 50) });
+}));
+
 // Live server logs via Server-Sent Events.
 app.get("/api/logs/stream", requireAdmin, (req, res) => {
   res.writeHead(200, {

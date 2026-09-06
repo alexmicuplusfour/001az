@@ -9,7 +9,7 @@ import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
 import { kindFor } from './kinds.js';
 import { effectiveView } from './view.js';
-import { runSimilar } from './search.js';
+import { runSimilar, runSimilarMeaning } from './search.js';
 import { MIN_TAGS } from './patterns.js';
 
 const elGrid = document.getElementById("grid");
@@ -282,9 +282,12 @@ function openTagPop(chip, img) {
   // The footer's actions gate one by one — they want different things.
   // Editing needs a logged-in user and a taxonomy; Find similar (the 1b
   // search, computed from exactly the chips this pop shows) needs neither,
-  // just enough identity to match on.
+  // just enough identity to match on; the meaning flavor needs only the
+  // board's embeddings (no tag floor — a barely-tagged item with a rich
+  // description is exactly where it shines).
   const canEdit = state.me && state.facets.length;
   const canSimilar = img.tags.length >= MIN_TAGS;
+  const canMeaning = state.searchAvailable;
   const ctx = openDropdown(chip, {
     className: "tag-pop",
     hover: true,
@@ -318,7 +321,7 @@ function openTagPop(chip, img) {
         body.appendChild(s);
       }
     },
-    footer: (canEdit || canSimilar) ? (foot, { close }) => {
+    footer: (canEdit || canSimilar || canMeaning) ? (foot, { close }) => {
       if (canEdit) foot.appendChild(ddAction({
         label: "Edit tags",
         icon: ICONS.pencil,
@@ -335,6 +338,15 @@ function openTagPop(chip, img) {
           e.stopPropagation();
           close();
           runSimilar(img);
+        },
+      }));
+      if (canMeaning) foot.appendChild(ddAction({
+        label: "Find similar by meaning",
+        icon: ICONS.sparkle,
+        onClick: (e) => {
+          e.stopPropagation();
+          close();
+          runSimilarMeaning(img);
         },
       }));
     } : undefined,

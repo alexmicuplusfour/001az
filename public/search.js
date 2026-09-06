@@ -43,6 +43,8 @@ export async function runSearch(q) {
 // search box itself is hidden), and it leaves searchDraft alone — the
 // input stays the user's; the toolbar's mode chip announces this mode and
 // its × lands back in clearSearch.
+const anchorLabel = (img) => img.symbol || img.displayLabel || img.identity;
+
 export function runSimilar(img) {
   const results = similarTo(img);
   if (!results) return; // the action is gated on MIN_TAGS, so only a degenerate board lands here
@@ -50,8 +52,35 @@ export function runSimilar(img) {
   state.searchLoading = false;
   state.searchQuery = `similar:${img.identity}`; // feeds filterKey; never displayed
   state.searchResults = results;
-  state.searchSimilarTo = img.symbol || img.displayLabel || img.identity;
+  state.searchSimilarTo = anchorLabel(img);
   document.dispatchEvent(new Event('app:render'));
+}
+
+// The meaning flavor (plan 1b-meaning): same mode, different scorer. The
+// server ranks the board against this item's stored search vectors — the
+// free half of /api/search, nothing embedded and nothing metered — and
+// bounds by rank, since item-anchored scores have no honest cutoff. The
+// mode chip carries the flavor in its label, so the two similars stay
+// tellable apart after the fact.
+export async function runSimilarMeaning(img) {
+  const token = ++searchReq;
+  try {
+    const r = await fetch(`/api/search/similar?board=${state.boardId}&item=${img.id}`);
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.error || "Search failed");
+    }
+    const { results } = await r.json();
+    if (token !== searchReq) return; // superseded
+    state.searchLoading = false;
+    state.searchQuery = `similar-meaning:${img.id}`;
+    state.searchResults = new Map(results.map((x) => [x.id, x.score]));
+    state.searchSimilarTo = `${anchorLabel(img)} · meaning`;
+    document.dispatchEvent(new Event('app:render'));
+  } catch (err) {
+    if (token !== searchReq) return;
+    toast.error(err.message || "Search failed");
+  }
 }
 
 export function clearSearch() {

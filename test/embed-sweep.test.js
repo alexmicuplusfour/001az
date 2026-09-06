@@ -8,7 +8,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { startServer, adminSession, seedUser, seedBoard, req, meterTotals } from "./helpers.js";
-import { itemsNeedingEmbedding, markTagged, setItemTags, embeddingStats, createAiKey, setSetting, setPluginState } from "../server/db.js";
+import { itemsNeedingEmbedding, markTagged, setItemTags, embeddingStats, createAiKey, setSetting, setPluginState, setItemEmbedding } from "../server/db.js";
 import { PROVIDERS } from "../server/providers.js";
 import { embedBatch, embedTextFor } from "../server/worker.js";
 
@@ -242,4 +242,75 @@ test("compat embed call aborts on a hung provider instead of wedging the tick", 
     delete process.env.AI_EMBED_TIMEOUT_MS;
     hung.close();
   }
+});
+
+// ── similar by meaning (plan 1b-meaning): the free half of search ───────────
+// Item-to-item over stored vectors: no query embed, so no provider call and
+// nothing metered. Bounded by RANK (top 50, anchor first), never by score —
+// item-anchored cosine has no honest cutoff (measured in the plan).
+
+async function withEmbedderEnabled(fn) {
+  await setPluginState(db, "ai:openai", { installed: true });
+  const keyId = await createAiKey(db, "similar-key", "openai", "sk-test");
+  await setSetting(db, "embed_key_id", String(keyId));
+  await setSetting(db, "embed_enabled", "1");
+  try { await fn(); } finally {
+    await setSetting(db, "embed_enabled", null);
+    await setSetting(db, "embed_key_id", null);
+  }
+}
+
+test("similar route: ranked by stored vectors, anchor first, no score cutoff, nothing metered", async () => {
+  const member = await seedUser(db, "similar@test.local");
+  const bS = await seedBoard(db, "similar-board", [member.id]);
+  await withEmbedderEnabled(async () => {
+    const a = await insertTagged("anchor", bS);
+    const near = await insertTagged("near", bS);
+    const far = await insertTagged("far", bS);
+    const un = await insertTagged("never embedded", bS);
+    await setItemEmbedding(db, a, new Float32Array([1, 0]), EMBEDDER.model);
+    await setItemEmbedding(db, near, new Float32Array([0.8, 0.6]), EMBEDDER.model);
+    await setItemEmbedding(db, far, new Float32Array([0, 1]), EMBEDDER.model);
+    const r = await req(srv.base, "GET", `/api/search/similar?board=${bS}&item=${a}`, { sid: member.sid });
+    assert.equal(r.status, 200);
+    // far scores 0.0 and is still there — rank bounds, score never does
+    assert.deepEqual(r.json.results.map((x) => String(x.id)), [a, near, far].map(String));
+    assert.ok(Math.abs(r.json.results[0].score - 1) < 1e-6, "the anchor leads at ~1.0");
+    const r404 = await req(srv.base, "GET", `/api/search/similar?board=${bS}&item=${un}`, { sid: member.sid });
+    assert.equal(r404.status, 404, "an un-embedded anchor is a 404, not an empty win");
+  });
+  const t = await meterTotals(db, bS, "embed");
+  assert.equal(Number(t?.calls || 0), 0, "free: no provider call, nothing metered");
+  // and with the embedder gone, the route says so like /api/search does
+  const off = await req(srv.base, "GET", `/api/search/similar?board=${bS}&item=1`, { sid: member.sid });
+  assert.equal(off.status, 404);
+});
+
+test("similar route: instances collapse to their entity's best score, and the cap is 50", async () => {
+  const member = await seedUser(db, "similar2@test.local");
+  const bS = await seedBoard(db, "similar-cap-board", [member.id]);
+  await withEmbedderEnabled(async () => {
+    const anchor = await insertTagged("anchor", bS);
+    await setItemEmbedding(db, anchor, new Float32Array([1, 0]), EMBEDDER.model);
+    // one entity, two instances at different similarities — best must win
+    const { rows: [{ id: instA }] } = await db.query(
+      `INSERT INTO items (board_id, entity_ids, payload, status, tags, created_at, updated_at)
+       VALUES ($1, '{9001}', '{"identity":"twin"}', 'tagged', '["a/b"]', $2, $2) RETURNING id`, [bS, Date.now()]);
+    const { rows: [{ id: instB }] } = await db.query(
+      `INSERT INTO items (board_id, entity_ids, payload, status, tags, created_at, updated_at)
+       VALUES ($1, '{9001}', '{"identity":"twin"}', 'tagged', '["a/b"]', $2, $2) RETURNING id`, [bS, Date.now()]);
+    await setItemEmbedding(db, instA, new Float32Array([0, 1]), EMBEDDER.model);   // 0.0 to anchor
+    await setItemEmbedding(db, instB, new Float32Array([0.6, 0.8]), EMBEDDER.model); // 0.6
+    for (let i = 0; i < 55; i++) {
+      const id = await insertTagged(`filler ${i}`, bS);
+      await setItemEmbedding(db, id, new Float32Array([0.5, 0.866]), EMBEDDER.model); // 0.5 — under the twin's best
+    }
+    const r = await req(srv.base, "GET", `/api/search/similar?board=${bS}&item=${anchor}`, { sid: member.sid });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.results.length, 50, "rank-capped at 50");
+    const twin = r.json.results.find((x) => String(x.id) === "9001");
+    assert.ok(twin, "the entity appears once");
+    assert.ok(Math.abs(twin.score - 0.6) < 1e-6, "wearing its best instance's score");
+    assert.equal(r.json.results.filter((x) => String(x.id) === "9001").length, 1);
+  });
 });
