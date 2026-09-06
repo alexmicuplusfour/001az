@@ -2,7 +2,7 @@
 // lightbox-live-chart-plan.md, slice 3). Registered ahead of the built-ins in
 // detail-view.js; matches when the board's face comes from a connector and
 // replaces the frozen face picture with a live one: area/candles, a range row,
-// crosshair readout — the Google Finance idiom.
+// crosshair readout, wheel/drag zoom-pan — the Google Finance idiom.
 //
 // The client knows NO provider, tier, or range table: the kind toggle, the
 // range row, the highlights and the "isn't available" note are all rendered
@@ -257,6 +257,12 @@ export const chartDetail = {
           timeScale: {
             borderVisible: false,
             secondsVisible: false,
+            // Wheel/pinch zoom and drag pan (the library's defaults) explore
+            // WITHIN the served series only: fixed edges leave no blank space
+            // past either end, and zooming out clamps at the full range — the
+            // range pills stay the one way to ask for more history.
+            fixLeftEdge: true,
+            fixRightEdge: true,
             // One formatter for the chart's whole life, reading the CURRENT
             // response's shape — installed once because applyOptions can't
             // un-set a formatter (its merge skips undefined). Returning null
@@ -267,8 +273,6 @@ export const chartDetail = {
               return type >= 3 ? shape.tickTime.format(d) : shape.tickDay.format(d); // 3 = TickMarkType.Time
             },
           },
-          handleScroll: false,
-          handleScale: false,
         });
         chart.subscribeCrosshairMove((param) => {
           const data = param.time != null && series ? param.seriesData.get(series) : null;
@@ -320,6 +324,10 @@ export const chartDetail = {
           axisLabelVisible: false, title: "",
         });
       }
+      // Every response opens at the full served range, price axis autoscaled
+      // — a prior render's hand-zoom, or an axis drag (which turns autoscale
+      // off), must not frame the NEXT response's data.
+      chart.priceScale("right").applyOptions({ autoScale: true });
       chart.timeScale().fitContent();
 
       // Header numbers come from the SERIES — entity.fields mutate under the
