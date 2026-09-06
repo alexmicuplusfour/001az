@@ -641,9 +641,7 @@ export function openIngestModal() {
     // ── Sort & limit ──
     const sortSection = section("Sort & limit");
     const sortRow = document.createElement("div");
-    sortRow.className = "im-row";
-    const sortLbl = document.createElement("label");
-    sortLbl.textContent = "Sort by";
+    sortRow.className = "im-row im-knobs";
     const sortSel = document.createElement("select");
     for (const s of desc.sorts || []) {
       const o = document.createElement("option");
@@ -660,8 +658,6 @@ export function openIngestModal() {
       if (v === (cfg.sort?.order || "desc")) o.selected = true;
       orderSel.appendChild(o);
     }
-    const totalLbl = document.createElement("label");
-    totalLbl.textContent = "Keep top";
     const totalInput = document.createElement("input");
     totalInput.type = "number";
     totalInput.min = "1";
@@ -669,8 +665,6 @@ export function openIngestModal() {
     totalInput.placeholder = "all";
     totalInput.style.width = "80px";
     if (cfg.total) totalInput.value = cfg.total;
-    const limitLbl = document.createElement("label");
-    limitLbl.textContent = "Limit per run";
     const limitInput = document.createElement("input");
     limitInput.type = "number";
     limitInput.min = "1";
@@ -692,11 +686,24 @@ export function openIngestModal() {
     limitInput.addEventListener("input", () => {
       cfg.limit = limitInput.value === "" ? null : Number(limitInput.value);
     });
-    sortRow.append(sortLbl, sortSel, orderSel, totalLbl, totalInput, limitLbl, limitInput);
+    // Label+control units that wrap as a whole — the flat row used to strand
+    // "per run" on the line above its box at modal widths.
+    const knob = (label, ...controls) => {
+      const wrap = document.createElement("span");
+      wrap.className = "im-pair";
+      const lbl = document.createElement("label");
+      lbl.textContent = label;
+      wrap.append(lbl, ...controls);
+      return wrap;
+    };
+    sortRow.append(
+      knob("Sort by", sortSel, orderSel),
+      knob("Keep top", totalInput),
+      knob("Admit per run", limitInput));
     sortSection.appendChild(sortRow);
     const limitHint = document.createElement("p");
     limitHint.className = "im-hint";
-    limitHint.textContent = "Keep top mirrors the first N matching, in sort order (e.g. the top 2000 by market cap). Limit per run paces how many are admitted each run.";
+    limitHint.textContent = "Keep top decides what belongs on the board: the first N matching, in sort order (e.g. the top 2000 by market cap). Admit per run only paces a run into batches — it never changes what ends up on the board.";
     sortSection.appendChild(limitHint);
     settingsView.appendChild(sortSection);
 

@@ -591,6 +591,12 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-settings > .modal-section:first-child { border-top: none; margin-top: 0; padding-top: 0; }
 .im-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .im-row > label { font-size: 12px; color: #6b6b72; margin: 0; }
+/* Label+control units inside a row: wrap as a unit so a label can never
+   strand apart from its box, with a wider gap BETWEEN knobs than inside one
+   so the grouping reads at a glance. */
+.im-knobs { column-gap: 18px; }
+.im-pair { display: inline-flex; align-items: center; gap: 8px; }
+.im-pair > label { font-size: 12px; color: #6b6b72; margin: 0; }
 .im-row select { max-width: 260px; }
 .im-filters { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .im-filter-row { display: flex; align-items: center; gap: 6px; }
