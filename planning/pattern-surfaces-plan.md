@@ -216,6 +216,57 @@ the way: the alert-event chip's classes generalized to `.mode-chip` /
 Scoring tests live in test/pattern-similar.test.js (ratio math, floor, cap +
 anchor survival, MIN_TAGS gate, all-universal-chips null).
 
+### 1b-meaning (2026-09-06): a second flavor on the same rails
+
+Keep chip-similar exactly as shipped, add a SECOND trigger — "Find similar
+by meaning" — riding the stored search embeddings. The two genuinely answer
+different questions (measured, stocks board): chip-similar finds items that
+ANSWER THE TAXONOMY alike (GPRO → SNAP/HOOD/PINS — fallen consumer
+darlings, the narrative archetype), meaning-similar finds items whose
+EMBEDDED STORY reads alike (TSLA → TM/HMC/F/GM/LI — automakers; AAL →
+LUV/UAL/RYAAY/JBLU — airlines; NVDA → AMD/LSCC/ORCL/AVGO — semis), i.e.
+industry kinship finer than the sector facet encodes, because the embed text
+(worker.js embedTextFor) is the AI's description + reasoning + tags +
+transcript.
+
+**Why it's free**: the paid half of /api/search is embedding the QUERY. An
+item's own vector is already on its row (items.embedding, per instance,
+Float32Array; stocks board 1115/1115 embedded, local bge-small 384-dim).
+Item-to-item is dot products over stored vectors — no provider call, nothing
+to meter (doctrine: only paid calls meter).
+
+**The measured design constraint**: the search route's relative cutoff
+(top − 0.15) is WRONG for item anchors. Self scores 1.000 but the best real
+neighbor is ~0.79 — the rule returns only the anchor; re-anchoring on the
+runner-up returns 717 of 1115. And the score curves have NO knee (r1 ~0.75–
+0.82 decaying smoothly to p50 ~0.61–0.66, every anchor tried): no honest
+threshold exists in bge's compressed cosine range. So the bound is rank, not
+score: **top-50 cap, no cutoff**, anchor included (scores 1.0, leads its own
+results — the chip-similar convention).
+
+**Route**: `GET /api/search/similar?board=&item=` — requireAuth +
+canAccessBoard; resolveEmbedder for the current MODEL name only (no call;
+404 "not enabled" when unresolvable, mirroring /api/search);
+boardEmbeddings(board, model); anchor rows = those whose (entity_id ?? id)
+matches `item` (multi-instance anchors fall out naturally: candidate score =
+max over anchor×candidate pairs, then the search route's entity collapse);
+no anchor rows → 404 (backfill lag — client toasts). No rate limiter: free
+compute, one O(N·D) scan.
+
+**Client**: `runSimilarMeaning(img)` in search.js beside runSimilar — async
+(searchReq stale-guard like runSearch, no spinner: local fetch), same
+searchResults map, searchQuery `similar-meaning:<id>`, and the mode chip
+label carries the flavor at SET time (chip flavor sets "DVLT", meaning sets
+"DVLT · meaning" — searchSimilarTo stays one display string, no new state).
+Trigger: third ddAction in the tag pop footer — "Find similar by meaning",
+ICONS.sparkle (the AI glyph; the two rows explain each other), gated on
+state.searchAvailable ONLY — no MIN_TAGS gate, since a barely-tagged item
+with a rich description is exactly where this flavor shines.
+
+**Tests**: the route (seeded small vectors: entity collapse, cap, anchor
+first, 404s); scoring stays server-side so the patterns unit file is
+untouched.
+
 ## Stage 2 — movement (needs history depth)
 
 Prerequisite that costs nothing today: **turn the stocks board's daily retag
