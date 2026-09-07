@@ -116,6 +116,26 @@ test('contextmenu toggles exclusion; Alt+click is its twin; left-click includes'
   assert.ok(!state.selected.get('color').not.has('blue'), 'right-click again clears the exclusion');
 });
 
+test('the −N respects the facet\'s own includes: an inert strike says 0', () => {
+  // The user-found case (2026-09-08): color is single-valued per item, so
+  // with blue included, striking red removes nothing — the count must say
+  // so instead of quoting the leave-facet-out number (which said −29 live).
+  state.selected = new Map([['color', selEntry(['blue'], ['red'])]]);
+  const red = pillByText(render(), 'red');
+  assert.equal(red.querySelector('.count').textContent, '0', 'inert strike, honest zero');
+  assert.ok(red.classList.contains('neg'), 'still chosen and clearable');
+});
+
+test('the −N bites on multi-valued facets: un-strike restores exactly N', () => {
+  const extra = toItem({ id: 3, name: 'c', status: 'tagged', tags: ['size/big', 'size/small'] });
+  state.items = [...state.items, extra];
+  state.selected = new Map([['size', selEntry(['big'], ['small'])]]);
+  const small = pillByText(render(), 'small');
+  assert.equal(small.querySelector('.count').textContent, '−1',
+    'the dual-tagged item is what the strike removes — big-only items were never at stake');
+  state.items = state.items.slice(0, 2);
+});
+
 test('a mouse right-click never eats the next left-click', () => {
   // ONE container across both gestures — the real rail's shape. The earlier
   // tests re-rendered between dispatches, handing each gesture a fresh

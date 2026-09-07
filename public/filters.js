@@ -159,6 +159,19 @@ export function computeFacetStats() {
   const activeSel = [...state.selected].filter(([, v]) => selSize(v));
   const totals = new Map(); // "facet/value" -> count over all items
   const counts = new Map(); // "facet/value" -> count in the current filter context
+  // An EXCLUDED chip answers a different question than an included one.
+  // `counts` (leave the whole facet out) is right for includes — "add this
+  // to the OR and N items appear" — but an exclusion's honest number is the
+  // marginal: "un-strike this and N items come back", which must respect the
+  // facet's OWN include half. With comfortable included, striking roomy on a
+  // single-valued facet removes nothing — the chip must say 0, not −29.
+  const negCounts = new Map(); // "facet/value" -> items restored by un-striking
+  const negFacets = new Map(activeSel.filter(([, v]) => v.not.size));
+  const restoredBy = (has, entry, value) => {
+    if (!facetPass(has, entry.any)) return false;
+    for (const w of entry.not) if (w !== value && has(w)) return false;
+    return true;
+  };
   // The sizes of the leave-one-out contexts `counts` live in: a chip under
   // facet F counts items that match every OTHER active facet, so its context
   // holds ctxAll (items failing no facet) plus ctxFail[F] (items failing only
@@ -231,19 +244,29 @@ export function computeFacetStats() {
     for (const t of item.tags) {
       const slash = t.indexOf("/");
       if (slash <= 0) continue;
-      if (fails === 1 && t.slice(0, slash) !== failKey) continue;
+      const fk = t.slice(0, slash);
+      if (fails === 1 && fk !== failKey) continue;
       counts.set(t, (counts.get(t) || 0) + 1);
+      const entry = negFacets.get(fk);
+      const value = entry?.not.has(t.slice(slash + 1)) ? t.slice(slash + 1) : null;
+      if (value != null && restoredBy((x) => entityHasValue(item, fk, x), entry, value)) {
+        negCounts.set(t, (negCounts.get(t) || 0) + 1);
+      }
     }
     for (const [sk, sys] of SYSTEM_FACET_ENTRIES) {
       if (fails === 1 && sk !== failKey) continue;
+      const entry = negFacets.get(sk);
       for (const v of sys.entity(item) || []) {
         const t = tag(sk, v);
         counts.set(t, (counts.get(t) || 0) + 1);
+        if (entry?.not.has(v) && restoredBy((x) => entityHasValue(item, sk, x), entry, v)) {
+          negCounts.set(t, (negCounts.get(t) || 0) + 1);
+        }
       }
     }
   }
   return {
-    totals, counts, ctxAll, ctxFail, facetsWithData,
+    totals, counts, negCounts, ctxAll, ctxFail, facetsWithData,
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
@@ -398,7 +421,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   wireExclusion(container);
   container.replaceChildren();
   const {
-    totals, counts, ctxAll, ctxFail, facetsWithData,
+    totals, counts, negCounts, ctxAll, ctxFail, facetsWithData,
     totalUntagged, untaggedInContext,
     totalActive, activeInContext,
     totalQueued, queuedInContext,
@@ -422,10 +445,12 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const entry = state.selected.get(facetKey);
     const active = entry?.any.has(value) || false;
     const negated = entry?.not.has(value) || false;
-    // A negated chip's count is what the exclusion removes — signed so the
-    // pill explains itself (plain 0 when it removes nothing, never "−0").
-    // Negated is a CHOSEN state: never muted, no odds badge, same as active.
-    const count = negated && ctxCount ? `−${ctxCount}` : ctxCount;
+    // A negated chip's count is what un-striking would restore (negCounts —
+    // it respects the facet's own include half), signed so the pill explains
+    // itself; plain 0 when the strike removes nothing, never "−0". Negated
+    // is a CHOSEN state: never muted, no odds badge, same as active.
+    const removed = negated ? negCounts.get(t) || 0 : 0;
+    const count = negated ? (removed ? `−${removed}` : 0) : ctxCount;
     const el = pill(label, count, active,
       !active && !negated && ctxCount === 0,
       (e) => (e.altKey ? toggleNeg : toggle)(facetKey, value));

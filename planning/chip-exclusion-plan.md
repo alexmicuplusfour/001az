@@ -93,10 +93,17 @@ The per-facet pass test, written once:
   `counts`/`ctxAll`/`ctxFail`/`totals`, all of which flow through the shared
   pass test — the conditioning is "the whole selection" by construction.
   Excluded chips show no odds badge (chosen state, like active).
-- **Counts**: the leave-one-out convention extends verbatim. A chip under
-  facet F counts items matching every OTHER facet that hold the value — for
-  an excluded chip that number is precisely what the exclusion is
-  suppressing. Same computation, new reading, rendered `−N`.
+- **Counts** (revised 2026-09-08 — the first reading was wrong and QA
+  caught it): the leave-the-facet-out convention stays for INCLUDE chips
+  ("add this to the OR and N appear"), but an EXCLUDED chip answers a
+  different question — the marginal, "un-strike this and N come back" —
+  which must respect the facet's own include half and sibling strikes
+  (`negCounts` in computeFacetStats). With comfortable included on a
+  single-valued facet, striking roomy shows an honest `0` (inert, still
+  clearable), not the leave-facet-out −29; on a multi-valued facet
+  (car-but-NOT-truck) it bites and says exactly by how much. Mixed
+  include+exclude on one facet is therefore legal everywhere and
+  meaningful exactly where items can hold several of its values.
 - **Muted rule**: an excluded chip is never muted (it is chosen); at count 0
   it is inert but clearable — the selected-but-gone doctrine.
 
