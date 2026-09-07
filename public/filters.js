@@ -294,7 +294,7 @@ const excludeWired = new WeakSet();
 function wireExclusion(container) {
   if (excludeWired.has(container)) return;
   excludeWired.add(container);
-  let timer = null, fired = false;
+  let timer = null, fired = false, touchPress = false;
   const cancel = () => { clearTimeout(timer); timer = null; };
   const chipOf = (e) => {
     const el = e.target.closest?.(".pill");
@@ -305,14 +305,19 @@ function wireExclusion(container) {
     if (!el) return;
     e.preventDefault();
     cancel();
-    fired = true;
+    // Only a TOUCH press trails a synthetic click worth swallowing — a mouse
+    // right-click never produces one, and arming the swallow there ate the
+    // user's next legitimate left-click anywhere in the rail.
+    fired = touchPress;
     toggleNeg(el.dataset.facet, el.dataset.value);
   });
   container.addEventListener("pointerdown", (e) => {
-    const el = chipOf(e);
-    if (!el || e.pointerType !== "touch") return;
+    // Every new press starts clean: only its own gesture may swallow its click.
     fired = false;
+    touchPress = e.pointerType === "touch";
     cancel();
+    const el = chipOf(e);
+    if (!el || !touchPress) return;
     timer = setTimeout(() => { fired = true; toggleNeg(el.dataset.facet, el.dataset.value); }, 550);
   });
   for (const ev of ["pointerup", "pointermove", "pointercancel"]) {

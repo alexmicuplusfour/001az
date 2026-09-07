@@ -115,3 +115,16 @@ test('contextmenu toggles exclusion; Alt+click is its twin; left-click includes'
   pillByText(box, 'blue').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   assert.ok(!state.selected.get('color').not.has('blue'), 'right-click again clears the exclusion');
 });
+
+test('a mouse right-click never eats the next left-click', () => {
+  // ONE container across both gestures — the real rail's shape. The earlier
+  // tests re-rendered between dispatches, handing each gesture a fresh
+  // handler and hiding exactly this: the swallow flag armed by a mouse
+  // right-click (which no synthetic click ever follows) lay in wait and ate
+  // the next legitimate click anywhere in the rail.
+  const box = render();
+  pillByText(box, 'red').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  assert.ok(state.selected.get('color').not.has('red'), 'right-click excludes');
+  pillByText(box, 'blue').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  assert.ok(state.selected.get('color').any.has('blue'), 'the very next left-click lands');
+});
