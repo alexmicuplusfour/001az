@@ -6,24 +6,12 @@
 // is composition a pure-module test can't see.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { JSDOM } from 'jsdom';
-
-const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-const dom = new JSDOM(html, { url: 'http://localhost/', pretendToBeVisual: true });
-const { window } = dom;
-for (const k of ['document', 'localStorage', 'Event', 'CustomEvent', 'KeyboardEvent', 'HTMLElement', 'Node']) {
-  globalThis[k] = window[k];
-}
-globalThis.window = window;
-globalThis.getComputedStyle = window.getComputedStyle.bind(window);
-globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
-globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
-globalThis.IntersectionObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+import { window } from './jsdom-stub.js';
 
 const { state } = await import('../public/state.js');
 const { openFilterConfigPop } = await import('../public/filterconfigs.js');
 const { closeDropdown } = await import('../public/dropdown.js');
+const { selEntry } = await import('../public/facet-match.js');
 
 state.me = { id: 1, name: 'tester' };
 state.boardId = 'b1';
@@ -51,7 +39,7 @@ test('the saved-filters section head is permanent — even empty, even with no s
 
 test('a fresh selection gets the save input, with no divider between list and input', () => {
   state.filterConfigs = [{ id: 1, name: 'kept', config: { color: ['red'] } }];
-  state.selected = new Map([['color', new Set(['blue'])]]);
+  state.selected = new Map([['color', selEntry(['blue'])]]);
   const pop = openPop();
   assert.ok(pop.querySelector('.dd-input'), 'unsaved selection is savable');
   // exactly ONE divider in the pop — the one setting off the lens toggles;
@@ -62,7 +50,7 @@ test('a fresh selection gets the save input, with no divider between list and in
 
 test('an already-saved selection is told so instead of offered a duplicate', () => {
   state.filterConfigs = [{ id: 1, name: 'kept', config: { color: ['red'] } }];
-  state.selected = new Map([['color', new Set(['red'])]]);
+  state.selected = new Map([['color', selEntry(['red'])]]);
   const pop = openPop();
   assert.equal(pop.querySelector('.dd-input'), null, 'no input for a selection that is already a config');
   const note = [...pop.querySelectorAll('.dd-empty')].find((n) => n.textContent.includes('Saved as'));

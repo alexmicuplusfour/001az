@@ -691,6 +691,14 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   line-height: 1;
 }
 .al-chip button:hover { color: #b4232a; }
+/* The excluded half of a condition — the rail's .pill.neg twin (tokens in
+   styles.css :root); the strike stays off the × via the button's own box. */
+.al-chip.neg {
+  text-decoration: line-through;
+  color: var(--neg-ink);
+  border-color: var(--neg-border);
+}
+.al-chip.neg button { text-decoration: none; }
 /* history rows ride the .job-row skeleton; unseen ones read heavier */
 .al-firing { cursor: pointer; }
 .al-firing:hover { background: #f6f7f8; }

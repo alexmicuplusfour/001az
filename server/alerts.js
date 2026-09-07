@@ -1,10 +1,11 @@
 // Alerts: watched facet conditions (planning/alerts-plan.md). This module owns
-// the matcher — the server mirror of filters.js matchesExcept — the
+// the matcher — riding the same facet-match.js rule as filters.js — the
 // tag-landing evaluation hook, and the delivery sweep the worker's maintenance
 // loop ticks. Detection is always immediate (a match row the moment an entity
 // enters the set); delivery — webhook now, daily digest, or record-only — is
 // just a consumer of those rows. SQL lives in db.js like everything else.
 import crypto from "node:crypto";
+import { facetPass, halvesOf, canonEntry, encodePairs } from "../public/facet-match.js";
 import {
   boardAlerts,
   entityForAlerts,
@@ -37,16 +38,21 @@ const WEBHOOK_MAX_ATTEMPTS = 3; // then 'failed' with the error kept
 const WEBHOOK_RETRY_BACKOFF_MS = [60000, 300000];
 const PAYLOAD_ENTITY_CAP = 20;  // entity_count carries the real total
 
-// The matchesExcept mirror (filters.js:17): OR within a facet's values, AND
-// across facets, membership tested against "facet/value" tag strings. An
-// empty condition matches nothing (the API refuses to store one anyway).
+// The same rule filters.js applies — facetPass, imported rather than
+// mirrored, so the alert set and the grid can never disagree on what a
+// selection means. Membership tested against "facet/value" tag strings;
+// entry shapes are facet-match.js's (halvesOf). An empty condition matches
+// nothing (the API refuses to store one anyway), and an empty facet ENTRY
+// also matches nothing — a stored condition with no values is corrupt,
+// where a live selection's empty facet is merely untouched; that
+// difference belongs here, not in the rule.
 export function matchesCondition(tagSet, condition) {
   const keys = Object.keys(condition || {});
   if (!keys.length) return false;
   for (const key of keys) {
-    const values = condition[key];
-    if (!Array.isArray(values) || !values.length) return false;
-    if (!values.some((v) => tagSet.has(`${key}/${v}`))) return false;
+    const { any, not } = halvesOf(condition[key]);
+    if (!any.length && !not.length) return false;
+    if (!facetPass((v) => tagSet.has(`${key}/${v}`), any, not)) return false;
   }
   return true;
 }
@@ -117,9 +123,10 @@ export async function seedAlertBaseline(db, alertId, boardId, condition) {
 
 // Canonical condition equality — JSONB reorders object keys and the client
 // may reorder values, neither of which changes what matches. Decides whether
-// an edit needs a fresh baseline pass.
+// an edit needs a fresh baseline pass. canonEntry reads both wire forms, so
+// an { any, not } entry compares like its legacy-array spelling.
 const canonCondition = (c) =>
-  JSON.stringify(Object.keys(c || {}).sort().map((k) => [k, [...c[k]].sort()]));
+  JSON.stringify(Object.keys(c || {}).sort().map((k) => [k, canonEntry(c[k])]));
 export function sameCondition(a, b) {
   return canonCondition(a) === canonCondition(b);
 }
@@ -133,14 +140,13 @@ export function nextDailyAt(atMin, from = Date.now()) {
   return d.getTime();
 }
 
-// The condition as a shareable ?f= value — the encodeSelected mirror
-// (filters.js:231), so webhook links land on the same filtered view the
-// client would build itself.
-export function encodeConditionF(condition) {
-  return Object.keys(condition || {}).sort().map((key) =>
-    encodeURIComponent(key) + ":" + [...condition[key]].sort().map(encodeURIComponent).join(",")
-  ).join(";");
-}
+// The condition as a shareable ?f= / ?fx= value — the same encodePairs the
+// client's URL sync uses, so webhook links land on the same filtered view
+// the client would build itself and the format cannot drift. One half per
+// call: "any" is the ?f= param, "not" the ?fx= — a link must REPRODUCE an
+// exclusion, not merely survive it.
+export const encodeConditionF = (condition, half = "any") =>
+  encodePairs(Object.entries(condition || {}).map(([k, v]) => [k, halvesOf(v)[half]]));
 
 // The same absolute base invite links mint from (server.js BASE_URL) — one
 // "where does this app live" knob, not two. Unset/blank → payloads carry
@@ -174,9 +180,11 @@ export function buildFiringPayload(target, entities, { test = false } = {}) {
     })),
   };
   if (base) {
+    const fx = encodeConditionF(target.condition, "not");
     payload.links = {
       ...(target.id != null ? { event: `${base}/?board=${encodeURIComponent(target.board_id)}&event=${target.id}` } : {}),
-      filter: `${base}/?board=${encodeURIComponent(target.board_id)}&f=${encodeURIComponent(encodeConditionF(target.condition))}`,
+      filter: `${base}/?board=${encodeURIComponent(target.board_id)}&f=${encodeURIComponent(encodeConditionF(target.condition))}`
+        + (fx ? `&fx=${encodeURIComponent(fx)}` : ""),
     };
   }
   return payload;

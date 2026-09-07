@@ -11,6 +11,7 @@ const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
 const { oddsLabel, chipOdds, saveOdds, restoreOdds } = await import("../public/patterns.js");
 const { computeFacetStats } = await import("../public/filters.js");
+const { selEntry } = await import("../public/facet-match.js");
 
 // ── oddsLabel: gates and rounding ────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ function seedBoard() {
 
 test("computeFacetStats: one selected facet — ctxAll is its matches, ctxFail its refusers", () => {
   seedBoard();
-  state.selected = new Map([["color", new Set(["red"])]]);
+  state.selected = new Map([["color", selEntry(["red"])]]);
   const s = computeFacetStats();
   assert.equal(s.ctxAll, 6);
   assert.equal(s.ctxFail.get("color"), 4);
@@ -82,8 +83,8 @@ test("computeFacetStats: one selected facet — ctxAll is its matches, ctxFail i
 test("computeFacetStats: two selected facets split the refusers by which one they fail", () => {
   seedBoard();
   state.selected = new Map([
-    ["color", new Set(["red"])],
-    ["size", new Set(["big"])],
+    ["color", selEntry(["red"])],
+    ["size", selEntry(["big"])],
   ]);
   const s = computeFacetStats();
   assert.equal(s.ctxAll, 5);                 // red+big
@@ -96,7 +97,7 @@ test("computeFacetStats: two selected facets split the refusers by which one the
 
 test("chipOdds: chips under the only selected facet read against the whole board, so ×1", () => {
   seedBoard();
-  state.selected = new Map([["color", new Set(["red"])]]);
+  state.selected = new Map([["color", selEntry(["red"])]]);
   const s = computeFacetStats();
   // color's leave-one-out context IS the board, so blue's share can only
   // equal its board share — the lens self-silences with no special case.
@@ -123,7 +124,7 @@ test("chipOdds: a cross-facet skew reads its multiplier; the context floor outra
   for (let i = 8; i < 20; i++) state.items.push(item(i, ["color/blue", "size/big"]));
   for (let i = 20; i < 22; i++) state.items.push(item(i, ["color/red", "size/small"]));
   for (let i = 22; i < 100; i++) state.items.push(item(i, ["color/blue", "size/small"]));
-  state.selected = new Map([["size", new Set(["big"])]]);
+  state.selected = new Map([["size", selEntry(["big"])]]);
   const s = computeFacetStats();
   assert.equal(s.ctxAll, 20);
   assert.deepEqual(chipOdds(s, "color", "color/red"), { text: "×4.0", tone: "up-2" }, "8 of 20 big are red vs 10 of 100 board-wide");
@@ -134,7 +135,7 @@ test("chipOdds: a cross-facet skew reads its multiplier; the context floor outra
   // The same proportions on a small board say nothing at all — with 6 items
   // in context the floor speaks before any ratio does.
   seedBoard();
-  state.selected = new Map([["size", new Set(["big"])]]);
+  state.selected = new Map([["size", selEntry(["big"])]]);
   const small = computeFacetStats();
   assert.equal(small.ctxAll, 6);
   assert.equal(chipOdds(small, "color", "color/red"), null, "under the context floor");

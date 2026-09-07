@@ -153,6 +153,7 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmb
 // The pure k-means both cluster flavors share — a dependency-free public
 // module, imported here the same way the test suite imports public modules.
 import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
+import { halvesOf, wireEntry } from "../public/facet-match.js";
 import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -618,6 +619,24 @@ app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => 
 }));
 
 // --- saved filter configs (any logged-in user) ---
+
+// One selection cleaning for the stored shapes — filter configs and alert
+// conditions share it (they were near-identical twins before the exclusion
+// arc unified them). Entry shapes are facet-match.js's (halvesOf in,
+// wireEntry out); this adds only what an API boundary owes: strings only,
+// caps enforced, both-empty entries dropped.
+function cleanSelection(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const strings = (a) => a.filter((x) => typeof x === "string").slice(0, 100);
+  for (const [k, v] of Object.entries(raw)) {
+    const halves = halvesOf(v);
+    const wire = wireEntry(strings(halves.any), strings(halves.not));
+    if (wire) out[String(k).slice(0, 100)] = wire;
+  }
+  return out;
+}
+
 app.get("/api/filter-configs", requireAuth, wrap(async (req, res) => {
   res.json(await listFilterConfigs(db, req.user.id, req.query.board || ""));
 }));
@@ -628,14 +647,7 @@ app.post("/api/filter-configs", requireAuth, wrap(async (req, res) => {
   const boardId = (req.body && req.body.board_id ? String(req.body.board_id) : "").trim();
   if (!boardId || !(await boardExists(db, boardId)) || !(await canAccessBoard(db, boardId, req.user)))
     return res.status(404).json({ error: "board not found" });
-  // config: { facetKey: [values] } — keep only that shape.
-  const raw = req.body && typeof req.body.config === "object" && req.body.config ? req.body.config : {};
-  const config = {};
-  for (const [k, v] of Object.entries(raw)) {
-    if (!Array.isArray(v)) continue;
-    const values = v.filter((x) => typeof x === "string").slice(0, 100);
-    if (values.length) config[String(k).slice(0, 100)] = values;
-  }
+  const config = cleanSelection(req.body?.config);
   if (!Object.keys(config).length) return res.status(400).json({ error: "empty config" });
   const saved = await saveFilterConfig(db, req.user.id, boardId, name, config);
   if (!saved) return res.status(400).json({ error: "invalid name" });
@@ -681,16 +693,7 @@ function parseAlertBody(body, base) {
   if (!name) return { error: "name required" };
 
   let condition = base.condition || {};
-  if (b.condition !== undefined) {
-    // { facetKey: [values] } — the filter-configs cleaning, ≥1 facet kept.
-    const raw = typeof b.condition === "object" && b.condition && !Array.isArray(b.condition) ? b.condition : {};
-    condition = {};
-    for (const [k, v] of Object.entries(raw)) {
-      if (!Array.isArray(v)) continue;
-      const values = v.filter((x) => typeof x === "string").slice(0, 100);
-      if (values.length) condition[String(k).slice(0, 100)] = values;
-    }
-  }
+  if (b.condition !== undefined) condition = cleanSelection(b.condition); // the filter-configs cleaning, shared
   if (!Object.keys(condition).length) return { error: "empty condition" };
 
   const delivery = b.delivery !== undefined ? String(b.delivery) : (base.delivery || "immediate");

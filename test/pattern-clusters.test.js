@@ -13,6 +13,7 @@ const { toItem } = await import("../public/utils.js");
 const { refreshClusters, clusterValues, clusterSet, toggleClusters, saveClusters, restoreClusters, stepClusters, toggleMeaningClusters, restoreMeaningClusters } =
   await import("../public/patterns.js");
 const { LEVEL_MAX } = await import("../public/cluster-core.js");
+const { selEntry } = await import("../public/facet-match.js");
 
 const item = (id, tags, status = "tagged") => toItem({ id, name: `${id}.webp`, status, tags });
 const valueOf = (id) => clusterSet({ id })?.values().next().value;
@@ -127,7 +128,7 @@ test("clusters: toggling off clears the lens's own selection", () => {
   // behind it would filter the board to nothing.
   store.clear();
   state.boardId = "b1";
-  state.selected = new Map([["~clusters", new Set(["c0"])], ["color", new Set(["red"])]]);
+  state.selected = new Map([["~clusters", selEntry(["c0"])], ["color", selEntry(["red"])]]);
   toggleClusters(false);
   assert.equal(state.selected.has("~clusters"), false);
   assert.ok(state.selected.has("color"), "other selections untouched");
@@ -192,7 +193,7 @@ test("stepClusters: clamps to [1, LEVEL_MAX], clears only the lens's selection, 
   state.boardId = "b1";
   state.items = seedBlocks();
   state.showClusters = 1;
-  state.selected = new Map([["~clusters", new Set(["c0"])], ["color", new Set(["red"])]]);
+  state.selected = new Map([["~clusters", selEntry(["c0"])], ["color", selEntry(["red"])]]);
   stepClusters(1);
   assert.equal(state.showClusters, 2);
   assert.equal(state.selected.has("~clusters"), false, "old group names no longer name those groups");
@@ -219,7 +220,7 @@ test("stepClusters: clamps to [1, LEVEL_MAX], clears only the lens's selection, 
 test("the two cluster flavors are mutually exclusive, in state and in storage", () => {
   store.clear();
   state.boardId = "b1";
-  state.selected = new Map([["~clusters", new Set(["c0"])], ["color", new Set(["red"])]]);
+  state.selected = new Map([["~clusters", selEntry(["c0"])], ["color", selEntry(["red"])]]);
   toggleClusters(true);
   toggleMeaningClusters(true); // flips tags OFF, itself ON
   assert.equal(state.showClusters, 0);

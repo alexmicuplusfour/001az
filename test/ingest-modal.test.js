@@ -7,20 +7,7 @@
 // server faithfully round-trips whatever the client remembers to send.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { JSDOM } from 'jsdom';
-
-const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-const dom = new JSDOM(html, { url: 'http://localhost/', pretendToBeVisual: true });
-const { window } = dom;
-for (const k of ['document', 'localStorage', 'Event', 'CustomEvent', 'KeyboardEvent', 'HTMLElement', 'Node']) {
-  globalThis[k] = window[k];
-}
-globalThis.window = window;
-globalThis.getComputedStyle = window.getComputedStyle.bind(window);
-globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
-globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
-globalThis.IntersectionObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+import { window } from './jsdom-stub.js';
 
 const { state } = await import('../public/state.js');
 const { openIngestModal } = await import('../public/ingest-modal.js');

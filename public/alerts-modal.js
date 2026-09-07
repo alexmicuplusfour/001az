@@ -11,6 +11,7 @@ import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
 import { ddRow, ddSep, ddEmpty } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
+import { halvesOf, selEntry, wireEntry, selSize } from './facet-match.js';
 import { switchRow } from './board-modal.js';
 import { openAlertEvent, clearAlertEvent, resetListFilters } from './alert-event.js';
 import { ensurePolling } from './data.js';
@@ -130,12 +131,26 @@ function serverClockNote() {
   return ` The time is the server's clock${zone} — now ${hhmm}, ${span} ${diff > 0 ? "ahead of" : "behind"} you.`;
 }
 
+// Wire condition ↔ the editor's working form: live entries per facet, the
+// same shapes facet-match.js owns everywhere else.
+const workCondition = (raw) => Object.fromEntries(
+  Object.entries(raw || {}).map(([k, v]) => {
+    const { any, not } = halvesOf(v);
+    return [k, selEntry(any, not)];
+  })
+);
+const wireCondition = (cond) => Object.fromEntries(
+  Object.entries(cond).map(([k, e]) => [k, wireEntry(e.any, e.not)])
+);
+
 export function openAlertEditor(existing) {
   const isNew = !existing;
   // The condition starts as the current pills (create) or the stored one
   // (edit); either way it's edited by removal only — adding means reopening
-  // from a richer selection.
-  let condition = structuredClone(isNew ? selectedAsConfig() : (existing.condition || {}));
+  // from a richer selection. Held as live entries (selEntry copies, so the
+  // stored row is never mutated) whatever wire shape it arrived in,
+  // serialized back through wireEntry on save.
+  let condition = workCondition(isNew ? selectedAsConfig() : existing.condition);
   let enabled = isNew ? true : !!existing.enabled;
   let secretCleared = false;
 
@@ -158,7 +173,7 @@ export function openAlertEditor(existing) {
   // ── condition ──
   const condSection = document.createElement("div");
   condSection.className = "modal-section";
-  const condHead = sectionHeadingEl("Condition", "New items matching every facet below (any of its values) trigger the alert.");
+  const condHead = sectionHeadingEl("Condition", "New items matching every facet below (any of its values, none of its struck ones) trigger the alert.");
   condHead.style.marginBottom = "12px";
   condSection.appendChild(condHead);
   const condBox = document.createElement("div");
@@ -185,25 +200,29 @@ export function openAlertEditor(existing) {
       // the stored condition keeps raw keys/ids either way.
       k.textContent = SYSTEM_FACETS[key] ? SYSTEM_FACETS[key].label.toLowerCase() : key;
       group.appendChild(k);
-      for (const v of condition[key]) {
-        const chip = document.createElement("span");
-        chip.className = "al-chip";
-        const txt = document.createElement("span");
-        const uploader = key === "~uploaders"
-          ? state.items.find((item) => String(item.uploadedBy?.id) === v)?.uploadedBy
-          : null;
-        txt.textContent = uploader ? (uploader.name || uploader.email) : v;
-        const rm = document.createElement("button");
-        rm.type = "button";
-        rm.title = "Remove";
-        rm.textContent = "×";
-        rm.addEventListener("click", () => {
-          condition[key] = condition[key].filter((x) => x !== v);
-          if (!condition[key].length) delete condition[key];
-          renderCondition();
-        });
-        chip.append(txt, rm);
-        group.appendChild(chip);
+      for (const half of ["any", "not"]) {
+        const neg = half === "not";
+        for (const v of condition[key][half]) {
+          const chip = document.createElement("span");
+          chip.className = neg ? "al-chip neg" : "al-chip";
+          if (neg) chip.title = "must not hold this value";
+          const txt = document.createElement("span");
+          const uploader = key === "~uploaders"
+            ? state.items.find((item) => String(item.uploadedBy?.id) === v)?.uploadedBy
+            : null;
+          txt.textContent = uploader ? (uploader.name || uploader.email) : v;
+          const rm = document.createElement("button");
+          rm.type = "button";
+          rm.title = "Remove";
+          rm.textContent = "×";
+          rm.addEventListener("click", () => {
+            condition[key][half].delete(v);
+            if (!selSize(condition[key])) delete condition[key];
+            renderCondition();
+          });
+          chip.append(txt, rm);
+          group.appendChild(chip);
+        }
       }
       condBox.appendChild(group);
     }
@@ -219,7 +238,7 @@ export function openAlertEditor(existing) {
     adopt.style.marginTop = "10px";
     adopt.textContent = "Replace with current filter";
     adopt.addEventListener("click", () => {
-      condition = structuredClone(selectedAsConfig());
+      condition = workCondition(selectedAsConfig());
       renderCondition();
     });
     condSection.appendChild(adopt);
@@ -356,7 +375,7 @@ export function openAlertEditor(existing) {
     if (modeSel.value === "daily" && !atInput.value) return toast.error("Pick a digest time");
     const payload = {
       name,
-      condition,
+      condition: wireCondition(condition),
       delivery: modeSel.value,
       // daily_at only travels on daily saves — absent means keep (the secret
       // pattern), so flipping to immediate and back doesn't forget the HH:MM.

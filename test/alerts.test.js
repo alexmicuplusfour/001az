@@ -11,6 +11,7 @@ import { startServer, adminSession, seedUser, seedItem, req, withLegacyEntityId 
 import { createBoard, createEntity, insertItem, setBoardMembers, setItemEntities, reconcileEntities } from "../server/db.js";
 import {
   matchesCondition,
+  sameCondition,
   nextDailyAt,
   encodeConditionF,
   evaluateItemAlerts,
@@ -98,11 +99,73 @@ test("matchesCondition: OR within a facet, AND across facets", () => {
   assert.equal(matchesCondition(new Set(), { kind: ["a"] }), false);
 });
 
+test("matchesCondition: { any, not } entries — exclusion on the server, same rule", () => {
+  const tags = new Set(["kind/a", "color/red"]);
+  // Exclusion held → no match; clear → match; the any half still binds.
+  assert.equal(matchesCondition(tags, { kind: { any: ["a"], not: ["b"] } }), true);
+  assert.equal(matchesCondition(tags, { color: { any: [], not: ["red"] } }), false);
+  assert.equal(matchesCondition(tags, { color: { any: [], not: ["blue"] } }), true);
+  assert.equal(matchesCondition(tags, { kind: { any: ["b"], not: [] } }), false);
+  // Unset passes a NOT — an entity with no color tag matches "not red".
+  assert.equal(matchesCondition(new Set(["kind/a"]), { kind: ["a"], color: { any: [], not: ["red"] } }), true);
+  // Corrupt entries still refuse: both halves empty, or junk.
+  assert.equal(matchesCondition(tags, { kind: { any: [], not: [] } }), false);
+  assert.equal(matchesCondition(tags, { kind: "a" }), false);
+  assert.equal(matchesCondition(tags, { kind: [] }), false);
+});
+
+test("alert conditions: the { any, not } form survives the route's cleaning", async () => {
+  const alert = await makeAlert({
+    name: "clean shape",
+    condition: { kind: { any: ["a"], not: ["b"] }, color: ["red"] },
+  });
+  assert.deepEqual(alert.condition, { kind: { any: ["a"], not: ["b"] }, color: ["red"] },
+    "object entry kept, exclusion-free entry stays the legacy array");
+  const junk = await req(base, "POST", "/api/alerts", {
+    sid: admin.sid,
+    body: { board_id: boardId, name: "junk", condition: { kind: { any: [], not: [] } } },
+  });
+  assert.equal(junk.status, 400, "a condition that cleans to nothing is refused");
+  // Remove the object-form alert: the migration-0024 heal test below re-runs
+  // that migration's SQL, whose matcher predates the { any, not } form (it
+  // only ever ran on array-era data in the wild) — an anachronistic alert in
+  // its path is a test artifact, not a product state.
+  const del = await req(base, "DELETE", `/api/alerts/${alert.id}`, { sid: admin.sid });
+  assert.equal(del.status, 200, del.text);
+});
+
 test("nextDailyAt: today when the time is ahead, tomorrow when it passed", () => {
   const noon = new Date(2026, 6, 25, 12, 0, 0, 0).getTime();
   const at9 = 9 * 60, at15 = 15 * 60;
   assert.equal(nextDailyAt(at15, noon), new Date(2026, 6, 25, 15, 0, 0, 0).getTime());
   assert.equal(nextDailyAt(at9, noon), new Date(2026, 6, 26, 9, 0, 0, 0).getTime());
+});
+
+test("sameCondition: both wire forms compare, and an array equals its { any } spelling", () => {
+  // Regression: canonCondition once spread entries as arrays and threw on an
+  // { any, not } entry — on the alert-edit path, deciding re-baselining.
+  assert.equal(sameCondition({ kind: { any: ["a"], not: ["c"] } }, { kind: { any: ["a"], not: ["c"] } }), true);
+  assert.equal(sameCondition({ kind: ["b", "a"] }, { kind: { any: ["a", "b"], not: [] } }), true);
+  assert.equal(sameCondition({ kind: { any: ["a"], not: ["c"] } }, { kind: ["a"] }), false, "an exclusion is a different condition");
+});
+
+test("encodeConditionF: both halves, one per param — links reproduce exclusions", () => {
+  const cond = { kind: { any: ["b", "a"], not: ["c"] }, color: ["red"] };
+  assert.equal(encodeConditionF(cond), "color:red;kind:a,b", "the any half is the ?f= value");
+  assert.equal(encodeConditionF(cond, "not"), "kind:c", "the not half is the ?fx= value");
+  assert.equal(encodeConditionF({ color: ["red"] }, "not"), "", "no exclusions, no fx");
+});
+
+test("a firing payload's filter link carries fx when the condition excludes", () => {
+  process.env.BASE_URL = "http://app.test";
+  const target = { id: 7, alert_id: 1, name: "n", board_id: "b1", fired_at: 1, entity_count: 0,
+    condition: { kind: { any: ["a"], not: ["c"] } } };
+  const link = buildFiringPayload(target, []).links.filter;
+  assert.ok(link.includes("f=" + encodeURIComponent("kind:a")), link);
+  assert.ok(link.includes("fx=" + encodeURIComponent("kind:c")), link);
+  const bare = buildFiringPayload({ ...target, condition: { kind: ["a"] } }, []).links.filter;
+  assert.ok(!bare.includes("fx="), "no exclusions, no fx param");
+  process.env.BASE_URL = "";
 });
 
 test("encodeConditionF mirrors the client's encodeSelected", () => {

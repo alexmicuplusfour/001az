@@ -12,6 +12,7 @@ const { state } = await import("../public/state.js");
 const { toItem, toInstance, instanceTagCounts, mappingHasAiWork } = await import("../public/utils.js");
 const { effectiveView, resolveView, rowsRelevant, saveView, restoreView } = await import("../public/view.js");
 const { instanceMatches } = await import("../public/filters.js");
+const { selEntry } = await import("../public/facet-match.js");
 
 const inst = (id, tags) => ({ id, name: `${id}.webp`, kind: "image", status: "tagged", tags });
 
@@ -122,19 +123,19 @@ test("mappingHasAiWork: connector/file-only mappings and no mapping → false", 
 const mkInst = (tags) => toInstance({ id: 9, name: "x.webp", status: "tagged", tags });
 
 test("instanceMatches: values within a facet OR, facets AND", () => {
-  state.selected = new Map([["hair-length", new Set(["short"])]]);
+  state.selected = new Map([["hair-length", selEntry(["short"])]]);
   assert.equal(instanceMatches(mkInst(["hair-length/short"])), true);
   assert.equal(instanceMatches(mkInst(["hair-length/long"])), false);
 
-  state.selected = new Map([["hair-length", new Set(["short", "long"])]]);
+  state.selected = new Map([["hair-length", selEntry(["short", "long"])]]);
   assert.equal(instanceMatches(mkInst(["hair-length/long"])), true);
 
   // The cross-instance union case: an instance must satisfy EVERY facet on
   // its own — short alone fails a short+roberts filter even though its
   // entity (via a sibling photo) matches.
   state.selected = new Map([
-    ["hair-length", new Set(["short"])],
-    ["which-emma", new Set(["emma-roberts"])],
+    ["hair-length", selEntry(["short"])],
+    ["which-emma", selEntry(["emma-roberts"])],
   ]);
   assert.equal(instanceMatches(mkInst(["hair-length/short", "which-emma/emma-roberts"])), true);
   assert.equal(instanceMatches(mkInst(["hair-length/short"])), false);
@@ -142,7 +143,7 @@ test("instanceMatches: values within a facet OR, facets AND", () => {
 });
 
 test("instanceMatches: empty-value facets and no selections match everything", () => {
-  state.selected = new Map([["hair-length", new Set()]]);
+  state.selected = new Map([["hair-length", selEntry()]]);
   assert.equal(instanceMatches(mkInst([])), true);
   state.selected = new Map();
   assert.equal(instanceMatches(mkInst([])), true);

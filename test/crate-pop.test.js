@@ -7,23 +7,7 @@
 // crate" toast, the delete that never repaints, the footer that never renders.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { JSDOM } from 'jsdom';
-
-const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
-const dom = new JSDOM(html, { url: 'http://localhost/', pretendToBeVisual: true });
-const { window } = dom;
-// Assign UNCONDITIONALLY: Node ships its own global Event/CustomEvent, and
-// jsdom's dispatchEvent rejects instances of them — a module doing
-// `new Event('app:render')` must get jsdom's class or every dispatch throws.
-for (const k of ['document', 'localStorage', 'Event', 'CustomEvent', 'KeyboardEvent', 'HTMLElement', 'Node']) {
-  globalThis[k] = window[k];
-}
-globalThis.window = window;
-globalThis.getComputedStyle = window.getComputedStyle.bind(window);
-globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
-globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
-globalThis.IntersectionObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+import { window } from './jsdom-stub.js';
 globalThis.confirm = () => true;
 
 // jsdom swallows exceptions thrown inside event listeners (they surface as a

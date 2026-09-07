@@ -3,6 +3,10 @@
   --pill-bg: #f1f1f3;
   --pill-bg-hover: #e6e6ea;
   --pill-active: #111;
+  /* The excluded ("NOT") state, worn by rail pills and alert-condition chips.
+     The odds lens's down-arm warm family — orange already means "less" here. */
+  --neg-ink: #a8400f;
+  --neg-border: rgba(235, 104, 52, 0.55);
   --text: #111;
   --text-dim: #6b6b72;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -390,6 +394,8 @@ header.header-collapsed #toolbar-fold {
   cursor: pointer;
   white-space: nowrap;
   user-select: none;
+  /* long-press is a gesture here (exclusion) — the iOS callout would eat it */
+  -webkit-touch-callout: none;
   transition: background 0.12s, color 0.12s, border-color 0.12s, opacity 0.12s;
 }
 
@@ -470,6 +476,23 @@ header.header-collapsed #toolbar-fold {
 
 .pill.muted {
   opacity: 0.4;
+}
+
+/* An excluded value (chip-exclusion arc): struck label in the warm "less"
+   family (green/red stay reserved for price direction). A chosen state like
+   .active, so never muted. The strike must not cross the −N count:
+   text-decoration doesn't propagate into inline-blocks (the .mult badge
+   already leans on this). The alert editor's twin (.al-chip.neg) lives with
+   its base in modal.css. */
+.pill.neg {
+  text-decoration: line-through;
+  color: var(--neg-ink);
+  border-color: var(--neg-border);
+}
+
+.pill.neg .count {
+  display: inline-block;
+  text-decoration: none;
 }
 
 main#grid {

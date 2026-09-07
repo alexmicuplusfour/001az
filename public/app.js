@@ -1,6 +1,7 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
-import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelected, syncFiltersToUrl, activeCount } from './filters.js';
+import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount } from './filters.js';
+import { selEntry } from './facet-match.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoard } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid, dropAllCards } from './grid.js';
 import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
@@ -73,14 +74,14 @@ async function main() {
 
   const params = new URLSearchParams(location.search);
   state.boardId = params.get("board");
-  state.selected = decodeSelected(params.get("f")); // shareable filtered links
+  state.selected = decodeSelection(params.get("f"), params.get("fx")); // shareable filtered links
   // Legacy shareable links: ?u=5,7 predates the ~uploaders system facet.
   // Fold it into the selection (writes stopped — syncFiltersToUrl drops the
   // param); an ?f= that already carries ~uploaders wins over the stale ?u=.
   const uParam = params.get("u");
   if (uParam && !state.selected.has("~uploaders")) {
     const ids = uParam.split(",").filter(Boolean);
-    if (ids.length) state.selected.set("~uploaders", new Set(ids));
+    if (ids.length) state.selected.set("~uploaders", selEntry(ids));
   }
 
   if (!state.boardId) {

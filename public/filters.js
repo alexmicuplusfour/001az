@@ -1,5 +1,6 @@
 import { state } from './state.js';
 import { tag, pill, pillAction, appendCount, ICONS } from './utils.js';
+import { facetPass, selEntry, halvesOf, wireEntry, canonEntry, selSize, selHas, selValues, encodePairs, decodePairs } from './facet-match.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
 import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters } from './patterns.js';
@@ -10,9 +11,11 @@ const elFilterDrawer = document.getElementById("filter-drawer");
 const elFiltersMobile = document.getElementById("filters-mobile");
 
 export function filterKey() {
+  // The triple keeps include and exclude apart — ["dark"] selected and
+  // ["dark"] excluded must never share a render-cache key.
   const sel = [...state.selected.entries()]
-    .map(([k, v]) => [k, [...v].sort()])
-    .filter(([, v]) => v.length)
+    .map(([k, v]) => [k, [...v.any].sort(), [...v.not].sort()])
+    .filter(([, any, not]) => any.length || not.length)
     .sort((a, b) => (a[0] < b[0] ? -1 : 1));
   return JSON.stringify([sel, state.showFavorites, state.showUntagged, state.showProcessing, state.showUnprocessed, state.sort, state.selectedCrateId, state.alertEvent?.id ?? null, state.boardId, state.searchResults ? state.searchQuery : ""]);
 }
@@ -60,12 +63,10 @@ function instanceHasValue(inst, key, value) {
 
 function matchesExcept(item, exceptKey) {
   for (const [key, values] of state.selected) {
-    if (key === exceptKey || values.size === 0) continue;
-    let ok = false;
-    for (const v of values) {
-      if (entityHasValue(item, key, v)) { ok = true; break; }
-    }
-    if (!ok) return false;
+    // Toggled-empty entries linger in the map; skip them before paying the
+    // closure + facetPass call per item — this loop runs per render pass.
+    if (key === exceptKey || !selSize(values)) continue;
+    if (!facetPass((v) => entityHasValue(item, key, v), values.any, values.not)) return false;
   }
   return true;
 }
@@ -82,14 +83,10 @@ function matchesExcept(item, exceptKey) {
 // dims like any facet.
 export function instanceMatches(inst) {
   for (const [key, values] of state.selected) {
-    if (values.size === 0) continue;
+    if (!selSize(values)) continue;
     const sys = SYSTEM_FACETS[key];
     if (sys && !sys.instance) continue; // entity-level dimension — every tile passes
-    let ok = false;
-    for (const v of values) {
-      if (instanceHasValue(inst, key, v)) { ok = true; break; }
-    }
-    if (!ok) return false;
+    if (!facetPass((v) => instanceHasValue(inst, key, v), values.any, values.not)) return false;
   }
   return true;
 }
@@ -159,7 +156,7 @@ export function taggedFiltered() {
 // "/" to find their facet, so facet keys must not contain slashes (the
 // facet/value tag convention already requires this).
 export function computeFacetStats() {
-  const activeSel = [...state.selected].filter(([, v]) => v.size);
+  const activeSel = [...state.selected].filter(([, v]) => selSize(v));
   const totals = new Map(); // "facet/value" -> count over all items
   const counts = new Map(); // "facet/value" -> count in the current filter context
   // The sizes of the leave-one-out contexts `counts` live in: a chip under
@@ -204,11 +201,10 @@ export function computeFacetStats() {
     let fails = 0;
     let failKey = null;
     for (const [key, values] of activeSel) {
-      let ok = false;
-      for (const v of values) {
-        if (entityHasValue(item, key, v)) { ok = true; break; }
+      if (!facetPass((v) => entityHasValue(item, key, v), values.any, values.not)) {
+        fails++; failKey = key;
+        if (fails > 1) break;
       }
-      if (!ok) { fails++; failKey = key; if (fails > 1) break; }
     }
 
     // An uploader selection rides `fails` like any facet (the `~uploaders`
@@ -257,7 +253,7 @@ export function computeFacetStats() {
 
 export function activeCount() {
   let n = 0;
-  for (const values of state.selected.values()) n += values.size;
+  for (const values of state.selected.values()) n += selSize(values);
   if (state.showUntagged) n++;
   if (state.showProcessing) n++;
   if (state.showUnprocessed) n++;
@@ -270,12 +266,64 @@ export function favoritesInContext() {
   return taggedFiltered().filter((item) => item.favoritedByMe).length;
 }
 
-export function toggle(facetKey, value) {
-  const set = state.selected.get(facetKey) || new Set();
-  if (set.has(value)) set.delete(value);
-  else set.add(value);
-  state.selected.set(facetKey, set);
+// One body for both verbs, so the each-state-clears-the-other rule can't
+// drift between them: toggling a value into one half removes it from the
+// sibling.
+function toggleHalf(facetKey, value, mine, other) {
+  const entry = state.selected.get(facetKey) || selEntry();
+  if (entry[mine].has(value)) entry[mine].delete(value);
+  else { entry[mine].add(value); entry[other].delete(value); }
+  state.selected.set(facetKey, entry);
   document.dispatchEvent(new Event('app:render'));
+}
+
+export const toggle = (facetKey, value) => toggleHalf(facetKey, value, "any", "not");
+// The exclusion twin — right-click / Alt+click / long-press land here.
+export const toggleNeg = (facetKey, value) => toggleHalf(facetKey, value, "not", "any");
+
+// The exclusion gesture, wired ONCE per rail container (they survive
+// replaceChildren, so this beats seven listeners per pill rebuilt every
+// render): real contextmenu (desktop right-click; Android fires it natively
+// on long-press ~500ms) plus a touch-only timer for iOS, which never fires
+// contextmenu for touches. The native event wins the race and cancels the
+// timer, so Android can't double-fire; either path marks the press so the
+// capture-phase listener swallows the synthetic click that may follow.
+// Chips carry their address in data-facet/data-value; pills without one
+// (status, pillAction) are ignored.
+const excludeWired = new WeakSet();
+function wireExclusion(container) {
+  if (excludeWired.has(container)) return;
+  excludeWired.add(container);
+  let timer = null, fired = false;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  const chipOf = (e) => {
+    const el = e.target.closest?.(".pill");
+    return el?.dataset.facet != null ? el : null;
+  };
+  container.addEventListener("contextmenu", (e) => {
+    const el = chipOf(e);
+    if (!el) return;
+    e.preventDefault();
+    cancel();
+    fired = true;
+    toggleNeg(el.dataset.facet, el.dataset.value);
+  });
+  container.addEventListener("pointerdown", (e) => {
+    const el = chipOf(e);
+    if (!el || e.pointerType !== "touch") return;
+    fired = false;
+    cancel();
+    timer = setTimeout(() => { fired = true; toggleNeg(el.dataset.facet, el.dataset.value); }, 550);
+  });
+  for (const ev of ["pointerup", "pointermove", "pointercancel"]) {
+    container.addEventListener(ev, cancel);
+  }
+  container.addEventListener("click", (e) => {
+    if (!fired) return;
+    fired = false;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
 }
 
 export function clearAll() {
@@ -292,30 +340,36 @@ function toggleFlag(flag) {
 }
 
 // --- saved filter configs + URL encoding ---
-// A config is the facet selection as a plain object: { facetKey: [values] }.
-// Loading one is one-shot — it just sets the pills, nothing stays "applied".
+// A config is the facet selection as a plain object; entry shapes and the
+// legacy-array rule live in facet-match.js (halvesOf/wireEntry). Loading one
+// is one-shot — it just sets the pills, nothing stays "applied".
 
 export function selectedAsConfig() {
   const out = {};
   for (const [key, values] of state.selected) {
-    if (values.size) out[key] = [...values].sort();
+    const wire = wireEntry(values.any, values.not);
+    if (wire) out[key] = wire;
   }
   return out;
 }
 
 export function applyFilterConfig(config) {
   state.selected = new Map(
-    Object.entries(config || {}).map(([k, v]) => [k, new Set(v)])
+    Object.entries(config || {}).map(([k, v]) => {
+      const { any, not } = halvesOf(v);
+      return [k, selEntry(any, not)];
+    })
   );
   document.dispatchEvent(new Event('app:render'));
 }
 
 // True when a config matches the current pills exactly — pure feedback for
-// highlighting, not a mode. Compared canonically (sorted keys/values):
-// JSONB reorders object keys, so plain stringify comparison would lie.
+// highlighting, not a mode. Compared canonically (canonEntry: sorted, both
+// entry forms alike): JSONB reorders object keys, so plain stringify
+// comparison would lie.
 function canonConfig(config) {
   return JSON.stringify(
-    Object.keys(config).sort().map((k) => [k, [...config[k]].sort()])
+    Object.keys(config).sort().map((k) => [k, canonEntry(config[k])])
   );
 }
 
@@ -323,28 +377,26 @@ export function configMatchesCurrent(config) {
   return canonConfig(config) === canonConfig(selectedAsConfig());
 }
 
-// Compact query-param form: "key:v1,v2;key2:v3" (parts URI-encoded so the
-// separators can't collide with facet names/values).
-export function encodeSelected() {
-  const parts = [];
-  for (const [key, values] of [...state.selected.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-    if (!values.size) continue;
-    parts.push(
-      encodeURIComponent(key) + ":" + [...values].sort().map(encodeURIComponent).join(",")
-    );
-  }
-  return parts.join(";");
-}
+// The wire codec itself (encodePairs/decodePairs) lives in facet-match.js —
+// alert firing links encode the same format server-side, so the two sides
+// share one implementation. ?f= carries the include halves (its meaning
+// since day one, so old links decode unchanged), ?fx= the exclude halves;
+// an old build ignores ?fx= and shows the less-filtered view.
+const encodeHalf = (half) =>
+  encodePairs([...state.selected.entries()].map(([k, v]) => [k, v[half]]));
 
-export function decodeSelected(str) {
+export const encodeSelected = () => encodeHalf("any");
+export const encodeExcluded = () => encodeHalf("not");
+
+// Both params into entries; an fx-only key is a valid selection with an
+// empty include half.
+export function decodeSelection(fStr, fxStr) {
   const map = new Map();
-  if (!str) return map;
-  for (const part of str.split(";")) {
-    const i = part.indexOf(":");
-    if (i <= 0) continue;
-    const key = decodeURIComponent(part.slice(0, i));
-    const values = part.slice(i + 1).split(",").filter(Boolean).map(decodeURIComponent);
-    if (values.length) map.set(key, new Set(values));
+  for (const [key, values] of decodePairs(fStr)) map.set(key, selEntry(values));
+  for (const [key, values] of decodePairs(fxStr)) {
+    const entry = map.get(key) || selEntry();
+    for (const v of values) entry.not.add(v);
+    map.set(key, entry);
   }
   return map;
 }
@@ -356,6 +408,9 @@ export function syncFiltersToUrl() {
   const f = encodeSelected();
   if (f) url.searchParams.set("f", f);
   else url.searchParams.delete("f");
+  const fx = encodeExcluded();
+  if (fx) url.searchParams.set("fx", fx);
+  else url.searchParams.delete("fx");
   // Uploaders ride ?f= as the ~uploaders facet now; drop the legacy ?u= so an
   // old link's param migrates away on the first filter change.
   url.searchParams.delete("u");
@@ -364,6 +419,7 @@ export function syncFiltersToUrl() {
 }
 
 export function renderFacetsInto(container, stats = computeFacetStats()) {
+  wireExclusion(container);
   container.replaceChildren();
   const {
     totals, counts, ctxAll, ctxFail, facetsWithData,
@@ -387,9 +443,21 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   const chip = (facetKey, value, label = value) => {
     const t = tag(facetKey, value);
     const ctxCount = counts.get(t) || 0;
-    const active = state.selected.get(facetKey)?.has(value) || false;
-    const el = pill(label, ctxCount, active, !active && ctxCount === 0, () => toggle(facetKey, value));
-    const odds = state.showOdds && !active && chipOdds(stats, facetKey, t);
+    const entry = state.selected.get(facetKey);
+    const active = entry?.any.has(value) || false;
+    const negated = entry?.not.has(value) || false;
+    // A negated chip's count is what the exclusion removes — signed so the
+    // pill explains itself (plain 0 when it removes nothing, never "−0").
+    // Negated is a CHOSEN state: never muted, no odds badge, same as active.
+    const count = negated && ctxCount ? `−${ctxCount}` : ctxCount;
+    const el = pill(label, count, active,
+      !active && !negated && ctxCount === 0,
+      (e) => (e.altKey ? toggleNeg : toggle)(facetKey, value));
+    if (negated) el.classList.add("neg");
+    // The address the container-level exclusion gesture reads (wireExclusion).
+    el.dataset.facet = facetKey;
+    el.dataset.value = value;
+    const odds = state.showOdds && !active && !negated && chipOdds(stats, facetKey, t);
     if (odds) appendCount(el, odds.text, `mult mult-${odds.tone}`);
     return el;
   };
@@ -453,9 +521,9 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   // whether another carving finds more structure is the viewer's to see,
   // and an overshoot is one "fewer" away.
   {
-    const sel = state.selected.get("~clusters") || new Set();
+    const sel = state.selected.get("~clusters") || selEntry();
     const values = clusterValues();
-    if (values.length || sel.size) {
+    if (values.length || selSize(sel)) {
       const pills = rowInto(SYSTEM_FACETS["~clusters"].label);
       const shown = new Set();
       for (const v of values) {
@@ -464,7 +532,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
         if (v.title) el.title = v.title;
         pills.appendChild(el);
       }
-      for (const value of sel) {
+      for (const value of selValues(sel)) {
         if (!shown.has(value)) pills.appendChild(chip("~clusters", value));
       }
       if (clusterLevel() > 1) {
@@ -484,12 +552,12 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   // Same visibility rule as facet values — data or active, else hidden — and
   // the row vanishes when no chip is visible.
   {
-    const sel = state.selected.get("~objects") || new Set();
+    const sel = state.selected.get("~objects") || selEntry();
     const declared = (state.boardMapping?.fields || [])
       .filter((f) => f.source === "detect")
       .map((f) => f.key);
-    const chips = [...new Set([...declared, ...sel])].filter(
-      (key) => (totals.get(tag("~objects", key)) || 0) > 0 || sel.has(key)
+    const chips = [...new Set([...declared, ...selValues(sel)])].filter(
+      (key) => (totals.get(tag("~objects", key)) || 0) > 0 || selHas(sel, key)
     );
     if (chips.length) {
       const pills = rowInto(SYSTEM_FACETS["~objects"].label);
@@ -501,33 +569,33 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   // original rule) plus any selected-but-gone id, so an active chip always
   // has a click-off; names resolve from items, falling back to the raw id.
   {
-    const sel = state.selected.get("~uploaders") || new Set();
-    if (uploaderTotals.size >= 2 || sel.size > 0) {
+    const sel = state.selected.get("~uploaders") || selEntry();
+    if (uploaderTotals.size >= 2 || selSize(sel) > 0) {
       const uploaderItems = [...uploaderTotals.entries()].sort((a, b) => b[1] - a[1]);
       const pills = rowInto(SYSTEM_FACETS["~uploaders"].label);
       const shown = new Set();
       for (const [uid, total] of uploaderItems) {
         const key = String(uid);
-        if (total === 0 && !sel.has(key)) continue;
+        if (total === 0 && !selHas(sel, key)) continue;
         shown.add(key);
         const uploader = state.items.find((item) => item.uploadedBy?.id === uid)?.uploadedBy;
         pills.appendChild(chip("~uploaders", key, uploader ? (uploader.name || uploader.email) : key));
       }
       // Selected but gone from the board — chip() lands the same pill by
       // arithmetic (no items means no context count, so: active, unmuted).
-      for (const key of sel) {
+      for (const key of selValues(sel)) {
         if (!shown.has(key)) pills.appendChild(chip("~uploaders", key));
       }
     }
   }
 
   for (const facet of state.facets) {
-    const sel = state.selected.get(facet.key) || new Set();
-    if (!facetsWithData.has(facet.key) && sel.size === 0) continue;
+    const sel = state.selected.get(facet.key) || selEntry();
+    if (!facetsWithData.has(facet.key) && selSize(sel) === 0) continue;
     const pills = rowInto(facet.label);
     for (const value of facet.values) {
       const total = totals.get(tag(facet.key, value)) || 0;
-      if (total === 0 && !sel.has(value)) continue;
+      if (total === 0 && !selHas(sel, value)) continue;
       pills.appendChild(chip(facet.key, value));
     }
   }
