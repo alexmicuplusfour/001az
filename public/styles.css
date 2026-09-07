@@ -394,8 +394,6 @@ header.header-collapsed #toolbar-fold {
   cursor: pointer;
   white-space: nowrap;
   user-select: none;
-  /* long-press is a gesture here (exclusion) — the iOS callout would eat it */
-  -webkit-touch-callout: none;
   transition: background 0.12s, color 0.12s, border-color 0.12s, opacity 0.12s;
 }
 

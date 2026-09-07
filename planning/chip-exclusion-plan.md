@@ -1,7 +1,10 @@
 # Chip exclusion ("NOT") — deep dive (2026-09-07)
 
-> **Status: BUILT — all three stages, 2026-09-08, uncommitted; manual QA
-> owed (real right-click, mobile long-press, shared `?fx=` link).** Stage 0 of
+> **Status: SHIPPED — all three stages + simplify pass, pushed 2026-09-08
+> (a7b8eab + the gesture fixes). Desktop right-click QA'd live (caught the
+> swallow bug, fixed, then the whole swallow rig deleted). Still owed:
+> Android long-press, a shared `?fx=` link. iOS gesture: none yet, by
+> decision.** Stage 0 of
 > [conversational-search-plan.md](conversational-search-plan.md), but a
 > standalone arc: right-click a rail pill to exclude its value. Serves manual
 > filtering on its own; the ask feature inherits it.
@@ -24,10 +27,12 @@
   gesture clears the other state for that value: two independent toggles,
   no hidden three-state cycle, so right-click never surprises on an active
   pill. **Alt+click** does the same — the keyboard-adjacent twin, one line.
-- **Touch**: long-press. Android fires `contextmenu` on long-press natively,
-  so the one listener covers it; iOS needs a pointer-timer fallback (~550ms,
-  cancel on move/up/scroll, swallow the trailing click). Nothing more on
-  mobile — long-tap is enough, no discoverability affordance (pinned).
+- **Touch**: long-press on Android — it fires `contextmenu` natively, so
+  the one listener covers it. **iOS has no exclusion gesture yet**
+  (revised 2026-09-08): the speculative pointer-timer + click-swallow rig
+  built for it was deleted after its swallow flag ate real desktop clicks —
+  the iOS path gets built from a real device when QA reaches one. Nothing
+  more on mobile — no discoverability affordance (pinned).
 - An excluded pill renders with a **struck label + muted-warm border**
   (pinned; extends `.pill`, no new component vocabulary) and its count
   renders as **`−N`** — what the exclusion removes, sign included.
@@ -434,12 +439,14 @@ reproduce the exclusion, not just survive it).
   `e.altKey ? toggleNeg : toggle`; gesture wiring via a local
   `onExclude(el, fn)` helper (single consumer today — promoted to utils.js
   only when a second surface adopts it, per the component doctrine).
-- `onExclude`: `contextmenu` → preventDefault, cancel any timer, mark
-  fired, run. Touch-only pointer timer (~550ms) for iOS — started only when
-  `pointerType === "touch"`, cancelled on up/move/cancel/leave, and on
-  Android the native `contextmenu` (~500ms) wins and cancels it, so no
-  double-fire. A capture-phase click listener swallows the synthetic click
-  after either fire.
+- The gesture (revised 2026-09-08, twice): delegated to the rail
+  containers (`wireExclusion`, chips carry `data-facet`/`data-value`), and
+  then stripped to ONE `contextmenu` listener — desktop right-click and
+  Android long-press are the same event. The iOS timer + click-swallow rig
+  was deleted: all of that complexity served one untested platform, and the
+  swallow misfired on desktop (a mouse right-click trails no synthetic
+  click, so the armed flag ate the next real one — caught by the user in
+  first-session QA, locked by a persistent-container regression test).
 
 **styles.css**
 - `.pill.neg` (and `.al-chip.neg`, one combined selector): struck label +

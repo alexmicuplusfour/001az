@@ -282,53 +282,24 @@ export const toggle = (facetKey, value) => toggleHalf(facetKey, value, "any", "n
 export const toggleNeg = (facetKey, value) => toggleHalf(facetKey, value, "not", "any");
 
 // The exclusion gesture, wired ONCE per rail container (they survive
-// replaceChildren, so this beats seven listeners per pill rebuilt every
-// render): real contextmenu (desktop right-click; Android fires it natively
-// on long-press ~500ms) plus a touch-only timer for iOS, which never fires
-// contextmenu for touches. The native event wins the race and cancels the
-// timer, so Android can't double-fire; either path marks the press so the
-// capture-phase listener swallows the synthetic click that may follow.
-// Chips carry their address in data-facet/data-value; pills without one
-// (status, pillAction) are ignored.
+// replaceChildren): one contextmenu listener covers desktop right-click and
+// Android's native long-press alike. iOS never fires contextmenu for
+// touches, so iOS has NO exclusion gesture yet — deliberately: the
+// timer-and-click-swallow rig that stood here was speculative complexity
+// for an untested platform, and its swallow flag ate real clicks on
+// desktop. Build the iOS path from a device, not a guess. Chips carry
+// their address in data-facet/data-value; pills without one (status,
+// pillAction) are ignored.
 const excludeWired = new WeakSet();
 function wireExclusion(container) {
   if (excludeWired.has(container)) return;
   excludeWired.add(container);
-  let timer = null, fired = false, touchPress = false;
-  const cancel = () => { clearTimeout(timer); timer = null; };
-  const chipOf = (e) => {
-    const el = e.target.closest?.(".pill");
-    return el?.dataset.facet != null ? el : null;
-  };
   container.addEventListener("contextmenu", (e) => {
-    const el = chipOf(e);
-    if (!el) return;
+    const el = e.target.closest?.(".pill");
+    if (el?.dataset.facet == null) return;
     e.preventDefault();
-    cancel();
-    // Only a TOUCH press trails a synthetic click worth swallowing — a mouse
-    // right-click never produces one, and arming the swallow there ate the
-    // user's next legitimate left-click anywhere in the rail.
-    fired = touchPress;
     toggleNeg(el.dataset.facet, el.dataset.value);
   });
-  container.addEventListener("pointerdown", (e) => {
-    // Every new press starts clean: only its own gesture may swallow its click.
-    fired = false;
-    touchPress = e.pointerType === "touch";
-    cancel();
-    const el = chipOf(e);
-    if (!el || !touchPress) return;
-    timer = setTimeout(() => { fired = true; toggleNeg(el.dataset.facet, el.dataset.value); }, 550);
-  });
-  for (const ev of ["pointerup", "pointermove", "pointercancel"]) {
-    container.addEventListener(ev, cancel);
-  }
-  container.addEventListener("click", (e) => {
-    if (!fired) return;
-    fired = false;
-    e.preventDefault();
-    e.stopImmediatePropagation();
-  }, true);
 }
 
 export function clearAll() {
