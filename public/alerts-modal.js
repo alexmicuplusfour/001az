@@ -214,7 +214,7 @@ export function openAlertEditor(existing) {
           const rm = document.createElement("button");
           rm.type = "button";
           rm.title = "Remove";
-          rm.textContent = "×";
+          rm.innerHTML = ICONS.x;
           rm.addEventListener("click", () => {
             condition[key][half].delete(v);
             if (!selSize(condition[key])) delete condition[key];

@@ -687,18 +687,20 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   cursor: pointer;
   color: #8a8a92;
   padding: 0 3px;
-  font-size: 14px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
 }
+/* the × inks only the middle half of its viewBox (the .tool-btn.clear note) */
+.al-chip button svg { width: 14px; height: 14px; }
 .al-chip button:hover { color: #b4232a; }
 /* The excluded half of a condition — the rail's .pill.neg twin (tokens in
-   styles.css :root); the strike stays off the × via the button's own box. */
+   styles.css :root). The strike can't reach the ×: the button is an atomic
+   inline (inline-flex), which text-decoration does not propagate into. */
 .al-chip.neg {
   text-decoration: line-through;
   color: var(--neg-ink);
   border-color: var(--neg-border);
 }
-.al-chip.neg button { text-decoration: none; }
 /* history rows ride the .job-row skeleton; unseen ones read heavier */
 .al-firing { cursor: pointer; }
 .al-firing:hover { background: #f6f7f8; }
