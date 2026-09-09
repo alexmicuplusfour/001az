@@ -22,9 +22,9 @@ export const alertsUnseen = () => state.alerts.reduce((n, a) => n + (a.unseen ||
 // ── the plus-menu section ──
 
 export function appendAlertMenu(body, close) {
-  // Two tenants share this pop (ingestion above, alerts here), so the section
-  // wears its name the way saved filters does — the head is the segmentation,
-  // no divider needed.
+  // Two tenants share this pop (ingestion above, alerts here): the divider
+  // parts them, and the section wears its name the way saved filters does.
+  body.appendChild(ddSep());
   body.appendChild(ddHead("Alerts"));
   if (!state.alerts.length) {
     // The saved-filters teaching trick: the empty state explains the flow.
