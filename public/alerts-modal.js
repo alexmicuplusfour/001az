@@ -9,7 +9,7 @@ import { state } from './state.js';
 import { ICONS, fmtDuration, relTime } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
-import { ddRow, ddSep, ddEmpty } from './dropdown.js';
+import { ddRow, ddSep, ddEmpty, ddHead } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { halvesOf, selEntry, wireEntry, selSize } from './facet-match.js';
 import { switchRow } from './board-modal.js';
@@ -22,7 +22,10 @@ export const alertsUnseen = () => state.alerts.reduce((n, a) => n + (a.unseen ||
 // ── the plus-menu section ──
 
 export function appendAlertMenu(body, close) {
-  body.appendChild(ddSep());
+  // Two tenants share this pop (ingestion above, alerts here), so the section
+  // wears its name the way saved filters does — the head is the segmentation,
+  // no divider needed.
+  body.appendChild(ddHead("Alerts"));
   if (!state.alerts.length) {
     // The saved-filters teaching trick: the empty state explains the flow.
     body.appendChild(ddEmpty(Object.keys(selectedAsConfig()).length
