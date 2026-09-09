@@ -47,11 +47,21 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 16px 20px;
   border-bottom: 1px solid #eee;
   flex-shrink: 0;
 }
-.modal-title { font-size: 15px; font-weight: 600; margin: 0; }
+/* flex-shrink: 0 — the name never crumples; under width pressure the status
+   slot below yields first. Titles are chrome-short by design. */
+.modal-title { font-size: 15px; font-weight: 600; margin: 0; flex-shrink: 0; }
+/* The status slot createModal carves in every header. Sits against the ×
+   (margin-left: auto absorbs the free space); under pressure it yields FIRST
+   (min-width: 0) — the chip's label ellipsizes, its dot and tint survive.
+   Empty = invisible: an unused slot must cost no gap. */
+.modal-status { margin-left: auto; min-width: 0; display: inline-flex; }
+.modal-status:empty { display: none; }
+.modal-status .status-chip { max-width: 100%; }
 .modal-close {
   background: none;
   border: none;
@@ -654,6 +664,73 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .im-status.ok { color: #16a34a; }
 .im-status.tight { margin: 4px 0 0; }
 .im-status.flush { margin: 0; }
+
+/* ── Status chip — dot + the state in words (ingest-status-plan.md) ──
+   The generic inline status OBJECT, .im-status's sibling: the line judges in
+   a sentence, the chip states in a word or two — droppable next to a title,
+   in a row, on a card. The tone tints the GROUND, so the verdict reads at a
+   distance and survives a clipped label. Nothing minted: each ground/ink
+   pair is the statement-box family (.good/.warn/.mute-box, styles.css) at
+   pill scale, error the reds .jobs-danger wears — borderless, because the
+   boxes' 1px edge is statement-scale chrome and at 22px the tint alone is
+   the edge. Literal values: the box family lives in styles.css, which
+   admin.html doesn't load. Dot inks brighten for 8px duty the way .btn-dot's
+   red does; the one minted ink in the whole set is the warn dot — and warn
+   itself has no adopter yet, built because the set is (quota, degraded).
+   .live = something is happening RIGHT NOW (a due run, a live watch), never
+   merely "enabled"; the ripple dies under reduced motion, the dot stays.
+   .dim = a deliberate hold (paused, off) — quiet, not a warning (the
+   .mapping-chip.paused treatment). The label span is what a cramped host
+   ellipsizes (the header slot above); the dot never gives. Not interactive:
+   no hover, no cursor — the chip is a verdict, not a control. The DOM half
+   is statusChip() in modal.js; the words come from a pure presenter
+   (ingest-present.js is the first). */
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: #6b6b72;
+  background: #f6f6f9;
+  border-radius: 6px;
+  padding: 3px 10px 3px 8px;
+}
+.status-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-dot {
+  flex: none;
+  position: relative;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  color: #9aa0aa;
+  background: currentColor;
+}
+.status-chip.ok { color: #14532d; background: #f0fdf4; }
+.status-chip.ok .status-dot { color: #16a34a; }
+.status-chip.warn { color: #7a5b12; background: #fff7e6; }
+.status-chip.warn .status-dot { color: #e09f3e; }
+.status-chip.error { color: #b4232a; background: #fdeaea; }
+.status-chip.error .status-dot { color: #e5484d; }
+.status-chip.dim { opacity: 0.6; }
+/* the ripple is a scaled+faded ring, transform/opacity only — .live is a
+   steady state (a watch pulses for the life of the modal), and a box-shadow
+   spread here would repaint every frame of it */
+.status-chip.live .status-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: currentColor;
+  animation: status-ripple 1.8s ease-out infinite;
+}
+@keyframes status-ripple {
+  from { transform: scale(1); opacity: 0.45; }
+  to { transform: scale(2.4); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-chip.live .status-dot::after { display: none; }
+}
 
 /* ── alert editor + history (alerts-modal.js) ── */
 #alert-modal .modal-dialog { max-width: 480px; }

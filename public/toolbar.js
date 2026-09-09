@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { refreshBoardIngest, ACTIVE, QUEUED } from './data.js';
+import { nudgeBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot } from './utils.js';
 import { openJobsModal, jobsUnseen } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
@@ -10,6 +10,7 @@ import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
 import { openIngestModal } from './ingest-modal.js';
+import { presentIngest } from './ingest-present.js';
 import { openBoardModal } from './board-modal.js';
 import { openConnectorBrowse } from './connector-browse.js';
 import { appendAlertMenu, appendAlertFooter, alertsUnseen } from './alerts-modal.js';
@@ -28,18 +29,14 @@ let tokenOdo = null;
 // ── ingestion chip: countdown to the board's next automatic run ──
 // The board payload carries ingest_next_run_at once; after each run the stamp
 // moves server-side, so when the countdown expires the chip re-learns the
-// schedule via refreshBoardIngest (throttled). A rebuilt toolbar strands the
-// old chip's interval, which self-clears on its next tick via isConnected —
-// which is why the throttle and backoff live at module level, not per chip.
-let ingestEtaFetchAt = 0;
-let ingestEtaBackoff = 5000;
+// schedule via data.js's nudgeBoardIngest — the one throttle+backoff per tab,
+// shared with the ingest modal's header tick. (A rebuilt toolbar strands the
+// old chip's interval, which self-clears on its next tick via isConnected.)
 
 function ingestChip() {
-  const baseTitle = "Automatic ingestion — next run countdown. Click to configure.";
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = "mapping-chip ingest-chip";
-  chip.title = baseTitle;
   const icon = document.createElement("span");
   icon.className = "ingest-chip-icon";
   icon.innerHTML = ICONS.redo;
@@ -50,55 +47,47 @@ function ingestChip() {
   // does, so skip the attribute write (and its a11y-tree churn) otherwise.
   const setTitle = (t) => { if (chip.title !== t) chip.title = t; };
 
-  // A pending run outranks the mode: a hand-fired run on a paused board should
-  // read as the run it is, not as the pause it will fall back to when it lands.
+  // Precedence, classification, and the words come from the presenter — the
+  // same verdict the ingest modal's header chip and the boards-page chip
+  // read, so the three surfaces cannot drift (the rules used to live here as
+  // a private copy: "a pending run outranks the mode", "failing tints, it
+  // doesn't replace — the countdown is real, it's the retry"). What stays
+  // local is compact FORM — the bare countdown off p.left/p.due, the word
+  // "paused" — and the click affordance only this surface has.
   const render = () => {
-    // Failing tints, it doesn't replace: the countdown is real (it's the
-    // retry), so the chip keeps counting — red. The state signal the jobs
-    // dot deliberately isn't (it fires once at onset; this holds while the
-    // failure does, and clears the moment a run succeeds).
-    const failing = !!state.boardIngestError;
-    chip.classList.toggle("error", failing);
-    const at = state.boardIngestNextRun;
-    if (!at) {
+    const p = presentIngest({
+      mode: state.boardIngestMode,
+      nextRunAt: state.boardIngestNextRun,
+      error: state.boardIngestError,
+      now: Date.now(),
+    });
+    // The error tint is the state signal the jobs dot deliberately isn't (it
+    // fires once at onset; this holds while the failure does, and clears the
+    // moment a run succeeds).
+    chip.classList.toggle("error", p.tone === "error");
+    const title = `Automatic ingestion: ${p.title} Click to ${p.tone === "error" ? "see the error" : "configure"}.`;
+    if (p.left == null) {
       // A manual board's chip is on its way out here — the run it was showing
       // just landed and the next toolbar render drops it — so leave its last
       // text alone rather than flashing "paused" at something that isn't.
-      if (state.boardIngestMode !== "paused") return false;
+      if (p.state !== "paused" && p.state !== "held-failed") return;
       chip.classList.add("paused");
       eta.textContent = "paused";
-      setTitle(failing
-        ? "Automatic ingestion is paused — and its last run failed. Click to see the error."
-        : "Automatic ingestion is paused — the schedule is held. Click to configure.");
-      return false;
-    }
-    chip.classList.remove("paused");
-    const left = at - Date.now();
-    eta.textContent = left <= 0 ? "now" : fmtDuration(left);
-    setTitle(failing
-      ? "Automatic ingestion is failing — the countdown is its retry. Click to see the error."
-      : baseTitle);
-    return left <= 0;
-  };
-  render();
-  const t = setInterval(async () => {
-    if (!chip.isConnected) return clearInterval(t);
-    const due = render();
-    if (!due) {
-      ingestEtaBackoff = 5000; // fresh countdown — next expiry probes eagerly
+      setTitle(title);
       return;
     }
+    chip.classList.remove("paused");
+    eta.textContent = p.due ? "now" : fmtDuration(p.left);
+    setTitle(title);
+  };
+  render();
+  const t = setInterval(() => {
+    if (!chip.isConnected) return clearInterval(t);
+    render();
     // Expired (or run-now fired): the sweep claims within a worker tick, so
-    // shortly after "now" the server holds a fresh next_run_at — re-learn it.
-    if (Date.now() - ingestEtaFetchAt > ingestEtaBackoff) {
-      ingestEtaFetchAt = Date.now();
-      await refreshBoardIngest();
-      // A refresh that leaves the stamp in the past means it isn't advancing
-      // (worker down, or a long run draining at "now") — back off instead of
-      // hammering the board endpoint from every open tab.
-      const at = state.boardIngestNextRun;
-      if (!(at && at > Date.now())) ingestEtaBackoff = Math.min(ingestEtaBackoff * 2, 60000);
-    }
+    // shortly after "now" the server holds a fresh next_run_at. The re-learn
+    // itself — throttle, backoff, the one clock per tab — is data.js's.
+    nudgeBoardIngest();
   }, 1000);
   return chip;
 }

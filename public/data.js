@@ -396,6 +396,32 @@ export async function refreshBoardIngest() {
   }
 }
 
+// The due-stamp nudge: while a board's ingest stamp sits at/past "now" the
+// sweep owns the truth and the client must re-learn it — from ONE clock. The
+// throttle+backoff used to live in the toolbar chip "at module level, not
+// per chip" so rebuilt chips shared it; the ingest modal's header tick
+// proved that argument one level up — the budget is per ENDPOINT, not per
+// surface, so it lives here beside the fetch it guards. Every ticking
+// surface offers this every second; a fresh countdown resets the backoff so
+// the next expiry probes eagerly, and a stamp that refuses to advance
+// (worker down, a long run draining at "now") backs the whole tab off to
+// 60s instead of letting each surface keep its own cadence.
+let ingestNudgeAt = 0;
+let ingestNudgeBackoff = 5000;
+export function nudgeBoardIngest() {
+  const at = state.boardIngestNextRun;
+  if (!(at != null && at <= Date.now())) {
+    ingestNudgeBackoff = 5000;
+    return;
+  }
+  if (Date.now() - ingestNudgeAt <= ingestNudgeBackoff) return;
+  ingestNudgeAt = Date.now();
+  refreshBoardIngest().then(() => {
+    const next = state.boardIngestNextRun;
+    if (!(next && next > Date.now())) ingestNudgeBackoff = Math.min(ingestNudgeBackoff * 2, 60000);
+  });
+}
+
 // Background-drain append: pages walk newest→oldest, so pushing each one at
 // the END keeps state.items newest-first. A delta poll may already have
 // unshifted one of these ids mid-drain — skip those.

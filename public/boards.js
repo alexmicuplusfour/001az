@@ -21,7 +21,8 @@
 // change and the same argument board-modal.js was given for announce.test.js.
 import { api } from "./api.js";
 import { openDropdown, ddRow, ddSep } from "./dropdown.js";
-import { ICONS, fmtDuration } from "./utils.js";
+import { ICONS } from "./utils.js";
+import { presentIngest } from "./ingest-present.js";
 import { openBoardModal } from "./board-modal.js";
 import { applyBoardDot } from "./board-signal.js";
 import { createTicker } from "./ticker.js";
@@ -473,19 +474,22 @@ function chipsFor(b) {
   chips.className = "bc-chips";
 
   if (b.ingest_mode) {
-    // A pending stamp outranks the mode: a hand-fired run on a manual or paused
-    // board is a run, and saying "on demand" while one is queued would be a lie.
-    // No stamp on a "scheduled" board just means the sweep hasn't armed it yet.
-    const left = b.ingest_next_run_at ? b.ingest_next_run_at - Date.now() : null;
-    const when = left != null
-      ? (left <= 0 ? " — next run due" : ` — next run in ${fmtDuration(left)}`)
-      : { manual: " — off", paused: " — paused" }[b.ingest_mode] ?? "";
-    // Failing outranks the countdown in words (the countdown is the retry),
-    // and tints the chip — the gallery toolbar's ingest chip does the same.
-    const c = chip(ICONS.redo, "", b.ingest_error
-      ? "Automatic ingestion — failing (it retries on its own; open the board for the error)"
-      : `Automatic ingestion${when}`);
-    if (b.ingest_error) c.classList.add("error");
+    // Words and precedence from the presenter — the same verdict the gallery
+    // toolbar chip and the ingest modal read, so a pending stamp outranks the
+    // mode and failing outranks the countdown's wording without this surface
+    // keeping its own copy of either rule. All this card adds is the
+    // feature's name and, while failing, the pointer at where the error
+    // lives. (The countdown in the title is as static as the card render it
+    // rides — same as it always was.)
+    const p = presentIngest({
+      mode: b.ingest_mode,
+      nextRunAt: b.ingest_next_run_at ?? null,
+      error: !!b.ingest_error,
+      now: Date.now(),
+    });
+    const c = chip(ICONS.redo, "", `Automatic ingestion: ${p.label}`
+      + (p.tone === "error" ? ". Open the board for the error." : ""));
+    if (p.tone === "error") c.classList.add("error");
     chips.appendChild(c);
   }
   if (b.has_mapping) {

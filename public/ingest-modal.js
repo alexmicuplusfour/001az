@@ -13,13 +13,14 @@
 import { state } from './state.js';
 import { fmtDuration, glyphEl, fmtUsd, relTime } from './utils.js';
 import { toast } from './toast.js';
-import { createModal, sectionHeadingEl, createDrawer, tileRow, busy } from './modal.js';
+import { createModal, sectionHeadingEl, createDrawer, tileRow, busy, statusChip } from './modal.js';
+import { presentIngest } from './ingest-present.js';
 import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './board-modal.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
 import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
 import { fillSelect } from './select.js';
-import { stampBoard, ensurePolling } from './data.js';
+import { stampBoard, ensurePolling, nudgeBoardIngest } from './data.js';
 
 const OP_LABELS = {
   contains: "contains", equals: "equals", starts_with: "starts with",
@@ -69,7 +70,7 @@ export function openIngestModal() {
   if (modalEl) return; // already open
 
   const canEdit = !!state.boardManage;
-  const { overlay, dialog, body, footer, titleEl, close } = createModal({
+  const { overlay, dialog, body, footer, titleEl, statusEl, close } = createModal({
     title: "Automatic ingestion",
     id: "ingest-modal",
     bodyStyle: "display:flex;flex-direction:column;",
@@ -106,6 +107,39 @@ export function openIngestModal() {
     }
     const desc = info.descriptor;
     const catalogByFn = Object.fromEntries((desc.filters || []).map((c) => [c.fn, c]));
+
+    // ── Header status — the chip is the record, the controls are the draft ──
+    // Fills the header slot with the SAVED truth: the same live trio the
+    // toolbar chip renders (stampBoard keeps it fresh; Run now stamps it
+    // directly), through the presenter that owns the precedence + wording.
+    // Unsaved edits never move it — Save closes this modal, so the saved
+    // trigger mode can't go stale while the chip is up.
+    const chip = statusChip();
+    statusEl.appendChild(chip.el);
+    const savedTriggerMode = info.config?.trigger?.mode ?? null;
+    // The last-run line's renderer rides the same tick — assigned where the
+    // line is built (it only exists once a run has happened), a no-op before.
+    let renderRunLine = () => {};
+    // The modal's one 1s tick, gated on the modal itself: the header chip
+    // and the last-run line both re-render on it, and data.js's shared
+    // due-stamp nudge gets its offer — one throttle+backoff per tab, no
+    // matter how many surfaces are ticking.
+    const renderStatus = () => {
+      renderRunLine();
+      chip.set(presentIngest({
+        mode: state.boardIngestMode,
+        nextRunAt: state.boardIngestNextRun,
+        error: state.boardIngestError,
+        triggerMode: savedTriggerMode,
+        now: Date.now(),
+      }));
+      nudgeBoardIngest();
+    };
+    renderStatus();
+    const statusTimer = setInterval(() => {
+      if (!overlay.isConnected) return clearInterval(statusTimer);
+      renderStatus();
+    }, 1000);
 
     // Buffered config — edits stay local until Save. (Where a source keeps
     // its base path — `folder` vs `path` — is pathKeyFor, the source
@@ -805,14 +839,21 @@ export function openIngestModal() {
     prevSection.appendChild(prevRow);
     settingsView.appendChild(prevSection);
 
-    // Status line from the sweep-owned run state.
+    // Status line from the sweep-owned run state — history, not state (the
+    // header chip's job; two facts, two lines). It re-renders on the chip's
+    // 1s tick because "Last run 21s ago" is a claim about NOW, and a watch
+    // board falsifies it within the minute it takes to read the modal.
     if (info.state?.last_run_at) {
       const st = info.state;
       const line = document.createElement("p");
       line.className = "im-status" + (st.last_error ? " error" : "");
-      line.textContent = st.last_error
-        ? `Last run ${relTime(st.last_run_at)} — error: ${st.last_error}`
-        : `Last run ${relTime(st.last_run_at)} — added ${st.last_added ?? 0}${st.drain_left ? ` (${st.drain_left} still draining)` : ""}`;
+      renderRunLine = () => {
+        const text = st.last_error
+          ? `Last run ${relTime(st.last_run_at)} — error: ${st.last_error}`
+          : `Last run ${relTime(st.last_run_at)} — added ${st.last_added ?? 0}${st.drain_left ? ` (${st.drain_left} still draining)` : ""}`;
+        if (line.textContent !== text) line.textContent = text;
+      };
+      renderRunLine();
       settingsView.appendChild(line);
     }
 

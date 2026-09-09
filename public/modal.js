@@ -94,12 +94,20 @@ export function createModal({ title = "", id, bodyStyle = "", onClose } = {}) {
   const titleEl = document.createElement("div");
   titleEl.className = "modal-title";
   titleEl.textContent = title;
+  // The header's status slot — carved here so EVERY modal has one, not just
+  // whichever modal wants it this month (ingest-status-plan.md). Empty it is
+  // invisible (:empty in modal.css) and costs nothing; a modal with a
+  // verdict drops content into the returned statusEl (the ingest modal
+  // mounts a statusChip). Width pressure resolves in a fixed order: the
+  // title never shrinks, the slot yields and its label ellipsizes.
+  const statusEl = document.createElement("span");
+  statusEl.className = "modal-status";
   const closeBtn = document.createElement("button");
   closeBtn.className = "modal-close";
   closeBtn.type = "button";
   closeBtn.setAttribute("aria-label", "Close");
   closeBtn.textContent = "×";
-  header.append(titleEl, closeBtn);
+  header.append(titleEl, statusEl, closeBtn);
 
   const body = document.createElement("div");
   body.className = "modal-body";
@@ -114,7 +122,37 @@ export function createModal({ title = "", id, bodyStyle = "", onClose } = {}) {
   const close = mountModal({ overlay, dialog, onClose });
   closeBtn.addEventListener("click", close);
 
-  return { overlay, dialog, header, titleEl, body, footer, closeBtn, close };
+  return { overlay, dialog, header, titleEl, statusEl, body, footer, closeBtn, close };
+}
+
+// ─── Status chip — dot + the state in words (ingest-status-plan.md) ────────
+// The generic DOM half of the status component: builds the span and applies a
+// presenter verdict ({ tone, live, dim, label, title }) with change-guards so
+// a 1s tick doesn't churn the class list, the a11y tree, or the title
+// attribute. The WORDS always come from a pure presenter (ingest-present.js
+// is the first); this factory knows nothing about any feature's states —
+// that split is what keeps the rules testable and the surfaces thin.
+export function statusChip() {
+  const el = document.createElement("span");
+  el.className = "status-chip";
+  const dot = document.createElement("span");
+  dot.className = "status-dot";
+  // The words carry the state; the dot is redundant to a screen reader.
+  dot.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.className = "status-label";
+  el.append(dot, label);
+  const set = (v) => {
+    const cls = "status-chip"
+      + (v.tone && v.tone !== "neutral" ? ` ${v.tone}` : "")
+      + (v.live ? " live" : "")
+      + (v.dim ? " dim" : "");
+    if (el.className !== cls) el.className = cls;
+    if (label.textContent !== v.label) label.textContent = v.label;
+    const t = v.title || "";
+    if (el.title !== t) el.title = t;
+  };
+  return { el, set };
 }
 
 // ─── One busy state for every action button (any page that loads modal.css) ─
