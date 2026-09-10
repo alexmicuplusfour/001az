@@ -66,20 +66,18 @@ const STATUS_LABELS = {
   pending_fetch: "queued to fetch",
 };
 
-// The cancel control's two strengths, in one place — copy, request and past
-// tense together, so re-wording a verb (or adding a third) is one entry rather
-// than a hunt through the handler and the renderer.
+// The cancel control's two strengths, in one place, so re-wording a verb (or
+// adding a third) is one entry rather than a hunt through the handler and the
+// renderer.
 const CANCEL_VERBS = {
   queued: {
     label: "Cancel queued",
     title: "Pull queued work out of the pipeline — items already being processed finish",
-    past: "Cancelled",
     confirm: "Cancel this board's queued work? Items already being processed will finish; tagged items keep their tags, never-tagged ones are parked, queued adds are removed.",
   },
   abort: {
     label: "Abort",
     title: "Settle everything now — running calls finish in the background and their results are discarded",
-    past: "Aborted",
     confirm: "Abort this board's running work? Already-launched calls finish in the background and their results are DISCARDED — the spend is committed, the outcome isn't. Vehicles mid-fetch are removed. (Running feed scans and transcriptions are not queue items; pause the board to stop their next tick.)",
   },
 };
@@ -162,16 +160,21 @@ export function summaryFor(j) {
     if (j.kind === "cancel") {
       // Name the verb: both strengths come through one route, so this row is
       // the only place an abort is distinguishable from a cancel — with
-      // nothing in flight their counts are identical.
+      // nothing in flight their counts are identical. The tail names what the
+      // verb could NOT reach (calls already in the air land on their own), and
+      // when that is the whole story it LEADS, instead of a verb that did
+      // nothing — nineteen rows reading "cancelled: 106 left to finish" is how
+      // the 2026-09-10 postmortem started.
       const did = d.mode === "abort" ? "aborted" : "cancelled";
       const bits = [
         d.restored ? `${d.restored} restored` : "",
         d.parked ? `${d.parked} parked` : "",
         d.removed ? `${d.removed} removed` : "",
-        d.finishing ? `${d.finishing} left to finish` : "",
         d.discarding ? `${d.discarding} discarding` : "",
       ].filter(Boolean);
-      return `${did}${bits.length ? `: ${bits.join(" · ")}` : " — nothing was queued"}`;
+      const ran = d.finishing ? `${d.finishing} still running will finish` : "";
+      if (!bits.length) return ran ? `nothing was queued — ${ran}` : `${did} — nothing was queued`;
+      return `${did}: ${bits.join(" · ")}${ran ? ` — ${ran}` : ""}`;
     }
     if (j.kind === "diagnose") {
       // The RUN belongs in the ledger; the finding itself does not — it is a
@@ -348,8 +351,11 @@ export function openJobsModal({ kind } = {}) {
   let cancelBtn = null;
   let cancelLabel = null;
   // Is the hard verb on offer? A board fact, not this tab's: the newest cancel
-  // row said it had to leave work running, and work is still running. Same
-  // answer in every tab, and it survives a reload.
+  // row said it had to leave work running, and something is still actively
+  // running for it to catch. ACTIVE alone on purpose — since the boundary
+  // moved to queue position (the 2026-09-10 postmortem), a QUEUED row is
+  // never beyond the soft verb, so Abort earns the button only over calls in
+  // the air. Same answer in every tab, and it survives a reload.
   const abortOffered = () =>
     state.items.some((i) => ACTIVE.has(i.status)) &&
     (jobs.find((j) => j.kind === "cancel")?.detail?.finishing ?? 0) > 0;
@@ -413,8 +419,7 @@ export function openJobsModal({ kind } = {}) {
         // The same sentence the History row will carry — summaryFor owns the
         // wording, so the toast and the ledger can't drift.
         const said = summaryFor({ kind: "cancel", outcome: "ok", detail: c });
-        const any = c.restored || c.parked || c.removed || c.finishing || c.discarding;
-        toast(any ? `${verb.past} — ${said}` : "Nothing was queued");
+        toast(said.charAt(0).toUpperCase() + said.slice(1));
         load(true); // pull the cancel row in now; the queue rows clear on the delta poll
       } catch (e) {
         toast.error(e.message || "Cancel failed");
@@ -534,15 +539,16 @@ export function openJobsModal({ kind } = {}) {
     for (const item of queued.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(item));
     if (queued.length > QUEUED_SHOWN) note(liveList, `…and ${queued.length - QUEUED_SHOWN} more queued`);
     if (!liveList.children.length) note(liveList, "Nothing in flight.");
-    // The client can't see mid_pass, so "queued" here is an upper bound on what
-    // a cancel would touch — the button's honesty lives in the confirm copy and
-    // the counts the server answers with, not in this visibility test.
+    // Which verb, and over how many: Cancel counts the queue it would pull;
+    // Abort counts everything left in the pipeline, because it takes the
+    // queued rows AND discards the running calls' landings — the full
+    // remainder, not just the calls in the air.
     if (cancelBtn) {
       const abort = abortOffered();
       const verb = CANCEL_VERBS[abort ? "abort" : "queued"];
-      const n = abort ? active.length : queued.length;
+      const n = abort ? inFlight.length : queued.length;
       cancelBtn.style.display = n ? "" : "none";
-      cancelLabel.textContent = abort ? `${verb.label} — ${n} still running` : verb.label;
+      cancelLabel.textContent = abort ? `${verb.label} — ${n} left` : verb.label;
       cancelBtn.title = verb.title;
     }
   }

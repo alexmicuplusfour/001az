@@ -433,7 +433,7 @@ export async function updateItemPayload(db, id, patch) {
 
 // The counter reset every explicit re-queue performs: forget the in-flight
 // bookkeeping so the row enters its new leg clean.
-const REQUEUE_RESET = `tag_facets=NULL, mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1`;
+const REQUEUE_RESET = `tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1`;
 
 // "Throw away the AI's verdict" — the tag columns a redo clears. Its ABSENCE
 // is the distinction refreshEntityData exists to make (that verb re-buys the
@@ -557,7 +557,7 @@ export async function setItemTags(db, id, tags) {
   // tag_facets=NULL: a human just settled this item, so any pending scoped pass
   // is moot. This UPDATE has no status fence, so it CAN land on a scoped row.
   const result = await db.query(
-    `UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, tag_facets=NULL, undecided=FALSE, mid_pass=NULL, ${CLEAR_EMBEDDING}, updated_at=$4 WHERE id=$5 RETURNING entity_ids`,
+    `UPDATE items SET status='tagged', tags=$1, tag_reasoning=$2, tag_confidence=$3, tag_facets=NULL, undecided=FALSE, ${CLEAR_EMBEDDING}, updated_at=$4 WHERE id=$5 RETURNING entity_ids`,
     [JSON.stringify(tags), JSON.stringify(reasoning), JSON.stringify(confidence), Date.now(), id]
   );
   await addTagSnapshot(db, id, "user", tags, reasoning, false);
@@ -1810,7 +1810,7 @@ const requeueSettledSql = (where) => `
            shortCircuit: `payload ? 'extracted_at'`,
            extract: `(payload ? 'mapping') OR (status='held' AND $3::jsonb IS NOT NULL)`,
          })},
-         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+         attempts=0, error=NULL, retry_at=NULL, updated_at=$1
    WHERE board_id=$2 AND ${where}`;
 
 // Queue a board's settled items for a fresh tagging pass (held ones included —
@@ -1848,7 +1848,7 @@ export async function retagBoard(db, boardId) {
 export async function retagBoardFacets(db, boardId, facetKeys) {
   const { rowCount } = await db.query(
     `UPDATE items SET status='pending', tag_facets=$3::text[],
-       mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+       attempts=0, error=NULL, retry_at=NULL, updated_at=$1
      WHERE board_id=$2 AND status='tagged' AND NOT undecided`,
     [Date.now(), boardId, facetKeys]
   );
@@ -1864,7 +1864,7 @@ export async function retagBoardFacets(db, boardId, facetKeys) {
 const retagFacetsSql = (scope) => `
   UPDATE items
      SET status='pending', tag_facets=$3::text[],
-         mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+         attempts=0, error=NULL, retry_at=NULL, updated_at=$1
    WHERE ${scope} AND status='tagged' AND NOT undecided
    RETURNING entity_ids`;
 // NOT REQUEUE_RESET: a scoped pass ARMS tag_facets, where every other verb
@@ -2370,17 +2370,12 @@ export async function setEntityFaceAt(db, id, at) {
 // Value-fenced like markTagged: lands only while the row is still
 // 'extracting'; a mid-flight re-route/delete discards (returns false).
 export async function markExtracted(db, id, fields) {
-  // mid_pass=TRUE (Stage 2): a leg just ran, so from here to the tag landing
-  // this row is started work — soft cancel must let it finish. Stamped even on
-  // the park arm (a held row's every exit is a clearing queuer): mirroring the
-  // status CASE in the marker would just be drift waiting to happen.
   const { rowCount } = await db.query(
     `UPDATE items
      SET payload = (payload - 'park') || jsonb_build_object('fields', $1::jsonb, 'extracted_at', $2::bigint),
          status = CASE WHEN payload ? 'park'
                             AND NOT (SELECT b.auto_tag FROM boards b WHERE b.id = items.board_id)
                        THEN 'held' ELSE 'pending' END,
-         mid_pass = TRUE,
          attempts = 0,
          error = NULL,
          retry_at = NULL,
@@ -2405,7 +2400,6 @@ export async function advanceFetched(db, id, toStatus, patch = {}) {
     `UPDATE items
      SET payload = (payload - 'unfetched') || $1::jsonb,
          status = $2,
-         mid_pass = TRUE,
          attempts = 0,
          error = NULL,
          retry_at = NULL,
@@ -2444,7 +2438,6 @@ export async function advanceFaced(db, id) {
          status = CASE WHEN payload ? 'park'
                             AND NOT (SELECT b.auto_tag FROM boards b WHERE b.id = items.board_id)
                        THEN 'held' ELSE 'pending' END,
-         mid_pass = TRUE,
          attempts = 0,
          error = NULL,
          retry_at = NULL,
@@ -2977,7 +2970,7 @@ export async function boardNextRefreshAt(db, boardId) {
 // definition legs or a user's mid-flight run. Returns whether it requeued.
 export async function requeueItemForTag(db, id) {
   const { rowCount } = await db.query(
-    "UPDATE items SET status='pending', mid_pass=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2 AND status IN ('tagged','failed')",
+    "UPDATE items SET status='pending', attempts=0, error=NULL, retry_at=NULL, updated_at=$1 WHERE id=$2 AND status IN ('tagged','failed')",
     [Date.now(), id]
   );
   return rowCount > 0;
@@ -3142,7 +3135,7 @@ export async function markTagged(db, id, tags, undecided = false, reasoning = {}
   const vals = [JSON.stringify(tags), JSON.stringify(reasoning || {}), JSON.stringify(confidence || {}), Date.now()];
   const sets = [
     "status='tagged'", "tags=$1", "tag_reasoning=$2", "tag_confidence=$3",
-    "tag_facets=NULL", "mid_pass=NULL", "error=NULL", "retry_at=NULL",
+    "tag_facets=NULL", "error=NULL", "retry_at=NULL",
     CLEAR_EMBEDDING, "updated_at=$4",
   ];
   if (!scoped) { vals.push(undecided); sets.push(`undecided=$${vals.length}`); }
@@ -3727,11 +3720,20 @@ function costOf(units) {
   return priced ? { micros, unpriced: unpricedList(remainder) } : null;
 }
 
-// Soft cancel — "Cancel queued" (job-control-plan.md Stage 2). Pulls a board's
-// NOT-STARTED queued work out of the pipeline in one transaction; anything
-// mid-pipeline (mid_pass) or in flight is left to run its remaining legs to
-// tagging — started work is never stranded half-done. One status-independent
-// rule for every queued status the marker admits:
+// Soft cancel — "Cancel queued" (job-control-plan.md Stage 2; boundary moved
+// by the 2026-09-10 postmortem). Pulls EVERYTHING a board has waiting — every
+// queued status — out of the pipeline in one transaction; only rows a worker
+// is actually holding (the in-flight statuses) are beyond it, and they run to
+// their landings. The boundary is queue position, nothing else. It was "has
+// this pass started" (a mid_pass marker, 0044) for four days: on a feed board
+// every row queued to tag has, by construction, already run its fetch/extract/
+// face legs, so the soft verb protected the entire visible queue and cancelled
+// nothing across 19 presses while a dead provider's retry timers held 106
+// items. The marker guarded money that isn't there — every paid unit sits in
+// the TAG call, which a queued row hasn't made (fetch is an API hit, extract/
+// face/embed run local) — and parking mid-prep strands nothing: the release
+// routers re-enter a held row at the leg its payload shape names.
+// One status-independent rule for every queued row:
 //
 //   tags present → 'tagged'   (the pre-queue settled state, restored — covers
 //                              pending, a tagged-but-unfaced vehicle at
@@ -3757,13 +3759,13 @@ function costOf(units) {
 // (the old helper missed it). The ghost-card sweep in the client's delta poll
 // picks up the deletions — vanished queued cards are precisely its job.
 //
-// Returns { restored, parked, removed, finishing } — finishing = rows still
-// running (in-flight + mid_pass queued) that the cancel deliberately skipped;
-// the Jobs modal's cancel row carries all four.
+// Returns { restored, parked, removed, finishing } — finishing = the
+// in-flight rows still running, which the soft verb cannot reach; the Jobs
+// modal's cancel row carries all four.
 //
-// ABORT (job-control-plan.md Stage 3) is the same function with the boundary
-// test off: `{ abort: true }` widens both branches to the in-flight statuses
-// and drops the mid_pass fence, so everything settles NOW. No call is touched
+// ABORT (job-control-plan.md Stage 3) is the same function with the in-flight
+// halves added: `{ abort: true }` widens both status lists, so everything
+// settles NOW. No call is touched
 // — the landing fences (markTagged/markExtracted/advanceFaced/advanceFetched
 // all write WHERE status='<in-flight>') drop each result as it comes back and
 // the legs write their `discarded` rows with the tokens spent. The extra
@@ -3795,9 +3797,8 @@ export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
     const del = await client.query(
       `DELETE FROM items
        WHERE board_id=$1 AND status = ANY($2::text[]) AND ${UNFETCHED}
-         AND ($3 OR mid_pass IS NOT TRUE)
        RETURNING entity_ids`,
-      [boardId, fetchLane, abort]
+      [boardId, fetchLane]
     );
     // Sole-home placeholders go with their vehicles (no files exist pre-fetch,
     // so there is nothing to hand to sources.cleanup); an entity that somehow
@@ -3810,28 +3811,27 @@ export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
     // read out of order. (Two statements worked only because the parked one ran
     // second, on what the restored one had already moved out of the status set;
     // nothing said so, and swapping them would have parked every restorable row.)
-    // The second status list ($5, the fetch lane) catches the fetched
+    // The second status list ($4, the fetch lane) catches the fetched
     // vehicles the delete arm's unfetched guard spared — they pull back with
     // everyone else, so the two statements stay exact per-row complements.
     const { rows: [pulled] } = await client.query(
       `WITH pulled AS (
          UPDATE items
             SET status = CASE WHEN tags != '[]'::jsonb THEN 'tagged' ELSE 'held' END,
-                mid_pass=NULL, tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+                tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
           WHERE board_id=$2
             AND (status = ANY($3::text[])
-                 OR (status = ANY($5::text[]) AND NOT ${UNFETCHED}))
-            AND ($4 OR mid_pass IS NOT TRUE)
+                 OR (status = ANY($4::text[]) AND NOT ${UNFETCHED}))
           RETURNING status)
        SELECT COUNT(*) FILTER (WHERE status='tagged')::int AS restored,
               COUNT(*) FILTER (WHERE status='held')::int AS parked
          FROM pulled`,
-      [now, boardId, pulls, abort, fetchLane]
+      [now, boardId, pulls, fetchLane]
     );
-    // What the cancel LEFT RUNNING: in-flight rows plus the mid_pass queued
-    // ones it skipped. Not derivable from the counts above — they report what
-    // was touched. Abort skips the query rather than asking a question it has
-    // already answered: its two statements cover IN_FLIGHT_STATES between them
+    // What the cancel LEFT RUNNING: the in-flight rows it cannot reach. Not
+    // derivable from the counts above — they report what was touched. Abort
+    // skips the query rather than asking a question it has already answered:
+    // its two statements cover IN_FLIGHT_STATES between them
     // (the fetch lane splits per-row on the unfetched flag), so it leaves
     // nothing behind by construction.
     const finishing = abort

@@ -56,6 +56,39 @@ test("rows from before the rendition shipped still summarize", () => {
   assert.equal(summaryFor({ kind: "tag", outcome: "ok", detail: { tags: 1 } }), "1 tag");
 });
 
+// --- the cancel row: honest about both what it did and what it could not reach ---
+
+test("a cancel that pulled work names the verb and the counts", () => {
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "queued", restored: 2, parked: 3, removed: 1, finishing: 0 } }),
+    "cancelled: 2 restored · 3 parked · 1 removed"
+  );
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "queued", parked: 3, finishing: 2 } }),
+    "cancelled: 3 parked — 2 still running will finish"
+  );
+});
+
+test("a cancel that could reach nothing leads with that, not with the verb", () => {
+  // The 2026-09-10 postmortem: nineteen rows read "cancelled: 106 left to
+  // finish" while nothing had been cancelled at all.
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "queued", finishing: 106 } }),
+    "nothing was queued — 106 still running will finish"
+  );
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "queued" } }),
+    "cancelled — nothing was queued"
+  );
+});
+
+test("an abort row is distinguishable and counts its discards", () => {
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "abort", parked: 4, discarding: 2, finishing: 0 } }),
+    "aborted: 4 parked · 2 discarding"
+  );
+});
+
 test("a transcribe row counts turns only when the engine produced them", () => {
   assert.equal(summaryFor({ kind: "transcribe", outcome: "ok", detail: { chars: 134, turns: 3 } }),
     "134 chars · 3 turns");

@@ -1,20 +1,12 @@
-// Soft cancel (planning/job-control-plan.md, Stage 2): the mid_pass marker —
-// set by the three fenced leg landings, cleared by every queuer — and the
-// status-uniform cancel rule it enables: not-started queued rows restore
-// (tags) or park (never tagged), queued adds delete, started work finishes.
+// Cancel/Abort (planning/job-control-plan.md, Stages 2/3; boundary moved by
+// the 2026-09-10 postmortem): the line is QUEUE POSITION. Every queued row is
+// the soft verb's — restore (tags) or park (never tagged), unfetched adds
+// delete — regardless of how far its pass got; only rows a worker is holding
+// are beyond it, and abort widens the same rule over those.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard, seedUser, adminSession, req, seedInstance } from "./helpers.js";
-import {
-  cancelBoardQueue,
-  claimNextWork,
-  markExtracted,
-  markTagged,
-  retagBoard,
-  retagItem,
-  getEntity,
-  listJobLog,
-} from "../server/db.js";
+import { cancelBoardQueue, markTagged, getEntity, listJobLog } from "../server/db.js";
 
 let srv, db, base;
 before(async () => {
@@ -24,39 +16,7 @@ before(async () => {
 after(() => srv.close());
 
 const rowOf = async (id) =>
-  (await db.query("SELECT status, tags, mid_pass, tag_facets, retry_at, error FROM items WHERE id=$1", [id])).rows[0];
-
-test("mid_pass lifecycle: a leg landing sets it, the tag landing and queuers clear it", async () => {
-  const bid = await seedBoard(db, "cancel-marker");
-  const { id } = await seedInstance(db, bid, "pending_extract", { payload: { mapping: { x: 1 } } });
-
-  const claimed = await claimNextWork(db, true);
-  assert.equal(claimed.id, id);
-  assert.equal(claimed.status, "extracting");
-  await markExtracted(db, id, { a: "b" });
-  let row = await rowOf(id);
-  assert.equal(row.status, "pending");
-  assert.equal(row.mid_pass, true, "the extract landing marks the row started");
-
-  const again = await claimNextWork(db, true);
-  assert.equal(again.id, id);
-  await markTagged(db, id, ["sector/tech"]);
-  row = await rowOf(id);
-  assert.equal(row.status, "tagged");
-  assert.equal(row.mid_pass, null, "the tag landing consumes the marker");
-
-  await retagItem(db, id);
-  assert.equal((await rowOf(id)).mid_pass, null, "a queuer starts the pass unmarked");
-});
-
-test("retagBoard queues every row unmarked — a fresh pass is cancellable", async () => {
-  const bid = await seedBoard(db, "cancel-fresh");
-  const { id } = await seedInstance(db, bid, "tagged", { tags: ["sector/tech"], midPass: true });
-  await retagBoard(db, bid);
-  const row = await rowOf(id);
-  assert.equal(row.status, "pending");
-  assert.equal(row.mid_pass, null, "the stale marker died with the queuer");
-});
+  (await db.query("SELECT status, tags, tag_facets, attempts, retry_at, error FROM items WHERE id=$1", [id])).rows[0];
 
 test("cancel: the status-uniform rule across every queued shape", async () => {
   const bid = await seedBoard(db, "cancel-matrix");
@@ -69,14 +29,20 @@ test("cancel: the status-uniform rule across every queued shape", async () => {
   // A FETCHED vehicle re-buying its data (Stage 3a reprocess): real fields and
   // history, not a name-only shell — it must pull back like any leg, never delete.
   const refetching = await seedInstance(db, bid, "pending_fetch", { payload: { source: { id: "y" } } });
-  const startedQueued = await seedInstance(db, bid, "pending", { midPass: true });
+  // The postmortem's exact shape: a row whose prep legs already ran and whose
+  // tag calls burned attempts against a dead provider, waiting out a retry
+  // timer. The old boundary ("has this pass started") shielded it through 19
+  // cancel presses; queue position pulls it and clears the whole retry triple.
+  const retryLimbo = await seedInstance(db, bid, "pending");
+  await db.query("UPDATE items SET attempts=3, retry_at=$1, error='429 out of credits' WHERE id=$2",
+    [Date.now() + 900000, retryLimbo.id]);
   const inFlight = await seedInstance(db, bid, "processing");
   // An armed scope on a cancellable row must die with the cancel (0030's
   // "a scoped row is only ever pending or processing").
   await db.query("UPDATE items SET tag_facets=ARRAY['sector'] WHERE id=$1", [restoredPending.id]);
 
   const counts = await cancelBoardQueue(db, bid);
-  assert.deepEqual(counts, { restored: 2, parked: 4, removed: 1, finishing: 2, discarding: 0 });
+  assert.deepEqual(counts, { restored: 2, parked: 5, removed: 1, finishing: 1, discarding: 0 });
 
   for (const { id } of [restoredPending, restoredFace]) {
     const row = await rowOf(id);
@@ -92,9 +58,11 @@ test("cancel: the status-uniform rule across every queued shape", async () => {
   assert.equal(await getEntity(db, removedFetch.eid), null, "and its placeholder entity with it");
   assert.equal((await rowOf(refetching.id)).status, "held", "a fetched vehicle survives the cancel, parked");
   assert.ok(await getEntity(db, refetching.eid), "and keeps its entity");
-  const started = await rowOf(startedQueued.id);
-  assert.equal(started.status, "pending", "a started (mid_pass) row is left to finish");
-  assert.equal(started.mid_pass, true, "its marker survives — still mid-pipeline");
+  const limbo = await rowOf(retryLimbo.id);
+  assert.equal(limbo.status, "held", "the retry-limbo row is pulled, not shielded");
+  assert.equal(limbo.attempts, 0);
+  assert.equal(limbo.retry_at, null);
+  assert.equal(limbo.error, null, "the dead provider's stamp goes with it");
   assert.equal((await rowOf(inFlight.id)).status, "processing", "in-flight rows are never touched");
 });
 
@@ -121,7 +89,7 @@ test("the route: manager-gated, both verbs, and the arming sequence between them
 
   const hard = await req(base, "POST", `/api/boards/${bid}/jobs/cancel-queued`, { sid: admin.sid, body: { abort: true } });
   assert.equal(hard.status, 200);
-  assert.equal(hard.json.parked, 1, "the in-flight bare row parked — no fence under abort");
+  assert.equal(hard.json.parked, 1, "the in-flight bare row parked");
   assert.equal(hard.json.discarding, 1, "its call finishes in the background and is discarded");
   assert.equal(hard.json.finishing, 0, "nothing is left running, so the verb disarms itself");
 
@@ -147,13 +115,13 @@ test("an admin reaches the same route through board-manager access", async () =>
   assert.equal(r.json.parked, 0);
 });
 
-test("abort: the same rule with the fence off — in-flight rows settle, their landings discard", async () => {
+test("abort: the same rule widened over the in-flight halves — their landings discard", async () => {
   const bid = await seedBoard(db, "abort-matrix");
   const taggedInFlight = await seedInstance(db, bid, "processing", { tags: ["sector/tech"] });
   const bareExtracting = await seedInstance(db, bid, "extracting");
   const bareFacing = await seedInstance(db, bid, "facing");
   const midFetch = await seedInstance(db, bid, "fetching", { payload: { unfetched: true, source: { id: "y" } } });
-  const startedQueued = await seedInstance(db, bid, "pending", { midPass: true });
+  const queuedToo = await seedInstance(db, bid, "pending");
 
   const counts = await cancelBoardQueue(db, bid, { abort: true });
   assert.deepEqual(counts, { restored: 1, parked: 3, removed: 1, finishing: 0, discarding: 4 });
@@ -161,7 +129,7 @@ test("abort: the same rule with the fence off — in-flight rows settle, their l
   assert.equal((await rowOf(taggedInFlight.id)).status, "tagged", "a mid-tag row with tags restores");
   assert.equal((await rowOf(bareExtracting.id)).status, "held", "a mid-extract bare row parks");
   assert.equal((await rowOf(bareFacing.id)).status, "held");
-  assert.equal((await rowOf(startedQueued.id)).status, "held", "mid_pass no longer shields a queued row");
+  assert.equal((await rowOf(queuedToo.id)).status, "held", "the queued remainder goes with it");
   assert.equal(await rowOf(midFetch.id), undefined, "a mid-fetch vehicle is deleted");
 
   // The whole design leans on this: the call that was in the air lands into
@@ -170,4 +138,3 @@ test("abort: the same rule with the fence off — in-flight rows settle, their l
   assert.equal(landed, false, "the landing fence drops the in-flight result");
   assert.deepEqual((await rowOf(taggedInFlight.id)).tags, ["sector/tech"], "the restored tags survive the late landing");
 });
-

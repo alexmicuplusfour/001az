@@ -1,0 +1,14 @@
+-- The cancel boundary moved (job-control-plan.md, 2026-09-10 postmortem):
+-- queue position, not "has this pass started". mid_pass (0044) was the
+-- started-marker — set by the leg landings, cleared by every queuer — and on
+-- a feed board it made "Cancel queued" a guaranteed no-op: every row queued
+-- to tag has by construction already run its fetch/extract/face legs, so the
+-- soft verb protected the entire visible queue while a dead provider's retry
+-- timers held it (19 presses, nothing cancelled, $5 of tagging the user was
+-- trying to stop). The marker guarded money that isn't there — every paid
+-- unit sits in the tag call, which a queued row hasn't made — and parking
+-- mid-prep strands nothing: the release routers re-enter a held row at the
+-- leg its payload shape names. With the fence gone the column has no reader.
+-- Archives are safe: a restore rebuilds at the archive's own migrationId and
+-- migrates forward through this drop.
+ALTER TABLE items DROP COLUMN IF EXISTS mid_pass;

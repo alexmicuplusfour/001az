@@ -75,13 +75,29 @@ export const anthropicWire = {
     // ones, so an unrelated (or repeat) 400 throws.
     const client = anthropicClient(apiKey, desc.base);
     const endpoint = desc.base || "";
+    // Anthropic reports an empty credit balance as a 400 invalid_request_error
+    // — permanent-shaped (4xx), so failOrRequeue would stamp the ACCOUNT's
+    // problem onto items one by one as terminal failures (39 rows in 90
+    // seconds, 2026-09-10). noCount reroutes it down the missing-key lane:
+    // retry later, burn no attempt, fail nothing. Vendor string, so it lives
+    // in the vendor's wire.
+    const create = (req) => client.messages.create(req).catch((e) => {
+      if (/credit balance is too low/i.test(e?.message || "")) {
+        e.noCount = true;
+        // noCount's backoff floor is the 60s race arm — per-minute hammering
+        // for a standing outage. No Retry-After comes with this 400, so pace
+        // it here: 5 minutes between tries, and a top-up drains within 5.
+        e.retryAfter ??= 300;
+      }
+      throw e;
+    });
     let sent = askFor(endpoint, model, { schema });
     const build = () => anthropicRequest({ model, systemText, schema, parts, research, tool, temperature: sent.temperature ? 0 : undefined, strict: sent.strict });
     let request = build();
     let msg;
     for (;;) {
       try {
-        msg = await client.messages.create(request);
+        msg = await create(request);
         break;
       } catch (e) {
         const feature = refusedFeature(e, sent);
@@ -105,7 +121,7 @@ export const anthropicWire = {
     // call below turns it into a retryable failure).
     for (let i = 0; i < 3 && msg.stop_reason === "pause_turn"; i++) {
       request.messages.push({ role: "assistant", content: msg.content });
-      msg = await client.messages.create(request);
+      msg = await create(request);
       addUsage(msg.usage);
     }
     const block = msg.content.find((b) => b.type === "tool_use" && b.name === tool.name);

@@ -218,6 +218,11 @@ keep the count — the count is the point (the queue is intact), the pulse is th
 
 ## The cancel boundary: "entered the pipeline"
 
+> **SUPERSEDED (2026-09-10).** The boundary is queue position now — every queued
+> row cancels, only in-flight rows are beyond the soft verb — and `mid_pass` is
+> dropped (0046). This section stays as the original reasoning; the postmortem
+> section before the decisions log records the night that broke it.
+
 Rule (2026-09-04): soft cancel touches only items that have NOT consumed any leg's
 work this pass; started items run their remaining legs to tagging and settle
 coherently. No aborting of in-flight calls in any stage.
@@ -275,6 +280,10 @@ rides `claimFairBatch`'s `RETURNING *` for free).
   preserving the marker is exactly right for a bounced mid-pipeline row.
 
 ## Stage 2 — soft cancel ("Cancel queued")
+
+> **Boundary superseded (2026-09-10):** the mid_pass mechanics below are
+> history — the boundary is queue position and the marker is dropped (0046).
+> See the postmortem section before the decisions log.
 
 **Cleanup pass (2026-09-04, suite 1364 green).** Beyond the build: the two
 landing UPDATEs collapsed into one `CASE` + `FILTER` statement — the split
@@ -426,6 +435,10 @@ landing status — write one per branch (`tagged` restore, `held` park, placehol
 delete, `retry_at IS NULL` on all).
 
 ## Stage 3 — Abort (the hard verb)
+
+> **Reveal condition amended (2026-09-10):** with the queue-position boundary,
+> ACTIVE-only is the correct abort gate (a queued row is never beyond the soft
+> verb); the latch-vs-ledger derivation below otherwise stands.
 
 **Cleanup pass (2026-09-04, suite 1365 green).** One real bug, found by the
 altitude review: the reveal was a per-tab LATCH, so after a cancel emptied the
@@ -582,6 +595,76 @@ Dropped (2026-09-04): aborting in-flight provider calls via AbortSignal threadin
 The fence-discard semantics make it unnecessary, the spend on a launched call is
 committed anyway, and it would touch every wire.
 
+## The night the design met a dead provider (2026-09-10 postmortem)
+
+From the stocks board's job ledger, all inside one half hour (UTC): the feed
+ran and ~106 items went fetch → extract → face → queued to tag on Gemini,
+whose prepayment credits were exhausted — 318 `requeued` rows, attempts 3 of
+the 5-attempt ceiling, every item parked on the 15-minute backoff arm. The
+user switched the board to Anthropic (correct — the mapping is read at claim
+time), then pressed **Cancel queued nineteen times** between 00:15:17 and
+00:17:52. Every press answered `finishing: 106` and touched nothing: every
+queued row was `mid_pass`, and Abort never appeared because zero rows were
+ACTIVE — all of them sat `pending` on retry timers. As the timers expired,
+items claimed on claude-opus-4-7 and landed: 67 tagged, $5.06 — spend the
+user was actively trying to stop. At 00:24 the Anthropic balance hit its
+floor; its out-of-credits error is a 400 `invalid_request_error`,
+permanent-shaped, and the remaining 39 items were terminally failed in ~90
+seconds, one per claim.
+
+Three findings, three fixes (built 2026-09-10):
+
+1. **The mid_pass boundary made soft cancel a structural no-op on feed boards
+   — moved to queue position** (0046 drops the column, writes and all). On a
+   feed board every row queued to tag has, by construction, already run its
+   prep legs, so "once started, let it finish" protected the entire visible
+   queue. The rule guarded money that isn't there — every paid unit sits in
+   the tag call, which a queued row hasn't made (fetch is an API hit;
+   extract/face/embed run local) — and parking mid-prep strands nothing:
+   requeueSettledSql's routers re-enter a held row at the leg its payload
+   shape names. New line: every QUEUED row is the soft verb's; only rows a
+   worker is holding are beyond it. This dissolves the "Abort unreachable"
+   trap on its own — the trap was a queue stuck in backoff (zero ACTIVE rows,
+   so the reveal's items condition never held, while the fence made Cancel
+   refuse); with the fence gone that queue simply cancels, and ACTIVE-only
+   becomes the CORRECT abort gate: the hard verb earns the button only over
+   calls in the air.
+2. **Out-of-credits is the account's problem, not the item's.** Gemini spells
+   it 429 + "prepayment credits are depleted" (counted attempts — a long
+   outage marches every item toward the transient ceiling); Anthropic spells
+   it 400 + "credit balance is too low" (permanent-shaped — one hit failed
+   each item). Both wires now stamp `noCount` on their vendor's spelling —
+   failOrRequeue's missing-key lane: requeue on the row's own leg, burn no
+   attempt, never fail. When credits return, the queue drains itself. The
+   wires also default `retryAfter` to 300s when the vendor sent none —
+   noCount's own backoff floor is the 60s race arm, which for a standing
+   outage would mean claiming and calling every item every minute, forever;
+   5-minute pacing keeps the outage quiet and a top-up drains within 5.
+   Arithmetic pinned in fences.test.js ("noCount outranks permanent"); the
+   ledger sentences pinned in jobs-row.test.js.
+3. **The cancel row read like success while doing nothing** — nineteen rows
+   of "cancelled: 106 left to finish". summaryFor now leads the no-op with
+   what was NOT reachable ("nothing was queued — N still running will
+   finish"), and the toast repeats the ledger sentence verbatim — which also
+   killed a latent "Cancelled — cancelled: …" double verb in the toast.
+   Abort's button count is the full pipeline remainder (queued + running),
+   since the hard verb settles both.
+
+Left open, eyes open:
+
+- The compat wire has no credit classifier — its vendors spell exhaustion as
+  429 `insufficient_quota` and still ride the counted ladder. No live compat
+  account showed the string tonight; stamp it when one does.
+- The wire regexes are untested (a test would restate the regex against a
+  fabricated error); the failOrRequeue arithmetic they lean on is pinned.
+- The deeper broke-provider shape — a claim-gate capability block ("tagging
+  blocked — N waiting", no churn at all) — deliberately not built: noCount
+  stops the per-item damage, and the block is real machinery for a condition
+  the ledger already narrates.
+- The 39 failed rows on the stocks board predate the fix and stay failed;
+  the auto-tag off→on sweep (queueUntagged) re-queues them once credits
+  exist.
+
 ## Decisions log
 
 1. ~~held vs tagged+undecided~~ → **held** (embedding spend, resume affordance,
@@ -621,3 +704,16 @@ committed anyway, and it would touch every wire.
     `POST /jobs/cancel-queued { abort: true }` — status lists derived from
     IN_FLIGHT_FOR so a fifth leg can't be forgotten; counts gain `discarding`
     (pre-counted in-tx); the ledger row is always written, even all-zero.
+12. ~~cancel boundary ("entered the pipeline", `mid_pass`)~~ → **queue
+    position** (2026-09-10 postmortem): the marker made soft cancel a
+    structural no-op on feed boards and guarded no marginal spend; 0046 drops
+    the column. In-flight is the only protected set — the landing fences were
+    always the real mechanism.
+13. Out-of-credits errors → **`noCount` stamped in the vendor wires**
+    (anthropic "credit balance is too low", google "prepayment credits")
+    rather than a claim-gate block: account gaps never fail items, retries
+    stay cheap, the queue self-drains on top-up. Compat's
+    `insufficient_quota` left for a verified sighting.
+14. Cancel-row copy → the no-op **leads with what was not reachable**
+    ("nothing was queued — N still running will finish"); the toast repeats
+    the ledger sentence verbatim; Abort's count spans the full remainder.

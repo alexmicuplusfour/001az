@@ -88,6 +88,25 @@ test("a stale failure can't stamp error/retry_at over a user's re-route", async 
   await park([id]);
 });
 
+// The 2026-09-10 lesson: a 400 is permanent-shaped, but when it is the
+// ACCOUNT's problem (credit balance empty — the wires stamp noCount on their
+// vendors' spellings of it), the row must ride the retry lane — requeued on
+// its own leg, no attempt burned, never failed — instead of the whole queue
+// being terminally failed one item at a time.
+test("noCount outranks permanent: an account-gap 400 requeues instead of failing", async () => {
+  const id = await seed("processing");
+  const broke = new Error("400 Your credit balance is too low to access the Anthropic API.");
+  broke.status = 400;
+  broke.noCount = true;
+  assert.equal(await failOrRequeue(db, id, broke, 3, "pending"), false, "not failed");
+  const r = await row(id);
+  assert.equal(r.status, "pending", "requeued to its own leg");
+  assert.equal(r.attempts, 0, "no attempt burned — the outage can outlast any ceiling");
+  assert.ok(Number(r.retry_at) > Date.now(), "spaced for a later retry");
+  assert.match(r.error, /credit balance/, "the reason stays visible on the row");
+  await park([id]);
+});
+
 test("user wins the whole race: claim → retag flips it → stale stamp discards → re-claimable", async () => {
   const id = await seed("pending");
   const claimed = await claimNextWork(db, true);
