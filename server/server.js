@@ -307,6 +307,21 @@ app.use((_req, res, next) => {
   next();
 });
 
+// Every /api answer is private and generated, so no cache should hold one.
+// They are already re-fetched today, but by an absence rather than a rule: the
+// heuristic that invents a freshness lifetime multiplies against Last-Modified,
+// generated JSON carries none, and the lifetime falls out as zero. Give one
+// route a Last-Modified — a file download, an export — and the heuristic wakes
+// up on it; put a shared cache in front and it is free to hand one signed-in
+// user's answer to the next. no-store is the instruction that absence has been
+// standing in for. Scoped to /api so it never reaches /gallery or /thumbnails,
+// whose filenames are unrepeatable and which cache hard on purpose; the SSE log
+// stream writes its own Cache-Control through writeHead, which takes precedence.
+app.use("/api", (_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
+
 // Live handles the backup routes need but that only exist later (the worker
 // starts in the isMain block below); mutated there, read by reference.
 const runtime = { stopWorker: null, restartWorker: null, exitAfter: false, restore: { active: false, sid: null } };
@@ -3464,7 +3479,24 @@ sources.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayloa
 
 // Frontend assets (same-origin /api during host dev; in the container the app
 // is the only file server and Caddy just proxies).
-app.use(express.static(STATIC_DIR, { extensions: ["html"], cacheControl: false }));
+//
+// Sending no Cache-Control is not "do not cache" — it is "no instructions", and
+// a browser with no instructions invents a freshness lifetime of roughly a tenth
+// of the file's age (RFC 9111 4.2.2). That made staleness scale with how long
+// ago a file was last edited: styles.css, untouched for four days, sat in the
+// disk cache for ten hours without one request reaching this server, so a
+// rebuilt image served bytes nobody asked for and only a hard refresh broke the
+// spell. no-cache is the opposite of how it reads: store the file, but
+// revalidate before every use. The ETag express.static derives from size+mtime
+// (and COPY carries the host mtime into the image) then answers most of those
+// with a ~150-byte 304. Filenames here are not content-hashed, so this is the
+// ceiling: a year-long max-age would need fingerprinting, which would need a
+// build step this frontend does not have. Uploads under /gallery and
+// /thumbnails do have unrepeatable names, which is why those get to cache hard.
+app.use(express.static(STATIC_DIR, {
+  extensions: ["html"],
+  setHeaders: (res) => res.setHeader("Cache-Control", "no-cache"),
+}));
 
 app.use((err, _req, res, _next) => {
   // Errors that carry a status (body-parser, multer field errors) keep it;
