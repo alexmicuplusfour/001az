@@ -20,7 +20,9 @@ services:
   app:
     image: ghcr.io/alexmicuplusfour/001az-app:${APP_TAG:-latest}
     build: !reset null
-    ports:
+    # !override replaces the base file's public port instead of adding to it:
+    # only the host Caddy may reach the app, and it terminates TLS.
+    ports: !override
       - "127.0.0.1:3001:3001"
 
   caddy:

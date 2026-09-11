@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -276,6 +277,11 @@ app.disable("x-powered-by");
 // Caddy terminates in front of us; trust one hop so req.ip is the client,
 // not the proxy (rate limiting and request logs key on it).
 app.set("trust proxy", 1);
+
+// gzip every response. The app serves its own static files (~1.1 MB of JS/CSS
+// -> ~350 KB), so compression belongs here rather than in a proxy nobody is
+// guaranteed to run: a plain `docker compose up` has no proxy in front.
+app.use(compression());
 
 // Security headers on every response. CSP notes: fonts come from Google Fonts;
 // img needs data: (inline SVG chevron in admin.css) and blob: (upload

@@ -1,4 +1,4 @@
-# Copy .env.example to .env — every setting is documented there.
+# docker compose up -d  ->  http://localhost:8001
 
 name: 001az
 
@@ -7,10 +7,15 @@ services:
     image: ghcr.io/alexmicuplusfour/001az-app:latest
     build: .
     restart: unless-stopped
-    env_file: .env
+    ports:
+      - "8001:3001"
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-gallery}:${POSTGRES_PASSWORD:-gallery}@db:5432/${POSTGRES_DB:-gallery}
       INGEST_ROOT: /data/ingest
+      BASE_URL: http://localhost:8001 # must match caddy's port below
     volumes:
       - appdata:/data
       - ./ingest-root:/data/ingest
@@ -26,21 +31,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-gallery}
     volumes:
       - pgdata:/var/lib/postgresql/data
-
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-    environment:
-      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - app
 
   extractor: # PDF/docx text + OCR
     image: ghcr.io/alexmicuplusfour/001az-extractor:latest
@@ -73,6 +63,20 @@ services:
       args:
         OBJECT_DETECTOR_MODEL: ${OBJECT_DETECTOR_MODEL:-iSEE-Laboratory/llmdet_tiny}
     restart: unless-stopped
+
+  caddy: # optional HTTPS. Put your domain below, then COMPOSE_PROFILES=edge
+    image: caddy:2
+    profiles: ["edge"]
+    command: caddy reverse-proxy --from example.com --to app:3001
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
 
 volumes:
   pgdata:
