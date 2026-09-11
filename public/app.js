@@ -1,4 +1,5 @@
 import { state } from './state.js';
+import { getJson } from './api.js';
 import { toItem } from './utils.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount } from './filters.js';
 import { selEntry } from './facet-match.js';
@@ -85,20 +86,40 @@ async function main() {
   }
 
   if (!state.boardId) {
+    // null, not [], when the question couldn't be asked — the two answers lead
+    // opposite ways below, and a failed fetch that reads as "zero boards" would
+    // send an anonymous visitor the wrong direction.
     const accessible = await fetch("/api/boards", { cache: "no-store" })
-      .then((r) => r.ok ? r.json() : []).catch(() => []);
-    if (accessible.length > 0) {
+      .then((r) => r.ok ? r.json() : null).catch(() => null);
+    if (accessible?.length) {
       const last = localStorage.getItem("lastBoard");
       const target = accessible.find((b) => String(b.id) === last) || accessible[0];
       location.replace(`/?board=${target.id}`);
       return;
     }
+    // Zero boards is not an empty board — it's a boardless page. Everything
+    // below is item-scoped: the toolbar collapses to the logo, and the grid
+    // reports "No items match these filters" about filters that aren't there
+    // and a board that doesn't exist. The boards page is where nothing-to-show
+    // has words for itself (and, for an admin, the button that fixes it).
+    // The landing rule for a reader who HAS boards is unchanged — last board,
+    // not a gate (planning/boards-page-plan.md, "Entry points" #4).
+    if (Array.isArray(accessible)) {
+      location.replace("/boards");
+      return;
+    }
+    // Couldn't ask: fall through to the /api/me gate, which sends an anonymous
+    // visitor to login with the interrupted URL intact.
   }
 
-  const [boardData, itemsData, meData, cratesData, boardsData, filterConfigsData] = await Promise.all([
+  const [boardRes, itemsData, meData, cratesData, boardsData, filterConfigsData] = await Promise.all([
+    // getJson, not the `r.ok ? json : null` idiom its siblings below use: this
+    // is the one fetch in the batch whose failure decides where the reader ends
+    // up, so "the server said no" and "there was no answer" have to arrive
+    // apart. The others only decide what renders, and null is answer enough.
     state.boardId
-      ? fetch(`/api/boards/${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null)
-      : Promise.resolve(null),
+      ? getJson(`/api/boards/${state.boardId}`, { cache: "no-store" })
+      : Promise.resolve({}),
     state.boardId
       ? fetch(`/api/items?board=${state.boardId}&limit=200`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
       : Promise.resolve([]),
@@ -117,7 +138,22 @@ async function main() {
     refreshJobErrors(),
   ]);
 
+  const boardData = boardRes.data || null;
+  // The server refused it. Which of the two reasons applies — deleted, or
+  // access revoked — it deliberately does not say: a 403 for the second would
+  // confirm to someone who can't see a board that it exists, so server.js
+  // (~1039) answers 404 to both. 404 ONLY, though: a 401 is an expired
+  // session, and the /api/me gate below reaches login in one hop where this
+  // would take two.
+  const boardGone = boardRes.status === 404;
+
   if (boardData) localStorage.setItem("lastBoard", String(state.boardId));
+  // …and the reverse. A board the server just refused has no business being
+  // where we land next time. Only when it IS the remembered one: following a
+  // dead link to somebody else's board must not evict the reader's own.
+  else if (boardGone && localStorage.getItem("lastBoard") === state.boardId) {
+    localStorage.removeItem("lastBoard");
+  }
 
   state.facets = boardData ? boardData.facets : [];
   state.boardName = boardData ? boardData.name : null;
@@ -143,6 +179,18 @@ async function main() {
   }
   if (state.me.needs_password) {
     location.replace("/login.html");
+    return;
+  }
+  // Signed in, and the board isn't ours. Everything below this line is about
+  // rendering a board — without one it draws the boardless shell the zero-board
+  // landing above exists to avoid, and here it would do it to someone who asked
+  // for a specific board and was told nothing.
+  //
+  // The boards page shows what IS ours, and `gone` is the note it needs to say
+  // why the address changed. A silent redirect is the part that would read as
+  // the app losing your place.
+  if (boardGone) {
+    location.replace("/boards?gone=1");
     return;
   }
   // First page ({ items, nextCursor, now }) — or a bare array from a server

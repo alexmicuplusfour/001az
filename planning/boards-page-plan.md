@@ -320,7 +320,10 @@ Card anatomy:
   `openBoardModal(null, …)` call as the dropdown footer, navigating to the new
   board on save.
 - Empty board → dashed placeholder face, "No items yet". Zero boards → page
-  empty state: "No boards yet — ask an admin for access."
+  empty state, keyed on the reader (amended 2026-09-12): a member gets "No
+  boards yet — ask an admin for access."; an admin, who is holding the "+ New
+  board" button two inches away and cannot ask anyone, gets "No boards yet —
+  use + New board to make the first one."
 - Symbol-fill preview entries render as small tiles reusing
   `.connector-face`/`.connector-symbol` styling.
 
@@ -361,6 +364,56 @@ settings surfaces; this one is a gallery, so it follows the gallery.
 4. **Deliberately NOT changed**: the no-`?board=` landing still redirects to
    the last-used board (app.js ~64–84, `lastBoard` in localStorage). Power
    users land on their board; the boards page is a destination, not a gate.
+
+   **Amended 2026-09-12 — the zero-board half of that landing.** The rule
+   above is about a reader who HAS boards, and it stands. The other branch was
+   written a month before this page existed (app.js's landing block predates
+   boards.js by ~92095ec→da9cb86) and had nowhere to send anyone, so it fell
+   through into the gallery with `boardId` null: a toolbar collapsed to the
+   logo, and `renderGrid`'s "No items match these filters." — a sentence about
+   filters, on a page with no filters and no board. That is a fresh instance's
+   first screen. It now redirects to `/boards`, which is not a gate for the
+   same reason: with zero boards there is nothing to gate, and this is the one
+   page whose empty state has words for the situation.
+
+   Only when the question was actually ANSWERED. `/api/boards` failing (401,
+   offline) now yields `null` rather than `[]`, and falls through to the
+   `/api/me` gate so an anonymous visitor still reaches login with `next`
+   intact, instead of bouncing through `/boards` and losing it.
+
+   **The other boardless case, same day: `?board=` naming a board that is gone
+   or no longer yours.** It rendered the same empty shell. The blocker looked
+   like a server one and was not: the server already answers 404 for both
+   readings — deliberately, since a 403 for "revoked" would confirm the board
+   exists to the person who just lost it (server.js ~1039; pinned in
+   member-boards.test.js, "a board that never existed and a board you can't
+   see are the same 404"). What could not tell them apart was the CLIENT, whose
+   `.then(r => r.ok ? r.json() : null).catch(() => null)` flattened a refusal
+   and a dropped request into the same null.
+
+   So the distinction moved into the shared helper as `getJson`
+   ([api.js](../public/api.js)): `{ data }` answered, `{ status }` refused,
+   `{}` no answer — with the empty object as the shape a caller falls into by
+   writing no branch for it, which is the stay-put direction. `api()` is
+   unchanged; it throws one Error per non-200, which is right for every caller
+   whose answer only decides what renders. This is the one whose answer decides
+   where the reader ends up.
+
+   404 only, and only after the `/api/me` gate: a 401 is an expired session,
+   and login is one hop from that gate where it would be two through here.
+   On the way out, `lastBoard` is evicted — but only when the refused board IS
+   the remembered one, so a dead link to someone else's board cannot cost the
+   reader their own landing place.
+
+   The landing is `/boards?gone=1`, and the note is spent on arrival
+   (`history.replaceState`, the idiom `?item=` and `#jobs` already use): it is a
+   remark about one arrival, not an address, and left in place it would
+   re-explain the move on every reload and travel into a bookmark. The message
+   — "That board isn't available — it may have been deleted, or your access to
+   it removed." — names no board, because a 404 is all we ever got and naming
+   one to someone who can't open it is the disclosure the 404 exists to
+   prevent. Both readings, one sentence, for the same reason the status code
+   covers both.
 
 ## Slices
 

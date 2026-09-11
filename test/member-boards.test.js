@@ -102,6 +102,28 @@ test("board-admin here is the same grant the Boards tab makes", async () => {
   assert.equal(rename.status, 200);
 });
 
+// The gallery leans on this pair: a 404 from GET /api/boards/:id is what sends
+// a reader to /boards with the "isn't available" note (public/app.js). It can
+// only carry that meaning if BOTH ways of not having a board answer the same
+// way — and they have to, because a 403 for the revoked one would confirm the
+// board exists to the person who just lost it.
+test("a board that never existed and a board you can't see are the same 404", async () => {
+  const unknown = "00000000-0000-4000-8000-000000000000";
+  // Its own board rather than boardA/B: the tests in this file hand memberships
+  // back and forth in sequence, and "a board this member is not on" has to be
+  // true at the moment it is asserted, not at the top of the file.
+  const hidden = await seedBoard(db, "unseen");
+  const missResp = await req(base, "GET", `/api/boards/${unknown}`, { sid: member.sid });
+  const hiddenResp = await req(base, "GET", `/api/boards/${hidden}`, { sid: member.sid });
+  assert.equal(missResp.status, 404);
+  assert.equal(hiddenResp.status, 404);
+  // Identical bodies too: a message that differed would leak the distinction
+  // the status code is matching on purpose.
+  assert.deepEqual(hiddenResp.json, missResp.json);
+  // …and a global admin is not fooled by the same URL — that board is really there.
+  assert.equal((await req(base, "GET", `/api/boards/${hidden}`, { sid: admin.sid })).status, 200);
+});
+
 test("revoking drops the row — and only this member's", async () => {
   await patch(member.id, { boardIds: [] });
   assert.deepEqual((await findUser(member.id)).boards, []);

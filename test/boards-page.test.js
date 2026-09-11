@@ -18,68 +18,18 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 
-// The localStorage the watermarks read, from the shared stub rather than a
-// fourth hand-rolled copy — "ONE copy on purpose", as that file puts it. Its
-// `document ||=` cannot shadow the richer one built below, since static imports
-// evaluate before this module body runs.
-import { localStore as store } from "./browser-stub.js";
+// The browser the page boots against, from the shared stub rather than a hand
+// copy — the same "ONE copy on purpose" argument browser-stub.js makes, one
+// altitude up: this file and boards-empty.test.js both need a document a page
+// can BUILD into, and a second copy drifts.
+import { byId, historyCalls, localStore as store } from "./dom-stub.js";
 
-const el = (tag = "div") => {
-  const n = {
-    tag, children: [], attrs: {}, dataset: {}, style: {}, classes: new Set(),
-    className: "", textContent: "", innerHTML: "", href: "", title: "", type: "", hidden: false,
-    classList: {
-      add: (c) => n.classes.add(c), remove: (c) => n.classes.delete(c),
-      contains: (c) => n.classes.has(c), toggle() {},
-    },
-    appendChild(c) { c.parent = n; n.children.push(c); return c; },
-    append(...c) { c.forEach((x) => n.appendChild(x)); },
-    replaceChildren(...c) { n.children.length = 0; c.forEach((x) => n.appendChild(x)); },
-    remove() { const k = n.parent?.children; if (k) k.splice(k.indexOf(n), 1); },
-    setAttribute(k, v) { n.attrs[k] = v; },
-    getAttribute(k) { return n.attrs[k] ?? null; },
-    removeAttribute(k) { delete n.attrs[k]; },
-    addEventListener() {}, removeEventListener() {},
-    querySelector(sel) {
-      if (sel === ".board-card") return n.children.find((c) => String(c.className).includes("board-card")) || null;
-      if (sel === ":scope > .btn-dot") return n.children.find((c) => c.className === "btn-dot") || null;
-      // Containment, not equality — the note also carries the shared .vis-hidden
-      // utility class.
-      if (sel === ".bc-signal-note")
-        return n.children.find((c) => String(c.className).split(" ").includes("bc-signal-note")) || null;
-      return null;
-    },
-    querySelectorAll() { return []; },
-  };
-  return n;
-};
-
-const byId = {};
-globalThis.document = {
-  hidden: false,
-  getElementById: (id) => (byId[id] ||= el()),
-  createElement: el,
-  createDocumentFragment: el,
-  querySelector: (s) => (s === "header" ? el() : null),
-  querySelectorAll: (s) => (s === "#boards-grid .bc-wrap" ? byId["boards-grid"].children : []),
-  addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; },
-  body: el(), documentElement: el(), head: el(),
-};
-globalThis.window = {
-  addEventListener() {}, removeEventListener() {},
-  matchMedia: () => ({ matches: false, addEventListener() {} }),
-  getComputedStyle: () => ({}),
-};
-globalThis.getComputedStyle = () => ({});
-globalThis.location = {
-  href: "/boards", pathname: "/boards", search: "",
-  // A redirect here means the auth gate misfired, which would leave a signed-in
-  // reader bounced to the login page. Loud rather than silent.
-  replace(u) { throw new Error("unexpected redirect to " + u); },
-};
-globalThis.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };
-globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-globalThis.Audio = class { play() { return Promise.resolve(); } };
+// Reached from a board that turned out not to be ours — app.js's 404 branch
+// sends the reader here with this param. Set BEFORE the page is imported, since
+// boards.js reads the address once during boot, and set on THIS harness rather
+// than a third one: a revoked board is most often a board you lost while
+// keeping others, so the message belongs on a page with cards on it.
+globalThis.location.search = "?gone=1";
 
 const BOARD = "b-boot";
 const OTHER = "b-second";
@@ -170,4 +120,21 @@ test("…and a hidden line inside the link that says what the dot is for", () =>
 
 test("the refresh ticker is armed once the page has cards", () => {
   assert.equal(armed, 1, "one interval, and only after the grid rendered");
+});
+
+test("a reader bounced off a board is told why, without being told which", () => {
+  const wrapEl = document.body.children.find((c) => c.id === "toast-wrap");
+  const msgs = wrapEl.children.map((t) => t.children.find((c) => c.className === "toast-msg")?.textContent);
+  assert.deepEqual(msgs, [
+    "That board isn't available — it may have been deleted, or your access to it removed.",
+  ]);
+  // The board id was in the address and is deliberately NOT in the sentence:
+  // the server answered 404 precisely so that a reader who can't open a board
+  // learns nothing about it, and a message naming it would hand that back.
+  assert.ok(!msgs[0].includes(BOARD));
+});
+
+test("…and the note is consumed, so a reload doesn't re-explain the move", () => {
+  assert.deepEqual(historyCalls, ["/boards"]);
+  assert.equal(location.search, "");
 });

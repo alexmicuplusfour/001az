@@ -58,12 +58,37 @@ if (!me) {
   document.querySelector("header").hidden = false;
   gridEl().hidden = false;
   renderToolbar();
+  announceGone();
   initArrange();
   // In parallel, and deliberately not awaited together: the grid renders on the
   // overview and the dots attach when signals land. The gallery's own precedent
   // — "the button is drawn immediately either way, and only the dot waits."
   render().then(() => { if (wraps().length) signalsTicker.start(); });
   refreshSignals();
+}
+
+// Arriving from a board that turned out not to be ours — app.js got a 404 for
+// it and sent the reader here with `?gone=1` (planning/boards-page-plan.md,
+// "Entry points"). Said here rather than there because the page you land on is
+// where an explanation is worth reading; on the page you're leaving it would be
+// a sentence with a navigation on top of it.
+//
+// The board goes UNNAMED, and not for want of space: a 404 is all we ever got,
+// so we never learned the name — and naming a board to someone who can't open
+// it is exactly the disclosure that 404 is there to prevent. The message covers
+// both readings for the same reason the status code does.
+//
+// Consumed like the gallery's ?item= and #jobs: the param is a note about ONE
+// arrival, not an address. Left in place it would re-explain the move on every
+// reload, and travel into a bookmark or a shared link that has nothing to do
+// with it.
+function announceGone() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("gone")) return;
+  toast.info("That board isn't available — it may have been deleted, or your access to it removed.");
+  params.delete("gone");
+  const rest = params.toString();
+  history.replaceState(null, "", location.pathname + (rest ? `?${rest}` : ""));
 }
 
 // --- toolbar: row 1 only, logo left, user menu right ---
@@ -146,7 +171,14 @@ async function render() {
     return;
   }
   if (!boards.length) {
-    grid.replaceChildren(note("No boards yet — ask an admin for access."));
+    // Who is reading decides what nothing means. A member is waiting on someone
+    // else; an admin is looking at a button they already have — telling them to
+    // ask an admin, with "+ New board" in the corner of the same screen, reads
+    // as the page not knowing who signed in. This is also the first screen of a
+    // fresh instance, since a boardless landing now arrives here (app.js).
+    grid.replaceChildren(note(me.is_admin
+      ? "No boards yet — use + New board to make the first one."
+      : "No boards yet — ask an admin for access."));
     return;
   }
   // The response IS the reader's arrangement — the server sorts it (server.js
