@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import http from "node:http";
+import { fileURLToPath } from "node:url";
 import {
   createUser,
   getUserByEmail,
@@ -26,6 +27,8 @@ import {
 // sidecar-catalog.js (like worker.js and db.js) resolves once and is shared by
 // every bust and every static test import. Clearing here clears the app's.
 import { clearSidecarHealth, seedSidecarHealth } from "../server/sidecar-catalog.js";
+
+const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
 const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgres://gallery:gallery@127.0.0.1:5433/postgres";
 const TEMPLATE_DB = process.env.TEST_TEMPLATE_DB || "gallery_test_template";
@@ -49,7 +52,10 @@ process.env.TRANSCRIBER_URL = DEAD_SIDECAR;
 process.env.OBJECT_DETECTOR_URL = DEAD_SIDECAR;
 process.env.EXTRACTOR_URL = DEAD_SIDECAR;
 
-export async function startServer() {
+// `frontend: true` serves the REAL public/ instead of the empty temp dir — the
+// browser tests (test/browser/) need the actual page; every API test is faster
+// without it.
+export async function startServer({ frontend = false } = {}) {
   const name = "gallery_test_" + crypto.randomBytes(6).toString("hex");
   // max 2: files run in parallel, and every worker holds one of these alongside
   // the app's own pool. The admin pool only creates and drops a database, so two
@@ -84,7 +90,7 @@ export async function startServer() {
   process.env.THUMBS_DIR = thumbsDir;
   process.env.BACKUPS_DIR = backupsDir;
   process.env.PLUGINS_DIR = pluginsDir;
-  process.env.STATIC_DIR = tmp; // no real frontend needed for API tests
+  process.env.STATIC_DIR = frontend ? PUBLIC_DIR : tmp; // no real frontend needed for API tests
   process.env.CONNECTOR_RPM = "1000000"; // don't rate-limit stubbed provider calls in tests
   process.env.CONNECTOR_BURST = "1000000";
   process.env.AI_RPM = "1000000"; // same for the AI wire's per-key pacing

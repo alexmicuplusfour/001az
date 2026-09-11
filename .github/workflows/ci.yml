@@ -33,5 +33,9 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The browser tests (test/browser/) drive a real Chromium. --with-deps
+      # pulls the shared libraries the headless build needs on a bare runner;
+      # chromium only, because that's the one they launch.
+      - run: npx playwright install --with-deps chromium
       - run: npm test
 

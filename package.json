@@ -7,7 +7,8 @@
     "server": "node server/server.js",
     "lint": "eslint .",
     "pretest": "npm run lint && node scripts/build-test-template.mjs",
-    "test": "node --test --test-concurrency=8 \"test/**/*.test.js\""
+    "test": "node --test --test-concurrency=8 \"test/**/*.test.js\"",
+    "test:browser": "node --test \"test/browser/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.108.0",
@@ -28,6 +29,7 @@
     "eslint": "^10.10.0",
     "ftp-srv": "^4.6.3",
     "globals": "^17.12.0",
-    "jsdom": "^29.1.1"
+    "jsdom": "^29.1.1",
+    "playwright": "^1.63.0"
   }
 }
