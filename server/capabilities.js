@@ -20,6 +20,15 @@
 //   noun        what to call it mid-sentence in an error the admin will read
 //               ("anthropic advertises no object detection"). `label` titles a
 //               card; `noun` goes inside prose.
+//   icon        the capability's MARK, as a key into the client's ICONS set
+//               (public/utils.js) — the third piece of its identity, beside
+//               the label and the blurb, and here for the same reason: a
+//               surface that lists capabilities must not carry a table of
+//               which glyph goes with which id. Every entry declares one, so
+//               no reader has to handle absence. The marks are the ones the
+//               app already uses for this work elsewhere (the tag chip, the
+//               mapping pane's AI-field and detection glyphs, the item menu's
+//               re-transcribe) — a capability wears one mark everywhere.
 //   declaredBy  which capability's `provides` entry advertises this one. Almost
 //               always itself; `extract` rides tagging's declaration and wire.
 //   verb        the wire method that performs it.
@@ -57,6 +66,7 @@ export const CAPABILITY_DEFS = [
     noun: "tagging",
     label: "Tagging",
     blurb: "labels an item against its board's own facet taxonomy",
+    icon: "tag",
     declaredBy: "tag", verb: "tag", models: true,
     // Tagging with no declared filter shows the whole live list — a provider may
     // be all-chat, so an unfiltered dump is the right answer here, while the same
@@ -119,6 +129,7 @@ export const CAPABILITY_DEFS = [
     noun: "field extraction",
     label: "Field extraction",
     blurb: "reads a board's structured fields out of an item",
+    icon: "srcSparkle",
     // Extraction rides the TAGGING declaration and wire (text-only), so it is a
     // distinct capability sharing a wire — which is why `declaredBy` is a field
     // rather than just the id.
@@ -148,6 +159,7 @@ export const CAPABILITY_DEFS = [
     noun: "embeddings",
     label: "Semantic search",
     blurb: "embeds items so search can rank them by meaning",
+    icon: "search",
     declaredBy: "embed", verb: "embed", models: true,
     binding: { keys: { provider: "embed_provider", keyId: "embed_key_id", model: "embed_model", enabled: "embed_enabled" }, boardKeys: null },
     floor: { kind: "off" },
@@ -163,6 +175,7 @@ export const CAPABILITY_DEFS = [
     noun: "transcription",
     label: "Transcription",
     blurb: "turns audio into text so recordings can be tagged and searched",
+    icon: "srcWave",
     declaredBy: "transcribe", verb: "transcribe", models: true,
     // A pinned model must be one the provider advertises: otherwise every call
     // throws at the wire and the item requeues for ever. Only these two check —
@@ -191,6 +204,7 @@ export const CAPABILITY_DEFS = [
     noun: "object detection",
     label: "Object detection",
     blurb: "finds objects in an image so items can be searched by what is in them",
+    icon: "srcFrame",
     declaredBy: "detect", verb: "detect", models: true,
     // The Mapping pane surfaces this capability's provenance beside the detect
     // fields it powers — same flag, same consumer as extract's band. Data, not
@@ -217,6 +231,7 @@ export const CAPABILITY_DEFS = [
     noun: "web research",
     label: "Web research",
     blurb: "lets the tagger search the web before it answers",
+    icon: "srcGlobe",
     // A MODIFIER, not a slot: nothing binds it, it has no model axis, and it
     // renders inside the tagging card. It appears here because a provider
     // DECLARES it, and because leaving it out would mean two lists again.

@@ -19,7 +19,7 @@
 // resolve it — so the module owning the header's whole notification rule could
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
-import { ICONS } from "./utils.js";
+import { ICONS, glyphEl } from "./utils.js";
 import { createModal, sectionHeading, provBand, keepPlace, busy } from "./modal.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
@@ -485,8 +485,9 @@ export async function openBoardModal(boardId, opts = {}) {
   // ── The AI-models strip: a full-bleed fold between the modal header and the
   // scrolling body, shared by both panes. It holds every per-board capability
   // picker; the panes keep one-line "Using …" bands that point here. While
-  // open, a scrim dims the body below (click it, or Esc, to fold). Admin-only:
-  // the pickers read admin feeds, and pins are admin-written.
+  // open, a scrim dims everything below it — body and footer both (click it,
+  // or Esc, to fold). Admin-only: the pickers read admin feeds, and pins are
+  // admin-written.
   let stripEl = null;
   let setStripOpen = () => {};
   if (canEditAI) {
@@ -498,16 +499,18 @@ export async function openBoardModal(boardId, opts = {}) {
       </button>
       <div class="strip-body"><div id="board-modal-caps"></div></div>`;
     dialog.insertBefore(stripEl, body);
-    // The scrim needs a positioned box that is exactly the body's, so the body
-    // moves into a wrapper. (The dialog itself can't serve: its open-transition
+    // The scrim needs a positioned box that is exactly what the open strip
+    // supersedes — the body AND the footer under it, since Save is as much
+    // "not now" as the body is while the strip is the surface in hand. So both
+    // move into a wrapper. (The dialog itself can't serve: its open-transition
     // transform makes it a containing block only while a transform stands —
     // reduced-motion drops it.)
     const wrap = document.createElement("div");
-    wrap.className = "modal-body-wrap";
+    wrap.className = "modal-strip-wrap";
     dialog.insertBefore(wrap, body);
-    wrap.appendChild(body);
+    wrap.append(body, footer);
     const scrim = document.createElement("div");
-    scrim.className = "modal-body-scrim";
+    scrim.className = "modal-strip-scrim";
     scrim.setAttribute("aria-hidden", "true");
     wrap.appendChild(scrim);
     setStripOpen = wireFold(stripEl, ".strip-head");
@@ -851,6 +854,10 @@ export async function openBoardModal(boardId, opts = {}) {
         row.className = "frow";
         const head = document.createElement("div");
         head.className = "frow-head";
+        // The capability's mark, named by the feed (cap.icon) — the same glyph
+        // this work wears everywhere else in the app. Nothing here knows which
+        // one that is.
+        const mark = glyphEl(cap.icon, false);
         const left = document.createElement("div");
         const name = document.createElement("div");
         name.className = "frow-name";
@@ -866,7 +873,7 @@ export async function openBoardModal(boardId, opts = {}) {
         const srcEl = document.createElement("span");
         srcEl.className = "frow-src";
         cur.append(valEl, srcEl);
-        head.append(left, cur);
+        head.append(mark, left, cur);
         // One row open at a time — the strip is a status list first.
         head.addEventListener("click", () => {
           const open = !row.classList.contains("open");

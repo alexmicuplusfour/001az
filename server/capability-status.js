@@ -171,6 +171,10 @@ async function aiEntry(db, cap, catalog, presence) {
     noun: cap.noun,
     agent: cap.agent,
     blurb: cap.blurb,
+    // The capability's mark, as an ICONS key — label, blurb, icon: the three
+    // pieces of its identity travel together, so a surface that lists
+    // capabilities never keeps its own id → glyph table.
+    icon: cap.icon,
     // Which `provides` slice backs this capability — the modal's model catalog
     // reads p.ai.provides[declaredBy] instead of assuming it equals the id.
     declaredBy: cap.declaredBy,

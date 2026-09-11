@@ -273,7 +273,7 @@ button.is-busy .busy-spin {
    its scrolling body. Generic chrome, not tied to any one modal — the board
    editor's AI-models fold is one user. Flat by design: the strip is chrome,
    and whatever it holds is hairline-separated, never boxes in boxes. Pair
-   with .modal-body-wrap/.modal-body-scrim to dim the body while open. ─── */
+   with .modal-strip-wrap/.modal-strip-scrim to dim what sits below it. ─── */
 .modal-strip {
   flex-shrink: 0;
   background: #fbfbfc;
@@ -338,6 +338,8 @@ button.is-busy .busy-spin {
 /* inside a modal strip, the head's hover bleeds to the strip's full width */
 .modal-strip .frow-head { margin: 0 -20px; padding: 10px 20px; }
 .frow-head:hover { background: #f3f3f6; }
+/* a row may lead with the .glyph atom — its mark, sized to the summary line */
+.frow-head > .glyph svg { width: 17px; height: 17px; }
 .frow-name { font-size: 13.5px; font-weight: 550; }
 .frow-desc { font-size: 12px; color: #9a9aa6; margin-top: 1px; }
 .frow-cur { margin-left: auto; text-align: right; flex: none; max-width: 55%; }
@@ -351,17 +353,19 @@ button.is-busy .busy-spin {
   100% { background: transparent; }
 }
 
-/* the body wrapper + scrim while a strip is open (the host modal wraps its
-   .modal-body so the scrim has a positioned box exactly the body's size) */
-.modal-body-wrap {
+/* the wrapper + scrim while a strip is open. The host modal moves everything
+   below the strip — .modal-body AND .modal-footer — in here, so the scrim has
+   a positioned box exactly the size of what the open strip supersedes: the
+   footer dims with the body rather than floating lit under a dimmed pane. */
+.modal-strip-wrap {
   position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
-.modal-body-wrap > .modal-body { flex: 1; }
-.modal-body-scrim {
+.modal-strip-wrap > .modal-body { flex: 1; }
+.modal-strip-scrim {
   position: absolute;
   inset: 0;
   z-index: 4;
@@ -371,7 +375,7 @@ button.is-busy .busy-spin {
   cursor: pointer;
   transition: opacity 0.15s ease;
 }
-.modal-strip.open ~ .modal-body-wrap .modal-body-scrim {
+.modal-strip.open ~ .modal-strip-wrap .modal-strip-scrim {
   opacity: 1;
   pointer-events: auto;
 }
@@ -419,7 +423,7 @@ button.is-busy .busy-spin {
 
 @media (prefers-reduced-motion: reduce) {
   .chev,
-  .modal-body-scrim {
+  .modal-strip-scrim {
     transition: none;
   }
   .frow.flash { animation: none; }

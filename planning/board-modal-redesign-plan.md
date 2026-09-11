@@ -170,8 +170,9 @@ Everything added to modal.css is a reusable component, never named for its
 first use: `.modal-strip`/`.strip-head`/`.strip-body` (full-bleed collapsible
 band under any modal header), `.frow-*` (fold-out row list — summary line over
 an inline editor), `.fold-summary` and `.chev` (shared by the strip and
-`.disclosure`), `.prov`, `.linkbtn`, `.modal-body-wrap`/`.modal-body-scrim`
-(the scrim pairs with any open `.modal-strip` via a sibling selector). The
+`.disclosure`), `.prov`, `.linkbtn`, `.modal-strip-wrap`/`.modal-strip-scrim`
+(the wrapper holds everything an open strip supersedes — body and footer —
+and the scrim pairs with any open `.modal-strip` via a sibling selector). The
 first draft used `.cap-*` names and collided with admin.html's existing
 `.cap-head` — modal.css loads on that page — which is exactly why the rule
 exists. Fold carets are `ICONS.chevron` (1em, `currentColor` — same size and
