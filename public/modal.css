@@ -274,11 +274,15 @@ button.is-busy .busy-spin {
    editor's AI-models fold is one user. Flat by design: the strip is chrome,
    and whatever it holds is hairline-separated, never boxes in boxes. Pair
    with .modal-strip-wrap/.modal-strip-scrim to dim what sits below it. ─── */
+/* Closed, the band is a thin seam between header and body and wants its rule.
+   Open, it is the surface in hand and ends in the scrim below it — a hairline
+   there only draws that edge twice. */
 .modal-strip {
   flex-shrink: 0;
   background: #fbfbfc;
   border-bottom: 1px solid #eee;
 }
+.modal-strip.open { border-bottom-color: transparent; }
 /* the two fold heads share everything but their padding */
 .strip-head,
 .disc-head {
