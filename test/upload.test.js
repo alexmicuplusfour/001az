@@ -34,7 +34,7 @@ globalThis.document = {
   dispatchEvent(ev) { for (const fn of listeners[ev.type] || []) fn(ev); return true; },
 };
 
-const { mergeUploadedRows } = await import("../public/upload.js");
+const { mergeUploadedRows, handleFiles } = await import("../public/upload.js");
 const { reconcile, hasPendingUploadTags } = await import("../public/data.js");
 const { state } = await import("../public/state.js");
 const { toItem } = await import("../public/utils.js");
@@ -74,4 +74,46 @@ test("reconcile: uploads parked in held complete the processing watcher", () => 
 
   reconcile([row(21, "held"), row(22, "held")]);
   assert.equal(hasPendingUploadTags(), false, "held = definition done — the toast clears");
+});
+
+// The toolbar's + button stopped uploading anything (drag-drop kept working).
+// `input.files` is LIVE: the change handler clears `value` right after calling
+// handleFiles — so the same file can be picked twice in a row — and that empties
+// the FileList object already handed over. handleFiles awaits the media-types
+// fetch before reading it, so by the time it looked there was nothing there and
+// it returned without a word: no request, no toast, no error. It now snapshots
+// the list synchronously, before the first await.
+test("handleFiles: clearing the live input right after the call still uploads", async () => {
+  state.items = [];
+  state.uploading = [];
+  state.boardId = 1;
+
+  // A FileList that empties in place the way the browser's does on `value = ""`.
+  const file = new File(["hello"], "notes.txt", { type: "text/plain", lastModified: 5 });
+  const live = [file];
+  live.clear = () => live.splice(0);
+
+  let sentNames = null;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).startsWith("/api/media-types")) {
+      return { ok: true, json: async () => [{ name: "doc", extensions: ["txt"], maxBytes: 10 * 1024 * 1024 }] };
+    }
+    sentNames = opts.body.getAll("files").map((v) => v.name ?? String(v));
+    return { ok: true, json: async () => ({ uploaded: [row(31, "held")] }) };
+  };
+
+  try {
+    const p = handleFiles(live);
+    live.clear(); // exactly what `elFileInput.value = ""` does to the list we passed
+    await p;
+    // handleFiles only queues — drain the worker before reading the result.
+    for (let i = 0; i < 50 && !state.items.length; i++) await new Promise((r) => setTimeout(r, 5));
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.notEqual(sentNames, null, "the upload request must still go out");
+  assert.deepEqual(sentNames, ["notes.txt"]);
+  assert.deepEqual(state.items.map((i) => i.id), [31], "and the row lands in the grid");
 });

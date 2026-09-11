@@ -67,8 +67,15 @@ function uploadGate(types) {
 }
 
 export async function handleFiles(fileList) {
+  // Snapshot BEFORE the first await. `input.files` is live: the change handler
+  // clears `value` right after calling us (so re-picking the same file fires
+  // change again), which empties that same FileList object in place. Reading
+  // it after awaiting the media-types fetch saw zero files and returned
+  // silently — the picker path did nothing at all, while drag-drop (whose
+  // DataTransfer list nobody clears) kept working.
+  const picked = [...fileList];
   const { accepts, limitFor } = uploadGate(await loadMediaTypes());
-  const files = [...fileList].filter(accepts);
+  const files = picked.filter(accepts);
   if (!files.length) return;
 
   if (!uploadStats) {
