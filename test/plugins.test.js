@@ -450,7 +450,7 @@ test("resolvers: a not-installed AI plugin drops out; fallbacks stay graceful", 
     await setSetting(db, "embed_enabled", "1");
     await setSetting(db, "embed_provider", "local");
     assert.equal((await resolveEmbedder(db)).provider, "local");
-    await setSetting(db, "embed_enabled", null);
+    await setSetting(db, "embed_enabled", "0");
     assert.equal(await resolveEmbedder(db), null, "off via the setting, not a removal");
   } finally {
     if (savedEnv !== undefined) process.env.ANTHROPIC_API_KEY = savedEnv;

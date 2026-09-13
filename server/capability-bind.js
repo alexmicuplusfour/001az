@@ -119,7 +119,10 @@ export async function bindCapability(db, capId, patch = {}) {
   if (patch.enabled !== undefined && keys.enabled) {
     if (patch.enabled && !(await resolveCapability(db, capId, { ignoreEnabled: true })))
       throw bad(`pick a provider for ${cap.noun} before turning it on`);
-    await setSetting(db, keys.enabled, patch.enabled ? "1" : null);
+    // "0", not null: null now means "no explicit choice, use the declared
+    // default" (capability-resolve.js enabledFor), so writing it to turn
+    // something off would turn an on-by-default capability straight back on.
+    await setSetting(db, keys.enabled, patch.enabled ? "1" : "0");
   }
 }
 

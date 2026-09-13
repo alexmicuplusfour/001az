@@ -63,6 +63,28 @@ async function disqualified(db, cap, provider) {
 }
 const usable = async (db, cap, provider) => ((await disqualified(db, cap, provider)) ? null : PROVIDERS[provider]);
 
+// Is this capability switched on? THREE states in one setting, which is why it
+// is a function and not a comparison at each call site:
+//
+//   "1"    on, because someone said so
+//   "0"    off, because someone said so
+//   null   neither — fall to what the capability declares (enabledDefault)
+//
+// The third used to be spelled the same as the second, and turning a capability
+// off wrote null. That was harmless only while every default was off; the
+// moment one declares itself on, "off" and "never touched" have to stop being
+// the same byte or the Turn-off button writes a value that reads as on.
+// Same shape as plugins.installed, and for the same reason.
+//
+// A capability with no enable flag is always on; asking is free and keeps the
+// callers from testing for the key first.
+async function enabledFor(db, cap) {
+  const key = cap.binding.keys?.enabled;
+  if (!key) return true;
+  const v = await getSetting(db, key);
+  return v == null ? !!cap.binding.enabledDefault : v === "1";
+}
+
 // The model in effect: the capability's own setting wins, else whatever the
 // provider declares as its default for that capability.
 async function modelFor(db, cap, desc) {
@@ -265,10 +287,9 @@ async function floorBinding(db, cap, board = null, storedProvider) {
 export async function resolveCapability(db, capId, { ignoreEnabled = false, board = null } = {}) {
   const cap = CAPABILITY[capId];
   if (!cap) return null;
-  const keys = cap.binding.keys;
-  // An `off` capability is gated before anything else is read: a disabled
-  // embedder must not resolve just because a key is still stored.
-  if (!ignoreEnabled && keys?.enabled && (await getSetting(db, keys.enabled)) !== "1") return null;
+  // A disabled capability is gated before anything else is read: it must not
+  // resolve just because a key is still stored.
+  if (!ignoreEnabled && !(await enabledFor(db, cap))) return null;
   const pinned = await boardBinding(db, cap, board);
   if (pinned.binding) return pinned.binding;
   if (pinned.miss) console.log(`board's pinned ${cap.noun} provider can't serve (${pinned.miss}) — falling back to the app default`);
@@ -356,7 +377,7 @@ export async function capabilityBinding(db, capId) {
   // A capability with no provider setting (tagging) still has a stored
   // provider — the key row's. Stored information, just stored in the row.
   if (!keys.provider && keyId) out.provider = (await getAiKey(db, keyId))?.provider || null;
-  if (keys.enabled) out.enabled = (await getSetting(db, keys.enabled)) === "1";
+  if (keys.enabled) out.enabled = await enabledFor(db, cap);
   return out;
 }
 

@@ -170,7 +170,19 @@ export const CAPABILITY_DEFS = [
     // has its own now (utils.js ICONS.embed).
     icon: "embed",
     declaredBy: "embed", verb: "embed", models: true,
-    binding: { keys: { provider: "embed_provider", keyId: "embed_key_id", model: "embed_model", enabled: "embed_enabled" }, boardKeys: null },
+    // ON out of the box. The enable flag exists because embedding a collection
+    // is work, and it used to be work that could cost MONEY — the default
+    // embedder was whatever key you bound. With the floor below naming the
+    // on-device engine, the bill is CPU: the model is baked into the image
+    // (Dockerfile), the sweep only touches items that are ALREADY TAGGED, and a
+    // fresh instance therefore embeds nothing until there is something to
+    // embed. A feature that is free, local and idle-by-nature should not need
+    // finding.
+    //
+    // Declared per capability rather than by flipping what an absent setting
+    // means everywhere: the next capability with an enable flag gets to decide
+    // for itself, and it has to say so here.
+    binding: { keys: { provider: "embed_provider", keyId: "embed_key_id", model: "embed_model", enabled: "embed_enabled" }, enabledDefault: true, boardKeys: null },
     // The on-device embedder, same as transcribe and detect name theirs. It is
     // `core` (always installed), in-process, keyless and free, so there is no
     // host where it is missing and nothing about naming it is a choice made on

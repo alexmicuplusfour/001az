@@ -345,8 +345,13 @@ test("board settings carry every pin column for the modal's pickers", async () =
 test("the resolver ignores a board for capabilities without board scope", async () => {
   assert.equal(CAPABILITY.embed.binding.boardKeys, null, "embed is global by declaration — one search index, one vector space");
   // A board fragment carrying nonsense columns changes nothing: embed has no
-  // board rung to read them.
-  assert.equal(await resolveCapability(db, "embed", { board: { embed_key_id: 424242 } }), null);
+  // board rung to read them. Said as an EQUALITY rather than as "resolves to
+  // nothing" — embed resolves to its floor now, and a test that reads null for
+  // two different reasons stops being able to tell which one it caught.
+  assert.deepEqual(
+    await resolveCapability(db, "embed", { board: { embed_key_id: 424242 } }),
+    await resolveCapability(db, "embed"),
+    "the board fragment made no difference at all");
 });
 
 // --- extraction's ladder (leaves global tag bound: keep last) ---

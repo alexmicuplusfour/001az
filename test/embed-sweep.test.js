@@ -255,7 +255,10 @@ async function withEmbedderEnabled(fn) {
   await setSetting(db, "embed_key_id", String(keyId));
   await setSetting(db, "embed_enabled", "1");
   try { await fn(); } finally {
-    await setSetting(db, "embed_enabled", null);
+    // "0", not null: null is "no choice made" and embed declares itself on, so
+    // clearing would leave the embedder running — and the assertions that
+    // follow these blocks are about the route with NO embedder.
+    await setSetting(db, "embed_enabled", "0");
     await setSetting(db, "embed_key_id", null);
   }
 }

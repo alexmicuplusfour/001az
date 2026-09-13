@@ -203,6 +203,9 @@ test("items expose memberships in other members' public crates", async () => {
 
 test("semantic search respects auth, board access, and the enabled flag", async () => {
   // Feature off: even a member gets 404 (indistinguishable from missing).
+  // Turned off explicitly — embed ships ON, so "off" is now a state a test has
+  // to ask for rather than one it inherits from an empty settings table.
+  await setSetting(db, "embed_enabled", "0");
   let r = await req(base, "GET", `/api/search?board=${boardA}&q=x`, { sid: member.sid });
   assert.equal(r.status, 404);
   r = await req(base, "GET", `/api/search?board=${boardA}&q=x`);
@@ -223,7 +226,7 @@ test("semantic search respects auth, board access, and the enabled flag", async 
     assert.equal(r.status, 200);
     assert.deepEqual(r.json.results, []);
   } finally {
-    await setSetting(db, "embed_enabled", null);
+    await setSetting(db, "embed_enabled", null); // back to the declared default
     await setSetting(db, "embed_key_id", null);
   }
 });

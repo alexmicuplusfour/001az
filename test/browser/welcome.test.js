@@ -310,9 +310,13 @@ test("the quiet section names them, marks them, and says what the feed says", as
   assert.equal(names.includes("Tagging"), false);
 
   // presentChip verbatim, not a fourth spelling of a state that already has
-  // one. On a host with no sidecars that is `unavailable`; embeddings are off.
+  // one. On a host with no sidecars the two engines read `unavailable`, while
+  // semantic search is already running on the built-in embedder it declares as
+  // its floor — which is what `active · built-in` means and why this row can
+  // say something true on an instance nobody has configured yet.
   const states = await page.locator(".w-other .w-state").allTextContents();
-  assert.ok(states.includes("off"), `the feed's own words, got: ${states.join(", ")}`);
+  assert.ok(states.includes("active · built-in"), `the feed's own words, got: ${states.join(", ")}`);
+  assert.ok(states.includes("unavailable"), `the feed's own words, got: ${states.join(", ")}`);
 
   assert.deepEqual(page.errors, []);
 });

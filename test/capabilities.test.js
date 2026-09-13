@@ -135,22 +135,36 @@ test("the floor kinds behave as declared", async (t) => {
   delete process.env.ANTHROPIC_API_KEY;
   t.after(() => { if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved; });
 
-  // builtin: always resolves, and says it came from the floor.
-  for (const id of ["transcribe", "detect"]) {
+  // builtin: always resolves, and says it came from the floor. `embed` is one
+  // of these now — its floor is the on-device embedder, same as the two
+  // sidecar-backed engines name theirs.
+  for (const id of ["transcribe", "detect", "embed"]) {
     const b = await resolveCapability(db, id);
     assert.equal(b.viaFloor, true, `${id}: unconfigured → floor`);
     assert.equal(b.provider, CAPABILITY[id].floor.provider);
   }
-  // off / blocked: nothing resolves, and the difference is what the caller does.
-  assert.equal(await resolveCapability(db, "embed"), null, "off until enabled");
+  // …and the enable flag is a SEPARATE gate, which is the distinction the old
+  // `{ kind: "off" }` floor blurred: the floor says who serves, the flag says
+  // whether anyone should. Explicit "0", because null is now "no choice made"
+  // and embed declares itself on.
+  await setSetting(db, "embed_enabled", "0");
+  assert.equal(await resolveCapability(db, "embed"), null, "the flag gates it, not the floor");
+  await setSetting(db, "embed_enabled", null);
+  assert.equal((await resolveCapability(db, "embed")).provider, "local", "…and unset falls to the declared default");
+
+  // blocked: nothing resolves, and the difference from the above is what the
+  // caller does with the nothing.
   assert.equal(await resolveCapability(db, "tag"), null, "blocked: work waits, it does not fail");
   // delegate: extraction has no global binding of its own and defers to tagging.
   assert.deepEqual(await resolveCapability(db, "extract"), await resolveCapability(db, "tag"));
 
   // The wrappers' null-vs-never-null contracts, which differ per capability.
+  // Embedding moved into the never-null group when it got a floor: all three
+  // capabilities with an on-device engine behind them always resolve, and the
+  // only one that can still answer nothing is the one whose floor is blocked.
   assert.ok(await resolveTranscriber(db), "transcription never fails to resolve");
   assert.ok(await resolveDetector(db), "detection never fails to resolve");
-  assert.equal(await resolveEmbedder(db), null);
+  assert.ok(await resolveEmbedder(db), "nor embedding, now that the built-in is its floor");
   assert.equal(await resolveDefaultAi(db), null);
 });
 
@@ -185,7 +199,13 @@ test("the status payload on a fresh instance — every default state, in one rea
   assert.equal(caps.detect.config[0].key, "detect_threshold");
   assert.equal(caps.detect.config[0].value, 0.3);
 
-  // Off by explicit flag; unavailable with the queue's depth attached.
+  // Semantic search is ON out of the box, served by the on-device embedder it
+  // declares as its floor — free, local, and idle until something is tagged.
+  assert.equal(caps.embed.state, "active");
+  assert.equal(caps.embed.viaFloor, true);
+  assert.equal(caps.embed.running.provider, "local");
+
+  // Tagging: unavailable, with the queue's depth attached.
   //
   // `unavailable` rather than `blocked` since Stage 4 (welcome-plan.md 4.4):
   // "needs a key" claims there is installed supply waiting on a credential, and
@@ -193,7 +213,6 @@ test("the status payload on a fresh instance — every default state, in one rea
   // all. The distinction is the whole reason the state machine has both words,
   // and retiring the pre-added vendor is what finally made the fresh instance
   // an honest example of the second one.
-  assert.equal(caps.embed.state, "off");
   assert.equal(caps.tag.state, "unavailable");
   assert.ok(caps.tag.demand.waiting >= 1, "the seeded pending item is counted");
   // The roster still NAMES what could serve it — that is how the reader learns
@@ -350,10 +369,14 @@ test("bind and probe are addressed by capability id, with the same rules the leg
   r = await req(srv.base, "POST", "/api/admin/capabilities/nonsense/probe", { sid: admin.sid });
   assert.equal(r.status, 400);
 
-  // Probing a capability with nothing bound reports the reason rather than 500.
+  // Probing a DISABLED capability reports the reason rather than 500. Turned
+  // off explicitly, because embed is on by default now — the path under test is
+  // the refusal, and it needs something refusing.
+  await setSetting(db, "embed_enabled", "0");
   r = await req(srv.base, "POST", "/api/admin/capabilities/embed/probe", { sid: admin.sid });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /not enabled/);
+  await setSetting(db, "embed_enabled", null);
 
   await setSetting(db, "transcribe_provider", null);
   await setSetting(db, "transcribe_key_id", null);
