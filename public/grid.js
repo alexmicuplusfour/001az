@@ -539,6 +539,21 @@ export function progressLane(progressItems) {
   return children;
 }
 
+// The two empty states are different sentences: a board with nothing in it is
+// not a filter result, and "No items match these filters" on a fresh board
+// blames filters that were never touched. state.items is the UNFILTERED set,
+// so it is the discriminant — the filtered list going empty while items exist
+// is the filters' doing. Exported so rows.js says the same thing (it already
+// borrows this file's cards and lane for the same reason).
+export function emptyNote() {
+  const e = document.createElement("div");
+  e.className = "empty";
+  e.textContent = state.items.length
+    ? "No items match these filters."
+    : "Nothing here yet — use + to add the first items.";
+  return e;
+}
+
 // key is passed in from app.js render() so grid.js doesn't need to import filterKey.
 export function renderGrid(key, progressItems, items) {
   if (key !== lastFilterKey) {
@@ -550,10 +565,7 @@ export function renderGrid(key, progressItems, items) {
   if (!items.length && !progressItems.length) {
     for (const { el } of cardCache.values()) stageObserver.unobserve(el);
     cardCache = new Map();
-    const e = document.createElement("div");
-    e.className = "empty";
-    e.textContent = "No items match these filters.";
-    elGrid.replaceChildren(e);
+    elGrid.replaceChildren(emptyNote());
     return;
   }
 

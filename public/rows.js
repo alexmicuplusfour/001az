@@ -9,7 +9,7 @@
 // boards, and remove; hearts/crates stay on the card — they reference
 // entities(id) in the schema.
 import { state } from './state.js';
-import { cardFor, cardSig, releaseCard, progressLane, pinWhileOpen } from './grid.js';
+import { cardFor, cardSig, releaseCard, progressLane, pinWhileOpen, emptyNote } from './grid.js';
 import { thumbUrl } from './kinds.js';
 import { openLightboxAt } from './lightbox.js';
 import { selectFace } from './face-select.js';
@@ -357,10 +357,7 @@ export function renderRows(key, progressItems, items) {
 
   if (!items.length && !progressItems.length) {
     dropAllRows();
-    const e = document.createElement("div");
-    e.className = "empty";
-    e.textContent = "No items match these filters.";
-    elGrid.replaceChildren(e);
+    elGrid.replaceChildren(emptyNote());
     return;
   }
 
