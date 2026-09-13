@@ -679,42 +679,27 @@ function tileFor(entry, slot, spares, face) {
   return img;
 }
 
-// The admin's empty state: a card-shaped <button> where the first board will
-// appear, wearing the real card's classes — the same dashed face an empty
-// board shows — so the grid sizes it exactly like the boards that will
-// follow it.
+// The admin's empty state: a dashed outline where the first board will
+// appear, a plus with the words under it in the middle. Deliberately NOT
+// dressed as a board card — it shipped for an hour wearing the real card's
+// classes and read as an existing empty board, which is exactly what an
+// empty board's own dashed face means. The outline sits on the button
+// itself: the dashes ARE the affordance, not a note inside a card.
 //
-// Deliberately NOT a .bc-wrap, and no data-board: wraps() means "the boards
-// on screen" and feeds the signals ticker's ready gate, the dots and the
+// Not a .bc-wrap either, and no data-board: wraps() means "the boards on
+// screen" and feeds the signals ticker's ready gate, the dots and the
 // arrangement PATCH. A placeholder leaking into that set would arm a poll
 // about nothing, and could save an arrangement containing undefined.
 function newBoardCard() {
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.className = "board-card bc-new";
-
-  const face = document.createElement("div");
-  face.className = "bc-face empty";
+  btn.className = "bc-new";
   const plus = document.createElement("span");
   plus.className = "bc-new-plus";
   plus.innerHTML = ICONS.plus;
-  face.appendChild(plus);
-
-  const name = document.createElement("div");
-  name.className = "bc-name";
-  name.textContent = "New board";
-  const count = document.createElement("span");
-  count.className = "bc-count";
-  // The welcome CTA's own footnote, carried to where the click actually lands.
-  count.textContent = "A board is where your taxonomy lives.";
-  const meta = document.createElement("div");
-  meta.className = "bc-meta";
-  meta.appendChild(count);
-  const body = document.createElement("div");
-  body.className = "bc-body";
-  body.append(name, meta);
-
-  btn.append(face, body);
+  const label = document.createElement("span");
+  label.textContent = "New board";
+  btn.append(plus, label);
   btn.addEventListener("click", createBoard);
   return btn;
 }

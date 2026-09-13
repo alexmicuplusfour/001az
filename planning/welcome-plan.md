@@ -83,7 +83,10 @@ otherwise:
   same modal (`createBoard`: one call, two doors, the toolbar button being
   the other). board-modal.js no longer loads on /welcome at all. The modal is
   still the creation surface; an abstracted create flow is its own future
-  arc.
+  arc. *Restyled the same day:* the first cut wore the real card's classes
+  and read as an existing empty board — white ground, shadow, dashed
+  rectangle inside. Now the dashed outline IS the button (darker than the
+  empty face's), plus and "New board" centered in it, no card chrome.
 
 Stage 2 is specified against a working prototype (eight revisions), and records
 what the design stopped being as well as what it is.

@@ -81,19 +81,19 @@ before(async () => {
   toolbar = byId["toolbar"];
 });
 
-test("an admin gets the first board's silhouette — a card that creates", () => {
+test("an admin gets the first board's silhouette — a button that creates", () => {
   assert.equal(grid.children.length, 1);
   const card = grid.children[0];
-  // A <button> in the real card's classes, so the grid sizes it like the
-  // boards that will follow. NOT a .bc-wrap and no data-board: wraps() means
-  // "the boards on screen", and dom-stub's document.querySelectorAll matches
-  // on the class precisely so a placeholder cannot answer for a card.
+  // A dashed outline, a plus, the words — and NONE of the board card's
+  // classes: dressed as one, it read as an existing empty board. Not a
+  // .bc-wrap and no data-board either: wraps() means "the boards on screen",
+  // and dom-stub's document.querySelectorAll matches on the class precisely
+  // so a placeholder cannot answer for a card.
   assert.equal(card.tag, "button");
-  assert.equal(card.className, "board-card bc-new");
-  const [face, body] = card.children;
-  assert.equal(face.className, "bc-face empty");
-  assert.equal(face.children[0].className, "bc-new-plus");
-  assert.equal(body.querySelector(".bc-name").textContent, "New board");
+  assert.equal(card.className, "bc-new");
+  const [plus, label] = card.children;
+  assert.equal(plus.className, "bc-new-plus");
+  assert.equal(label.textContent, "New board");
 });
 
 test("…and the toolbar still carries + New board beside it", () => {

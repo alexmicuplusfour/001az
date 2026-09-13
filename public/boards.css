@@ -141,37 +141,36 @@ main#boards-grid {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
 }
 
-/* The empty grid's "New board" card (boards.js newBoardCard): a <button> in
-   the real card's clothes. The reset undoes the UA button chrome that
-   .board-card — styled for an <a> — never had to deal with; the hover
-   restates .bc-wrap's lift and shadow because this card has no wrapper:
-   being no board, it takes no dot, no grip, no pencil, and must not be
-   counted by wraps(). */
+/* The empty grid's "New board" placeholder (boards.js newBoardCard). NOT a
+   board card — no white ground, no shadow: that is what an existing empty
+   board looks like. The dashed outline sits on the button itself, darker
+   than .bc-face.empty's #dcdce2, because here the dashes are the control
+   rather than a note inside one. The face's own ratio, so it takes one grid
+   cell at board proportions. */
 button.bc-new {
-  border: 0;
+  aspect-ratio: 4 / 3;
+  border: 1.5px dashed #b9bec9;
+  border-radius: 8px;
   padding: 0;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-button.bc-new:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
-}
-/* Centered in the dashed placeholder, in its colour: the face already says
-   "nothing here yet", and the plus only adds "…and this is where you start". */
-.bc-new-plus {
-  position: absolute;
-  inset: 0;
+  background: none;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #dcdce2;
+  gap: 10px;
+  font: inherit;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+button.bc-new:hover {
+  border-color: #7e8490;
+  color: #111;
 }
 .bc-new-plus svg {
   width: 30px;
   height: 30px;
+  display: block;
 }
 
 /* The card's controls: the rearrange grip (planning/board-arrangement-plan.md)
