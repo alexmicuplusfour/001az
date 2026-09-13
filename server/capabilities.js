@@ -41,7 +41,10 @@
 //   floor       what happens with no usable binding — see FLOORS below.
 //   modifierOf  a qualifier on another capability, not a slot of its own.
 
-// The floor kinds, all five of which exist in the tree today:
+// The floor kinds. Four are in use; `off` is declared and currently unused,
+// like `sibling` — both stay documented because the presenter renders any kind
+// the registry declares, which is what lets a new capability land without a
+// client edit.
 //   builtin   a registered provider with no wire; the engine is the sidecar
 //             adapter. Resolves whenever that engine is actually on this host
 //             — a sidecar-backed built-in (one whose descriptor declares
@@ -52,7 +55,10 @@
 //             is a runtime fact about the PROVIDER, so it is asked of the
 //             descriptor at resolution (capability-resolve.js) rather than
 //             declared as a second truth here.        (transcribe, detect)
-//   off       resolves to nothing until an enable flag is set.        (embed)
+//   off       resolves to nothing, full stop — for a capability that should go
+//             dark rather than fall anywhere. NOT how an enable flag works:
+//             that is `binding.keys.enabled`, read at the top of
+//             resolveCapability, and embed carries both.          (none today)
 //   blocked   resolves to nothing and work waits unserved — the queue requeues
 //             via noKeyError's noCount rather than failing.             (tag)
 //   delegate  falls back to another capability's binding.          (extract)
@@ -165,7 +171,21 @@ export const CAPABILITY_DEFS = [
     icon: "embed",
     declaredBy: "embed", verb: "embed", models: true,
     binding: { keys: { provider: "embed_provider", keyId: "embed_key_id", model: "embed_model", enabled: "embed_enabled" }, boardKeys: null },
-    floor: { kind: "off" },
+    // The on-device embedder, same as transcribe and detect name theirs. It is
+    // `core` (always installed), in-process, keyless and free, so there is no
+    // host where it is missing and nothing about naming it is a choice made on
+    // anyone's behalf — which is why this is a floor and not a seeded setting.
+    //
+    // This used to be `{ kind: "off" }`, which was answering the wrong
+    // question. The ENABLE GATE is `binding.keys.enabled`, enforced at the top
+    // of resolveCapability; the floor only ever answered "and who serves it
+    // when nothing is bound", where the honest answer was never "nobody". With
+    // no floor, a fresh instance could not turn semantic search ON at all: the
+    // enable button asks "would this resolve if it were on?" and refused with
+    // "pick a provider for embeddings before turning it on", so the one-click
+    // capability took a trip through the Local Embedder's plugin modal first.
+    // Still off until enabled — embedding a whole collection is opt-in.
+    floor: { kind: "builtin", provider: "local" },
     // The UI confirms before re-binding the model while enabled: vectors only
     // compare within a model, so a model change re-embeds the whole collection.
     // Copy lives here as data — the generic section renders a confirm for any

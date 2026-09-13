@@ -228,11 +228,19 @@ test("semantic search respects auth, board access, and the enabled flag", async 
   }
 });
 
-test("enabling semantic search requires an embeddings-capable key", async () => {
-  // No embed key configured → refuse to enable.
+test("enabling semantic search needs something that can embed — and the built-in is something", async (t) => {
+  // Nothing configured is no longer a refusal: the floor is the on-device
+  // embedder, so "would this resolve if it were on?" answers yes and the
+  // capability turns on in one click. It used to 400 with "pick a provider for
+  // embeddings before turning it on", which sent a fresh admin to a plugin
+  // modal to choose the only option there was.
+  t.after(() => req(base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { enabled: false } }));
   let r = await req(base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { enabled: true } });
-  assert.equal(r.status, 400);
-  // An anthropic key is not eligible either.
+  assert.equal(r.status, 200);
+
+  // What the refusal was actually FOR, and it still holds: a key that cannot
+  // embed is not eligible, however it is offered. The gate is the provider's
+  // own declaration, not whether anything at all is configured.
   const anthKey = await createAiKey(db, "anth", "anthropic", "sk-ant-test");
   r = await req(base, "POST", "/api/admin/capabilities/embed/bind", { sid: admin.sid, body: { keyId: anthKey, enabled: true } });
   assert.equal(r.status, 400);
