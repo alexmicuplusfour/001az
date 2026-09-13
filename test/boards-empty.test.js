@@ -3,11 +3,11 @@
 // accessible boards redirects here instead of rendering an item-scoped gallery
 // with no item scope).
 //
-// What it pins is that the empty state reads the SIGNED-IN USER, not just the
-// count. Both sentences are true of zero boards; only one is true of the person
-// looking at it, and the wrong one is worse than no sentence at all — an admin
-// told to "ask an admin for access" is being sent to themselves, past the "+ New
-// board" button in the corner of the same screen.
+// What it pins is that the empty state reads the SIGNED-IN USER, not just
+// the count. A member with no boards is waiting on someone else, so they get
+// a sentence; an admin gets the placeholder card that CREATES — and the
+// wrong one is worse than nothing at all: an admin told to "ask an admin for
+// access" is being sent to themselves.
 //
 // Two readers means two boots, and the page reads `me` once at module scope —
 // so this is a second FILE rather than a second test in boards-page.test.js.
@@ -81,16 +81,25 @@ before(async () => {
   toolbar = byId["toolbar"];
 });
 
-test("an admin is pointed at the button they already have", () => {
+test("an admin gets the first board's silhouette — a card that creates", () => {
   assert.equal(grid.children.length, 1);
-  const note = grid.children[0];
-  assert.equal(note.className, "boards-note");
-  assert.equal(note.textContent, "No boards yet — use + New board to make the first one.");
+  const card = grid.children[0];
+  // A <button> in the real card's classes, so the grid sizes it like the
+  // boards that will follow. NOT a .bc-wrap and no data-board: wraps() means
+  // "the boards on screen", and dom-stub's document.querySelectorAll matches
+  // on the class precisely so a placeholder cannot answer for a card.
+  assert.equal(card.tag, "button");
+  assert.equal(card.className, "board-card bc-new");
+  const [face, body] = card.children;
+  assert.equal(face.className, "bc-face empty");
+  assert.equal(face.children[0].className, "bc-new-plus");
+  assert.equal(body.querySelector(".bc-name").textContent, "New board");
 });
 
-test("…and that button is genuinely on the page the sentence describes", () => {
-  // The copy names a control by its label; if the header ever stops rendering
-  // it, the sentence becomes a lie and this fails with the reason attached.
+test("…and the toolbar still carries + New board beside it", () => {
+  // The standing control, not the invitation: the placeholder is the empty
+  // state's door and leaves with it, while this button stays for every later
+  // board. Two doors on one screen is the design, not a leftover.
   const auth = toolbar.children.find((c) => c.className === "auth");
   const labels = auth.children.map((c) => c.innerHTML || "");
   assert.ok(labels.some((h) => h.includes("New board")), "header carries + New board");

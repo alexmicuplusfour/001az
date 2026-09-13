@@ -17,7 +17,6 @@
 import { api } from "./api.js";
 import { userMenuButton } from "./user-menu.js";
 import { ICONS, glyphEl } from "./utils.js";
-import { openBoardModal } from "./board-modal.js";
 import { busy } from "./modal.js";
 import { presentChip } from "./capability-present.js";
 
@@ -397,12 +396,12 @@ function settled(running) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.textContent = "Make your first board";
-  btn.addEventListener("click", () =>
-    openBoardModal(null, {
-      canEditAI: true,
-      onSaved: (saved) => { location.href = `/?board=${encodeURIComponent(saved.id)}`; },
-    })
-  );
+  // A door, not a dialog. The board modal used to open right here, and a
+  // first-run screen ending in the app's densest dialog is a jump cut. The
+  // button lands on the boards page instead, where the empty grid's own
+  // "New board" card (boards.js newBoardCard) picks the thread up — and
+  // board-modal.js stops loading on this page at all.
+  btn.addEventListener("click", () => { location.href = "/boards"; });
   const note = document.createElement("span");
   note.className = "w-next-note";
   note.textContent = "A board is where your taxonomy lives.";

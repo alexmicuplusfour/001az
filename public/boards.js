@@ -118,6 +118,19 @@ function announceGone() {
   history.replaceState(null, "", location.pathname + (rest ? `?${rest}` : ""));
 }
 
+// Creating a board, from either of its two doors — the toolbar's "+ New
+// board" and the empty grid's placeholder card. Landing in the new board is
+// part of the meaning: it is where you'd go next anyway. A declaration, not a
+// const: the boot block runs during module evaluation and renderToolbar wires
+// this synchronously — the same TDZ hazard the arrangement state at the top
+// of the file spells out.
+function createBoard() {
+  openBoardModal(null, {
+    canEditAI: true,
+    onSaved: (saved) => { location.href = `/?board=${encodeURIComponent(saved.id)}`; },
+  });
+}
+
 // --- toolbar: row 1 only, logo left, user menu right ---
 
 function renderToolbar() {
@@ -130,19 +143,13 @@ function renderToolbar() {
   const auth = document.createElement("div");
   auth.className = "auth"; // margin-left:auto pushes it to the right edge
 
-  // Creating a board is a global-admin power (POST /api/admin/boards), same as
-  // the gallery dropdown's footer action — and it lands you in the new board,
-  // which is where you'd go next anyway.
+  // Creating a board is a global-admin power (POST /api/admin/boards), same
+  // as the gallery dropdown's footer action.
   if (me.is_admin) {
     const newBtn = document.createElement("button");
     newBtn.className = "tool-btn";
     newBtn.innerHTML = ICONS.plus + "<span>New board</span>";
-    newBtn.addEventListener("click", () =>
-      openBoardModal(null, {
-        canEditAI: true,
-        onSaved: (saved) => { location.href = `/?board=${encodeURIComponent(saved.id)}`; },
-      })
-    );
+    newBtn.addEventListener("click", createBoard);
     auth.appendChild(newBtn);
   }
 
@@ -190,7 +197,7 @@ async function setupStrip() {
   door.href = "/welcome";
   // Named for the destination, not the reader's situation: "Finish setup" is
   // right for someone who skipped and wrong for someone whose key died
-  // yesterday. Both land on the page the user menu also calls Setup.
+  // yesterday.
   door.textContent = "Setup →";
 
   const strip = document.getElementById("setup-strip");
@@ -215,14 +222,15 @@ async function render() {
     return;
   }
   if (!boards.length) {
-    // Who is reading decides what nothing means. A member is waiting on someone
-    // else; an admin is looking at a button they already have — telling them to
-    // ask an admin, with "+ New board" in the corner of the same screen, reads
-    // as the page not knowing who signed in. This is also the first screen of a
-    // fresh instance, since a boardless landing now arrives here (app.js).
-    grid.replaceChildren(note(me.is_admin
-      ? "No boards yet — use + New board to make the first one."
-      : "No boards yet — ask an admin for access."));
+    // Who is reading decides what nothing means. A member is waiting on
+    // someone else, so they get a sentence. An admin gets the first board's
+    // own silhouette — a card that creates — rather than a sentence pointing
+    // at the corner button: this is the first screen of a fresh instance
+    // (a boardless landing arrives here, and so does the welcome screen's
+    // "Make your first board"), and the empty state IS the invitation.
+    grid.replaceChildren(me.is_admin
+      ? newBoardCard()
+      : note("No boards yet — ask an admin for access."));
     return;
   }
   // The response IS the reader's arrangement — the server sorts it (server.js
@@ -669,6 +677,46 @@ function tileFor(entry, slot, spares, face) {
     }
   });
   return img;
+}
+
+// The admin's empty state: a card-shaped <button> where the first board will
+// appear, wearing the real card's classes — the same dashed face an empty
+// board shows — so the grid sizes it exactly like the boards that will
+// follow it.
+//
+// Deliberately NOT a .bc-wrap, and no data-board: wraps() means "the boards
+// on screen" and feeds the signals ticker's ready gate, the dots and the
+// arrangement PATCH. A placeholder leaking into that set would arm a poll
+// about nothing, and could save an arrangement containing undefined.
+function newBoardCard() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "board-card bc-new";
+
+  const face = document.createElement("div");
+  face.className = "bc-face empty";
+  const plus = document.createElement("span");
+  plus.className = "bc-new-plus";
+  plus.innerHTML = ICONS.plus;
+  face.appendChild(plus);
+
+  const name = document.createElement("div");
+  name.className = "bc-name";
+  name.textContent = "New board";
+  const count = document.createElement("span");
+  count.className = "bc-count";
+  // The welcome CTA's own footnote, carried to where the click actually lands.
+  count.textContent = "A board is where your taxonomy lives.";
+  const meta = document.createElement("div");
+  meta.className = "bc-meta";
+  meta.appendChild(count);
+  const body = document.createElement("div");
+  body.className = "bc-body";
+  body.append(name, meta);
+
+  btn.append(face, body);
+  btn.addEventListener("click", createBoard);
+  return btn;
 }
 
 function note(text) {

@@ -259,6 +259,14 @@ test("Connect runs the three calls, and only then does a board become the next s
   // reads as the page not having noticed what just happened.
   assert.equal(await page.locator(".w-foot").isVisible(), false);
 
+  // The button is a DOOR, not a dialog: it lands on the boards page, where the
+  // empty grid's "New board" card picks the thread up. The board modal used to
+  // open right here — a first-run screen ending in the app's densest dialog —
+  // and board-modal.js no longer loads on this page at all.
+  await page.locator("#w-next button").click();
+  await page.waitForURL(/\/boards$/, { timeout: 15000 });
+  await page.locator("button.bc-new").waitFor({ timeout: 15000 });
+
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
 });

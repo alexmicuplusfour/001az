@@ -141,6 +141,39 @@ main#boards-grid {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
 }
 
+/* The empty grid's "New board" card (boards.js newBoardCard): a <button> in
+   the real card's clothes. The reset undoes the UA button chrome that
+   .board-card — styled for an <a> — never had to deal with; the hover
+   restates .bc-wrap's lift and shadow because this card has no wrapper:
+   being no board, it takes no dot, no grip, no pencil, and must not be
+   counted by wraps(). */
+button.bc-new {
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+button.bc-new:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+/* Centered in the dashed placeholder, in its colour: the face already says
+   "nothing here yet", and the plus only adds "…and this is where you start". */
+.bc-new-plus {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #dcdce2;
+}
+.bc-new-plus svg {
+  width: 30px;
+  height: 30px;
+}
+
 /* The card's controls: the rearrange grip (planning/board-arrangement-plan.md)
    and the manage pencil, as a hover-revealed cluster in the top-right corner.
 
@@ -297,6 +330,7 @@ img.bc-thumb {
 
 @media (prefers-reduced-motion: reduce) {
   .bc-wrap,
+  .bc-new,
   .bc-thumb {
     transition: none;
   }

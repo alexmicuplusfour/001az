@@ -74,6 +74,16 @@ otherwise:
   by the fix, the flip is conditioned on the operator's own env, it grew a
   migration, and its second bullet is **deleted** — Stage 3b already ships that
   sentence, 20px higher on the same page.
+- **2026-09-13, the CTA handoff moved (post-ship).** "Make your first board"
+  opened the board modal on the welcome screen itself — the app's densest
+  dialog as the closing shot of a guided first run, and exactly the stall the
+  out-of-scope list predicted. The button is now a navigation to `/boards`,
+  where an admin's empty grid renders a card-shaped placeholder — the real
+  card's classes, the empty face's dashed rectangle, a plus — that opens the
+  same modal (`createBoard`: one call, two doors, the toolbar button being
+  the other). board-modal.js no longer loads on /welcome at all. The modal is
+  still the creation surface; an abstracted create flow is its own future
+  arc.
 
 Stage 2 is specified against a working prototype (eight revisions), and records
 what the design stopped being as well as what it is.
@@ -722,6 +732,12 @@ lands. Progressive disclosure with teeth: the step is absent, not disabled.
 On success the title flips to **"Model connected"** and the footnote to
 **"Change it any time from Setup"** — which is also where the re-entry question
 (Stage 3a) gets answered, at the moment the reader would wonder about it.
+
+> **2026-09-13, since shipping:** the button NAVIGATES to `/boards` now — the
+> modal-in-place was a jump cut, and the boards page's empty grid carries a
+> placeholder card that opens it instead (see the ledger entry). And with
+> Stage 3a reversed there is no Setup to point at: the footnote reads "Change
+> it any time from Admin → Capabilities."
 
 #### 2.5 The rest of the capabilities: named, marked, and collapsed
 
@@ -1555,7 +1571,10 @@ exist, or a page nothing routes to, are each worse than today.
   screen ends by opening the existing board modal, and that is where a first
   admin actually has to write a taxonomy — the product's main feature, on a
   large surface whose headline is not "write your tags". If first-run stalls
-  anywhere after this ships, it stalls there.
+  anywhere after this ships, it stalls there. **2026-09-13: half-taken** —
+  the button lands on the boards page and its placeholder card opens the
+  modal, so the seam for an abstracted create flow exists (`createBoard`),
+  but the modal is still what opens.
 - **Closed: re-gating.** The zero-boards rung (Stage 1.2) settles it — new
   gets the redirect, broken gets the strip, and no second stored bit is
   needed. It also happens to be the thing that keeps `/api/me` cheap.
