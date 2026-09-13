@@ -113,7 +113,22 @@ export function layoutGrid() {
     card.style.top  = (pt + heights[col]) + "px";
     heights[col] += h + GAP;
   }
-  elGrid.style.height = (pt + Math.max(...heights) - GAP + pb) + "px";
+  let h = pt + Math.max(...heights) - GAP + pb;
+  // The scrollbar takes width, this layout reads that width, and the height
+  // stamped here decides whether the scrollbar exists. A board whose stack
+  // lands within a whisker of the fold has no consistent answer: at full
+  // width it overflows, minus the scrollbar it fits, so each relayout
+  // toggled the scrollbar and the next one measured the other width —
+  // forever, 20s apart. The escape is that the disagreement is only ever a
+  // few px tall: a stack that would scroll ONLY into its own bottom padding
+  // is clamped to exactly fit instead. Near-the-fold boards keep full width
+  // and no scrollbar, with the difference absorbed by padding (at least
+  // 20px of it always survives); boards clearly past the fold are past the
+  // clamp's reach and scroll exactly as before. Floor, because a stamped
+  // height a fraction over the room still rounds up into a scrollbar.
+  const room = Math.floor(window.innerHeight - (elGrid.getBoundingClientRect().top + window.scrollY));
+  if (h > room && h - room < pb - 20) h = room;
+  elGrid.style.height = h + "px";
 }
 
 export function scheduleLayout() {
@@ -617,7 +632,15 @@ const sentinelObserver = new IntersectionObserver(
 sentinelObserver.observe(elGridSentinel);
 
 export function initGrid() {
-  window.addEventListener("resize", scheduleLayout);
+  // The width layoutGrid reads is the html element's content box, and that
+  // box changes twice as often as the window does: on real resizes, and when
+  // the page scrollbar comes or goes — which fires no resize event. Observe
+  // the box itself, so a scrollbar toggle relays out now, not at the next
+  // 20s signals tick (that lag is what made the old flap visible as a slow
+  // dance). With the fit clamp above, every board reaches a state where the
+  // stamped height and the scrollbar agree, so this observer goes quiet
+  // after at most one extra pass.
+  new ResizeObserver(scheduleLayout).observe(document.documentElement);
 }
 
 export function visibleGridItems() {
