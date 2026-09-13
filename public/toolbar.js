@@ -232,7 +232,9 @@ function openBoardPop(anchorEl) {
         icon: ICONS.plus,
         onClick: () => {
           close();
-          openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}`; } });
+          // &created=1: the arrival page says the toast — this one dies with
+          // the navigation (app.js consumes it).
+          openBoardModal(null, { canEditAI: true, onSaved: (saved) => { location.href = `/?board=${saved.id}&created=1`; } });
         },
       }));
     },

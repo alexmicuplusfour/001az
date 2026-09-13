@@ -19,6 +19,7 @@ import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
 import { restoreOdds, restoreClusters, restoreMeaningClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
+import { toast } from './toast.js';
 
 const elGridRoot = document.getElementById("grid");
 
@@ -221,6 +222,18 @@ async function main() {
   // (openAlertEvent renders when the fetch lands); ?item= opens the lightbox
   // on an entity — which may still be draining in, so keep looking as pages
   // append until it shows up (or the board is done streaming without it).
+  // Arrival from "New board" (toolbar.js): the modal's own created toast can
+  // never outlive the navigation that follows it, so the confirmation rides
+  // the URL and is said HERE, on the page the reader is actually looking at.
+  // One-shot like ?item= and the boards page's ?gone= — consumed, so a reload
+  // or a shared link doesn't congratulate twice.
+  if (params.has("created")) {
+    toast(`Board "${state.boardName}" created`);
+    const url = new URL(location.href);
+    url.searchParams.delete("created");
+    history.replaceState(null, "", url.pathname + url.search);
+  }
+
   const eventId = Number(params.get("event"));
   if (eventId) openAlertEvent(eventId);
   const itemId = Number(params.get("item"));
