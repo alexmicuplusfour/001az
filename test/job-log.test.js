@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { startServer, seedBoard, seedUser, adminSession, req } from "./helpers.js";
+import { startServer, seedBoard, seedUser, adminSession, req, primeSidecars } from "./helpers.js";
 import {
   addJobLog,
   stampJobLog,
@@ -41,6 +41,14 @@ before(async () => {
   root = fs.mkdtempSync(path.join(srv.galleryDir, "..", "ingest-root-"));
   process.env.INGEST_ROOT = root;
   process.env.POLL_MS = "50";
+  // This file's world HAS a transcriber — its whole transcribe section stubs
+  // one. Say so, rather than letting it be inferred: the stub answers every GET
+  // with a finished transcription, so a /health probe used to land in it and
+  // read as presence by accident. Nothing probes lazily any more
+  // (sidecar-presence-latency-plan.md), so the accident is gone and the claim
+  // has to be made — which is what primeSidecars is for, and why its own
+  // comment wanted the probe OUT of these stubs' call ledgers in the first place.
+  primeSidecars();
 });
 after(async () => {
   delete process.env.INGEST_ROOT;

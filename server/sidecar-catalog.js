@@ -27,42 +27,65 @@ const sidecars = () => Object.entries(PROVIDERS).filter(([, d]) => d.liveCatalog
 // the address is stated once and a redeploy can't move one and not the other.
 export const sidecarUrl = (provider) => PROVIDERS[provider]?.liveCatalog?.url() || null;
 
-// ONE /health read per sidecar, cached ~60s — failures included, so an admin
-// page reload doesn't re-time-out against a down sidecar on every hit. Every
-// reader shares it (the catalogs below, the capabilities page's running line,
-// the probe toast, presence below), so a request costs at most one round trip
-// per engine.
+// What each sidecar last said, as a plain value: the /health body, or null for
+// "did not answer". NOT a promise and NOT a TTL — reading this map never
+// touches the network, which is the whole point (sidecar-presence-latency-plan.md).
 //
-// The cache holds the probe's PROMISE, stamped at probe start: presence put
-// this on the resolution hot path (one ask per claimed item), where concurrent
-// cache misses against a down-but-routing host would otherwise each burn the
-// full 2s timeout instead of sharing one.
+// It used to be a lazy cache: first reader after a 60s expiry paid the probe,
+// and since the readers are all admin routes and the resolution hot path, that
+// reader was always a page. Against a host that ACCEPTS and never answers — a
+// compose hostname whose service was excluded from the stack — that is the
+// full 2s budget below, measured at 2075ms on the capabilities feed and
+// 2015ms on the single-capability route the boards strip uses, which has no
+// sidecar of its own to wait for.
+//
+// So absence stopped being something a request discovers. The watch loop at the
+// bottom of this file is the only thing that ever probes; everyone else reads
+// what it left. An entry that is MISSING (nothing probed yet) reads exactly
+// like one that is null: absent. That is the safe direction — the resolver
+// treats an absent floor as blocked, so the item waits and requeues rather than
+// failing — and startSidecarWatch() awaits its first sweep before the listener
+// opens, so in a real server there is no unprobed window to fall into.
 const health = new Map();
+
+// Async, though it no longer awaits anything: every caller is already `await`ing
+// it and the signature is what keeps this change from touching six call sites.
 export async function sidecarHealth(provider) {
-  const url = sidecarUrl(provider);
-  if (!url) return null;
-  const hit = health.get(provider);
-  if (hit && Date.now() - hit.at < 60000) return hit.body;
-  const body = (async () => {
-    try {
-      const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return await res.json();
-      // Drain the refused body: an abandoned one holds its socket until GC.
-      await res.body?.cancel();
-      return null;
-    } catch { return null; /* down/unreachable — callers fall back */ }
-  })();
-  health.set(provider, { at: Date.now(), body });
-  return body;
+  if (!sidecarUrl(provider)) return null;
+  return health.get(provider) ?? null;
 }
 
-// Tests flip presence mid-file (a stand-in box goes down, an env URL moves) and
-// the TTL would otherwise carry the stale answer across that line. `seed` is
-// its twin: state what an engine reports without standing one up, for tests
-// that drive an engine's protocol through their own fetch stub and must not
-// have a /health probe land in that stub's call ledger.
+// ONE /health read, with the budget every reader used to pay inline.
+async function probe(provider) {
+  try {
+    const res = await fetch(`${sidecarUrl(provider)}/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) return await res.json();
+    // Drain the refused body: an abandoned one holds its socket until GC.
+    await res.body?.cancel();
+    return null;
+  } catch { return null; /* down/unreachable — callers fall back */ }
+}
+
+// Every engine at once. Concurrent because a host missing both sidecars must
+// cost one timeout rather than two — the only place that reasoning still lives,
+// now that no request is behind it. Exported for the watch below and for tests
+// that stand up real stand-in boxes and want the map to reflect them.
+export async function sweepSidecars() {
+  const names = sidecars().map(([name]) => name);
+  const bodies = await Promise.all(names.map(probe));
+  names.forEach((name, i) => health.set(name, bodies[i]));
+  return health;
+}
+
+// Tests flip presence mid-file (a stand-in box goes down, an env URL moves).
+// `seed` is its twin: state what an engine reports without standing one up, for
+// tests that drive an engine's protocol through their own fetch stub and must
+// not have a /health probe land in that stub's call ledger. Both are plain
+// writes to the map above — with no lazy fetch behind it, what a fixture puts
+// in is exactly what every reader sees, for as long as it sits there. The TTL
+// that used to expire mid-file under CI load is gone with the laziness.
 export const clearSidecarHealth = () => health.clear();
-export const seedSidecarHealth = (provider, body) => health.set(provider, { at: Date.now(), body });
+export const seedSidecarHealth = (provider, body) => health.set(provider, body);
 
 // Is the engine actually on this machine? true/false for a sidecar-backed
 // provider, null for anything else — so callers ask unconditionally, the
@@ -74,17 +97,14 @@ export async function sidecarPresent(provider) {
   return !!(await sidecarHealth(provider));
 }
 
-// Presence for EVERY sidecar-backed engine at once, probed concurrently — the
-// sidecarCatalogs shape, for the same reason: a serial reader (the
-// capabilities feed walks its entries one by one) must pay one cold-cache
-// timeout for N down engines, not N. Callers that then ask per provider hit
-// the warmed cache.
+// Presence for EVERY sidecar-backed engine at once — the shape the capabilities
+// feed wants, so it can walk its entries serially without asking per engine.
+// A read of held state now; it used to be the one concurrent probe round that
+// the whole feed's latency hung on.
 //
-// Built out of sidecarPresent, not out of sidecarHealth: "present" is defined
-// once, above, so the resolver's floor gate and the admin card can never come
-// to different conclusions about the same engine. Concurrency is unaffected —
-// sidecarHealth starts its fetch before it yields, so every probe is in flight
-// before the first await here.
+// Still built out of sidecarPresent rather than the map directly: "present" is
+// defined once, above, so the resolver's floor gate and the admin card can
+// never come to different conclusions about the same engine.
 export const sidecarPresenceMap = async () =>
   new Map(await Promise.all(
     sidecars().map(async ([name]) => [name, (await sidecarPresent(name)) ?? false])));
@@ -116,7 +136,7 @@ function catalogOf(body, note) {
 // descriptor's own declaration, and a picker that offers only what was
 // reported hides rather than offering a model that may not serve. A board's
 // stored pin is untouched either way — the choice hides, it is never destroyed.
-// Probed concurrently: two down sidecars must cost one timeout, not two.
+// Reads what the watch left; the Promise.all is now just shape, not latency.
 export async function sidecarCatalogs() {
   const entries = sidecars();
   const bodies = await Promise.all(entries.map(([name]) => sidecarHealth(name)));
@@ -140,4 +160,56 @@ export function applySidecarCatalogs(live, holderFor) {
     const holder = holderFor(provider);
     if (holder) holder.provides = { ...holder.provides, [cap]: catalog };
   }
+}
+
+// --- the watch ---
+//
+// The only thing in this process that probes. Started by server.js inside its
+// `isMain` block, beside startWorker — which is the seam that already means
+// "a real server process, never a test": under test the module is imported for
+// its app/db exports and nothing in that block runs, so the map stays whatever
+// a fixture put in it and no stray /health lands in anyone's call ledger.
+//
+// The loop shape is worker.js's, not a setInterval: sleep in a timeout that a
+// wake() can cut short, and re-check the flag after waking so stop() is prompt.
+// The timer is unref'd — the listener is what should hold the process open, and
+// a watch that outlives it would be the only thing keeping a shut-down server
+// alive for up to one interval.
+let watching = false;
+let wake = null;
+
+// Returns the FIRST sweep, so the caller can await it before opening a
+// listener: boot pays one probe round — 2s on a host with neither engine, with
+// nobody waiting on it — and every request afterwards reads a filled map. That
+// await is what makes "nobody waits" an invariant rather than a race won by
+// warming the cache in time.
+export function startSidecarWatch() {
+  if (watching) return Promise.resolve(health);
+  watching = true;
+  // Read at START, the POLL_MS convention — so the cadence is a property of
+  // this run rather than of when the module happened to be imported.
+  const WATCH_MS = Number(process.env.SIDECAR_WATCH_MS) || 30000;
+  const first = sweepSidecars().then((m) => {
+    const said = sidecars().map(([n]) => `${n} ${m.get(n) ? "up" : "absent"}`).join(", ");
+    if (said) console.log(`sidecars: ${said} (re-probed every ${Math.round(WATCH_MS / 1000)}s)`);
+    return m;
+  });
+  (async () => {
+    await first;
+    while (watching) {
+      await new Promise((r) => {
+        const t = setTimeout(r, WATCH_MS);
+        t.unref?.();
+        wake = () => { clearTimeout(t); r(); };
+      });
+      if (!watching) break;
+      await sweepSidecars(); // probe() swallows its own failures; a sweep cannot reject
+    }
+  })();
+  return first;
+}
+
+export function stopSidecarWatch() {
+  watching = false;
+  wake?.();
 }

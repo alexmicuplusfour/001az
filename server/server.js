@@ -155,7 +155,7 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmb
 // module, imported here the same way the test suite imports public modules.
 import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
 import { halvesOf, wireEntry } from "../public/facet-match.js";
-import { sidecarCatalogs, applySidecarCatalogs } from "./sidecar-catalog.js";
+import { sidecarCatalogs, applySidecarCatalogs, startSidecarWatch, stopSidecarWatch } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
 import { testKey, embedTexts, providerCatalog, cachedProviderModels, invalidateModelListCache, PROVIDERS } from "./providers.js";
@@ -3561,6 +3561,13 @@ app.use((err, _req, res, _next) => {
 // tagging worker stays off.
 const isMain = import.meta.url === pathToFileURL(process.argv[1] || "").href;
 if (isMain) {
+  // Probe the sidecars ONCE before anything can ask, then keep it swept in the
+  // background (sidecar-presence-latency-plan.md). Awaited deliberately: on a
+  // host that excludes an engine this costs the /health budget, and boot is the
+  // one moment when paying it costs nobody anything — a request that arrives
+  // after the listener opens then reads held state instead of discovering
+  // absence by timeout, which is what it used to do every 60s, forever.
+  await startSidecarWatch();
   const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   });
@@ -3589,6 +3596,7 @@ if (isMain) {
     shuttingDown = true;
     console.log(`${signal}: shutting down`);
     const drained = stopWorker();
+    stopSidecarWatch();
     server.close();
     for (const res of logClients) res.end();
     server.closeAllConnections();

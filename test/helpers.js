@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import http from "node:http";
+import net from "node:net";
 import { fileURLToPath } from "node:url";
 import {
   createUser,
@@ -26,7 +27,7 @@ import {
 // ?bust= query, but query strings don't propagate to its bare imports, so
 // sidecar-catalog.js (like worker.js and db.js) resolves once and is shared by
 // every bust and every static test import. Clearing here clears the app's.
-import { clearSidecarHealth, seedSidecarHealth } from "../server/sidecar-catalog.js";
+import { clearSidecarHealth, seedSidecarHealth, sweepSidecars } from "../server/sidecar-catalog.js";
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
@@ -273,6 +274,36 @@ export function jsonBox(payload, { status = 200, delay = 0 } = {}) {
   return new Promise((resolve) => box.listen(0, "127.0.0.1", () => resolve(box)));
 }
 
+// A host that ACCEPTS and never answers — which is what a compose hostname
+// whose service was excluded from the stack actually does, and the one kind of
+// absence the dead-port default above cannot imitate: a closed port is REFUSED
+// instantly, so it costs nothing and hides every latency bug behind itself.
+// That is why 1,523 tests never noticed the /health budget being paid on the
+// request path (sidecar-presence-latency-plan.md, Why now).
+//
+// Returns `close()`, which also restores the dead-port defaults. Sockets are
+// left hanging deliberately — unref'd so a forgotten one cannot hold the
+// process open, and destroyed on close.
+export async function hangingSidecars() {
+  const sockets = [];
+  const box = net.createServer((s) => { sockets.push(s); });
+  box.unref();
+  await new Promise((r) => box.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${box.address().port}`;
+  process.env.TRANSCRIBER_URL = url;
+  process.env.OBJECT_DETECTOR_URL = url;
+  return {
+    url,
+    close: async () => {
+      process.env.TRANSCRIBER_URL = DEAD_SIDECAR;
+      process.env.OBJECT_DETECTOR_URL = DEAD_SIDECAR;
+      clearSidecarHealth();
+      for (const s of sockets) s.destroy();
+      await new Promise((r) => box.close(r));
+    },
+  };
+}
+
 // What a healthy host's sidecars report on /health, keyed by provider name —
 // ONE statement of it, so the two fixtures below can't drift into describing
 // different machines.
@@ -302,13 +333,18 @@ export async function sidecarsUp() {
   ]);
   process.env.TRANSCRIBER_URL = whisper.url();
   process.env.OBJECT_DETECTOR_URL = detector.url();
-  clearSidecarHealth();
+  // A SWEEP, not a clear. Nothing probes lazily any more
+  // (sidecar-presence-latency-plan.md): the health map is filled by the watch
+  // loop, which a test never starts, so clearing it would leave both engines
+  // reading absent no matter what these boxes answer. One sweep here is the
+  // fixture stating "and now the app has seen them".
+  await sweepSidecars();
   return {
     whisper, detector,
     close: async () => {
       process.env.TRANSCRIBER_URL = DEAD_SIDECAR;
       process.env.OBJECT_DETECTOR_URL = DEAD_SIDECAR;
-      clearSidecarHealth();
+      clearSidecarHealth(); // empty reads absent — no sweep needed to say "gone"
       await Promise.all([whisper, detector].map((b) => new Promise((r) => b.close(r))));
     },
   };
