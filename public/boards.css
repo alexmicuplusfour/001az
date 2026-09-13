@@ -145,20 +145,17 @@ main#boards-grid {
    board card — no white ground, no shadow: that is what an existing empty
    board looks like. The dashed outline sits on the button itself, darker
    than .bc-face.empty's #dcdce2, because here the dashes are the control
-   rather than a note inside one. The face's own ratio, so it takes one grid
-   cell at board proportions. */
+   rather than a note inside one. Its SIZE is a real card's, exactly: the
+   invisible ghost inside carries a card's own face and body, so the height
+   falls out of the same rules the neighbouring cards will use. */
 button.bc-new {
-  aspect-ratio: 4 / 3;
+  position: relative;
   border: 1.5px dashed #b9bec9;
   border-radius: 8px;
   padding: 0;
   background: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
   font: inherit;
+  text-align: left;
   color: var(--text-dim);
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s;
@@ -166,6 +163,20 @@ button.bc-new {
 button.bc-new:hover {
   border-color: #7e8490;
   color: #111;
+}
+/* Laid out, never painted — and hidden from the accessibility tree, which
+   only ever hears the visible label. */
+.bc-new-ghost {
+  visibility: hidden;
+}
+.bc-new-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
 }
 .bc-new-plus svg {
   width: 30px;

@@ -696,12 +696,41 @@ function newBoardCard() {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "bc-new";
+
+  // The size ghost: a real card's skeleton — face over body, in the card's
+  // own classes, invisible — so this button is EXACTLY board-card-sized at
+  // every width. The metrics come from the same rules the real cards read
+  // (.bc-face's ratio, .bc-body's padding, the name and meta line heights),
+  // so they cannot drift; a hand-copied height in the stylesheet could.
+  const face = document.createElement("div");
+  face.className = "bc-face";
+  const name = document.createElement("div");
+  name.className = "bc-name";
+  name.textContent = "New board";
+  const count = document.createElement("span");
+  count.className = "bc-count";
+  count.textContent = countLabel(0);
+  const meta = document.createElement("div");
+  meta.className = "bc-meta";
+  meta.appendChild(count);
+  const body = document.createElement("div");
+  body.className = "bc-body";
+  body.append(name, meta);
+  const ghost = document.createElement("div");
+  ghost.className = "bc-new-ghost";
+  ghost.append(face, body);
+
+  // What the reader sees, centered over the ghost.
   const plus = document.createElement("span");
   plus.className = "bc-new-plus";
   plus.innerHTML = ICONS.plus;
+  const words = document.createElement("span");
+  words.textContent = "New board";
   const label = document.createElement("span");
-  label.textContent = "New board";
-  btn.append(plus, label);
+  label.className = "bc-new-label";
+  label.append(plus, words);
+
+  btn.append(ghost, label);
   btn.addEventListener("click", createBoard);
   return btn;
 }

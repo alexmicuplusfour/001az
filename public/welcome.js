@@ -264,21 +264,16 @@ function showCard(p) {
   if (needsBase) input.placeholder = p.ai.base || "http://…";
   field.append(label, input);
 
-  // band 3 — the action, and one dot per call it makes
+  // band 3 — the action. The button's own busy ring is the only progress
+  // shown: a three-dot per-call trace lived here for a release and read as
+  // clutter next to it, so the calls report only when one FAILS (inline, in
+  // the provider's own words).
   const go = document.createElement("button");
   go.type = "button";
   go.textContent = "Connect";
-  const trace = document.createElement("div");
-  trace.className = "w-trace";
-  const dots = [0, 1, 2].map(() => {
-    const d = document.createElement("span");
-    d.className = "w-dot";
-    trace.appendChild(d);
-    return d;
-  });
   const actions = document.createElement("div");
   actions.className = "w-actions";
-  actions.append(go, trace);
+  actions.append(go);
 
   const err = document.createElement("div");
   err.className = "w-err";
@@ -286,7 +281,7 @@ function showCard(p) {
 
   card.replaceChildren(head, field, actions, err);
 
-  const onConnect = busy(go, () => connect(input, dots, err));
+  const onConnect = busy(go, () => connect(input, err));
   go.addEventListener("click", onConnect);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") onConnect(); });
   input.focus();
@@ -303,10 +298,9 @@ function showCard(p) {
 // reload lands on the boards page rather than back here. That is why a failure
 // keeps the reader ON this card with what they typed still in the field: it is
 // the last cheap chance to fix a typo.
-async function connect(input, dots, err) {
+async function connect(input, err) {
   const p = picked;
   err.hidden = true;
-  for (const d of dots) d.classList.remove("is-on");
   const typed = input.value.trim();
   const needsBase = !!p.ai?.needsBase;
   if (!typed && !p.ai?.keyless) { input.focus(); return; }
@@ -315,7 +309,6 @@ async function connect(input, dots, err) {
     const body = { name: p.label, provider: p.name, key: needsBase ? "" : typed };
     if (needsBase) body.base_url = typed || p.ai.base || "";
     const { id: keyId } = await api("POST", "/api/admin/ai-keys", body);
-    dots[0].classList.add("is-on");
 
     // Picking IS installing (welcome-plan.md 4.3). Every rung of resolution is
     // gated on the provider's plugin being installed (capability-resolve.js,
@@ -332,15 +325,12 @@ async function connect(input, dots, err) {
     // of a condition someone has to keep true.
     //
     // After the key and not before, because a rejected field is the common
-    // failure and it should leave nothing behind. No fourth dot: this is part
-    // of connecting, not a step the reader took.
+    // failure and it should leave nothing behind.
     await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
 
     await api("POST", "/api/admin/capabilities/tag/bind", { keyId });
-    dots[1].classList.add("is-on");
 
     const probe = await api("POST", "/api/admin/capabilities/tag/probe");
-    dots[2].classList.add("is-on");
     settled(probe);
   } catch (e) {
     err.textContent = e.message;

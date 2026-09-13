@@ -211,24 +211,6 @@ header {
   gap: 14px;
 }
 
-/* One dot per call Connect makes. Four would mean one that is lit before the
-   button exists — the install happens on the tile. */
-.w-trace {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.w-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #ececef;
-  transition: background 0.2s;
-}
-.w-dot.is-on {
-  background: #1c7c3c;
-}
-
 /* Inline, never a toast: a long action's error must not outlive the surface
    that caused it, and on this page the failure IS the content. */
 .w-err {
@@ -372,7 +354,6 @@ header {
 
 @media (prefers-reduced-motion: reduce) {
   .w-tile,
-  .w-dot,
   .w-caret {
     transition: none;
   }

@@ -119,9 +119,6 @@ test("picking a bundled provider installs it, and the card is drawn from the rep
 
   // The grid is gone: you never look at four vendors you already rejected.
   assert.equal(await page.locator(".w-tiles").isVisible(), false);
-  // One dot per call Connect makes. Four would mean one lit before the button
-  // existed, since the install already happened on the tile.
-  assert.equal(await page.locator(".w-dot").count(), 3);
 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
@@ -162,8 +159,6 @@ test("a failed connect says why, inline, and leaves what you typed alone", async
   // cheap chance to fix a character.
   assert.equal(await page.locator("#w-secret").inputValue(), typo);
   assert.equal(await page.locator("#w-next").isVisible(), false);
-  // Two of three: the key row and the bind landed, the probe did not.
-  assert.equal(await page.locator(".w-dot.is-on").count(), 2);
   // And the finding, stated outright: the redirect is already off. `tag` now
   // RESOLVES — a stored binding resolves whether or not anything answers at
   // the far end — so nothing would send this admin back here.
@@ -235,8 +230,7 @@ test("Connect runs the three calls, and only then does a board become the next s
 
   await page.locator("#w-next button").waitFor({ timeout: 15000 });
   assert.equal(await page.locator("#w-next button").textContent(), "Make your first board");
-  // The card's action row is GONE, dots and all: progress for an action that is
-  // over is just decoration, and the card has stopped being something you
+  // The card's action row is GONE: the card has stopped being something you
   // operate. Scoped to the card, because the board button below wears the same
   // class — that is how it gets modal.css's button (see the note there).
   assert.equal(await page.locator("#w-picked .w-actions").count(), 0);

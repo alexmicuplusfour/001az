@@ -91,9 +91,15 @@ test("an admin gets the first board's silhouette — a button that creates", () 
   // so a placeholder cannot answer for a card.
   assert.equal(card.tag, "button");
   assert.equal(card.className, "bc-new");
-  const [plus, label] = card.children;
+  // The ghost is a real card's skeleton in the card's own classes — that is
+  // the whole sizing mechanism, so its shape is the assertion.
+  const [ghost, label] = card.children;
+  assert.equal(ghost.className, "bc-new-ghost");
+  assert.deepEqual(ghost.children.map((c) => c.className), ["bc-face", "bc-body"]);
+  assert.equal(label.className, "bc-new-label");
+  const [plus, words] = label.children;
   assert.equal(plus.className, "bc-new-plus");
-  assert.equal(label.textContent, "New board");
+  assert.equal(words.textContent, "New board");
 });
 
 test("…and the toolbar still carries + New board beside it", () => {
