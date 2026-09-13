@@ -117,6 +117,52 @@ test("a sweep against engines that answer flips the map, and a later one flips i
   assert.equal(await sidecarPresent("whisper"), false);
 });
 
+// A model sidecar is not ready for tens of seconds after `compose up` — it
+// imports torch and loads weights — so the interval between "it came up" and
+// "the app noticed" is what a reader actually experiences. One fixed 30s
+// cadence makes that interval up to 30s; looking often while something is
+// missing makes it seconds. The bound is what keeps a host that deploys neither
+// engine from probing two dead addresses forever.
+test("the watch looks often while an engine is missing, and settles once it is not", async (t) => {
+  const box = await jsonBox({ model: "base" });
+  const saved = [process.env.TRANSCRIBER_URL, process.env.OBJECT_DETECTOR_URL];
+  process.env.SIDECAR_WATCH_FAST_MS = "30";
+  process.env.SIDECAR_WATCH_MS = "5000";     // "slow" — must not fire during this test
+  process.env.SIDECAR_WATCH_WARMUP_MS = "60000";
+  t.after(async () => {
+    stopSidecarWatch();
+    [process.env.TRANSCRIBER_URL, process.env.OBJECT_DETECTOR_URL] = saved;
+    for (const v of ["SIDECAR_WATCH_FAST_MS", "SIDECAR_WATCH_MS", "SIDECAR_WATCH_WARMUP_MS"]) delete process.env[v];
+    await new Promise((r) => box.close(r));
+  });
+
+  // Both engines missing (the hanging host from before()), so the watch is in
+  // its fast phase and sweeping hard.
+  await startSidecarWatch();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(await sidecarPresent("whisper"), false);
+
+  // One comes up, the way a container does: the address starts answering. The
+  // watch is already looking, so this lands within a fast tick rather than
+  // waiting out the steady cadence — which is the whole point.
+  process.env.TRANSCRIBER_URL = box.url();
+  const t0 = Date.now();
+  while (Date.now() - t0 < 4000 && !(await sidecarPresent("whisper"))) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  const noticed = Date.now() - t0;
+  assert.equal(await sidecarPresent("whisper"), true, `never noticed it came up (${noticed}ms)`);
+  assert.ok(noticed < 5000, `noticed in ${noticed}ms — it waited out the steady cadence instead`);
+
+  // Past the warm-up, the cadence is the steady one no matter what is missing:
+  // a host that deploys neither engine stops paying for the fast phase.
+  process.env.SIDECAR_WATCH_WARMUP_MS = "0";
+  stopSidecarWatch();
+  const hits = box.hits.length;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(box.hits.length, hits, "stopped is stopped, whatever the cadence");
+});
+
 test("the watch: the first sweep is awaitable, it keeps going, and it stops", async (t) => {
   const box = await jsonBox({ model: "base" });
   const saved = process.env.TRANSCRIBER_URL;
@@ -142,8 +188,14 @@ test("the watch: the first sweep is awaitable, it keeps going, and it stops", as
   await new Promise((r) => setTimeout(r, 150));
   assert.ok(box.hits.length > afterFirst, "it kept sweeping");
 
+  // "Stopped" means no NEW sweep starts — not that one already in flight is
+  // torn down, which nothing can do while a probe holds its budget. So settle
+  // first, THEN take the reading. (That gap is also what the generation counter
+  // in the watch is for: it keeps a retired loop from resuming beside a fresh
+  // one if the two overlap.)
   stopSidecarWatch();
-  const atStop = box.hits.length;
   await new Promise((r) => setTimeout(r, 150));
+  const atStop = box.hits.length;
+  await new Promise((r) => setTimeout(r, 200));
   assert.equal(box.hits.length, atStop, "and stopped");
 });

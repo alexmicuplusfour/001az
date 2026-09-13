@@ -177,6 +177,13 @@ export function applySidecarCatalogs(live, holderFor) {
 // alive for up to one interval.
 let watching = false;
 let wake = null;
+// Which loop is the live one. stop() cannot interrupt a sweep already in flight
+// (a probe holds its full budget), so a stop immediately followed by a start
+// would otherwise leave the OLD loop to finish its sweep, re-read a `watching`
+// that is true again, and carry on beside the new one — two loops probing,
+// with only one stoppable. Each loop keeps the generation it was born with and
+// exits the moment that stops being the current one.
+let generation = 0;
 
 // Returns the FIRST sweep, so the caller can await it before opening a
 // listener: boot pays one probe round — 2s on a host with neither engine, with
@@ -189,20 +196,46 @@ export function startSidecarWatch() {
   // Read at START, the POLL_MS convention — so the cadence is a property of
   // this run rather than of when the module happened to be imported.
   const WATCH_MS = Number(process.env.SIDECAR_WATCH_MS) || 30000;
+  const FAST_MS = Number(process.env.SIDECAR_WATCH_FAST_MS) || 2000;
+  // How long the fast cadence is worth paying for. 180s because that is the
+  // object-detector's own healthcheck start_period — the number its image
+  // already declares as "this may take a while to come up".
+  const WARMUP_MS = Number(process.env.SIDECAR_WATCH_WARMUP_MS) || 180000;
+  const startedAt = Date.now();
+
+  // Two cadences, and the whole rule is one line: look often while an engine is
+  // MISSING and we are still early enough that it might just be starting.
+  //
+  // `compose up` starts everything at once, and a model sidecar is not ready for
+  // tens of seconds — it has to import torch and load weights. At one fixed 30s
+  // cadence the app spends up to half a minute reporting an engine as
+  // unavailable after it has come up, which is what a reader actually notices.
+  //
+  // Bounded on purpose, and this is the part that keeps it honest: a host that
+  // simply does not deploy these engines (the common self-hosted case) must not
+  // probe two dead addresses every two seconds forever. After the warm-up it
+  // settles to the steady cadence and stays there, so the fast phase is a
+  // startup cost paid once per process, not a standing one.
+  const nextDelay = () =>
+    Date.now() - startedAt < WARMUP_MS && sidecars().some(([n]) => !health.get(n))
+      ? FAST_MS
+      : WATCH_MS;
+
   const first = sweepSidecars().then((m) => {
     const said = sidecars().map(([n]) => `${n} ${m.get(n) ? "up" : "absent"}`).join(", ");
-    if (said) console.log(`sidecars: ${said} (re-probed every ${Math.round(WATCH_MS / 1000)}s)`);
+    if (said) console.log(`sidecars: ${said} (re-probed every ${Math.round(nextDelay() / 1000)}s)`);
     return m;
   });
+  const mine = ++generation;
   (async () => {
     await first;
-    while (watching) {
+    while (watching && generation === mine) {
       await new Promise((r) => {
-        const t = setTimeout(r, WATCH_MS);
+        const t = setTimeout(r, nextDelay());
         t.unref?.();
         wake = () => { clearTimeout(t); r(); };
       });
-      if (!watching) break;
+      if (!watching || generation !== mine) break;
       await sweepSidecars(); // probe() swallows its own failures; a sweep cannot reject
     }
   })();
@@ -211,5 +244,6 @@ export function startSidecarWatch() {
 
 export function stopSidecarWatch() {
   watching = false;
+  generation++; // retire the live loop even if it is mid-sweep and cannot hear this yet
   wake?.();
 }

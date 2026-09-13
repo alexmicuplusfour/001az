@@ -6,7 +6,8 @@ Open-vocabulary object detector — POST /detect
 LLMDet (grounding-DINO family) via HuggingFace transformers: takes an image and a
 list of noun-phrase queries and returns a box + score + matched-phrase label per
 detected object, with no per-class training. The model is baked into the image at
-build (OBJECT_DETECTOR_MODEL), loaded once, and served offline. Synchronous like
+build (OBJECT_DETECTOR_MODEL), loaded once on a background thread at startup
+so /health answers immediately, and served offline. Synchronous like
 the extractor (a detection is seconds, not the minutes a transcription can take),
 single-threaded so one memory-heavy inference runs at a time.
 """
@@ -16,6 +17,7 @@ import json
 import os
 import sys
 import time
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import torch
@@ -37,10 +39,43 @@ DEFAULT_THRESHOLD = float(os.environ.get("OBJECT_DETECTOR_THRESHOLD") or "0.3")
 FULL_FRAME_COVERAGE = 0.95
 FULL_FRAME_MIN_SCORE = float(os.environ.get("OBJECT_DETECTOR_FULL_FRAME_MIN_SCORE") or "0.45")
 
-print(f"object-detector: loading {MODEL_ID} ...", flush=True)
+# The processor is config + tokenizer, no weights, so this is cheap — and it is
+# also the BAKE CHECK: a missing or half-baked model raises here, at boot, where
+# the healthcheck's start_period is aimed, rather than at a user's first
+# detection hours later. Same reasoning the transcriber spells out for its own
+# baked-model verification.
+print(f"object-detector: checking {MODEL_ID} ...", flush=True)
 _processor = AutoProcessor.from_pretrained(MODEL_ID, local_files_only=True)
-_model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID, local_files_only=True).eval()
-print("object-detector: ready", flush=True)
+
+# The WEIGHTS load on a background thread while the server is already accepting
+# requests. They used to load here, before the socket was open — which meant
+# nothing answered /health for as long as the load took, so the app could not
+# tell "still starting" from "not deployed on this host" and reported object
+# detection as unavailable for a minute or two after every `compose up`.
+#
+# Blocking on first use instead would be worse than either: this server is
+# single-threaded, so a first detection carrying the load would also block
+# /health for its whole duration, and the capability would flip to unavailable
+# at the exact moment it started being used.
+#
+# A detection that arrives before the load finishes simply waits on the event.
+# The worker already allows 180s for one /detect exchange and its comment
+# already names a cold model load as a reason one might take that long.
+_model = None
+_ready = threading.Event()
+
+
+def _load():
+    global _model
+    print(f"object-detector: loading {MODEL_ID} ...", flush=True)
+    _model = AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID, local_files_only=True).eval()
+    _ready.set()
+    print("object-detector: ready", flush=True)
+
+
+def model():
+    _ready.wait()
+    return _model
 
 
 def detect(img, queries, threshold):
@@ -52,7 +87,7 @@ def detect(img, queries, threshold):
     text = " ".join(f"{q.strip().rstrip('.').lower()}." for q in queries)
     inputs = _processor(images=img, text=text, return_tensors="pt")
     with torch.no_grad():
-        outputs = _model(**inputs)
+        outputs = model()(**inputs)   # waits if the weights are still loading
     # NOTE: version-sensitive — transformers 5.x mangles the boxes; the image pins
     # transformers>=4.55,<5 (see Dockerfile). input_ids maps boxes → phrases.
     res = _processor.post_process_grounded_object_detection(
@@ -145,6 +180,10 @@ class Server(HTTPServer):
 
 
 if __name__ == "__main__":
+    # Listen FIRST, load second: the socket is what /health needs, and answering
+    # it in milliseconds is what lets the app show this engine as present the
+    # moment the container is up.
     server = Server(("0.0.0.0", 3004), Handler)
     print("object-detector listening on :3004", flush=True)
+    threading.Thread(target=_load, daemon=True).start()
     server.serve_forever()
