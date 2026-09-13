@@ -1572,7 +1572,7 @@ body.bulk-mode .heart {
   flex-shrink: 0;
 }
 /* jobs chip — ambient "work is happening" signal beside the board controls;
-   pulses with the client's in-flight count, opens the job log modal */
+   opens the job log modal */
 .jobs-chip {
   gap: 5px;
   border: none;
@@ -1583,13 +1583,105 @@ body.bulk-mode .heart {
 .jobs-chip:hover { background: var(--pill-bg-hover); }
 .jobs-chip-icon { display: inline-flex; }
 .jobs-chip-icon svg { width: 12px; height: 12px; }
-.jobs-chip.busy { color: var(--text); }
-.jobs-chip.busy .jobs-chip-icon svg { animation: jobs-pulse 1.6s ease-in-out infinite; }
-/* the count stays (the queue is intact), the pulse stops (nothing is moving) */
-.jobs-chip.busy.paused .jobs-chip-icon svg { animation: none; }
-@keyframes jobs-pulse { 50% { opacity: 0.35; } }
+/* busy: the pill goes dark and white light breathes along its bottom edge —
+   the count's work happening below deck. The glow is gradient layers pushed
+   through a turbulence displacement (#jobs-dune, index.html); they overhang
+   the pill by 8px so the displacement always samples painted white at the
+   bottom edge, never transparency (= dark holes), and the clip-path cuts
+   back up to the pill shape. .cooling shares the layers because the fade-out
+   happens on a chip that is no longer .busy (see the edge notes below). */
+.jobs-chip.busy,
+.jobs-chip.cooling { position: relative; }
+.jobs-chip.busy { color: #fff; }
+.jobs-chip.busy,
+.jobs-chip.busy:hover { background: var(--pill-active); }
+/* children ride above the glow; the shadow keeps the count readable when a
+   bright dune passes under it */
+.jobs-chip.busy > *,
+.jobs-chip.cooling > * { position: relative; z-index: 1; }
+.jobs-chip.busy > * { filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6)); }
+.jobs-chip.busy::before, .jobs-chip.busy::after,
+.jobs-chip.cooling::before, .jobs-chip.cooling::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 -8px;
+  clip-path: inset(0 0 8px round 6px);
+  filter: url(#jobs-dune) blur(2px);
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+/* Two sweeps at co-prime periods so the sheen never visibly loops. The phase
+   is anchored to the wall clock (--jobs-phase, a negative delay stamped by
+   toolbar.js): the toolbar rebuilds the chip every render, and an element-age
+   phase would snap the sweep back to frame zero on every delta poll. */
+.jobs-chip.busy::before,
+.jobs-chip.cooling::before {
+  background-image:
+    radial-gradient(80% 66% at 50% 100%, #fff 35%, rgba(255, 255, 255, 0) 80%),
+    radial-gradient(38% 100% at 50% 95%, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0) 74%);
+  background-size: 100% 100%, 260% 100%;
+  animation: jobs-aurora-a 3s ease-in-out infinite alternate;
+  animation-delay: var(--jobs-phase, 0s);
+}
+.jobs-chip.busy::after,
+.jobs-chip.cooling::after {
+  background-image: radial-gradient(28% 78% at 50% 90%, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0) 74%);
+  background-size: 320% 100%;
+  animation: jobs-aurora-b 4.6s ease-in-out infinite alternate;
+  animation-delay: var(--jobs-phase, 0s);
+}
+@keyframes jobs-aurora-a { from { background-position: 0 0, 0% 0; } to { background-position: 0 0, 100% 0; } }
+@keyframes jobs-aurora-b { from { background-position: 100% 0; opacity: 0.7; } 50% { opacity: 1; } to { background-position: 0% 0; opacity: 0.75; } }
+/* the count stays (the queue is intact), the light stops moving (nothing is) */
+.jobs-chip.busy.paused::before,
+.jobs-chip.busy.paused::after { animation-play-state: paused; }
+/* idle↔busy edges: the toolbar rebuilds fresh nodes every render, so a class
+   flip has no element to transition on. Instead every render inside a 450ms
+   window after the edge wears a one-shot class (toolbar.js keeps the window;
+   renders land in bursts, so one render can't carry it alone): .igniting
+   darkens the pill while the glow rises, .cooling runs the reverse on the
+   now-idle chip. --jobs-edge-phase is the edge's age as a negative delay —
+   a rebuild mid-window resumes the animation where the torn-down node left
+   it. Aurora keeps its wall-clock phase through both, so the light that
+   fades in is mid-sweep, not restarting. */
+.jobs-chip.igniting { animation: jobs-ignite 0.45s ease-out; animation-delay: var(--jobs-edge-phase, 0s); }
+.jobs-chip.igniting::before {
+  animation: jobs-aurora-a 3s ease-in-out infinite alternate, jobs-glow-in 0.45s ease-out;
+  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
+}
+.jobs-chip.igniting::after {
+  animation: jobs-aurora-b 4.6s ease-in-out infinite alternate, jobs-glow-in 0.45s ease-out;
+  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
+}
+.jobs-chip.cooling { animation: jobs-cool 0.45s ease-out; animation-delay: var(--jobs-edge-phase, 0s); }
+.jobs-chip.cooling::before {
+  animation: jobs-aurora-a 3s ease-in-out infinite alternate, jobs-glow-out 0.45s ease-out forwards;
+  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
+}
+.jobs-chip.cooling::after {
+  animation: jobs-aurora-b 4.6s ease-in-out infinite alternate, jobs-glow-out 0.45s ease-out forwards;
+  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
+}
+/* the ghost of the final count rides the cool-down out — without it the pill
+   snaps narrow the instant the queue drains */
+.jobs-chip.cooling .jobs-chip-count {
+  overflow: hidden;
+  animation: jobs-count-collapse 0.45s ease-out forwards;
+  animation-delay: var(--jobs-edge-phase, 0s);
+}
+@keyframes jobs-ignite { from { color: var(--text-dim); background-color: var(--pill-bg); } }
+@keyframes jobs-cool { from { color: #fff; background-color: var(--pill-active); } }
+@keyframes jobs-glow-in { from { opacity: 0; } }
+@keyframes jobs-glow-out { to { opacity: 0; } }
+/* margin-left swallows the flex gap as the width goes, so the chip lands at
+   its true icon-only width */
+@keyframes jobs-count-collapse { from { max-width: 3ch; } to { max-width: 0; margin-left: -5px; opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .jobs-chip.busy .jobs-chip-icon svg { animation: none; }
+  /* busy keeps a static glow (it IS the state signal); the edges just cut */
+  .jobs-chip.busy::before, .jobs-chip.busy::after,
+  .jobs-chip.igniting, .jobs-chip.cooling { animation: none; }
+  .jobs-chip.cooling::before, .jobs-chip.cooling::after { content: none; }
+  .jobs-chip.cooling .jobs-chip-count { display: none; }
 }
 
 /* jobs modal — two sections (In progress / History) of compact log rows */

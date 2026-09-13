@@ -150,16 +150,48 @@ function diagnosticsBtn() {
 // HAPPENING and goes away on its own, the dot is work that went WRONG and
 // doesn't. Same corner treatment as the plus-caret's unseen alerts and the
 // Tagging-consistency finding — three signals, one vocabulary.
+// Idle↔busy edge tracking for the chip's ignite/cool animations: every render
+// builds a fresh chip, so a CSS transition on the class flip has no element to
+// run on. The edge is a timestamped WINDOW, not a single render: a queue
+// draining lands several app:render dispatches back-to-back, and if only the
+// crossing render wore the class, the very next rebuild would strip it and
+// cut the fade to nothing. Every rebuild inside the window re-wears the class
+// and hands CSS the edge's age as a negative delay (--jobs-edge-phase), so
+// the rebuilt node resumes the animation mid-flight instead of restarting or
+// dropping it. Same-board edges only — a board switch swaps state.items
+// wholesale, and that's navigation, not work starting or ending.
+let lastJobsBusy = null;
+let lastJobsCount = 0;
+let lastJobsBoard = null;
+let jobsEdge = null; // { dir: "igniting" | "cooling", at: performance.now() }
+const JOBS_EDGE_MS = 450; // matches the jobs-ignite/jobs-cool duration in styles.css
+// The glow's noise wobble is SMIL (the <animate> inside #jobs-dune), out of
+// CSS's reach — honor reduced motion by removing it once at boot.
+if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) document.querySelector("#jobs-dune animate")?.remove();
+
 function jobsChip() {
   const n = state.items.reduce((k, i) => k + (ACTIVE.has(i.status) || QUEUED.has(i.status) ? 1 : 0), 0);
+  const busy = n > 0;
+  if (lastJobsBoard !== state.boardId) jobsEdge = null;
+  else if (lastJobsBusy !== null && lastJobsBusy !== busy) jobsEdge = { dir: busy ? "igniting" : "cooling", at: performance.now() };
+  const edgeAge = jobsEdge ? performance.now() - jobsEdge.at : Infinity;
+  // The direction check guards a re-crossing inside the window (busy again
+  // before the cool-down finished): the flip above already re-stamped the
+  // edge, this just keeps a stale class off a chip whose state moved on.
+  const edgeClass = edgeAge < JOBS_EDGE_MS && (jobsEdge.dir === "igniting") === busy ? jobsEdge.dir : "";
+  const cooling = edgeClass === "cooling";
   const failed = jobsUnseen();
   const chip = document.createElement("button");
   chip.type = "button";
-  chip.className = "mapping-chip jobs-chip" + (n > 0 ? " busy" : "") + (state.boardPaused ? " paused" : "");
+  chip.className = "mapping-chip jobs-chip" + (busy ? " busy" : "") + (edgeClass ? ` ${edgeClass}` : "") + (state.boardPaused ? " paused" : "");
+  // The aurora's phase rides the wall clock, not element age — rebuilds while
+  // busy would otherwise snap the sweep back to frame zero every delta poll.
+  if (busy || cooling) chip.style.setProperty("--jobs-phase", `-${(performance.now() / 1000).toFixed(2)}s`);
+  if (edgeClass) chip.style.setProperty("--jobs-edge-phase", `-${Math.round(edgeAge)}ms`);
   // Every fact that holds, in one list — a queue draining while an earlier item
   // failed is the ordinary case, and the tooltip is the only place any of them
   // is named. Paused keeps the count (the queue is intact, which is the point)
-  // but stops the note claiming motion; .paused stops the pulse to match.
+  // but stops the note claiming motion; .paused freezes the glow to match.
   const notes = [
     n > 0 ? `${n} item${n === 1 ? "" : "s"} ${state.boardPaused ? "waiting" : "in the pipeline"}` : "",
     state.boardPaused ? "board paused" : "",
@@ -172,13 +204,19 @@ function jobsChip() {
   icon.className = "jobs-chip-icon";
   icon.innerHTML = ICONS.activity;
   chip.appendChild(icon);
-  if (n > 0) {
+  // Cooling shows the ghost of the final count so the pill narrows with the
+  // fade instead of snapping the moment the queue drains.
+  if (busy || cooling) {
     const count = document.createElement("span");
-    count.textContent = n;
+    count.className = "jobs-chip-count";
+    count.textContent = busy ? n : lastJobsCount;
     chip.appendChild(count);
   }
   chip.addEventListener("click", () => openJobsModal());
   if (failed) attachBtnDot(chip);
+  lastJobsBusy = busy;
+  if (busy) lastJobsCount = n;
+  lastJobsBoard = state.boardId;
   return chip;
 }
 

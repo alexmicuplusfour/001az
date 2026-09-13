@@ -65,6 +65,18 @@
       </div>
     </div>
 
+    <!-- displacement noise for the jobs chip's busy glow (.jobs-chip.busy,
+         styles.css) — the aurora layers are pushed through this filter so the
+         light's edge undulates instead of reading as a clean gradient -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true"><defs>
+      <filter id="jobs-dune" x="-30%" y="-30%" width="160%" height="160%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.02 0.045" numOctaves="1" seed="4" result="n">
+          <animate attributeName="baseFrequency" dur="10s" values="0.02 0.045;0.028 0.06;0.02 0.045" repeatCount="indefinite"/>
+        </feTurbulence>
+        <feDisplacementMap in="SourceGraphic" in2="n" scale="7" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+    </defs></svg>
+
     <script src="app.js" type="module"></script>
   </body>
 </html>
