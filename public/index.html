@@ -15,9 +15,6 @@
   </head>
   <body>
     <header>
-      <!-- Row 1 sits in its own wrapper: that wrapper is the grid track the
-           scroll collapse empties (header-scroll.js), and the row's spacing and
-           dividing rule go down inside it. -->
       <div id="toolbar-fold"><div id="toolbar"></div></div>
       <div id="toolbar-sub"></div>
     </header>
@@ -31,8 +28,6 @@
 
     <div id="lightbox" class="lightbox" tabindex="-1" hidden>
       <button id="lightbox-prev" class="lightbox-nav prev" aria-label="Previous"></button>
-      <!-- The stage: detail renderers (detail-view.js) mount their own DOM here;
-           nothing inside is fixed markup anymore. -->
       <div id="lightbox-stage" class="lightbox-stage"></div>
       <button id="lightbox-next" class="lightbox-nav next" aria-label="Next"></button>
       <div id="lightbox-controls" class="lightbox-controls">

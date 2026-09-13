@@ -248,9 +248,13 @@ test("a pin that passes the coarse filter but cannot resolve waits per item, unf
   await setPluginState(db, "ai:openai", { installed: false });
   t.after(() => setPluginState(db, "ai:openai", { installed: true }));
 
+  // Settled, not merely present: the row exists as "running" for the moment
+  // between the worker claiming the clip and resolution coming back empty,
+  // and a poll that returns on existence can read exactly that moment. This
+  // was the file's intermittent failure — not wall-clock pressure.
   const rows = await until(async () => {
     const r = await jobRows(boardId, "transcribe");
-    return r.length ? r : null;
+    return r.length && r[0].outcome !== "running" ? r : null;
   }, WORKER_WAIT);
   assert.equal(rows.length, 1, "repeat encounters fold into the one requeued row");
   assert.equal(rows[0].outcome, "requeued");

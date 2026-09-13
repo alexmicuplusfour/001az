@@ -182,6 +182,9 @@ button.bc-new:hover {
   width: 30px;
   height: 30px;
   display: block;
+  /* The shared glyph ships stroke-width 2.5 for toolbar sizes; at 30px that
+     reads heavy, and the CSS property outranks the SVG attribute. */
+  stroke-width: 1.5;
 }
 
 /* The card's controls: the rearrange grip (planning/board-arrangement-plan.md)

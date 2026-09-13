@@ -7,23 +7,13 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
-    <!-- Absolute, like boards.html: this page is linked as /welcome (the static
-         mount resolves it via extensions:["html"]), so relative asset paths
-         would resolve against whatever path it was reached by. -->
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/dropdown.css" />
-    <!-- modal.css owns the action row's button styles and busy()'s spinner.
-         No modal opens on this page — "Make your first board" is a
-         navigation to /boards. -->
     <link rel="stylesheet" href="/modal.css" />
     <link rel="stylesheet" href="/toast.css" />
     <link rel="stylesheet" href="/welcome.css" />
   </head>
   <body>
-    <!-- The gallery's header shell with row 1 only, exactly as the boards page
-         wears it — the logo and the user menu, so first-run reads as the same
-         product and not as an installer. welcome.js fills it once /api/me
-         answers. -->
     <header hidden>
       <div id="toolbar-fold"><div id="toolbar"></div></div>
     </header>
@@ -32,19 +22,11 @@
       <h1 id="w-title">Connect an AI model</h1>
       <p id="w-why" class="w-why">Needed for tagging, descriptions and board fields.</p>
 
-      <!-- The chooser, and then the one provider you picked in its place. Both
-           live here rather than being built and thrown away, so the back arrow
-           is a `hidden` flip and not a re-render. -->
       <div id="w-tiles" class="w-tiles"></div>
       <div id="w-picked" class="w-picked" hidden></div>
 
-      <!-- A footnote, sized and placed as one: directly under the models, where
-           the hesitation it answers actually happens ("am I stuck with this?").
-           Not a subtitle. -->
       <p id="w-fine" class="w-fine">You can change this later.</p>
 
-      <!-- Absent until the connection lands, not disabled: the step does not
-           exist yet, and a greyed button claims it does. -->
       <div id="w-next" class="w-next w-actions" hidden></div>
 
       <hr class="w-rule" />

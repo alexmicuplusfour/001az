@@ -7,35 +7,19 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
-    <!-- Absolute, like admin.html: this page is linked as /boards (the static
-         mount resolves it via extensions:["html"]), so relative asset paths
-         would resolve against whatever path it was reached by. -->
     <link rel="stylesheet" href="/styles.css" />
     <link rel="stylesheet" href="/dropdown.css" />
-    <!-- board-modal.js (the manage pencil / New board) renders into these -->
     <link rel="stylesheet" href="/modal.css" />
     <link rel="stylesheet" href="/toast.css" />
     <link rel="stylesheet" href="/boards.css" />
   </head>
   <body>
-    <!-- The gallery's header shell, with only row 1 (#toolbar) — no filter
-         row, no sub-row: this page has nothing to filter. boards.js fills it
-         with the logo and the user menu once /api/me answers. -->
     <header hidden>
       <div id="toolbar-fold"><div id="toolbar"></div></div>
     </header>
     <div id="gate" class="gate">Checking access…</div>
-    <!-- The setup strip (planning/welcome-plan.md 3b): what isn't running, for
-         an admin, above the boards it isn't running for. Declared empty and
-         hidden rather than spliced in beside the grid — this page states its
-         own structure, and the strip is absent far more often than not. -->
     <div id="setup-strip" class="warn-box setup-strip" hidden></div>
     <main id="boards-grid" hidden></main>
-    <!-- Where the arrange grip's arrow keys say what moved where
-         (planning/board-arrangement-plan.md). Declared here, not built in JS:
-         a live region has to be in the document BEFORE its text changes or the
-         change goes unannounced, and a sibling of the grid rather than a child,
-         since a child would take a grid cell and open a hole in the row. -->
     <p id="arrange-note" class="vis-hidden" aria-live="polite"></p>
     <script src="/boards.js" type="module"></script>
   </body>
