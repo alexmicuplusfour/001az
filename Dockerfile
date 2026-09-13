@@ -20,6 +20,14 @@ RUN npm ci --omit=dev
 
 COPY . .
 
+# The repo's commentary stays in the repo: served JS/CSS ships bare. esbuild
+# reprints each file without comments — no bundling, no minify, no renames,
+# ES modules preserved — which halves what a browser downloads (public/ is
+# ~1MB, 40%+ comments). Top-level only on purpose: vendor/ is already
+# minified and carries its own license file, and server/ never reaches a
+# browser — stripping it would only desync stack traces from the repo.
+RUN npx -y esbuild@0.24.2 public/*.js public/*.css --outdir=public --allow-overwrite --format=esm --legal-comments=none
+
 # Server-owned state (uploads + thumbnails) lives on a volume at /data.
 # The transformers cache dir must be node-owned before we switch users so the
 # pre-download (and runtime writes) succeed without permission errors.
