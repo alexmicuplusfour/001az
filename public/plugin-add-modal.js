@@ -66,7 +66,14 @@ export function openAddPluginModal(connections, ctx) {
       addBtn.textContent = "Add";
       addBtn.onclick = busy(addBtn, async () => {
         try {
-          await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
+          // Two verbs for two kinds of "not added": a built-in's code is loaded
+          // and `installed` is a visibility flag, while a bundled example
+          // (welcome-plan.md 2b) has never loaded at all — no def for PATCH to
+          // find — so it installs from its path, like the URL box above. No
+          // confirm on that path: that warning is about code from the internet,
+          // and this source is the image the server is running from.
+          if (p.bundled) await api("POST", "/api/admin/plugins/install", { url: p.bundled.path });
+          else await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
           toast(`${p.label} added`);
           asAdded(); // claims the button (busy leaves it "Added", disabled)
           ctx.refresh(); // refresh the page underneath so the new card appears

@@ -14,7 +14,7 @@ import { resolveSource } from "../server/plugin-fetch.js";
 import { installFromUrl, uninstall, unregister } from "../server/plugin-loader.js";
 import { getConnector } from "../server/connectors/index.js";
 import { PROVIDERS } from "../server/providers.js";
-import { pluginCatalog } from "../server/plugins.js";
+import { pluginCatalog, bundledPlugins } from "../server/plugins.js";
 import { getExternalPlugin, setExternalLoadError, getSetting, setSetting, listAiKeys, createAiKey } from "../server/db.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { getSourceBackend } from "../server/ingestion/sources/index.js";
@@ -98,6 +98,60 @@ test("installFromUrl: a file: source registers, persists, and shows installed+ex
   assert.equal(await getExternalPlugin(db, id), null, "record gone");
   assert.equal(fs.existsSync(row.dir), false, "code removed");
   assert.equal((await pluginCatalog(db)).some((p) => p.id === id), false, "off the catalog");
+});
+
+// The bundled catalog's other half (planning/welcome-plan.md Stage 2b): the
+// listing is only worth having if the path it carries actually installs. Driven
+// through the ROUTE rather than installFromUrl, because the Add button and the
+// welcome chooser both go that way and the path is theirs to hand over.
+test("bundled: the listed path installs, and the row leaves the list it came from", async () => {
+  const before = await bundledPlugins(db);
+  const row = before.find((p) => p.id === "ai:community.ollama");
+  assert.ok(row, "listed while not installed");
+
+  const r = await req(base, "POST", "/api/admin/plugins/install",
+    { sid: admin.sid, body: { url: row.bundled.path } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.plugin.id, "ai:community.ollama");
+  // The install is what the chooser learns the provider's SHAPE from — the
+  // manifest could not tell it whether to draw a key field or a server URL.
+  assert.equal(r.json.plugin.ai.keyless, true);
+  assert.equal(r.json.plugin.ai.needsBase, true);
+  assert.ok(r.json.plugin.ai.base, "and where to point it by default");
+
+  // One row, not two: the bundled listing is what's NOT installed, so an
+  // installed example must hand its place to the real catalog entry.
+  const after = await bundledPlugins(db);
+  assert.equal(after.some((p) => p.id === "ai:community.ollama"), false, "off the bundled list");
+  assert.ok(after.some((p) => p.id === "ai:community.deepseek"), "its sibling is untouched");
+  const catalog = await pluginCatalog(db);
+  const entry = catalog.find((p) => p.id === "ai:community.ollama");
+  assert.equal(entry.external, true);
+  assert.equal(entry.state.installed, true);
+  assert.equal(catalog.filter((p) => p.id === "ai:community.ollama").length, 1);
+
+  await uninstall(db, "ai:community.ollama");
+  assert.ok((await bundledPlugins(db)).some((p) => p.id === "ai:community.ollama"), "removing puts it back on offer");
+});
+
+test("bundled: every listing hint matches the descriptor it stands in for", async () => {
+  // The one risk the hints carry. A manifest can be read without running
+  // anything, which is why `keyless`/`needsBase` are declared there — and it is
+  // also why they are a SECOND copy of something the factory already says. This
+  // is the drift pin: install each bundled example for real and hold the box's
+  // blurb to what is in the box.
+  //
+  // Not a lint over examples/: the assertion needs the loaded descriptor, so it
+  // needs the install, which is why it lives in this file and not plugins.test.
+  for (const row of await bundledPlugins(db)) {
+    const r = await req(base, "POST", "/api/admin/plugins/install",
+      { sid: admin.sid, body: { url: row.bundled.path } });
+    assert.equal(r.status, 200, `${row.id}: installs`);
+    const { ai } = r.json.plugin;
+    assert.equal(row.bundled.keyless, !!ai.keyless, `${row.id}: manifest keyless hint`);
+    assert.equal(row.bundled.needsBase, !!ai.needsBase, `${row.id}: manifest needsBase hint`);
+    await uninstall(db, row.id);
+  }
 });
 
 test("installFromUrl: a connector-domain installs the whole domain (dir named from the catalog id)", async () => {

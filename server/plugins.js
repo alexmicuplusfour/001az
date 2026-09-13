@@ -18,8 +18,18 @@
 // stores only those overrides. Secrets never land there: a connector's api_key
 // field writes through to the existing `<domain>_key_<provider>` setting, and
 // AI keys stay in the ai_keys table.
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { PROVIDERS, providerCatalog } from "./providers.js";
 import { CAPABILITY_IDS } from "./capabilities.js";
+// A deliberate module cycle: plugin-loader.js imports resetDefs() from here.
+// Both directions are CALLS, never module-eval reads of each other's bindings,
+// and both bindings are hoisted function declarations — so whichever module
+// loads first, the other's namespace is complete by the time anything runs.
+// The alternative was a second copy of the manifest → catalog-id rule, which is
+// the one thing catalogIdFor exists to prevent.
+import { catalogIdFor, manifestIn } from "./plugin-loader.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS, extOf } from "./sources/index.js";
 import { sourceManifests } from "./ingestion/sources/index.js";
@@ -38,10 +48,25 @@ function aiDefs() {
     description: p.description || "",
     // The on-device embedder (local/Xenova) and the on-device transcriber
     // (whisper sidecar) are always-on built-ins — no account, always installed.
-    // Anthropic is the one connection pre-added, since tagging (the product's
-    // core value) must work out of the box; it's still removable.
     core: p.name === "local" || p.name === "whisper" || p.name === "localDetector",
-    defaultInstalled: p.name === "anthropic",
+    // NOTHING is pre-added (welcome-plan.md 4.4). The welcome screen is the
+    // chooser, so a vendor card on a fresh instance would be a choice the app
+    // made on someone's behalf. The old default was anthropic, justified as
+    // "tagging must work out of the box" — which it never did, because the row
+    // it pre-added has no key in it.
+    //
+    // The exception is not an opinion about vendors, it is reading the
+    // operator's: ANTHROPIC_API_KEY is a documented path (.env.example) and
+    // tag's env rung is install-gated like every other rung
+    // (capability-resolve.js, disqualified), so leaving it uninstalled would
+    // mean a key in the compose file that silently does nothing — explained by
+    // a Capabilities tab reporting that they removed a plugin they never saw.
+    // An explicit `installed: false` still wins, because installedFor checks
+    // the row before it gets here; that is what keeps the off-switch.
+    //
+    // Read once per DEFS build — once per process in production, since env is
+    // fixed at boot. A test that MOVES the var must resetDefs() after it.
+    defaultInstalled: p.name === "anthropic" && !!process.env.ANTHROPIC_API_KEY,
     // Derived from the descriptor's `provides` normal form over the capability
     // id list — NOT over the provider's own keys, since the card wants an
     // explicit false for what it can't do. Adding a capability adds a key here
@@ -243,26 +268,101 @@ const health = (row) =>
 // external_plugins.kind (the manifest kind) → catalog kind (the card's family).
 const CATALOG_KIND = { "ai-provider": "ai", "connector-provider": "connector", "connector-domain": "connector", "source": "source" };
 
+// A catalog row built from a MANIFEST ALONE — no live descriptor behind it.
+// Two rows are in that position and they are the same shape for the same
+// reason: a plugin whose factory failed to run, and one whose factory has not
+// been asked to. Everything a descriptor declares (capabilities, config
+// fields, the ai/connector blocks) is therefore absent, and every reader of
+// these rows has to survive the absence — which is why they are empty rather
+// than missing.
+const manifestEntry = (id, m, extra) => ({
+  id,
+  kind: CATALOG_KIND[m.kind] || "connector",
+  segment: id.split(":")[0],
+  name: m.id || id,
+  label: m.label || id,
+  description: m.description || "",
+  core: false,
+  capabilities: {},
+  configSchema: [],
+  ...extra,
+});
+
 // An external plugin that FAILED to load never reaches the live registries, so
 // pluginDefs() can't see it — but it's installed (code on disk) and must show as
 // an errored card with its reason + a Retry. Built from the stored manifest +
 // the recorded load_error (health row, if any, carries prior runtime failures).
-function erroredExternalEntry(ext, row) {
-  const m = ext.manifest || {};
-  return {
-    id: ext.id,
-    kind: CATALOG_KIND[ext.kind] || "connector",
-    segment: ext.id.split(":")[0],
-    name: m.id || ext.id,
-    label: m.label || ext.id,
-    description: m.description || "",
-    core: false,
+const erroredExternalEntry = (ext, row) =>
+  manifestEntry(ext.id, ext.manifest || {}, {
     external: true,
     source: { url: ext.source_url, ref: ext.resolved_ref },
-    capabilities: {},
-    configSchema: [],
     state: { installed: true, config: {}, loadError: ext.load_error || { message: "failed to load", at: null }, health: health(row) },
-  };
+  });
+
+// --- bundled examples (planning/welcome-plan.md Stage 2b) ---
+
+// Where the image's own example plugins live. Resolved off THIS FILE rather
+// than the working directory: installFromUrl resolves a bare path against cwd
+// (plugin-fetch resolveSource), which is the right rule for an admin typing one
+// into the URL box and the wrong one for a scan that has to find the same
+// directory however node was started.
+const BUNDLED_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "examples", "plugins");
+
+// Catalog rows for every bundled plugin this instance has NOT installed.
+//
+// The gap this closes is DISCOVERY, not capability: examples/plugins/* ships in
+// the image and installs with no network at all, but nothing lists it, so the
+// only way to find one is to read a README in the source tree — which makes a
+// bundled example strictly harder to install than a random GitHub repo.
+//
+// Deliberately NOT part of pluginDefs(). That array is what getPluginDef
+// searches, and it is how PATCH /api/admin/plugins/:id and .../test find their
+// target; a bundled row in there would make `PATCH { installed: true }` answer
+// 200 and record installed:true for code that has never been loaded. Nothing
+// would crash — resolution reports the provider as not installed, since
+// PROVIDERS has no such entry — but the page would show an installed card for
+// a provider that cannot serve. The install verb is not a toggle and must not
+// be reachable through the toggle's route, so these rows are a READ, composed
+// into the payload beside the catalog and never into the def list.
+//
+// `bundled.path` is what POST /api/admin/plugins/install takes. Absolute, for
+// the same reason BUNDLED_DIR is: the install runs in the same process but its
+// path rule is cwd-relative, and an absolute one needs no agreement about where
+// that is.
+export async function bundledPlugins(db) {
+  let entries;
+  try { entries = fs.readdirSync(BUNDLED_DIR, { withFileTypes: true }); }
+  catch { return []; } // no examples/ in this deployment — nothing is bundled
+  const onDisk = new Set((await listExternalPlugins(db)).map((r) => r.id));
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(BUNDLED_DIR, e.name);
+    let manifest;
+    // One malformed example must not take the Plugins page with it — skipped
+    // and logged, the same isolation loadAll() gives a plugin that won't load.
+    try {
+      manifest = manifestIn(dir);
+    } catch (err) {
+      console.log(`bundled plugin ${e.name}: not listable — ${err.message}`);
+      continue;
+    }
+    const id = catalogIdFor(manifest);
+    // Installed already (healthy or errored) — the real catalog owns the row,
+    // and offering "Add" for something on disk would 409 at the install route.
+    if (onDisk.has(id)) continue;
+    // The hints live on `bundled`, deliberately NOT on an `ai` block. `ai` means
+    // "this is what the descriptor says", and half of one would read as a
+    // descriptor that declares `keyless: false` rather than as a row whose
+    // descriptor has never run — which is the difference between "bring a key"
+    // and "we don't know yet". `bundled` is already the block that means
+    // "true of a row that isn't installed", and it disappears when it is.
+    out.push(manifestEntry(id, manifest, {
+      bundled: { path: dir, keyless: !!manifest.keyless, needsBase: !!manifest.needsBase },
+      state: { installed: false, config: {}, health: null },
+    }));
+  }
+  return out;
 }
 
 // The full admin catalog: every def + its state, secrets masked. Connector

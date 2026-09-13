@@ -247,6 +247,21 @@ export function validateManifest(m) {
   // in that kind's definition — this only guards it appearing on the wrong kind.
   if (m.faceProducers !== undefined && m.kind !== "connector-domain")
     throw new Error("manifest.faceProducers is only supported on a connector-domain plugin");
+  // LISTING HINTS (planning/welcome-plan.md Stage 2b), and nothing more. They
+  // exist because a catalog can read a manifest without running anything, while
+  // everything a provider actually declares — keyless, needsBase, models,
+  // provides — lives in the factory and is unknown until it loads. A chooser
+  // that has to order "costs nothing" ahead of "bring a key", or label a field
+  // "Server URL" instead of "API key", needs those two answers one step before
+  // they exist.
+  //
+  // They are never read once the plugin is loaded: the descriptor is the truth,
+  // this is the blurb on the box. A bundled example's hints are pinned equal to
+  // its descriptor by test, which is what keeps the box from lying.
+  for (const hint of ["keyless", "needsBase"]) {
+    if (m[hint] !== undefined && typeof m[hint] !== "boolean")
+      throw new Error(`manifest.${hint} must be a boolean (it is a listing hint, not a setting)`);
+  }
   KIND_DEFS[m.kind].validateManifest?.(m); // kind-specific manifest checks
 }
 
@@ -277,6 +292,17 @@ const readManifest = (dir) => {
   catch (e) { throw new Error(`manifest.json is not valid JSON: ${e.message}`); }
 };
 
+// Read a plugin dir's manifest and check it — the pair every entry point starts
+// with, since a manifest nobody validated is just some JSON. Exported because
+// the bundled-catalog scan (plugins.js bundledPlugins) is the third entry point
+// and must fail on the same files with the same sentences; it differs only in
+// what it does with the throw, which is skip rather than abort.
+export function manifestIn(dir) {
+  const m = readManifest(dir);
+  validateManifest(m);
+  return m;
+}
+
 async function buildModule(dir, manifest) {
   // Per-version dirs (<id>@<ref>) already bust Node's ESM cache across upgrades;
   // the query param covers a same-dir Retry within one process.
@@ -303,8 +329,7 @@ export function unregister(manifest) {
 // registerBuilt is validation/build with no side effects, so a throw here leaves
 // the registries untouched. Returns { catalogId, manifest } on success.
 export async function loadDir(dir) {
-  const manifest = readManifest(dir);
-  validateManifest(manifest);
+  const manifest = manifestIn(dir);
   const built = await buildModule(dir, manifest);
   validateBuilt(manifest, built);
   // A connector-domain must NOT shadow an existing domain (a built-in like crypto,
@@ -395,8 +420,7 @@ export async function installFromUrl(db, url) {
 
   try {
     const { resolvedRef } = await fetchModule(source, staging);
-    const manifest = readManifest(staging);
-    validateManifest(manifest);
+    const manifest = manifestIn(staging);
     const catalogId = catalogIdFor(manifest);
 
     const existing = await getExternalPlugin(db, catalogId);

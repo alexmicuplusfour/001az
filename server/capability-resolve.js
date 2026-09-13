@@ -28,7 +28,7 @@
 // `active` from `degraded` (slice 3); today it tells an engine which shape to be.
 import { PROVIDERS, declaredCatalog } from "./providers.js";
 import { CAPABILITY, CAPABILITY_DEFS, configFieldView } from "./capabilities.js";
-import { getSetting, getAiKey } from "./db.js";
+import { getSetting, getAiKey, anyBoard } from "./db.js";
 import { pluginInstalled } from "./plugins.js";
 import { sidecarPresent } from "./sidecar-catalog.js";
 
@@ -275,6 +275,42 @@ export async function resolveCapability(db, capId, { ignoreEnabled = false, boar
   const stored = await storedBinding(db, cap);
   if (stored.binding) return stored.binding;
   return (await envBinding(db, cap)) || (await floorBinding(db, cap, board, stored.named));
+}
+
+// Is this instance still waiting on its first run? (planning/welcome-plan.md
+// Stage 1.2.) Three rungs, ordered cheapest-first, each one a short-circuit
+// for the next — which is load-bearing rather than tidy:
+//
+//   1. the admin said "later"      one PK lookup on settings(key)
+//   2. this instance has boards    one EXISTS on a tiny table
+//   3. tagging cannot resolve      the walk above
+//
+// The order is forced by where the answer is read. /api/me carries it, and
+// that endpoint is fetched EIGHT times per admin page load — once per tab
+// renderer — under the `Cache-Control: no-store` this app sets across all of
+// /api. A steady state that reached rung 3 would multiply by eight; it never
+// does, because an instance with boards stops at rung 2.
+//
+// Rung 2 is also the honest half, not just the fast one: it is what separates
+// NEW from BROKEN. An instance that has been running for months and whose key
+// was revoked yesterday is not a first-run problem, and sending it back to an
+// onboarding screen would be the app mistaking damage for innocence. It gets
+// the boards page's strip instead, which says what is wrong without claiming
+// nothing has happened yet.
+//
+// That is also why there is no "onboarding completed" flag anywhere. The one
+// stored bit is the admin's "later" (`welcome_skipped`); everything else is
+// derived, so a key that stops working re-arms the surfaces that tell the
+// truth without re-arming the redirect that would insult them.
+//
+// It names "tag" — the only place in this flow that names a capability, and
+// deliberately a literal rather than a `backbone: true` field on the registry.
+// One backbone is a fact about this product, not a table; a second one would
+// be the moment to promote it.
+export async function setupPending(db) {
+  if (await getSetting(db, "welcome_skipped")) return false;
+  if (await anyBoard(db)) return false;
+  return !(await resolveCapability(db, "tag"));
 }
 
 // Why is the STORED choice not the thing serving? Null when it serves — or when

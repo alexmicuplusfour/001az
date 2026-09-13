@@ -4,12 +4,58 @@
 // capabilities.test.js proves the server actually emits.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory, isDelegating } from "../public/capability-present.js";
+import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory, isDelegating, presentTrouble } from "../public/capability-present.js";
 
 const supported = [
   { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
   { name: "whisper", label: "Local Transcriber (Whisper)", installed: true, keyCount: 0, onDevice: true, keyless: true },
 ];
+
+// presentTrouble — the boards page's setup strip (welcome-plan.md 3b), and the
+// only presenter that answers "should this page say anything at all". Its case
+// list is the thing worth pinning: it moved once already, when Stage 4 retired
+// the pre-added provider and `unavailable` became what a FRESH instance reads.
+// A predicate that still named only blocked/degraded would have gone quiet for
+// exactly the reader the strip was built for, with every test green.
+test("trouble: the three states that mean not-working, and the one that doesn't", () => {
+  const cap = (over) => ({ id: "tag", label: "Tagging", state: "active", running: null, supportedBy: [], ...over });
+
+  // The chip's own words, never a fourth spelling invented here.
+  assert.equal(presentTrouble(cap({ state: "blocked" })), "needs a key");
+  assert.equal(presentTrouble(cap({ state: "degraded" })), "degraded");
+  assert.equal(presentTrouble(cap({ state: "unavailable" })), "unavailable");
+
+  // Silence is the answer almost every time: something serving, and something
+  // deliberately turned off, are both nobody's emergency.
+  assert.equal(presentTrouble(cap({ state: "active" })), null);
+  assert.equal(presentTrouble(cap({ state: "off" })), null);
+
+  // The cost rides along when there is one, and stays off when there isn't —
+  // "0 items waiting" is a sentence with no information in it.
+  assert.equal(presentTrouble(cap({ state: "blocked", demand: { waiting: 14 } })), "needs a key · 14 items waiting");
+  assert.equal(presentTrouble(cap({ state: "blocked", demand: { waiting: 1 } })), "needs a key · 1 item waiting");
+  assert.equal(presentTrouble(cap({ state: "blocked", demand: { waiting: 0 } })), "needs a key");
+
+  // The case with no state of its own: a stored binding that RESOLVES while
+  // the far end refuses. `active` and broken at once is not a contradiction —
+  // resolution asks whether a binding exists, the health ledger asks whether
+  // anything answered — and until this existed the only surface that showed it
+  // was the banner inside the offending plugin's own modal.
+  const failing = cap({
+    running: { provider: "acme" },
+    supportedBy: [{ name: "acme", health: { failCount: 3, lastError: { message: "Acme: 401 bad key" } } }],
+  });
+  assert.equal(presentTrouble(failing), "Acme: 401 bad key");
+  assert.equal(presentTrouble({ ...failing, demand: { waiting: 2 } }), "Acme: 401 bad key · 2 items waiting");
+
+  // A live streak, not a total: a success zeroes it (db.js recordPluginHealth),
+  // so a provider that failed yesterday and works now says nothing.
+  const healed = cap({
+    running: { provider: "acme" },
+    supportedBy: [{ name: "acme", health: { failCount: 0, lastError: { message: "Acme: 401 bad key" } } }],
+  });
+  assert.equal(presentTrouble(healed), null);
+});
 
 test("chips: the five states, and active splits on who is serving", () => {
   assert.deepEqual(presentChip({ state: "active", viaFloor: false }), { cls: "ok", text: "active" });

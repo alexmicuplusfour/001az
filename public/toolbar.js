@@ -4,6 +4,7 @@ import { ICONS, toolBtn, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUni
 import { openJobsModal, jobsUnseen } from './jobs-modal.js';
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep, ddAction, ddHead } from './dropdown.js';
+import { userMenuButton } from './user-menu.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
@@ -202,27 +203,6 @@ function modeChip(iconMarkup, text, onClear, tail = "") {
   const clear = toolBtn(ICONS.x, "crates-clear", onClear);
   clear.title = "Show all items";
   elToolbarSub.append(el, clear);
-}
-
-function openUserMenu(anchorEl) {
-  openDropdown(anchorEl, {
-    className: "user-menu-pop",
-    build: (body, { close }) => {
-      if (state.me && state.me.is_admin) {
-        body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
-      }
-      body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
-      body.appendChild(ddSep());
-      body.appendChild(ddRow({
-        label: "Sign out",
-        onClick: async () => {
-          close();
-          await fetch("/api/logout", { method: "POST" });
-          location.reload();
-        },
-      }));
-    },
-  });
 }
 
 function openBoardPop(anchorEl) {
@@ -477,17 +457,9 @@ export function renderToolbar(resultCount) {
       plusWrap.appendChild(plusMenu);
       auth.appendChild(plusWrap);
     }
-    const userBtn = document.createElement("button");
-    userBtn.className = "tool-btn user-menu-btn";
-    const nameSpan = document.createElement("span");
-    nameSpan.className = "user-menu-name";
-    nameSpan.textContent = state.me.name || state.me.email;
-    const chev = document.createElement("span");
-    chev.className = "dd-caret";
-    chev.innerHTML = ICONS.chevron;
-    userBtn.append(nameSpan, chev);
-    userBtn.addEventListener("click", () => openUserMenu(userBtn));
-    auth.appendChild(userBtn);
+    // Reload rather than a redirect: this page's own gate (app.js) sends a
+    // signed-out reader to login, so the one true answer is "ask again".
+    auth.appendChild(userMenuButton({ me: state.me, afterSignOut: () => location.reload() }));
   }
   elToolbar.appendChild(auth);
 

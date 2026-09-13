@@ -6,7 +6,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, req } from "./helpers.js";
-import { pluginDefs, getPluginDef, pluginState, pluginCatalog, mediaLimits, mediaLimitLookup } from "../server/plugins.js";
+import { pluginDefs, getPluginDef, pluginState, pluginCatalog, mediaLimits, mediaLimitLookup, resetDefs } from "../server/plugins.js";
 import { UPLOAD_HARD_CEILING } from "../server/upload-limits.js";
 import { setPluginState, setSetting, getSetting, createAiKey, recordPluginHealth, getPluginRow, updateBoard } from "../server/db.js";
 import { up as carryConnectorInstalls } from "../server/migrations/0018_carry_connector_installs.js";
@@ -40,8 +40,25 @@ test("defs: one entry per integration, ids unique and namespaced", () => {
   // media handler, the on-device embedder, and the local-folder source.
   assert.deepEqual(pluginDefs().filter((d) => d.core).map((d) => d.id),
     ["ai:local", "ai:whisper", "ai:localDetector", "media:image", "media:text", "media:pdf", "media:docx", "media:audio", "source:folder"]);
-  // exactly one connection is pre-added — the flagship AI provider.
-  assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
+  // NOTHING is pre-added (welcome-plan.md 4.4): the welcome screen is the
+  // chooser, and a pre-added vendor is a choice the app doesn't get to make.
+  // The one exception isn't the app choosing either — it is the app reading a
+  // key the OPERATOR put in the environment, so it is pinned in both
+  // directions. resetDefs because the defs memoize, and env is fixed at boot
+  // everywhere except here.
+  const saved = process.env.ANTHROPIC_API_KEY;
+  try {
+    delete process.env.ANTHROPIC_API_KEY;
+    resetDefs();
+    assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), []);
+    process.env.ANTHROPIC_API_KEY = "sk-env";
+    resetDefs();
+    assert.deepEqual(pluginDefs().filter((d) => d.defaultInstalled).map((d) => d.id), ["ai:anthropic"]);
+  } finally {
+    if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = saved;
+    resetDefs();
+  }
 });
 
 test("defs: capabilities mirror the underlying descriptors", () => {
@@ -80,11 +97,13 @@ before(async () => {
 after(() => srv.close());
 
 test("state: install defaults follow the tier; config is schema-default overlaid", async () => {
-  // No row yet: connections are available (not installed), the flagship is
-  // pre-added, built-ins are always installed.
+  // No row yet: EVERY connection is available (not installed) and built-ins are
+  // always installed. Two tiers, where there used to be three — the flagship
+  // exception went with the pre-added default (welcome-plan.md 4.4), so
+  // anthropic is now an ordinary connection like every other vendor.
   assert.equal((await pluginState(db, "crypto:coingecko")).installed, false);
   assert.equal((await pluginState(db, "ai:openai")).installed, false);
-  assert.equal((await pluginState(db, "ai:anthropic")).installed, true, "flagship pre-added");
+  assert.equal((await pluginState(db, "ai:anthropic")).installed, false, "no vendor is pre-added");
   assert.equal((await pluginState(db, "ai:local")).installed, true, "embedder is core");
   assert.equal((await pluginState(db, "media:pdf")).installed, true, "media is core");
 
@@ -223,11 +242,83 @@ test("GET /api/admin/plugins: admin-only; the payload is the plugin list — slo
 
   const r = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
   assert.equal(r.status, 200);
-  assert.equal(r.json.plugins.length, pluginDefs().length);
+  // Every def, PLUS the bundled examples this instance hasn't installed
+  // (welcome-plan.md Stage 2b — pinned in full below). Split rather than
+  // totalled: "length === defs + bundled" would go green if a def went missing
+  // and a bundled row arrived in the same breath.
+  const defIds = new Set(pluginDefs().map((d) => d.id));
+  assert.deepEqual(r.json.plugins.filter((p) => !p.bundled).map((p) => p.id), [...defIds]);
+  assert.ok(r.json.plugins.some((p) => p.bundled), "the bundled examples ride along");
   // The slot/domain state these lines used to pin lives on the capabilities
   // feed (fresh-instance states are asserted in capabilities.test.js); the
   // absence is pinned so the parallel projection can't quietly come back.
   assert.equal("slots" in r.json, false);
+});
+
+// The bundled catalog (planning/welcome-plan.md Stage 2b). What ships in the
+// image at examples/plugins/* installs with no network at all, but until this
+// nothing LISTED it — so the only way to find one was to read a README in the
+// source tree, which made a bundled example strictly harder to install than a
+// random GitHub repo.
+//
+// The install half lives in plugin-install.test.js, which owns a temp
+// PLUGINS_DIR; this file only pins what the catalog SAYS, and the rule that
+// keeps saying it from becoming a way to half-install something.
+test("bundled: the image's own examples are listed as available, from the manifest alone", async () => {
+  const { json } = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
+  const bundled = json.plugins.filter((p) => p.bundled);
+  assert.deepEqual(bundled.map((p) => p.id).sort(), ["ai:community.deepseek", "ai:community.ollama"]);
+
+  for (const p of bundled) {
+    assert.equal(p.state.installed, false, `${p.id}: available, not added`);
+    assert.equal(p.core, false, `${p.id}: removable — which is what puts it in the Add modal`);
+    assert.ok(p.bundled.path, `${p.id}: carries the path the install route takes`);
+    assert.equal(typeof p.bundled.keyless, "boolean", `${p.id}: the listing hints are always answered`);
+    assert.equal(typeof p.bundled.needsBase, "boolean");
+    assert.ok(p.label && p.description, `${p.id}: a manifest can say both without being run`);
+    // Everything a DESCRIPTOR declares is absent: the factory has not run, so
+    // there is nothing to read it from. Empty rather than missing, so a reader
+    // that iterates finds nothing instead of throwing — and the welcome
+    // chooser has to install before it can know whether to draw a key field or
+    // a server-URL field (welcome-plan.md 2.3).
+    assert.deepEqual(p.capabilities, {}, `${p.id}: no capabilities until it loads`);
+    assert.deepEqual(p.configSchema, [], `${p.id}: no config schema until it loads`);
+    // …including, pointedly, a HALF one. The chooser needs `keyless` and
+    // `needsBase` one step before they exist, and they ride `bundled` rather
+    // than a partial `ai` for exactly this reason: `ai.keyless === false` means
+    // "the descriptor says bring a key", and "nothing has loaded yet" is not
+    // that. The hints are pinned equal to the real descriptor in
+    // plugin-install.test.js, which is what stops the box from lying.
+    assert.equal("ai" in p, false, `${p.id}: no descriptor block until it loads`);
+  }
+
+  // The ordering rule the chooser turns on (welcome-plan.md 2.2): the row that
+  // can be finished without deciding to spend money leads. It is only knowable
+  // here because the manifest says so.
+  const ollama = bundled.find((p) => p.id === "ai:community.ollama");
+  assert.deepEqual({ keyless: ollama.bundled.keyless, needsBase: ollama.bundled.needsBase },
+    { keyless: true, needsBase: true });
+  const deepseek = bundled.find((p) => p.id === "ai:community.deepseek");
+  assert.equal(deepseek.bundled.keyless, false, "the keyed sibling — the test that this is a field, not a special case");
+});
+
+test("bundled: a listed example is NOT a def, and PATCH can't half-install one", async () => {
+  // The rule the whole stage rests on. pluginDefs() is what getPluginDef
+  // searches, and getPluginDef is how PATCH /api/admin/plugins/:id and
+  // .../test find their target — so a bundled row in there would make
+  // `PATCH { installed: true }` answer 200 and record installed:true for code
+  // that has never been loaded. The page would then show an installed card for
+  // a provider that cannot serve. The install verb is not a toggle.
+  assert.equal(getPluginDef("ai:community.ollama"), null);
+  assert.equal(pluginDefs().some((d) => d.id.startsWith("ai:community.")), false);
+
+  const patched = await req(base, "PATCH", "/api/admin/plugins/ai:community.ollama",
+    { sid: admin.sid, body: { installed: true } });
+  assert.equal(patched.status, 404);
+  assert.equal(patched.json.error, "unknown plugin");
+
+  // …and nothing was written on the way to that 404.
+  assert.equal(await getPluginRow(db, "ai:community.ollama"), null);
 });
 
 // --- slice 3: writes + enforcement ---
@@ -344,8 +435,11 @@ test("resolvers: a not-installed AI plugin drops out; fallbacks stay graceful", 
     const viaBoard = await resolveBoardAi(db, { aiKeyId: gkey, aiModel: "gemini-2.5-pro" });
     assert.equal(viaBoard.provider, "openai");
 
-    // env fallback honors the anthropic install state (pre-added by default)
+    // env fallback honors the anthropic install state. Setting the var is now
+    // also what installs the provider (welcome-plan.md 4.4), so the defs have
+    // to be rebuilt — in a live server the env is fixed long before they build.
     process.env.ANTHROPIC_API_KEY = "sk-env";
+    resetDefs();
     await setSetting(db, "default_key_id", null);
     assert.equal((await resolveDefaultAi(db)).provider, "anthropic");
     await setPluginState(db, "ai:anthropic", { installed: false });

@@ -166,7 +166,7 @@ import { learnPrices } from "./price-learner.js";
 import { MODEL_CAPABILITIES, kindList, capabilityLabel } from "./capabilities.js";
 import { bindCapability, setCapabilityConfig, assertValidCapabilityConfig, boardBindingPatch, boardConfigPatch } from "./capability-bind.js";
 import { capabilityStatus } from "./capability-status.js";
-import { boardConfigCatalog } from "./capability-resolve.js";
+import { boardConfigCatalog, setupPending } from "./capability-resolve.js";
 import { probeCapability } from "./capability-probe.js";
 import { loadAll as loadPlugins, installFromUrl, uninstall, pluginsDir } from "./plugin-loader.js";
 import { rateLimit } from "./ratelimit.js";
@@ -178,7 +178,7 @@ import { wantedFields, faceSchedule, domainState } from "./connectors/runtime.js
 import { mediaCatalog, getMediaField } from "./media/index.js";
 import { createFieldReconciler } from "./field-reconcile.js";
 import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
-import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits } from "./plugins.js";
+import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits, bundledPlugins } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
@@ -400,7 +400,10 @@ app.get("/api/health", wrap(async (_req, res) => {
 }));
 
 // --- auth ---
-app.get("/api/me", (req, res) => {
+// Async since setup_pending (below) asks the database — so it goes through
+// wrap() like every other async route, or a DB error would surface as an
+// unhandled rejection instead of a 500.
+app.get("/api/me", wrap(async (req, res) => {
   res.json(req.user ? {
     email: req.user.email,
     name: req.user.name,
@@ -413,8 +416,19 @@ app.get("/api/me", (req, res) => {
     // "09:00" silently mean some other hour.
     server_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     server_tz_offset_min: -new Date().getTimezoneOffset(),
+    // First-run setup, admin-only (planning/welcome-plan.md Stage 1): the
+    // boards page's boot gate reads this and sends an admin with no boards
+    // and no model to the chooser instead of to a sentence about boards.
+    //
+    // Absent for a member BY CONSTRUCTION rather than by a client-side check.
+    // They cannot add a key, so the question was never theirs to answer, and
+    // a field that is never present cannot be read by the wrong reader.
+    //
+    // Cheap on purpose — see setupPending, which is ordered around the fact
+    // that this route is the most-fetched one in the app.
+    ...(req.user.is_admin ? { setup_pending: await setupPending(db) } : {}),
   } : null);
-});
+}));
 
 // Second login window keyed by the submitted email (whether or not it exists —
 // keying only real accounts would leak which emails are registered). The per-IP
@@ -2441,7 +2455,14 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   // GET /api/admin/capabilities, so this payload stopped running three
   // resolvers, four binding walks, and a stats query per render to restate
   // what the feed already says.
-  res.json({ plugins });
+  //
+  // The bundled examples ride in the SAME array rather than a field of their
+  // own (welcome-plan.md Stage 2b): every reader already partitions this list
+  // on `state.installed` and `core`, so an available-and-not-installed row
+  // lands where it belongs — out of the cards, into the Add modal — with no
+  // edit. What they are NOT is part of pluginDefs(), which is what keeps the
+  // routes below from addressing a plugin whose code was never loaded.
+  res.json({ plugins: [...plugins, ...(await bundledPlugins(db))] });
 }));
 
 // Star a connector domain's default provider. (Registered before the :id
@@ -2738,6 +2759,17 @@ app.get("/api/admin/capabilities", requireAdmin, wrap(async (_req, res) => {
   res.json({ capabilities: await capabilityStatus(db) });
 }));
 
+// ONE entry, for a reader that wants one. Registered before the :id/* routes
+// below and safe beside them — those are POSTs. The boards page's setup strip
+// (welcome-plan.md 3b) rides here: it asks about tagging on every admin page
+// load, and the full feed would charge it for object detection, ingestion
+// sources and two connector domains it never looks at.
+app.get("/api/admin/capabilities/:id", requireAdmin, wrap(async (req, res) => {
+  const [entry] = await capabilityStatus(db, { only: req.params.id });
+  if (!entry) return res.status(404).json({ error: "unknown capability" });
+  res.json(entry);
+}));
+
 // The capability-native peers. Same rules, addressed by capability id rather
 // than by a per-capability body field — so a new capability is reachable here
 // the moment it exists in CAPABILITY_DEFS.
@@ -2762,6 +2794,22 @@ app.post("/api/admin/capabilities/:id/probe", requireAdmin, wrap(async (req, res
   } catch (err) {
     res.status(err.status || 400).json({ error: err.message });
   }
+}));
+
+// "Later." The one stored bit of the first-run flow, and it buys exactly one
+// thing: the /welcome redirect stops firing. Nothing else changes — the Setup
+// row in the user menu stays, the boards page still says what isn't running,
+// and the Capabilities tab still reports a blocked tagger, because all three
+// are derived from whether tagging resolves rather than from this flag.
+//
+// Skipping is a decision about being interrupted, not a claim that the
+// instance is configured, and the app should not confuse the two. There is
+// deliberately no route to un-skip: by the time it would matter the instance
+// has boards, and the predicate has already stopped asking.
+app.post("/api/admin/welcome/skip", requireAdmin, wrap(async (_req, res) => {
+  await setSetting(db, "welcome_skipped", "1");
+  console.log("welcome: first-run setup skipped — the /welcome redirect is off");
+  res.json({ ok: true });
 }));
 
 // Connector admin config lives on the Plugins surface now:

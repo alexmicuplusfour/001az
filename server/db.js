@@ -1683,6 +1683,19 @@ export async function deleteBoard(db, id) {
   });
 }
 
+// Does this instance have any board at all — one row, or none? Deliberately
+// not a COUNT (the number is nobody's question) and deliberately not
+// listBoards, which selects every column of every row.
+//
+// Its one reader is the first-run predicate (capability-resolve.js
+// setupPending), where it is the rung that tells a NEW instance from a broken
+// one, and where being cheap is the entire reason it exists rather than the
+// caller reusing a list.
+export async function anyBoard(db) {
+  const { rows } = await db.query("SELECT 1 FROM boards LIMIT 1");
+  return rows.length > 0;
+}
+
 export async function boardExists(db, id) {
   const { rows } = await db.query("SELECT 1 FROM boards WHERE id=$1", [id]);
   return rows.length > 0;

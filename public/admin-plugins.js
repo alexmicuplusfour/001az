@@ -27,8 +27,10 @@ let activeKind = "all";
 // left out of a hand-list here; a data connector shows its domain; media is
 // always core.
 export function tagFor(p, caps) {
-  // An external plugin that failed to load carries only its manifest — no live
-  // p.connector/p.ai descriptor — so guard every deref below with `?.`.
+  // Two kinds of row carry only a MANIFEST, with no live p.connector/p.ai
+  // descriptor behind it: an external plugin that failed to load, and a bundled
+  // example nobody has installed (welcome-plan.md Stage 2b). Guard every
+  // descriptor deref here and in keyNote below — both run over the same list.
   if (p.state?.loadError) return "Plugin · error";
   if (p.kind === "ai") {
     const role = servingRoles(caps, p.name)[0];
@@ -44,7 +46,7 @@ export function tagFor(p, caps) {
 function keyNote(p) {
   if (p.state?.loadError) return null; // errored externals show their reason, not a key note
   if (p.kind === "ai") {
-    if (p.ai.onDevice) return null; // in-process — nothing to connect
+    if (!p.ai || p.ai.onDevice) return null; // no descriptor loaded (see tagFor), or in-process
     const n = p.state.keyCount;
     const noun = p.ai.keyless ? "connection" : "key"; // keyless-networked rows are connections without a secret
     return n ? { text: `${n} ${noun}${n > 1 ? "s" : ""}` } : { text: `no ${noun} yet`, warn: true };

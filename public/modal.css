@@ -156,14 +156,25 @@
   box-sizing: border-box;
 }
 
-/* Button styles for a modal's action row (the gallery page has no global button
-   styles). BOTH action rows: the dialog's own footer and a drawer's
-   (modal.js createDrawer). One definition, because a drawer's Cancel is the
-   same button as the dialog's Cancel — it was an outlined one only because it
-   had been declared somewhere else. Unclassed = the primary; `.ghost` = the
-   secondary, the same class every other surface in the app uses for one. */
+/* Button styles for an ACTION ROW (the gallery page has no global button
+   styles). Three of them now: the dialog's own footer, a drawer's
+   (modal.js createDrawer), and the welcome screen's Connect row. One
+   definition, because a drawer's Cancel is the same button as the dialog's
+   Cancel — it was an outlined one only because it had been declared somewhere
+   else — and by the same argument the welcome screen's Connect is the same
+   button as a modal's Save. Unclassed = the primary; `.ghost` = the secondary,
+   the same class every other surface in the app uses for one.
+
+   `.w-actions` is welcome.css's flex row, worn here as the hook: an element
+   that is an action row gets the buttons by saying so, which is how its "Make
+   your first board" row picks this up without a fourth selector. A fourth
+   SELECTOR would be the signal to lift this into styles.css under a class of
+   its own. It is scoped rather than global because styles.css deliberately
+   gives the gallery no `button` rule, and an unscoped one here — modal.css
+   loads on every gallery page — would repaint every .tool-btn in the app. */
 .modal-footer button,
-.drawer-foot button {
+.drawer-foot button,
+.w-actions button {
   border: 1px solid transparent;
   border-radius: 7px;
   padding: 8px 14px;
@@ -173,9 +184,11 @@
   color: #fff;
 }
 .modal-footer button.ghost,
-.drawer-foot button.ghost { background: #f1f1f3; color: #111; }
+.drawer-foot button.ghost,
+.w-actions button.ghost { background: #f1f1f3; color: #111; }
 .modal-footer button.ghost:hover,
-.drawer-foot button.ghost:hover { background: #e6e6ea; }
+.drawer-foot button.ghost:hover,
+.w-actions button.ghost:hover { background: #e6e6ea; }
 
 /* The shared busy state (modal.js `busy`): the wrapped label keeps reserving
    the button's width — hidden by opacity, not visibility, so the

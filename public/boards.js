@@ -20,9 +20,10 @@
 // Node, so this file could not be imported by a test at all. That is the same
 // change and the same argument board-modal.js was given for announce.test.js.
 import { api } from "./api.js";
-import { openDropdown, ddRow, ddSep } from "./dropdown.js";
+import { userMenuButton } from "./user-menu.js";
 import { ICONS } from "./utils.js";
 import { presentIngest } from "./ingest-present.js";
+import { presentTrouble } from "./capability-present.js";
 import { openBoardModal } from "./board-modal.js";
 import { applyBoardDot } from "./board-signal.js";
 import { createTicker } from "./ticker.js";
@@ -53,6 +54,27 @@ if (!me) {
   // app.js applies (~123). This page is a landing surface (the gallery logo
   // points here), so it can't be the way around it.
   location.replace("/login.html");
+} else if (me.is_admin && me.setup_pending) {
+  // Nothing configured and nothing to show: an admin whose instance has no
+  // boards and no AI model goes to the chooser rather than to a sentence about
+  // boards (planning/welcome-plan.md Stage 1.3).
+  //
+  // This ONE branch is the whole gate, which is why app.js has none. Its
+  // boardless landing already replaces to /boards before its own fetch batch
+  // runs (~100), and the gallery logo points here too — so both ways in pass
+  // through this ladder, and the alternative (a second branch over there) sits
+  // downstream of a six-request Promise.all and would charge a redirected
+  // admin for a whole board payload first.
+  //
+  // Placed below needs_password because a fresh invite chooses a password
+  // before anything else, and above the else that unhides #gate so nothing
+  // paints and then jumps.
+  //
+  // `setup_pending` already means "no boards, no model, not skipped" — the
+  // server composes all three (capability-resolve.js setupPending) so no
+  // client re-derives any of it. The is_admin test is belt to that suspender:
+  // the field is absent for a member by construction, which reads falsy.
+  location.replace("/welcome");
 } else {
   document.getElementById("gate").hidden = true;
   document.querySelector("header").hidden = false;
@@ -65,6 +87,11 @@ if (!me) {
   // — "the button is drawn immediately either way, and only the dot waits."
   render().then(() => { if (wraps().length) signalsTicker.start(); });
   refreshSignals();
+  // Deliberately not awaited with the rest: the cards are the page and this is
+  // a footnote about the server, so it lands a beat late rather than holding
+  // the grid. Admin-only at the CALL — a member's page never issues it, and
+  // the route's own requireAdmin is the backstop, not the gate.
+  if (me.is_admin) setupStrip();
 }
 
 // Arriving from a board that turned out not to be ours — app.js got a 404 for
@@ -119,39 +146,56 @@ function renderToolbar() {
     auth.appendChild(newBtn);
   }
 
-  const userBtn = document.createElement("button");
-  userBtn.className = "tool-btn user-menu-btn";
-  const name = document.createElement("span");
-  name.className = "user-menu-name";
-  name.textContent = me.name || me.email;
-  const chev = document.createElement("span");
-  chev.className = "dd-caret";
-  chev.innerHTML = ICONS.chevron;
-  userBtn.append(name, chev);
-  userBtn.addEventListener("click", () => openUserMenu(userBtn));
-
-  auth.appendChild(userBtn);
+  auth.appendChild(userMenuButton({ me, afterSignOut: () => location.replace(LOGIN) }));
   bar.replaceChildren(logo, auth);
 }
 
-// The gallery's user menu, minus nothing — same rows, same order.
-function openUserMenu(anchorEl) {
-  openDropdown(anchorEl, {
-    className: "user-menu-pop",
-    build: (body, { close }) => {
-      if (me.is_admin) body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
-      body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
-      body.appendChild(ddSep());
-      body.appendChild(ddRow({
-        label: "Sign out",
-        onClick: async () => {
-          close();
-          await fetch("/api/logout", { method: "POST" });
-          location.replace(LOGIN);
-        },
-      }));
-    },
-  });
+// The setup strip (planning/welcome-plan.md 3b): one line, above the grid,
+// when the thing that tags what you add is not going to. It has no dismiss
+// because there is nothing to dismiss — it is a reading of the current state,
+// so it leaves by itself the moment the state changes.
+//
+// Who reads it: an admin who SKIPPED first-run setup, one whose key stopped
+// working, and — since the welcome screen exists — one whose connect went
+// wrong, because a stored binding resolves whether or not anything answers and
+// nothing sends them back. That last reader is why presentTrouble has a third
+// case (capability-present.js).
+//
+// One capability, not the feed: /api/admin/capabilities/:id costs 12 queries
+// against 58, and the eight other entries are about object detection and
+// ingestion sources.
+async function setupStrip() {
+  let cap;
+  try {
+    cap = await api("GET", "/api/admin/capabilities/tag");
+  } catch {
+    return; // advisory: a page that can't ask says nothing rather than guessing
+  }
+  const trouble = presentTrouble(cap);
+  if (!trouble) return;
+
+  // Two spans in a wrapper, so the flex row's gap falls between the sentence
+  // and the link and not inside the sentence. Elements rather than bare strings
+  // into append(): the app builds text nodes explicitly everywhere else, and
+  // the only error handled in here is the fetch's — a throw on a later line
+  // would take the strip out in silence.
+  const said = document.createElement("span");
+  const what = document.createElement("b");
+  what.textContent = cap.label;
+  const rest = document.createElement("span");
+  rest.textContent = ` — ${trouble}`;
+  said.append(what, rest);
+
+  const door = document.createElement("a");
+  door.href = "/welcome";
+  // Named for the destination, not the reader's situation: "Finish setup" is
+  // right for someone who skipped and wrong for someone whose key died
+  // yesterday. Both land on the page the user menu also calls Setup.
+  door.textContent = "Setup →";
+
+  const strip = document.getElementById("setup-strip");
+  strip.replaceChildren(said, door);
+  strip.hidden = false;
 }
 
 // --- the board grid ---

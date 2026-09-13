@@ -115,7 +115,14 @@ test("a sidecar's live model lands in provides — and the legacy triple is gone
     const byId = Object.fromEntries(r.json.plugins.map((p) => [p.id, p]));
     assert.ok(byId["ai:whisper"].ai.provides.transcribe, "the sidecar override writes the normal form");
     assert.ok(byId["ai:localDetector"].ai.provides.detect);
-    for (const p of r.json.plugins.filter((x) => x.kind === "ai")) {
+    // `p.ai` is the DESCRIPTOR's block, and since welcome-plan.md Stage 2b the
+    // payload also carries rows built from a manifest alone — bundled examples
+    // nobody has installed, whose factory has never run. They have no block at
+    // all, which trivially satisfies what this loop is asking, so they are
+    // skipped rather than made to carry an empty one: `ai`'s fields are
+    // booleans where false is meaningful, and an empty object would read as a
+    // keyed, non-on-device provider instead of as "nothing has been loaded".
+    for (const p of r.json.plugins.filter((x) => x.kind === "ai" && x.ai)) {
       for (const legacy of ["embeds", "transcribes", "detects"])
         assert.ok(!(legacy in p.ai), `${p.id}: legacy "${legacy}" is back in the plugins payload`);
     }

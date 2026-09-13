@@ -33,8 +33,8 @@ import { sidecarDefaultModel, sidecarPresenceMap } from "./sidecar-catalog.js";
 import { listSources } from "./ingestion/files.js";
 import { probeable } from "./capability-probe.js";
 
-// Per-capability demand — what an outage costs, attached to blocked/degraded
-// cards ("14 items waiting"). Keyed by id HERE rather than on CAPABILITY_DEFS
+// Per-capability demand — what an outage costs, attached to the cards that are
+// reporting one ("14 items waiting"). Keyed by id HERE rather than on CAPABILITY_DEFS
 // because that module is pure data imported by db.js and these need queries; a
 // capability that owns a queue adds its entry here. `transcribe` is deliberately
 // absent: its only counting query is an unindexed payload scan (fine in the
@@ -148,8 +148,15 @@ async function aiEntry(db, cap, catalog, presence) {
     if (viaFloor) running.model = (await sidecarDefaultModel(eff.provider)) || running.model;
   }
 
+  // Every state that means "not working", which is the same three
+  // presentTrouble speaks for. `unavailable` joined them when Stage 4 retired
+  // the pre-added provider (welcome-plan.md 4.4): before that, tag could only
+  // reach it on an instance where someone had removed every AI plugin, and now
+  // it is what a FRESH one reads — whose queue fills while nothing is installed
+  // to drain it, which is exactly when the number is worth showing. `active`
+  // has PROGRESS instead, and `off` is a decision rather than an outage.
   const demand =
-    (state === "blocked" || state === "degraded") && DEMAND[cap.id]
+    ["blocked", "degraded", "unavailable"].includes(state) && DEMAND[cap.id]
       ? await DEMAND[cap.id](db, { running, bound })
       : null;
   const progress = state === "active" && PROGRESS[cap.id] ? await PROGRESS[cap.id](db, running) : null;
@@ -333,7 +340,19 @@ async function sourceEntry(db, catalog) {
   };
 }
 
-export async function capabilityStatus(db) {
+// `only` narrows the answer to ONE entry by id — a parameter, never a branch,
+// so this stays the same walk with a filter and nothing here is authored per
+// capability. It exists because the Capabilities page is not the only reader
+// any more: the boards page's strip (welcome-plan.md 3b) wants one row and
+// would otherwise pay for nine. Measured on a fresh instance — 58 queries for
+// the full feed, 12 for a single capability, against 6 for the boards payload
+// it rides beside.
+//
+// The two shared reads still run: `pluginCatalog` is 7 of those queries and
+// every entry needs it, and the probe round below is cached. Skipping either
+// for a capability that happens not to need it would mean knowing which one
+// that is, which is the table this file exists to not have.
+export async function capabilityStatus(db, { only } = {}) {
   // ONE concurrent probe round for every sidecar-backed engine, ahead of the
   // serial walk below — whose entries each read presence and (when a floor
   // serves) the sidecar's model. The walk would otherwise probe engine by
@@ -341,13 +360,20 @@ export async function capabilityStatus(db) {
   // round and every later read is a cache hit. Overlapped with the catalog it
   // shares nothing with.
   const [catalog, presence] = await Promise.all([pluginCatalog(db), sidecarPresenceMap()]);
+  // id → how to build that entry, assembled before any of it runs, so `only` is
+  // one filter rather than a guard copied to four sites. Still SERIAL: they
+  // share a catalog and a cache, and racing them buys only contention.
+  const builders = [
+    // modifiers render inside their parent, never as a row
+    ...CAPABILITY_DEFS.filter((c) => !c.modifierOf).map((cap) => [cap.id, () => aiEntry(db, cap, catalog, presence)]),
+    ...listConnectors().map((c) => [c.name, () => domainEntry(db, c, catalog)]),
+    ["ingest", () => ingestEntry(catalog)],
+    ["source", () => sourceEntry(db, catalog)],
+  ];
   const out = [];
-  for (const cap of CAPABILITY_DEFS) {
-    if (cap.modifierOf) continue; // renders inside its parent, never as a row
-    out.push(await aiEntry(db, cap, catalog, presence));
+  for (const [id, build] of builders) {
+    if (only && id !== only) continue;
+    out.push(await build());
   }
-  for (const c of listConnectors()) out.push(await domainEntry(db, c, catalog));
-  out.push(ingestEntry(catalog));
-  out.push(await sourceEntry(db, catalog));
   return out;
 }

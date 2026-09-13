@@ -159,7 +159,10 @@ export const CAPABILITY_DEFS = [
     noun: "embeddings",
     label: "Semantic search",
     blurb: "embeds items so search can rank them by meaning",
-    icon: "search",
+    // Was "search" — the magnifier, which names what embeddings are for rather
+    // than what they are, and was the one borrowed glyph in this table. The set
+    // has its own now (utils.js ICONS.embed).
+    icon: "embed",
     declaredBy: "embed", verb: "embed", models: true,
     binding: { keys: { provider: "embed_provider", keyId: "embed_key_id", model: "embed_model", enabled: "embed_enabled" }, boardKeys: null },
     floor: { kind: "off" },

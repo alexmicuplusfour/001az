@@ -19,6 +19,48 @@ export function presentChip(c) {
   return { cls: "dim", text: "unavailable" };
 }
 
+// What a capability's outage costs, in the one noun this file uses for it.
+// Two readers, both below — the card's Waiting line and the strip's clause.
+const items = (n) => `${n} item${n === 1 ? "" : "s"}`;
+
+// Is this capability worth interrupting someone's page about, and in whose
+// words? The boards page's setup strip (welcome-plan.md 3b) is the reader;
+// null means "say nothing", which is the answer almost every time. It returns
+// the WHOLE clause, not a bag of parts — wording is what this module is for,
+// and a caller assembling one is a caller that can word it differently.
+//
+// The states that mean "not working" are all three of blocked, degraded and
+// unavailable. `off` is excluded on purpose — someone turned it off, which is
+// news about a decision rather than about a fault. `unavailable` joined the
+// list when Stage 4 retired the pre-added provider: with nothing installed that
+// advertises tagging, a fresh instance reads `unavailable` where it used to
+// read `blocked`, and a predicate that named only the old one would have gone
+// silent for exactly the reader 3b was built for.
+//
+// Then a fourth condition, and it is the one that made this a function rather
+// than a `state` check at the call site: **resolving, and failing anyway**,
+// which has NO state of its own and must not be given one. A stored binding
+// that resolves IS active; whether the far end answers is a separate fact kept
+// by the health ledger, and the two disagreeing is not a contradiction. It is
+// also what a failed first-run connect leaves behind, so it is the case most
+// likely to be read — and until this, the only surface that showed it was the
+// banner inside the offending plugin's own modal. `failCount` is a live streak
+// (db.js recordPluginHealth zeroes it on success), so non-zero means now.
+//
+// The text is never authored here: it is the chip, or the provider's own last
+// error. A fourth spelling of a state is what this module exists to prevent,
+// and a condition with no chip of its own does not get invented words either.
+export function presentTrouble(c) {
+  const failing = c.state === "active" && c.running
+    ? (c.supportedBy || []).find((p) => p.name === c.running.provider && p.health?.failCount)
+    : null;
+  const said = ["blocked", "degraded", "unavailable"].includes(c.state)
+    ? presentChip(c).text
+    : failing?.health?.lastError?.message;
+  if (!said) return null;
+  return said + (c.demand?.waiting ? ` · ${items(c.demand.waiting)} waiting` : "");
+}
+
 // A provider name → its display label, via the entry's own roster — the
 // payload ships names in bound/running and labels in supportedBy, so the
 // lookup stays inside one entry. Exported: the plugin modal's section planner
@@ -59,7 +101,7 @@ export function presentLines(c) {
     lines.push({ k: "Running", v: (labelIn(c, c.running.provider) + (c.running.model ? ` · ${c.running.model}` : "")) + via });
   }
   if (c.reason) lines.push({ k: "Why", v: c.reason });
-  if (c.demand?.waiting) lines.push({ k: "Waiting", v: `${c.demand.waiting} item${c.demand.waiting === 1 ? "" : "s"}` });
+  if (c.demand?.waiting) lines.push({ k: "Waiting", v: items(c.demand.waiting) });
   // Delegation is the story only while nothing of this capability's OWN is
   // bound (isDelegating) — with an app-wide default stored (slice 5), the
   // Running line already tells the truth and "uses each board's tagger" would

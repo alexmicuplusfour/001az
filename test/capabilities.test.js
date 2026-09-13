@@ -25,6 +25,10 @@ import { IMAGE_PRESETS, DEFAULT_PRESET } from "../server/ai-image.js";
 import { resolveTranscriber, resolveDetector, resolveEmbedder, resolveDefaultAi } from "../server/worker.js";
 import { installFromUrl, uninstall } from "../server/plugin-loader.js";
 import { getSetting, setSetting, createAiKey, deleteAiKey, setPluginState } from "../server/db.js";
+// The env var is what installs anthropic now (welcome-plan.md 4.4) and the defs
+// memoize, so a test that MOVES it has to rebuild them. A live server never
+// does: its environment is fixed long before anything reads it.
+import { resetDefs } from "../server/plugins.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
 const keyBound = CAPABILITY_DEFS.filter((c) => c.binding.keys?.keyId);
@@ -181,17 +185,28 @@ test("the status payload on a fresh instance — every default state, in one rea
   assert.equal(caps.detect.config[0].key, "detect_threshold");
   assert.equal(caps.detect.config[0].value, 0.3);
 
-  // Off by explicit flag; blocked with the queue's depth attached.
+  // Off by explicit flag; unavailable with the queue's depth attached.
+  //
+  // `unavailable` rather than `blocked` since Stage 4 (welcome-plan.md 4.4):
+  // "needs a key" claims there is installed supply waiting on a credential, and
+  // on a fresh instance there is none — nothing installed advertises tagging at
+  // all. The distinction is the whole reason the state machine has both words,
+  // and retiring the pre-added vendor is what finally made the fresh instance
+  // an honest example of the second one.
   assert.equal(caps.embed.state, "off");
-  assert.equal(caps.tag.state, "blocked");
+  assert.equal(caps.tag.state, "unavailable");
   assert.ok(caps.tag.demand.waiting >= 1, "the seeded pending item is counted");
-  assert.ok(caps.tag.supportedBy.find((p) => p.name === "anthropic")?.installed, "the pre-added flagship shows as installable supply");
+  // The roster still NAMES what could serve it — that is how the reader learns
+  // what to add. It just isn't installed, which is the point.
+  const flagship = caps.tag.supportedBy.find((p) => p.name === "anthropic");
+  assert.equal(flagship.installed, false, "no vendor is pre-added any more");
+  assert.equal(flagship.label, "Anthropic", "but the supply is still listed");
 
   // Extraction delegates to tagging and follows its state; scopes are derived.
   // (board-or-global since slice 5 gave extract an app-wide default.)
   assert.equal(caps.extract.delegatesTo, "tag");
   assert.equal(caps.extract.delegatesToAgent, "tagger", "the presenter renders the noun from the feed, not a mapping");
-  assert.equal(caps.extract.state, "blocked");
+  assert.equal(caps.extract.state, "unavailable", "it delegates, so it inherits");
   assert.equal(caps.extract.scope, "board-or-global");
   assert.equal(caps.extract.boardOverrides, 0);
   assert.equal(caps.tag.scope, "board-or-global");
@@ -264,7 +279,12 @@ test("tagging's shared model setting goes with the key — the env rung must not
   // OpenAI default key was handed to Claude on every item after the fallback.
   const saved = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "sk-env";
-  t.after(() => { if (saved === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = saved; });
+  resetDefs();
+  t.after(() => {
+    if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = saved;
+    resetDefs();
+  });
 
   const created = await createAiKey(db, "k2", "openai", "sk-test");
   const keyId = created.id ?? created;
@@ -425,9 +445,11 @@ test("the modal's bind bodies (4b): env-apply, one-call enable, revert, off", as
   const keyId = created.id ?? created;
   const saved = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "sk-env";
+  resetDefs();
   t.after(async () => {
     if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = saved;
+    resetDefs();
     await deleteAiKey(db, keyId);
     await setSetting(db, "model", null);
     await setSetting(db, "embed_provider", null);
@@ -498,6 +520,7 @@ test("degraded says why, shows what took over — and the payload never carries 
   // what actually answers.
   const savedEnv = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = "sk-env-standin";
+  resetDefs();
   await setSetting(db, "default_key_id", String(keyId));
   try {
     const caps = byId(await req(srv.base, "GET", "/api/admin/capabilities", { sid: admin.sid }));
@@ -509,6 +532,7 @@ test("degraded says why, shows what took over — and the payload never carries 
   } finally {
     if (savedEnv === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = savedEnv;
+    resetDefs();
     await setSetting(db, "default_key_id", null);
   }
 });
@@ -565,6 +589,37 @@ test("domain entries: generated, and blocked means a key is the only thing missi
   caps = await get();
   assert.equal(caps.crypto.state, "degraded");
   assert.match(caps.crypto.reason, /took over/);
+});
+
+// One entry by id (welcome-plan.md 3c). The boards page's setup strip asks
+// about tagging on every admin page load, and the full feed would charge it for
+// object detection, ingestion sources and two connector domains it never reads
+// — 58 queries against 12, measured.
+//
+// What this pins is that `only` is a FILTER and not a second implementation:
+// the entry it serves has to be byte-identical to the one the full feed serves,
+// or the strip and the Capabilities page are reading two different servers.
+test("the feed answers for one capability, and answers the same thing", async () => {
+  const { sid } = await adminSession(db);
+  const full = (await req(srv.base, "GET", "/api/admin/capabilities", { sid })).json.capabilities;
+
+  for (const id of ["tag", "embed", "crypto", "ingest", "source"]) {
+    const one = await req(srv.base, "GET", `/api/admin/capabilities/${id}`, { sid });
+    assert.equal(one.status, 200, id);
+    assert.deepEqual(one.json, full.find((c) => c.id === id), `${id}: the same entry, not a second opinion`);
+  }
+
+  // Every id the full feed serves is reachable this way and no others — which
+  // is what keeps the route generic instead of a list someone has to extend.
+  for (const c of full) {
+    assert.equal((await req(srv.base, "GET", `/api/admin/capabilities/${c.id}`, { sid })).status, 200, c.id);
+  }
+  const bogus = await req(srv.base, "GET", "/api/admin/capabilities/nope", { sid });
+  assert.equal(bogus.status, 404);
+  // A MODIFIER is not a row in either shape: research renders inside its
+  // parent, and asking for it by id must not mint one.
+  assert.equal((await req(srv.base, "GET", "/api/admin/capabilities/research", { sid })).status, 404);
+  assert.equal((await req(srv.base, "GET", "/api/admin/capabilities/tag", {})).status, 403, "admin-only, like its parent");
 });
 
 // --- leaves a stored binding behind on purpose: keep last ---

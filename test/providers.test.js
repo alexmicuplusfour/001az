@@ -144,8 +144,10 @@ test("GET /api/admin/ai-providers: admin-only, returns the catalog + install fla
   assert.equal(r.status, 200);
   // the static catalog rides through untouched, plus a per-provider install flag
   assert.deepEqual(r.json.map(({ installed, ...rest }) => rest), providerCatalog());
-  // fresh install: the core on-device engines (embedder + whisper transcriber)
-  // and the pre-added flagship are installed
+  // fresh install: ONLY the core on-device engines (embedder, whisper
+  // transcriber, object detector). No vendor is pre-added since welcome-plan.md
+  // 4.4 — every networked provider is available and waits to be chosen, which
+  // is what makes the welcome screen's chooser the place the choice happens.
   const installed = r.json.filter((p) => p.installed).map((p) => p.name).sort();
-  assert.deepEqual(installed, ["anthropic", "local", "localDetector", "whisper"]);
+  assert.deepEqual(installed, ["local", "localDetector", "whisper"]);
 });

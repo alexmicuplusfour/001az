@@ -3,5 +3,6 @@
   "apiVersion": 1,
   "kind": "ai-provider",
   "label": "DeepSeek",
+  "description": "DeepSeek V4 models for tagging — TEXT ONLY, no vision. Bring a key.",
   "main": "index.js"
 }

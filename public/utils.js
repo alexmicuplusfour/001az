@@ -189,6 +189,13 @@ export const ICONS = {
   srcPerson: glyph('<circle cx="12" cy="9.5" r="3.3"/><path d="M5.5 20.5a6.5 6.5 0 0 1 13 0"/>'),
   srcWave: glyph('<path d="M4 10.5v3M8 7.5v9M12 4.5v15M16 7.5v9M20 10.5v3"/>'),
   srcDot: glyph('<circle cx="12" cy="12" r="3.4"/>'),
+  // Embeddings' own mark, and the reason it exists: CAPABILITY_DEFS used to
+  // give that capability `icon: "search"` — the magnifier below — which is
+  // what embeddings are FOR, not what they are, and the only borrowed glyph in
+  // the set. Points scattered in a plane is the thing itself. Filled dots
+  // rather than a stroked figure because at 15px a five-part outline closes up;
+  // the fill rides the glyph helper's currentColor like every other mark.
+  embed: glyph('<circle cx="6" cy="9" r="1.7" fill="currentColor" stroke="none"/><circle cx="11.5" cy="6" r="1.7" fill="currentColor" stroke="none"/><circle cx="10" cy="13.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="17" cy="10.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="14" cy="17.5" r="1.7" fill="currentColor" stroke="none"/>'),
   // Ingestion source kinds join the set here (sourceGlyph in
   // source-chooser.js): the local folder and an S3 bucket get their own
   // marks; other remote servers (FTP, installed source plugins) ride

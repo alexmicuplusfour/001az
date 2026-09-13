@@ -50,6 +50,27 @@ main#boards-grid {
   padding: 40px 24px;
 }
 
+/* The setup strip (planning/welcome-plan.md 3b). The BOX is styles.css's
+   .warn-box — the app's amber "this wants your attention" shell, which already
+   means exactly this — so all that belongs here is the row inside it and where
+   it sits: the grid's own side padding, and the grid's top padding for the gap
+   below. Its own [hidden] rule because the display above beats the UA's. */
+.setup-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 20px 24px 0;
+}
+.setup-strip[hidden] {
+  display: none;
+}
+.setup-strip a {
+  margin-left: auto;
+  color: inherit;
+  white-space: nowrap;
+}
+
 /* The grid item is a WRAPPER, not the card link. The card's controls (the
    rearrange grip, the manage pencil) are <button>s, and a button inside an <a>
    is invalid — and unreliable — nested interactive content, so they are the
