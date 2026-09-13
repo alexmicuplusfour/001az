@@ -1,6 +1,7 @@
 # Welcome — the first screen of a fresh instance (2026-09-13)
 
-**Status: ALL STAGES SHIPPED 2026-09-13 (local, uncommitted).** Suite green at
+**Status: ALL STAGES SHIPPED 2026-09-13. Stage 3a and the walked-in half of 3.0
+were REVERSED the same day — see the banner on Stage 3.** Suite green at
 1523 (was 1495), eslint clean. Stage 4 arrived as a bug fix rather than the
 one-line cleanup it was written as — four of the chooser's five keyed providers
 could not complete first-run at all — and retiring the default then changed
@@ -50,6 +51,16 @@ otherwise:
   3a makes it a recurring destination; the strip's predicate misses the reader
   Stage 2 creates; and its feed costs 58 queries for the one row it reads. All
   measured, all in **Stage 3** below.
+- **2026-09-13, Stage 3a REVERSED, and 3.0 with it.** Shipped, used, and wrong:
+  a standing "Setup" row reads as an unfinished task on an instance with
+  nothing left to set up, and the page it led to answered a returning reader
+  with a blank API-key box for the provider already answering — which added
+  the SAME connection a second time and orphaned the first (reproduced:
+  `["1:OpenAI"] → ["1:OpenAI","2:OpenAI"]`). The row is gone, `/welcome`
+  bounces a configured instance to the boards page, and the way back is the
+  3b strip alone, which is the one door that says what is wrong. Kept: the
+  user-menu extraction 3a forced, which is why removing the row was one edit
+  instead of three.
 - **2026-09-13, Stage 4 built.** The fix landed first and the flip second, as
   4.2 requires. Then the flip moved a state nobody had budgeted for:
   `blocked` → `unavailable` on a fresh instance, which two readers had written
@@ -1017,6 +1028,22 @@ box is up, not that a usable model is pulled, so a green test followed by a
 failing tag is a reachable state and the copy should not promise otherwise.
 
 ### Stage 3 — the persistent place
+
+> **REVERSED IN PART, 2026-09-13, after using it.** Everything below shipped as
+> written. Then **3a's menu row was removed and 3.0's walked-in path deleted**,
+> because the premise underneath both — that `/welcome` should be somewhere an
+> admin returns to — is wrong. It is a first-run guide. A returning reader had
+> no question it could answer, and the one it asked anyway ("paste an API key")
+> produced a DUPLICATE connection to the provider already serving.
+>
+> What stands: **3b (the boards strip)**, which is now the whole answer to "how
+> do they get back" — it appears only when tagging is broken and says how; and
+> **3c (the one-capability feed route)**, which the strip rides. What went:
+> the menu row, and `settled()`'s second arrival. `/welcome` now sends a
+> configured instance to the boards page, so the walked-in state cannot occur.
+>
+> The sections below are left as written: the reasoning is why the row looked
+> right, and the reversal only makes sense next to it.
 
 Two rungs, both derived from the same feed — plus a third thing the first rung
 turns out to require, and a cost fix the second one needs before it ships.

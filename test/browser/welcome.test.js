@@ -22,7 +22,7 @@ import path from "node:path";
 import http from "node:http";
 import { openApp } from "./harness.js";
 import { adminSession, seedUser } from "../helpers.js";
-import { setPassword, getSetting, listAiKeys, deleteAiKey, setPluginState } from "../../server/db.js";
+import { setPassword, getSetting, listAiKeys, deleteAiKey, setPluginState, setSetting } from "../../server/db.js";
 import { hashPassword } from "../../server/password.js";
 
 let app, admin, pluginsTmp, ollama;
@@ -246,7 +246,8 @@ test("Connect runs the three calls, and only then does a board become the next s
   // The title stops instructing and starts stating, and the footnote answers
   // the question the reader has NOW — where, not whether.
   assert.equal(await page.locator("#w-title").textContent(), "Model connected");
-  assert.match(await page.locator("#w-fine").textContent(), /Setup/);
+  assert.match(await page.locator("#w-fine").textContent(), /Admin/,
+    "where to change it later is Admin → Capabilities; this page is done asking");
   // The provider's LABEL, never its internal name. An installed plugin's is its
   // namespaced manifest id ("community.ollama"), which is a string no reader of
   // this screen has any business seeing — the feed ships names in `running` and
@@ -262,27 +263,30 @@ test("Connect runs the three calls, and only then does a board become the next s
   assert.deepEqual(page.failures, []);
 });
 
-// welcome-plan.md 3.0 — the thing the Setup row breaks if nobody looks. This
-// page was built as a first-run screen, and 3a makes it somewhere an admin
-// comes back to. The failure it guards is not a crash: it is a configured
-// instance being offered "Make your first board" and a chooser that has
-// collapsed, i.e. a Setup link that lands on the one page unable to change the
-// setup.
-test("walking in on a configured instance is not a first run", async () => {
+// There is no such thing as walking in on a configured instance any more. The
+// page spent one release trying to be two things — a first-run guide and a
+// place to change your mind — and the second one produced a blank API-key box
+// for the provider that was already answering, which added the SAME connection
+// a second time and orphaned the first.
+//
+// So it is a first-run guide and nothing else: if a model is connected, every
+// question this page can ask has an answer, and changing one later is Admin →
+// Capabilities. Runs straight after the connect test on purpose — that is what
+// leaves the instance configured — and hands the instance back unconfigured,
+// because everything below needs a chooser to look at.
+test("a configured instance has nothing to do here, so it doesn't stay", async (t) => {
+  t.after(async () => {
+    for (const k of await listAiKeys(app.db)) await deleteAiKey(app.db, k.id);
+    await setSetting(app.db, "default_key_id", null);
+  });
+
   const page = await app.open("/welcome", { sid: admin.sid });
-  await page.locator("#w-why").waitFor({ timeout: 15000 });
-  await page.waitForTimeout(400); // the feeds land, then settled() runs
+  await page.waitForURL(/\/boards$/, { timeout: 15000 });
 
-  // It says what is answering — that part is the same either way.
-  assert.match(await page.locator("#w-why").textContent(), /Ollama .* is answering\./);
-
-  // …and then everything the just-connected path does is ABSENT.
-  assert.ok(await page.locator(".w-tile").count() > 1, "the chooser stays — changing the model IS the task here");
-  assert.equal(await page.locator("#w-next").isVisible(), false, "no board button: it claims how new you are");
-  assert.equal(await page.locator("#w-title").textContent(), "Connect an AI model", "the title is still the task");
-  assert.equal(await page.locator("#w-fine").textContent(), "You can change this later.",
-    "not \"change it from Setup\" — they arrived from Setup");
-  assert.equal(await page.locator(".w-foot").isVisible(), false, "nothing left to skip");
+  // Sent on, not shown a dead end: the chooser never drew, and the boards page
+  // it landed on is a real page rather than the gate still spinning.
+  assert.equal(await page.locator(".w-tile").count(), 0);
+  assert.equal(await page.locator("#gate").isVisible(), false);
 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
@@ -345,24 +349,30 @@ test("skip stores the one bit and leaves; a member never gets here at all", asyn
   assert.deepEqual(theirs.errors, []);
 });
 
-// welcome-plan.md 3a — the answer to "how do they get back". One menu now
-// (public/user-menu.js); it had three copies and adding this row to all three
-// is how it got to three.
-test("Setup is in the user menu, for an admin, on every surface that has one", async () => {
+// The way back is NOT a menu row. It was one for a release: "Setup", always
+// present, above Admin. On an instance with nothing left to set up that reads
+// as an unfinished task, and it pointed at a page that could no longer help —
+// so it is gone, and what remains is the boards page's strip, which appears
+// exactly when tagging is broken and says which way it is broken.
+//
+// Pinned as an ABSENCE because that is the kind of thing that comes back by
+// accident: the row is three words and an href, and the argument against it is
+// a paragraph.
+test("the user menu has no Setup row — the strip is the way back", async () => {
   const page = await app.open("/boards", { sid: admin.sid });
   await page.locator(".user-menu-btn").waitFor({ timeout: 15000 });
   await page.locator(".user-menu-btn").click();
   await page.locator(".user-menu-pop").waitFor({ timeout: 15000 });
 
   const rows = await page.locator(".user-menu-pop .dd-row").allTextContents();
-  assert.deepEqual(rows, ["Setup", "Admin", "Profile", "Sign out"],
-    "above Admin: the smaller door before every setting this instance has");
-  assert.equal(await page.locator('.user-menu-pop a.dd-row[href="/welcome"]').count(), 1);
+  assert.deepEqual(rows, ["Admin", "Profile", "Sign out"]);
+  assert.equal(await page.locator('.user-menu-pop a.dd-row[href="/welcome"]').count(), 0,
+    "nothing in this menu points at the first-run screen");
   assert.deepEqual(page.errors, []);
 
-  // A member has no key to add and no instance to set up — the row is a
-  // property of the reader, which is the whole reason `me` is an argument now
-  // rather than something each copy sniffed for itself.
+  // The admin-only rows are still a property of the READER rather than of which
+  // page is asking — the reason `me` is an argument to userMenuButton, and the
+  // half of that test worth keeping.
   const { user } = await app.signIn({ email: "row@welcome.browser", boardName: "Theirs" });
   const theirs = await app.open("/boards", { sid: user.sid });
   await theirs.locator(".user-menu-btn").waitFor({ timeout: 15000 });

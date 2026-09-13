@@ -4,8 +4,9 @@
 // planning/welcome-plan.md Stage 2) the welcome screen. The copies were
 // identical down to the separator, and differed only in the two things below.
 //
-// It was extracted when Stage 3a wanted to add a row: adding it three times is
-// how the copies got to three in the first place.
+// It was extracted when Stage 3a wanted to add a row. That row has since been
+// removed (see below), and the extraction is the part worth keeping: the next
+// change to this menu is one edit rather than three.
 //
 // The two genuine differences, taken as arguments rather than sniffed:
 //
@@ -37,16 +38,17 @@ function open(anchorEl, me, afterSignOut) {
   openDropdown(anchorEl, {
     className: "user-menu-pop",
     build: (body, { close }) => {
-      if (me.is_admin) {
-        // The answer to "how do they get back" (welcome-plan.md Stage 3a).
-        // Always present and carrying no state: a row that shows up only when
-        // something is wrong is a row nobody can find when something is wrong,
-        // and the badge it would wear costs a capability feed per menu open.
-        // Above Admin because it is the smaller door — one decision, versus
-        // every setting this instance has.
-        body.appendChild(ddRow({ label: "Setup", href: "/welcome" }));
-        body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
-      }
+      // No "Setup" row. It was here for one release and it was wrong: /welcome
+      // is a first-run guide, not a settings page, so a permanent link to it
+      // reads as an unfinished task on an instance that has nothing left to do.
+      // Changing a model later is Admin → Capabilities, which is what that page
+      // is for and where the full vocabulary lives.
+      //
+      // The way BACK, for the admin who skipped or whose key died, is the
+      // boards page's strip (welcome-plan.md 3b) — it appears exactly when
+      // tagging isn't working and says what is wrong, which is the thing a
+      // standing menu row could never do.
+      if (me.is_admin) body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
       body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
       body.appendChild(ddSep());
       body.appendChild(ddRow({

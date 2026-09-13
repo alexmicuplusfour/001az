@@ -19,7 +19,7 @@ import { userMenuButton } from "./user-menu.js";
 import { ICONS, glyphEl } from "./utils.js";
 import { openBoardModal } from "./board-modal.js";
 import { busy } from "./modal.js";
-import { presentChip, labelIn } from "./capability-present.js";
+import { presentChip } from "./capability-present.js";
 
 const LOGIN = "/login.html?next=%2Fwelcome";
 const el = (id) => document.getElementById(id);
@@ -94,11 +94,20 @@ async function load() {
   }
 
   tagCap = caps.find((c) => c.id === "tag");
+  // Already served, so there is nothing on this page to do. Not a message, not
+  // a collapsed chooser — leave. This screen exists to get a first model
+  // connected; once one is, every question it can ask has an answer, and the
+  // two it would ask anyway (which provider, what key) are Admin →
+  // Capabilities' job. Sitting here offering a blank API-key box for the
+  // provider that is ALREADY ANSWERING is how the same connection got added
+  // twice.
+  //
+  // Reached from the boards strip this branch never fires: the strip only
+  // appears when tagging is in trouble, which is exactly when the chooser
+  // below is worth drawing.
+  if (tagCap?.state === "active") { location.replace("/boards"); return; }
   renderTiles(plugins);
   renderOthers(caps);
-  // Already served — an admin who walked in from the Setup row rather than
-  // being sent. Say so instead of asking again.
-  if (tagCap?.state === "active") settled(tagCap.running);
 }
 
 // Who can be picked. Two populations, one list:
@@ -349,38 +358,25 @@ async function connect(input, dots, err) {
 // the CONNECTION, not that the work will succeed. A self-hosted box with
 // nothing pulled answers the model list and then fails at the first tag.
 function settled(running) {
-  // Never `running.provider`. That is the internal name, and an installed
-  // plugin's is its namespaced manifest id — "community.ollama" — a string no
-  // reader of this screen has any business seeing.
+  // The provider's LABEL, taken off the card rather than out of the feed's
+  // roster. `running.provider` is the internal name — an installed plugin's is
+  // its namespaced manifest id, "community.ollama" — and the roster can't help
+  // either, because the feed was fetched BEFORE the install, so it has never
+  // heard of the provider that is now answering.
   //
-  // Two sources, because there are two ways to arrive and only one of them has
-  // a roster to look in. Coming through Connect, the label is the one already
-  // on the card: the feed was fetched BEFORE the install, so its roster has
-  // never heard of the provider that is now answering and labelIn would fall
-  // through to the name. Coming from the Setup row on an instance that was
-  // already configured, nothing was picked and the roster is current, which is
-  // exactly what labelIn is for.
-  const who = picked?.label || (running?.provider ? labelIn(tagCap, running.provider) : null);
-  const answering = who
-    ? `${who}${running.model ? ` · ${running.model}` : ""} is answering.`
-    : "This server can tag, describe and fill board fields.";
+  // One source, because there is one way to get here: somebody pressed
+  // Connect. Arriving on an instance that is already configured no longer
+  // reaches this screen at all (load() sends them to the boards page), which
+  // took a whole second arrival, and its copy, out of this function.
+  el("w-why").textContent =
+    `${picked.label}${running?.model ? ` · ${running.model}` : ""} is answering.`;
 
-  // True of both arrivals: what is answering, and that there is nothing left to
-  // skip — "Skip for now — uploads and boards work without it" under a
-  // connected model reads as the page not having noticed.
-  el("w-why").textContent = answering;
+  // "Skip for now" is an answer to a question that has been answered, and
+  // leaving it under a connected model reads as the page not having noticed.
   document.querySelector(".w-foot").hidden = true;
 
-  // WALKED IN, on an instance that is already configured — the Setup row's
-  // reader (welcome-plan.md 3.0), not a first run. Everything below is about
-  // finishing something they didn't start: there is no card, and "Make your
-  // first board" is a claim about how new they are. The title stays the task
-  // and the CHOOSER STAYS — a page reached from "Setup" that cannot change the
-  // setup is the one thing that rung must not produce.
-  if (!picked) return;
-
   el("w-title").textContent = "Model connected";
-  el("w-fine").textContent = "Change it any time from Setup.";
+  el("w-fine").textContent = "Change it any time from Admin → Capabilities.";
   el("w-tiles").hidden = true;
 
   // A finished card IS its head: the field, the action row and the way back all
