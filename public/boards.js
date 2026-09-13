@@ -119,16 +119,18 @@ function announceGone() {
 }
 
 // Creating a board, from either of its two doors — the toolbar's "+ New
-// board" and the empty grid's placeholder card. Landing in the new board is
-// part of the meaning: it is where you'd go next anyway. A declaration, not a
-// const: the boot block runs during module evaluation and renderToolbar wires
-// this synchronously — the same TDZ hazard the arrangement state at the top
-// of the file spells out.
+// board" and the empty grid's placeholder card. The page STAYS: this is the
+// index, the new card materializing in the grid is the confirmation, and the
+// created toast lives long enough to read — the location.href that used to
+// sit here outran its own toast. The gallery's New board still navigates,
+// because there you are inside one board asking for another: the leaving is
+// the point, and arriving in the new board is that path's confirmation.
+//
+// A declaration, not a const: the boot block runs during module evaluation
+// and renderToolbar wires this synchronously — the same TDZ hazard the
+// arrangement state at the top of the file spells out.
 function createBoard() {
-  openBoardModal(null, {
-    canEditAI: true,
-    onSaved: (saved) => { location.href = `/?board=${encodeURIComponent(saved.id)}`; },
-  });
+  openBoardModal(null, { canEditAI: true, onSaved: render });
 }
 
 // --- toolbar: row 1 only, logo left, user menu right ---

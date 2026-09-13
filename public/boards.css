@@ -7,8 +7,8 @@
    file adds only the grid and its cards.
 
    Card-internal parts are namespaced `bc-*` because styles.css already owns
-   the `.board-*` namespace for the toolbar's board controls — `.board-name`
-   there is a 13px toolbar label, and both stylesheets load on this page. */
+   the `.board-*` namespace for the toolbar's board controls (`.board-btn`,
+   `.board-group`), and both stylesheets load on this page. */
 
 /* Row 1 only. The gallery's #toolbar reserves bottom spacing and a hairline
    rule to divide itself from the filters row (#toolbar-sub) beneath it; this

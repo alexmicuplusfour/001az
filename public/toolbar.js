@@ -246,9 +246,9 @@ export function renderToolbar(resultCount) {
   elToolbarSub.replaceChildren();
 
   // Row 1: identity + upload + auth
-  // The logo is the conventional "home" — here that's the boards index, and
-  // it's the ONLY route there for a one-board member (the board switcher, and
-  // so its All-boards footer, only renders when there's more than one).
+  // The logo is the conventional "home" — here that's the boards index. The
+  // switcher's All-boards footer is the signed way there; this is the quiet
+  // one.
   const logo = document.createElement("a");
   logo.className = "toolbar-logo";
   logo.href = "/boards";
@@ -275,33 +275,24 @@ export function renderToolbar(resultCount) {
       templateChip.title = `Entity mapping template: ${connectorName}`;
     }
 
-    // Both renderings lead with `grid`, this app's word for the boards domain
-    // (the logo's destination, the All-boards row in the dropdown) — the name
-    // of the place you are reads the same whether or not you can leave it.
-    // What the pill adds is the caret, and a member with one board has nothing
-    // to open: same mark, no affordance it can't honour.
-    if (state.me && state.boards.length > 1) {
-      const boardBtn = document.createElement("button");
-      boardBtn.className = "tool-btn board-btn";
-      // Glyph, label, caret — the crates selector's shape.
-      boardBtn.innerHTML = ICONS.grid;
-      const nameEl = document.createElement("span");
-      nameEl.textContent = state.boardName;
-      const chev = document.createElement("span");
-      chev.className = "dd-caret";
-      chev.innerHTML = ICONS.chevron;
-      boardBtn.append(nameEl, chev);
-      boardBtn.addEventListener("click", () => openBoardPop(boardBtn));
-      boardGroup.appendChild(boardBtn);
-    } else {
-      const name = document.createElement("span");
-      name.className = "board-name";
-      name.innerHTML = ICONS.grid;
-      const nameText = document.createElement("span");
-      nameText.textContent = state.boardName;
-      name.appendChild(nameText);
-      boardGroup.appendChild(name);
-    }
+    // The pill, ALWAYS — reverted from a one-board plain label whose reasoning
+    // was "a member with one board has nothing to open". That stopped being
+    // true when the dropdown's footer grew "All boards" and the admin's "New
+    // board": a sole board still has somewhere to go, so the caret is an
+    // affordance every reader can honour. Glyph, label, caret — the crates
+    // selector's shape; `grid` is this app's word for the boards domain (the
+    // logo's destination, the All-boards row in the dropdown).
+    const boardBtn = document.createElement("button");
+    boardBtn.className = "tool-btn board-btn";
+    boardBtn.innerHTML = ICONS.grid;
+    const nameEl = document.createElement("span");
+    nameEl.textContent = state.boardName;
+    const chev = document.createElement("span");
+    chev.className = "dd-caret";
+    chev.innerHTML = ICONS.chevron;
+    boardBtn.append(nameEl, chev);
+    boardBtn.addEventListener("click", () => openBoardPop(boardBtn));
+    boardGroup.appendChild(boardBtn);
 
     // Board admins (global or per-board) get an inline "edit board" pencil that
     // opens the same board editor as the admin page (content-only + read-only
