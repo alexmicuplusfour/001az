@@ -15,7 +15,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-gallery}:${POSTGRES_PASSWORD:-gallery}@db:5432/${POSTGRES_DB:-gallery}
       INGEST_ROOT: /data/ingest
-      BASE_URL: http://localhost:8001 # must match caddy's port below
+      BASE_URL: http://localhost:8001 # must match the port above
     volumes:
       - appdata:/data
       - ./ingest-root:/data/ingest
@@ -37,32 +37,32 @@ services:
     build: ./extractor
     restart: unless-stopped
 
-  # Optional on-device AI engines — enable with COMPOSE_PROFILES=transcribe,detect
-  # in .env. Their models are baked into the image at build time.
+  # --- Optional AI engines: delete the leading "#" on a block to turn it on. ---
+  # Heavy: each bakes its models into the image at build time. The app works
+  # without them (the capability just reads "unavailable"). Every value shown
+  # is the default already compiled in, so you can uncomment and change none.
 
-  transcriber: # speech-to-text + speaker diarization (whisper)
-    image: ghcr.io/alexmicuplusfour/001az-transcriber:latest
-    profiles: ["transcribe"]
-    build:
-      context: ./transcriber
-      args:
-        WHISPER_MODEL: ${WHISPER_MODEL:-small}
-        BAKE_MODELS: ${BAKE_MODELS:-}
-    restart: unless-stopped
-    environment:
-      WHISPER_BEAM: ${WHISPER_BEAM:-}
-      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
-      WHISPER_DIARIZE: ${WHISPER_DIARIZE:-}
-      WHISPER_DIARIZE_THRESHOLD: ${WHISPER_DIARIZE_THRESHOLD:-}
+#  transcriber: # speech-to-text + speaker diarization (whisper), +~1.2GB
+#    image: ghcr.io/alexmicuplusfour/001az-transcriber:latest
+#    restart: unless-stopped
+#    build:
+#      context: ./transcriber
+#      args:
+#        WHISPER_MODEL: small    # tiny|base|small|medium|large, baked in
+#        BAKE_MODELS: ""         # bake extras so boards can pick: "small,medium"
+#    environment:
+#      WHISPER_LANGUAGE: ""      # "" auto-detects; or "en", "ro", "de"
+#      WHISPER_BEAM: "5"         # 5 accurate, 1 fastest
+#      WHISPER_DIARIZE: "1"      # "0" drops the S1/S2 speaker labels
+#      WHISPER_DIARIZE_THRESHOLD: "0.8"  # lower splits voices, higher merges
 
-  object-detector: # open-vocabulary object detection (LLMDet)
-    image: ghcr.io/alexmicuplusfour/001az-object-detector:latest
-    profiles: ["detect"]
-    build:
-      context: ./object-detector
-      args:
-        OBJECT_DETECTOR_MODEL: ${OBJECT_DETECTOR_MODEL:-iSEE-Laboratory/llmdet_tiny}
-    restart: unless-stopped
+#  object-detector: # open-vocabulary object detection (LLMDet), +~3GB
+#    image: ghcr.io/alexmicuplusfour/001az-object-detector:latest
+#    restart: unless-stopped
+#    build:
+#      context: ./object-detector
+#      args:
+#        OBJECT_DETECTOR_MODEL: iSEE-Laboratory/llmdet_tiny  # or llmdet_base
 
   caddy: # optional HTTPS. Put your domain below, then COMPOSE_PROFILES=edge
     image: caddy:2
