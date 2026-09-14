@@ -19,6 +19,7 @@ services:
     volumes:
       - appdata:/data
       - ./ingest-root:/data/ingest
+      - ./backups:/data/backups # daily DB archives — outlives `down -v`
     depends_on:
       - db
 
