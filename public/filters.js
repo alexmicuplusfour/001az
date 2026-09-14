@@ -5,6 +5,7 @@ import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
 import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters } from './patterns.js';
 import { LEVEL_MAX } from './cluster-core.js';
+import { lockScroll, unlockScroll } from './modal.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -632,14 +633,18 @@ function toggleFiltersDesktop() {
   elFilters.style.transition = "";
 }
 
+// The shared lock is ref-counted, so open/close must stay balanced — the
+// is-open class is the drawer's own record of holding a count.
 export function openFilterDrawer() {
+  if (elFilterDrawer.classList.contains("is-open")) return;
   elFilterDrawer.classList.add("is-open");
-  document.body.style.overflow = "hidden";
+  lockScroll();
 }
 
 export function closeFilterDrawer() {
+  if (!elFilterDrawer.classList.contains("is-open")) return;
   elFilterDrawer.classList.remove("is-open");
-  document.body.style.overflow = "";
+  unlockScroll();
 }
 
 // Called by the toolbar Filters button — decides inline vs drawer based on scroll + viewport.

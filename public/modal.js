@@ -10,16 +10,22 @@
 // bodyStyle (cssText for the body), onClose (run after the modal is dismissed).
 import { glyphEl } from './utils.js';
 
-// Lock/unlock page scroll while a modal is open. Removing the scrollbar would
-// otherwise reflow the page wider by its width; we reserve that width as
-// padding-right on the root element so the layout stays put. We pad <html>
-// rather than <body> on purpose: a page may center its body (max-width +
-// margin:auto) with border-box, where growing body padding shrinks the content
-// instead of holding it in place. The root has no such constraint. Ref-counted
-// so a modal opened from another modal doesn't unlock early or pad twice.
+// Lock/unlock page scroll while an overlay is open — modals here, and
+// exported for the lightbox and the filter drawer, because every
+// full-viewport overlay must hide the scrollbar the same way. Removing the
+// scrollbar would otherwise reflow the page wider by its width — and the
+// masonry relays out on real width changes (grid.js observes the root's
+// box), so a bare overflow:hidden doesn't just nudge the page, it re-lays
+// the whole grid under the overlay and back on close. We reserve that width
+// as padding-right on the root element so the layout stays put. We pad
+// <html> rather than <body> on purpose: a page may center its body
+// (max-width + margin:auto) with border-box, where growing body padding
+// shrinks the content instead of holding it in place. The root has no such
+// constraint. Ref-counted so a modal opened from another modal (or over the
+// lightbox) doesn't unlock early or pad twice.
 let scrollLocks = 0;
 let savedPaddingRight = "";
-function lockScroll() {
+export function lockScroll() {
   if (scrollLocks++ > 0) return;
   const root = document.documentElement;
   savedPaddingRight = root.style.paddingRight;
@@ -30,7 +36,7 @@ function lockScroll() {
   }
   document.body.style.overflow = "hidden";
 }
-function unlockScroll() {
+export function unlockScroll() {
   if (scrollLocks === 0 || --scrollLocks > 0) return;
   document.body.style.overflow = "";
   document.documentElement.style.paddingRight = savedPaddingRight;

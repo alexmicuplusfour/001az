@@ -6,7 +6,7 @@ import { openCratePop, closeCratePop } from './crates.js';
 import { scrollToCard } from './grid.js';
 import { fullUrl, kindFor } from './kinds.js';
 import { requeueToast } from './data.js';
-import { sectionHeading, busy, claim } from './modal.js';
+import { sectionHeading, busy, claim, lockScroll, unlockScroll } from './modal.js';
 import { openFacetScopePop } from './dropdown.js';
 
 import { selectFace } from './face-select.js';
@@ -755,7 +755,7 @@ export function openLightbox(item) {
   if (lightboxIndex < 0) { lightboxList = [item]; lightboxIndex = 0; }
   showLightbox();
   elLightbox.hidden = false;
-  document.body.style.overflow = "hidden";
+  lockScroll();
   elLightboxPin.classList.toggle("on", panelPinned());
   if (panelPinned()) setPanel(true);
 }
@@ -773,7 +773,7 @@ export function closeLightbox() {
   setPanel(false);
   scrollToCard(lightboxItem);
   elLightbox.hidden = true;
-  document.body.style.overflow = "";
+  unlockScroll();
   elLightbox.classList.remove("loading");
   currentHandle?.unmount?.();
   currentHandle = null;
