@@ -388,10 +388,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(422, {"error": "empty body"})
             return
         if want not in BAKED:
-            # 422, not 500: a model this image never baked is a permanent fault
-            # of the request, so the caller parks the clip with a readable
-            # reason instead of retrying it forever.
-            self._json(422, {"error": f"model '{want}' is not baked into this transcriber (have: {', '.join(BAKED)})"})
+            # 409, not 422: the pinned model and the pulled image disagreeing
+            # is a CONFIG fault, not the clip's. A 422 parks the clip as
+            # undecodable; 409 makes the caller back off the lane, so every
+            # clip survives an operator fixing either side. The body stays
+            # readable — app builds that predate 409 sniff it to the same
+            # conclusion.
+            self._json(409, {"error": f"model '{want}' is not baked into this transcriber (have: {', '.join(BAKED)})"})
             return
         # The model is part of the identity: same bytes at a different size is
         # a DIFFERENT job, or re-pinning a board would be served the previous

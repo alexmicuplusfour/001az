@@ -247,6 +247,19 @@ test("whisper client: failure taxonomy — lane-scope vs job-scope vs permanent"
   globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
   await assert.rejects(eng.transcribe(Buffer.from("x")), (e) => e.status === 503 && e.scope === undefined);
 
+  // model not baked (409) → config skew, not the clip's fault: transient with
+  // NO job scope (lane backoff), and the sidecar's reason rides the message
+  const notBaked = { error: "model 'small' is not baked into this transcriber (have: medium)" };
+  globalThis.fetch = async () => ({ ok: false, status: 409, json: async () => notBaked });
+  await assert.rejects(eng.transcribe(Buffer.from("x")),
+    (e) => /not baked.*have: medium/.test(e.message) && e.transient === true && e.scope === undefined);
+
+  // …an image that predates 409 says 422 with the same words — sniffed to the
+  // same conclusion instead of parking the clip as undecodable
+  globalThis.fetch = async () => ({ ok: false, status: 422, json: async () => notBaked });
+  await assert.rejects(eng.transcribe(Buffer.from("x")),
+    (e) => e.status === 422 && e.transient === true && e.scope === undefined);
+
   // the job failed on undecodable input → 422, job-scope → the clip parks
   globalThis.fetch = async (url, opts = {}) => (opts.method === "POST" ? submitOk
     : { ok: true, status: 200, json: async () => ({ status: "failed", error: "bad container", permanent: true }) });
@@ -325,6 +338,9 @@ test("transcribeFailurePolicy: park / park-capped / backoff-item / backoff-lane"
   // engine-wide transients → lane backoff (no clip is at fault)
   assert.equal(transcribeFailurePolicy(mk({ message: "transcriber unreachable (x) — will retry", transient: true }), 0), "backoff-lane");
   assert.equal(transcribeFailurePolicy(mk({ status: 503 }), 0), "backoff-lane");
+  // the not-baked shapes the engine throws: transient without scope → lane
+  assert.equal(transcribeFailurePolicy(mk({ status: 422, transient: true }), 0), "backoff-lane");
+  assert.equal(transcribeFailurePolicy(mk({ status: 409, transient: true }), 0), "backoff-lane");
   assert.equal(transcribeFailurePolicy(mk({ status: 429 }), 0), "backoff-lane");
   // a configuration gap (no engine bound for this board) waits like a faulted
   // job and can NEVER park, however many times it recurs — parking a clip over

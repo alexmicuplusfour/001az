@@ -938,6 +938,8 @@ const TRANSCRIBER_STALL_MS = Number(process.env.TRANSCRIBER_STALL_MS) || 900000;
 //   - `scope: "job"` — this clip's job failed/stalled/vanished: transient for
 //     the ITEM (per-item backoff + attempt cap), the lane moves on.
 //   - `status: 422` — undecodable input: the loop parks it permanently.
+//   - model-not-baked (409, or a pre-409 image's 422 naming it) — config skew,
+//     the lane backs off; no clip is at fault.
 // `id` comes from the resolved floor binding, not from a literal here — the
 // registry owns which provider is transcription's floor, and this engine is
 // merely what serves it.
@@ -981,8 +983,18 @@ function whisperTranscriber(binding) {
       }
       if (!sub.ok) {
         // 503 = queue full (lane-wide, transient via 5xx); 422 = bad input.
-        const e = new Error(`transcriber failed (HTTP ${sub.status})`);
+        // The body names the reason when the sidecar sent one, so the probe's
+        // toast and the job log say WHY, not just the number.
+        let detail = "";
+        try { detail = String((await sub.json())?.error || ""); } catch {}
+        const e = new Error(`transcriber failed (HTTP ${sub.status})${detail ? `: ${detail}` : ""}`);
         e.status = sub.status;
+        // A model this image didn't bake (409; older images say 422 with the
+        // same words) means the pinned model and the pulled tag disagree — the
+        // clip is innocent. Lane backoff, like an unwell sidecar: fixing the
+        // pin or the tag revives everything, where parking would turn a config
+        // skew into permanent data loss (the noCount rule's logic).
+        if (sub.status === 409 || /not baked/.test(detail)) e.transient = true;
         throw e;
       }
       const jobId = (await sub.json()).job;
