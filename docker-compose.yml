@@ -42,14 +42,12 @@ services:
   # without them (the capability just reads "unavailable"). Every value shown
   # is the default already compiled in, so you can uncomment and change none.
 
-#  transcriber: # speech-to-text + speaker diarization (whisper), +~1.2GB
-#    image: ghcr.io/alexmicuplusfour/001az-transcriber:latest
+#  transcriber: # speech-to-text + speaker diarization (whisper)
+#    # The model IS the image tag: :small (+~1.2GB), :medium (+~2.2GB, ~3x
+#    # slower, markedly better on real speech), or :small-medium (both baked,
+#    # boards pick per-board). Other bakes: build transcriber/Dockerfile.
+#    image: ghcr.io/alexmicuplusfour/001az-transcriber:small
 #    restart: unless-stopped
-#    build:
-#      context: ./transcriber
-#      args:
-#        WHISPER_MODEL: small    # tiny|base|small|medium|large, baked in
-#        BAKE_MODELS: ""         # bake extras so boards can pick: "small,medium"
 #    environment:
 #      WHISPER_LANGUAGE: ""      # "" auto-detects; or "en", "ro", "de"
 #      WHISPER_BEAM: "5"         # 5 accurate, 1 fastest

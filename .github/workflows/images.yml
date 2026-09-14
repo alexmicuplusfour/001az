@@ -1,7 +1,9 @@
 # The build half of planning/prebuilt-images-plan.md. A push to main builds
 # the images whose inputs changed since the last GREEN run (diffing against
 # event.before would silently skip a cancelled/failed run's changes) and
-# publishes latest + sha-<short> to GHCR. Unchanged images get this commit's
+# publishes latest + sha-<short> to GHCR (the transcriber also ships model
+# variants: :small = latest, :medium, :small-medium). Unchanged images get this
+# commit's
 # sha tag stamped by manifest retag — so EVERY green run leaves all four
 # images addressable at its commit, which is the tag the deploy pins.
 # workflow_dispatch rebuilds everything.
@@ -87,6 +89,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=sha
+            type=raw,value=small,enable=${{ matrix.image == 'transcriber' }}
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.image == 'app' && '.' || format('./{0}', matrix.image) }}
@@ -113,3 +116,37 @@ jobs:
           for s in $(echo '${{ needs.changes.outputs.retag }}' | jq -r '.[]'); do
             docker buildx imagetools create -t "$NS/001az-$s:sha-$short" "$NS/001az-$s:latest"
           done
+
+  # Model variants of the transcriber: same context, different bake. They run
+  # after `build` so the shared layers come out of its cache; each variant only
+  # pays for its own model-download layer. Stable tags, refreshed per build.
+  transcriber-variants:
+    needs: [changes, build]
+    if: contains(fromJSON(needs.changes.outputs.build), 'transcriber') && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: medium
+            args: WHISPER_MODEL=medium
+          - tag: small-medium
+            args: BAKE_MODELS=small,medium
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./transcriber
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/001az-transcriber:${{ matrix.tag }}
+          build-args: ${{ matrix.args }}
+          cache-from: |
+            type=gha,scope=transcriber-${{ matrix.tag }}
+            type=gha,scope=transcriber
+          cache-to: type=gha,mode=max,scope=transcriber-${{ matrix.tag }}
