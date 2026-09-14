@@ -317,6 +317,9 @@ export const ICONS = {
   // ▸ that the lightbox's arrows already got taken off (beda504), and a
   // character's weight is whichever font wins the race.
   stop: glyph('<rect x="5" y="5" width="14" height="14" rx="2"/>'),
+  // The Details panel's pin. Outline when idle; the panel header's .on rule
+  // fills it with currentColor for the pinned state, the heart's pattern.
+  pin: glyph('<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/>'),
   play: glyph('<path d="M6 4.5 20 12 6 19.5Z"/>'),
 };
 

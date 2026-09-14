@@ -2316,29 +2316,34 @@ body.bulk-mode .heart {
   align-items: center;
   gap: 12px;
 }
+.lbp-pin,
+.lbp-download,
 .lbp-close {
+  display: inline-flex;
   background: none;
   border: none;
-  font-size: 20px;
-  line-height: 1;
-  color: #aaa;
+  padding: 0;
+  color: #666;
   cursor: pointer;
-  padding: 0 2px;
 }
+.lbp-pin:hover,
+.lbp-download:hover,
 .lbp-close:hover {
   color: #111;
 }
-.lbp-download {
-  display: inline-flex;
-  color: #aaa;
-  cursor: pointer;
+/* The shared glyphs ship stroke-width 2/2.5 for toolbar sizes; the panel
+   header wants the lighter line at 18px (the boards.css precedent). */
+.lbp-head-actions svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.5;
 }
-.lbp-download svg {
-  width: 16px;
-  height: 16px;
-}
-.lbp-download:hover {
+/* pinned: the panel opens with the lightbox */
+.lbp-pin.on {
   color: #111;
+}
+.lbp-pin.on svg {
+  fill: currentColor;
 }
 .lbp-body {
   flex: 1;
@@ -2810,15 +2815,21 @@ div.lbp-file-thumb {
   color: #8a8a96;
 }
 .lbp-file-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: 1px solid #d0d0d8;
   border-radius: 4px;
-  font-size: 13px;
-  line-height: 1;
-  padding: 1px 6px;
+  padding: 2px;
   cursor: pointer;
-  color: #8a8a96;
+  color: #6b6b76;
   flex-shrink: 0;
+}
+.lbp-file-remove svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.5;
 }
 .lbp-file-remove:hover:not(:disabled) { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
 .lbp-file-remove:disabled { opacity: 0.4; cursor: default; }

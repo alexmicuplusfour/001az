@@ -63,6 +63,7 @@ const elLightboxInfo = document.getElementById("lightbox-info");
 const elLightboxPanel = document.getElementById("lightbox-panel");
 const elLightboxPanelBody = document.getElementById("lightbox-panel-body");
 const elLightboxDownload = document.getElementById("lightbox-download");
+const elLightboxPin = document.getElementById("lightbox-panel-pin");
 
 let lightboxItem = null;
 let lightboxList = [];
@@ -380,7 +381,7 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
       const rmBtn = document.createElement("button");
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
-      rmBtn.textContent = "×";
+      rmBtn.innerHTML = ICONS.x;
       rmBtn.addEventListener("click", busy(rmBtn, async (e) => {
         e.stopPropagation();
         try {
@@ -659,6 +660,14 @@ async function renderPanel() {
   drawDetOverlay(fields);
 }
 
+// Pinning the panel — per viewer, per board (the boardSort pattern). The
+// stored bit only decides the state a fresh lightbox open starts in; closing
+// the panel by hand doesn't unpin.
+const pinKey = () => `lbPanelPin:${state.boardId}`;
+function panelPinned() {
+  try { return localStorage.getItem(pinKey()) === "1"; } catch { return false; }
+}
+
 function setPanel(open) {
   panelOpen = open;
   elLightboxPanel.hidden = !open;
@@ -747,6 +756,8 @@ export function openLightbox(item) {
   showLightbox();
   elLightbox.hidden = false;
   document.body.style.overflow = "hidden";
+  elLightboxPin.classList.toggle("on", panelPinned());
+  if (panelPinned()) setPanel(true);
 }
 
 export function navLightbox(delta) {
@@ -819,7 +830,16 @@ export function initLightbox() {
   });
   elLightboxPanel.addEventListener("click", (e) => e.stopPropagation());
   elLightboxDownload.innerHTML = ICONS.download;
-  document.getElementById("lightbox-panel-close").addEventListener("click", () => setPanel(false));
+  const elPanelClose = document.getElementById("lightbox-panel-close");
+  elPanelClose.innerHTML = ICONS.x;
+  elPanelClose.addEventListener("click", () => setPanel(false));
+  elLightboxPin.innerHTML = ICONS.pin;
+  elLightboxPin.addEventListener("click", () => {
+    const on = !panelPinned();
+    try { on ? localStorage.setItem(pinKey(), "1") : localStorage.removeItem(pinKey()); }
+    catch { /* private mode / quota — the pin just won't stick */ }
+    elLightboxPin.classList.toggle("on", on);
+  });
 
   document.addEventListener("keydown", (e) => {
     if (elLightbox.hidden) return;
