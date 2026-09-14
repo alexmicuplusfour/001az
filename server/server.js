@@ -122,6 +122,7 @@ import {
   modelPriceFreshness,
   listJobLog,
   listRunningJobs,
+  boardLaneQueues,
   latestJobFailureAt,
   boardLatestFailures,
   clearJobLog,
@@ -150,7 +151,7 @@ import {
   setSessionCookie,
   clearSessionCookie,
 } from "./auth.js";
-import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, resolveTranscriber, engineStamp, nextAutoTagRun, normaliseIdentity } from "./worker.js";
+import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmbedder, resolveTranscriber, servedBacklogLanes, engineStamp, nextAutoTagRun, normaliseIdentity } from "./worker.js";
 // The pure k-means both cluster flavors share — a dependency-free public
 // module, imported here the same way the test suite imports public modules.
 import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
@@ -1129,6 +1130,43 @@ app.get("/api/boards/:id/tokens", requireAuth, wrap(async (req, res) => {
 // transcription or ingest run in flight) plus settled history, newest first
 // behind a keyset cursor. Deliberately member-visible like /tokens, errors
 // included — the log is transparency, not management.
+// The board's lane work as it goes over the wire — the `work` payload
+// (first-class-work-plan.md): the half of in-flight work that has no
+// items.status leg, next to the items that already carry the other half.
+// `running` is the job log's in-flight rows; `queued` is the served lanes'
+// backlogs — worker.js's servedBacklogLanes is the gate (a backlog nothing
+// will ever claim is a configuration gap, not work happening, and must not
+// glow), and its short memo is what lets this sit on the 4s delta poll.
+// Everything is labelled from the kind vocabulary so the payload is
+// self-describing (the kindList rule — no client-side label list), and the
+// running rows' own items are excluded from the counts, as in-flight
+// statuses are inside boardLaneQueues — one unit of work, one count.
+//
+// ONE composer for all three carriers (the items delta poll, the signals
+// errors tick, the jobs page), so state.work holds one row shape whichever
+// carrier wrote it last. `board` rides in from callers that already hold
+// the row — the verdict memo only reads it on a miss.
+async function workFor(boardId, board = null) {
+  const [running, lanes] = await Promise.all([
+    listRunningJobs(db, boardId),
+    servedBacklogLanes(db, boardId, board),
+  ]);
+  const queued = await boardLaneQueues(db, boardId, lanes,
+    running.map((j) => j.item_id).filter((x) => x != null));
+  return {
+    running: running.map((j) => ({
+      id: j.id, kind: j.kind, label: capabilityLabel(j.kind), target: j.target,
+      // entity_id is the dedup key: the client's cards are entities, and a
+      // running row whose entity already shows as an in-flight item is one
+      // unit of work wearing two records.
+      item_id: j.item_id, entity_id: j.entity_id,
+      entity_display: j.entity_display || j.target || j.entity_identity,
+      started_at: j.started_at,
+    })),
+    queued: queued.map((q) => ({ ...q, label: capabilityLabel(q.kind) })),
+  };
+}
+
 app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
   const board = await getBoard(db, req.params.id);
   if (!board || !(await canAccessBoard(db, board.id, req.user)))
@@ -1164,8 +1202,8 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
         outcome: req.query.outcome || null,
         limit,
       }).then((page) => ({ jobs: page.jobs.map(pick), nextCursor: page.nextCursor }));
-  const [running, history, hasRefresh, nextRefreshAt, failedAt] = await Promise.all([
-    listRunningJobs(db, board.id),
+  const [work, history, hasRefresh, nextRefreshAt, failedAt] = await Promise.all([
+    workFor(board.id, board),
     historyP,
     boardHasRefreshHistory(db, board.id),
     boardNextRefreshAt(db, board.id),
@@ -1178,7 +1216,11 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
     latestJobFailureAt(db, board.id),
   ]);
   res.json({
-    running: running.map(pick),
+    // The same `work` payload the other two carriers serve — the modal
+    // renders its Live section from it and writes it into the shared work
+    // state, so the chip and an open modal can never disagree, and
+    // state.work holds one row shape whichever carrier wrote last.
+    work,
     jobs: history.jobs,
     nextCursor: history.nextCursor,
     has_refresh: hasRefresh,
@@ -1219,7 +1261,17 @@ app.get("/api/boards/:id/jobs/errors", requireAuth, wrap(async (req, res) => {
   // stamps, so it has to be floored on the server's clock, not the reader's
   // (public/seen-mark.js). Free here, and this is the read that happens often
   // enough to keep the offset honest.
-  res.json({ failed_at: await latestJobFailureAt(db, board.id), now: Date.now() });
+  //
+  // `work` rides the same tick because this is the DISCOVERY channel: a sweep
+  // starting server-side on an idle board (a scheduled retag, an unpause, an
+  // engine arriving) has no client-side event, and the delta poll may not be
+  // running at all — this 20s read is what tells the client to wake it
+  // (first-class-work-plan.md).
+  const [failedAt, work] = await Promise.all([
+    latestJobFailureAt(db, board.id),
+    workFor(board.id, board),
+  ]);
+  res.json({ failed_at: failedAt, work, now: Date.now() });
 }));
 
 // Clear the board's job history — the modal's red button. Manager-gated:
@@ -2833,7 +2885,11 @@ app.get("/api/items", requireAuth, wrap(async (req, res) => {
   if (req.query.since != null) {
     if (!/^\d+$/.test(String(req.query.since))) return res.status(400).json({ error: "malformed since" });
     const { items } = await listItems(db, req.user.id, boardId, { since: Number(req.query.since) });
-    return res.json({ items, ids: await listEntityIds(db, boardId), now });
+    // `work` on every delta tick: the poll is the board's heartbeat, and the
+    // lane half of in-flight work travels beside the item half it already
+    // streams (first-class-work-plan.md).
+    const [ids, work] = await Promise.all([listEntityIds(db, boardId), workFor(boardId)]);
+    return res.json({ items, ids, now, work });
   }
 
   if (req.query.limit != null || req.query.after != null) {
@@ -2846,7 +2902,12 @@ app.get("/api/items", requireAuth, wrap(async (req, res) => {
       after = { createdAt: Number(m[1]), id: Number(m[2]) };
     }
     const { items, nextCursor } = await listItems(db, req.user.id, boardId, { limit, after });
-    return res.json({ items, nextCursor, now });
+    // The boot path's first page carries `work` too: opening a board
+    // mid-transcription must light the chip on arrival, not a signals tick
+    // later. Later pages skip it — one answer per load, not one per 500 rows.
+    const payload = { items, nextCursor, now };
+    if (after == null) payload.work = await workFor(boardId);
+    return res.json(payload);
   }
 
   const { items } = await listItems(db, req.user.id, boardId);

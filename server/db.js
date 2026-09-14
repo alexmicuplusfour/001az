@@ -2775,6 +2775,32 @@ export async function jobLogWrite(fn, label = "") {
   }
 }
 
+// One lane job's lifecycle, owned in one place: open a `running` row, settle
+// it exactly once. Both writes ride jobLogWrite (the cardinal rule above).
+// If the OPEN was lost (id null), settle degrades to writing a settled row
+// outright — the ledger still gets the outcome the running row would have
+// carried. `settle` is idempotent, so a caller's own outcome paths and its
+// catch-all backstop can each call it and only the first one writes; that is
+// what makes "a dangling running row reads as work-in-flight until a restart
+// reaps it" a property the helper guarantees rather than one every lane
+// re-argues. `id` stays visible for the callers that retract instead of
+// stamping (an idle ingest scan, a folded transcribe repeat — deleteJobLog).
+export async function openJob(db, fields) {
+  const jobId = await jobLogWrite(() => addJobLog(db, fields), `${fields.kind} start`);
+  let settled = false;
+  return {
+    id: jobId,
+    settle: (outcome) => {
+      if (settled) return null;
+      settled = true;
+      return jobLogWrite(() => (jobId != null
+        ? stampJobLog(db, jobId, outcome)
+        : addJobLog(db, { ...fields, endedAt: Date.now(), ...outcome })),
+      `${fields.kind} settle`);
+    },
+  };
+}
+
 // Resolve a running row. Detail merges over what the row already carries, so
 // a stamp can add outcome facts without re-sending the start-time context.
 export async function stampJobLog(db, id, { outcome, error = null, detail = null, endedAt = Date.now() }) {
@@ -3178,6 +3204,55 @@ export async function setItemEmbedError(db, id, message) {
   await db.query("UPDATE items SET embed_error=$1 WHERE id=$2", [String(message).slice(0, 500), id]);
 }
 
+// The two lane-need predicates, shared between each lane's claim query and
+// its backlog count (boardLaneQueues) so the two can never drift: what the
+// lane will claim is exactly what the wire reports as waiting
+// (first-class-work-plan.md). Both speak alias `i`; the embed one takes its
+// model's placeholder index because the two users bind it at different
+// positions.
+const NEEDS_TRANSCRIPT_SQL = `i.payload->'files'->0->>'kind'='audio'
+       AND NOT (i.payload ? 'transcript')
+       AND NOT (i.payload ? 'transcript_error')`;
+const needsEmbeddingSql = (p) => `i.embed_error IS NULL
+       AND (i.embedding IS NULL OR i.embedding_model IS DISTINCT FROM $${p})
+       AND (i.status='tagged'
+            OR (i.payload->'files'->0->>'kind'='audio' AND i.payload ? 'transcript'))`;
+
+// Each backlog lane's need-predicate, keyed by its job kind. The extra
+// binding a lane's predicate consumes starts at $4 — $1-$3 are the shared
+// frame below (board, in-flight statuses, excluded ids).
+const LANE_NEED = {
+  transcribe: { sql: NEEDS_TRANSCRIPT_SQL, args: () => [] },
+  embed: { sql: needsEmbeddingSql(4), args: (lane) => [lane.model] },
+};
+
+// The lane backlogs item statuses can't see — the wire's `queued` half. The
+// caller says which lanes are served, as `[{ kind, model? }]` (worker.js's
+// servedBacklogLanes — resolution lives beside the claim loops, this module
+// only speaks SQL), because a backlog nothing will ever claim is a
+// configuration gap, not work happening, and must not glow. One loop so the
+// exclusions hold for EVERY lane by construction: in-flight statuses (an
+// audio item waiting at `pending` for its transcript is already on the wire
+// as an item) and the ids the running rows carry (`excludeIds`) — one unit
+// of work, one count. No pause gate on purpose: a paused board's backlog is
+// intact and the chip's paused grammar already says "waiting", the truth.
+export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
+  const counts = await Promise.all(lanes.map(async (lane) => {
+    const need = LANE_NEED[lane.kind];
+    if (!need) return null;
+    const { rows } = await db.query(
+      `SELECT COUNT(*) AS n FROM items i
+       WHERE i.board_id=$1
+         AND NOT (i.status = ANY($2::text[]))
+         AND NOT (i.id = ANY($3::bigint[]))
+         AND ${need.sql}`,
+      [boardId, IN_FLIGHT_STATES, excludeIds, ...need.args(lane)]
+    );
+    return { kind: lane.kind, n: Number(rows[0].n) };
+  }));
+  return counts.filter((c) => c && c.n > 0);
+}
+
 // The embedding sweep's work queue: items whose vector is missing or from
 // another model. Two sources become searchable — tagged items (embedded from
 // their tags + reasoning) and transcribed audio (embedded from its transcript,
@@ -3189,10 +3264,7 @@ export async function itemsNeedingEmbedding(db, model, limit) {
     `SELECT i.id, i.board_id, i.entity_ids, i.tags, i.tag_reasoning, i.payload FROM items i
      JOIN boards b ON b.id = i.board_id
      WHERE ${notPaused("b")}
-       AND i.embed_error IS NULL
-       AND (i.embedding IS NULL OR i.embedding_model IS DISTINCT FROM $1)
-       AND (i.status='tagged'
-            OR (i.payload->'files'->0->>'kind'='audio' AND i.payload ? 'transcript'))
+       AND ${needsEmbeddingSql(1)}
      ORDER BY i.updated_at DESC, i.id DESC LIMIT $2`,
     [model, limit]
   );
@@ -3239,9 +3311,7 @@ export async function oneAudioNeedingTranscription(db, excludeIds = [], served =
     `SELECT i.id, i.board_id, i.entity_ids, i.payload FROM items i
      LEFT JOIN boards b ON b.id = i.board_id
      WHERE ${notPaused("b")}
-       AND i.payload->'files'->0->>'kind'='audio'
-       AND NOT (i.payload ? 'transcript')
-       AND NOT (i.payload ? 'transcript_error')
+       AND ${NEEDS_TRANSCRIPT_SQL}
        AND NOT (i.id = ANY($1::bigint[]))
        AND ($2 OR ${pins.length ? pins.join(" OR ") : "FALSE"})
      ORDER BY i.created_at DESC LIMIT 1`,

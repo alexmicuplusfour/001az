@@ -141,10 +141,11 @@ function diagnosticsBtn() {
 }
 
 // ── jobs chip: ambient "work is happening" signal + the door to the job log ──
-// The count is the client's own in-flight items (the statuses the delta poll
-// already streams), so it refreshes for free on every toolbar rebuild — no
-// extra requests. Sweep jobs the client can't see (a transcription, an ingest
-// run) live inside the modal, which does its own fetching.
+// The count is BOTH halves of in-flight work: the client's own in-flight
+// items (the statuses the delta poll already streams) and the lane work the
+// same carriers stream beside them as state.work — running sweep rows and
+// waiting backlogs (first-class-work-plan.md). No extra requests either way;
+// every payload that can carry work does.
 //
 // The dot is the other half, and says the opposite thing: the count is work
 // HAPPENING and goes away on its own, the dot is work that went WRONG and
@@ -170,7 +171,31 @@ const JOBS_EDGE_MS = 450; // matches the jobs-ignite/jobs-cool duration in style
 if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) document.querySelector("#jobs-dune animate")?.remove();
 
 function jobsChip() {
-  const n = state.items.reduce((k, i) => k + (ACTIVE.has(i.status) || QUEUED.has(i.status) ? 1 : 0), 0);
+  // Both halves of in-flight work: the pipeline items the delta poll streams,
+  // and the lane work the same carriers stream beside them — running sweep
+  // rows (a transcription, an ingest run, a diagnose pass) and the backlogs
+  // no items.status carries (planning/first-class-work-plan.md). A running
+  // row whose entity already shows as an in-flight item is one unit of work
+  // wearing two records (an audio item held at `pending` while its clip
+  // transcribes), so it dedups out of the count; queued lane counts already
+  // exclude in-flight items server-side for the same one-unit-one-count rule.
+  const busyIds = new Set();
+  let itemN = 0;
+  for (const i of state.items) if (ACTIVE.has(i.status) || QUEUED.has(i.status)) { itemN++; busyIds.add(i.id); }
+  // The lanes, tallied once by their served labels — the tooltip's sentences
+  // and the pill number both read from this. The sentences stay undeduped on
+  // purpose (they state what each lane is doing); only the NUMBER subtracts
+  // the running rows whose entity is already counted above.
+  const lanes = new Map();
+  const lane = (key) => { if (!lanes.has(key)) lanes.set(key, { run: 0, wait: 0 }); return lanes.get(key); };
+  let laneRun = 0;
+  for (const j of state.work.running) {
+    lane(j.label).run++;
+    if (j.entity_id == null || !busyIds.has(j.entity_id)) laneRun++;
+  }
+  for (const q of state.work.queued) lane(q.label).wait += q.n;
+  const laneWait = [...lanes.values()].reduce((k, l) => k + l.wait, 0);
+  const n = itemN + laneRun + laneWait;
   const busy = n > 0;
   if (lastJobsBoard !== state.boardId) jobsEdge = null;
   else if (lastJobsBusy !== null && lastJobsBusy !== busy) jobsEdge = { dir: busy ? "igniting" : "cooling", at: performance.now() };
@@ -192,8 +217,13 @@ function jobsChip() {
   // failed is the ordinary case, and the tooltip is the only place any of them
   // is named. Paused keeps the count (the queue is intact, which is the point)
   // but stops the note claiming motion; .paused freezes the glow to match.
+  // The lanes speak their served labels ("Transcription: 1 running, 3
+  // waiting") — the vocabulary arrives with the payload, never from a
+  // client-side list.
   const notes = [
-    n > 0 ? `${n} item${n === 1 ? "" : "s"} ${state.boardPaused ? "waiting" : "in the pipeline"}` : "",
+    itemN > 0 ? `${itemN} item${itemN === 1 ? "" : "s"} ${state.boardPaused ? "waiting" : "in the pipeline"}` : "",
+    ...[...lanes].map(([label, { run, wait }]) =>
+      `${label}: ${[run ? `${run} running` : "", wait ? `${wait} waiting` : ""].filter(Boolean).join(", ")}`),
     state.boardPaused ? "board paused" : "",
     failed ? "something failed since you last looked" : "",
   ].filter(Boolean);

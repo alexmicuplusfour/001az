@@ -25,7 +25,7 @@
 // screen is never fetched at all.
 import { state } from './state.js';
 import { createTicker } from './ticker.js';
-import { ensurePolling } from './data.js';
+import { ensurePolling, setWork } from './data.js';
 import { refreshFacetStats, canSeeDiagnostics } from './facet-diagnostics.js';
 import { jobsModalOpen } from './jobs-modal.js';
 import { noteServerNow } from './seen-mark.js';
@@ -92,6 +92,10 @@ export async function refreshJobErrors() {
     // server stamps against a server-floored mark.
     noteServerNow(d.now);
     state.jobsFailedAt = d.failed_at ?? null;
+    // The lane-work discovery leg: a sweep starting server-side on an idle
+    // board has no client-side event, and the delta poll may not be running
+    // at all — this tick is what notices, and setWork's rising edge wakes it.
+    setWork(d.work);
     // …including a response that says null. "This board has never failed" is an
     // answer; not having asked successfully is not, and the two were the same
     // value until this line.

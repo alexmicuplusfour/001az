@@ -3,7 +3,7 @@ import { getJson } from './api.js';
 import { toItem } from './utils.js';
 import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount } from './filters.js';
 import { selEntry } from './facet-match.js';
-import { inProgress, reconcile, ensurePolling, drainItems, stampBoard } from './data.js';
+import { inProgress, reconcile, ensurePolling, drainItems, stampBoard, setWork } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid, dropAllCards } from './grid.js';
 import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
 import { resolveView, restoreView } from './view.js';
@@ -199,6 +199,9 @@ async function main() {
   const firstPage = Array.isArray(itemsData) ? { items: itemsData, nextCursor: null, now: null } : itemsData;
   state.items = (firstPage.items || []).map(toItem);
   if (typeof firstPage.now === 'number') state.itemsSince = firstPage.now;
+  // The lane half of in-flight work rides the first page: opening a board
+  // mid-transcription lights the chip on arrival, not a signals tick later.
+  setWork(firstPage.work);
   state.crates = Array.isArray(cratesData) ? cratesData : [];
   state.filterConfigs = Array.isArray(filterConfigsData) ? filterConfigsData : [];
   initFilterConfigsUI();

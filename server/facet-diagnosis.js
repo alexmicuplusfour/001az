@@ -9,7 +9,7 @@
 import crypto from "node:crypto";
 import {
   boardFacetSegments, facetSplitValues, facetExamples,
-  boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, addJobLog,
+  boardsWithVotes, boardTagActivity, boardQueuedScopes, setFacetDiagnostic, openJob,
 } from "./db.js";
 import { meterAiCall, spentDetail } from "./metering.js";
 
@@ -575,6 +575,13 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
   // never engages and a facet retried every tick. Written on the attempt path
   // only; on a finding, `stats` already is what it asked about.
   const t0 = Date.now();
+  // The pass's in-flight presence: a paid call taking seconds-to-minutes is
+  // work happening, and `running` job-log rows are how lane work reaches the
+  // wire (first-class-work-plan.md). Both exits below settle this row
+  // instead of writing their own settled rows.
+  const job = await openJob(db, {
+    boardId: board.id, target: facet.key, kind: "diagnose", startedAt: t0,
+  });
   const attempted = async (error, spent = null) => {
     const attempts = (sameQuestion(prior, fresh, segment) ? prior.attempts || 0 : 0) + 1;
     await setFacetDiagnostic(db, board.id, facet.key, {
@@ -588,97 +595,110 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
     // success path already logs; without this the one surface that answers "what
     // did the worker do, and did it work" showed diagnosis as though it never
     // failed. Warn-never-throw for the same reason as the success row.
-    await addJobLog(db, {
-      boardId: board.id, target: facet.key, kind: "diagnose", outcome: "failed", error,
+    await job.settle({
+      outcome: "failed", error,
       // `spent` only where the call actually happened and its answer was
       // unusable — the wire-throw site has no usage to report. That row is the
       // one this function exists for ("it cost real money"), so it says how
       // much, the same way a discarded tag row does.
       detail: { attempts, items: segment.items, unanimous: segment.unanimous, ...spent },
-      startedAt: t0, endedAt: Date.now(),
-    }).catch((e) => console.warn(`diagnose job log write failed: ${e.message}`));
+    });
   };
 
-  const sample = await diagnosisSample(db, board.id, segment, examples);
-  // What the passes were parting on when this was written. Taken from the sample
-  // rather than probed for: this is the only path that needs it, and it has
-  // already paid for the query.
-  const split = sample.split.slice(0, 5).map((s) => s.value).sort();
-  const { systemText, schema, parts } = buildDiagnosePrompt(board, facet, segment, sample, prior?.previous);
-  let input, usage;
+  // Backstop for any throw the two exits above don't own (a db hiccup in the
+  // sample query, the meter, the landing): a running row left dangling reads
+  // as work-in-flight on every surface until a restart reaps it, so an
+  // unsettled row is stamped failed before the error continues to the
+  // caller's per-facet catch.
   try {
-    ({ input, usage } = await deps.tagger({
-      provider: ai.provider, apiKey: ai.apiKey, base: ai.base, model: ai.model,
-      systemText, schema, parts, tool: DIAGNOSE_TOOL,
-    }));
+    const sample = await diagnosisSample(db, board.id, segment, examples);
+    // What the passes were parting on when this was written. Taken from the sample
+    // rather than probed for: this is the only path that needs it, and it has
+    // already paid for the query.
+    const split = sample.split.slice(0, 5).map((s) => s.value).sort();
+    const { systemText, schema, parts } = buildDiagnosePrompt(board, facet, segment, sample, prior?.previous);
+    let input, usage;
+    try {
+      ({ input, usage } = await deps.tagger({
+        provider: ai.provider, apiKey: ai.apiKey, base: ai.base, model: ai.model,
+        systemText, schema, parts, tool: DIAGNOSE_TOOL,
+      }));
+    } catch (e) {
+      // Recorded before rethrowing, so the caller still logs it and the next tick
+      // still knows this was tried. Without the record the gates pass identically a
+      // minute later and the same call is made again, indefinitely.
+      await attempted(String(e.message).slice(0, 200));
+      throw e;
+    }
+    // One meter write per paid call, whatever came back — the ledger tracks
+    // spend, not usefulness. Metered as its own kind ('diagnose', the job-log
+    // vocabulary): it rides the tag binding but it is not tagging, and spend
+    // transparency is exactly the place the difference matters.
+    const dims = { capability: "diagnose", provider: ai.provider, model: ai.model };
+    if (usage) await meterAiCall(db, board.id, dims, usage);
+    // The same facts in the row's spelling, for whichever row this pass writes.
+    const spent = spentDetail(dims, [usage]);
+
+    // strictTools:false providers treat the schema as advisory, so an off-list
+    // verdict is reachable. Record no FINDING rather than inventing one: a stored
+    // verdict is a claim about the user's taxonomy, and "the model answered something
+    // we don't understand" is not one. The attempt is still recorded — it cost real
+    // money, and a provider that does this once will do it again.
+    const verdict = VERDICTS.includes(input?.verdict) ? input.verdict : null;
+    if (!verdict) {
+      console.warn(`diagnose: board ${board.id} facet ${facet.key} — unusable verdict ${JSON.stringify(input?.verdict)}`);
+      await attempted(`unusable verdict: ${JSON.stringify(input?.verdict)}`.slice(0, 200), spent);
+      return null;
+    }
+
+    const entry = {
+      verdict,
+      explanation: str(input.explanation),
+      values: arr(input.values),
+      // Forced empty on the two non-actionable verdicts rather than trusted: a model
+      // that has just said nothing is wrong must not hand the UI wording to paste
+      // over the user's own.
+      rewrite: ACTIONABLE.has(verdict) ? str(input.rewrite) : "",
+      stats: { items: segment.items, unanimous: segment.unanimous },
+      split,
+      // The twelve items this paragraph was reasoned from, so a retag can ask "does
+      // this touch any of them" from the arming site without ranking anything —
+      // which is what lets five items on a board of 2,500 leave a finding alone.
+      evidence,
+      d: segment.d,
+      scoped: segment.scoped,
+      k: fresh,
+      at: Date.now(),
+      // Carried forward, not re-derived: the demotion sets `previous` when the user
+      // edits, and it has to survive every later diagnosis or the "was 60%, now 88%"
+      // comparison loses its baseline the moment it becomes computable.
+      ...(prior?.previous ? { previous: prior.previous } : {}),
+    };
+    // The one write entitled to clear `stale`, and only the mark this pass actually
+    // read. A mark armed while the provider call was in flight describes a
+    // re-measurement this finding has not seen, so it survives and the next settled
+    // tick re-asks.
+    await setFacetDiagnostic(db, board.id, facet.key, entry, !!prior?.stale);
+    // Warn, never throw — the app's standing rule is that a writer must not throw
+    // into the job it observes. Thrown from here the finding would already be stored,
+    // the caller would log "diagnose failed", and the rotation would count a success
+    // as a failure.
+    await job.settle({
+      outcome: "ok",
+      detail: {
+        items: segment.items, unanimous: segment.unanimous, verdict, scoped: segment.scoped, ...spent,
+      },
+    });
+    return entry;
   } catch (e) {
-    // Recorded before rethrowing, so the caller still logs it and the next tick
-    // still knows this was tried. Without the record the gates pass identically a
-    // minute later and the same call is made again, indefinitely.
-    await attempted(String(e.message).slice(0, 200));
+    // settle is idempotent — the exits above already settled on their paths,
+    // so this only catches the throws nobody owns (a db hiccup in the sample
+    // query, the meter, the landing) before they reach the caller's
+    // per-facet catch. Unsettled, the running row would read as
+    // work-in-flight on every surface until a restart reaps it.
+    await job.settle({ outcome: "failed", error: String(e.message).slice(0, 200) });
     throw e;
   }
-  // One meter write per paid call, whatever came back — the ledger tracks
-  // spend, not usefulness. Metered as its own kind ('diagnose', the job-log
-  // vocabulary): it rides the tag binding but it is not tagging, and spend
-  // transparency is exactly the place the difference matters.
-  const dims = { capability: "diagnose", provider: ai.provider, model: ai.model };
-  if (usage) await meterAiCall(db, board.id, dims, usage);
-  // The same facts in the row's spelling, for whichever row this pass writes.
-  const spent = spentDetail(dims, [usage]);
-
-  // strictTools:false providers treat the schema as advisory, so an off-list
-  // verdict is reachable. Record no FINDING rather than inventing one: a stored
-  // verdict is a claim about the user's taxonomy, and "the model answered something
-  // we don't understand" is not one. The attempt is still recorded — it cost real
-  // money, and a provider that does this once will do it again.
-  const verdict = VERDICTS.includes(input?.verdict) ? input.verdict : null;
-  if (!verdict) {
-    console.warn(`diagnose: board ${board.id} facet ${facet.key} — unusable verdict ${JSON.stringify(input?.verdict)}`);
-    await attempted(`unusable verdict: ${JSON.stringify(input?.verdict)}`.slice(0, 200), spent);
-    return null;
-  }
-
-  const entry = {
-    verdict,
-    explanation: str(input.explanation),
-    values: arr(input.values),
-    // Forced empty on the two non-actionable verdicts rather than trusted: a model
-    // that has just said nothing is wrong must not hand the UI wording to paste
-    // over the user's own.
-    rewrite: ACTIONABLE.has(verdict) ? str(input.rewrite) : "",
-    stats: { items: segment.items, unanimous: segment.unanimous },
-    split,
-    // The twelve items this paragraph was reasoned from, so a retag can ask "does
-    // this touch any of them" from the arming site without ranking anything —
-    // which is what lets five items on a board of 2,500 leave a finding alone.
-    evidence,
-    d: segment.d,
-    scoped: segment.scoped,
-    k: fresh,
-    at: Date.now(),
-    // Carried forward, not re-derived: the demotion sets `previous` when the user
-    // edits, and it has to survive every later diagnosis or the "was 60%, now 88%"
-    // comparison loses its baseline the moment it becomes computable.
-    ...(prior?.previous ? { previous: prior.previous } : {}),
-  };
-  // The one write entitled to clear `stale`, and only the mark this pass actually
-  // read. A mark armed while the provider call was in flight describes a
-  // re-measurement this finding has not seen, so it survives and the next settled
-  // tick re-asks.
-  await setFacetDiagnostic(db, board.id, facet.key, entry, !!prior?.stale);
-  // Warn, never throw — the app's standing rule is that a writer must not throw
-  // into the job it observes. Thrown from here the finding would already be stored,
-  // the caller would log "diagnose failed", and the rotation would count a success
-  // as a failure.
-  await addJobLog(db, {
-    boardId: board.id, target: facet.key, kind: "diagnose", outcome: "ok",
-    detail: {
-      items: segment.items, unanimous: segment.unanimous, verdict, scoped: segment.scoped, ...spent,
-    },
-    startedAt: t0, endedAt: Date.now(),
-  }).catch((e) => console.warn(`diagnose job log write failed: ${e.message}`));
-  return entry;
 }
 
 const instability = (s) => (s.items - s.unanimous) / s.items;

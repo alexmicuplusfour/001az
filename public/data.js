@@ -43,6 +43,26 @@ export const ACTIVE = new Set(["processing", "extracting", "facing", "fetching"]
 export const QUEUED = new Set(["pending", "pending_extract", "pending_face", "pending_fetch"]);
 const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 
+// The lane half of in-flight work (state.work), asked the same two questions
+// as the item statuses below: a running row is work MOVING (a sidecar or
+// provider is holding a job open right now), a queued count is work WAITING
+// (a backlog the lane will claim). One setter for every carrier — the delta
+// poll, the signals tick, the jobs modal — so the wake-the-poll edge is free
+// wherever the payload lands, not a state machine each writer re-builds.
+// (The server filters queued to n > 0, so presence is the test.)
+export const workRunning = () => state.work.running.length > 0;
+export const workInFlight = () => workRunning() || state.work.queued.length > 0;
+export function setWork(w) {
+  if (!w) return; // absent on a server that predates the payload — keep the last known state
+  const had = workInFlight();
+  state.work = w;
+  // On the TRANSITION only, the alerts pattern: ensurePolling re-schedules
+  // the fast timer, so calling it on every quiet tick would keep nudging it
+  // back out. This edge is how an idle board DISCOVERS a sweep that started
+  // server-side (an unpause, an engine arriving, a scheduled retag).
+  if (!had && workInFlight()) ensurePolling();
+}
+
 function needsPoll() {
   return (
     state.uploading.length > 0 ||
@@ -56,6 +76,7 @@ function needsPoll() {
 function moving() {
   return (
     state.uploading.length > 0 ||
+    workRunning() ||
     state.items.some((item) => ACTIVE.has(item.status))
   );
 }
@@ -292,8 +313,12 @@ export function pollDelay() {
   // earn the fast tier — only work genuinely moving does: an upload landing
   // (pause gates execution, never intake) or a row pause let finish. Without
   // this a paused backlog would hold the 4s poll open indefinitely.
-  if (needsPoll()) return state.boardPaused && !moving() ? 30000 : 4000;
-  if (liveBoard() || state.boardIngestNextRun != null || state.alerts.length) return 30000;
+  if (needsPoll() || workRunning()) return state.boardPaused && !moving() ? 30000 : 4000;
+  // A lane backlog with nothing running drains at sweep pace (one clip at a
+  // time, a transcription is minutes) — the slow tier tracks it without
+  // holding the fast poll open for hours behind a lane backoff, and the
+  // running row a claim produces promotes the cadence the moment work moves.
+  if (workInFlight() || liveBoard() || state.boardIngestNextRun != null || state.alerts.length) return 30000;
   return 0;
 }
 
@@ -328,6 +353,7 @@ async function pollTick() {
     } else if (Array.isArray(data.items) && Array.isArray(data.ids)) {
       reconcile(data.items, new Set(data.ids));
       if (typeof data.now === 'number') state.itemsSince = data.now;
+      setWork(data.work); // the lane half rides the same tick
     }
     // Any other shape (proxy error body, partial JSON): skip the tick rather
     // than feed reconcile an empty presentIds set — that reads as "everything

@@ -725,9 +725,9 @@ test("GET /api/boards/:id/jobs: running + paged history, member-visible, 404 out
 
   const r = await req(srv.base, "GET", `/api/boards/${board}/jobs`, { sid: member.sid });
   assert.equal(r.status, 200);
-  assert.equal(r.json.running.length, 1);
-  assert.equal(r.json.running[0].kind, "transcribe");
-  assert.equal(r.json.running[0].entity_display, "clip.mp3"); // no entity → frozen target
+  assert.equal(r.json.work.running.length, 1);
+  assert.equal(r.json.work.running[0].kind, "transcribe");
+  assert.equal(r.json.work.running[0].entity_display, "clip.mp3"); // no entity → frozen target
   assert.equal(r.json.jobs.find((j) => j.kind === "tag").entity_display, "photo.png");
   assert.deepEqual(r.json.jobs.map((j) => j.outcome), ["failed", "ok", "ok"]); // newest first, running excluded
   assert.equal(r.json.jobs[0].error, "boom"); // error detail for every member

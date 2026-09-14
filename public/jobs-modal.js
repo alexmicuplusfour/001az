@@ -10,7 +10,7 @@
 // in Load-more pages isn't yanked back to the top.
 import { state } from './state.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
-import { ACTIVE, QUEUED, setBoardPaused } from './data.js';
+import { ACTIVE, QUEUED, setBoardPaused, setWork } from './data.js';
 import { fmtDuration, pill, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
 import { unseen, markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
 import { toast } from './toast.js';
@@ -482,7 +482,11 @@ export function openJobsModal({ kind } = {}) {
   histSec.append(filters, histList, more);
   body.append(liveSec, histSec);
 
-  let running = []; // the server's running sweep rows, refreshed on the interval
+  // The server half of Live renders straight from state.work — the modal's
+  // fetch lands there via setWork, so the chip and this dialog read one
+  // truth. While the dialog is open its fetch is also the only WRITER: the
+  // signals tick stands down (its `when`), the failed_at rule applied to
+  // work.
   let jobs = []; // settled rows fetched so far (across Load-more pages)
   let cursor = null;
   let pages = 0;
@@ -525,7 +529,7 @@ export function openJobsModal({ kind } = {}) {
   function renderLive() {
     if (!overlay.isConnected) return;
     liveList.replaceChildren();
-    for (const j of running) liveList.appendChild(runningRow(j));
+    for (const j of state.work.running) liveList.appendChild(runningRow(j));
     const inFlight = state.items.filter((i) => ACTIVE.has(i.status) || QUEUED.has(i.status));
     const active = inFlight.filter((i) => ACTIVE.has(i.status));
     // state.items is newest-first, but the worker claims oldest-first (FIFO —
@@ -534,10 +538,14 @@ export function openJobsModal({ kind } = {}) {
     // being tagged, and the sliced-off overflow is the newest (furthest back in
     // line) rather than the next up — the rows that feed into tagging are the
     // ones on screen.
-    const queued = inFlight.filter((i) => QUEUED.has(i.status)).reverse();
+    const queuedItems = inFlight.filter((i) => QUEUED.has(i.status)).reverse();
     for (const item of active) liveList.appendChild(liveItemRow(item));
-    for (const item of queued.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(item));
-    if (queued.length > QUEUED_SHOWN) note(liveList, `…and ${queued.length - QUEUED_SHOWN} more queued`);
+    for (const item of queuedItems.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(item));
+    if (queuedItems.length > QUEUED_SHOWN) note(liveList, `…and ${queuedItems.length - QUEUED_SHOWN} more queued`);
+    // The lane backlogs — waiting work no items.status carries (clips still
+    // to transcribe, items awaiting embedding), named from the served
+    // vocabulary like everything else here.
+    for (const q of state.work.queued) note(liveList, `${q.n} waiting — ${q.label}`);
     if (!liveList.children.length) note(liveList, "Nothing in flight.");
     // Which verb, and over how many: Cancel counts the queue it would pull;
     // Abort counts everything left in the pipeline, because it takes the
@@ -546,7 +554,7 @@ export function openJobsModal({ kind } = {}) {
     if (cancelBtn) {
       const abort = abortOffered();
       const verb = CANCEL_VERBS[abort ? "abort" : "queued"];
-      const n = abort ? inFlight.length : queued.length;
+      const n = abort ? inFlight.length : queuedItems.length;
       cancelBtn.style.display = n ? "" : "none";
       cancelLabel.textContent = abort ? `${verb.label} — ${n} left` : verb.label;
       cancelBtn.title = verb.title;
@@ -654,13 +662,13 @@ export function openJobsModal({ kind } = {}) {
     try {
       const data = await fetchPage(reset ? null : cursor);
       if (g !== gen) return; // a newer load took over while this one was in flight
-      running = data.running;
+      setWork(data.work);
       if (data.kinds) kindDefs = data.kinds; // the server's vocabulary, refreshed per fetch
       if (reset) { jobs = data.jobs; pages = 1; }
       else { jobs = jobs.concat(data.jobs); pages++; }
       cursor = data.nextCursor;
       const moved = noteStamp(data);
-      for (const j of [...data.running, ...data.jobs]) seenKinds.add(j.kind);
+      for (const j of [...data.work.running, ...data.jobs]) seenKinds.add(j.kind);
       // Refresh history lives outside job_log (field_snapshots) — the flag is
       // how its pill appears before the kind is ever fetched.
       if (data.has_refresh) seenKinds.add("refresh");
@@ -693,7 +701,7 @@ export function openJobsModal({ kind } = {}) {
     // acknowledges here: a failure landing now is never drawn, so the dot (and
     // the toast the rising edge earns it) is the only notice it will get.
     fetchPage(null).then((d) => {
-      running = d.running;
+      setWork(d.work);
       const moved = noteStamp(d);
       syncPaused(d);
       renderScheduled(d.scheduled);

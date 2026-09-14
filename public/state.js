@@ -22,6 +22,11 @@ export const state = {
   filterConfigs: [],
   alerts: [],           // the user's alerts on this board (with unseen counts)
   jobsFailedAt: null,   // newest failed job on this board (ms); drives the jobs chip's dot
+  // The lane half of in-flight work — running sweep rows (a transcription, an
+  // ingest run, a diagnose pass) and the backlogs no items.status carries.
+  // Streamed by the same carriers as items and read by the chip, the poll
+  // cadence and the jobs modal alike (planning/first-class-work-plan.md).
+  work: { running: [], queued: [] },
   alertEvent: null,     // ?event= view: { id, name, count, ids: Set<entityId> }
   selectedCrateId: null,
   showFavorites: false,

@@ -37,6 +37,7 @@ import {
   pruneFieldSnapshots,
   pruneTagSnapshots,
   addJobLog,
+  openJob,
   jobLogWrite,
   stampJobLog,
   deleteJobLog,
@@ -1173,11 +1174,10 @@ export async function transcribeOne(db, galleryDir, row, retry) {
   // A `running` job-log row is the only place "transcribing now" exists —
   // this sweep has no items.status leg. Each attempt is its own row (a
   // transient retry after the backoff opens a fresh one).
-  const jobId = await jobLogWrite(() => addJobLog(db, {
+  const job = await openJob(db, {
     boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
     target: file?.original_name || file?.name || null, kind: "transcribe",
-  }));
-  const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
+  });
   try {
     if (!file) throw new Error("no file on the item");
     // The board's own pin outranks the app default (slice 5). One PK
@@ -1229,7 +1229,7 @@ export async function transcribeOne(db, galleryDir, row, retry) {
     // extract legs use (the modal already renders detail.tokens).
     const { tokens } = spentDetail(dims, [usage]);
     // whisper's model is the sidecar's own answer (null if it predates self-reporting)
-    await stamp({ outcome: "ok", detail: {
+    await job.settle({ outcome: "ok", detail: {
       chars: text.length, turns: turns?.length, speakers: speakers || undefined,
       ...(secs ? { seconds: Math.round(secs) } : {}),
       ...(tokens ? { tokens } : {}),
@@ -1253,12 +1253,12 @@ export async function transcribeOne(db, galleryDir, row, retry) {
       // The first failure and the eventual resolution (ok/failed)
       // keep their own rows, and the fold survives restarts because
       // the prior row is found in the ledger, not in memory.
-      const prior = jobId == null ? null
+      const prior = job.id == null ? null
         : await jobLogWrite(() => latestSettledJob(db, row.board_id, "transcribe", row.id));
       if (prior?.outcome === "requeued") {
-        await foldJobRepeat(db, prior, jobId, { outcome: "requeued", error: err.message });
+        await foldJobRepeat(db, prior, job.id, { outcome: "requeued", error: err.message });
       } else {
-        await stamp({ outcome: "requeued", error: err.message });
+        await job.settle({ outcome: "requeued", error: err.message });
       }
       console.warn(`transcribe: transient ${action === "backoff-lane" ? "engine" : `clip #${row.id}`} error (retry in 60s): ${err.message}`);
       return action;
@@ -1271,7 +1271,7 @@ export async function transcribeOne(db, galleryDir, row, retry) {
       ? `gave up after ${attempts + 1} attempts: ${err.message}` : err.message;
     await updateItemPayload(db, row.id, { transcript_error: String(note).slice(0, 300) });
     retry.delete(row.id);
-    await stamp({ outcome: "failed", error: note });
+    await job.settle({ outcome: "failed", error: note });
     console.warn(`transcribe failed #${row.id} "${file?.original_name}": ${note}`);
     return "parked";
   }
@@ -1337,6 +1337,35 @@ function objectDetectorSidecar(binding, threshold) {
 // resolver finally reads it. Threshold is a CAPABILITY-level knob (it belongs
 // to detection, not to whichever provider serves it), closed over from
 // settings — deliberately global, never per-board.
+// Which backlog lanes are served for one board — the `queued` half's gate
+// (first-class-work-plan.md), living beside the resolvers it asks because
+// lane resolution is this module's job. Answers as `[{ kind, model? }]`,
+// db.js's boardLaneQueues vocabulary; adding a backlog lane = one line here
+// + its predicate in LANE_NEED beside the claim queries.
+//
+// Memoized briefly per board: the verdicts are configuration (bindings,
+// plugin installs, sidecar presence) but the delta poll asks every 4s per
+// open tab, and a resolution is a walk of settings reads that must not run
+// per tick. TTL rather than invalidation — the writers that can flip a
+// verdict span three modules, and the wire's own staleness is 4-20s, so a
+// few seconds of memory is invisible to the reader. The board row is only
+// needed on a miss (pin columns), so callers pass its id and optionally the
+// row they already hold.
+const laneVerdicts = new Map(); // boardId -> { at, lanes }
+const LANE_VERDICT_TTL_MS = 5000;
+export async function servedBacklogLanes(db, boardId, board = null) {
+  const hit = laneVerdicts.get(boardId);
+  if (hit && Date.now() - hit.at < LANE_VERDICT_TTL_MS) return hit.lanes;
+  const b = board ?? await getBoard(db, boardId);
+  const [transcriber, embedder] = await Promise.all([resolveTranscriber(db, b), resolveEmbedder(db)]);
+  const lanes = [
+    ...(transcriber ? [{ kind: "transcribe" }] : []),
+    ...(embedder ? [{ kind: "embed", model: embedder.model }] : []),
+  ];
+  laneVerdicts.set(boardId, { at: Date.now(), lanes });
+  return lanes;
+}
+
 export async function resolveDetector(db, board = null) {
   const b = await resolveCapability(db, "detect", { board });
   // Null since the floor became presence-gated: no provider bound and the
@@ -1999,11 +2028,10 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       // One run = one job-log row, `running` while the feed is enumerated and
       // admitted — ingest has no other in-flight representation. ingest_state
       // keeps only the LAST run; these rows are where the history lives.
-      const jobId = await jobLogWrite(() => addJobLog(db, {
+      const job = await openJob(db, {
         boardId: b.id, kind: "ingest", startedAt: now,
         detail: { trigger: cfg?.trigger?.mode || null },
-      }));
-      const stamp = (fields) => (jobId == null ? null : jobLogWrite(() => stampJobLog(db, jobId, fields)));
+      });
       try {
         const adapter = resolveIngestAdapter(b);
         if (!adapter) throw new Error("ingestion is not available for this board");
@@ -2084,14 +2112,14 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // both ledger the file out of every future scan permanently, and the
         // row naming it is the only trace that ever happened.
         const eventful = added > 0 || errors.length > 0 || remaining > 0 || skips.length > 0 || dups > 0;
-        if (!eventful && !oneShot && jobId != null) {
-          await jobLogWrite(() => deleteJobLog(db, jobId));
+        if (!eventful && !oneShot && job.id != null) {
+          await jobLogWrite(() => deleteJobLog(db, job.id));
         } else {
           // A scan whose ONLY news is the same per-item error as the prior
           // row's is a flat tick too (a wedged file on a continuous watch
           // ≈ 2,880 rows/day) — fold it instead of stamping a fresh row.
           const errorOnly = errors.length > 0 && !added && !skips.length && !dups && remaining === 0;
-          const prior = errorOnly && !oneShot && jobId != null
+          const prior = errorOnly && !oneShot && job.id != null
             ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
             : null;
           // Compare the STORED form — addJobLog caps error at 500 chars.
@@ -2099,12 +2127,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
             !Number(prior.detail?.admitted) && !Number(prior.detail?.skipped) &&
             !Number(prior.detail?.duplicates) && !Number(prior.detail?.drain_left);
           if (sameStory) {
-            await foldJobRepeat(db, prior, jobId, {
+            await foldJobRepeat(db, prior, job.id, {
               outcome: "ok", error: errors[0],
               detail: { scanned: candidates.length, fresh: fresh.length },
             });
           } else {
-            await stamp({
+            await job.settle({
               outcome: "ok", error: errors[0] ?? null,
               detail: {
                 scanned: candidates.length, fresh: fresh.length, admitted: added,
@@ -2137,13 +2165,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // The same failure repeating on the retry cadence (a dead source =
         // one row per 5-minute backoff) folds into its prior row; a hand-fired
         // run was asked for, so its row always stands alone.
-        const prior = !oneShot && jobId != null
+        const prior = !oneShot && job.id != null
           ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
           : null;
         if (prior?.outcome === "failed" && prior.error === String(err.message).slice(0, 500)) {
-          await foldJobRepeat(db, prior, jobId, { outcome: "failed", error: err.message });
+          await foldJobRepeat(db, prior, job.id, { outcome: "failed", error: err.message });
         } else {
-          await stamp({ outcome: "failed", error: err.message });
+          await job.settle({ outcome: "failed", error: err.message });
         }
         console.warn(`ingest error board "${b.name}" (${oneShot ? "not retried" : "retrying in 5m"}): ${err.message}`);
       }
