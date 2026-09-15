@@ -1068,6 +1068,24 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   background: none; border: none; color: #adb1b8; font-size: 16px; line-height: 1;
   cursor: pointer; padding: 0 12px; align-self: stretch; flex: none;
 }
+/* The actions slot (tileRow `actions`): labeled buttons riding the tile's
+   right edge, for rows whose acts need names instead of a whole-tile click. */
+.tile-actions { display: flex; align-items: center; gap: 6px; flex: none; padding-right: 10px; }
+.tile-actions button { white-space: nowrap; }
+/* Adoption modifier (the plugin modal's App defaults rows): their sum is a
+   STATUS SENTENCE, not an identifier — it must wrap, never ellipsize — and
+   their name is prose ("Semantic search"), not a mono key. Stated on the
+   container so the rows stay tileRow verbatim. */
+.tiles.prose .tile-sum { white-space: normal; }
+.tiles.prose .tile-name { font-family: inherit; }
+/* Crowded rows wrap instead of crushing: the acts keep their labels
+   (flex:none, nowrap) and the sentence keeps its width — four buttons on
+   the embed row once squeezed .tile-main to zero, leaving a status line
+   with no box at all. Wrapped, the acts drop under the sentence and ride
+   its right edge. */
+.tiles.prose .tile { flex-wrap: wrap; }
+.tiles.prose .tile-main { min-width: 240px; }
+.tiles.prose .tile-actions { margin-left: auto; padding: 6px 10px; }
 .tile-rm:hover { color: #d33; }
 
 /* Amber statement box: a configured thing that can't currently render — a

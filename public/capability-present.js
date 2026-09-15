@@ -67,6 +67,14 @@ export function presentTrouble(c) {
 // resolves the same names.
 export const labelIn = (c, name) => (c.supportedBy || []).find((p) => p.name === name)?.label || name;
 
+// A binding or a resolution, named the ONE way: the provider's label, then the
+// model it pins. Null when there is no provider to name — a binding can lose
+// its provider (a restored backup resurrects the pointer without the row), and
+// a sentence built from parts must drop the clause rather than say "null".
+// Four readers had re-typed this concatenation; the guard came with only one
+// of them, which is the whole argument for naming it.
+const named = (c, b) => (b?.provider ? labelIn(c, b.provider) + (b.model ? ` · ${b.model}` : "") : null);
+
 // A probe answer's one-line toast, shared by the page's Test button and the
 // modal section's — one string, or the two drift.
 export const fmtProbe = (r) =>
@@ -86,19 +94,15 @@ export function fmtProgress({ done, total, failed }) {
 // four.
 export function presentLines(c) {
   const lines = [];
-  const boundNames = (b) => {
-    if (!b?.provider) return null;
-    return labelIn(c, b.provider) + (b.model ? ` · ${b.model}` : "");
-  };
 
   // "Configured" only when it differs from what runs — while healthy, the
   // running line IS the configured line and saying it twice is noise.
   const showBound = c.bound && c.bound.provider && (c.state === "degraded" || c.state === "off");
-  if (showBound) lines.push({ k: "Configured", v: boundNames(c.bound) });
+  if (showBound) lines.push({ k: "Configured", v: named(c, c.bound) });
 
   if (c.running) {
     const via = c.viaFloor ? " — built-in, always on" : c.running.keyId === "env" ? " — via the server's env key" : "";
-    lines.push({ k: "Running", v: (labelIn(c, c.running.provider) + (c.running.model ? ` · ${c.running.model}` : "")) + via });
+    lines.push({ k: "Running", v: named(c, c.running) + via });
   }
   if (c.reason) lines.push({ k: "Why", v: c.reason });
   if (c.demand?.waiting) lines.push({ k: "Waiting", v: items(c.demand.waiting) });
@@ -142,6 +146,32 @@ export function presentSupported(p) {
 // Which provider's settings the Configure button should open: what runs, else
 // what is configured, else the floor — the same precedence a reader follows.
 export const configureTarget = (c) => c.running?.provider || c.bound?.provider || c.floor?.provider || null;
+
+// The connector modal's one sentence — the domain analog of the AI rows'
+// status line. Domains carry no floor-fill (`bound.provider` is the raw
+// stored star), so default-here is the same stored-first precedence the
+// slots always read; the trouble states arrive PRE-WORDED from the runtime
+// (domainState: "TMDB can't serve — OMDb took over", "X needs an API key")
+// and ride through verbatim — a fourth spelling is what this module exists
+// to prevent. `d` may be missing (a stale feed): the base sentence still
+// stands, off the label the caller already has. Both of the shell's call
+// sites — render and the post-promote in-place write — read THIS, which is
+// what ended the subtitle being authored twice.
+// The domain's effective default — the stored star, else what the sibling
+// scan resolved. ONE home for the precedence: domainStatus words it and the
+// connector modal's star button gates on it, and spelled twice they could
+// offer a star under "Currently the default for new adds."
+export const domainDefault = (d) => d?.bound?.provider || d?.running?.provider || null;
+
+export function domainStatus(d, providerName, fallbackLabel) {
+  const base = `${d?.label || fallbackLabel} data provider.`;
+  if (!d) return base;
+  if (d.reason) return `${base} ${d.reason}.`;
+  const def = domainDefault(d);
+  if (def === providerName) return `${base} Currently the default for new adds.`;
+  if (def) return `${base} Default for new adds: ${labelIn(d, def)}.`;
+  return base;
+}
 
 // Is this capability actually DELEGATING right now? The feed ships
 // `delegatesTo` for anything whose floor is a delegate — unconditionally, since
@@ -263,9 +293,7 @@ export function planBoardPicker(cap, keys, board, catalog) {
   // what that resolves to live is the shell's to add, since only the shell
   // sees unsaved edits to the target's picker.
   const delegated = isDelegating(cap);
-  const inherit = cap.running
-    ? labelIn(cap, cap.running.provider) + (cap.running.model ? ` · ${cap.running.model}` : "")
-    : "none configured";
+  const inherit = named(cap, cap.running) || "none configured";
   const unsetLabel = delegated
     ? `Same as the ${cap.delegatesToAgent || cap.delegatesTo}`
     : `App default (${inherit})`;
@@ -434,12 +462,71 @@ export function planBoardConfig(fields, board) {
     });
 }
 
-// --- the plugin modal's section planner ---
-// One capability section per (capability, provider) pair, planned here as pure
-// data and mounted by a thin DOM shell in plugin-modal.js. Everything the four
-// hand-written sections used to disagree on is now a field: which rows the
-// picker offers (including the env rung's), which buttons exist, and EXACTLY
-// what each button saves — the payload closures are the part worth testing,
+// The modal row's one-line status (plugin-modal-drawer-plan.md §2):
+// presentLines' Configured/Running precedence compressed to a sum line. While
+// healthy the running line IS the configured line; degraded and off are where
+// they part, and both halves get said. Spellings reuse what other surfaces
+// already own ("built-in", the env rung's var, "each board's {agent}") — a
+// fourth spelling of a state is what this module exists to prevent.
+function rowStatus(cap, keys, { connWord, holder, isDefaultHere, offersModel }) {
+  const b = cap.bound;
+  const r = cap.running;
+  // Clauses join one way, and a clause with nothing to say DROPS OUT — the
+  // degrade-by-parts rule applied at the composition rather than at one call
+  // site, which is what keeps a vanished key row or a provider-less binding
+  // from rendering "undefined" into a sentence.
+  const dot = (...parts) => parts.filter(Boolean).join(" · ");
+  const mine = (...parts) => { const said = dot(...parts); return `App default${said ? ` — ${said}` : ""}`; };
+  // THIS card's binding, named by the row it points at — the key names come
+  // from the rows the card is already showing.
+  const keyClause = (x) => {
+    const row = x?.keyId != null && x.keyId !== "env" ? keys.find((k) => String(k.id) === String(x.keyId)) : null;
+    return dot(row && `"${row.name}" ${connWord}`, x?.model);
+  };
+  // The qualifier the RESOLUTION carries when it is not a plain keyed call —
+  // closed over `r` so it structurally CANNOT be asked of this card's
+  // binding: the fallback rung being the env key once printed "built-in" at
+  // a networked provider. (`viaFloor` answers a different question — whether
+  // the FLOOR caught the fall — and is false for an explicitly bound
+  // on-device engine.)
+  const via = () => (r?.keyId === "env" ? " — env"
+    : (cap.supportedBy || []).find((p) => p.name === r?.provider)?.onDevice ? " — built-in" : "");
+
+  // Delegation first: while extract rides the tagger there is no default of
+  // ITS OWN to report, whoever happens to serve.
+  if (isDelegating(cap)) return `Follows each board's ${cap.delegatesToAgent || cap.delegatesTo}`;
+  if (cap.state === "off") {
+    if (!isDefaultHere) return `Off — ${cap.noun} disabled`;
+    const kept = keyClause(b);
+    return `Off — binding kept${kept ? ` (${kept})` : ""}`;
+  }
+  if (cap.state === "degraded") {
+    // The serving clause renders only when something actually serves — a
+    // blocked-floor capability's degraded line ends at "failing".
+    if (isDefaultHere) return `${mine(keyClause(b))} — failing${r ? `; ${labelIn(cap, r.provider)} serving` : ""}`;
+    // The card of whoever picked the work up names the default it stands in
+    // for — when there is a name to give.
+    const owner = b?.provider ? labelIn(cap, b.provider) : null;
+    if (holder) return `Serving as the fallback${via()}${owner ? ` (${owner} is the app default)` : ""}`;
+    const n = named(cap, b);
+    return n ? `App default: ${n} — degraded` : "The app default is failing";
+  }
+  if (!r) return "No app default yet"; // blocked / unavailable — nothing resolves
+  if (isDefaultHere) {
+    if (r.keyId === "env") return mine(`${cap.env.var} env var`, r.model);
+    if (via()) return mine("built-in", offersModel && r.model);
+    return mine(keyClause(r));
+  }
+  return `App default: ${dot(labelIn(cap, r.provider), r.model)}${via()}`;
+}
+
+// --- the plugin modal's row/drawer planner ---
+// One capability ROW per (capability, provider) pair — status line, open
+// plan, primary, row actions — planned here as pure data and mounted by a
+// thin DOM shell in plugin-modal.js. Everything the four hand-written
+// sections used to disagree on is now a field: which rows the drawer's
+// picker offers (including the env rung's), which acts exist, and EXACTLY
+// what each one saves — the payload closures are the part worth testing,
 // because a wrong body here writes a wrong binding server-side.
 //
 //   cap      one entry of GET /api/admin/capabilities
@@ -453,10 +540,40 @@ export function planSection(cap, provider, keys) {
   // and only while the server actually holds the secret.
   const envRow = !!(cap.env?.configured && cap.env.provider === provider.name);
   const holder = cap.running?.provider === provider.name;
+  // Have the stored choice and the running one PARTED? Named once, because
+  // three readers below ask it and an inverted second spelling is how they
+  // start disagreeing: a state that still resolves would have rendered the
+  // active status line beside the wrong primary label.
+  const parted = cap.state === "degraded" || cap.state === "off";
+  // Is THIS provider the admin's stored choice? Not `bound.provider === name`:
+  // capabilityBinding FLOOR-FILLS the provider, so a capability with nothing
+  // bound reads back as its own floor's engine. The server keeps the same
+  // guard for the same reason (capability-status.js `storedNonFloor`, which
+  // is not on the wire) — and without it a fresh instance's disabled embedder
+  // claimed the Local Embedder card as a stored choice: "binding kept" over a
+  // binding nobody made, with no button left to turn embeddings back on. A
+  // stored keyId needs no clause of its own; the binding's provider is always
+  // that row's provider.
+  const storedHere = cap.bound?.provider === provider.name
+    && provider.name !== (cap.floor?.kind === "builtin" ? cap.floor.provider : null);
+  // The stored/resolving default points HERE — split from `holder` (what
+  // SERVES) because the two part company exactly when a card most needs to
+  // be honest: a degraded default is still the default while the floor
+  // serves, and conflated they presented that card as a bystander ("Make
+  // default …" over blank pickers). Active resolves without a bound row on
+  // the env rung, so it asks `running`. A delegating capability has no
+  // default of its own to be (isDelegating's rule). Probe / Turn off / revert
+  // stay on `holder`: they act on what runs.
+  const isDefaultHere = !isDelegating(cap) && (parted ? storedHere : holder);
 
   const base = { title: cap.label, subtitle: cap.blurb };
   if (!onDevice && !keys.length && !envRow) {
-    return { ...base, guard: `Add a ${connWord} above to serve ${cap.noun} with this provider.` };
+    // The guard doubles as the row's status: nothing to act on, no action.
+    // It answers the whole row contract (status + open + actions) rather than
+    // half of it, so the shell renders every row one way instead of keeping a
+    // guard branch alive — and a field added later can't forget this return.
+    const guard = `Add a ${connWord} above to serve ${cap.noun} with this provider.`;
+    return { ...base, guard, status: guard, open: null, primary: null, rowActions: [], progressLine: null };
   }
 
   // Connection rows: this provider's keys, plus the env rung where it applies.
@@ -465,10 +582,7 @@ export function planSection(cap, provider, keys) {
     ? null
     : [...keys.map((k) => ({ value: String(k.id), label: k.name })),
        ...(envRow ? [{ value: "env", label: `${cap.env.var} env var` }] : [])];
-  const preselect = holder && rows ? (cap.bound?.keyId ? String(cap.bound.keyId) : envRow ? "env" : null) : null;
-  // The one-key-hidden rule: a single row already holding the slot asks no
-  // question, so the picker stays out of the way.
-  const ask = !!rows && (rows.length > 1 || !holder);
+  const preselect = isDefaultHere && rows ? (cap.bound?.keyId ? String(cap.bound.keyId) : envRow ? "env" : null) : null;
 
   // The model axis: a networked provider gets the picker (live listings can
   // offer more than the curated set). An on-device engine gets one too WHEN it
@@ -484,10 +598,14 @@ export function planSection(cap, provider, keys) {
         : "model baked at deploy — the sidecar names it when reachable" }
     : { catalog: { models: catalog.models, defaultModel: catalog.default } };
 
-  const buttons = [];
-  buttons.push({
+  // The one act that stages a choice (and so earns the drawer), and the
+  // one-click acts on live state that stay on the row beside it. Built as the
+  // two they are rather than sliced back out of one array by position, so
+  // nothing can quietly land in front of the apply entry.
+  const applyLabel = `Make default ${cap.agent}`;
+  const primary = {
     kind: "apply",
-    label: `Make default ${cap.agent}`,
+    label: applyLabel,
     toast: `Default ${cap.agent} saved`,
     payload: (sel) =>
       onDevice
@@ -499,16 +617,17 @@ export function planSection(cap, provider, keys) {
             model: sel.model,
             ...(cap.binding.enable ? { enabled: true } : {}),
           },
-  });
-  if (cap.probeable && holder) buttons.push({ kind: "probe" });
+  };
+  const rowActions = [];
+  if (cap.probeable && holder) rowActions.push({ kind: "probe" });
   if (cap.binding.enable && holder) {
-    buttons.push({ kind: "off", label: "Turn off", toast: `${cap.label} turned off`, payload: () => ({ enabled: false }) });
+    rowActions.push({ kind: "off", label: "Turn off", toast: `${cap.label} turned off`, payload: () => ({ enabled: false }) });
   }
   // …and only toward an engine that is actually running — a revert to an
   // absent sidecar would bind the capability to nothing (the other half of
   // removalStory's promise, hence the shared predicate).
   if (holder && floorPromises(cap) && cap.floor.provider !== provider.name) {
-    buttons.push({
+    rowActions.push({
       kind: "revert",
       label: `Use the built-in ${cap.noun} instead`,
       toast: `${cap.label} reverted to the built-in ${cap.noun}`,
@@ -516,26 +635,55 @@ export function planSection(cap, provider, keys) {
     });
   }
 
+  // The row/drawer split (plugin-modal-drawer-plan.md §3). Whether an act
+  // needs the drawer is STRUCTURAL: offered iff a group would render — a key
+  // question (two rows or more), or a model catalog. One key and one baked
+  // model ask nothing, so that promote stays a single click; default-here
+  // with nothing to ask needs no button at all — the status line already
+  // says it, where a disabled "Make default …" used to sit as a marker.
+  const hasChoices = rows?.length > 1 || !!model.catalog;
+  const open = hasChoices
+    ? {
+        label: isDefaultHere ? "Change…" : "Make default…",
+        drawer: true,
+        // The task's head — the same phrase family as applyLabel, planned
+        // here so the drawer's title can't drift from the planner's
+        // vocabulary when the family gets reworded.
+        title: `Default ${cap.agent}`,
+        // "Save changes" only for the healthy default repointing itself; the
+        // off drawer's primary genuinely re-elects (binds + enables), so it
+        // keeps the verbatim label.
+        primaryLabel: isDefaultHere && !parted ? "Save changes" : applyLabel,
+        // Re-posting an active or degraded binding is a no-op, so those
+        // drawers demand a change from the open-time snapshot before the
+        // primary arms. The OFF drawer's re-post IS the act — enabled:true
+        // rides it — so it opens armed with the kept binding preselected.
+        requiresChange: isDefaultHere && cap.state !== "off",
+      }
+    : isDefaultHere ? null : { label: applyLabel, drawer: false };
+
   return {
     ...base,
     guard: null,
+    status: rowStatus(cap, keys, { connWord, holder, isDefaultHere, offersModel: !!model.catalog }),
+    open,
     rows,
     preselect,
-    ask,
     model,
     holder,
-    savedModel: holder ? cap.bound?.model ?? null : null,
-    buttons,
+    isDefaultHere,
+    savedModel: isDefaultHere ? cap.bound?.model ?? null : null,
+    primary,
+    rowActions,
     // The costly-rebind confirm, armed only while the capability is live and a
     // model is actually pinned — the DOM compares the select against priorModel.
     confirm: cap.rebindWarning && cap.bound?.enabled && cap.bound?.model
       ? { message: cap.rebindWarning, priorModel: cap.bound.model }
       : null,
-    // Beside a proposal button: what you'd be replacing.
-    currentDefault: holder ? null : {
-      label: cap.running ? labelIn(cap, cap.running.provider) : "none",
-      model: cap.running?.model ?? null,
-    },
+    // Beside the drawer's primary: what you'd be replacing. Absent for the
+    // default itself (a repair replaces nothing) and when nothing runs (the
+    // row already says "No app default yet" — "Replacing: none" is a lie).
+    currentDefault: isDefaultHere ? null : named(cap, cap.running),
     progressLine: cap.progress ? fmtProgress(cap.progress) : null,
   };
 }

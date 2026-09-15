@@ -559,7 +559,10 @@ export function drawerHeadParts(glyphName, ai, title, src) {
 // onOpen absent = a locked tile: a div, no hover cursor, no tab stop (a thing
 // with no editor still renders and can still be removable). onRemove absent =
 // no ×. `place` rides the main button for keepPlace focus restoration.
-export function tileRow({ glyph, ai, name, sum, title, place, onOpen, onRemove, removeLabel, removeTitle }) {
+// `actions` mounts labeled buttons where the × sits (before it, when both) —
+// for rows whose acts need NAMES ("Test", "Change…") rather than an implicit
+// whole-tile click; such rows stay locked, one tab stop per act.
+export function tileRow({ glyph, ai, name, sum, title, place, onOpen, onRemove, removeLabel, removeTitle, actions }) {
   const tile = document.createElement("div");
   tile.className = "tile" + (ai ? " ai" : "");
   const main = document.createElement(onOpen ? "button" : "div");
@@ -584,6 +587,12 @@ export function tileRow({ glyph, ai, name, sum, title, place, onOpen, onRemove, 
   body.append(nameEl, sumEl);
   main.appendChild(body);
   tile.appendChild(main);
+  if (actions?.length) {
+    const act = document.createElement("div");
+    act.className = "tile-actions";
+    act.append(...actions);
+    tile.appendChild(act);
+  }
   if (onRemove) {
     const rm = document.createElement("button");
     rm.className = "tile-rm";

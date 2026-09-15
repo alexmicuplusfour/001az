@@ -4,7 +4,7 @@
 // capabilities.test.js proves the server actually emits.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { presentChip, presentLines, presentSupported, configureTarget, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory, isDelegating, presentTrouble } from "../public/capability-present.js";
+import { presentChip, presentLines, presentSupported, configureTarget, domainStatus, domainDefault, planSection, planBoardPicker, planBoardConfig, fmtProgress, servingRoles, roleBadge, keyRoles, removalStory, isDelegating, presentTrouble } from "../public/capability-present.js";
 
 const supported = [
   { name: "openai", label: "OpenAI", installed: true, keyCount: 1, onDevice: false, keyless: false },
@@ -146,7 +146,7 @@ test("Configure opens what a reader would: running, else configured, else the fl
 // wrong binding server-side (their server halves live in capabilities.test.js).
 
 const tagCap = {
-  id: "tag", label: "Tagging", noun: "tagging", agent: "tagger", declaredBy: "tag",
+  id: "tag", label: "Tagging", noun: "tagging", agent: "tagger", declaredBy: "tag", state: "active",
   binding: { provider: false, enable: false }, floor: { kind: "blocked" },
   env: { configured: true, provider: "anthropic", var: "ANTHROPIC_API_KEY" },
   probeable: true, blurb: "b",
@@ -155,21 +155,38 @@ const tagCap = {
   supportedBy: [{ name: "openai", label: "OpenAI" }, { name: "anthropic", label: "Anthropic" }],
 };
 const embedCap = {
-  id: "embed", label: "Semantic search", noun: "embeddings", agent: "embedder", declaredBy: "embed",
-  binding: { provider: true, enable: true }, floor: { kind: "off" }, probeable: true, blurb: "b",
+  id: "embed", label: "Semantic search", noun: "embeddings", agent: "embedder", declaredBy: "embed", state: "active",
+  // The registry's real floor (server/capabilities.js): the on-device engine,
+  // which is what makes a fresh instance's "turn it on" one click. The old
+  // `{ kind: "off" }` here was a stale copy of a shape the server retired, and
+  // it hid the floor-fill the binding read carries.
+  binding: { provider: true, enable: true }, floor: { kind: "builtin", provider: "local" }, probeable: true, blurb: "b",
   rebindWarning: "re-embeds everything. Continue?",
   bound: { provider: "openai", keyId: 5, model: "text-embedding-3-small", enabled: true },
   running: { provider: "openai", model: "text-embedding-3-small", keyId: 5 },
-  supportedBy: [{ name: "openai", label: "OpenAI" }, { name: "local", label: "Local Embedder (Xenova)" }],
+  supportedBy: [{ name: "openai", label: "OpenAI" }, { name: "local", label: "Local Embedder (Xenova)", onDevice: true }],
   progress: { done: 4, total: 10, failed: 1 },
 };
 const transcribeCap = {
-  id: "transcribe", label: "Transcription", noun: "transcription", agent: "transcriber", declaredBy: "transcribe",
+  id: "transcribe", label: "Transcription", noun: "transcription", agent: "transcriber", declaredBy: "transcribe", state: "active",
   binding: { provider: true, enable: false }, probeable: true, blurb: "b",
   floor: { kind: "builtin", provider: "whisper", label: "Local Transcriber (Whisper)" },
   bound: { provider: "openai", keyId: 7, model: "whisper-1" },
   running: { provider: "openai", model: "whisper-1", keyId: 7 },
-  supportedBy: [{ name: "openai", label: "OpenAI" }, { name: "whisper", label: "Local Transcriber (Whisper)" }],
+  supportedBy: [{ name: "openai", label: "OpenAI" }, { name: "whisper", label: "Local Transcriber (Whisper)", onDevice: true }],
+};
+// The two resolutions that aren't a plain keyed call, named once each: the
+// floor engine serving transcription, and tagging picked up by the env rung.
+// Both were pasted verbatim at three and four call sites.
+const floorServing = {
+  ...transcribeCap,
+  bound: { provider: "whisper", keyId: null, model: null },
+  running: { provider: "whisper", model: "large-v3", keyId: null },
+};
+const envServing = {
+  ...tagCap,
+  bound: { provider: null, keyId: null, model: null },
+  running: { provider: "anthropic", model: "m", keyId: "env" },
 };
 const openaiP = {
   name: "openai", label: "OpenAI",
@@ -188,29 +205,28 @@ const whisperMultiP = { name: "whisper", label: "Local Transcriber (Whisper)", a
   transcribe: { models: [{ id: "small", note: "baked" }, { id: "medium", note: "baked" }], default: "small" } } } };
 
 test("planSection: the env row exists only on its provider's card, and its apply saves keyId null", () => {
-  const plan = planSection({ ...tagCap, bound: { provider: null, keyId: null, model: null }, running: { provider: "anthropic", model: "m", keyId: "env" } }, anthropicP, []);
+  const plan = planSection(envServing, anthropicP, []);
   assert.equal(plan.guard, null, "the env row counts as a connection");
   assert.deepEqual(plan.rows, [{ value: "env", label: "ANTHROPIC_API_KEY env var" }]);
   assert.equal(plan.preselect, "env", "the holder preselects its own rung");
-  assert.equal(plan.ask, false, "one row already holding the slot asks no question");
-  assert.deepEqual(plan.buttons[0].payload({ key: "env", model: "claude-haiku-4-5" }),
+  assert.deepEqual(plan.primary.payload({ key: "env", model: "claude-haiku-4-5" }),
     { keyId: null, model: "claude-haiku-4-5" }, "no provider field — tag binds by row; env = clear the row");
   // The same capability on ANOTHER provider's card gets no env row.
   const other = planSection(tagCap, openaiP, [{ id: 3, name: "prod" }]);
   assert.deepEqual(other.rows, [{ value: "3", label: "prod" }]);
-  assert.deepEqual(other.buttons[0].payload({ key: "3", model: "gpt-5-mini" }), { keyId: 3, model: "gpt-5-mini" });
+  assert.deepEqual(other.primary.payload({ key: "3", model: "gpt-5-mini" }), { keyId: 3, model: "gpt-5-mini" });
 });
 
 test("planSection: embed's one apply binds AND enables; Turn off keeps the binding", () => {
   const plan = planSection(embedCap, openaiP, [{ id: 5, name: "prod" }]);
-  assert.deepEqual(plan.buttons[0].payload({ key: "5", model: "text-embedding-3-small" }),
+  assert.deepEqual(plan.primary.payload({ key: "5", model: "text-embedding-3-small" }),
     { provider: "openai", keyId: 5, model: "text-embedding-3-small", enabled: true });
-  const off = plan.buttons.find((b) => b.kind === "off");
+  const off = plan.rowActions.find((b) => b.kind === "off");
   assert.deepEqual(off.payload(), { enabled: false });
   // on-device: picked by name, no rows, still enables in the same call
   const local = planSection({ ...embedCap, running: { provider: "local", model: "bge", keyId: null } }, localP, []);
   assert.equal(local.rows, null);
-  assert.deepEqual(local.buttons[0].payload({ key: null, model: null }), { provider: "local", enabled: true });
+  assert.deepEqual(local.primary.payload({ key: null, model: null }), { provider: "local", enabled: true });
 });
 
 test("planSection: an on-device engine gets a model picker only once it reports serving several", () => {
@@ -219,22 +235,22 @@ test("planSection: an on-device engine gets a model picker only once it reports 
   const one = planSection(transcribeCap, whisperP, []);
   assert.ok(one.model.note, "a single baked model reads as a note");
   assert.equal(one.model.catalog, undefined);
-  assert.deepEqual(one.buttons[0].payload({ key: null, model: null }), { provider: "whisper" });
+  assert.deepEqual(one.primary.payload({ key: null, model: null }), { provider: "whisper" });
 
   // Two baked models — the picker appears and the choice is saved.
   const many = planSection(transcribeCap, whisperMultiP, []);
   assert.deepEqual(many.model.catalog, { models: whisperMultiP.ai.provides.transcribe.models, defaultModel: "small" });
   assert.equal(many.model.note, undefined);
-  assert.deepEqual(many.buttons[0].payload({ key: null, model: "medium" }), { provider: "whisper", model: "medium" });
+  assert.deepEqual(many.primary.payload({ key: null, model: "medium" }), { provider: "whisper", model: "medium" });
 });
 
 test("planSection: revert targets the floor by name — and never appears on the floor's own card", () => {
   const plan = planSection(transcribeCap, openaiP, [{ id: 7, name: "prod" }]);
-  const revert = plan.buttons.find((b) => b.kind === "revert");
+  const revert = plan.rowActions.find((b) => b.kind === "revert");
   assert.equal(revert.label, "Use the built-in transcription instead");
   assert.deepEqual(revert.payload(), { provider: "whisper" });
-  const floorCard = planSection({ ...transcribeCap, bound: { provider: "whisper", keyId: null, model: null }, running: { provider: "whisper", model: "large-v3", keyId: null } }, whisperP, []);
-  assert.equal(floorCard.buttons.find((b) => b.kind === "revert"), undefined);
+  const floorCard = planSection(floorServing, whisperP, []);
+  assert.equal(floorCard.rowActions.find((b) => b.kind === "revert"), undefined);
   assert.match(floorCard.model.note, /baked at deploy/, "the sidecar's empty catalog reads as a note, not a picker");
 });
 
@@ -243,10 +259,10 @@ test("planSection: guard, probe gating, confirm arming, and the progress line", 
   assert.match(guarded.guard, /Add a key above to serve transcription/);
 
   // Test only shows on the acting provider's card.
-  assert.ok(planSection(transcribeCap, openaiP, [{ id: 7, name: "k" }]).buttons.some((b) => b.kind === "probe"));
+  assert.ok(planSection(transcribeCap, openaiP, [{ id: 7, name: "k" }]).rowActions.some((b) => b.kind === "probe"));
   const notHolder = planSection({ ...transcribeCap, running: { provider: "whisper", model: null, keyId: null } }, openaiP, [{ id: 7, name: "k" }]);
-  assert.ok(!notHolder.buttons.some((b) => b.kind === "probe"));
-  assert.deepEqual(notHolder.currentDefault, { label: "Local Transcriber (Whisper)", model: null });
+  assert.ok(!notHolder.rowActions.some((b) => b.kind === "probe"));
+  assert.equal(notHolder.currentDefault, "Local Transcriber (Whisper)", "presenter-worded, model clause dropped when null");
 
   // The costly-rebind confirm arms only while enabled with a pinned model.
   const armed = planSection(embedCap, openaiP, [{ id: 5, name: "k" }]);
@@ -256,6 +272,155 @@ test("planSection: guard, probe gating, confirm arming, and the progress line", 
 
   assert.equal(armed.progressLine, fmtProgress({ done: 4, total: 10, failed: 1 }));
   assert.match(armed.progressLine, /4 of 10 items processed/);
+});
+
+// --- the row/drawer split (plugin-modal-drawer-plan.md, stage 1) ---
+
+test("planSection: the row status — active spellings", () => {
+  // keyed default-here names its key and model
+  assert.equal(planSection(tagCap, openaiP, [{ id: 3, name: "prod" }]).status,
+    'App default — "prod" key · gpt-5-mini');
+  // …the env rung names the var instead of a row
+  const env = planSection(envServing, anthropicP, []);
+  assert.equal(env.status, "App default — ANTHROPIC_API_KEY env var · m");
+  // …and the same resolution read from another card carries the env qualifier
+  const envElsewhere = planSection(envServing, openaiP, [{ id: 3, name: "prod" }]);
+  assert.equal(envElsewhere.status, "App default: Anthropic · m — env");
+  // elsewhere, an on-device default carries the built-in qualifier
+  const elsewhere = planSection(floorServing, openaiP, [{ id: 7, name: "prod" }]);
+  assert.equal(elsewhere.status, "App default: Local Transcriber (Whisper) · large-v3 — built-in");
+  // on-device default-here: a single baked model stays quiet…
+  const floorCard = planSection(floorServing, whisperP, []);
+  assert.equal(floorCard.status, "App default — built-in");
+  // …and gets named once there was a choice to make
+  const multi = planSection({ ...transcribeCap, bound: { provider: "whisper", keyId: null, model: "medium" }, running: { provider: "whisper", model: "medium", keyId: null } }, whisperMultiP, []);
+  assert.equal(multi.status, "App default — built-in · medium");
+  // nothing resolves
+  assert.equal(planSection({ ...tagCap, state: "blocked", bound: { provider: null, keyId: null, model: null }, running: null }, openaiP, [{ id: 3, name: "prod" }]).status,
+    "No app default yet");
+  // a bound key row that vanished degrades to the model clause — never "undefined"
+  assert.equal(planSection(tagCap, openaiP, [{ id: 9, name: "other" }]).status,
+    "App default — gpt-5-mini");
+});
+
+test("planSection: degraded — the bound card is still the default; the floor card says fallback", () => {
+  const degTr = { ...transcribeCap, state: "degraded", running: floorServing.running };
+  const boundCard = planSection(degTr, openaiP, [{ id: 7, name: "prod" }]);
+  assert.equal(boundCard.status, 'App default — "prod" key · whisper-1 — failing; Local Transcriber (Whisper) serving');
+  assert.equal(boundCard.isDefaultHere, true);
+  assert.equal(boundCard.open.label, "Change…");
+  assert.equal(boundCard.open.primaryLabel, "Make default transcriber", '"Save changes" is the healthy default\'s label only');
+  assert.equal(boundCard.preselect, "7", "repair opens prefilled, not blank");
+  assert.equal(boundCard.savedModel, "whisper-1");
+  // the serving floor's card is not the default — and no longer leaks the
+  // bound provider's model into its own picker
+  const floorSide = planSection(degTr, whisperP, []);
+  assert.equal(floorSide.status, "Serving as the fallback — built-in (OpenAI is the app default)");
+  assert.equal(floorSide.isDefaultHere, false);
+  assert.equal(floorSide.savedModel, null);
+  // a blocked floor has nothing serving: the line ends at "failing"…
+  const degTag = planSection({ ...tagCap, state: "degraded", running: null }, openaiP, [{ id: 3, name: "prod" }]);
+  assert.equal(degTag.status, 'App default — "prod" key · gpt-5-mini — failing');
+  // …and a third advertiser still names the degraded default
+  assert.equal(planSection({ ...tagCap, state: "degraded", running: null }, anthropicP, []).status,
+    "App default: OpenAI · gpt-5-mini — degraded");
+
+  // The rung that picks the work up is not always the floor — stored → env →
+  // floor is the resolution order, so the fallback card's qualifier is
+  // DERIVED from what serves rather than assumed to be an engine.
+  const envPickedUp = planSection({ ...tagCap, state: "degraded", running: { provider: "anthropic", model: "m", keyId: "env" } }, anthropicP, []);
+  assert.equal(envPickedUp.status, "Serving as the fallback — env (OpenAI is the app default)");
+
+  // A binding can lose its provider (a restored backup resurrects the pointer
+  // without the row). Every line that would have named it drops the clause
+  // instead of rendering "null" into a sentence.
+  const fossil = { ...tagCap, state: "degraded", bound: { provider: null, keyId: 3, model: null }, running: null };
+  assert.equal(planSection(fossil, anthropicP, []).status, "The app default is failing");
+  assert.equal(planSection(fossil, whisperP, []).status, "The app default is failing");
+});
+
+test("domainStatus: the connector modal's one sentence, both call sites", () => {
+  const dom = {
+    id: "movies", kind: "domain", label: "Movies", state: "active", reason: null,
+    bound: { provider: "omdb" }, running: { provider: "omdb" },
+    supportedBy: [{ name: "omdb", label: "OMDb" }, { name: "tmdb", label: "TMDB" }],
+  };
+  assert.equal(domainDefault(dom), "omdb", "one home for the stored-else-scan precedence — the star button gates on it");
+  assert.equal(domainStatus(dom, "omdb", "Movies"), "Movies data provider. Currently the default for new adds.");
+  // …and the not-default card finally names who IS.
+  assert.equal(domainStatus(dom, "tmdb", "Movies"), "Movies data provider. Default for new adds: OMDb.");
+  // Unset star: the sibling-scan's pick is the default for new adds.
+  assert.equal(domainStatus({ ...dom, bound: { provider: null } }, "omdb", "Movies"),
+    "Movies data provider. Currently the default for new adds.");
+  // Trouble states arrive pre-worded from domainState and ride through
+  // verbatim, on BOTH cards — the starred-but-failing provider must not
+  // claim "currently the default" over a takeover.
+  const deg = { ...dom, state: "degraded", reason: "TMDB can't serve — OMDb took over", bound: { provider: "tmdb" } };
+  assert.equal(domainStatus(deg, "omdb", "Movies"), "Movies data provider. TMDB can't serve — OMDb took over.");
+  assert.equal(domainStatus(deg, "tmdb", "Movies"), "Movies data provider. TMDB can't serve — OMDb took over.");
+  // A stale feed without the domain: the base sentence, off the caller's label.
+  assert.equal(domainStatus(undefined, "omdb", "Movies"), "Movies data provider.");
+  // The promote handler's patched entry (no refetch by design).
+  assert.equal(domainStatus({ ...deg, bound: { provider: "omdb" }, state: "active", reason: null }, "omdb", "Movies"),
+    "Movies data provider. Currently the default for new adds.");
+});
+
+test("planSection: off — the bound card keeps its binding on the record; elsewhere reads disabled", () => {
+  const offCap = { ...embedCap, state: "off", bound: { ...embedCap.bound, enabled: false }, running: null };
+  const boundCard = planSection(offCap, openaiP, [{ id: 5, name: "prod" }]);
+  assert.equal(boundCard.status, 'Off — binding kept ("prod" key · text-embedding-3-small)');
+  assert.equal(boundCard.open.label, "Change…");
+  assert.equal(boundCard.open.primaryLabel, "Make default embedder", "the off drawer's primary re-elects: binds + enables");
+  assert.equal(boundCard.open.requiresChange, false, "the re-post IS the act — the off drawer opens armed");
+  assert.equal(boundCard.preselect, "5", "the kept binding prefills the drawer");
+  const other = planSection(offCap, localP, []);
+  assert.equal(other.status, "Off — embeddings disabled");
+});
+
+test("planSection: a floor-filled binding is not a stored choice", () => {
+  // capabilityBinding floor-fills `bound.provider`, so a capability with
+  // NOTHING bound reads back as its own floor's engine — the server guards
+  // this with storedNonFloor and the guard is not on the wire. Read as a
+  // choice, a fresh instance's disabled embedder claimed the Local Embedder
+  // card: "binding kept" over a binding nobody made, and `open: null` left no
+  // button to turn embeddings back on — on the one capability whose apply is
+  // the client's only `enabled: true`.
+  const fresh = {
+    ...embedCap, state: "off", running: null,
+    bound: { provider: "local", keyId: null, model: null, enabled: false }, // nothing stored; the floor filled in
+  };
+  const floorCard = planSection(fresh, localP, []);
+  assert.equal(floorCard.isDefaultHere, false);
+  assert.equal(floorCard.status, "Off — embeddings disabled");
+  assert.deepEqual(floorCard.open, { label: "Make default embedder", drawer: false },
+    "the one-click way back on survives");
+  // An explicit pin of a NON-floor provider is still a stored choice.
+  assert.equal(planSection({ ...fresh, bound: { provider: "openai", keyId: 5, model: "text-embedding-3-small", enabled: false } },
+    openaiP, [{ id: 5, name: "prod" }]).isDefaultHere, true);
+});
+
+test("planSection: open — drawer iff a group would render; default-here choiceless needs no button", () => {
+  // healthy keyed default: a model catalog earns the drawer even with one key
+  const tag = planSection(tagCap, openaiP, [{ id: 3, name: "prod" }]);
+  assert.deepEqual(tag.open, { label: "Change…", drawer: true, title: "Default tagger", primaryLabel: "Save changes", requiresChange: true });
+  assert.equal(tag.isDefaultHere, true);
+  // not default-here with choices
+  const anth = planSection(tagCap, anthropicP, []);
+  assert.deepEqual(anth.open, { label: "Make default…", drawer: true, title: "Default tagger", primaryLabel: "Make default tagger", requiresChange: false });
+  assert.equal(anth.isDefaultHere, false);
+  // choiceless promote stays one click (on-device, single baked model)
+  assert.deepEqual(planSection(transcribeCap, whisperP, []).open,
+    { label: "Make default transcriber", drawer: false });
+  // choiceless default-here: the disabled status-marker button dies
+  const floorCard = planSection(floorServing, whisperP, []);
+  assert.equal(floorCard.open, null);
+  // guard: the status carries the guard text, and there is nothing to act on
+  const guarded = planSection(transcribeCap, openaiP, []);
+  assert.equal(guarded.open, null);
+  assert.equal(guarded.status, guarded.guard);
+  // multi-model on-device: the model question alone earns the drawer
+  assert.deepEqual(planSection(transcribeCap, whisperMultiP, []).open,
+    { label: "Make default…", drawer: true, title: "Default transcriber", primaryLabel: "Make default transcriber", requiresChange: false });
 });
 
 // --- slice 5b: extraction's own binding displaces the delegation story ---
@@ -276,7 +441,7 @@ test("the Uses line yields once the capability has its own global binding", () =
 test("planSection: extract gets a section on its declarer's card — bind by row, tag's model catalog, one button", () => {
   const extractCap = {
     id: "extract", label: "Field extraction", noun: "field extraction", agent: "extractor",
-    declaredBy: "tag", blurb: "b", delegatesTo: "tag",
+    declaredBy: "tag", blurb: "b", delegatesTo: "tag", delegatesToAgent: "tagger", state: "active",
     binding: { provider: false, enable: false, global: true }, floor: { kind: "delegate" },
     bound: { provider: null, keyId: null, model: null },
     running: { provider: "openai", model: "gpt-5-mini", keyId: 3 }, // delegating: the tagger serves
@@ -286,10 +451,15 @@ test("planSection: extract gets a section on its declarer's card — bind by row
   assert.equal(plan.guard, null);
   assert.deepEqual(plan.rows, [{ value: "3", label: "prod" }]);
   assert.equal(plan.model.catalog.models[0].id, "gpt-5-mini", "extraction rides the tagging wire — its models are tag models");
-  assert.equal(plan.buttons.length, 1, "no probe (nothing of its own to probe), no off, no revert");
-  assert.equal(plan.buttons[0].label, "Make default extractor");
-  assert.deepEqual(plan.buttons[0].payload({ key: "3", model: "gpt-5-mini" }), { keyId: 3, model: "gpt-5-mini" },
+  assert.equal(plan.rowActions.length, 0, "no probe (nothing of its own to probe), no off, no revert");
+  assert.equal(plan.primary.label, "Make default extractor");
+  assert.deepEqual(plan.primary.payload({ key: "3", model: "gpt-5-mini" }), { keyId: 3, model: "gpt-5-mini" },
     "no provider field (binds by row), no enabled flag");
+  // Delegating: the tagger serving THROUGH it does not make this extract's
+  // own default — the row reports the relationship and offers the election.
+  assert.equal(plan.status, "Follows each board's tagger");
+  assert.equal(plan.isDefaultHere, false);
+  assert.deepEqual(plan.open, { label: "Make default…", drawer: true, title: "Default extractor", primaryLabel: "Make default extractor", requiresChange: false });
 });
 
 // --- slice 5b: the board modal's per-board pin picker ---
@@ -633,7 +803,7 @@ test("presence: an absent engine dims, isn't offered, isn't promised, and isn't 
   // …and the plugin card stops offering a revert to nothing.
   const noRevert = planSection({ ...transcribeCap, floor: { ...transcribeCap.floor, present: false } },
     openaiP, [{ id: 7, name: "prod" }]);
-  assert.equal(noRevert.buttons.find((b) => b.kind === "revert"), undefined);
+  assert.equal(noRevert.rowActions.find((b) => b.kind === "revert"), undefined);
 });
 
 test("removalStory: the consequence clause per floor shape", () => {

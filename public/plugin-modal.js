@@ -1,20 +1,24 @@
 // Per-plugin configuration modal, opened from the Plugins tab gear. Sections
 // vary by kind: connectors get their schema-driven config form (key, rate
 // limits) plus Test and the domain-default star; AI providers get their key
-// registry (this provider's slice of ai_keys) plus ONE generic section per
-// capability they advertise — planned by capability-present.js from the
-// capabilities payload, so a new capability needs no edit here; media types
-// are informational (built-ins, nothing to configure). The last
-// recorded health error surfaces at the top. Writes go through the plugins
-// API, the ai-keys routes, and /api/admin/capabilities/:id/{bind,probe} —
-// this file owns no state of its own.
+// registry (this provider's slice of ai_keys) plus ONE "App defaults"
+// section — a status row per capability they advertise, planned by
+// capability-present.js from the capabilities payload, so a new capability
+// needs no edit here. The modal body states FACTS; choosing a default is an
+// explicit act in the bottom drawer (modal.js createDrawer), where the old
+// stack of per-capability sections used to stage key/model selects that read
+// as saved state. Media types are informational (built-ins, nothing to
+// configure). The last recorded health error surfaces at the top. Writes go
+// through the plugins API, the ai-keys routes, and
+// /api/admin/capabilities/:id/{bind,probe} — this file owns no state of its
+// own.
 import { toast } from "/toast.js";
 import { api } from "/api.js";
-import { createModal, sectionHeading, sectionHeadingEl, busy } from "/modal.js";
+import { createModal, sectionHeading, sectionHeadingEl, busy, createDrawer, drawerHeadParts, dwGroup, tileRow } from "/modal.js";
 import { syncModelPicker, switchRow } from "/board-modal.js";
 import { fillSelect, isUnset } from "/select.js";
 import { fmtDuration, relTime } from "/utils.js";
-import { planSection, fmtProbe, keyRoles, removalStory } from "/capability-present.js";
+import { planSection, domainStatus, domainDefault, fmtProbe, keyRoles, removalStory } from "/capability-present.js";
 
 
 const LABEL_CSS = "display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;";
@@ -34,45 +38,28 @@ function labeled(label, el) {
   return row;
 }
 
-// A slot's promote button, always labelled "Make default {slot}" and always
-// ghost — the same weight as the connector's "Make default for {domain}".
-// Enabled when this provider isn't the default; when it already IS, it sits
-// disabled as a status marker and re-enables only once you change the key or
-// model, so you can still repoint the running default. `sels` are the selects
-// to watch; `apply` runs the write.
-//
-// A picker still on its empty state is not an answer, so it holds the button
-// down too — which is also what keeps `apply` from posting the placeholder's ""
-// as a key id. Note the ordering this relies on: each section wires the key
-// select's model-refill listener BEFORE building this button, so by the time
-// `sync` runs the model picker has already been emptied for the new connection.
-function slotButton(label, isDefault, sels, apply) {
-  const btn = document.createElement("button");
-  btn.className = "ghost";
-  btn.textContent = label;
-  const initial = sels.map((s) => s.value);
-  const sync = () => {
-    btn.disabled = sels.some(isUnset)
-      || (isDefault && !sels.some((s, i) => s.value !== initial[i]));
-  };
-  sels.forEach((s) => s.addEventListener("change", sync));
-  sync();
-  btn.onclick = busy(btn, apply);
-  return btn;
+// A quiet fact line — the one spelling of the muted paragraph every section
+// leans on for notes, empty states, and progress lines.
+function muted(text) {
+  const el = document.createElement("p");
+  el.className = "muted";
+  el.style.margin = "0";
+  el.textContent = text;
+  return el;
 }
 
-// What a slot's pickers say before they have been answered. The key one echoes
-// the label above it — a keyless provider has connections, not keys — and both
-// read as instructions, so an untouched slot section can't be mistaken for a
-// configured one.
+// What the drawer's pickers say before they have been answered. The key one
+// echoes the label above it — a keyless provider has connections, not keys —
+// and both read as instructions, so an untouched picker can't be mistaken
+// for a configured one.
 const pickKey = (p) => `Select a ${p.ai.keyless ? "connection" : "key"}`;
 // …and the model select's empty state NAMES what leaving it alone will use.
-// Saving without a pick has always fallen back to the catalog's default (see
-// selVals below), so "Select a model" was the one label here that wasn't true:
-// it read as "nothing will happen until you choose" while a choice was already
-// implied. Naming it keeps the placeholder honest without pre-selecting a
-// suggestion as though it were a decision — the board modal's "App default
-// (…)" row says the same thing the same way.
+// Committing without a pick has always fallen back to the catalog's default
+// (see the drawer's sel), so "Select a model" was the one label here that
+// wasn't true: it read as "nothing will happen until you choose" while a
+// choice was already implied. Naming it keeps the placeholder honest without
+// pre-selecting a suggestion as though it were a decision — the board
+// modal's "App default (…)" row says the same thing the same way.
 const pickModel = (defaultModel) => (defaultModel ? `Default (${defaultModel})` : "Select a model");
 
 // Live commit for a SETTINGS control — the plugin modals carry no Save
@@ -86,9 +73,9 @@ const pickModel = (defaultModel) => (defaultModel ? `Default (${defaultModel})` 
 // stored key. Commits are serialized per field, NOT gated by disabling the
 // control — a stepper/Enter `change` fires with focus still in the field,
 // and disabling it would steal that focus and eat clicks mid-commit.
-// Settings only: creation forms (keys, source connections) and the slot
-// promotions stay explicit buttons — those change WHAT something is, not
-// how it's tuned.
+// Settings only: creation (the key drawer's primary, the source-connection
+// form) and the default promotions stay explicit buttons — those change
+// WHAT something is, not how it's tuned.
 function autosave(el, commit, { revertOnError = true } = {}) {
   let saved = el.value;
   let chain = Promise.resolve();
@@ -107,16 +94,41 @@ function autosave(el, commit, { revertOnError = true } = {}) {
   });
 }
 
+// Every drawer task commits the same way: the primary is its own busy
+// state, success closes the task THEN reloads the modal, and failure keeps
+// the draft — re-armed off its current answers, so retrying is a click, not
+// a re-pick. `write` performs the API call and its own success toast; the
+// choreography is the half that must not fork (a copy that forgot the
+// re-arm would leave a failed drawer's primary dead).
+const commitTask = (drawer, reload, syncArm, write) => async () => {
+  drawer.setPrimaryDisabled(true);
+  try {
+    await write();
+    drawer.close();
+    reload();
+  } catch (err) {
+    toast.error(err.message);
+    syncArm();
+  }
+};
+
 export function openPluginModal(p, ctx) {
-  const { body, footer, close } = createModal({
+  const { body, footer, dialog, close } = createModal({
     title: p.label,
     bodyStyle: "display:flex;flex-direction:column;gap:26px;",
   });
 
+  // The capability drawer rises over the DIALOG, not the body: reload()
+  // rebuilds the body's children, and a sheet hung there would be orphaned
+  // under an open task. Lazy and reused across reloads — a modal that never
+  // opens one (connector, media) hangs nothing.
+  let drawerInst = null;
+  const drawer = () => (drawerInst ??= createDrawer(dialog));
+
   // Every mutating action re-fetches state and rebuilds the modal in place
-  // rather than closing it — only Close dismisses the modal. So a "Make default
-  // …", a saved slot, or an added key reflects immediately (the button flips,
-  // status text updates) and the cards behind stay in sync. Builders get this
+  // rather than closing it — only Close dismisses the modal. So a changed
+  // default or an added key reflects immediately (the row's status flips,
+  // badges update) and the cards behind stay in sync. Builders get this
   // `reload` where they used to get a `done` that closed.
   async function reload() {
     let state;
@@ -128,11 +140,11 @@ export function openPluginModal(p, ctx) {
   }
 
   // Builders return their section node; every action lives inside its
-  // section — autosaving fields, slot buttons, per-row actions, add/edit
-  // forms — so the footer holds just Close, for every plugin kind. There is
-  // deliberately no footer-level commit: one once saved only the rate-limit
-  // section while looking modal-wide, and the reload it triggered discarded
-  // a model choice staged in the section above it.
+  // section — autosaving fields, row actions, add/edit forms, the capability
+  // drawer's primary — so the footer holds just Close, for every plugin
+  // kind. There is deliberately no footer-level commit: one once saved only
+  // the rate-limit section while looking modal-wide, and the reload it
+  // triggered discarded a model choice staged in the section above it.
   function render() {
     body.replaceChildren();
     footer.replaceChildren();
@@ -155,17 +167,16 @@ export function openPluginModal(p, ctx) {
       // On-device providers (local embedder, whisper sidecar) have no accounts
       // — nothing to register. Keyless-NETWORKED providers still get the
       // section: their rows are connections without a secret.
-      if (!p.ai.onDevice) built.push(keysSection(p, ctx, reload));
-      // One generic section per capability this provider advertises, planned
+      if (!p.ai.onDevice) built.push(keysSection(p, ctx, reload, drawer));
+      // One App-defaults row per capability this provider advertises, planned
       // from the capabilities payload (capability-present.js) — a capability
-      // added to the server's registry gets its section with no edit here.
+      // added to the server's registry gets its row with no edit here.
       // `binding.global` gates: a capability with an app-wide default gets a
-      // section (extract's arrived in slice 5), a modifier (research) has none.
+      // row (extract's arrived in slice 5), a modifier (research) has none.
       // `declaredBy`, not `id`: extract rides tagging's advertisement, so the
       // provider flag to check is the declarer's.
-      for (const cap of ctx.capabilities || []) {
-        if (cap.kind === "ai" && cap.binding.global && p.capabilities[cap.declaredBy]) built.push(capabilitySection(cap, p, ctx, reload));
-      }
+      const caps = (ctx.capabilities || []).filter((c) => c.kind === "ai" && c.binding.global && p.capabilities[c.declaredBy]);
+      if (caps.length) built.push(defaultsSection(caps, p, ctx, reload, drawer));
       if (p.configSchema.length) built.push(pacingSection(p)); // rpm/burst — networked providers only
     } else if (p.kind === "source") {
       built.push(sourceSection(p, ctx, reload));
@@ -187,15 +198,14 @@ export function openPluginModal(p, ctx) {
 // --- connector: schema-driven config + test + domain default ---
 
 function connectorSection(p, ctx, reload) {
-  // The domain's star state off the capabilities feed — bound is the stored
-  // star, running what actually resolves; same precedence the old slots read
-  // (`setting || effective`) applied.
+  // The domain's star state off the capabilities feed. Both halves live in
+  // capability-present.js: domainDefault is the stored-else-scan precedence
+  // (shared with the sentence, so the star button and the subtitle cannot
+  // disagree) and domainStatus is the WORDING, including the runtime's
+  // pre-worded takeover and needs-a-key reasons — this shell only mounts.
   const d = (ctx.capabilities || []).find((c) => c.kind === "domain" && c.id === p.connector.domain);
-  const isDefault = (d?.bound?.provider || d?.running?.provider) === p.name;
-  const sec = section(
-    "Configuration",
-    `${p.connector.domainLabel} data provider.` + (isDefault ? " Currently the default for new adds." : "")
-  );
+  const isDefault = domainDefault(d) === p.name;
+  const sec = section("Configuration", domainStatus(d, p.name, p.connector.domainLabel));
   // Held by reference because there is nothing to query it back by: section()
   // renders the subtitle from sectionHeading's inline-styled markup, which
   // carries no class. A `.sub` lookup here borrowed the page's OTHER subtitle
@@ -305,7 +315,9 @@ function connectorSection(p, ctx, reload) {
         ctx.refresh(); // repaint the default badge on every card behind the modal
         toast(`${p.label} is now the ${p.connector.domainLabel} default`);
         star.remove();
-        subLine.textContent = `${p.connector.domainLabel} data provider. Currently the default for new adds.`;
+        // No refetch by design (the in-place flip keeps unsaved field edits
+        // alive), so the helper gets a PATCHED entry instead of a stale one.
+        subLine.textContent = domainStatus({ ...d, bound: { provider: p.name }, state: "active", reason: null }, p.name, p.connector.domainLabel);
       } catch (err) { toast.error(err.message); }
     });
     sec.appendChild(star);
@@ -361,9 +373,9 @@ function pacingSection(p) {
   return sec;
 }
 
-// --- ai: this provider's keys (add / test / remove) ---
+// --- ai: this provider's keys (test / edit / remove; add and edit are drawer tasks) ---
 
-function keysSection(p, ctx, reload) {
+function keysSection(p, ctx, reload, drawer) {
   const mine = ctx.keys.filter((k) => k.provider === p.name);
   // A keyless provider (self-hosted — no account secret) registers the same
   // rows as connections: the row is what boards and the default slots point
@@ -372,7 +384,7 @@ function keysSection(p, ctx, reload) {
   const noun = keyless ? "connection" : "key";
   const sec = section(
     keyless ? "Connections" : "API keys",
-    `Named ${noun}s for this provider. Boards can pick any of them; one can be the app default below.`
+    `Named ${noun}s for this provider. Boards can pick any of them; one can back an app default below.`
   );
 
   // Self-hosted providers (needsBase): a connection IS a server, so show where
@@ -389,14 +401,24 @@ function keysSection(p, ctx, reload) {
       // names its role now: "default" alone stopped being an answer the
       // moment one row could hold several.
       const roles = keyRoles(ctx.capabilities, k.id);
-      const roleBadges = roles.map((c) => `<span class="badge">default ${c.agent}</span>`).join(" ");
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${k.name} ${roleBadges}</td>
+        <td></td>
         ${needsBase ? `<td style="${MONO_CSS}color:#9aa0aa"></td>` : ""}
-        <td style="${MONO_CSS}color:#9aa0aa">${k.hint}</td>
+        <td style="${MONO_CSS}color:#9aa0aa"></td>
         <td><div class="row-actions"></div></td>`;
+      // Admin-authored DATA lands as text, never as markup — the name AND
+      // the hint (built from the typed key's tail); badges append as spans.
+      const nameTd = tr.children[0];
+      nameTd.append(k.name);
+      for (const c of roles) {
+        const b = document.createElement("span");
+        b.className = "badge";
+        b.textContent = `default ${c.agent}`;
+        nameTd.append(" ", b);
+      }
       if (needsBase) tr.children[1].textContent = k.base_url || `${p.ai.base || "?"} (default)`;
+      tr.children[needsBase ? 2 : 1].textContent = k.hint;
       const act = tr.querySelector(".row-actions");
 
       const testBtn = document.createElement("button");
@@ -411,8 +433,8 @@ function keysSection(p, ctx, reload) {
 
       const editBtn = document.createElement("button");
       editBtn.className = "ghost";
-      editBtn.textContent = "edit";
-      editBtn.onclick = () => beginEdit(k);
+      editBtn.textContent = "edit…";
+      editBtn.onclick = () => keyDrawer(p, k, drawer(), reload);
 
       const delBtn = document.createElement("button");
       delBtn.className = "danger";
@@ -437,164 +459,145 @@ function keysSection(p, ctx, reload) {
     table.appendChild(tbody);
     sec.appendChild(table);
   } else {
-    const none = document.createElement("p");
-    none.className = "muted";
-    none.style.margin = "0";
     // A capability's env rung belongs to a specific provider — when the server
     // holds that secret and THIS is the provider, an empty key list is not
     // "unconfigured". All three literals (provider, capability, env var) come
     // from the feed now.
     const envCap = (ctx.capabilities || []).find((c) => c.env?.configured && c.env.provider === p.name);
-    none.textContent = envCap
+    sec.appendChild(muted(envCap
       ? `No ${noun}s stored — ${envCap.noun} runs on the ${envCap.env.var} env var.`
-      : `No ${noun}s yet.`;
-    sec.appendChild(none);
+      : `No ${noun}s yet.`));
   }
 
-  const addForm = document.createElement("form");
-  addForm.style.cssText = "margin:0;";
-  const nameIn = document.createElement("input");
-  nameIn.placeholder = keyless ? "Name (e.g. Homelab)" : "Name (e.g. Personal)";
-  nameIn.required = true;
-  nameIn.autocomplete = "off";
-  // Self-hosted: the server URL is the connection's identity. Blank keeps the
-  // plugin's default base (shown as the placeholder).
+  // Creation is a drawer task, not a resident form — the section states
+  // facts, the drawer stages the draft.
+  const add = document.createElement("button");
+  add.className = "ghost";
+  add.style.alignSelf = "flex-start";
+  add.textContent = `Add ${noun}…`;
+  add.onclick = () => keyDrawer(p, null, drawer(), reload);
+  sec.appendChild(add);
+  return sec;
+}
+
+// --- ai: the key drawer — add or edit one row of the registry ---
+// One task, two modes: `editing` null stages a new row, a row prefills it —
+// which is what deleted the old form's edit-hijack and Cancel choreography
+// (a drawer open IS the mode). The <form> died with it, and its two jobs
+// re-homed deliberately: required-ness became live primary gating, and
+// Enter-to-submit is not replaced — no drawer task in the app wires Enter.
+// The row id never changes on edit, so boards and the default bindings ride
+// through a rename / repoint / rotation.
+function keyDrawer(p, editing, drawer, reload) {
+  const keyless = p.ai.keyless;
+  const noun = keyless ? "connection" : "key";
+  let nameIn = null;
   let baseIn = null;
-  if (needsBase) {
-    baseIn = document.createElement("input");
-    baseIn.type = "text";
-    baseIn.placeholder = p.ai.base || "http://host:port/v1";
-    baseIn.autocomplete = "off";
-    baseIn.spellcheck = false;
-    baseIn.style.cssText = MONO_CSS;
-  }
-  const keyIn = document.createElement("input");
-  keyIn.type = "password";
-  // Keyless: the token is optional (e.g. a reverse proxy in front of the box).
-  keyIn.placeholder = keyless ? "token (optional)" : "sk-…";
-  // "new-password", not "off": Chrome ignores "off" on password fields once a
-  // login is saved for the site, and autofills email+password into name+key.
-  keyIn.autocomplete = "new-password";
-  keyIn.required = !keyless;
-  keyIn.style.cssText = MONO_CSS;
-  const addBtn = document.createElement("button");
-  addBtn.type = "submit";
-  addBtn.textContent = `Add ${noun}`;
-  const cancelBtn = document.createElement("button");
-  cancelBtn.type = "button";
-  cancelBtn.className = "ghost";
-  cancelBtn.textContent = "Cancel";
-  cancelBtn.hidden = true;
-  addForm.append(nameIn, ...(baseIn ? [baseIn] : []), keyIn, addBtn, cancelBtn);
+  let keyIn = null;
 
-  // Edit-in-place reuses the add form (the sourceSection pattern): prefill,
-  // flip the button to Save, PATCH on submit. The row id never changes, so
-  // boards and the default slots ride through a rename / repoint / rotation.
-  let editingId = null;
-  function beginEdit(k) {
-    editingId = k.id;
-    nameIn.value = k.name;
-    if (baseIn) baseIn.value = k.base_url || "";
-    keyIn.value = "";
-    keyIn.required = false;
-    keyIn.placeholder = k.hint === "no key" ? "token (optional)" : "•••• stored — leave blank to keep";
-    addBtn.textContent = "Save changes";
-    cancelBtn.hidden = false;
-    nameIn.focus();
-  }
-  cancelBtn.onclick = () => {
-    editingId = null;
-    addForm.reset();
-    keyIn.required = !keyless;
-    keyIn.placeholder = keyless ? "token (optional)" : "sk-…";
-    addBtn.textContent = `Add ${noun}`;
-    cancelBtn.hidden = true;
-  };
-
-  addForm.onsubmit = busy(addBtn, async (e) => {
-    e.preventDefault();
-    try {
-      if (editingId) {
-        await api("PATCH", `/api/admin/ai-keys/${editingId}`, {
-          name: nameIn.value.trim(),
-          ...(keyIn.value.trim() ? { key: keyIn.value.trim() } : {}), // blank = keep the stored one
-          ...(baseIn ? { base_url: baseIn.value.trim() } : {}), // blank = back to the default
+  // Add arms on the required pair (a keyless connection needs no token);
+  // edit arms on the name alone — a blank secret means "keep the stored one",
+  // which is also why an edited row can never blur-clear its key.
+  const syncArm = () => drawer.setPrimaryDisabled(
+    !nameIn.value.trim() || (!editing && !keyless && !keyIn.value.trim())
+  );
+  const primary = {
+    label: editing ? "Save changes" : `Add ${noun}`,
+    // A new row opens unarmed (nothing typed yet); an edit opens armed — the
+    // name is real. Static, unlike the capability drawer's opening state:
+    // nothing here depends on what build() renders.
+    disabled: !editing,
+    onClick: commitTask(drawer, reload, syncArm, async () => {
+      const name = nameIn.value.trim();
+      if (editing) {
+        // key only when typed (blank keeps the stored secret); base_url
+        // ALWAYS when the provider has one (blank = clear the override,
+        // back to the plugin's default).
+        await api("PATCH", `/api/admin/ai-keys/${editing.id}`, {
+          name,
+          ...(keyIn.value.trim() ? { key: keyIn.value.trim() } : {}),
+          ...(baseIn ? { base_url: baseIn.value.trim() } : {}),
         });
-        toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" saved`);
+        toast(`${keyless ? "Connection" : "Key"} "${name}" saved`);
       } else {
         await api("POST", "/api/admin/ai-keys", {
-          name: nameIn.value.trim(),
+          name,
           provider: p.name,
           key: keyIn.value.trim(),
           ...(baseIn?.value.trim() ? { base_url: baseIn.value.trim() } : {}),
         });
-        toast(`${keyless ? "Connection" : "Key"} "${nameIn.value.trim()}" added`);
+        toast(`${keyless ? "Connection" : "Key"} "${name}" added`);
       }
-      // awaited so the button stays held until the rebuild replaces it
-      await reload(); // rebuilds the section — form state resets with it
-    } catch (err) {
-      toast.error(err.message);
-    }
+    }),
+  };
+
+  const head = drawerHeadParts("key", false, editing ? editing.name : `New ${noun}`, p.label);
+  drawer.open({
+    head: head.nodes,
+    build(host) {
+      nameIn = document.createElement("input");
+      nameIn.placeholder = keyless ? "e.g. Homelab" : "e.g. Personal";
+      nameIn.autocomplete = "off";
+      nameIn.value = editing?.name || "";
+      // The head names the row being staged — and follows a rename live
+      // (drawerHeadParts hands the refs back for exactly this).
+      nameIn.addEventListener("input", () => {
+        head.t.textContent = nameIn.value.trim() || (editing ? editing.name : `New ${noun}`);
+        syncArm();
+      });
+      host.appendChild(dwGroup("Name", nameIn));
+
+      // Self-hosted: the server URL is the row's identity. Blank keeps the
+      // plugin's default base (the placeholder names it).
+      if (p.ai.needsBase) {
+        baseIn = document.createElement("input");
+        baseIn.type = "text";
+        baseIn.placeholder = p.ai.base || "http://host:port/v1";
+        baseIn.autocomplete = "off";
+        baseIn.spellcheck = false;
+        baseIn.style.cssText = MONO_CSS;
+        baseIn.value = editing?.base_url || "";
+        host.appendChild(dwGroup("Server", baseIn, editing ? "blank = back to the default" : null));
+      }
+
+      keyIn = document.createElement("input");
+      keyIn.type = "password";
+      // "new-password", not "off": Chrome ignores "off" on password fields
+      // once a login is saved for the site, and autofills credentials into
+      // key forms.
+      keyIn.autocomplete = "new-password";
+      keyIn.style.cssText = MONO_CSS;
+      keyIn.placeholder = editing
+        ? editing.hint === "no key" ? "token (optional)" : "•••• stored — leave blank to keep"
+        : keyless ? "token (optional)" : "sk-…";
+      keyIn.addEventListener("input", syncArm);
+      host.appendChild(dwGroup(keyless ? "Token" : "Key", keyIn));
+
+    },
+    primary,
   });
-  sec.appendChild(addForm);
+}
+
+// --- ai: the App defaults section (plugin-modal-drawer-plan.md) ---
+// One status row per capability: a locked tile stating the app-wide fact
+// (planSection.status) with its acts as labeled buttons — the one-click acts
+// on live state (Test / Turn off / revert) and the one that STAGES a choice
+// ("Make default… / Change…"), which opens the drawer below. Every DECISION
+// comes from planSection (capability-present.js, pure and node-tested —
+// including the exact bind bodies); this shell only mounts the plan.
+
+function defaultsSection(caps, p, ctx, reload, drawer) {
+  const sec = section("App defaults", "One default per job, app-wide. Boards use it unless they pin their own.");
+  const keys = ctx.keys.filter((k) => k.provider === p.name);
+  const tiles = document.createElement("div");
+  tiles.className = "tiles prose";
+  for (const cap of caps) tiles.appendChild(capabilityRow(cap, p, keys, reload, drawer));
+  sec.appendChild(tiles);
   return sec;
 }
 
-// --- ai: one generic capability section (capabilities-plan.md, slice 4b) ---
-// The tagger/embedder/transcriber/detector sections used to be four ~110-line
-// copies of this, each free to disagree. Every DECISION now comes from
-// planSection (capability-present.js, pure and node-tested — including the
-// exact bind bodies); this shell only mounts the plan onto the shared pieces
-// (section/fillSelect/syncModelPicker/slotButton) and posts to the
-// capability-native routes.
-function capabilitySection(cap, p, ctx, reload) {
-  const plan = planSection(cap, p, ctx.keys.filter((k) => k.provider === p.name));
-  const sec = section(plan.title, plan.subtitle);
-  const muted = (text) => {
-    const el = document.createElement("p");
-    el.className = "muted";
-    el.style.margin = "0";
-    el.textContent = text;
-    return el;
-  };
-  if (plan.guard) {
-    sec.appendChild(muted(plan.guard));
-    return sec;
-  }
-
-  let keySel = null;
-  if (plan.rows) {
-    keySel = document.createElement("select");
-    keySel.style.cssText = "width:100%;";
-    fillSelect(keySel, plan.rows, { value: plan.preselect, placeholder: plan.ask ? pickKey(p) : null });
-    if (plan.ask) sec.appendChild(labeled(p.ai.keyless ? "Connection" : "Key", keySel));
-  }
-
-  let modelSel = null;
-  if (plan.model.catalog) {
-    modelSel = document.createElement("select");
-    modelSel.style.cssText = "width:100%;";
-    // Live options carved to this capability (kind = its declaring id); the
-    // slot's persisted model rides as `saved` only while the selected
-    // connection IS the slot's own.
-    const syncLive = () => syncModelPicker(modelSel, plan.model.catalog, keySel ? (keySel.value === "env" ? "env" : Number(keySel.value) || null) : null, {
-      kind: cap.declaredBy,
-      saved: plan.holder && (!keySel || keySel.value === plan.preselect) ? plan.savedModel : null,
-      placeholder: pickModel(plan.model.catalog.defaultModel),
-    });
-    if (keySel) keySel.addEventListener("change", syncLive);
-    syncLive();
-    sec.appendChild(labeled("Model", modelSel));
-  } else {
-    sec.appendChild(muted(plan.model.note));
-  }
-
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center;";
-  const selVals = () => ({
-    key: keySel?.value ?? null,
-    model: modelSel?.value || plan.model.catalog?.defaultModel || null,
-  });
+function capabilityRow(cap, p, keys, reload, drawer) {
+  const plan = planSection(cap, p, keys);
   const post = (payload, okToast) => async () => {
     try {
       await api("POST", `/api/admin/capabilities/${cap.id}/bind`, payload());
@@ -603,53 +606,159 @@ function capabilitySection(cap, p, ctx, reload) {
     } catch (err) { toast.error(err.message); }
   };
 
-  for (const b of plan.buttons) {
-    if (b.kind === "apply") {
-      const apply = async () => {
-        const sel = selVals();
-        // The costly-rebind confirm (embed: a model change re-embeds everything)
-        // arms only while live with a pinned model — planned as data.
-        if (plan.confirm && sel.model && sel.model !== plan.confirm.priorModel && !confirm(plan.confirm.message)) return;
-        await post(() => b.payload(sel), b.toast)();
-      };
-      actions.appendChild(slotButton(b.label, plan.holder, [keySel, modelSel].filter(Boolean), apply));
-    } else if (b.kind === "probe") {
+  const actions = [];
+  for (const b of plan.rowActions) {
+    if (b.kind === "probe") {
       const t = document.createElement("button");
       t.className = "ghost";
       t.textContent = "Test";
       t.onclick = busy(t, async () => {
-        try {
-          const r = await api("POST", `/api/admin/capabilities/${cap.id}/probe`);
-          toast(fmtProbe(r));
-        } catch (err) { toast.error(err.message); }
+        try { toast(fmtProbe(await api("POST", `/api/admin/capabilities/${cap.id}/probe`))); }
+        catch (err) { toast.error(err.message); }
       });
-      actions.appendChild(t);
+      actions.push(t);
     } else {
       // off | revert: a fixed-payload write, styled as the destructive half.
       const btn = document.createElement("button");
       btn.className = "danger";
       btn.textContent = b.label;
       btn.onclick = busy(btn, post(b.payload, b.toast));
-      actions.appendChild(btn);
+      actions.push(btn);
     }
   }
-  if (plan.currentDefault) {
-    const span = document.createElement("span");
-    span.className = "muted";
-    span.style.cssText = "font-size:12px;";
-    span.textContent = `Current default: ${plan.currentDefault.label}${plan.currentDefault.model ? ` · ${plan.currentDefault.model}` : ""}`;
-    actions.appendChild(span);
+  if (plan.open) {
+    const openBtn = document.createElement("button");
+    openBtn.className = "ghost";
+    openBtn.textContent = plan.open.label;
+    openBtn.onclick = plan.open.drawer
+      ? () => capabilityDrawer(cap, p, plan, drawer(), reload)
+      // Choiceless: nothing to stage, so the promote stays one click — the
+      // single row (when keyed) auto-answers, exactly what the drawer's fact
+      // line would have stated.
+      : busy(openBtn, post(() => plan.primary.payload({ key: plan.rows?.[0]?.value ?? null, model: null }), plan.primary.toast));
+    actions.push(openBtn);
   }
-  // When the row is tight, the NOTE does the shrinking (it wraps onto more
-  // lines) — never the buttons, whose labels would break mid-phrase ("Make
-  // default embedder" on two lines). Flex items shrink by default, so opt the
-  // buttons out.
-  for (const el of actions.children) {
-    if (el.tagName === "BUTTON") { el.style.flexShrink = "0"; el.style.whiteSpace = "nowrap"; }
-  }
-  if (actions.children.length) sec.appendChild(actions);
-  if (plan.progressLine) sec.appendChild(muted(plan.progressLine));
-  return sec;
+
+  // A guarded row arrives here too — status carries the guard text, no
+  // actions — so there is exactly one row shape.
+  const tile = tileRow({ glyph: cap.icon, name: plan.title, sum: plan.status, title: plan.subtitle, actions });
+  if (!plan.progressLine) return tile;
+  // Only a backfilling row needs a wrapper: it glues the progress line to
+  // its tile tighter than the section's own gap.
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+  wrap.append(tile, muted(plan.progressLine));
+  return wrap;
+}
+
+// --- ai: the capability drawer — where a default is chosen ---
+// One editing task over the dialog: pick the connection (when there is more
+// than one to pick — a single row auto-answers as a stated fact), pick the
+// model, commit with the one primary. Dismissal paths never post
+// (createDrawer's contract), and an error keeps the drawer open with the
+// draft, so retrying is a click rather than a re-pick.
+function capabilityDrawer(cap, p, plan, drawer, reload) {
+  const rows = plan.rows || [];
+  let keySel = null;   // rendered only when there is a question (rows > 1)
+  let modelSel = null; // rendered only when the capability has a catalog
+  let warnBox = null;
+  let snap = [];       // open-time answers — requiresChange compares to these
+
+  // The commit body reads the RENDERED controls and falls back to what the
+  // task already stated: the single row's id, the catalog's default model
+  // (the placeholder names that fallback — leaving it alone is an answer).
+  const sel = () => ({
+    key: keySel?.value ?? rows[0]?.value ?? null,
+    model: modelSel?.value || plan.model.catalog?.defaultModel || null,
+  });
+  // An unanswered rendered picker holds the primary down; a default-here
+  // drawer additionally waits for an edit — except off's, whose unchanged
+  // re-post is the act (open.requiresChange, planned as data). ONE spelling,
+  // read by the live sync and the opening state both.
+  const gated = () => [keySel, modelSel].filter(Boolean).some(isUnset)
+    || (plan.open.requiresChange && keySel?.value === snap[0] && modelSel?.value === snap[1]);
+  const syncArm = () => drawer.setPrimaryDisabled(gated());
+  const syncWarn = () => {
+    if (warnBox) warnBox.hidden = !(sel().model && sel().model !== plan.confirm.priorModel);
+  };
+  const primary = {
+    label: plan.open.primaryLabel,
+    onClick: commitTask(drawer, reload, syncArm, async () => {
+      await api("POST", `/api/admin/capabilities/${cap.id}/bind`, plan.primary.payload(sel()));
+      toast(plan.primary.toast);
+    }),
+  };
+
+  drawer.open({
+    head: drawerHeadParts(cap.icon, false, plan.open.title, p.label).nodes,
+    build(host) {
+      const hint = document.createElement("div");
+      hint.className = "dw-hint";
+      hint.textContent = plan.subtitle;
+      host.appendChild(hint);
+
+      if (rows.length > 1) {
+        keySel = document.createElement("select");
+        fillSelect(keySel, rows, { value: plan.preselect, placeholder: pickKey(p) });
+        host.appendChild(dwGroup(p.ai.keyless ? "Connection" : "Key", keySel));
+      } else if (rows.length === 1) {
+        // One row asks no question: it is stated, not asked — sel() answers
+        // with it, and the explicit act is the primary click itself.
+        const fact = document.createElement("div");
+        fact.textContent = rows[0].label;
+        host.appendChild(dwGroup(p.ai.keyless ? "Connection" : "Key", fact));
+      }
+
+      if (plan.model.catalog) {
+        modelSel = document.createElement("select");
+        // Live options carved to this capability; the persisted model rides
+        // as `saved` only while the selected connection is the binding's own.
+        const liveKey = () => { const k = sel().key; return k === "env" ? "env" : Number(k) || null; };
+        const syncLive = () => syncModelPicker(modelSel, plan.model.catalog, liveKey(), {
+          kind: cap.declaredBy,
+          saved: !keySel || keySel.value === plan.preselect ? plan.savedModel : null,
+          placeholder: pickModel(plan.model.catalog.defaultModel),
+        });
+        if (keySel) keySel.addEventListener("change", syncLive);
+        syncLive();
+        host.appendChild(dwGroup("Model", modelSel));
+      } else {
+        host.appendChild(muted(plan.model.note));
+      }
+
+      if (plan.currentDefault) {
+        const rep = document.createElement("div");
+        rep.className = "dw-hint";
+        rep.textContent = `Replacing: ${plan.currentDefault}`;
+        host.appendChild(rep);
+      }
+      if (plan.confirm) {
+        // The costly-rebind warning, inline and live where the choice is
+        // made — the primary is already an explicit, gated act, so no popup.
+        warnBox = document.createElement("div");
+        warnBox.className = "warn-box flush";
+        warnBox.textContent = plan.confirm.message;
+        host.appendChild(warnBox);
+      }
+
+      // Snapshot AFTER the initial fills so requiresChange measures the
+      // user's edits, not the render. The arm/warn listener registers after
+      // syncLive's refill listener, so on a key change the model picker has
+      // already settled by the time arming reads it. A live listing landing
+      // can MOVE the selection and dispatches change when it does — a picker
+      // that moves on its own has to say so, and arming hears it.
+      snap = [keySel?.value, modelSel?.value];
+      for (const s of [keySel, modelSel]) {
+        s?.addEventListener("change", () => { syncArm(); syncWarn(); });
+      }
+      syncWarn();
+      // createDrawer reads primary.disabled after build runs — set the
+      // opening state here, where the controls exist (snap was just taken,
+      // so `gated` reads unchanged-at-open exactly as the live sync will).
+      primary.disabled = gated();
+    },
+    primary,
+  });
 }
 
 // --- source: saved connections (add / edit / test / remove) ---
@@ -659,11 +768,7 @@ function sourceSection(p, ctx, reload) {
   // subfolder in their own ingestion settings.
   if (!p.capabilities.needsConnection) {
     const sec = section("Local folder", null);
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.style.margin = "0";
-    note.textContent = "Built-in — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here.";
-    sec.appendChild(note);
+    sec.appendChild(muted("Built-in — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here."));
     return sec;
   }
 
@@ -827,11 +932,7 @@ function mediaSection(p) {
   list.style.cssText = "margin:0;" + MONO_CSS;
   list.textContent = p.capabilities.extensions.map((e) => "." + e).join("  ");
   sec.appendChild(list);
-  const note = document.createElement("p");
-  note.className = "muted";
-  note.style.margin = "0";
-  note.textContent = "Built-in — always installed; it's how the app reads these file types.";
-  sec.appendChild(note);
+  sec.appendChild(muted("Built-in — always installed; it's how the app reads these file types."));
 
   // Per-type upload limit: the manifest default, overridable here. Shown in MB;
   // stored as bytes in the plugin config, which the server reads in mediaLimits.
