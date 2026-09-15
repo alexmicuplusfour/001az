@@ -112,8 +112,24 @@
    needs it. */
 .section-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
-/* base element styles — mirrors admin.html globals so the modal looks the same on all pages */
-.modal-dialog input {
+/* base element styles — mirrors admin.html globals so the modal looks the same on all pages.
+
+   The two selectors after the dialog's are surfaces OUTSIDE a modal that ask
+   for the same control: the welcome screen's key field and the sign-in card's
+   email/password. Both had grown a private copy of this box — near-miss
+   borders (#e2e2e6), a 6px radius, their own padding — which is how the app
+   ended up with three answers to "what does a text field look like".
+
+   Note what is NOT here: a :focus rule. The focus state is the BROWSER's ring,
+   deliberately, and it is the reason those two copies had to go. Each of them
+   wrote `outline: none` and replaced a 2px ring with a 1px border-colour — one
+   black, one #b9b9c2 — so the app's loudest affordance came out quietest on
+   the two screens a first-time visitor sees first. Anything that turns the
+   outline off owes a replacement at least as visible; none of these do, so
+   none of them turn it off. */
+.modal-dialog input,
+.w-field input,
+.login-card input {
   padding: 8px 10px;
   border: 1px solid #d8d8de;
   border-radius: 7px;
@@ -167,14 +183,22 @@
 
    `.w-actions` is welcome.css's flex row, worn here as the hook: an element
    that is an action row gets the buttons by saying so, which is how its "Make
-   your first board" row picks this up without a fourth selector. A fourth
-   SELECTOR would be the signal to lift this into styles.css under a class of
-   its own. It is scoped rather than global because styles.css deliberately
-   gives the gallery no `button` rule, and an unscoped one here — modal.css
-   loads on every gallery page — would repaint every .tool-btn in the app. */
+   your first board" row picks this up without a fourth selector.
+
+   The fourth arrived anyway — the sign-in card's submit, which was its own
+   hand-rolled black button at a 6px radius and 13px/500. This comment used to
+   say a fourth selector was the signal to lift the rule into styles.css under
+   a class of its own. That lift is not available: admin.html renders modal
+   footers and does not load styles.css, so the definition would have to be in
+   two places to reach every wearer — which is the problem, not the fix. One
+   list here, and the next wearer joins it. It is scoped rather than global
+   because styles.css deliberately gives the gallery no `button` rule, and an
+   unscoped one here — modal.css loads on every gallery page — would repaint
+   every .tool-btn in the app. */
 .modal-footer button,
 .drawer-foot button,
-.w-actions button {
+.w-actions button,
+.login-card button {
   border: 1px solid transparent;
   border-radius: 7px;
   padding: 8px 14px;
@@ -450,15 +474,13 @@ button.is-busy .busy-spin {
 .fe-root { margin-bottom: 10px; }
 .fe-facet { margin-bottom: 10px; }
 .fe-head { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
-input.fe-label { flex: none; width: 240px; padding: 5px 8px; font: inherit; font-weight: 500; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
+input.fe-label { flex: none; width: 240px; padding: 5px 8px; font-weight: 500; border-radius: 6px; margin: 0; }
 .fe-key-hint { font-size: 11px; color: #b0b0b8; font-family: "SF Mono", Consolas, monospace; white-space: nowrap; }
-.fe-val-row input { flex: none; width: 240px; padding: 4px 8px; font: inherit; font-size: 13px; border: 1px solid #d8d8de; border-radius: 6px; margin: 0; }
+.fe-val-row input { flex: none; width: 240px; padding: 4px 8px; font-size: 13px; border-radius: 6px; margin: 0; }
 .fe-values { padding-left: 22px; }
-textarea.fe-desc { display: block; width: calc(100% - 22px); margin: 0 0 6px 22px; padding: 4px 8px; font: inherit; font-size: 12px; color: #4b4b52; border: 1px solid #e4e4ec; border-radius: 6px; resize: vertical; min-height: 0; }
+textarea.fe-desc { display: block; width: calc(100% - 22px); margin: 0 0 6px 22px; padding: 4px 8px; font: inherit; font-size: 12px; color: #4b4b52; border: 1px solid #e4e4ec; border-radius: 6px; min-height: 0; }
 textarea.fe-desc::placeholder { color: #b0b0b8; }
 .fe-val-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
-.fe-single { display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1; color: #6b6b72; cursor: pointer; white-space: nowrap; user-select: none; margin-left: auto; }
-.fe-single input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; border: none; border-radius: 0; background: none; cursor: pointer; }
 .fe-rm { display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #bbb; cursor: pointer; padding: 2px 4px; font-size: 15px; line-height: 1; border-radius: 4px; }
 .fe-rm:hover { color: #d33; background: #fdeaea; }
 .fe-add-val { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 2px 0; margin-top: 2px; display: block; }
@@ -502,23 +524,14 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 #connector-browse .modal-dialog { width: min(900px, 94vw); }
 #connector-browse .modal-body { min-height: 0; } /* let .cb-scroll own the scroll */
 .cb-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.cb-search { min-width: 180px; }
-.cb-search {
-  flex: 1;
-  font: inherit;
-  font-size: 13px;
-  padding: 7px 10px;
-  border: 1px solid #d8d8e0;
-  border-radius: 7px;
-}
-.cb-sort {
-  font: inherit;
-  font-size: 13px;
-  padding: 7px 8px;
-  border: 1px solid #d8d8e0;
-  border-radius: 7px;
-  background: #fff;
-}
+/* Only the ROW geometry — the box is the base rule's, as it always was. Both
+   of these carried a full box (7px padding, a #d8d8e0 border, 13px type) at
+   (0,1,0) against a (0,1,1) base, so none of it ever drew; .cb-sort's own
+   `background: #fff` losing is the lucky one, since winning would have wiped
+   the chevron the base paints. Same trapdoor as .al-input below — see the note
+   there. .cb-sort has nothing left to say and is gone entirely; the class stays
+   in the markup as connector-browse.js's hook. */
+.cb-search { flex: 1; min-width: 180px; }
 .cb-order {
   font: inherit;
   font-size: 12px;
@@ -595,8 +608,13 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .cb-more:hover { background: #efeff3; }
 .cb-more:disabled { opacity: .6; cursor: default; }
 
+/* Same four wearers as the rule above — a busy Connect on the welcome screen
+   and a submitting Sign in were left undimmed only because this list was
+   copied short. */
 .modal-footer button:disabled,
-.drawer-foot button:disabled { opacity: .5; cursor: default; }
+.drawer-foot button:disabled,
+.w-actions button:disabled,
+.login-card button:disabled { opacity: .5; cursor: default; }
 
 /* ── price editor (prices-modal.js) ───────────────────────────────────────── */
 /* Wide, because the table is Provider × Model × one column per metered unit and
@@ -755,17 +773,20 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 
 /* ── alert editor + history (alerts-modal.js) ── */
 #alert-modal .modal-dialog { max-width: 480px; }
+/* A plain modal input that has to SHARE A ROW — that is the whole job now.
+   It also carried padding: 7px 9px, a #d6d9de border, a 6px radius and a 13px
+   size, all of which were dead on arrival: `.modal-dialog input` above is
+   (0,1,1) and `.al-input` is (0,1,0), so the base rule won every one of them
+   and these fields have always been drawn at the dialog's own size.
+
+   Its `:focus` was the exception — a class plus a pseudo-class outranks the
+   base — so the one thing this block actually did was turn the browser's ring
+   off and hand back a #9aa0aa hairline, making the alert editor the single
+   dialog whose inputs lit up differently from every other dialog's. */
 .al-input {
   flex: 1;
   min-width: 0;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  border: 1px solid #d6d9de;
-  border-radius: 6px;
-  font: inherit;
-  font-size: 13px;
 }
-.al-input:focus { outline: none; border-color: #9aa0aa; }
 .al-cond { display: flex; flex-direction: column; gap: 8px; }
 .al-cond-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .al-cond-key { font-size: 12px; color: #6b6b72; min-width: 64px; }
@@ -943,11 +964,28 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .fd-edit { display: block; background: none; border: none; color: #2563eb; cursor: pointer; font: inherit; font-size: 12px; padding: 0; margin: -6px 0 14px; }
 .fd-edit:hover { text-decoration: underline; }
 
-/* ─── Field sources: AI marker tokens ─────────────────────────────────────────
+/* ─── Card + AI marker tokens ─────────────────────────────────────────────────
    Violet marks a value a MODEL produces (extract, detect — the sources whose
    field-sources.js row carries a capability); grey stays deterministic. One
-   pair of tokens so a future inferred source inherits the treatment. */
+   pair of tokens so a future inferred source inherits the treatment.
+
+   The grey half had no tokens for a long time, which is how its three values
+   ended up written out seven times across two sheets — and how the welcome
+   screen's tile could claim in a comment to match the modal card "verbatim"
+   with nothing enforcing it. Now the claim is the cascade's.
+
+   .prov (the provenance band) keeps a literal #f7f7fa on purpose: it is a
+   borderless tinted strip that happens to share the value, not a card, and
+   binding it here would hand it the card family's next repaint.
+
+   --card-bg-hover has one wearer that does NOT take --card-bg with it: the
+   welcome tile rests white, because that page's ground is tinted and a tile
+   starting at --card-bg would have no edges. It is the same step, from a
+   different floor. */
 :root {
+  --card-bg: #f7f7fa;
+  --card-bg-line: #e7e9ed;
+  --card-bg-hover: #eff1f4;
   --ai-ink: #5b4bd6;
   --ai-bg: #f4f2fd;
   --ai-bg-line: #e5e1f8;
@@ -1042,10 +1080,10 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .tiles { display: flex; flex-direction: column; gap: 8px; }
 .tile {
   display: flex; align-items: center;
-  background: #f7f7fa; border: 1px solid #e7e9ed; border-radius: 10px;
+  background: var(--card-bg); border: 1px solid var(--card-bg-line); border-radius: 10px;
   min-height: 62px; overflow: hidden;
 }
-.tile:hover { background: #eff1f4; }
+.tile:hover { background: var(--card-bg-hover); }
 .tile.ai { background: var(--ai-bg); border-color: var(--ai-bg-line); }
 .tile.ai:hover { background: var(--ai-bg-hover); }
 .tile-main {
@@ -1138,10 +1176,10 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .mm-srcrow { display: flex; gap: 7px; }
 .mm-srcopt {
   flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 7px;
-  text-align: left; background: #f7f7fa; border: 1px solid #e7e9ed;
+  text-align: left; background: var(--card-bg); border: 1px solid var(--card-bg-line);
   border-radius: 9px; padding: 11px 12px; font: inherit; cursor: pointer;
 }
-.mm-srcopt:hover:not(:disabled) { background: #eff1f4; }
+.mm-srcopt:hover:not(:disabled) { background: var(--card-bg-hover); }
 .mm-srcopt.ai { background: var(--ai-bg); border-color: var(--ai-bg-line); }
 .mm-srcopt.ai:hover:not(:disabled) { background: var(--ai-bg-hover); }
 .mm-srcopt[aria-pressed="true"] { border-color: #111; box-shadow: 0 0 0 1px #111 inset; }

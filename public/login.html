@@ -8,6 +8,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="modal.css" />
     <link rel="stylesheet" href="toast.css" />
     <style>
       body { align-items: center; justify-content: center; }
@@ -24,26 +25,17 @@
       .login-card form:not([hidden]) { display: flex; flex-direction: column; gap: 10px; }
       /* :not([hidden]) — display:flex would otherwise override the hidden attribute */
       .login-card label:not([hidden]) { font-size: 12px; color: var(--text-dim); display: flex; flex-direction: column; gap: 4px; }
-      .login-card input {
-        border: 1px solid #e2e2e6;
-        border-radius: 6px;
-        padding: 8px 10px;
-        font-size: 14px;
-        color: var(--text);
-      }
-      .login-card input:focus { outline: none; border-color: #b9b9c2; }
-      .login-card button[type="submit"] {
-        margin-top: 8px;
-        border: none;
-        border-radius: 6px;
-        background: var(--pill-active);
-        color: #fff;
-        padding: 9px 10px;
-        font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-      }
-      .login-card button[type="submit"]:disabled { opacity: 0.6; cursor: default; }
+      /* The field and the submit are declared in modal.css, which names
+         .login-card in both rules — a sign-in field is the same control as a
+         field in a dialog, and this card's primary action is the same button
+         as a dialog's Save. They were a private near-copy of each: a #e2e2e6
+         border, a 6px radius, a focus that traded the browser's 2px ring for a
+         #b9b9c2 hairline you could not see. That is the whole reason modal.css
+         is linked above.
+
+         All that is left is the one thing a dialog footer already has and this
+         card does not: the button standing off the last field. */
+      .login-card button { margin-top: 8px; }
       .login-error { margin: 12px 0 0; font-size: 12.5px; color: #b3261e; }
     </style>
   </head>

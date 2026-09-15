@@ -101,12 +101,28 @@ header {
   border-radius: 11px;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.13s, transform 0.13s, box-shadow 0.13s;
+  transition: background-color 0.13s;
 }
+/* The modal card's hover, verbatim (.tile and .mm-srcopt in modal.css): the
+   fill steps down one shade and the border does not move. It was a black
+   border plus a lift, which is the wrong sentence twice — black border is how
+   .w-picked below says "this is the one you chose", so hover was wearing the
+   answer's clothes, and the lift is a GALLERY card's gesture (boards.css), for
+   objects with pictures in them rather than rows in a chooser.
+
+   The fill is --card-bg-hover and not --card-bg (the modal card's RESTING
+   shade) because this page's ground is tinted (#f7f8fa from styles.css) — a
+   tile that started there would have no edges at all. White at rest, the
+   modal's hover shade on the way in: the same step, from a different floor.
+   The tokens are modal.css's, which welcome.html loads. */
 .w-tile:hover {
-  border-color: var(--text);
-  transform: translateY(-1px);
-  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.055);
+  background: var(--card-bg-hover);
+}
+/* The monogram rests on --pill-bg, which the hover fill all but swallows — the
+   chip faded out exactly when the pointer arrived. White is the tile's own
+   resting ground, so the inversion costs the sheet no new colour. */
+.w-tile:hover .w-mark {
+  background: #fff;
 }
 
 /* The monogram, from label[0]. No vendor assets and no id→glyph table: a
@@ -122,6 +138,7 @@ header {
   background: var(--pill-bg);
   color: var(--text-dim);
   font: 600 14px/1 var(--sans);
+  transition: background-color 0.13s;
 }
 
 .w-name {
@@ -191,17 +208,15 @@ header {
   color: var(--text-dim);
   font-size: 11.5px;
 }
+/* The BOX comes from modal.css's base-element rule, which names this selector
+   alongside .modal-dialog input: a key field on this page is the same control
+   as a key field in the plugin modal, and there is no reading of "the same
+   control" under which it should have a paler border and a different focus.
+   Only the face is stated here — a secret is mono, which is what
+   plugin-modal.js sets on its own key inputs (MONO_CSS). */
 .w-field input {
-  width: 100%;
-  padding: 9px 11px;
-  border: 1px solid #e2e2e6;
-  border-radius: 7px;
-  color: var(--text);
-  font: 12.5px/1.3 "SF Mono", Consolas, monospace;
-}
-.w-field input:focus {
-  outline: none;
-  border-color: var(--text);
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: 13px;
 }
 
 /* The third action row wearing modal.css's button (see the note there). */
@@ -354,6 +369,7 @@ header {
 
 @media (prefers-reduced-motion: reduce) {
   .w-tile,
+  .w-mark,
   .w-caret {
     transition: none;
   }
