@@ -105,10 +105,10 @@ header {
 }
 /* The modal card's hover, verbatim (.tile and .mm-srcopt in modal.css): the
    fill steps down one shade and the border does not move. It was a black
-   border plus a lift, which is the wrong sentence twice — black border is how
-   .w-picked below says "this is the one you chose", so hover was wearing the
-   answer's clothes, and the lift is a GALLERY card's gesture (boards.css), for
-   objects with pictures in them rather than rows in a chooser.
+   border plus a lift, which is the wrong sentence twice — ink that dark is a
+   verdict, not a pointer passing over, and the lift is a GALLERY card's
+   gesture (boards.css), for objects with pictures in them rather than rows in
+   a chooser.
 
    The fill is --card-bg-hover and not --card-bg (the modal card's RESTING
    shade) because this page's ground is tinted (#f7f8fa from styles.css) — a
@@ -155,13 +155,19 @@ header {
 
 /* --- the one you picked, in the grid's place --- */
 
+/* The tile you picked, opened — so it wears the tile's own hairline, and the
+   same white ground and radius. It was 1px solid var(--text), announcing a
+   selection against a grid that is no longer on screen: picking hides .w-tiles
+   (showCard), so by the time this is drawn there is nothing left for a black
+   border to distinguish it FROM. A page with one card on it does not need to
+   say which card. is-done still changes colour, because finishing is news. */
 .w-picked {
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 16px 18px 18px;
   background: #fff;
-  border: 1px solid var(--text);
+  border: 1px solid #ececef;
   border-radius: 11px;
 }
 .w-picked.is-done {
