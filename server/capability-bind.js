@@ -11,8 +11,8 @@
 // model used to be a 400 that left the provider unset and must stay one.
 import { PROVIDERS, declaredCatalog } from "./providers.js";
 import { CAPABILITY, CAPABILITY_DEFS } from "./capabilities.js";
-import { setSetting, getAiKey } from "./db.js";
-import { resolveCapability } from "./capability-resolve.js";
+import { setSetting, getSetting, getAiKey, clearBoardModelPins } from "./db.js";
+import { resolveCapability, storedProviderName } from "./capability-resolve.js";
 
 const bad = (message) => Object.assign(new Error(message), { status: 400 });
 
@@ -264,6 +264,46 @@ export function boardConfigPatch(body = {}) {
     }
   }
   return cols;
+}
+
+// The un-bind beside the bind: stored model pins, reconciled against what a
+// deployed image actually bakes. chooseModel above guarantees a FRESH pick is
+// real; what no write path can see is the store and the deployment changing
+// independently — a restored backup resurrects a pin from another era, a
+// re-tagged image changes the baked set under a stored choice. Both funnel
+// through one event, the sidecar's catalog landing (sweepSidecars' hook:
+// boot, which is also every post-restore boot, and any answer that differs
+// from the last), and this runs there: a pin the image no longer bakes is
+// DELETED where it lives, so config re-matches reality before any lane can
+// trip over the skew. The pickers render the live catalog, so a stale pin is
+// one no UI can even show — nothing but this can clear it.
+//
+// Judged only for the store the sidecar OWNS: the app-level pin applies only
+// when the capability's stored provider names the sidecar, and a board pin
+// only where the board's provider column does — a keyed provider's model
+// rides the same columns and is never judged here. Engines with a STATIC
+// declared catalog (the in-process embedder) are exempt by shape: their
+// catalog ships with the app itself, so a stored pin can only name what some
+// build declared — and their wires ignore the model besides.
+//
+// Returns the cleared board rows: the caller owns the board-cache
+// invalidation — worker state, not binding state.
+export async function reconcileModelPins(db, provider, capId, models) {
+  const cap = CAPABILITY[capId];
+  if (!cap) return [];
+  const { keys, boardKeys } = cap.binding;
+  if (keys?.model && keys?.provider) {
+    const [named, pinned] = await Promise.all([storedProviderName(db, cap), getSetting(db, keys.model)]);
+    if (named === provider && pinned && !models.includes(pinned)) {
+      await setSetting(db, keys.model, null);
+      console.warn(`${capId}: stored model '${pinned}' is not in the deployed ${provider} image (has: ${models.join(", ")}) — cleared; the image's default serves`);
+    }
+  }
+  if (!boardKeys?.model || !boardKeys?.provider) return [];
+  const cleared = await clearBoardModelPins(db, boardKeys, provider, models);
+  for (const b of cleared)
+    console.warn(`${capId}: board "${b.name}" pinned a model the deployed ${provider} image doesn't bake — cleared; the image's default serves`);
+  return cleared;
 }
 
 // A capability-level knob (detect's threshold, tagging's image preset): belongs

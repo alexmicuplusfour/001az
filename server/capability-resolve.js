@@ -41,7 +41,7 @@ const SIDECAR_ABSENT_MISS = "the built-in engine is not running on this server";
 // The provider named in a capability's own setting, read once — storedBinding
 // publishes it and floorBinding needs it, and the transcription lane walks
 // both every poll tick, where a duplicated PK SELECT is ~30k queries a day.
-const storedProviderName = async (db, cap) =>
+export const storedProviderName = async (db, cap) =>
   (cap.binding.keys?.provider ? await getSetting(db, cap.binding.keys.provider) : null);
 
 // Why can this provider NOT serve this capability right now? Null = it can.

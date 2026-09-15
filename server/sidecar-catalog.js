@@ -66,14 +66,47 @@ async function probe(provider) {
   } catch { return null; /* down/unreachable — callers fall back */ }
 }
 
+// What an answered body says the image can serve. Shared with catalogOf so
+// the picker's offer and the reconcile below can never read the same body
+// two ways; an image that predates the model axis reports only `model`,
+// which reads as a one-model list.
+const bakedOf = (body) => (Array.isArray(body?.models) ? body.models : [body?.model]).filter(Boolean);
+
 // Every engine at once. Concurrent because a host missing both sidecars must
 // cost one timeout rather than two — the only place that reasoning still lives,
 // now that no request is behind it. Exported for the watch below and for tests
 // that stand up real stand-in boxes and want the map to reflect them.
-export async function sweepSidecars() {
-  const names = sidecars().map(([name]) => name);
-  const bodies = await Promise.all(names.map(probe));
-  names.forEach((name, i) => health.set(name, bodies[i]));
+//
+// `onCatalog(provider, cap, models)` fires when a sidecar's ANSWERED model
+// list differs from its last ANSWER — including the first after boot, which
+// is what makes a restored backup's stale pin die at startup with no job
+// anywhere near it (the process reboots after a restore, and this sweep runs
+// before the listener opens). The baseline (`lastBaked`) is per-answer, not
+// the presence map: absence is not a catalog change in either direction — an
+// unreachable sidecar hides a choice (never destroys one, the standing rule
+// above), and its return with the same bake is a recovery, not news. A body
+// that names no model is not a catalog — never an empty list to reconcile
+// pins against. The hook must not break the sweep (presence is load-bearing
+// for resolution), so it is awaited under its own catch; the baseline
+// advances only after it succeeds, so a failed hook (a db hiccup at boot)
+// retries on the next sweep instead of being lost.
+const lastBaked = new Map(); // provider -> JSON of its last answered, non-empty model list
+export async function sweepSidecars(onCatalog) {
+  const probed = await Promise.all(
+    sidecars().map(async ([name, desc]) => [name, desc, await probe(name)]));
+  for (const [name, desc, body] of probed) {
+    health.set(name, body);
+    if (!onCatalog || !body) continue;
+    const models = bakedOf(body);
+    const key = JSON.stringify(models);
+    if (!models.length || lastBaked.get(name) === key) continue;
+    try {
+      await onCatalog(name, desc.liveCatalog.cap, models);
+      lastBaked.set(name, key);
+    } catch (e) {
+      console.warn(`sidecar catalog hook failed for ${name}: ${e.message}`);
+    }
+  }
   return health;
 }
 
@@ -84,7 +117,7 @@ export async function sweepSidecars() {
 // writes to the map above — with no lazy fetch behind it, what a fixture puts
 // in is exactly what every reader sees, for as long as it sits there. The TTL
 // that used to expire mid-file under CI load is gone with the laziness.
-export const clearSidecarHealth = () => health.clear();
+export const clearSidecarHealth = () => { health.clear(); lastBaked.clear(); };
 export const seedSidecarHealth = (provider, body) => health.set(provider, body);
 
 // Is the engine actually on this machine? true/false for a sidecar-backed
@@ -126,7 +159,7 @@ export async function sidecarDefaultModel(provider) {
 // model. A keyed provider's notes stay per-model, because there they genuinely
 // differ (speed, price, context).
 function catalogOf(body, note) {
-  const models = (Array.isArray(body?.models) ? body.models : [body?.model]).filter(Boolean);
+  const models = bakedOf(body);
   if (!models.length) return null;
   return { default: body.model || models[0], models: models.map((id) => ({ id })), note };
 }
@@ -190,7 +223,7 @@ let generation = 0;
 // nobody waiting on it — and every request afterwards reads a filled map. That
 // await is what makes "nobody waits" an invariant rather than a race won by
 // warming the cache in time.
-export function startSidecarWatch() {
+export function startSidecarWatch(onCatalog) {
   if (watching) return Promise.resolve(health);
   watching = true;
   // Read at START, the POLL_MS convention — so the cadence is a property of
@@ -221,7 +254,7 @@ export function startSidecarWatch() {
       ? FAST_MS
       : WATCH_MS;
 
-  const first = sweepSidecars().then((m) => {
+  const first = sweepSidecars(onCatalog).then((m) => {
     const said = sidecars().map(([n]) => `${n} ${m.get(n) ? "up" : "absent"}`).join(", ");
     if (said) console.log(`sidecars: ${said} (re-probed every ${Math.round(nextDelay() / 1000)}s)`);
     return m;
@@ -236,7 +269,7 @@ export function startSidecarWatch() {
         wake = () => { clearTimeout(t); r(); };
       });
       if (!watching || generation !== mine) break;
-      await sweepSidecars(); // probe() swallows its own failures; a sweep cannot reject
+      await sweepSidecars(onCatalog); // probe() swallows its own failures; a sweep cannot reject
     }
   })();
   return first;

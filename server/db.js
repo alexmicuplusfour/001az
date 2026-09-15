@@ -1530,6 +1530,24 @@ export async function deleteAiKey(db, id) {
   return true;
 }
 
+// The catalog-landing member of the cleanup family above (a deleted key
+// clears by keyId here; an uninstalled plugin clears by name in
+// plugin-loader): NULL every board model pinned to `provider` that names a
+// model outside what its deployed image bakes. Column names come from the
+// registry's boardKeys — module constants, never input, the deleteAiKey
+// rule. Returns the cleared rows: the caller owns the telling (the log
+// line) and the board-cache invalidation, which are its seams, not this
+// module's.
+export async function clearBoardModelPins(db, boardKeys, provider, models) {
+  const { rows } = await db.query(
+    `UPDATE boards SET ${boardKeys.model}=NULL
+      WHERE ${boardKeys.provider}=$1 AND ${boardKeys.model} IS NOT NULL AND NOT (${boardKeys.model} = ANY($2::text[]))
+      RETURNING id, name`,
+    [provider, models]
+  );
+  return rows;
+}
+
 // --- boards ---
 
 // Every per-board capability column, from the registry — so a new

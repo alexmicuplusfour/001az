@@ -165,7 +165,7 @@ import { meterAiCall, priceUnpricedHistory } from "./metering.js";
 import { validRate, unitList, unitVocabulary } from "./units.js";
 import { learnPrices } from "./price-learner.js";
 import { MODEL_CAPABILITIES, kindList, capabilityLabel } from "./capabilities.js";
-import { bindCapability, setCapabilityConfig, assertValidCapabilityConfig, boardBindingPatch, boardConfigPatch } from "./capability-bind.js";
+import { bindCapability, setCapabilityConfig, assertValidCapabilityConfig, boardBindingPatch, boardConfigPatch, reconcileModelPins } from "./capability-bind.js";
 import { capabilityStatus } from "./capability-status.js";
 import { boardConfigCatalog, setupPending } from "./capability-resolve.js";
 import { probeCapability } from "./capability-probe.js";
@@ -3628,7 +3628,17 @@ if (isMain) {
   // one moment when paying it costs nobody anything — a request that arrives
   // after the listener opens then reads held state instead of discovering
   // absence by timeout, which is what it used to do every 60s, forever.
-  await startSidecarWatch();
+  // The catalog-landing hook is where stored model pins meet deployed
+  // reality (reconcileModelPins): boot — which is also every post-restore
+  // boot — and any sidecar redeploy that changes the baked set. Wired here
+  // because this is the seam that already means "a real server process":
+  // under test the map is whatever a fixture seeded, and no fixture's
+  // seeding should mutate settings behind the test's back. The cleared
+  // boards' cache invalidation is this closure's half — worker state, on
+  // the seam server.js already owns for board writes.
+  await startSidecarWatch(async (provider, cap, models) => {
+    for (const b of await reconcileModelPins(db, provider, cap, models)) invalidateBoardCache(b.id);
+  });
   const server = app.listen(PORT, HOST, () => {
     console.log(`API listening on http://${HOST}:${PORT}  (db: ${new URL(DATABASE_URL).host})`);
   });

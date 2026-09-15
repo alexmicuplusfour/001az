@@ -329,3 +329,38 @@ loser — it regressed to "filthy pebbins" while costing more than medium.
 and rebuilding the transcriber gets the entire quality jump today, with no
 code. This plan is what makes it a per-board CHOICE rather than a deploy-wide
 one.
+
+## Addendum (2026-09-15): pins reconciled against the deployed catalog
+
+A stored pin and the deployed image can change independently — a restored
+backup resurrects a pin from another era, a re-tagged image changes the baked
+set under a stored choice. The write path can't see either (it validates
+fresh picks only), and since the pickers render the live catalog, a stale pin
+is one no UI can even show, let alone clear. Letting a lane discover the skew
+by failing (409 → backoff) surfaced it as a standing error the user couldn't
+act on.
+
+The mechanism: every drift window funnels through ONE event — the sidecar's
+catalog landing. `sweepSidecars(onCatalog)`
+([sidecar-catalog.js](../server/sidecar-catalog.js)) diffs each ANSWERED
+`/health` model list against the previous answer and notifies on first
+answer (boot — which is also every post-restore boot, since restore reboots
+the process) and on change (a redeploy that re-bakes). Absence never
+notifies: an unreachable sidecar hides a choice, it doesn't destroy one —
+the standing rule. The change-detection baseline
+remembers the last ANSWER (not the presence map), so a flapping sidecar's
+recovery with the same bake re-fires nothing, and it advances only after
+the hook succeeds, so a failed landing retries next sweep. Boot wires the
+hook to `reconcileModelPins(db, provider, cap, models)`
+([capability-bind.js](../server/capability-bind.js) — the un-bind beside
+the bind): a pin the image no longer bakes is DELETED where it lives (the
+capability's `*_model` setting when the stored provider names the sidecar;
+board columns via db.js `clearBoardModelPins`, the catalog-landing member
+of the deleteAiKey/plugin-uninstall cleanup family), with a log line
+saying so; the cleared board rows return to the boot closure, which owns
+the board-cache invalidation. Keyed providers' models ride the same
+columns and are never judged here; engines with a STATIC declared catalog
+(the in-process embedder) are exempt by shape — their catalog ships with
+the app, and their wires ignore the model besides. Mismatch can no longer
+persist by design; the wire's 409 remains as a race backstop for the
+seconds between a redeploy and the next sweep.
