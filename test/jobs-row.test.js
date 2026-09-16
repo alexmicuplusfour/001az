@@ -82,6 +82,19 @@ test("a cancel that could reach nothing leads with that, not with the verb", () 
   );
 });
 
+test("a cancel that only stopped the feed says exactly that", () => {
+  // The Stage 5 case, and the common one on a feed board: the queue was empty
+  // at that instant because the run had not refilled it yet.
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "queued", stopped_run: true, drain_dropped: 750 } }),
+    "cancelled: feed run stopped (750 to drain dropped)"
+  );
+  assert.equal(
+    summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "queued", parked: 4, stopped_run: true } }),
+    "cancelled: 4 parked · feed run stopped"
+  );
+});
+
 test("an abort row is distinguishable and counts its discards", () => {
   assert.equal(
     summaryFor({ kind: "cancel", outcome: "ok", detail: { mode: "abort", parked: 4, discarding: 2, finishing: 0 } }),

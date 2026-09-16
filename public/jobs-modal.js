@@ -73,12 +73,12 @@ const CANCEL_VERBS = {
   queued: {
     label: "Cancel queued",
     title: "Pull queued work out of the pipeline — items already being processed finish",
-    confirm: "Cancel this board's queued work? Items already being processed will finish; tagged items keep their tags, never-tagged ones are parked, queued adds are removed.",
+    confirm: "Cancel this board's queued work? A feed run in progress is stopped too (the schedule itself is unchanged). Items already being processed will finish; tagged items keep their tags, never-tagged ones are parked, and queued adds are removed — the feed then holds them out until you Re-include them.",
   },
   abort: {
     label: "Abort",
     title: "Settle everything now — running calls finish in the background and their results are discarded",
-    confirm: "Abort this board's running work? Already-launched calls finish in the background and their results are DISCARDED — the spend is committed, the outcome isn't. Vehicles mid-fetch are removed. (Running feed scans and transcriptions are not queue items; pause the board to stop their next tick.)",
+    confirm: "Abort this board's running work? Already-launched calls finish in the background and their results are DISCARDED — the spend is committed, the outcome isn't. Vehicles mid-fetch are removed, and a feed run in progress is stopped (the schedule itself is unchanged). (A transcription already running is not a queue item; pause the board to stop its next tick.)",
   },
 };
 
@@ -181,6 +181,12 @@ export function summaryFor(j) {
         d.parked ? `${d.parked} parked` : "",
         d.removed ? `${d.removed} removed` : "",
         d.discarding ? `${d.discarding} discarding` : "",
+        // The producer, named (Stage 5): on a feed board this is often the
+        // only thing a cancel did — the queue was empty because the run had
+        // not refilled it yet.
+        d.stopped_run
+          ? `feed run stopped${d.drain_dropped ? ` (${d.drain_dropped} to drain dropped)` : ""}`
+          : "",
       ].filter(Boolean);
       const ran = d.finishing ? `${d.finishing} still running will finish` : "";
       if (!bits.length) return ran ? `nothing was queued — ${ran}` : `${did} — nothing was queued`;

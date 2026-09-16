@@ -282,6 +282,18 @@ test("run-now: auth matrix, and a paused feed still runs once", async () => {
   assert.ok(b.ingest_next_run_at <= Date.now(), "armed for the next tick");
   await updateBoard(db, boardId, { ingestNextRunAt: null });
 
+  // A fresh run is FRESH: the unfinished budget of the run this one supersedes
+  // is its own verdict, and carrying it forward would hand the new run a stale
+  // limit (job-control-plan.md Stage 5 — the sweep's settle is fenced, so a
+  // superseded tick's admissions were never subtracted from it).
+  await patchIngest({ ...GOOD, trigger: { mode: "manual" } });
+  await setIngestState(db, boardId, { last_run_at: Date.now() - 1000, last_added: 2, drain_left: 8 });
+  assert.equal((await req(base, "POST", `/api/boards/${boardId}/ingest/run`, { sid: admin.sid })).status, 200);
+  b = await getBoard(db, boardId);
+  assert.equal(b.ingest_state.drain_left, undefined, "the superseded budget is gone");
+  assert.equal(b.ingest_state.last_added, 2, "run history is not a budget — it stays");
+  await updateBoard(db, boardId, { ingestNextRunAt: null });
+
   // Nothing configured at all is still a 409 — there's no config to run.
   await patchIngest(null);
   const none = await req(base, "POST", `/api/boards/${boardId}/ingest/run`, { sid: admin.sid });

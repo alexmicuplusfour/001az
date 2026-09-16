@@ -55,6 +55,13 @@ export const RUN_CAP = (declared) => {
   return env > 0 ? env : Math.max(1, Number(declared) || 25);
 };
 
+// The continuous watch's rescan interval — "continuous" is just a 30s rescan,
+// and this is the operator's knob for it. Resolved here with the caps above
+// because it has TWO readers since Stage 5: the sweep re-arms the watch after
+// each tick, and a cancel re-arms it when it stops a run in flight. A 5s floor
+// keeps a typo from turning a watch into a spin.
+export const CONTINUOUS_MS = () => Math.max(5000, Number(process.env.INGEST_CONTINUOUS_MS) || 30000);
+
 // null input.connector = a file board → the shared file adapter (its source
 // backend is picked per-board by ingest.source.type, default folder). Connector
 // boards (crypto/stocks) get a per-board feed adapter built from their manifest's

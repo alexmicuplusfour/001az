@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, seedBoard } from "./helpers.js";
-import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, setIngestState, clearIngestLog, deleteInstance } from "../server/db.js";
+import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, setIngestState, stopIngestRun, clearIngestLog, deleteInstance } from "../server/db.js";
 import { startWorker } from "../server/worker.js";
 import { createSources } from "../server/sources/index.js";
 
@@ -161,6 +161,36 @@ test("a capped run drains across ticks and honors the logical limit exactly", as
     "exactly `limit` admitted, name-ascending — drain ticks resumed the budget, not a fresh limit");
   assert.equal(board.ingest_state.last_error, null);
   assert.equal(board.ingest_state.drain_left ?? 0, 0, "drain bookkeeping cleared on completion");
+});
+
+// job-control-plan.md Stage 5. The sweep is the one producer in the app, and
+// its writes are now value-fenced like every landing in db.js: the stamp a
+// tick claimed the board under is the run's identity, checked between
+// admissions AND at settle. Without the settle half, the tick already in
+// flight writes drain_left straight back over the stop — and since a tick
+// walks a catalog and then admits its whole batch, "mid-tick" is the normal
+// state during a drain, not a narrow window.
+test("a stop mid-drain ends the run: the tick in flight can't restore the budget", async () => {
+  for (let i = 1; i <= 12; i++) put(`stopdrain/f${i}.txt`, `file ${i}`);
+  const id = await seedBoard(db, "stopdrain");
+  await watch(id, "stopdrain", { limit: 12 }); // per-tick cap is 2 → six ticks
+  await setIngestNextRun(db, id, Date.now() - 1);
+  await until(async () => ((await getBoard(db, id)).ingest_state?.drain_left || 0) > 0);
+
+  const stop = await stopIngestRun(db, id, null); // manual board → no next run
+  assert.equal(stop.stopped, true);
+  assert.ok(stop.dropped > 0, "the dropped remainder is reported back to the caller");
+
+  // Several drain periods later the run is still over: nothing re-armed it,
+  // nothing rewrote the budget, and no further files were admitted.
+  await new Promise((r) => setTimeout(r, 500));
+  const b = await getBoard(db, id);
+  assert.equal(b.ingest_state.drain_left ?? 0, 0, "the budget stayed dropped");
+  assert.equal(b.ingest_next_run_at, null, "…and the run could not re-arm itself");
+  const landed = (await names(id)).length;
+  assert.ok(landed < 12, `the run stopped short (${landed} of 12)`);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal((await names(id)).length, landed, "no admissions after the stop");
 });
 
 test("a cleared memory heals from item provenance instead of duplicating", async () => {

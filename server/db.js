@@ -2004,6 +2004,76 @@ export async function clearIngestSuperseded(db, boardId) {
   await db.query("UPDATE boards SET ingest_state = ingest_state - 'drain_left' - 'last_error' WHERE id=$1", [boardId]);
 }
 
+// --- the run fence (job-control-plan.md Stage 5) ---
+//
+// A feed run is the one PRODUCER in this file, and until Stage 5 it was also
+// the only one whose writes weren't value-fenced — so cancelling a board's
+// queue emptied the consumer side while the drain refilled it from the next
+// tick, which is exactly what nineteen presses of "Cancel queued" ran into
+// (the 2026-09-10 postmortem's sibling, 2026-09-17).
+//
+// `ingest_next_run_at` IS the run's identity: dueIngestBoards claims a board
+// at a value, so every continuation of that run can be made conditional on the
+// value still being there. Whoever re-stamps it supersedes the run in flight —
+// a cancel, "Run now", a save that changes the trigger — and the fence is what
+// makes that true instead of merely intended. The pairing rule: everyone who
+// re-stamps also settles the budget (dropped, cleared, restarted), because a
+// superseded tick's settle dies and cannot subtract its own admissions from
+// drain_left. NOT superseded, and unchanged by this: a filter-only save and a
+// ledger clear both clear drain_left without re-stamping, so the tick in
+// flight still writes it back — the same pre-existing clobber they had before
+// the fence, left for whoever decides what those two should do to a run that
+// is already importing under the old rules.
+//
+// Is the run this tick claimed still the board's run? Asked between
+// admissions, so a stop lands mid-batch instead of after it: one PK lookup
+// against an admission that creates an entity, an item and a chart job.
+export async function ingestRunArmed(db, boardId, fence) {
+  const { rowCount } = await db.query(
+    "SELECT 1 FROM boards WHERE id=$1 AND ingest_next_run_at=$2", [boardId, fence]);
+  return rowCount > 0;
+}
+
+// The sweep's end-of-tick write, fenced: run state and the next stamp in ONE
+// statement, so a superseded run cannot resurrect its own budget (the tick in
+// flight would otherwise write drain_left back over the cancel that dropped
+// it). One statement also settles the schedule and the error together, which
+// the error path's two writes used to have to order by hand — last_error is
+// what observers poll, so everything it implies must already be true when it
+// lands. Returns false when the run was superseded and nothing was written.
+export async function settleIngestRun(db, boardId, fence, { state, nextRunAt }) {
+  const { rowCount } = await db.query(
+    `UPDATE boards SET ingest_state=$1, ingest_next_run_at=$2
+      WHERE id=$3 AND ingest_next_run_at=$4`,
+    [state === null ? null : JSON.stringify(state), nextRunAt, boardId, fence]
+  );
+  return rowCount > 0;
+}
+
+// Stop the run in flight (the cancel verbs' producer half). Drops the budget —
+// clearIngestSuperseded's rule, for the same reason: it is the unfinished
+// portion of a run that is now over — and re-stamps, which breaks the fence
+// above and stops the tick that is already running.
+//
+// `<= $3` is what distinguishes A RUN from A SCHEDULE: a board armed for
+// tomorrow's 00:00 is not running, so a cancel must leave it alone and report
+// that it stopped nothing. `nextRunAt` is the caller's nextScheduledIngestRun
+// — the next NATURAL run, null for a manual/one-shot one — so stopping a run
+// never disarms a live schedule. Returns { stopped, dropped }.
+export async function stopIngestRun(db, boardId, nextRunAt, now = Date.now()) {
+  const { rows } = await db.query(
+    `WITH prev AS (SELECT id, (ingest_state->>'drain_left')::int AS drain FROM boards WHERE id=$1)
+     UPDATE boards b
+        SET ingest_state = b.ingest_state - 'drain_left' - 'last_error',
+            ingest_next_run_at = $2
+       FROM prev
+      WHERE b.id = prev.id AND b.ingest_next_run_at IS NOT NULL AND b.ingest_next_run_at <= $3
+     RETURNING COALESCE(prev.drain, 0) AS dropped`,
+    [boardId, nextRunAt, now]
+  );
+  return { stopped: rows.length > 0, dropped: rows[0]?.dropped || 0 };
+}
+
 // The dedup ledger: every source_key ever ledgered on this board, with what
 // the sweep needs to judge it. Rows outlive their entities on purpose —
 // deleting an item is a user judgment the feed must not overturn on the next

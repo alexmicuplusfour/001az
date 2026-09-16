@@ -6,7 +6,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, seedBoard, seedUser, adminSession, req, seedInstance } from "./helpers.js";
-import { cancelBoardQueue, markTagged, getEntity, listJobLog } from "../server/db.js";
+import {
+  cancelBoardQueue, markTagged, getEntity, listJobLog,
+  getBoard, updateBoard, setIngestNextRun, setIngestState,
+} from "../server/db.js";
 
 let srv, db, base;
 before(async () => {
@@ -113,6 +116,57 @@ test("an admin reaches the same route through board-manager access", async () =>
   assert.equal(r.status, 200);
   assert.equal(r.json.restored, 1);
   assert.equal(r.json.parked, 0);
+});
+
+// Stage 5: a cancel is half a verb on a feed board unless it stops the thing
+// filling the queue. The run's identity is its armed stamp, so stopping it is
+// a re-stamp — to the next NATURAL run, never a disarm.
+const feedBoard = async (name, trigger) => {
+  const bid = await seedBoard(db, name);
+  await updateBoard(db, bid, {
+    ingest: { enabled: true, source: { folder: "x" }, filters: [], sort: { by: "name", order: "asc" }, trigger },
+  });
+  return bid;
+};
+
+test("cancel stops the feed run in flight, and re-arms the schedule that owns it", async () => {
+  const admin = await adminSession(db);
+  const bid = await feedBoard("cancel-run", { mode: "daily", at: "00:00" });
+  // Mid-drain, as the sweep leaves it: re-armed for `now`, remainder parked.
+  await setIngestNextRun(db, bid, Date.now() - 1);
+  await setIngestState(db, bid, { last_run_at: Date.now() - 1000, last_added: 250, drain_left: 750 });
+
+  const r = await req(base, "POST", `/api/boards/${bid}/jobs/cancel-queued`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.stopped_run, true, "the cancel says it stopped a run");
+  assert.equal(r.json.drain_dropped, 750, "…and how much of it never happened");
+
+  const b = await getBoard(db, bid);
+  assert.equal(b.ingest_state.drain_left, undefined, "the budget of a run that is over");
+  assert.ok(b.ingest_next_run_at > Date.now(), "re-stamped to tomorrow's run, NOT disarmed");
+  assert.equal(b.ingest_state.last_added, 250, "run history survives — only the budget is a verdict");
+
+  const { jobs } = await listJobLog(db, bid, {});
+  assert.equal(jobs.find((j) => j.kind === "cancel").detail.stopped_run, true, "the ledger row carries it");
+});
+
+test("a one-shot run disarms; a schedule that isn't running is left alone", async () => {
+  const admin = await adminSession(db);
+  const manual = await feedBoard("cancel-run-manual", { mode: "manual" });
+  await setIngestNextRun(db, manual, Date.now() - 1); // "Run now" armed it
+  const r1 = await req(base, "POST", `/api/boards/${manual}/jobs/cancel-queued`, { sid: admin.sid });
+  assert.equal(r1.json.stopped_run, true);
+  assert.equal(r1.json.drain_dropped, undefined, "nothing was draining — no number to report");
+  assert.equal((await getBoard(db, manual)).ingest_next_run_at, null, "a manual run has no next");
+
+  // Armed for later is a SCHEDULE, not a run: a cancel must not touch it, or
+  // every cancel would quietly push the daily feed forward.
+  const later = await feedBoard("cancel-run-later", { mode: "daily", at: "00:00" });
+  const stamp = Date.now() + 3600000;
+  await setIngestNextRun(db, later, stamp);
+  const r2 = await req(base, "POST", `/api/boards/${later}/jobs/cancel-queued`, { sid: admin.sid });
+  assert.equal(r2.json.stopped_run, undefined, "nothing was running");
+  assert.equal(Number((await getBoard(db, later)).ingest_next_run_at), stamp, "the stamp is untouched");
 });
 
 test("abort: the same rule widened over the in-flight halves — their landings discard", async () => {

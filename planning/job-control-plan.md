@@ -665,6 +665,208 @@ Left open, eyes open:
   the auto-tag off→on sweep (queueUntagged) re-queues them once credits
   exist.
 
+## Stage 5 — the producer (cancelling an ingestion run), 2026-09-17
+
+**The complaint.** A feed run on the stocks board, and the Jobs modal shows seven
+consecutive `cancelled: N parked` rows (10, 5, 6, 10, 4, 7, 11) braided with
+three aborts and a wall of `discarded` tagging rows. Every press worked — the
+counts are real, the abort armed correctly, the discards carry their spend —
+and the queue was full again a second later. The user pressed cancel until the
+producer ran out, then said: "there is no way to cancel ingestion jobs."
+
+**Why.** An ingestion run is a PRODUCER with its own clock, and the cancel verbs
+are consumer verbs. Specifically:
+
+- `ingestLoop` (worker.js) polls at `POLL_MS` when idle but at **200ms** while any
+  board is mid-run (`more ? 200 : POLL_MS`) — a drain is deliberately a fast
+  loop, so it finishes in minutes instead of hours.
+- Each tick admits up to `RUN_CAP` (connector 250, files 25), writes
+  `drain_left = remaining` into `ingest_state`, and re-arms
+  `ingest_next_run_at = Date.now()` — "more to give, come straight back".
+- `cancelBoardQueue` empties the queue. Nothing in it touches the thing filling
+  the queue, so the next tick refills from `drain_left`.
+- The only existing brake is `boards.paused` (`dueIngestBoards` carries
+  `notPaused()`), and it is a HOLD, not a stop: `drain_left` and the armed stamp
+  both survive, so resuming continues the same run where it left off. Nothing
+  anywhere ends a run.
+
+**A second defect, retracted.** The first pass through this read
+`cancelBoardQueue`'s DELETE as bypassing the feed's ledger, leaving cancelled
+adds as `admitted` rows pointing at nothing — never re-admitted, still holding
+their `total` slot. Wrong: the DELETE calls `stampIngestDeleted` (db.js), added
+deliberately by the deletions arc (03fd7a9) with a rationale this plan had not
+considered — *unledgered, the next sweep tick would silently un-do this cancel*.
+So a cancelled add is stamped `deleted`: held out on purpose, its slot
+backfilled, counted in the preview's "ignored", and reversible through
+Re-include. That is better than the "forget it" this plan originally proposed,
+which would have handed the next scheduled run the same 300 items to re-admit.
+Nothing to build here; the producer half below is the whole stage.
+
+One thread left open, NOT touched here because it belongs to the deletions arc:
+with `rememberDeletions: false` the stamp is deliberately skipped, which leaves
+the row `admitted` — and `runWindow` keeps every settled key out of `fresh`
+whatever its reason, so it is worth confirming that "off" really does let a
+deleted item come back rather than only changing which slot it holds.
+
+### The two options
+
+**A — a separate "Stop run" verb** (a button in the ingest modal or a second
+button in Jobs). New route, new button, new copy, new client state to know when
+to show it, and the user presses two things in sequence to get one outcome. It
+*also* needs the fence below to be exact, so A is strictly B plus a surface.
+
+**B — fold it into Cancel/Abort.** "Cancel queued" already means *stop this
+board's queued work*. A run mid-drain IS that work, arriving in instalments. No
+route, no button, no client state; one press; the existing confirm copy gains a
+clause.
+
+**Picked: B.** Same mechanism, one less surface, one less press. The scope stays
+honest — cancel stops *the run in flight*, it does not change the schedule or
+the config.
+
+### The mechanism: fence the sweep on the stamp it claimed under
+
+A naive "cancel drops `drain_left`" loses a race that is not narrow. A connector
+tick walks a metered catalog, batches a provider warm, then performs up to 250
+admissions — "mid-tick" is the *normal* state during a drain, and the tick's
+final `setIngestState` / `setIngestNextRun` pair would rewrite the budget the
+cancel just dropped.
+
+So give the run an identity and fence on it. `ingest_next_run_at` already is
+one: the sweep claims a board at value **V**, and every continuation of that run
+becomes conditional on `ingest_next_run_at = V`.
+
+- **Between admissions** — one PK lookup per admit, which is noise beside an
+  admit that creates an entity, an item and a chart job. A broken fence stops
+  the batch where it stands.
+- **At settle** — the state write and the re-arm (and the error path's) no-op on
+  a broken fence, so a cancelled run cannot resurrect its own budget.
+
+Cancel then simply writes a DIFFERENT value: `nextScheduledIngestRun(cfg, now)`
+— the next natural run for a scheduled board, `null` for a manual/one-shot one —
+plus the existing `clearIngestSuperseded` to drop `drain_left`. The fence breaks,
+the tick stops admitting, the run is over. The daily schedule is untouched.
+
+This is the same value-fence idiom as every landing in db.js, applied to the one
+producer that never got it — and it makes two EXISTING supersede intentions
+actually work mid-run, both of which are silently clobbered today:
+
+- a save that changes the TRIGGER already calls `clearIngestSuperseded` ("the
+  budget of a run whose premises just vanished") and re-stamps — with the fence
+  that pair really does end the run instead of losing to the next tick;
+- "Run now" pressed mid-drain re-stamps, so the old drain stops instead of
+  being swallowed by it (pre-fence the tick in flight simply re-armed over the
+  button).
+
+Not fixed, and pre-existing: a FILTER-only save and the ledger clear both drop
+the budget without re-stamping, so the tick in flight writes it back. The fence
+doesn't change that either way; deciding what those two should do to a run
+already importing under the old rules belongs to the ingest arc, not here.
+
+### The ledger: forget, don't remember
+
+Cancel's DELETE gains a sibling statement in the same transaction: delete the
+`ingest_log` rows of the items it removed (the ids it already has in RETURNING).
+
+Not `reason='deleted'`, which is the vocabulary for *the user rejected this
+content* — held out forever, slot backfilled, counted under "ignored". A cancel
+is "not now": wrong provider, wrong price, a mistake. The content was never
+judged. Forgetting is what makes Stage 2's "re-addable" promise true.
+
+Accepted, eyes open: the next scheduled run re-admits them. That is correct — the
+feed is configured to want those keys, and the cancel stopped a run, not a
+preference. With the run-stop in place "next run" means the next scheduled time,
+not 200ms later.
+
+### Transparency
+
+The cancel job-log row names what it stopped (`detail.stopped_run`: the dropped
+`drain_left`, or `true` when a run was armed with nothing left to drain), so
+`summaryFor` can append `· feed run stopped`. The confirm copy gains the clause:
+cancel stops the feed run in flight; the schedule is unchanged.
+
+### Second pass (same day)
+
+Three findings, all fixed:
+
+1. **The order inside `cancelQueued` was backwards** — it pulled the queue and
+   *then* stopped the run, so everything the drain admitted during the pull's
+   transaction survived the cancel. The same bug wearing a smaller number.
+   Stop first: the admit loop's next fence check ends the batch, so at most the
+   one admission already in flight can land behind the pull. Closing that last
+   row would need the sweep to publish "I am running this board" — a marker
+   with a lifetime, for one item. Argued, not pinned: a test for it would be a
+   timing race either way.
+2. **A superseded tick leaves a stale budget.** Its settle dies with the fence,
+   so the admissions it made were never subtracted from `drain_left` — a run
+   resumed from that budget over-admits by up to one tick's worth, breaking the
+   "the run's `limit` stays exact" promise. "Run now" now clears the budget
+   like the other re-stampers (it is a FRESH run, which is what the button
+   says), making the pairing rule complete: whoever moves the stamp also
+   settles the budget.
+3. **Two overclaims in my own comments**, corrected in place: a config save
+   supersedes a run only when it changes the TRIGGER (filter edits keep the
+   armed stamp by design), and the ledger-bypass "defect" this plan opened with
+   never existed.
+
+### Build order
+
+1. **db.js** — `settleIngestRun(db, boardId, { state, nextRunAt }, fence)`
+   replacing the `setIngestState` + `setIngestNextRun` pairs at the sweep's two
+   settle points; `ingestRunArmed(db, boardId, fence)` for the admit loop;
+   `cancelBoardQueue` is untouched — its ledger stamp was already right.
+2. **worker.js** — capture `fence = b.ingest_next_run_at` per board iteration,
+   check it between admissions, settle through the fenced write.
+3. **server.js** — `cancelQueued` stops the run when `board.ingest` exists
+   (`clearIngestSuperseded` + `setIngestNextRun(nextScheduledIngestRun(cfg, now))`)
+   and reports what it dropped. `nextScheduledIngestRun` joins the existing
+   `ingestion/index.js` import.
+4. **jobs-modal.js** — confirm copy + `summaryFor` clause.
+
+### Tests
+
+- the settle fence: claim at V, move the stamp, the tick's settle no-ops and
+  `drain_left` stays dropped;
+- the admit loop stops mid-batch when the stamp moves;
+- cancel on a scheduled board re-arms to the next scheduled time — the daily feed
+  is NOT disarmed (the regression that would matter most);
+- cancel on a manual/one-shot run disarms it;
+- a config save mid-drain ends the run (the existing intention, now effective).
+
+SHIPPED 2026-09-17, suite 1586 green. The settle fence and the mid-batch stop
+are covered end to end in ingest-sweep.test.js (a real drain, stopped mid-run,
+asserted not to re-arm or rewrite its budget); the route half, the schedule
+re-arm and the leave-a-schedule-alone rule in cancel-queued.test.js; the row
+sentence in jobs-row.test.js. The config-save case rides the same fence and is
+left to the sweep suite already exercising saves.
+
+### Not in this stage
+
+- **`retag_on_refresh` is the other producer** (refresh cascade →
+  `requeueItemForTag`). One item per refreshed entity on a schedule, not a
+  flood, and it is off on the board that prompted this. Left alone.
+- **A run row in the modal's In-progress list.** The live list shows pipeline
+  items only, so a draining feed appears nowhere in Jobs — you see the flood,
+  not the source. Worth a line ("Ingestion: N to drain") but it is its own
+  transparency change; the cancel row naming what it stopped covers the
+  immediate confusion, and the toolbar chip already says `running`.
+- **The run-state line after a cancelled run.** The superseded tick's state
+  write dies with the fence (it has to — that write is where drain_left would
+  come back), so `ingest_state` keeps whatever the last COMPLETED run left. On
+  a board whose only run was cancelled the modal reads "never run" while
+  History shows the cancelled run and its counts. Seen in the live test
+  (2026-09-16): the job row carries the truth, and splitting the settle into
+  history-without-budget is more machinery than the line is worth.
+- **Transcription cancel mid-clip** — still parked (Stage 4 list).
+- **Offering the button while the queue is momentarily empty.** The cancel
+  control appears on queued rows, so a run caught between batches with an empty
+  queue hides it for that instant. The obvious proxy — `ingest_next_run_at <=
+  now` — is unusable: a continuous watch is 'due' every 30 seconds, so the
+  button would flicker on every such board forever. The honest signal is
+  `drain_left`, which the board payload does not carry and which is not worth
+  plumbing for an instant-long gap in the one case (a flood) where the queue is
+  never empty.
+
 ## Decisions log
 
 1. ~~held vs tagged+undecided~~ → **held** (embedding spend, resume affordance,
@@ -717,3 +919,19 @@ Left open, eyes open:
 14. Cancel-row copy → the no-op **leads with what was not reachable**
     ("nothing was queued — N still running will finish"); the toast repeats
     the ledger sentence verbatim; Abort's count spans the full remainder.
+15. Cancelling a feed run → **folded into Cancel/Abort**, not a separate "Stop
+    run" verb (2026-09-17): cancel already means "stop this board's queued
+    work", a mid-drain run IS that work in instalments, and a separate verb is
+    the same mechanism plus a surface plus a second press.
+16. Stopping the run → **value-fence the sweep on `ingest_next_run_at`**, the
+    stamp it claimed under, checked between admissions and at settle. A
+    timestamp compare-and-set, no new column and no new state; "mid-tick" is
+    the normal state during a drain, so an unfenced cancel loses to the tick
+    that is already running. Also makes the config-save and Run-now
+    supersessions effective mid-run, which they are not today.
+17. ~~A cancelled add's ledger row → forgotten~~ → **left stamped `deleted`,
+    as it already was** (2026-09-17, same day): the "bypassed ledger" this plan
+    opened with was a misread of `cancelBoardQueue`. The existing stamp is also
+    the better rule — forgetting would hand the next scheduled run the same
+    items to re-admit, where `deleted` holds the cancel and Re-include reverses
+    it deliberately.

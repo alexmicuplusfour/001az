@@ -131,6 +131,7 @@ import {
   boardNextRefreshAt,
   setIngestNextRun,
   setIngestState,
+  stopIngestRun,
   demoteFacetDiagnostics,
   clearIngestSuperseded,
   ingestedKeys,
@@ -185,7 +186,7 @@ import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, 
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
-import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, ENUM_CAP } from "./ingestion/index.js";
+import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, nextScheduledIngestRun, CONTINUOUS_MS, ENUM_CAP } from "./ingestion/index.js";
 import { applySort, runWindow, settledRow } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
 import { invalidateSourceCache } from "./ingestion/files.js";
@@ -1290,23 +1291,46 @@ app.delete("/api/boards/:id/jobs", requireAuth, requireBoardManager, wrap(async 
 // job-log row per cancel, whatever the counts came to — somebody asked, so
 // "nothing was queued" is the answer — and the ledger never breaks the job:
 // a log failure is a warn, the cancel itself already committed.
-async function cancelQueued(boardId, { abort = false } = {}) {
+async function cancelQueued(board, { abort = false } = {}) {
+  const boardId = board.id;
   const t0 = Date.now();
+  // The PRODUCER half FIRST (job-control-plan.md Stage 5), and the order is
+  // the point: emptying the queue is half a cancel on a board whose feed is
+  // mid-run — a drain re-arms itself for `now` and refills within the tick,
+  // which is what turned one cancel into a row of them (2026-09-17). Pull
+  // before stop and everything the tick admits during the pull's transaction
+  // survives it, which is the same bug wearing a smaller number. Stop first
+  // and the admit loop's next fence check — taken between admissions — ends
+  // the batch, so at most the one admission already in flight can land behind
+  // the pull. Closing that last item would need the sweep to publish "I am
+  // running this board", which is a marker with a lifetime, for one row.
+  //
+  // The run is stopped the way everything else in this app is stopped — by
+  // moving the value its work is fenced on — and re-stamped to the next
+  // NATURAL run, so a cancel ends the run in flight without touching the
+  // schedule that owns it.
+  const run = board.ingest
+    ? await stopIngestRun(db, boardId,
+        nextScheduledIngestRun(board.ingest, Date.now(), { continuousMs: CONTINUOUS_MS() }))
+    : { stopped: false, dropped: 0 };
+  const stopped = run.stopped
+    ? { stopped_run: true, ...(run.dropped ? { drain_dropped: run.dropped } : {}) }
+    : {};
   const counts = await cancelBoardQueue(db, boardId, { abort });
   await jobLogWrite(() => addJobLog(db, {
     boardId, kind: "cancel", outcome: "ok",
-    detail: { mode: abort ? "abort" : "queued", ...counts },
+    detail: { mode: abort ? "abort" : "queued", ...counts, ...stopped },
     startedAt: t0, endedAt: Date.now(),
   }), `cancel row, board ${boardId}`);
-  console.log(`cancel ${abort ? "ABORT" : "queued"}: board ${boardId} — ${counts.restored} restored, ${counts.parked} parked, ${counts.removed} removed, ${abort ? `${counts.discarding} discarding` : `${counts.finishing} left to finish`}`);
-  return counts;
+  console.log(`cancel ${abort ? "ABORT" : "queued"}: board ${boardId} — ${counts.restored} restored, ${counts.parked} parked, ${counts.removed} removed, ${abort ? `${counts.discarding} discarding` : `${counts.finishing} left to finish`}${run.stopped ? `, feed run stopped${run.dropped ? ` (${run.dropped} to drain dropped)` : ""}` : ""}`);
+  return { ...counts, ...stopped };
 }
 
 // Manager-gated like Clear above and for the same reason: reading the queue is
 // for every member, emptying it is holding the board. `{ abort: true }` in the
 // body is the hard verb (Stage 3) — same door, wider blast radius.
 app.post("/api/boards/:id/jobs/cancel-queued", requireAuth, requireBoardManager, wrap(async (req, res) => {
-  res.json({ ok: true, ...(await cancelQueued(req.board.id, { abort: req.body?.abort === true })) });
+  res.json({ ok: true, ...(await cancelQueued(req.board, { abort: req.body?.abort === true })) });
 }));
 
 // Board-manager content editing — the gallery's "edit board" modal. A global
@@ -1671,9 +1695,20 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
 // board, and deliberately NOT gated on `enabled` — pausing a schedule stops the
 // timer, it doesn't confiscate the button. The sweep disarms a paused board
 // again after the run, so this buys exactly one run.
+// One invariant behind the three re-stampers (job-control-plan.md Stage 5):
+// whoever moves ingest_next_run_at outside the sweep also settles the budget,
+// because the sweep's own settle is fenced on that stamp and a superseded tick
+// cannot write drain_left back. A config save clears it (the premises
+// changed), a cancel drops it (the run is over), and "Run now" starts a fresh
+// one — which is what the button says, and what keeps the run's `limit` exact:
+// a tick superseded mid-batch admitted rows its dead settle never subtracted,
+// so a resumed budget would be stale by up to one tick's worth and over-admit
+// by that much. Pre-fence this route couldn't start a run mid-drain at all —
+// the tick in flight simply re-armed over it.
 app.post("/api/boards/:id/ingest/run", requireAuth, requireBoardManager, wrap(async (req, res) => {
   if (!req.board.ingest)
     return res.status(409).json({ error: "ingestion is not configured on this board" });
+  await clearIngestSuperseded(db, req.board.id);
   await setIngestNextRun(db, req.board.id, Date.now());
   res.json({ ok: true });
 }));

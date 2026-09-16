@@ -50,8 +50,8 @@ import {
   advanceFetched,
   landEntityFetch,
   dueIngestBoards,
-  setIngestNextRun,
-  setIngestState,
+  settleIngestRun,
+  ingestRunArmed,
   ingestedKeys,
   recordIngest,
   withPluginHealth,
@@ -62,7 +62,7 @@ import { CAPABILITY } from "./capabilities.js";
 import { meterAiCall, meterAiCalls, spentDetail } from "./metering.js";
 import { learnPrices } from "./price-learner.js";
 import { wantedGeneration } from "./pricing.js";
-import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
+import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP, CONTINUOUS_MS } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
 import { applyLimit, runWindow } from "./ingestion/filter-engine.js";
@@ -2013,13 +2013,17 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   // tick; a bigger logical run drains across ticks with next_run_at=now,
   // resuming from drain_left so the run's `limit` stays exact. Per-board
   // failures land in ingest_state with a 5-minute backoff — never the loop.
-  const INGEST_CONTINUOUS_MS = Math.max(5000, Number(process.env.INGEST_CONTINUOUS_MS) || 30000);
-
   async function ingestDue() {
     let draining = false; // any board mid-run → the loop polls short instead of idling
     for (const b of await dueIngestBoards(db, Date.now())) {
       const cfg = b.ingest;
       const now = Date.now();
+      // The stamp this tick claimed the board under IS this run's identity
+      // (job-control-plan.md Stage 5). Everything below is fenced on it, so
+      // whoever re-stamps mid-flight — a cancel, "Run now", a save that
+      // changes the trigger — stops this run where it stands instead of
+      // losing to it.
+      const fence = b.ingest_next_run_at;
       // Not the schedule's run: a manual board, or a paused one that only got
       // here because "Run now" armed it. Either way it's one run — nothing
       // re-arms afterwards, nothing retries, and the row it leaves in the job
@@ -2069,7 +2073,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         const errors = [];
         const skips = []; // labels — the "why did my file never get picked up" answer
         const held = []; // labels — recognized as content you deleted (stage 5)
+        let superseded = false;
         for (const c of batch) {
+          // Between admissions, not just between ticks: a connector batch is
+          // 250 admissions deep, so "after the batch" would still be a flood
+          // arriving after a cancel.
+          if (!(await ingestRunArmed(db, b.id, fence))) { superseded = true; break; }
           try {
             await adapter.admit(db, b, c, { sources });
             added++;
@@ -2096,21 +2105,27 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
             } else errors.push(`${c.label}: ${err.message}`);
           }
         }
-        const remaining = picked.length - batch.length;
+        // A superseded run has no remainder to hand on: whoever re-stamped
+        // decided what happens next, and drain_left is the budget of a run
+        // that is over.
+        const remaining = superseded ? 0 : picked.length - batch.length;
         if (remaining > 0) draining = true;
-        await setIngestState(db, b.id, {
-          last_run_at: now,
-          last_added: added,
-          last_error: errors[0] ?? null,
-          ...(remaining > 0 ? { drain_left: remaining } : {}),
-        });
         // A drain continues regardless of how the run started — it's already in
         // flight and somebody asked for all of it. Otherwise only a live
-        // schedule re-arms (nextScheduledIngestRun owns that rule).
-        await setIngestNextRun(db, b.id,
-          remaining > 0
+        // schedule re-arms (nextScheduledIngestRun owns that rule). The fence
+        // decides whether either lands: false = this run was superseded while
+        // it worked, and its state write dies with it.
+        const stopped = !(await settleIngestRun(db, b.id, fence, {
+          state: {
+            last_run_at: now,
+            last_added: added,
+            last_error: errors[0] ?? null,
+            ...(remaining > 0 ? { drain_left: remaining } : {}),
+          },
+          nextRunAt: remaining > 0
             ? Date.now()
-            : nextScheduledIngestRun(cfg, Date.now(), { continuousMs: INGEST_CONTINUOUS_MS }));
+            : nextScheduledIngestRun(cfg, Date.now(), { continuousMs: CONTINUOUS_MS() }),
+        }));
         // A completed run is `ok` even with per-item errors (they're the run's
         // findings, carried in error/skipped) — `failed` means the run itself
         // died (the catch below). But an idle SCHEDULED scan (admitted
@@ -2126,7 +2141,9 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // disposition that updated only two of them would silently undo the
         // volume guard they exist to enforce.
         const ledgered = skips.length + dups + held.length;
-        const eventful = added > 0 || errors.length > 0 || remaining > 0 || ledgered > 0;
+        // `stopped` counts as an event: the row is the trace of a run that
+        // ended early, and the cancel that ended it is looking for company.
+        const eventful = added > 0 || errors.length > 0 || remaining > 0 || ledgered > 0 || stopped;
         if (!eventful && !oneShot && job.id != null) {
           await jobLogWrite(() => deleteJobLog(db, job.id));
         } else {
@@ -2168,6 +2185,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
                 // exist to prevent. It rides rows that earned their place
                 // some other way.
                 ...(tally.held ? { ignored: tally.held } : {}),
+                ...(stopped ? { stopped: true } : {}),
               },
             });
           }
@@ -2178,18 +2196,21 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // for ONCE — its outcome is this error (visible in the modal status
         // line), not a silent retry loop that runs forever until the source
         // heals. "Run now" re-arms it whenever the user wants.
-        // Settle the schedule BEFORE publishing the error: last_error is what
-        // observers poll for, so everything it implies (disarmed/backed off)
-        // must already be true when it lands.
-        await setIngestNextRun(db, b.id, oneShot ? null : Date.now() + 5 * 60000).catch(() => {});
-        // Preserve a mid-drain budget across the failure — wiping it would
+        // One fenced write (Stage 5): the schedule and the error land
+        // together — last_error is what observers poll for, so everything it
+        // implies (disarmed/backed off) must already be true when it lands —
+        // and a run cancelled mid-failure doesn't get to re-arm its retry.
+        // The mid-drain budget is preserved across a failure: wiping it would
         // hand the retry a fresh `limit` and over-admit the logical run.
         const drainLeft = Number(b.ingest_state?.drain_left) || 0;
-        await setIngestState(db, b.id, {
-          last_run_at: now,
-          last_added: 0,
-          last_error: err.message,
-          ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
+        await settleIngestRun(db, b.id, fence, {
+          state: {
+            last_run_at: now,
+            last_added: 0,
+            last_error: err.message,
+            ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
+          },
+          nextRunAt: oneShot ? null : Date.now() + 5 * 60000,
         }).catch(() => {});
         // The same failure repeating on the retry cadence (a dead source =
         // one row per 5-minute backoff) folds into its prior row; a hand-fired
