@@ -51,7 +51,7 @@ import {
   landEntityFetch,
   dueIngestBoards,
   settleIngestRun,
-  ingestRunArmed,
+  ingestRunGate,
   ingestedKeys,
   recordIngest,
   withPluginHealth,
@@ -2074,11 +2074,23 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         const skips = []; // labels — the "why did my file never get picked up" answer
         const held = []; // labels — recognized as content you deleted (stage 5)
         let superseded = false;
+        let pausedMid = false; // held by the board's pause, NOT superseded
+        let processed = 0;     // candidates dealt with, however they went
+        // What this run still owes, published before the first admission so the
+        // Jobs modal can say "importing 0 of 200" the moment the row appears —
+        // `picked` is the logical run's remainder, `batch` only this tick's
+        // slice of it. Progress is then republished every few admissions: the
+        // modal polls at 5s, so anything finer is writes nobody reads.
+        const planned = picked.length;
+        await job.progress({ planned, admitted: 0 });
+        let sinceProgress = 0;
         for (const c of batch) {
           // Between admissions, not just between ticks: a connector batch is
           // 250 admissions deep, so "after the batch" would still be a flood
-          // arriving after a cancel.
-          if (!(await ingestRunArmed(db, b.id, fence))) { superseded = true; break; }
+          // arriving after a cancel — or minutes of importing after a pause.
+          const gate = await ingestRunGate(db, b.id, fence);
+          if (!gate.armed) { superseded = true; break; }
+          if (gate.paused) { pausedMid = true; break; }
           try {
             await adapter.admit(db, b, c, { sources });
             added++;
@@ -2104,12 +2116,19 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
               else dups++;
             } else errors.push(`${c.label}: ${err.message}`);
           }
+          processed++;
+          if (++sinceProgress >= 5) { sinceProgress = 0; await job.progress({ admitted: added }); }
         }
         // A superseded run has no remainder to hand on: whoever re-stamped
         // decided what happens next, and drain_left is the budget of a run
-        // that is over.
-        const remaining = superseded ? 0 : picked.length - batch.length;
-        if (remaining > 0) draining = true;
+        // that is over. A PAUSED one is the opposite — it keeps every row it
+        // did not get to, which is what makes unpausing resume rather than
+        // restart. Counting what was PROCESSED rather than the batch length is
+        // what makes a mid-batch break honest in both cases.
+        const remaining = superseded ? 0 : picked.length - processed;
+        // Not while held: the board is out of dueIngestBoards until it comes
+        // back, so a fast drain poll would just spin on an empty answer.
+        if (remaining > 0 && !pausedMid) draining = true;
         // A drain continues regardless of how the run started — it's already in
         // flight and somebody asked for all of it. Otherwise only a live
         // schedule re-arms (nextScheduledIngestRun owns that rule). The fence

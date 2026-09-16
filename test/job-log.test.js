@@ -11,6 +11,7 @@ import sharp from "sharp";
 import { startServer, seedBoard, seedUser, adminSession, req, primeSidecars } from "./helpers.js";
 import {
   addJobLog,
+  openJob,
   stampJobLog,
   listJobLog,
   listRunningJobs,
@@ -137,6 +138,27 @@ test("add → stamp roundtrip: detail merges, error caps at 500, running vs sett
   assert.equal(jobs[0].error.length, 500); // capped like items.error
   assert.deepEqual(jobs[0].detail, { trigger: "manual", chars: 11 }); // stamp merges over start context
   assert.ok(Number(jobs[0].ended_at) >= Number(jobs[0].started_at));
+});
+
+// A job whose work is one long pass (a feed run admitting hundreds) publishes
+// progress onto its own row — the difference between "running" and a number
+// you can decide against.
+test("progress merges onto a running row, and cannot reopen a settled one", async () => {
+  const board = await seedBoard(db, "jobs-progress");
+  const job = await openJob(db, { boardId: board, kind: "ingest", detail: { trigger: "daily" }, startedAt: Date.now() });
+
+  await job.progress({ planned: 200, admitted: 0 });
+  await job.progress({ admitted: 35 });
+  let running = await listRunningJobs(db, board);
+  assert.deepEqual(running[0].detail, { trigger: "daily", planned: 200, admitted: 35 },
+    "each publish merges; the start context survives");
+
+  await job.settle({ outcome: "ok", detail: { admitted: 40, drain_left: 0 } });
+  await job.progress({ admitted: 99 });
+  const row = (await listJobLog(db, board, { kind: "ingest" })).jobs[0];
+  assert.equal(row.outcome, "ok");
+  assert.equal(row.detail.admitted, 40, "a late publish cannot un-finish the row");
+  assert.equal(row.detail.planned, 200, "…and what it published while running stays");
 });
 
 test("listJobLog: newest first, keyset cursor, kind/outcome filters", async () => {
@@ -358,7 +380,11 @@ test("ingest run: ok row with the run's counts", async () => {
   assert.equal(r.outcome, "ok");
   assert.equal(r.item_id, null); // a board run, not an instance job
   assert.equal(r.error, null);
-  assert.deepEqual(r.detail, { trigger: "manual", scanned: 3, fresh: 3, admitted: 3, skipped: 0, drain_left: 0 });
+  // `planned` is what the run owed when it began admitting — published onto
+  // the row WHILE it ran (the modal reads it as "importing N of M"), and kept
+  // by the settle that merges over it.
+  assert.deepEqual(r.detail,
+    { trigger: "manual", scanned: 3, fresh: 3, planned: 3, admitted: 3, skipped: 0, drain_left: 0 });
 });
 
 test("idle scheduled scans leave no history; a manual no-op run keeps its row", async () => {

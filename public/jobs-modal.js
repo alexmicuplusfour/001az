@@ -72,8 +72,8 @@ const STATUS_LABELS = {
 const CANCEL_VERBS = {
   queued: {
     label: "Cancel queued",
-    title: "Pull queued work out of the pipeline — items already being processed finish",
-    confirm: "Cancel this board's queued work? A feed run in progress is stopped too (the schedule itself is unchanged). Items already being processed will finish; tagged items keep their tags, never-tagged ones are parked, and queued adds are removed — the feed then holds them out until you Re-include them.",
+    title: "Drop everything this board is waiting to do — a feed run in progress included; work already being processed finishes",
+    confirm: "Cancel this board's queued work — everything waiting, including the rest of a feed run in progress (the schedule itself is unchanged)? Items already being processed will finish; tagged items keep their tags, never-tagged ones are parked, and queued adds are removed — the feed then holds them out until you Re-include them.",
   },
   abort: {
     label: "Abort",
@@ -273,6 +273,18 @@ function jobRow(j, newSince = 0) {
 }
 
 // A server `running` row: elapsed instead of outcome, no summary yet.
+// What a running row SAYS it is doing. A feed run publishes progress onto its
+// job row (worker.js), and that is the difference between "running" and a
+// number you can decide against — the row is a long single pass, not a queue
+// you can count on screen. Pure and exported for the same reason summaryFor is.
+export function runningStatus(j) {
+  if (j.kind === "transcribe") return "transcribing";
+  const planned = Number(j.detail?.planned);
+  if (j.kind === "ingest" && Number.isFinite(planned) && planned > 0)
+    return `importing ${Number(j.detail?.admitted) || 0} of ${planned}`;
+  return "running";
+}
+
 function runningRow(j) {
   const row = document.createElement("div");
   row.className = "job-row job-running";
@@ -284,7 +296,7 @@ function runningRow(j) {
   label.textContent = j.kind === "ingest" ? "Feed run" : (j.entity_display || j.target || "");
   const status = document.createElement("span");
   status.className = "job-outcome job-outcome-running";
-  status.textContent = j.kind === "transcribe" ? "transcribing" : "running";
+  status.textContent = runningStatus(j);
   const when = document.createElement("span");
   when.className = "job-when";
   when.textContent = `for ${fmtDuration(Date.now() - j.started_at)}`;
@@ -366,6 +378,19 @@ export function openJobsModal({ kind } = {}) {
   const abortOffered = () =>
     state.items.some((i) => ACTIVE.has(i.status)) &&
     (jobs.find((j) => j.kind === "cancel")?.detail?.finishing ?? 0) > 0;
+  // QUEUED means every kind of work this board is waiting to do — pipeline rows
+  // AND the un-admitted remainder of a feed run, which is queued work that
+  // simply hasn't been written down as rows yet. One verb over the lot, because
+  // they are one decision: the route has always cancelled both.
+  //
+  // This started as two names ("Cancel queued" / "Stop feed run") picked by
+  // whether any pipeline row happened to be waiting right then — and on a board
+  // whose charts render in a second, that flickered back and forth under the
+  // pointer every poll. A destructive button whose verb changes while you read
+  // it is worse than either name.
+  const feedRunning = () => state.work.running.some((j) => j.kind === "ingest");
+  const anythingQueued = () => feedRunning() || state.items.some((i) => QUEUED.has(i.status));
+  const cancelKey = () => (abortOffered() ? "abort" : "queued");
   const renderPause = () => {
     if (!pauseLabel) return;
     pauseLabel.textContent = state.boardPaused ? "Resume" : "Pause";
@@ -418,9 +443,9 @@ export function openJobsModal({ kind } = {}) {
     cancelBtn.appendChild(cancelLabel);
     cancelBtn.style.display = "none";
     cancelBtn.addEventListener("click", busy(cancelBtn, async () => {
-      const abort = abortOffered();
-      const verb = CANCEL_VERBS[abort ? "abort" : "queued"];
-      if (!confirm(verb.confirm)) return;
+      const key = cancelKey();
+      const abort = key === "abort";
+      if (!confirm(CANCEL_VERBS[key].confirm)) return;
       try {
         const c = await api("POST", `/api/boards/${state.boardId}/jobs/cancel-queued`, { abort });
         // The same sentence the History row will carry — summaryFor owns the
@@ -526,7 +551,11 @@ export function openJobsModal({ kind } = {}) {
     if (!sched) { schedLine.hidden = true; return; }
     const when = (ts) => (ts - Date.now() <= 0 ? "due now" : `in ${fmtDuration(ts - Date.now())}`);
     const bits = [];
-    if (sched.ingest_next_run_at) bits.push(`next feed run ${when(sched.ingest_next_run_at)}`);
+    // A run in flight holds its own stamp in the past for as long as it takes,
+    // so this line said "next feed run due now" beside a row already saying
+    // "importing 235 of 261" — two readings of the same fact, one of them
+    // wrong. The row is the better one; drop the bit while it is up.
+    if (sched.ingest_next_run_at && !feedRunning()) bits.push(`next feed run ${when(sched.ingest_next_run_at)}`);
     if (sched.retag_next_run_at) bits.push(`next retag ${when(sched.retag_next_run_at)}`);
     if (sched.refresh_next_at) bits.push(`next refresh ${when(sched.refresh_next_at)}`);
     schedLine.hidden = !bits.length;
@@ -559,11 +588,14 @@ export function openJobsModal({ kind } = {}) {
     // queued rows AND discards the running calls' landings — the full
     // remainder, not just the calls in the air.
     if (cancelBtn) {
-      const abort = abortOffered();
-      const verb = CANCEL_VERBS[abort ? "abort" : "queued"];
-      const n = abort ? inFlight.length : queuedItems.length;
-      cancelBtn.style.display = n ? "" : "none";
-      cancelLabel.textContent = abort ? `${verb.label} — ${n} left` : verb.label;
+      const key = cancelKey();
+      const verb = CANCEL_VERBS[key];
+      const show = key === "abort" ? inFlight.length > 0 : anythingQueued();
+      cancelBtn.style.display = show ? "" : "none";
+      // Abort names its count because it is the escalation and the number IS
+      // the warning. Cancel doesn't: its number changes every poll, and a
+      // count on the label is the same restlessness as a changing verb.
+      cancelLabel.textContent = key === "abort" ? `${verb.label} — ${inFlight.length} left` : verb.label;
       cancelBtn.title = verb.title;
     }
   }

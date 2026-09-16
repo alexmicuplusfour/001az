@@ -845,27 +845,80 @@ left to the sweep suite already exercising saves.
 - **`retag_on_refresh` is the other producer** (refresh cascade →
   `requeueItemForTag`). One item per refreshed entity on a schedule, not a
   flood, and it is off on the board that prompted this. Left alone.
-- **A run row in the modal's In-progress list.** The live list shows pipeline
-  items only, so a draining feed appears nowhere in Jobs — you see the flood,
-  not the source. Worth a line ("Ingestion: N to drain") but it is its own
-  transparency change; the cancel row naming what it stopped covers the
-  immediate confusion, and the toolbar chip already says `running`.
-- **The run-state line after a cancelled run.** The superseded tick's state
-  write dies with the fence (it has to — that write is where drain_left would
-  come back), so `ingest_state` keeps whatever the last COMPLETED run left. On
-  a board whose only run was cancelled the modal reads "never run" while
-  History shows the cancelled run and its counts. Seen in the live test
-  (2026-09-16): the job row carries the truth, and splitting the settle into
-  history-without-budget is more machinery than the line is worth.
 - **Transcription cancel mid-clip** — still parked (Stage 4 list).
-- **Offering the button while the queue is momentarily empty.** The cancel
-  control appears on queued rows, so a run caught between batches with an empty
-  queue hides it for that instant. The obvious proxy — `ingest_next_run_at <=
-  now` — is unusable: a continuous watch is 'due' every 30 seconds, so the
-  button would flicker on every such board forever. The honest signal is
-  `drain_left`, which the board payload does not carry and which is not worth
-  plumbing for an instant-long gap in the one case (a flood) where the queue is
-  never empty.
+### Both deferrals were wrong (2026-09-16, from two screenshots)
+
+The stage shipped with two things deliberately left out, and a user with a
+live feed run showed both of them to be the difference between a working verb
+and a dead one. What the dialog actually showed: `Ingestion · Feed run ·
+running · for 26s`, one chart rendering, nothing queued — **and no Cancel
+button anywhere on it**. Five seconds later, the same run at 31s, still no
+button. The ledger confirms it: a run admitting 200 vehicles, no cancel row
+against it, because there was nothing to press.
+
+1. ~~"A run row in the modal's In-progress list" — its own transparency
+   change~~. The row was already there (`workFor` serves running job rows); what
+   it said was the word "running" and a clock, for three minutes. `workFor` now
+   passes `detail` through, `openJob` gained a `progress()` that merges onto a
+   running row (fenced on `outcome='running'`, so a late publish can't un-finish
+   one), and the sweep publishes `planned` before its first admission and
+   `admitted` every five after. The row reads **"importing 47 of 400"** — the
+   difference between a word and a number you can decide against.
+2. ~~"Offering the button while the queue is momentarily empty" — an
+   instant-long gap not worth plumbing~~. Not instant: on a stocks board a chart
+   renders in about a second, so the pipeline keeps up with the producer and the
+   queue is *usually* empty while a run imports. The control now appears
+   whenever a feed run is running.
+
+   The first attempt at that gave the run its own verb ("Stop feed run") chosen
+   by whether a pipeline row happened to be waiting — **and the label flickered
+   between two names under the pointer**, every poll, on a destructive button.
+   The user called it: *"does cancel queued also cancel feed runs? if it does,
+   why do we also need a stop run button? queued includes all type of work
+   that's waiting to be done."* Exactly right, and it is the better model: the
+   un-admitted remainder of a feed run is queued work that has not been written
+   down as rows yet. ONE verb, "Cancel queued", over the lot — which is what
+   the route has always done anyway. `cancelKey()` now chooses only between
+   cancel and its escalation, and `anythingQueued()` decides visibility.
+
+The lesson worth keeping: this stage reasoned about the producer from the
+worker's side (ticks, budgets, fences) and never asked what the dialog looks
+like on a board where the consumer is faster than the producer. `queued.length`
+as the visibility test encoded an assumption — that a flood leaves a queue —
+that the arc's own postmortem board happened to satisfy and the next one did
+not.
+
+Pinned in test/jobs-modal.test.js (jsdom, the three shapes: run-only,
+run-plus-queue, idle), test/jobs-row.test.js (`runningStatus`),
+test/job-log.test.js (progress merges; a settled row never reopens) and
+test/ingest-sweep.test.js (`planned` is the RUN's remainder across a drain,
+not the tick's slice).
+
+### Third pass (2026-09-17)
+
+Three more, found by asking what ELSE on this dialog looks like a control that
+does nothing:
+
+1. **Pause did not stop a run that was already importing.** `dueIngestBoards`
+   is notPaused-gated, so pause stopped the NEXT tick — but a connector tick is
+   250 admissions deep, so a paused board kept importing for minutes after the
+   button said otherwise. The admit loop's per-row check now answers two
+   questions from the one lookup it was already making (`ingestRunGate` →
+   `{ armed, paused }`), and the two part company at the settle: a superseded
+   run drops its budget, a PAUSED one keeps it. That meant counting what the
+   tick actually PROCESSED rather than assuming the whole batch — which is what
+   makes a mid-batch break honest in either direction. Unpausing resumes the
+   same run where it stopped, which is pause's whole contract.
+2. **"Saved, but the run failed" said "Save failed".** The run POST shared the
+   save's try block, so a thrown fetch reported a failed save at someone whose
+   config was already stored — the reliable way to make them save twice and
+   trust neither. It has its own try now, and the repaint moved to just after
+   the PATCH, so a failed run cannot leave the chip showing the config the save
+   just replaced.
+3. **"next feed run due now", directly under a row saying the run was going.**
+   A run in flight holds its own stamp in the past until it settles, so the
+   schedule line was reporting the current run as an upcoming one. Dropped
+   while a run is up; the row above is the better telling.
 
 ## Decisions log
 
@@ -935,3 +988,16 @@ left to the sweep suite already exercising saves.
     the better rule — forgetting would hand the next scheduled run the same
     items to re-admit, where `deleted` holds the cancel and Re-include reverses
     it deliberately.
+18. **"Queued" means every kind of work the board is waiting to do** — pipeline
+    rows AND the un-admitted remainder of a feed run — under ONE verb
+    (2026-09-16, user's call). The control appears whenever any of it exists.
+    A second name for the run ("Stop feed run", chosen by whether a row
+    happened to be waiting) lasted one screenshot: it made the same request
+    through the same route while flickering between two words under the
+    pointer. A destructive button whose verb changes as you read it is worse
+    than either name, and the split was never real to begin with.
+19. A long-running job **publishes progress onto its own row** (`openJob`'s
+    `progress()`, merged and fenced on `outcome='running'`): a feed run says
+    "importing 47 of 400" instead of "running", because the row IS the only
+    place a watcher can see how much is left. Every five admissions — the modal
+    polls at 5s, so finer is writes nobody reads.

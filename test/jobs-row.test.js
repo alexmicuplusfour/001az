@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "./browser-stub.js"; // globals first — jobs-modal.js pulls in client modules
 
-const { summaryFor, imageTitle } = await import("../public/jobs-modal.js");
+const { summaryFor, imageTitle, runningStatus } = await import("../public/jobs-modal.js");
 
 const tagRow = (image) => ({ kind: "tag", outcome: "ok", detail: { tags: 7, model: "gpt-5-mini", ...(image ? { image } : {}) } });
 
@@ -54,6 +54,22 @@ test("an unrecognized fallback reason is shown, not swallowed", () => {
 test("rows from before the rendition shipped still summarize", () => {
   assert.equal(summaryFor(tagRow(null)), "7 tags");
   assert.equal(summaryFor({ kind: "tag", outcome: "ok", detail: { tags: 1 } }), "1 tag");
+});
+
+// --- the IN PROGRESS rows: a long pass says how far along it is ---
+
+test("a feed run in progress counts, instead of saying 'running' for three minutes", () => {
+  assert.equal(runningStatus({ kind: "ingest", detail: { planned: 200, admitted: 47 } }), "importing 47 of 200");
+  assert.equal(runningStatus({ kind: "ingest", detail: { planned: 200 } }), "importing 0 of 200",
+    "the row appears before the first admission lands");
+});
+
+test("rows with nothing to count keep the plain word", () => {
+  assert.equal(runningStatus({ kind: "ingest", detail: { trigger: "daily" } }), "running",
+    "a run from before progress shipped, or one still enumerating");
+  assert.equal(runningStatus({ kind: "ingest", detail: { planned: 0 } }), "running", "zero is not a countdown");
+  assert.equal(runningStatus({ kind: "tag", detail: {} }), "running");
+  assert.equal(runningStatus({ kind: "transcribe" }), "transcribing", "the one kind with its own verb");
 });
 
 // --- the cancel row: honest about both what it did and what it could not reach ---

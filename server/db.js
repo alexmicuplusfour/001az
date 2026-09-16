@@ -2025,13 +2025,28 @@ export async function clearIngestSuperseded(db, boardId) {
 // the fence, left for whoever decides what those two should do to a run that
 // is already importing under the old rules.
 //
-// Is the run this tick claimed still the board's run? Asked between
-// admissions, so a stop lands mid-batch instead of after it: one PK lookup
-// against an admission that creates an entity, an item and a chart job.
-export async function ingestRunArmed(db, boardId, fence) {
-  const { rowCount } = await db.query(
-    "SELECT 1 FROM boards WHERE id=$1 AND ingest_next_run_at=$2", [boardId, fence]);
-  return rowCount > 0;
+// May this tick admit its next row? Asked BETWEEN admissions, so both answers
+// land mid-batch instead of after it — one PK lookup against an admission that
+// creates an entity, an item and a chart job.
+//
+// Two different questions, deliberately answered together because a batch is
+// the only place either can be asked often enough to matter:
+//   armed   is the run this tick claimed still the board's run (the fence)
+//   paused  has the board been held since this tick started
+// They part company at the SETTLE: a superseded run is over and drops its
+// budget, where a paused one is HELD and must keep it — pause's whole contract
+// is that the queue is intact and resumes. Without the pause half, a 250-deep
+// connector batch keeps importing for minutes after the button says stopped,
+// which is the same "the control doesn't do anything" this arc keeps paying
+// for. An admission is the sweep claiming new work onto the board, and pause
+// stops claims — this is the same rule dueIngestBoards' notPaused() applies a
+// tick later, applied at the resolution the work actually happens at.
+export async function ingestRunGate(db, boardId, fence) {
+  const { rows } = await db.query(
+    "SELECT (ingest_next_run_at = $2) AS armed, paused FROM boards WHERE id=$1",
+    [boardId, fence]
+  );
+  return { armed: rows[0]?.armed === true, paused: rows[0]?.paused === true };
 }
 
 // The sweep's end-of-tick write, fenced: run state and the next stamp in ONE
@@ -3025,6 +3040,16 @@ export async function openJob(db, fields) {
   let settled = false;
   return {
     id: jobId,
+    // Publish progress onto the row while it runs. A job whose work is one
+    // long pass — a feed run admitting hundreds — is otherwise a word
+    // ("running") and a clock, which tells a watcher nothing about how much is
+    // left or whether stopping it is worth it. Merged into detail like the
+    // settle's, never-throw like the rest of the ledger, and a no-op once
+    // settled so a late tick can't un-finish a row.
+    progress: (detail) =>
+      settled || jobId == null
+        ? null
+        : jobLogWrite(() => progressJobLog(db, jobId, detail), `${fields.kind} progress`),
     settle: (outcome) => {
       if (settled) return null;
       settled = true;
@@ -3034,6 +3059,15 @@ export async function openJob(db, fields) {
       `${fields.kind} settle`);
     },
   };
+}
+
+// Progress on a row that is still running: detail merges, and the outcome
+// fence means a settled row is never reopened.
+export async function progressJobLog(db, id, detail) {
+  await db.query(
+    "UPDATE job_log SET detail = detail || $2 WHERE id=$1 AND outcome='running'",
+    [id, JSON.stringify(detail || {})]
+  );
 }
 
 // Resolve a running row. Detail merges over what the row already carries, so

@@ -930,7 +930,7 @@ export function openIngestModal() {
     // the BUFFERED config while a run executes the SAVED one, so an unsaved
     // filter edit would make the run admit a different set than the number
     // just acted on. Re-previewing instead shows the change where the user is
-    // already looking, with Run now beside it.
+    // already looking, with the run button beside it.
     async function forget(scope, scoped, done) {
       const r = await fetch(`/api/boards/${state.boardId}/ingest/clear`, {
         method: "POST",
@@ -958,7 +958,7 @@ export function openIngestModal() {
     // the far side, the hatch for undoing what the app remembers about it.
     // The hatch answers "why is this number odd?" — a question nobody has
     // while configuring — so it stays out of the task flow. It does NOT
-    // belong in the footer: that row is Save and Run now, the two things this
+    // belong in the footer: that row is Save and Save-and-run, the two things this
     // modal is for, and a footer `button` rule outranks .im-link there, so a
     // quiet maintenance link renders as a third primary.
     const lastRow = document.createElement("div");
@@ -1237,9 +1237,12 @@ export function openIngestModal() {
 
     // ── Footer (settings view) ──
     if (canEdit) {
-      const saveBtn = document.createElement("button");
-      saveBtn.textContent = "Save";
-      saveBtn.addEventListener("click", async () => {
+      // One path for both footer buttons. `run` fires the feed AFTERWARDS, and
+      // the order is the whole point of the button existing: /ingest/run
+      // executes the STORED config, so a run that didn't save first runs the
+      // previous one — which is how "hit Run now, then close without saving"
+      // became an easy and invisible mistake.
+      async function saveConfig({ run = false } = {}) {
         // No source added: with a saved config this is the remove gesture —
         // Save clears the board's ingestion outright (ingest: null). With
         // nothing saved either, there's nothing to write; saving the config
@@ -1247,7 +1250,8 @@ export function openIngestModal() {
         // the add step exists to kill.
         let body;
         let okToast = "Ingestion saved";
-        if (!sourceAdded()) {
+        const removing = !sourceAdded();
+        if (removing) {
           if (!saved) {
             toast.error("Add a source first — nothing to save.");
             return;
@@ -1289,34 +1293,52 @@ export function openIngestModal() {
           // Only stamp if the pair actually arrived: a 200 whose body didn't
           // survive the trip would otherwise blank a chip the save just kept.
           if (data.ingest_mode !== undefined) stampBoard(data);
+          // The save has landed, so everything the save changes repaints NOW —
+          // before the run is attempted. A run that fails afterwards must not
+          // leave the chip showing the config it just replaced.
           ensurePolling();
           document.dispatchEvent(new Event("app:render"));
+          // A save that REMOVED the ingestion has nothing to run, and the route
+          // would only 409 at it. The save stands; say so and close.
+          if (run && !removing) {
+            // Its own try: a run that throws (or refuses) is NOT a failed save,
+            // and saying "save failed" at someone whose config is stored is how
+            // they save twice and still trust nothing.
+            let queued = false;
+            let why = null;
+            try {
+              const rr = await fetch(`/api/boards/${state.boardId}/ingest/run`, { method: "POST" });
+              why = (await rr.json().catch(() => ({}))).error;
+              queued = rr.ok;
+            } catch { /* offline — same story as a refusal */ }
+            if (!queued) {
+              toast.error(why || "Saved, but the run could not be queued");
+              return;
+            }
+            // The route just armed next_run_at = now, after the PATCH echo
+            // stamped whatever the schedule said — so this stamp goes last.
+            state.boardIngestNextRun = Date.now();
+            okToast = state.boardPaused
+              ? "Saved — board paused, run queued for resume"
+              : "Saved — ingestion run queued";
+          }
           toast(okToast);
           close();
         } catch {
           toast.error("Save failed");
         }
-      });
+      }
+
+      const saveBtn = document.createElement("button");
+      saveBtn.textContent = "Save";
+      saveBtn.addEventListener("click", () => saveConfig());
       const runBtn = document.createElement("button");
       runBtn.className = "ghost";
-      runBtn.textContent = "Run now";
-      runBtn.title = "Runs the saved configuration on the next worker tick";
-      runBtn.addEventListener("click", async () => {
-        try {
-          const r = await fetch(`/api/boards/${state.boardId}/ingest/run`, { method: "POST" });
-          const data = await r.json().catch(() => ({}));
-          if (!r.ok) return toast.error(data.error || "Run failed");
-          // The route just armed next_run_at = now — no refetch needed. The
-          // chip flips to "now" on its next tick, and its own expiry refetch
-          // follows the sweep from there. On a paused board the arm DEFERS
-          // (the sweep's single choke point, job-control-plan.md Stage 1):
-          // nothing is confiscated, the run fires on resume — say so.
-          state.boardIngestNextRun = Date.now();
-          toast(state.boardPaused ? "Board paused — run queued for resume" : "Ingestion run queued");
-        } catch {
-          toast.error("Run failed");
-        }
-      });
+      // Named for both halves because it does both: the old "Run now" ran the
+      // STORED config, so editing and then running silently ran the old one.
+      runBtn.textContent = "Save and run now";
+      runBtn.title = "Save this configuration, then run it on the next worker tick";
+      runBtn.addEventListener("click", () => saveConfig({ run: true }));
       footerSettings.append(saveBtn, runBtn);
     } else {
       const note = document.createElement("p");

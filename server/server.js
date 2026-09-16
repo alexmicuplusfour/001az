@@ -1159,6 +1159,11 @@ async function workFor(boardId, board = null) {
   return {
     running: running.map((j) => ({
       id: j.id, kind: j.kind, label: capabilityLabel(j.kind), target: j.target,
+      // `detail` rides along because a running row can carry PROGRESS (a feed
+      // run's planned/admitted). Settled rows already serve theirs to History;
+      // withholding it here is what left a three-minute import showing as the
+      // word "running".
+      detail: j.detail,
       // entity_id is the dedup key: the client's cards are entities, and a
       // running row whose entity already shows as an in-flight item is one
       // unit of work wearing two records.

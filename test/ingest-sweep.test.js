@@ -170,6 +170,58 @@ test("a capped run drains across ticks and honors the logical limit exactly", as
 // flight writes drain_left straight back over the stop — and since a tick
 // walks a catalog and then admits its whole batch, "mid-tick" is the normal
 // state during a drain, not a narrow window.
+test("a run publishes what it owes onto its own row, before it admits anything", async () => {
+  for (let i = 1; i <= 3; i++) put(`progress/f${i}.txt`, `file ${i}`);
+  const id = await seedBoard(db, "progress");
+  await watch(id, "progress");
+  await runOnce(id);
+  // The settle merges over the progress, so each finished tick still carries
+  // the plan the modal was reading off it while that tick was in flight — and
+  // `planned` is the RUN's remainder, not the tick's slice, which is what
+  // makes "importing 2 of 3" mean anything across a drain.
+  const rows = await jobRowsAtLeast(id, 2);
+  const first = rows[rows.length - 1];
+  assert.equal(first.detail.planned, 3, "what the run owed when it started admitting");
+  assert.equal(first.detail.admitted, 2, "…and what the per-tick cap let that tick take");
+  assert.equal(rows[0].detail.planned, 1, "the drain tick owes what is left, and says so");
+});
+
+// Pause is a HOLD, and its contract is that the queue is intact and resumes —
+// so a run has to stop where it stands and keep what it has not got to. The
+// gate lives between admissions, not just in dueIngestBoards: a connector
+// batch is 250 deep, and a tick that keeps importing for minutes after the
+// button says paused is a button that does nothing.
+//
+// What this pins is the CONTRACT — stopped short, remainder kept, same run
+// resumed. Landing the pause inside a batch rather than between two ticks is
+// not something a test can force here (the cap is 2 and a .txt admission is
+// sub-millisecond); that half rides on the gate sharing its call site with the
+// cancel fence, which the test below exercises the same way.
+test("pause stops a run mid-batch and HOLDS its remainder; unpause resumes it", async () => {
+  for (let i = 1; i <= 8; i++) put(`pausedrain/f${i}.txt`, `file ${i}`);
+  const id = await seedBoard(db, "pausedrain");
+  await watch(id, "pausedrain", { limit: 8 });
+  await setIngestNextRun(db, id, Date.now() - 1);
+  await until(async () => ((await getBoard(db, id)).ingest_state?.drain_left || 0) > 0);
+
+  await db.query("UPDATE boards SET paused=TRUE WHERE id=$1", [id]);
+  await new Promise((r) => setTimeout(r, 500));
+  const held = await getBoard(db, id);
+  const landed = (await names(id)).length;
+  assert.ok(landed < 8, `the run stopped short (${landed} of 8)`);
+  assert.ok((held.ingest_state.drain_left || 0) > 0, "the remainder is KEPT, not dropped");
+  assert.ok(held.ingest_next_run_at, "…and it stays armed, waiting for the board");
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal((await names(id)).length, landed, "nothing admits while held");
+
+  await db.query("UPDATE boards SET paused=FALSE WHERE id=$1", [id]);
+  // Wait for the BUDGET to clear, not the item count: the last admission and
+  // the settle that zeroes drain_left are separate writes, so counting items
+  // first reads the stamp of the tick before.
+  await until(async () => (((await getBoard(db, id)).ingest_state?.drain_left ?? 0) === 0 ? true : null), 8000);
+  assert.equal((await names(id)).length, 8, "the same run finished its budget, from where it left off");
+});
+
 test("a stop mid-drain ends the run: the tick in flight can't restore the budget", async () => {
   for (let i = 1; i <= 12; i++) put(`stopdrain/f${i}.txt`, `file ${i}`);
   const id = await seedBoard(db, "stopdrain");

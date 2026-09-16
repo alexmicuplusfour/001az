@@ -67,6 +67,9 @@ let LEDGER = { total: 0, on_board: 0, held: 0, unprocessable: 0 };
 // the whole ledger and feeds only the records reset.
 let PREVIEW = { count: 0, new: 0, on_board: 0, held: 0, unprocessable: 0, capped: false, truncated: false };
 let CLEARED = 0;
+// Make the next board PATCH fail, so a test can prove what does NOT happen
+// after a refused save. Reset in the test's finally, never left armed.
+let SAVE_FAILS = null;
 let SAFE = true;
 // Answer to the next confirm(). Stubbed here beside fetch rather than inside a
 // test, so no test can leave a live auto-accept behind for the next one.
@@ -75,6 +78,8 @@ let confirmMsg = null;
 globalThis.confirm = (m) => { confirmMsg = m; return CONFIRMED; };
 globalThis.fetch = async (url, opts = {}) => {
   calls.push({ url: String(url), opts });
+  if (opts.method === 'PATCH' && SAVE_FAILS)
+    return { ok: false, json: async () => ({ error: SAVE_FAILS }) };
   if (String(url).endsWith('/ingest/preview'))
     return { ok: true, json: async () => structuredClone(PREVIEW) };
   if (String(url).endsWith('/ingest/clear'))
@@ -121,6 +126,38 @@ async function savedPatch(modal) {
   assert.ok(patch, 'Save PATCHed the board');
   return JSON.parse(patch.opts.body).ingest;
 }
+
+// The footer's second button used to be "Run now", and it ran the STORED
+// config — so editing, hitting it, and closing ran the OLD config and threw
+// the edits away, invisibly. It saves first now, and closes like Save does.
+test('Save and run now: PATCH first, then the run, then the modal closes', async (t) => {
+  const modal = await openBuilt(t);
+  const run = btn(modal, /^Save and run now$/);
+  assert.ok(run, 'the button names both halves');
+
+  run.click();
+  await tick(); await tick(); await tick();
+
+  const order = calls.filter((c) => c.opts.method === 'POST' || c.opts.method === 'PATCH');
+  assert.deepEqual(order.map((c) => c.opts.method), ['PATCH', 'POST'],
+    'the run route executes the STORED config, so the save has to land first');
+  assert.match(order[1].url, /\/ingest\/run$/);
+  await until(() => !modal.isConnected, 2000);
+});
+
+test('Save and run now: a save that fails never runs', async (t) => {
+  const modal = await openBuilt(t);
+  SAVE_FAILS = 'that folder is gone';
+  try {
+    btn(modal, /^Save and run now$/).click();
+    await tick(); await tick(); await tick();
+    assert.equal(calls.filter((c) => String(c.url).endsWith('/ingest/run')).length, 0,
+      'the run never fired — it would have run the PREVIOUS config');
+    assert.ok(modal.isConnected, 'and the dialog stays up, on the thing that needs fixing');
+  } finally {
+    SAVE_FAILS = null;
+  }
+});
 
 test('a saved config round-trips open → Save byte-identical — unknown keys included', async (t) => {
   const modal = await openBuilt(t);
@@ -269,7 +306,7 @@ test('the records reset is ledger-wide, warns per descriptor, and hides at zero'
   let modal = await openBuilt(t);
   const hatch = link(modal, /^Clear ingestion records/);
   assert.ok(hatch, 'the hatch names records, not history or memory');
-  // NOT in the footer: that row is Save and Run now, and a footer `button`
+  // NOT in the footer: that row is Save and Save-and-run, and a footer `button`
   // rule outranks .im-link there — a quiet maintenance link came out looking
   // like a third primary. It rides the last-run line instead, pushed right.
   assert.equal(hatch.closest('.modal-footer'), null);
