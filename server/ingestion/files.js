@@ -12,7 +12,8 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { admitFile } from "../ingest.js";
-import { withTx, recordIngest, getSourceConnection, listSourceConnections, withPluginHealth } from "../db.js";
+import { withTx, recordIngest, itemBySourceKey, itemByContentHash, deletedByContentHash,
+  getSourceConnection, listSourceConnections, withPluginHealth } from "../db.js";
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
 import { acceptsName, extOf } from "../sources/index.js";
 import { getSourceBackend, sourceModules } from "./sources/index.js";
@@ -114,6 +115,12 @@ export function descriptor() {
     filters: FILE_FILTERS,
     sorts: FILE_SORTS,
     triggerModes: FILE_TRIGGERS,
+    // FALSE because items admitted before provenance existed (stage 2) are
+    // invisible to both recognition probes, so forgetting the ledger really
+    // can re-import them as duplicates. Over-warning a fully-modern board is
+    // mild; promising "your items are safe" ahead of an irreversible act on a
+    // legacy one is not. Flip when that population stops mattering.
+    forgetAllIsSafe: false,
   };
 }
 
@@ -186,31 +193,119 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
   return { candidates: toCandidates(entries), truncated };
 }
 
+// Has this slot stopped holding the bytes we recorded? The adapter's own
+// question, in one place, because two callers ask it against two different
+// stores: the sweep compares a ledger row (runWindow, via `changed`), the key
+// probe below compares an item's provenance. Both shapes carry `size` and
+// `modified`, so one predicate serves both — and, more to the point, neither
+// can answer it differently from the other by accident.
+//
+// "Changed" means PROVABLY changed: a fact we never recorded proves nothing,
+// so it is not drift. A caller that needs the opposite default (the key
+// probe, which must not trust an unrecorded slot) says so at its own site.
+export function changed(candidate, recorded) {
+  if (!recorded) return false;
+  return (recorded.size !== null && recorded.size !== undefined
+          && Number(candidate.values?.file_size) !== Number(recorded.size))
+      || (recorded.modified !== null && recorded.modified !== undefined
+          && Number(candidate.values?.modified) !== Number(recorded.modified));
+}
+
+// The file's content identity, computed at admit on bytes already fetched
+// and about to be decoded — the one hashing site (never during a scan; scans
+// stay listings). Stage 5's rename/drift tiebreakers read it back.
+async function sha256(filePath) {
+  const h = crypto.createHash("sha256");
+  for await (const chunk of fs.createReadStream(filePath)) h.update(chunk);
+  return h.digest("hex");
+}
+
+// Recognition ladder rungs 3 and 4 (ingest-deletions-plan.md stage 5): the bytes are in hand,
+// so ask what they ARE before creating anything. A live item wins over a
+// deleted row — you had two copies and deleted one, so the survivor is the
+// better answer. Every throw carries `ledger`, the facts the sweep must
+// re-record: without them a file whose mtime merely moved would drift, be
+// re-fetched, be recognized, and drift again on the very next tick.
+async function recognize(db, boardId, ledger) {
+  const live = await itemByContentHash(db, boardId, ledger.hash);
+  if (live != null) {
+    const e = new Error("already on this board");
+    e.duplicate = true;
+    e.itemId = live;
+    e.ledger = ledger;
+    throw e;
+  }
+  const deletedAs = await deletedByContentHash(db, boardId, ledger.hash);
+  if (deletedAs != null) {
+    const e = new Error(`matches an item you deleted (${deletedAs})`);
+    e.held = true;
+    e.ledger = ledger;
+    throw e;
+  }
+}
+
 // Admit one candidate: fetch the source file to tmp (never consume the
 // original), then birth the entity+item and the ledger row in one transaction,
 // through the same admitFile the upload route uses. The gallery/thumbnail writes
 // inside admitFile precede COMMIT, so a rollback cleans them up best-effort —
 // the same latent orphan window the upload route has.
 export async function admit(db, board, candidate, { sources } = {}) {
+  // Rung 1 — self-heal WITHOUT paying the fetch: a live item born from this
+  // source key, whose recorded size and mtime still match what the listing
+  // reports, is this same file with a lost ledger row (a cleared memory, a
+  // crash between entity and ledger). Throw the same `.duplicate` the
+  // connector's unique constraint does and the sweep re-ledgers it, link
+  // included: the ledger rebuilds itself.
+  //
+  // The size/mtime agreement is load-bearing, not belt-and-braces. A path is
+  // only evidence of identity while the slot holds the same bytes, and on a
+  // spool folder it does not: drop, ingest, clear, drop something else under
+  // the same name. Short-circuiting on the key alone would call that second
+  // file a duplicate of the first and silently drop it forever. When the
+  // facts disagree — or were never recorded — we fall through and let the
+  // content decide. Only items admitted since provenance exists are visible
+  // here; older ones re-import, which is why forgetAllIsSafe stays false below.
+  const existing = await itemBySourceKey(db, board.id, candidate.key);
+  if (existing != null && existing.size != null && existing.modified != null
+      && !changed(candidate, existing)) {
+    const e = new Error("already on this board");
+    e.duplicate = true;
+    e.itemId = existing.id;
+    // The slot's facts, so the rebuilt ledger row carries them. Without this
+    // a healed row is written with NULL size/mtime, nothing can ever drift
+    // against it again, and the reused-path case this stage exists for dies
+    // silently on every file the Forget-all button healed.
+    e.ledger = { size: existing.size, modifiedAt: existing.modified };
+    throw e;
+  }
   const be = await resolveBackend(db, board.ingest?.source);
   const limitFor = await mediaLimitLookup(db); // effective per-type size gate
   const tmp = path.join(os.tmpdir(), `ingest-${crypto.randomBytes(8).toString("hex")}`);
   await be.fetch(candidate.key, tmp);
   let admitted = null;
+  let facts = null; // the slot's recorded facts, once the bytes have been read
   try {
+    const hash = await sha256(tmp);
+    // What every ledger write from here on records — and what the recognition
+    // throws carry, so a recognized file's slot is re-stamped and stops
+    // drifting on every tick.
+    facts = { hash, size: candidate.values.file_size ?? null, modifiedAt: candidate.values.modified ?? null };
+    await recognize(db, board.id, facts);
     return await withTx(db, async (client) => {
       admitted = await admitFile(client, sources, board, tmp, candidate.label, {
         addedAt: Date.now(),
         modifiedAt: candidate.values.modified,
         createdAt: candidate.values.created, // file sources fill `created` (media/universal.js)
         maxBytes: limitFor(candidate.label),
+        provenance: { key: candidate.key, hash, size: facts.size, modified: facts.modifiedAt },
       });
       if (!admitted) {
         const e = new Error("unsupported file type");
         e.skip = true; // ledger-and-forget: don't rescan it forever
         throw e;
       }
-      await recordIngest(client, board.id, candidate.key, Date.now());
+      await recordIngest(client, board.id, candidate.key, Date.now(),
+        { itemId: admitted.itemId, ...facts });
       return { entityId: admitted.entityId, itemId: admitted.itemId };
     });
   } catch (err) {
@@ -219,6 +314,10 @@ export async function admit(db, board, candidate, { sources } = {}) {
     // page-cap refusals) is deterministic — skip means the sweep ledgers it and
     // stops rescanning. Infra failures (db, disk, network) stay retryable.
     if (err.unprocessable) err.skip = true;
+    // A skip re-records the slot's facts for the same reason a recognition
+    // does: otherwise a touched unprocessable file is re-fetched every tick.
+    // Only where the bytes were actually read — a fetch failure knows none.
+    if (err.skip && !err.ledger && facts) err.ledger = facts;
     throw err;
   } finally {
     await fs.promises.unlink(tmp).catch(() => {});

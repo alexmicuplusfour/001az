@@ -146,11 +146,21 @@ export function summaryFor(j) {
         ? `${d.chars.toLocaleString()} chars${d.seconds ? ` · ${fmtQty(d.seconds, "duration")} of audio` : ""}${d.turns != null ? ` · ${d.turns} turns` : ""}${d.speakers ? ` · ${d.speakers} speaker${d.speakers === 1 ? "" : "s"}` : ""}${d.tokens ? ` · ${tokensNote(d.tokens)}` : ""}`
         : "";
     if (j.kind === "ingest") {
+      // Label lists are capped the same way wherever they appear in this row.
+      const someOf = (a) => (a?.length ? ` (${a.slice(0, 3).join(", ")}${a.length > 3 ? ", …" : ""})` : "");
       const bits = [`+${d.admitted ?? 0} admitted`, `${d.scanned ?? 0} scanned`];
       // Skips are permanent (the file is ledgered out of every future scan) —
       // name them: this row is the only trace the file was ever seen.
-      if (d.skipped) bits.push(`${d.skipped} skipped${d.skipped_labels?.length ? ` (${d.skipped_labels.slice(0, 3).join(", ")}${d.skipped_labels.length > 3 ? ", …" : ""})` : ""}`);
+      if (d.skipped) bits.push(`${d.skipped} skipped${someOf(d.skipped_labels)}`);
       if (d.duplicates) bits.push(`${d.duplicates} duplicate${d.duplicates === 1 ? "" : "s"}`);
+      // Recognized by CONTENT as something deleted, arriving under a name
+      // never seen before (a rename, a re-drop). Named like skips are, and
+      // for the same reason: the key is ledgered permanently, so this row is
+      // the only trace it happened.
+      if (d.held) bits.push(`${d.held} matched deleted item${d.held === 1 ? "" : "s"}${someOf(d.held_labels)}`);
+      // Standing, not an event: matches a user deletion is holding back. The
+      // ingest modal owns the verb that changes it ("Bring back").
+      if (d.ignored) bits.push(`${d.ignored} ignored`);
       if (d.drain_left) bits.push(`${d.drain_left} to drain`);
       if (j.error) bits.push(j.error); // per-item findings ride the ok row
       if (d.attempts > 1) bits.push(`${d.attempts} attempts`);

@@ -134,7 +134,9 @@ import {
   demoteFacetDiagnostics,
   clearIngestSuperseded,
   ingestedKeys,
-  ingestedAmong,
+  ingestLedgerCounts,
+  clearIngestLog,
+  isForgetScope,
   setPluginState,
   getPluginRow,
   withPluginHealth,
@@ -184,7 +186,7 @@ import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
 import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, ENUM_CAP } from "./ingestion/index.js";
-import { membership } from "./ingestion/filter-engine.js";
+import { applySort, runWindow, settledRow } from "./ingestion/filter-engine.js";
 import { getSourceBackend } from "./ingestion/sources/index.js";
 import { invalidateSourceCache } from "./ingestion/files.js";
 
@@ -1493,6 +1495,13 @@ app.get("/api/boards/:id/ingest", requireAuth, requireBoardManager, wrap(async (
     sources: adapter?.listSources ? await adapter.listSources(db) : null,
     config: req.board.ingest || null,
     state: req.board.ingest_state || null,
+    // What the board's memory holds, by reason — the three forget verbs
+    // (forget all / bring back / retry) each name their own count and hide
+    // at zero. Served here rather than by preview because the buttons need
+    // it before any preview runs, and because these are LEDGER-WIDE counts:
+    // the actions are ledger-wide too, unlike the preview's filter-scoped
+    // split.
+    ledger: await ingestLedgerCounts(db, req.board.id),
     // The resolved root itself (null = folder ingestion unconfigured), so the
     // modal can show what a subpath actually means (/data/ingest/ +
     // "wardrobe") instead of a bare name whose real location only ever
@@ -1551,39 +1560,27 @@ app.get("/api/ingest/folders", requireAuth, wrap(async (_req, res) => {
   res.json({ root: true, folders });
 }));
 
-// Dry-run a candidate config (request body, never saved): enumerate → filter
-// → sort with the shared engine. Default response is the count alone —
-// count = everything matching the filters (capped: the walk stopped at the
-// preview bound, render as "N+"); new = the subset not yet in the ledger,
-// i.e. what a run would actually consider. body.sample = { offset, limit }
-// opts into a page of matching rows (+ hasMore) for the results view — each
-// page is a fresh stateless enumerate, same as connector browse paging. Page
-// responses skip the full-ledger scan (and `new`) the count view needs;
-// instead each row carries `ingested` from a PK probe on just its page keys,
-// so the list can mark what a run would skip.
-app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wrap(async (req, res) => {
-  const adapter = resolveIngestAdapter(req.board);
-  if (!adapter) return res.status(400).json({ error: "ingestion is not available for this board" });
-  const body = req.body || {};
-  const cfg = { ...body, enabled: true }; // preview ignores the toggle
-  delete cfg.sample;
+// One enumerate-and-classify for a candidate config, shared by the preview
+// route below and the scoped forget beneath it (stage 6). Both have to answer
+// the same question — which candidates does this config match, and what does
+// the ledger say about them — and a forget that computed it its own way would
+// delete a different set than the count the user was looking at when they
+// clicked. That preview/action disagreement is the failure this arc has hit at
+// every stage; one call site is the fix. Errors carry `status` for the app's
+// own channel (wrap → the error middleware), like usageResponse does.
+async function previewWindow(board, cfg) {
+  const fail = (msg) => { throw Object.assign(new Error(msg), { status: 400 }); };
+  const adapter = resolveIngestAdapter(board);
+  if (!adapter) fail("ingestion is not available for this board");
   const hasRoot = !!process.env.INGEST_ROOT;
   const descriptor = adapter.descriptor();
-  // trigger: false — preview answers "what matches", and the schedule has no
+  // trigger: false — this answers "what matches", and the schedule has no
   // bearing on that; a half-typed "every N minutes" must not block it.
   const err = validateIngest(cfg, descriptor, { hasRoot, trigger: false });
-  if (err) return res.status(400).json({ error: err });
+  if (err) fail(err);
   if (adapter.validateSource) {
     const srcErr = await adapter.validateSource(db, cfg.source || {}, { hasRoot });
-    if (srcErr) return res.status(400).json({ error: srcErr });
-  }
-  let sample = null;
-  if (body.sample != null) {
-    const offset = Number(body.sample.offset ?? 0);
-    const limit = Number(body.sample.limit ?? 50);
-    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200)
-      return res.status(400).json({ error: "invalid sample window" });
-    sample = { offset, limit };
+    if (srcErr) fail(srcErr);
   }
   // The preview window IS the run window — one bound, so the count can never
   // promise what a run won't see. Connector adapters carry their own
@@ -1592,37 +1589,80 @@ app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wra
   const windowCap = adapter.windowCap ? adapter.windowCap() : ENUM_CAP();
   let enumerated;
   try {
-    enumerated = await adapter.enumerate(db, req.board, cfg, { limit: windowCap });
+    enumerated = await adapter.enumerate(db, board, cfg, { limit: windowCap });
   } catch (e) {
-    return res.status(400).json({ error: e.message });
+    fail(e.message);
   }
-  // The shared membership set (filter-engine.js) — the same function the
-  // sweep runs, so the count and a run read one set by construction. Once
-  // `total` is hit, `capped` must stop claiming the count is a lower bound —
-  // a full membership can't grow, however truncated the window — while a
-  // truncated window still below the total keeps its honest "+".
-  const matched = membership(enumerated.candidates, cfg, descriptor.filters);
-  const capped = !!enumerated.truncated && matched.length < (Number(cfg.total) || Infinity);
+  // The same slot-aware math the sweep runs (runWindow, filter-engine.js), so
+  // the count, the split and a run read one classification by construction.
+  // `member` is the membership when `total` is set (user-deleted and
+  // unprocessable keys backfill — they hold no slot); without a cap the set is
+  // the whole filtered window. The full ledger map serves the slot rule, the
+  // sample rows' badge, and the scoped forget's key set.
+  const known = await ingestedKeys(db, board.id);
+  return {
+    adapter, descriptor, known, enumerated,
+    ...runWindow(enumerated.candidates, cfg, descriptor.filters, known, { changed: adapter.changed }),
+  };
+}
+
+// Dry-run a candidate config (request body, never saved): enumerate → filter
+// → sort with the shared engine. Default response is the counts alone —
+// count = everything matching the filters (capped: the walk stopped at the
+// preview bound, render as "N+"); new = the subset not yet in the ledger,
+// i.e. what a run would actually consider; the tally says what happened to
+// the rest. body.sample = { offset, limit } opts into a page of matching rows
+// (+ hasMore) for the results view — each page is a fresh stateless
+// enumerate, same as connector browse paging, and each row carries its ledger
+// REASON so the list can mark what a run would skip and why (on the board /
+// held back / can't process).
+app.post("/api/boards/:id/ingest/preview", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const body = req.body || {};
+  const cfg = { ...body, enabled: true }; // preview ignores the toggle
+  delete cfg.sample;
+  let sample = null;
+  if (body.sample != null) {
+    const offset = Number(body.sample.offset ?? 0);
+    const limit = Number(body.sample.limit ?? 50);
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200)
+      return res.status(400).json({ error: "invalid sample window" });
+    sample = { offset, limit };
+  }
+  const { descriptor, known, enumerated, matched, member, fresh, tally } =
+    await previewWindow(req.board, cfg);
+  // Sorted here because only this caller needs the ordering.
+  const set = member ?? applySort(matched, cfg.sort, descriptor.filters); // what `count` claims and the results view pages
+  // Once `total` is hit, `capped` must stop claiming the count is a lower
+  // bound — a full membership can't grow, however truncated the window —
+  // while a truncated window still below the total keeps its honest "+".
+  const capped = !!enumerated.truncated && set.length < (Number(cfg.total) || Infinity);
   if (sample) {
-    const rows = matched.slice(sample.offset, sample.offset + sample.limit);
-    const known = await ingestedAmong(db, req.board.id, rows.map((c) => c.key));
+    const rows = set.slice(sample.offset, sample.offset + sample.limit);
     return res.json({
-      count: matched.length,
+      count: set.length,
       capped,
       // How deep this actually went. Shipped because the client has to NAME
       // it ("showing the first N scanned") and it was never a constant it
       // could hardcode — it's the safety backstop, or whatever an operator
       // set INGEST_FEED_CAP to.
       scanned: enumerated.candidates.length,
-      sample: rows.map((c) => ({ ...c, ingested: known.has(c.key) })),
-      hasMore: sample.offset + sample.limit < matched.length,
+      sample: rows.map((c) => ({ ...c, ledger: known.get(c.key)?.reason ?? null })),
+      hasMore: sample.offset + sample.limit < set.length,
     });
   }
-  const known = await ingestedKeys(db, req.board.id);
+  // The split (stage 3): what happened to the matches a run won't admit — on
+  // the board, held back by a deletion, or unprocessable bytes. The modal
+  // renders each as its own line under the count, the last two with the verb
+  // that undoes them (stage 6).
   res.json({
-    count: matched.length,
-    new: matched.filter((c) => !known.has(c.key)).length,
+    count: set.length,
+    new: fresh.length,
+    ...tally,
     capped,
+    // `capped` is the MEMBERSHIP's caveat and goes false the moment a full
+    // membership is reached; the tally's caveat is plain truncation, and the
+    // exception lines need their own or they'd state a floor as a total.
+    truncated: !!enumerated.truncated,
     scanned: enumerated.candidates.length,
   });
 }));
@@ -1636,6 +1676,61 @@ app.post("/api/boards/:id/ingest/run", requireAuth, requireBoardManager, wrap(as
     return res.status(409).json({ error: "ingestion is not configured on this board" });
   await setIngestNextRun(db, req.board.id, Date.now());
   res.json({ ok: true });
+}));
+
+// Forget ledger rows, so the next run treats those keys as never seen — ONE
+// verb behind three surfaces (ingest-deletions-plan.md stages 4 and 6):
+//   scope "all"      the footer's "Clear ingestion records…" — the whole lot
+//   scope "deleted"  "Re-include" what a deletion is holding out
+//   scope "skipped"  "Retry" what couldn't be read
+// The two scoped verbs take the candidate config too and act only on its
+// window (see below). This route deliberately does NOT arm a run: the scope
+// comes from the modal's BUFFERED config while a run would execute the SAVED
+// one, so an unsaved filter edit would make the run admit a different set
+// than the number just acted on. The client re-previews instead, which shows
+// the change where the user is already looking, with Run now beside it.
+//
+// Deliberately NOT gated on a configured ingest — ledger rows outlive a
+// removed config on purpose, and a board re-enabling ingestion later is
+// haunted by them; clearing the leftovers is legitimate. The superseded-state
+// clear rides along for the same reason a config save gets it: drain_left is
+// the budget of a run whose premises just vanished, and last_error a verdict
+// on a memory that no longer exists. The job log, run history stamps and
+// window caches all deliberately survive — this wipes what the feed
+// REMEMBERS, not what it DID.
+app.post("/api/boards/:id/ingest/clear", requireAuth, requireBoardManager, wrap(async (req, res) => {
+  const body = req.body || {};
+  const scope = body.scope ?? "all";
+  if (!isForgetScope(scope)) return res.status(400).json({ error: "unknown forget scope" });
+  // SCOPED forget (stage 6). Re-include and Retry are offered beside numbers
+  // the preview computed under the user's filters, so they have to act on
+  // that same window — forgetting the whole ledger while showing a windowed
+  // count is the two-numbers trap this arc keeps falling into. The candidate
+  // config rides in `ingest`; the keys are the ones whose ledger row still
+  // speaks for them (settledRow — a drifted slot answered for nothing in the
+  // tally either), and `scope` narrows them to a reason in db.js. `all` never
+  // scopes: the footer control says "records", means the lot, and is the one
+  // verb that isn't reading a windowed number.
+  let keys = null;
+  if (scope !== "all" && body.ingest) {
+    const { adapter, known, matched } = await previewWindow(req.board, { ...body.ingest, enabled: true });
+    keys = matched.filter((c) => settledRow(c, known, adapter.changed)).map((c) => c.key);
+  }
+  const cleared = await clearIngestLog(db, req.board.id, scope, keys);
+  await clearIngestSuperseded(db, req.board.id);
+  // Echo the trio this landed on, like the board PATCH does, so the client
+  // stamps through its single funnel instead of re-deriving what the clear
+  // implied. It isn't ceremony even though nothing here arms a timer:
+  // clearIngestSuperseded just dropped last_error, and the chip renders that.
+  res.json({
+    cleared,
+    // The counts this landed on, from the same GROUP BY the GET serves. The
+    // client re-derived them by subtraction until it had a branch per scope
+    // and a fourth waiting to be forgotten — and the route's own argument for
+    // echoing the trio below applies just as well to these.
+    ledger: await ingestLedgerCounts(db, req.board.id),
+    ...ingestStatus({ ingest: req.board.ingest, ingest_next_run_at: req.board.ingest_next_run_at }),
+  });
 }));
 
 app.get("/api/admin/boards", requireAdmin, wrap(async (_req, res) => {

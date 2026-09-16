@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
-import { getBoard, updateBoard, recordIngest, setIngestNextRun, setIngestState } from "../server/db.js";
+import { getBoard, updateBoard, recordIngest, setIngestNextRun, setIngestState, ingestedKeys, clearIngestLog } from "../server/db.js";
 
 let srv, db, base, admin, member, boardId, root;
 const OLD = Date.now() - 120000;
@@ -214,16 +214,16 @@ test("preview: dry-runs the request body without saving it; count by default, pa
   assert.deepEqual(p2.json.sample.map((c) => c.label), ["d.txt"]);
   assert.equal(p2.json.hasMore, false);
 
-  // Pages skip the ledger-wide accounting the count view does; instead each
-  // row says whether the ledger already holds it.
+  // Pages skip the count view's split; instead each row carries its ledger
+  // reason (null = never ledgered) for the results badge.
   assert.equal(p1.json.new, undefined, "no `new` on page responses");
-  assert.deepEqual(p1.json.sample.map((c) => c.ingested), [false, false], "nothing ledgered yet");
+  assert.deepEqual(p1.json.sample.map((c) => c.ledger), [null, null], "nothing ledgered yet");
   await recordIngest(db, boardId, p1.json.sample[0].key, Date.now());
   const p3 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
     sid: admin.sid,
     body: { ...previewBody, sample: { offset: 0, limit: 3 } },
   });
-  assert.deepEqual(p3.json.sample.map((c) => c.ingested), [true, false, false], "the ledgered row is marked");
+  assert.deepEqual(p3.json.sample.map((c) => c.ledger), ["admitted", null, null], "the ledgered row is marked");
   const r2 = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, { sid: admin.sid, body: previewBody });
   assert.equal(r2.json.new, 2, "the count view still accounts against the whole ledger");
 
@@ -286,6 +286,165 @@ test("run-now: auth matrix, and a paused feed still runs once", async () => {
   await patchIngest(null);
   const none = await req(base, "POST", `/api/boards/${boardId}/ingest/run`, { sid: admin.sid });
   assert.equal(none.status, 409, "no config, nothing to run");
+});
+
+test("preview split: reasons tally, and non-admitted keys hold no total slot", async () => {
+  const cid = await seedBoard(db, "split");
+  const cfg = {
+    enabled: true,
+    source: { folder: "pick", recursive: true },
+    filters: [{ fn: "extension", op: "equals", value: "txt" }],
+    sort: { by: "name", order: "asc" },
+  };
+  // Three matching keys, one per reason: a is on the board, b was deleted,
+  // deep/d can't be processed.
+  await recordIngest(db, cid, "a.txt", Date.now());
+  await recordIngest(db, cid, "b.txt", Date.now(), { reason: "deleted" });
+  await recordIngest(db, cid, "deep/d.txt", Date.now(), { reason: "skipped" });
+
+  const r = await req(base, "POST", `/api/boards/${cid}/ingest/preview`, { sid: admin.sid, body: cfg });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.count, 3, "no total: count is the whole filtered window");
+  assert.equal(r.json.new, 0, "every match is known — nothing to admit");
+  assert.equal(r.json.on_board, 1);
+  assert.equal(r.json.held, 1);
+  assert.equal(r.json.unprocessable, 1);
+
+  // With a total, only the admitted key holds a slot — deleted and skipped
+  // backfill (nothing fresh exists in this fixture to fill the freed seats,
+  // so the membership just shrinks to the eligible one).
+  const t = await req(base, "POST", `/api/boards/${cid}/ingest/preview`, { sid: admin.sid, body: { ...cfg, total: 2 } });
+  assert.equal(t.json.count, 1);
+  assert.equal(t.json.held, 1, "the split still answers for the whole window");
+
+  // Sample rows carry the reason for the results badge.
+  const s2 = await req(base, "POST", `/api/boards/${cid}/ingest/preview`, {
+    sid: admin.sid, body: { ...cfg, sample: { offset: 0, limit: 10 } },
+  });
+  assert.deepEqual(s2.json.sample.map((c) => [c.key, c.ledger]),
+    [["a.txt", "admitted"], ["b.txt", "deleted"], ["deep/d.txt", "skipped"]]);
+});
+
+test("clear: wipes the memory, spares the history, needs no config", async () => {
+  const cid = await seedBoard(db, "clear-me", [member.id]);
+  await recordIngest(db, cid, "pick/a.txt", Date.now());
+  await recordIngest(db, cid, "pick/b.txt", Date.now());
+  await setIngestState(db, cid, { last_run_at: 111, last_added: 2, last_error: "boom", drain_left: 7 });
+
+  // The GET payload counts what the button offers to wipe.
+  await req(base, "PATCH", `/api/boards/${cid}`, { sid: admin.sid, body: { ingest: GOOD } });
+  const g = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
+  assert.deepEqual(g.json.ledger, { total: 2, on_board: 2, held: 0, unprocessable: 0 });
+
+  const anon = await req(base, "POST", `/api/boards/${cid}/ingest/clear`, {});
+  assert.equal(anon.status, 401);
+  const notMgr = await req(base, "POST", `/api/boards/${cid}/ingest/clear`, { sid: member.sid });
+  assert.equal(notMgr.status, 403, "plain members can't wipe the memory");
+
+  const ok = await req(base, "POST", `/api/boards/${cid}/ingest/clear`, { sid: admin.sid });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.cleared, 2, "the receipt names the rows that died");
+  assert.equal((await ingestedKeys(db, cid)).size, 0);
+  // The response echoes the ingestion trio the clear landed on — the same
+  // thing the board PATCH echoes, and for the same reason: the client stamps
+  // it through one funnel rather than re-deriving what a clear implies.
+  assert.equal(ok.json.ingest_mode, "scheduled", "the config and its timer are untouched");
+  assert.equal(ok.json.ingest_error, false, "the error it just dropped is gone from the echo too");
+
+  // The superseded-state clear rides along (drain_left is a budget over
+  // vanished premises, last_error a verdict on a wiped memory) — but run
+  // HISTORY stays: this forgets what the feed remembers, not what it did.
+  const b = await getBoard(db, cid);
+  assert.equal(b.ingest_state.drain_left, undefined);
+  assert.equal(b.ingest_state.last_error, undefined);
+  assert.equal(b.ingest_state.last_run_at, 111);
+  assert.equal(b.ingest_state.last_added, 2);
+
+  // Deliberately no configured-ingest gate: rows outlive a removed config on
+  // purpose, and clearing a deconfigured board's haunting is legitimate.
+  await recordIngest(db, cid, "pick/c.txt", Date.now());
+  await req(base, "PATCH", `/api/boards/${cid}`, { sid: admin.sid, body: { ingest: null } });
+  const unconfigured = await req(base, "POST", `/api/boards/${cid}/ingest/clear`, { sid: admin.sid });
+  assert.equal(unconfigured.status, 200);
+  assert.equal(unconfigured.json.cleared, 1);
+
+  // Idempotent — clearing nothing is a zero receipt, not an error.
+  const again = await req(base, "POST", `/api/boards/${cid}/ingest/clear`, { sid: admin.sid });
+  assert.equal(again.status, 200);
+  assert.equal(again.json.cleared, 0);
+});
+
+test("forget scopes: one verb, three reaches — and a config narrows it to its own window", async () => {
+  const cid = await seedBoard(db, "forget-scopes", [member.id]);
+  // Real keys under the real fixture root, because the scoped forget
+  // ENUMERATES: a.txt is on the board, b.txt was deleted, deep/d.txt couldn't
+  // be read. c.md was deleted too but the config's extension filter excludes
+  // it, and gone.txt was deleted and has since left the source entirely —
+  // those last two are the difference between the two reaches.
+  const seed = async () => {
+    await clearIngestLog(db, cid);
+    await recordIngest(db, cid, "a.txt", Date.now());
+    await recordIngest(db, cid, "b.txt", Date.now(), { reason: "deleted" });
+    await recordIngest(db, cid, "c.md", Date.now(), { reason: "deleted" });
+    await recordIngest(db, cid, "gone.txt", Date.now(), { reason: "deleted" });
+    await recordIngest(db, cid, "deep/d.txt", Date.now(), { reason: "skipped" });
+  };
+  const forget = (body, sid = admin.sid) =>
+    req(base, "POST", `/api/boards/${cid}/ingest/clear`, { sid, body });
+  const reasons = async () =>
+    [...(await ingestedKeys(db, cid)).entries()].sort().map(([k, r]) => `${k}:${r.reason}`);
+
+  await req(base, "PATCH", `/api/boards/${cid}`, { sid: admin.sid, body: { ingest: GOOD } });
+  await seed();
+  const g = await req(base, "GET", `/api/boards/${cid}/ingest`, { sid: admin.sid });
+  assert.deepEqual(g.json.ledger, { total: 5, on_board: 1, held: 3, unprocessable: 1 },
+    "the GET's counts are LEDGER-wide — the footer reset is the one surface that reads them");
+
+  assert.equal((await forget({ scope: "nope" })).status, 400, "an unknown scope is a typo, not a wipe");
+  assert.equal((await forget({ scope: "deleted" }, member.sid)).status, 403);
+
+  // SCOPED (stage 6): Re-include is offered beside a filter-scoped count, so
+  // it acts on that window and nothing else. c.md fails the extension filter;
+  // gone.txt isn't in the listing at all. Both keep their rows.
+  await updateBoard(db, cid, { ingestNextRunAt: null });
+  const scoped = await forget({ scope: "deleted", ingest: GOOD });
+  assert.equal(scoped.json.cleared, 1, "only the deleted key this config's window actually names");
+  assert.deepEqual(await reasons(),
+    ["a.txt:admitted", "c.md:deleted", "deep/d.txt:skipped", "gone.txt:deleted"]);
+  assert.deepEqual(scoped.json.ledger, { total: 4, on_board: 1, held: 2, unprocessable: 1 },
+    "the receipt's counts come from the route's own GROUP BY, not the client's arithmetic");
+
+  // Nothing is armed, ever. The scope came from the modal's BUFFERED config
+  // while a run would execute the SAVED one, so arming here could admit a
+  // different set than the number that was acted on — the client re-previews
+  // instead. `run` is not a parameter any more, and saying it changes nothing.
+  assert.equal((await getBoard(db, cid)).ingest_next_run_at, null,
+    "a forget is not a request to run");
+  await forget({ scope: "deleted", ingest: GOOD, run: true });
+  assert.equal((await getBoard(db, cid)).ingest_next_run_at, null, "…even when asked");
+
+  // UNSCOPED: no config, so the whole reason bucket goes — what the toggle's
+  // old backlog question used to do, and still reachable by any caller that
+  // has no window to speak of.
+  await seed();
+  assert.equal((await forget({ scope: "deleted" })).json.cleared, 3);
+  assert.deepEqual(await reasons(), ["a.txt:admitted", "deep/d.txt:skipped"]);
+
+  // Retry: the unprocessable bucket, same verb, same narrowing.
+  assert.equal((await forget({ scope: "skipped", ingest: GOOD })).json.cleared, 1);
+  assert.deepEqual(await reasons(), ["a.txt:admitted"]);
+
+  // `all` never scopes — it is the footer's whole-ledger reset, the one clear
+  // not read off a windowed number. A config in the body is ignored.
+  await seed();
+  assert.equal((await forget({ scope: "all", ingest: GOOD })).json.cleared, 5);
+  assert.equal((await ingestedKeys(db, cid)).size, 0);
+
+  // A scoped forget still validates the config it was handed.
+  await seed();
+  const bad = await forget({ scope: "deleted", ingest: { ...GOOD, filters: [{ fn: "nope", op: "equals", value: "x" }] } });
+  assert.equal(bad.status, 400, "a config that couldn't be previewed can't be acted on either");
+  assert.equal((await ingestedKeys(db, cid)).size, 5, "and nothing died on the way");
 });
 
 test("folder picker: bounded listing under the root", async () => {

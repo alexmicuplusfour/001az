@@ -255,6 +255,15 @@ export function feedAdapter(conn) {
       // The ~3KB `ids=` URL that implies is well inside the usual 8KB bar; if a
       // provider ever 414s, the cap is what comes down.
       runCap: 250,
+      // An admission carries its own identity, so the ledger is a dedup
+      // SHORTCUT here rather than the only one: a row already on the board
+      // collides with the (board_id, identity) unique constraint and the
+      // sweep ledgers the `.duplicate` — the self-healing this file's header
+      // describes. Forgetting the ledger therefore re-adds only what was
+      // actually deleted, which is exactly what the clear warning promises.
+      // Declared rather than inferred because the file adapter's answer is
+      // the opposite one (files.js) and only the adapter knows.
+      forgetAllIsSafe: true,
     }),
 
     // The preview route bounds its enumerate with this so its count and a
@@ -353,10 +362,14 @@ export function feedAdapter(conn) {
 
     // One catalog row → one entity + tag vehicle through the same path as a
     // manual add (charts, live-field scheduling, park policy included), then
-    // the ledger row. `.duplicate` propagates — the sweep ledgers it.
+    // the ledger row — carrying the vehicle's item id (stage 2: the link is
+    // what lets a later deletion stamp this row `deleted`). `.duplicate`
+    // propagates — the sweep ledgers it; that write is linkless (a
+    // constraint violation names no row) and the upsert's COALESCE keeps
+    // whatever link the ledger already has.
     async admit(db, board, candidate) {
-      await addConnectorEntity(db, board, conn, conn.name, String(candidate.id));
-      await recordIngest(db, board.id, candidate.key, Date.now());
+      const row = await addConnectorEntity(db, board, conn, conn.name, String(candidate.id));
+      await recordIngest(db, board.id, candidate.key, Date.now(), { itemId: row.instances[0].id });
     },
   };
 }

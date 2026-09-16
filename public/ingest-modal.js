@@ -5,8 +5,9 @@
 // trigger modes, so this file knows nothing about folders vs future feed
 // adapters.
 //
-// Preview is manual and two-stage: a Preview button fetches just the match
-// count; clicking the count swaps this modal to a read-only results list
+// Preview is manual and two-stage: a Preview button fetches the counts (and
+// the lines that explain them); clicking the count swaps this modal to a
+// read-only results list
 // (connector-browse-style table with Load more) — no inline table trying to
 // summarize thousands of files. Back returns to the settings view with every
 // buffered edit intact (same modal, same closure — nothing is rebuilt).
@@ -120,6 +121,9 @@ export function openIngestModal() {
     // The last-run line's renderer rides the same tick — assigned where the
     // line is built (it only exists once a run has happened), a no-op before.
     let renderRunLine = () => {};
+    // Same trick for the footer's reset, which `forget` has to repaint from
+    // above the footer that builds it.
+    let renderHatch = () => {};
     // The modal's one 1s tick, gated on the modal itself: the header chip
     // and the last-run line both re-render on it, and data.js's shared
     // due-stamp nudge gets its offer — one throttle+backoff per tab, no
@@ -679,6 +683,21 @@ export function openIngestModal() {
     filterHint.className = "im-hint";
     filterHint.textContent = "No filters = everything in the source is eligible. All filters must match.";
     filterSection.appendChild(filterHint);
+    // Whether a deleted item can come back is an EXCLUSION RULE, so it lives
+    // where the exclusion rules live — which is also the only place the words
+    // make sense, because "skip" needs a "out of what?" and Filters is the
+    // section that answers it. Below the hint rather than among the rows: a
+    // standing rule, not an editable filter.
+    //
+    // It is FORWARD-ONLY (server: rememberDeletions gates the stamp, never the
+    // sweep), so the hint says so and nothing here offers to clear the
+    // backlog — that backlog now has a visible home of its own, three lines
+    // down under Preview. Two controls, two jobs.
+    filterSection.appendChild(inertUnlessEditable(switchRow(
+      "Skip items you've deleted from this board",
+      "— off, a deletion no longer keeps an item out",
+      cfg.rememberDeletions !== false,
+      (on) => { cfg.rememberDeletions = on; })));
     settingsView.appendChild(filterSection);
 
     // ── Sort & limit ──
@@ -822,7 +841,12 @@ export function openIngestModal() {
     trigSection.append(trigRow, trigHint);
     settingsView.appendChild(trigSection);
 
-    // ── Preview: a button fetches the count; the count opens the results view ──
+    // ── Preview: a button fetches the counts; the count opens the results view ──
+    // The count leads and everything under it EXPLAINS the count — which is
+    // the one moment anyone wants that explanation, because a number that
+    // looks too small IS the question. Each line renders only when non-zero,
+    // so a first run shows the count alone and nothing about exclusion ever
+    // crosses the reader's mind.
     const prevSection = section("Preview");
     const prevRow = document.createElement("div");
     prevRow.className = "im-row";
@@ -832,12 +856,103 @@ export function openIngestModal() {
     previewBtn.textContent = "Preview";
     const countBtn = document.createElement("button");
     countBtn.type = "button";
-    countBtn.className = "im-preview-count";
+    countBtn.className = "im-link";
     countBtn.style.display = "none";
-    countBtn.title = "View the matching items";
+    // The list is the whole matching window, badged — a superset of the count
+    // on the button, because the rows the count leaves out are exactly the
+    // ones worth inspecting when it looks too small.
+    countBtn.title = "View every matching item, including the ones left out";
     prevRow.append(previewBtn, countBtn);
     prevSection.appendChild(prevRow);
+    const exceptions = document.createElement("div");
+    exceptions.className = "im-exceptions";
+    exceptions.style.display = "none";
+    prevSection.appendChild(exceptions);
     settingsView.appendChild(prevSection);
+
+    // A truncated window makes every one of these numbers a floor. `capped`
+    // is the MEMBERSHIP's caveat and goes false the moment a full membership
+    // is reached, so it can't serve the tally — that reads `truncated`.
+    const fmtCount = (n, more) => `${(Number(n) || 0).toLocaleString()}${more ? "+" : ""}`;
+
+    // Why the count isn't bigger, in the order the answers matter: what's
+    // already here, what a deletion is holding out, what couldn't be read.
+    // The last two carry the verb that undoes them — scoped, like the number
+    // beside them, to the window the preview just measured.
+    const LINES = [
+      { field: "on_board", text: (n) => `${n} already on the board.` },
+      {
+        field: "held", scope: "deleted", verb: "Re-include",
+        text: (n) => `${n} excluded because you deleted them.`,
+        done: (n) => `${n.toLocaleString()} re-included`,
+        // States the slot consequence: re-including puts them back in the
+        // running, it doesn't reserve them a place.
+        confirm: (n) => `Re-include ${n.toLocaleString()} item${n === 1 ? "" : "s"} you deleted? They become eligible again and the next run re-adds what still matches — with a "Keep top" set they compete for slots, so any that have since fallen out of the top stay off.`,
+      },
+      {
+        field: "unprocessable", scope: "skipped", verb: "Retry",
+        text: (n) => `${n} couldn't be read.`,
+        done: (n) => `${n.toLocaleString()} queued for another read`,
+        confirm: (n) => `Retry ${n.toLocaleString()} item${n === 1 ? "" : "s"} that couldn't be read? They'll be read again on the next run — worth it if the files, or the app's handling of them, have changed since.`,
+      },
+    ];
+    // Each line hands back its own repaint, so nothing has to keep a parallel
+    // array of rows in step with the data by index.
+    const paintLines = LINES.map((L) => {
+      const row = document.createElement("div");
+      row.className = "im-exception";
+      row.style.display = "none";
+      const label = document.createElement("span");
+      row.appendChild(label);
+      if (L.scope && canEdit) {
+        const act = document.createElement("button");
+        act.type = "button";
+        act.className = "im-link quiet";
+        act.textContent = `${L.verb} \u203a`;
+        act.addEventListener("click", busy(act, async () => {
+          const n = Number(preview?.[L.field]) || 0;
+          if (!n || !confirm(L.confirm(n))) return;
+          await forget(L.scope, true, L.done);
+        }));
+        row.appendChild(act);
+      }
+      exceptions.appendChild(row);
+      return (d) => {
+        const n = Number(d[L.field]) || 0;
+        row.style.display = n > 0 ? "" : "none";
+        if (n > 0) label.textContent = L.text(fmtCount(n, d.truncated));
+      };
+    });
+
+    // One route behind three surfaces: the two exception verbs (scoped to the
+    // previewed window by the config they send) and the footer's whole-ledger
+    // reset (which sends none). Nothing here arms a run — the scope comes from
+    // the BUFFERED config while a run executes the SAVED one, so an unsaved
+    // filter edit would make the run admit a different set than the number
+    // just acted on. Re-previewing instead shows the change where the user is
+    // already looking, with Run now beside it.
+    async function forget(scope, scoped, done) {
+      const r = await fetch(`/api/boards/${state.boardId}/ingest/clear`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(scoped ? { scope, ingest: configPayload() } : { scope }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) return toast.error(data.error || "Failed to clear ingestion records");
+      // The route echoes the ingestion trio it landed on, so chips follow the
+      // one stamping funnel.
+      if (data.ingest_mode !== undefined) stampBoard(data);
+      // A clear also dropped drain_left + last_error server-side; the modal's
+      // own copy of the run state loses what the line renders off.
+      if (info.state) { delete info.state.drain_left; delete info.state.last_error; }
+      if (data.ledger) info.ledger = data.ledger; // the route's own counts, not our arithmetic
+      renderHatch();
+      renderStatus();
+      document.dispatchEvent(new Event("app:render"));
+      toast(data.cleared ? done(data.cleared) : "Nothing to change");
+      if (scoped) await runPreview();
+      else invalidatePreview(); // the whole-ledger reset moved every number
+    }
 
     // Status line from the sweep-owned run state — history, not state (the
     // header chip's job; two facts, two lines). It re-renders on the chip's
@@ -846,8 +961,11 @@ export function openIngestModal() {
     if (info.state?.last_run_at) {
       const st = info.state;
       const line = document.createElement("p");
-      line.className = "im-status" + (st.last_error ? " error" : "");
       renderRunLine = () => {
+        // Class rides the render, not the build: the clear button below can
+        // drop last_error mid-view, and a red line about a wiped verdict
+        // would outlive the verdict.
+        line.className = "im-status" + (st.last_error ? " error" : "");
         const text = st.last_error
           ? `Last run ${relTime(st.last_run_at)} — error: ${st.last_error}`
           : `Last run ${relTime(st.last_run_at)} — added ${st.last_added ?? 0}${st.drain_left ? ` (${st.drain_left} still draining)` : ""}`;
@@ -857,17 +975,32 @@ export function openIngestModal() {
       settingsView.appendChild(line);
     }
 
-    // A config edit makes a shown count a lie — hide it until re-previewed,
-    // so the results view can never open on stale numbers. The seq also
-    // discards an in-flight count fetch: without it, a slow response landing
-    // after an edit would re-show a count for a config the user no longer has.
+    // A config edit makes a shown count a lie — drop the whole block until
+    // re-previewed, so the results view can never open on stale numbers and a
+    // stale "2,336 excluded" can't outlive the filters it was measured under.
+    // The seq also discards an in-flight fetch: without it, a slow response
+    // landing after an edit would re-show numbers for a config the user no
+    // longer has.
     let previewSeq = 0;
+    let preview = null;
     function invalidatePreview() {
       previewSeq++;
-      countBtn.style.display = "none";
+      preview = null;
+      renderPreview();
     }
-
-    previewBtn.addEventListener("click", busy(previewBtn, async () => {
+    function renderPreview() {
+      countBtn.style.display = preview ? "" : "none";
+      exceptions.style.display = preview ? "" : "none";
+      if (!preview) return;
+      // "to ingest", not "new": a re-included item is eligible without being
+      // new, and "would be added" over-promises — `limit` paces a run across
+      // ticks, and some of the count turns out unreadable or already on the
+      // board under another name once the bytes are read. Eligibility is the
+      // one claim that survives all three.
+      countBtn.textContent = `${fmtCount(preview.new, preview.capped)} to ingest \u203a`;
+      paintLines.forEach((f) => f(preview));
+    }
+    async function runPreview() {
       // No source added = nothing to scan. Without this gate the preview
       // would fall through to "blank path" and scan the whole ingest root —
       // the exact presumption the add step exists to kill.
@@ -889,17 +1022,13 @@ export function openIngestModal() {
           toast.error(data.error || "Preview failed");
           return;
         }
-        // Lead with what a run would actually take; the rest is accounting.
-        const plus = data.capped ? "+" : "";
-        const already = data.count - data.new;
-        countBtn.textContent =
-          `${data.new}${plus} new match${data.new === 1 && !data.capped ? "" : "es"}` +
-          (already > 0 ? ` — ${already} already ingested` : "") + " ›";
-        countBtn.style.display = "";
+        preview = data;
+        renderPreview();
       } catch {
         if (mySeq === previewSeq) toast.error("Preview failed");
       }
-    }));
+    }
+    previewBtn.addEventListener("click", busy(previewBtn, runPreview));
     countBtn.addEventListener("click", showResults);
 
     // Only send filters the user has finished typing (a value-less filter
@@ -925,8 +1054,8 @@ export function openIngestModal() {
     // each source owns its own compact set, so nothing arbitrary gets sliced off
     // and a headline field like volume can't silently vanish. A source that
     // flags none falls back to every non-name field. A trailing status column
-    // marks rows the ledger already holds (a run skips them), so the "N new"
-    // promise on the count button is traceable in the list.
+    // marks rows the ledger already holds (a run skips them), so every number
+    // the Preview section states is traceable to the rows behind it.
     const nonName = (desc.filters || []).filter((c) => c.fn !== "name");
     const flagged = nonName.filter((c) => c.preview);
     const cols = flagged.length ? flagged : nonName;
@@ -975,10 +1104,16 @@ export function openIngestModal() {
         }
         const status = document.createElement("td");
         status.className = "cb-col-add";
-        if (row.ingested) {
+        if (row.ledger) {
           const span = document.createElement("span");
           span.className = "cb-on-board";
-          span.textContent = "Ingested";
+          // Same words as the lines under the count — the badge IS the
+          // per-row form of that tally, and two vocabularies for one fact is
+          // the thing stage 6 went looking for.
+          span.textContent =
+            row.ledger === "deleted" ? "Excluded"
+            : row.ledger === "skipped" ? "Couldn't be read"
+            : "On the board";
           status.appendChild(span);
         }
         tr.appendChild(status);
@@ -1142,7 +1277,34 @@ export function openIngestModal() {
           toast.error("Run failed");
         }
       });
-      footerSettings.append(saveBtn, runBtn);
+      // The maintenance hatch: pushed to the far side, out of the task flow,
+      // and quiet — it answers "why is this number odd?", which is a question
+      // nobody has while they are configuring. "Records" because this is
+      // current bookkeeping, not an archive ("history" would collide with the
+      // Jobs modal's run log) and not implementation ("memory", "ledger").
+      // Unlike the two scoped verbs above it, this one is ledger-wide: it is
+      // the only clear not read off a windowed number.
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "im-link quiet";
+      clearBtn.style.marginLeft = "auto";
+      clearBtn.textContent = "Clear ingestion records…";
+      clearBtn.title = "Forget everything this board remembers about what it has ingested";
+      clearBtn.addEventListener("click", busy(clearBtn, async () => {
+        const n = info.ledger.total;
+        if (!n) return;
+        // The file adapter can't recognize items admitted before provenance
+        // existed, so a full clear duplicates them — the descriptor says
+        // which adapters are safe, and nothing here sniffs the payload.
+        if (!confirm(desc.forgetAllIsSafe
+          ? `Clear everything this board remembers about ingestion (${n.toLocaleString()} record${n === 1 ? "" : "s"})? Items still on the board stay put; ones you deleted will be re-added by the next run.`
+          : `Clear everything this board remembers about ingestion (${n.toLocaleString()} record${n === 1 ? "" : "s"})? The next run treats the source as never seen — everything imports again, INCLUDING items still on this board, which will be duplicated. Best used after deleting the board's ingested items.`))
+          return;
+        await forget("all", false, (n) => `${n.toLocaleString()} record${n === 1 ? "" : "s"} cleared`);
+      }));
+      renderHatch = () => { clearBtn.style.display = info.ledger.total > 0 ? "" : "none"; };
+      renderHatch();
+      footerSettings.append(saveBtn, runBtn, clearBtn);
     } else {
       const note = document.createElement("p");
       note.style.cssText = "font-size:12px;color:#8a8a92;margin:0;";

@@ -11,7 +11,7 @@ import { startServer, seedBoard } from "./helpers.js";
 import { enumerate, admit } from "../server/ingestion/folder.js";
 import { applyFilters } from "../server/ingestion/filter-engine.js";
 import { descriptor } from "../server/ingestion/folder.js";
-import { getBoard, updateBoard, ingestedKeys, deleteEntity, setPluginState } from "../server/db.js";
+import { getBoard, updateBoard, ingestedKeys, deleteEntity, setPluginState, clearIngestLog } from "../server/db.js";
 import { createSources } from "../server/sources/index.js";
 
 let srv, db, sources, root;
@@ -178,6 +178,39 @@ test("ledger: an admitted key never re-admits — even after the entity is delet
   await deleteEntity(db, r.entityId);
   const after = await ingestedKeys(db, board.id);
   assert.ok(after.has("keep.txt"), "deletion is a user judgment the feed must not overturn");
+});
+
+test("admit stamps provenance + a linked ledger row; the probe heals a lost ledger", async () => {
+  put("prov/p.txt", "provenance content");
+  const board = await boardWatching("prov", "prov");
+  const { candidates } = await enumerate(db, board, board.ingest);
+  const r = await admit(db, board, candidates[0], { sources });
+
+  // Item-side: where the item came FROM, self-contained (survives a ledger
+  // wipe — that's its whole job).
+  const { rows: [item] } = await db.query("SELECT payload FROM items WHERE id=$1", [r.itemId]);
+  const prov = item.payload.provenance;
+  assert.equal(prov.key, "p.txt");
+  assert.equal(prov.size, candidates[0].values.file_size);
+  assert.equal(prov.modified, candidates[0].values.modified);
+  assert.match(prov.hash, /^[0-9a-f]{64}$/, "sha256 of the fetched bytes");
+
+  // Ledger-side: the same facts, plus the link the deletion stamps need.
+  const { rows: [led] } = await db.query(
+    "SELECT * FROM ingest_log WHERE board_id=$1 AND source_key=$2", [board.id, "p.txt"]);
+  assert.equal(led.reason, "admitted");
+  assert.equal(Number(led.item_id), r.itemId);
+  assert.equal(led.content_hash, prov.hash);
+  assert.equal(Number(led.file_size), prov.size);
+  assert.equal(Number(led.modified_at), prov.modified);
+
+  // Ledger wiped, item alive: the probe answers before any fetch, with the
+  // connector-shaped `.duplicate` carrying the item id for the re-ledger.
+  await clearIngestLog(db, board.id);
+  await assert.rejects(
+    () => admit(db, board, candidates[0], { sources }),
+    (e) => e.duplicate === true && e.itemId === r.itemId
+  );
 });
 
 test("admit: undecodable bytes throw err.skip and roll the tx back clean", async () => {

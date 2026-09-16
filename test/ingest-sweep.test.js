@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { startServer, seedBoard } from "./helpers.js";
-import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, setIngestState } from "../server/db.js";
+import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, setIngestState, clearIngestLog, deleteInstance } from "../server/db.js";
 import { startWorker } from "../server/worker.js";
 import { createSources } from "../server/sources/index.js";
 
@@ -50,6 +50,50 @@ async function until(fn, ms = 8000) {
   }
 }
 
+const names = async (id) => (await db.query(
+  "SELECT payload->'files'->0->>'original_name' AS name FROM items WHERE board_id=$1 ORDER BY 1", [id]
+)).rows.map((r) => r.name);
+
+// Settled ingest rows for a board, newest first.
+const jobRows = async (id) => (await db.query(
+  "SELECT detail, outcome, started_at FROM job_log WHERE board_id=$1 AND kind='ingest' AND outcome <> 'running' ORDER BY started_at DESC, id DESC",
+  [id])).rows;
+// The run-state stamp and the job-log row are written separately, and runOnce
+// below only waits for the stamp — the disarm it also waits for on a MANUAL
+// board is what keeps those reads off a half-written row. A scheduled board
+// re-arms instead, so there is no second signal, and a test that snapshots the
+// log can catch it a row short; the row then lands during the next run and
+// that run gets blamed for writing it. Wait for the count instead.
+const jobRowsAtLeast = (id, n) => until(async () => {
+  const rows = await jobRows(id);
+  return rows.length >= n ? rows : null;
+});
+
+// One run: arm the timer, wait for a fresh stamp. A manual board also
+// disarms itself afterwards and waiting for that avoids reading the row
+// mid-write; a SCHEDULED board re-arms instead, so there the stamp is the
+// whole signal (`disarms: false`).
+async function runOnce(id, after = 0, { disarms = true } = {}) {
+  await setIngestNextRun(db, id, Date.now() - 1);
+  return until(async () => {
+    const b = await getBoard(db, id);
+    const stamped = (b.ingest_state?.last_run_at || 0) > after;
+    return stamped && (!disarms || b.ingest_next_run_at === null) ? b : null;
+  });
+}
+
+// A board's ingest config, with only what a test actually varies spelled out.
+const watch = (id, folder, extra = {}) => updateBoard(db, id, {
+  ingest: {
+    enabled: true,
+    source: { folder, recursive: true },
+    filters: [],
+    sort: { by: "name", order: "asc" },
+    trigger: { mode: "manual" },
+    ...extra,
+  },
+});
+
 test("dueIngestBoards: armed + due only — the stamp decides, not `enabled`", async () => {
   // Timestamps live an hour out so the RUNNING worker's own dueIngestBoards
   // (which queries Date.now()) never claims these rows mid-test.
@@ -79,15 +123,7 @@ test("dueIngestBoards: armed + due only — the stamp decides, not `enabled`", a
 test("a paused schedule that was hand-fired runs once, then disarms itself", async () => {
   put("paused/a.txt", "one");
   const id = await seedBoard(db, "paused-sched");
-  await updateBoard(db, id, {
-    ingest: {
-      enabled: false, // held
-      source: { folder: "paused", recursive: false },
-      filters: [],
-      sort: { by: "name", order: "asc" },
-      trigger: { mode: "continuous" },
-    },
-  });
+  await watch(id, "paused", { enabled: false, trigger: { mode: "continuous" } }); // held
   // What "Run now" does: arm the stamp for the next tick.
   await setIngestNextRun(db, id, Date.now() - 1);
 
@@ -108,16 +144,7 @@ test("a paused schedule that was hand-fired runs once, then disarms itself", asy
 test("a capped run drains across ticks and honors the logical limit exactly", async () => {
   for (let i = 1; i <= 5; i++) put(`drain/f${i}.txt`, `file ${i}`);
   const id = await seedBoard(db, "drain");
-  await updateBoard(db, id, {
-    ingest: {
-      enabled: true,
-      source: { folder: "drain", recursive: true },
-      filters: [],
-      sort: { by: "name", order: "asc" },
-      limit: 3, // logical run cap < files available, > per-tick cap of 2
-      trigger: { mode: "manual" },
-    },
-  });
+  await watch(id, "drain", { limit: 3 }); // run cap < files available, > per-tick cap of 2
   await setIngestNextRun(db, id, Date.now() - 1);
 
   // Manual trigger: after the run fully drains, the timer disarms.
@@ -134,6 +161,37 @@ test("a capped run drains across ticks and honors the logical limit exactly", as
     "exactly `limit` admitted, name-ascending — drain ticks resumed the budget, not a fresh limit");
   assert.equal(board.ingest_state.last_error, null);
   assert.equal(board.ingest_state.drain_left ?? 0, 0, "drain bookkeeping cleared on completion");
+});
+
+test("a cleared memory heals from item provenance instead of duplicating", async () => {
+  put("wipe/a.txt", "one");
+  const id = await seedBoard(db, "wipe");
+  await watch(id, "wipe");
+  let b = await runOnce(id);
+  assert.equal(b.ingest_state.last_added, 1);
+  assert.deepEqual(await names(id), ["a.txt"]);
+
+  // Re-run without clearing: the ledger holds the file back.
+  b = await runOnce(id, b.ingest_state.last_run_at);
+  assert.equal(b.ingest_state.last_added, 0);
+  assert.deepEqual(await names(id), ["a.txt"]);
+
+  // Clear, run again: stage 1 pinned "the whole folder re-imports as
+  // duplicates" here; stage 2 replaced it — the admit probe recognizes the
+  // LIVE item by its payload provenance, throws the connector-shaped
+  // `.duplicate`, and the sweep re-ledgers the key, link included. The board
+  // does not grow; the ledger rebuilds itself. (Items born BEFORE provenance
+  // existed are invisible to the probe and still duplicate — why files.js
+  // keeps forgetAllIsSafe false for now.)
+  await clearIngestLog(db, id);
+  b = await runOnce(id, b.ingest_state.last_run_at);
+  assert.equal(b.ingest_state.last_added, 0);
+  assert.deepEqual(await names(id), ["a.txt"], "no duplicate birth — the heal");
+  const { rows } = await db.query(
+    "SELECT reason, item_id FROM ingest_log WHERE board_id=$1", [id]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].reason, "admitted");
+  assert.ok(rows[0].item_id != null, "rebuilt WITH the link the wipe destroyed");
 });
 
 test("an unreadable source lands in ingest_state with a spaced retry, not a wedged loop", async () => {
@@ -200,32 +258,110 @@ test("continuous trigger reschedules itself on the continuous cadence", async ()
 
 // ── "Keep top N": total is MEMBERSHIP (first N of the sorted set), not pacing ──
 
-const names = async (id) => (await db.query(
-  "SELECT payload->'files'->0->>'original_name' AS name FROM items WHERE board_id=$1 ORDER BY 1", [id]
-)).rows.map((r) => r.name);
+test("the spool case: a reused path holding DIFFERENT bytes is imported, not skipped", async () => {
+  // The workflow this stage exists for: the watch folder is a drop zone, not
+  // a library. Drop, ingest, clear the folder — the board item stays and
+  // nobody deleted anything — then drop a different file under the same name.
+  // Judged by path alone that second file is invisible forever, with no
+  // error, no badge and no run row to say so.
+  put("spool/drop.txt", "first payload");
+  const id = await seedBoard(db, "spool");
+  await watch(id, "spool");
+  let board = await runOnce(id);
+  assert.equal(board.ingest_state.last_added, 1);
 
-// One manual run: arm the timer, wait for it to disarm with a fresh stamp.
-async function runOnce(id, after = 0) {
-  await setIngestNextRun(db, id, Date.now() - 1);
-  return until(async () => {
-    const b = await getBoard(db, id);
-    return b.ingest_next_run_at === null && (b.ingest_state?.last_run_at || 0) > after ? b : null;
-  });
-}
+  // Still sitting there, untouched: recognized by path+size+mtime, no read.
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0);
+
+  // Folder cleared, different bytes dropped under the same name.
+  fs.rmSync(path.join(root, "spool/drop.txt"));
+  put("spool/drop.txt", "a completely different payload");
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 1, "the slot was reused — these are new bytes");
+  const { rows } = await db.query(
+    "SELECT payload->'provenance'->>'hash' AS hash FROM items WHERE board_id=$1", [id]);
+  assert.equal(rows.length, 2);
+  assert.notEqual(rows[0].hash, rows[1].hash, "two items, two distinct contents");
+});
+
+test("a touched file is recognized by content and stops drifting", async () => {
+  put("touch/f.txt", "stable bytes");
+  const id = await seedBoard(db, "touched");
+  await watch(id, "touch");
+  let board = await runOnce(id);
+  assert.equal(board.ingest_state.last_added, 1);
+
+  // Same bytes, new mtime — drift says "re-read me", content says "already
+  // here". The re-ledger must record the NEW mtime, or this repeats forever.
+  // Still older than the settle window (10s), or the listing would skip the
+  // file outright and there would be no drift to notice.
+  const later = new Date(Date.now() - 60000);
+  fs.utimesSync(path.join(root, "touch/f.txt"), later, later);
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0);
+  assert.equal((await names(id)).length, 1, "recognized by content — no second item");
+  const { rows: [led] } = await db.query(
+    "SELECT modified_at, reason FROM ingest_log WHERE board_id=$1", [id]);
+  assert.equal(led.reason, "admitted");
+  assert.equal(Number(led.modified_at), later.getTime(), "the slot's facts were re-stamped");
+
+  // Proof it settled: the next tick finds no drift, so nothing is re-read
+  // and the run reports no duplicate either.
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0);
+  assert.equal((await jobRows(id))[0].detail.duplicates ?? 0, 0,
+    "a settled slot is skipped by the cheap check — the file is never re-read");
+});
+
+test("renames: a live file is recognized, a deleted one stays deleted", async () => {
+  put("ren/keep.txt", "the keeper");
+  put("ren/gone.txt", "the rejected one");
+  const id = await seedBoard(db, "renames");
+  await watch(id, "ren");
+  let board = await runOnce(id);
+  assert.equal(board.ingest_state.last_added, 2);
+
+  // Delete one from the board; the other stays.
+  const { rows: [gone] } = await db.query(
+    "SELECT id FROM items WHERE board_id=$1 AND payload->'provenance'->>'key'='gone.txt'", [id]);
+  await deleteInstance(db, gone.id);
+
+  // Rename both on disk. The live one must NOT duplicate; the deleted one
+  // must NOT come back.
+  fs.renameSync(path.join(root, "ren/keep.txt"), path.join(root, "ren/keep-2024.txt"));
+  fs.renameSync(path.join(root, "ren/gone.txt"), path.join(root, "ren/gone-2024.txt"));
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0, "both were recognized by content");
+  assert.equal((await names(id)).length, 1, "one item still — the rename did not clone it");
+
+  const { rows: led } = await db.query(
+    "SELECT source_key, reason, item_id FROM ingest_log WHERE board_id=$1 ORDER BY source_key", [id]);
+  const by = Object.fromEntries(led.map((r) => [r.source_key, r]));
+  assert.equal(by["keep-2024.txt"].reason, "admitted");
+  assert.equal(Number(by["keep-2024.txt"].item_id), Number(by["keep.txt"].item_id),
+    "the new name points at the SAME item — so deleting it stamps both keys");
+  assert.equal(by["gone-2024.txt"].reason, "deleted", "content you deleted, under a new name");
+
+  // A held-back rename is an EVENT: it ledgers a key permanently, so the run
+  // row is its only trace and must survive.
+  const latest = (await jobRows(id))[0];
+  assert.equal(latest.detail.held, 1);
+  assert.deepEqual(latest.detail.held_labels, ["gone-2024.txt"]);
+
+  // And deleting the live item now stamps BOTH of its keys.
+  const { rows: [keep] } = await db.query(
+    "SELECT id FROM items WHERE board_id=$1", [id]);
+  await deleteInstance(db, keep.id);
+  const { rows: after } = await db.query(
+    "SELECT reason FROM ingest_log WHERE board_id=$1 AND source_key IN ('keep.txt','keep-2024.txt')", [id]);
+  assert.deepEqual(after.map((r) => r.reason), ["deleted", "deleted"]);
+});
 
 test("keep top: first `total` in sort order; ingested rows occupy slots; newcomers join, fallen rows stay", async () => {
   for (let i = 1; i <= 5; i++) put(`top/m${i}.txt`, `file ${i}`);
   const id = await seedBoard(db, "keep-top");
-  await updateBoard(db, id, {
-    ingest: {
-      enabled: true,
-      source: { folder: "top", recursive: true },
-      filters: [],
-      sort: { by: "name", order: "asc" },
-      total: 3,
-      trigger: { mode: "manual" },
-    },
-  });
+  await watch(id, "top", { total: 3 });
   let board = await runOnce(id);
   assert.deepEqual(await names(id), ["m1.txt", "m2.txt", "m3.txt"],
     "exactly the first `total` of the sorted set — m4/m5 are outside the membership, not queued behind it");
@@ -244,20 +380,91 @@ test("keep top: first `total` in sort order; ingested rows occupy slots; newcome
   assert.deepEqual(await names(id), ["a0.txt", "m1.txt", "m2.txt", "m3.txt"]);
 });
 
+test("keep top: a deleted member's slot backfills; the deleted key never resurrects", async () => {
+  for (let i = 1; i <= 5; i++) put(`backfill/b${i}.txt`, `file ${i}`);
+  const id = await seedBoard(db, "backfill");
+  await watch(id, "backfill", { total: 3 });
+  let board = await runOnce(id);
+  assert.deepEqual(await names(id), ["b1.txt", "b2.txt", "b3.txt"]);
+
+  // Delete b2: deleteInstance stamps its ledger row `deleted` (stage 2), and
+  // stage 3's slot rule frees its seat — the board keeps itself at N
+  // ELIGIBLE members, so rank 4 fills the gap while the deleted key itself
+  // stays held back.
+  const { rows: [b2] } = await db.query(
+    "SELECT id FROM items WHERE board_id=$1 AND payload->'files'->0->>'original_name'='b2.txt'", [id]);
+  await deleteInstance(db, b2.id);
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 1);
+  assert.deepEqual(await names(id), ["b1.txt", "b3.txt", "b4.txt"],
+    "rank 4 backfilled the freed slot; b2 was not resurrected");
+
+  // A full-again membership admits nothing more.
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 0);
+  assert.deepEqual(await names(id), ["b1.txt", "b3.txt", "b4.txt"]);
+});
+
+test("keep top: an unprocessable file's slot backfills too", async () => {
+  put("skipfill/a1.png", "not a png at all"); // sorts first, cannot decode
+  for (const n of ["a2.txt", "a3.txt", "a4.txt"]) put(`skipfill/${n}`, `file ${n}`);
+  const id = await seedBoard(db, "skipfill");
+  await watch(id, "skipfill", { total: 2 });
+  // Run 1: membership = [a1.png, a2.txt]; a1 skips (ledgered `skipped`),
+  // a2 admits. Run 2: the skipped key holds no slot — a corrupt file is no
+  // more an eligible member than a rejected one — so a3 backfills.
+  let board = await runOnce(id);
+  assert.deepEqual(await names(id), ["a2.txt"]);
+  board = await runOnce(id, board.ingest_state.last_run_at);
+  assert.equal(board.ingest_state.last_added, 1);
+  assert.deepEqual(await names(id), ["a2.txt", "a3.txt"]);
+});
+
+test("`ignored` rides the run row but never makes a flat tick eventful", async () => {
+  put("ign/x1.txt", "one");
+  put("ign/x2.txt", "two");
+  const id = await seedBoard(db, "ignored");
+  // SCHEDULED, not manual: retracting a flat tick is a schedule-only rule (a
+  // hand-fired run always keeps its row — somebody asked). A month-long
+  // interval means the cadence can't re-fire mid-test.
+  await watch(id, "ign", { trigger: { mode: "interval", every: 43200 } });
+  let board = await runOnce(id, 0, { disarms: false });
+  assert.equal(board.ingest_state.last_added, 2);
+
+  // Delete one: its row is stamped `deleted`, so the next scan matches it and
+  // holds it back — that is the run row's `ignored`.
+  const { rows: [x1] } = await db.query(
+    "SELECT id FROM items WHERE board_id=$1 AND payload->'files'->0->>'original_name'='x1.txt'", [id]);
+  await deleteInstance(db, x1.id);
+
+  // A run that admits nothing, errs on nothing and only has a standing
+  // `ignored` to report is a FLAT TICK: its row is retracted, not stamped.
+  // Otherwise a continuous watch writes "1 ignored" every 30s forever — the
+  // volume lesson the retract-and-fold logic exists for.
+  const before = await jobRowsAtLeast(id, 1);
+  board = await runOnce(id, board.ingest_state.last_run_at, { disarms: false });
+  assert.equal(board.ingest_state.last_added, 0);
+
+  // On a run that DID something, the figure rides along — and that row
+  // landing is also what proves the flat tick above is FINISHED. Asserting
+  // the retraction the moment the flat run stamps would pass just as happily
+  // against a row still in flight, which is the trap this test sat in.
+  put("ign/x3.txt", "three");
+  board = await runOnce(id, board.ingest_state.last_run_at, { disarms: false });
+  assert.equal(board.ingest_state.last_added, 1);
+  const rows = await jobRowsAtLeast(id, 2);
+  assert.equal(rows.length, 2, "three runs, two rows — the flat tick retracted its own");
+  assert.deepEqual(rows[1], before[0], "and it left the earlier run's row alone");
+  const latest = rows[0];
+  assert.equal(latest.detail.admitted, 1);
+  assert.equal(latest.detail.ignored, 1, "one match is held back by a deletion");
+});
+
 test("keep top + per-run limit: the budget drains inside the membership, never past it", async () => {
   for (let i = 1; i <= 5; i++) put(`topdrain/f${i}.txt`, `file ${i}`);
   const id = await seedBoard(db, "keep-top-drain");
-  await updateBoard(db, id, {
-    ingest: {
-      enabled: true,
-      source: { folder: "topdrain", recursive: true },
-      filters: [],
-      sort: { by: "name", order: "asc" },
-      total: 4,
-      limit: 3, // per-run budget < membership, > the per-tick cap of 2 → forces a drain
-      trigger: { mode: "manual" },
-    },
-  });
+  // limit: per-run budget < membership, > the per-tick cap of 2 → forces a drain
+  await watch(id, "topdrain", { total: 4, limit: 3 });
   let board = await runOnce(id);
   assert.deepEqual(await names(id), ["f1.txt", "f2.txt", "f3.txt"],
     "run 1: the per-run budget, drained across ticks, all inside the membership");

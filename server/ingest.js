@@ -31,7 +31,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 // dbc: the pool or a tx client. Returns null for unsupported file types;
 // throws with err.reason for user-explainable refusals (e.g. PDF page cap).
 export async function admitFile(dbc, sources, board, tmpPath, originalName,
-  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null, maxBytes = null } = {}) {
+  { addedAt = Date.now(), modifiedAt = null, createdAt = null, uploadedBy = null, maxBytes = null, provenance = null } = {}) {
   // Per-type size gate — the real, admin-adjustable upload limit lives HERE, not
   // at multer (whose global ceiling is only an absolute backstop, and which
   // folder/remote ingestion never passes through). `maxBytes` is the effective
@@ -88,6 +88,12 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   // no park and go all the way. Unmapped: auto-tag on → pending, off → held.
   const payload = {
     identity: file.name, files: [file], fields: fileFields,
+    // Where this item came FROM (source key + content hash + the listing's
+    // size/mtime) — file ingestion only; the upload route passes none. What
+    // lets a post-clear scan recognize the item as already here (the ledger's
+    // link points the other way and dies with the ledger), and stage 5's
+    // rename/drift tiebreakers read the hash. ingest-deletions-plan.md.
+    ...(provenance ? { provenance } : {}),
     ...(hasMapping ? { mapping: board.mapping } : {}),
     ...(hasMapping && !board.auto_tag ? { park: true } : {}),
   };

@@ -772,8 +772,12 @@ test("admit: entity + tag vehicle + ledger row; a duplicate identity propagates 
   const { rows: [item] } = await db.query("SELECT payload, status FROM items WHERE board_id=$1", [boardId]);
   assert.equal(item.status, "pending", "auto-tag on, no face → straight to the tag leg");
   assert.deepEqual(item.payload.source, { provider: "acme", id: "Gizmo" });
-  const { rows: ledger } = await db.query("SELECT source_key FROM ingest_log WHERE board_id=$1", [boardId]);
+  const { rows: [itemRow] } = await db.query("SELECT id FROM items WHERE board_id=$1", [boardId]);
+  const { rows: ledger } = await db.query("SELECT source_key, reason, item_id FROM ingest_log WHERE board_id=$1", [boardId]);
   assert.deepEqual(ledger.map((r) => r.source_key), ["gz"]);
+  assert.equal(ledger[0].reason, "admitted");
+  assert.equal(Number(ledger[0].item_id), itemRow.id,
+    "the row links its vehicle — what lets a later deletion stamp it (stage 2)");
 
   // Same identity again (ledger row lost, or a manual add raced the feed):
   // the entities unique constraint answers, tagged for the sweep to ledger.
@@ -836,7 +840,10 @@ test("sweep e2e: a crypto feed admits its filter-defined bucket, once", async ()
     body: { source: {}, filters: [], sort: { by: "market_cap", order: "desc" }, trigger: { mode: "manual" } },
   });
   assert.equal(prev.status, 200);
-  assert.deepEqual(prev.json, { count: 3, new: 1, capped: false, scanned: 3 },
+  // The split rides along (stage 3): one coin still on the board, one
+  // deleted above — correctly reported held back, not resurrected.
+  assert.deepEqual(prev.json,
+    { count: 3, new: 1, on_board: 1, held: 1, unprocessable: 0, capped: false, truncated: false, scanned: 3 },
     "filterless preview sees the full universe; only doge is unledgered");
 
   const page = await req(base, "POST", `/api/boards/${boardId}/ingest/preview`, {
@@ -844,7 +851,9 @@ test("sweep e2e: a crypto feed admits its filter-defined bucket, once", async ()
     body: { source: {}, filters: [], sort: { by: "market_cap", order: "desc" }, trigger: { mode: "manual" }, sample: { offset: 0, limit: 50 } },
   });
   assert.equal(page.status, 200);
-  assert.deepEqual(page.json.sample.map((c) => [c.key, c.ingested]), [["btc", true], ["eth", true], ["doge", false]]);
+  assert.deepEqual(page.json.sample.map((c) => [c.key, c.ledger]),
+    [["btc", "admitted"], ["eth", "deleted"], ["doge", null]],
+    "rows carry their ledger reason — eth was deleted above and reads held back");
 });
 
 test("drain economics: one catalog walk per RUN, one batched warm per tick", async () => {

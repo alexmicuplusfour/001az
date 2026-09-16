@@ -6,7 +6,7 @@
 // the catalog-feed adapter. The sweep, routes, modal, filter engine and ledger
 // are all adapter-blind.
 //
-// Four optional pieces an adapter may add, each a no-op when absent, and each
+// Five optional pieces an adapter may add, each a no-op when absent, and each
 // there because the two adapters have genuinely different cost shapes:
 //   validateSource(db, source, opts)  reject a bad source at save time
 //   windowCap()                       enumeration depth (preview and run share it)
@@ -14,6 +14,21 @@
 //                                     a file adapter has nothing to warm
 //   descriptor().runCap               admissions per tick — per-ITEM cost (files,
 //                                     25) vs per-TICK cost (feeds, 250)
+//   changed(candidate, recorded)      has this source slot stopped holding the
+//                                     bytes we recorded? Files answer by size
+//                                     and mtime; a connector has no slots to
+//                                     reuse and passes none, so it never does.
+//                                     Owned by the adapter because the sweep
+//                                     and the adapter's own key probe both ask
+//                                     it, against different stores.
+//   descriptor().forgetAllIsSafe      would forgetting the whole ledger leave
+//                                     items already on the board alone? A feed
+//                                     says yes (its unique constraint absorbs a
+//                                     re-add as `.duplicate`); the file adapter
+//                                     says no while pre-provenance items exist.
+//                                     The words the clear warning uses, and
+//                                     nothing else — a capability claim here
+//                                     would be a claim the code has to keep.
 // enumerate also takes an options bag: { limit } bounds the window (the preview
 // route), { extend } marks a drain tick continuing a run already in flight.
 import * as files from "./files.js";
@@ -120,6 +135,10 @@ export function validateIngest(ingest, descriptor, { hasRoot = false, trigger = 
   if (!ingest || typeof ingest !== "object" || Array.isArray(ingest)) return "ingest must be an object";
   if (!descriptor) return "ingestion is not available for this board";
   if (typeof ingest.enabled !== "boolean") return "ingest.enabled must be a boolean";
+  // Whether a deletion sticks (stage 4). Optional — absent reads as true at
+  // the stamp sites, so an old config is a remembering one.
+  if (ingest.rememberDeletions !== undefined && typeof ingest.rememberDeletions !== "boolean")
+    return "ingest.rememberDeletions must be a boolean";
 
   // Source shape only — the concrete per-source rules (folder jail, connection
   // reference, install gate) depend on the chosen source type and live in the

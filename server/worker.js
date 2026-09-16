@@ -65,7 +65,7 @@ import { wantedGeneration } from "./pricing.js";
 import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP } from "./ingestion/index.js";
 import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
 import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
-import { applyLimit, membership } from "./ingestion/filter-engine.js";
+import { applyLimit, runWindow } from "./ingestion/filter-engine.js";
 import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
 import { sidecarUrl } from "./sidecar-catalog.js";
 import { pluginState } from "./plugins.js";
@@ -2046,19 +2046,16 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         const drainLeft = Number(b.ingest_state?.drain_left) || 0;
         const { candidates } = await adapter.enumerate(db, b, cfg, { drain: drainLeft > 0 });
         const known = await ingestedKeys(db, b.id);
-        // `total` is MEMBERSHIP — the board mirrors the first N of the
-        // filtered, sorted window, and rows already ingested count toward N.
-        // So it caps BEFORE the known-subtraction (after, it would degenerate
-        // into another per-run limit). Without a total the two orders agree —
-        // the cap is the only reason to look at ingested rows — so subtract
-        // `known` first and spare the hot path: a mature continuous board
-        // then re-sorts its ~0 fresh rows per tick, not the full window for
-        // an identical result. `fresh` filters the sorted list, so order
-        // survives into the budget slice.
-        const total = Number(cfg.total) || 0;
-        const pool = total ? candidates : candidates.filter((c) => !known.has(c.key));
-        const matched = membership(pool, cfg, catalog);
-        const fresh = total ? matched.filter((c) => !known.has(c.key)) : matched;
+        // Membership vs admission — two different subtractions since stage 3
+        // (a user-deleted key backfills its `total` slot but never re-admits)
+        // — and both live in runWindow, shared with the preview route so a
+        // count and a run can never disagree. `fresh` arrives sorted, so
+        // order survives into the budget slice.
+        // `changed` is the adapter's own "has this slot stopped holding the
+        // bytes we recorded" (files.js); without it a reused path is
+        // invisible forever — the spool case.
+        const { fresh, tally } = runWindow(candidates, cfg, catalog, known,
+          { changed: adapter.changed });
         const budget = drainLeft > 0 ? drainLeft : (Number(cfg.limit) || Infinity);
         const picked = applyLimit(fresh, budget);
         const batch = picked.slice(0, RUN_CAP(descriptor.runCap));
@@ -2071,17 +2068,30 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         let dups = 0;
         const errors = [];
         const skips = []; // labels — the "why did my file never get picked up" answer
+        const held = []; // labels — recognized as content you deleted (stage 5)
         for (const c of batch) {
           try {
             await adapter.admit(db, b, c, { sources });
             added++;
           } catch (err) {
-            // duplicate (already on the board) and skip (unsupported bytes)
-            // are ledger-and-forget: stop rescanning them. Real errors stay
-            // unledgered so the next run retries them.
-            if (err.duplicate || err.skip) {
-              await recordIngest(db, b.id, c.key, Date.now());
+            // duplicate (already on the board), skip (unsupported bytes) and
+            // held (stage 5: the bytes are something you deleted) are all
+            // ledger-and-forget: stop rescanning them. Real errors stay
+            // unledgered so the next run retries them. The reason stamped is
+            // what the history reads back — a corrupt file is not a rejection
+            // and a rejection is not a duplicate. `err.ledger` carries the
+            // slot's re-read facts (hash/size/mtime) where the bytes were
+            // actually read, which is what stops a merely-touched file from
+            // drifting and being re-fetched on every single tick; the sweep
+            // passes it through without looking inside, staying adapter-blind.
+            if (err.duplicate || err.skip || err.held) {
+              await recordIngest(db, b.id, c.key, Date.now(), {
+                ...(err.ledger || {}),
+                reason: err.skip ? "skipped" : err.held ? "deleted" : "admitted",
+                itemId: err.itemId ?? null,
+              });
               if (err.skip) skips.push(c.label);
+              else if (err.held) held.push(c.label);
               else dups++;
             } else errors.push(`${c.label}: ${err.message}`);
           }
@@ -2111,21 +2121,27 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         // "0 admitted" is the answer. Skips and duplicates COUNT as events:
         // both ledger the file out of every future scan permanently, and the
         // row naming it is the only trace that ever happened.
-        const eventful = added > 0 || errors.length > 0 || remaining > 0 || skips.length > 0 || dups > 0;
+        // Keys this run ledgered out of every future scan. Named once: the
+        // three predicates below all ask the same question, and a fourth
+        // disposition that updated only two of them would silently undo the
+        // volume guard they exist to enforce.
+        const ledgered = skips.length + dups + held.length;
+        const eventful = added > 0 || errors.length > 0 || remaining > 0 || ledgered > 0;
         if (!eventful && !oneShot && job.id != null) {
           await jobLogWrite(() => deleteJobLog(db, job.id));
         } else {
           // A scan whose ONLY news is the same per-item error as the prior
           // row's is a flat tick too (a wedged file on a continuous watch
           // ≈ 2,880 rows/day) — fold it instead of stamping a fresh row.
-          const errorOnly = errors.length > 0 && !added && !skips.length && !dups && remaining === 0;
+          const errorOnly = errors.length > 0 && !added && !ledgered && remaining === 0;
           const prior = errorOnly && !oneShot && job.id != null
             ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
             : null;
           // Compare the STORED form — addJobLog caps error at 500 chars.
-          const sameStory = prior?.outcome === "ok" && prior.error === String(errors[0] ?? "").slice(0, 500) &&
-            !Number(prior.detail?.admitted) && !Number(prior.detail?.skipped) &&
-            !Number(prior.detail?.duplicates) && !Number(prior.detail?.drain_left);
+          const quiet = (d) => !Number(d?.admitted) && !Number(d?.skipped)
+            && !Number(d?.duplicates) && !Number(d?.held) && !Number(d?.drain_left);
+          const sameStory = prior?.outcome === "ok"
+            && prior.error === String(errors[0] ?? "").slice(0, 500) && quiet(prior.detail);
           if (sameStory) {
             await foldJobRepeat(db, prior, job.id, {
               outcome: "ok", error: errors[0],
@@ -2139,6 +2155,19 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
                 skipped: skips.length, drain_left: remaining > 0 ? remaining : 0,
                 ...(skips.length ? { skipped_labels: skips.slice(0, 20) } : {}),
                 ...(dups ? { duplicates: dups } : {}),
+                // Recognized as content you deleted, under a name the ledger
+                // had never seen. An EVENT, unlike `ignored` below: it
+                // ledgers a new key permanently, so this row is its only
+                // trace — the same argument skips make.
+                ...(held.length ? { held: held.length, held_labels: held.slice(0, 20) } : {}),
+                // How many matches a user deletion is holding back. A
+                // STANDING number, not an event of this run — which is why
+                // it touches neither `eventful` above nor `sameStory`
+                // below: a continuous watch would otherwise stamp a fresh
+                // "1433 ignored" row every 30s, the volume lesson those two
+                // exist to prevent. It rides rows that earned their place
+                // some other way.
+                ...(tally.held ? { ignored: tally.held } : {}),
               },
             });
           }

@@ -2004,31 +2004,172 @@ export async function clearIngestSuperseded(db, boardId) {
   await db.query("UPDATE boards SET ingest_state = ingest_state - 'drain_left' - 'last_error' WHERE id=$1", [boardId]);
 }
 
-// The dedup ledger: every source_key ever admitted to this board. Rows outlive
-// their entities on purpose — deleting an item is a user judgment the feed
-// must not overturn on the next scan.
+// The dedup ledger: every source_key ever ledgered on this board, with what
+// the sweep needs to judge it. Rows outlive their entities on purpose —
+// deleting an item is a user judgment the feed must not overturn on the next
+// scan. Map(key → { reason, size, modified }): `reason` drives the slot rule
+// (stage 3), and the size/mtime pair drives DRIFT (stage 5) — a known key
+// whose recorded pair no longer matches the listing is a different file in a
+// reused slot, not the one this row remembers. Both null for connector rows
+// and for anything ledgered before stage 2, which is exactly right: nothing
+// to compare means nothing can drift.
 export async function ingestedKeys(db, boardId) {
-  const { rows } = await db.query("SELECT source_key FROM ingest_log WHERE board_id=$1", [boardId]);
-  return new Set(rows.map((r) => r.source_key));
+  const { rows } = await db.query(
+    "SELECT source_key, reason, file_size, modified_at FROM ingest_log WHERE board_id=$1", [boardId]);
+  return new Map(rows.map((r) => [r.source_key, {
+    reason: r.reason,
+    size: r.file_size === null ? null : Number(r.file_size),
+    modified: r.modified_at === null ? null : Number(r.modified_at),
+  }]));
 }
 
-// Ledger membership for a handful of specific keys (a preview page) — a PK
-// probe instead of materializing a board's whole ledger.
-export async function ingestedAmong(db, boardId, keys) {
-  if (!keys.length) return new Set();
+// Is this content already on the board? Asked of the ITEMS (payload
+// provenance), not the ledger, so the answer survives a Forget-all — which
+// makes this the by-content half of the self-heal as well as the rename
+// check. Returns the live item's id, or null. Files only: nothing else
+// carries provenance.
+//
+// `payload ? 'provenance'` is restated rather than implied: it is the partial
+// index's predicate (0050), and Postgres cannot derive it from the arrow
+// expression below — without it the probe seq-scans `items` on every
+// admission.
+export async function itemByContentHash(db, boardId, hash) {
+  if (!hash) return null;
   const { rows } = await db.query(
-    "SELECT source_key FROM ingest_log WHERE board_id=$1 AND source_key = ANY($2)",
-    [boardId, keys]
+    `SELECT id FROM items
+      WHERE board_id=$1 AND payload ? 'provenance'
+        AND payload->'provenance'->>'hash' = $2 LIMIT 1`,
+    [boardId, hash]
   );
-  return new Set(rows.map((r) => r.source_key));
+  return rows[0]?.id ?? null;
+}
+
+// Did you delete this content? The `deleted` stamp is the only record left
+// once the item is gone, so unlike the question above this one must ask the
+// ledger. Returns the key it was deleted under (useful for the log), or null.
+export async function deletedByContentHash(db, boardId, hash) {
+  if (!hash) return null;
+  const { rows } = await db.query(
+    "SELECT source_key FROM ingest_log WHERE board_id=$1 AND content_hash=$2 AND reason='deleted' LIMIT 1",
+    [boardId, hash]
+  );
+  return rows[0]?.source_key ?? null;
+}
+
+// What the board's memory holds, by reason — one GROUP BY behind the modal's
+// three buttons (Forget all / Bring back N / Retry N), each of which hides at
+// zero. LEDGER-WIDE on purpose, unlike the preview split's filter-scoped
+// tallies: the actions these numbers label are ledger-wide too.
+export async function ingestLedgerCounts(db, boardId) {
+  const { rows } = await db.query(
+    "SELECT reason, COUNT(*)::int AS n FROM ingest_log WHERE board_id=$1 GROUP BY reason", [boardId]);
+  const by = Object.fromEntries(rows.map((r) => [r.reason, r.n]));
+  return {
+    total: rows.reduce((a, r) => a + r.n, 0),
+    on_board: by.admitted ?? 0,
+    held: by.deleted ?? 0,
+    unprocessable: by.skipped ?? 0,
+  };
+}
+
+// Forget ledger rows, so the next run treats those keys as never seen. ONE
+// verb, three scopes (ingest-deletions-plan.md stage 4) — the blunt reset was
+// only ever the widest of them:
+//   all       the stage-1 button: forget everything
+//   deleted   "bring back" — the rows a user deletion stamped
+//   skipped   "retry" — unprocessable bytes, worth another pass once the file
+//             (or the handler that refused it) has changed
+// Forgetting is the right mechanism for all three: flipping a row to
+// `admitted` instead would claim the item is on the board AND still keep its
+// key out of `fresh`. Returns how many rows died — the route's receipt.
+//
+// `keys` narrows the delete to a caller-supplied source-key set (stage 6):
+// the two scoped verbs are offered beside FILTER-SCOPED counts, so they must
+// act on the window those counts were read off rather than on the whole
+// ledger. The caller supplies keys, never reasons — the scope still owns that
+// mapping here, so no route learns the vocabulary. `all` passes none: it is
+// the whole-ledger reset by definition.
+const FORGET_SCOPES = { all: null, deleted: "deleted", skipped: "skipped" };
+export const isForgetScope = (scope) => Object.hasOwn(FORGET_SCOPES, scope);
+export async function clearIngestLog(db, boardId, scope = "all", keys = null) {
+  const reason = FORGET_SCOPES[scope];
+  const where = ["board_id=$1"];
+  const params = [boardId];
+  if (reason) where.push(`reason=$${params.push(reason)}`);
+  if (keys) where.push(`source_key = ANY($${params.push(keys)}::text[])`);
+  const { rowCount } = await db.query(`DELETE FROM ingest_log WHERE ${where.join(" AND ")}`, params);
+  return rowCount;
 }
 
 // Accepts the pool or a tx client (the folder adapter ledgers inside the
-// admit transaction).
-export async function recordIngest(dbc, boardId, sourceKey, at) {
+// admit transaction). An UPSERT, not DO NOTHING, since stage 2: a re-admission
+// of a brought-back key must flip its `deleted` stamp back to `admitted`, and
+// created_at means "when last ledgered" (what history's time grouping wants).
+// COALESCE on the link + provenance so a linkless write — the sweep's dup
+// path, which often knows only the key — can never wipe facts a richer write
+// already recorded.
+export async function recordIngest(dbc, boardId, sourceKey, at,
+  { reason = "admitted", itemId = null, hash = null, size = null, modifiedAt = null } = {}) {
   await dbc.query(
-    "INSERT INTO ingest_log (board_id, source_key, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-    [boardId, sourceKey, at]
+    `INSERT INTO ingest_log (board_id, source_key, created_at, reason, item_id, content_hash, file_size, modified_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (board_id, source_key) DO UPDATE SET
+       created_at = EXCLUDED.created_at,
+       reason = EXCLUDED.reason,
+       item_id = COALESCE(EXCLUDED.item_id, ingest_log.item_id),
+       content_hash = COALESCE(EXCLUDED.content_hash, ingest_log.content_hash),
+       file_size = COALESCE(EXCLUDED.file_size, ingest_log.file_size),
+       modified_at = COALESCE(EXCLUDED.modified_at, ingest_log.modified_at)`,
+    [boardId, sourceKey, at, reason, itemId, hash, size, modifiedAt]
+  );
+}
+
+// The file adapter's self-heal probe: a LIVE item on this board already born
+// from this source key (payload.provenance, stamped at admit — files only).
+// What lets a post-clear scan recognize "already here" without the ledger,
+// the way the connector adapter's unique constraint does.
+//
+// Returns { id, size, modified } — the item's recorded facts, not just its
+// id, because a path is only evidence when the SLOT hasn't changed. On a
+// watch folder used as a spool the same name is reused for different files,
+// so the caller compares these before trusting the match and otherwise falls
+// through to reading the bytes (files.js). Null when no item claims the key.
+export async function itemBySourceKey(db, boardId, key) {
+  const { rows } = await db.query(
+    `SELECT id,
+            (payload->'provenance'->>'size')::bigint     AS size,
+            (payload->'provenance'->>'modified')::bigint AS modified
+       FROM items
+      WHERE board_id=$1 AND payload ? 'provenance'
+        AND payload->'provenance'->>'key' = $2 LIMIT 1`,
+    [boardId, key]
+  );
+  const r = rows[0];
+  return r ? { id: r.id, size: r.size === null ? null : Number(r.size), modified: r.modified === null ? null : Number(r.modified) } : null;
+}
+
+// "Remember deletions" (ingest.rememberDeletions, default true) as a SQL
+// predicate over the owning board. The toggle is FORWARD-looking, so it acts
+// by stopping the stamp rather than by teaching the sweep to ignore one —
+// that would be the retroactive reading, a mass re-import wearing a
+// preference's clothes, and it would make "off, but leave the backlog out"
+// inexpressible. Absent config, absent key, and a board with no ingest at all
+// all read as true. Correlated on ingest_log.board_id so the stamp sites pay
+// no extra round-trip.
+const REMEMBERS_DELETIONS =
+  `COALESCE((SELECT (b.ingest->>'rememberDeletions')::boolean FROM boards b WHERE b.id = ingest_log.board_id), TRUE)`;
+
+// Stamp the ledger rows of items being deleted `deleted` — rejection is
+// RECORDED at the one moment intent is known, never inferred from absence
+// (ingest-deletions-plan.md stage 2). Lives beside the three db-level
+// deletion sites that call it, so no route can forget. Upload-born items
+// have no ledger row; the UPDATE matching nothing is the correct no-op.
+async function stampIngestDeleted(dbc, boardId, itemIds) {
+  if (!itemIds.length) return;
+  await dbc.query(
+    `UPDATE ingest_log SET reason='deleted'
+      WHERE board_id=$1 AND item_id = ANY($2::bigint[]) AND ${REMEMBERS_DELETIONS}`,
+    [boardId, itemIds]
   );
 }
 
@@ -2658,6 +2799,9 @@ export async function deleteEntity(db, id) {
     );
     const { rows } = await client.query("DELETE FROM entities WHERE id=$1 RETURNING board_id", [id]);
     if (!rows.length) return null;
+    // The orphans are the items this delete actually removes — the shared
+    // instances scrubbed above survive, so they are correctly NOT stamped.
+    await stampIngestDeleted(client, rows[0].board_id, orphans.map((o) => o.id));
     return { board_id: rows[0].board_id, files: orphans.flatMap((r) => r.payload?.files || []) };
   });
 }
@@ -2671,7 +2815,10 @@ export async function deleteEntity(db, id) {
 export async function deleteInstance(db, id) {
   const { rows } = await db.query(
     `WITH del AS (DELETE FROM items WHERE id=$1 RETURNING payload, entity_ids, board_id),
-          touch AS (UPDATE entities SET updated_at=$2 WHERE id IN (SELECT unnest(entity_ids) FROM del))
+          touch AS (UPDATE entities SET updated_at=$2 WHERE id IN (SELECT unnest(entity_ids) FROM del)),
+          stamp AS (UPDATE ingest_log SET reason='deleted'
+                    WHERE item_id=$1 AND board_id IN (SELECT board_id FROM del)
+                      AND ${REMEMBERS_DELETIONS})
      SELECT payload, entity_ids, board_id FROM del`,
     [id, Date.now()]
   );
@@ -3898,9 +4045,14 @@ export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
     const del = await client.query(
       `DELETE FROM items
        WHERE board_id=$1 AND status = ANY($2::text[]) AND ${UNFETCHED}
-       RETURNING entity_ids`,
+       RETURNING id, entity_ids`,
       [boardId, fetchLane]
     );
+    // A cancelled queued FEED add is "don't re-add" — unledgered, the next
+    // sweep tick would silently un-do this cancel. Stamped `deleted`, the
+    // cancel holds and the bring-back surface can reverse it. Hand-browsed
+    // adds have no ledger row; the stamp is a no-op for them.
+    await stampIngestDeleted(client, boardId, del.rows.map((r) => r.id));
     // Sole-home placeholders go with their vehicles (no files exist pre-fetch,
     // so there is nothing to hand to sources.cleanup); an entity that somehow
     // has another instance keeps living and only lost this vehicle. A separate

@@ -90,14 +90,77 @@ export function applyLimit(candidates, limit) {
   return candidates.slice(0, limit);
 }
 
-// The membership set: what a config MATCHES — filters, then sort, then the
-// `total` cap ("keep top N"). One function so the preview's count and the
-// sweep's run can never disagree on the set; that promise held by two inline
-// copies staying character-identical is no promise at all. The per-run
-// admission budget (`limit`) is deliberately absent — that's pacing, the
-// sweep's own slice over the fresh remainder.
-export function membership(candidates, cfg, catalog, now = Date.now()) {
-  return applyLimit(
-    applySort(applyFilters(candidates, cfg.filters, catalog, now), cfg.sort, catalog),
-    Number(cfg.total) || Infinity);
+// The one classification of a scan — the can't-disagree promise that used to
+// live in a shared `membership()` helper, now that the preview and the sweep
+// need the same SPLIT and not just the same set (stages 3-5).
+// `known` is the ledger as Map(key -> { reason, size, modified }).
+//
+// Everything below falls out of ONE classification of each matching
+// candidate, because every earlier attempt to compute these separately drifted
+// apart: the preview tallied "held back" one way while the run row counted
+// "ignored" another, and the two disagreed on exactly the case that motivated
+// the stage.
+//
+//   settled   the key is known AND still holds the bytes we recorded. Only a
+//             settled key can speak for its ledger row.
+//   slots     a settled key consumes a `total` slot iff its reason is
+//             `admitted` (legacy rows included — they can't prove absence).
+//             `deleted` and `skipped` backfill: the board keeps itself at N
+//             ELIGIBLE members, and a corrupt file is no more an eligible
+//             member than a rejected one.
+//   admission every settled key stays out of `fresh`, whatever its reason —
+//             backfilling a slot never resurrects its occupant.
+//
+// CHANGED is what makes a disposable watch folder work. A path there is not a
+// name, it is a slot, and slots get reused: drop a file, ingest it, clear the
+// folder, drop a different file under the same name. Judged by path alone that
+// second file is skipped forever — no error, no badge, no run row. So a key
+// whose recorded facts no longer match the listing is NOT settled: it is a new
+// file wearing an old name, it takes a slot from nobody, and the admit path
+// reads its bytes and decides by content. The predicate belongs to the adapter
+// (files.js `changed`; a connector passes none and can never change), so
+// nothing here learns file-specific vocabulary.
+//
+// Returns { matched, member, fresh, tally }: `matched` is everything the
+// filters admit (unsorted — the caller sorts if it needs to), `member` the
+// slot-aware membership or null when there is no cap, `fresh` what a run
+// admits, `tally` the reason split the preview shows and the run row's
+// `ignored` reads off.
+// Is this candidate's ledger row still speaking for it? Returns the row when
+// it is, null when the key is unknown or the slot has drifted (see CHANGED
+// below). Exported because the scoped forget (stage 6) has to delete exactly
+// the rows the tally counted — computing "settled" a second way there is how
+// the shown number and the acted-on number come apart, which is the failure
+// this whole arc keeps circling.
+export function settledRow(candidate, known, changed = null) {
+  const row = known.get(candidate.key);
+  if (row === undefined) return null;
+  return changed && changed(candidate, row) ? null : row;
+}
+
+export function runWindow(candidates, cfg, catalog, known, { changed = null, now = Date.now() } = {}) {
+  const settled = (c) => !!settledRow(c, known, changed);
+  const matched = applyFilters(candidates, cfg.filters, catalog, now);
+
+  const tally = { on_board: 0, held: 0, unprocessable: 0 };
+  for (const c of matched) {
+    const row = settledRow(c, known, changed);
+    if (!row) continue; // a reused slot answers for nothing
+    if (row.reason === "admitted") tally.on_board++;
+    else if (row.reason === "deleted") tally.held++;
+    else if (row.reason === "skipped") tally.unprocessable++;
+  }
+
+  // The cap is the only reason to look at settled rows at all, so without one
+  // the sort runs over the fresh remainder alone — a mature continuous board
+  // orders its ~0 new rows per tick, never the whole window.
+  const total = Number(cfg.total) || 0;
+  const member = total
+    ? applyLimit(applySort(matched.filter((c) => !settled(c) || known.get(c.key).reason === "admitted"),
+        cfg.sort, catalog), total)
+    : null;
+  const fresh = member
+    ? member.filter((c) => !settled(c))
+    : applySort(matched.filter((c) => !settled(c)), cfg.sort, catalog);
+  return { matched, member, fresh, tally };
 }

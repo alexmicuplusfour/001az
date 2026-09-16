@@ -677,8 +677,13 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 .im-btn:hover { background: #111; color: #fff; border-color: #111; }
 .im-btn:disabled { opacity: .55; cursor: default; }
-/* the count doubles as the door into the results view */
-.im-preview-count {
+/* Borderless text action — .im-btn's quiet sibling, for a verb that belongs
+   inline in a sentence rather than in a row of controls. Four callers: the
+   preview count (which doubles as the door into the results view), the two
+   exception verbs beneath it, and the footer's reset. `.quiet` steps it down
+   to the 12px accounting voice of the lines it sits among, so an undo offered
+   beside a fact doesn't outweigh the fact. */
+.im-link {
   font: inherit;
   font-size: 13px;
   font-weight: 600;
@@ -688,7 +693,20 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   cursor: pointer;
   color: #111;
 }
-.im-preview-count:hover { text-decoration: underline; }
+.im-link:hover { text-decoration: underline; }
+.im-link.quiet { font-size: 12px; font-weight: 400; color: #6b6b72; }
+/* Preview's exception lines: a fact, and the verb that undoes it pushed to
+   the far side. Same 12px accounting voice as .im-status. */
+.im-exceptions { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.im-exception {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+  color: #6b6b72;
+  line-height: 1.4;
+}
+.im-exception > .im-link { margin-left: auto; white-space: nowrap; }
 /* Modal-body status line — shared vocabulary like .im-btn, not ingest-only:
    one 12px line whose tone IS the verdict. Base = neutral accounting ("Last
    run 2m ago — added 3"). Tones borrow the app's existing families rather
