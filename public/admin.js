@@ -2,14 +2,14 @@
 // three tab renders. Each tab lives in its own module; renderMembers runs first
 // because it also gates the shell visible, while the boards/plugins renders
 // re-check access and no-op for non-admins.
-import { ICONS } from "/utils.js";
-import { renderMembers } from "/admin-members.js";
-import { renderBoards } from "/admin-boards.js";
-import { renderUsage } from "/admin-usage.js";
-import { renderStorage } from "/admin-storage.js";
-import { renderPluginSurfaces } from "/admin-plugins.js";
-import { renderBackups } from "/admin-backups.js";
-import { renderLogs, setLogsActive } from "/admin-logs.js";
+import { ICONS } from "./utils.js";
+import { renderMembers } from "./admin-members.js";
+import { renderBoards } from "./admin-boards.js";
+import { renderUsage } from "./admin-usage.js";
+import { renderStorage } from "./admin-storage.js";
+import { renderPluginSurfaces } from "./admin-plugins.js";
+import { renderBackups } from "./admin-backups.js";
+import { renderLogs, setLogsActive } from "./admin-logs.js";
 
 // --- Tabs ---
 // The rail's markup names its glyphs (data-icon) instead of carrying them; fill

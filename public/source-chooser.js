@@ -12,7 +12,7 @@
 // primary fires onCommit; Cancel, scrim and Esc discard the whole draft.
 import { drawerHeadParts, dwGroup } from './modal.js';
 import { pagedTableScaffold } from './paged-table.js';
-import { switchRow } from './board-modal.js';
+import { switchRow } from './switch.js';
 import { fillSelect } from './select.js';
 import { fmtSize } from './utils.js';
 

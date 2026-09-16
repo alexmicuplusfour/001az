@@ -9,13 +9,13 @@
 // opens the SERVING provider's existing plugin modal — the page diagnoses, the
 // Plugins surface owns the lifecycle. Deep links: #capabilities/<id> selects
 // the tab (admin.js) and flashes the card (here).
-import { api } from "/api.js";
-import { toast } from "/toast.js";
-import { openPluginModal } from "/plugin-modal.js";
-import { busy } from "/modal.js";
-import { refreshPluginSurfaces, loadPluginState } from "/admin-plugins.js";
-import { presentChip, presentLines, presentSupported, configureTarget, fmtProbe } from "/capability-present.js";
-import { fillSelect } from "/select.js";
+import { api } from "./api.js";
+import { toast } from "./toast.js";
+import { openPluginModal } from "./plugin-modal.js";
+import { busy } from "./modal.js";
+import { refreshPluginSurfaces, loadPluginState } from "./admin-plugins.js";
+import { presentChip, presentLines, presentSupported, configureTarget, fmtProbe } from "./capability-present.js";
+import { fillSelect } from "./select.js";
 
 const chipEl = ({ cls, text }) => {
   const s = document.createElement("span");

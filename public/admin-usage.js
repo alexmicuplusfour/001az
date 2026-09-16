@@ -14,12 +14,12 @@
 // within a unit, cost across everything, and the strip's two ratios — client
 // math on named buckets, the same contract the gallery's token chip
 // established. Self-guards on /api/me, so it no-ops for non-admins.
-import { api } from "/api.js";
-import { toast } from "/toast.js";
-import { busy } from "/modal.js";
-import { ICONS, pill, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "/utils.js";
-import { sparkline, dayKey } from "/sparkline.js";
-import { openPricesModal } from "/prices-modal.js";
+import { api } from "./api.js";
+import { toast } from "./toast.js";
+import { busy } from "./modal.js";
+import { ICONS, pill, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "./utils.js";
+import { sparkline, dayKey } from "./sparkline.js";
+import { openPricesModal } from "./prices-modal.js";
 
 const usageContent = document.getElementById("usage-content");
 

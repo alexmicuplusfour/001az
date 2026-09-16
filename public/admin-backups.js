@@ -1,9 +1,9 @@
 // Backups tab: create/download/upload/delete backup archives, tune the daily
 // auto-backup, and restore — which wipes the instance, replaces it with the
 // archive, and reboots the server (the overlay walks the admin through it).
-import { toast } from "/toast.js";
-import { api } from "/api.js";
-import { fmtSize } from "/utils.js";
+import { toast } from "./toast.js";
+import { api } from "./api.js";
+import { fmtSize } from "./utils.js";
 
 const content = document.getElementById("backups-content");
 let pollTimer = null;

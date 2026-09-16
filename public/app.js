@@ -11,15 +11,15 @@ import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
 import { initFilterConfigsUI } from './filterconfigs.js';
 import { initUpload } from './upload.js';
-import { initLightbox, openLightbox } from './lightbox.js';
+import { openDetail, preloadDetail } from './detail-open.js';
 import { openAlertEvent } from './alert-event.js';
-import { openJobsModal } from './jobs-modal.js';
 import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
 import { restoreSort } from './sort.js';
 import { restoreOdds, restoreClusters, restoreMeaningClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
 import { toast } from './toast.js';
+import { openJobsModal, preloadModals } from './modal-door.js';
 
 const elGridRoot = document.getElementById("grid");
 
@@ -71,7 +71,6 @@ async function main() {
   initShortcuts();
   initFilters();
   initUpload();
-  initLightbox();
   initHeaderScroll();
 
   const params = new URLSearchParams(location.search);
@@ -86,6 +85,10 @@ async function main() {
     if (ids.length) state.selected.set("~uploaders", selEntry(ids));
   }
 
+  // Set when the landing rule below has already asked which boards are ours,
+  // so the boot batch doesn't ask a second time.
+  let landed = null;
+
   if (!state.boardId) {
     // null, not [], when the question couldn't be asked — the two answers lead
     // opposite ways below, and a failed fetch that reads as "zero boards" would
@@ -95,8 +98,23 @@ async function main() {
     if (accessible?.length) {
       const last = localStorage.getItem("lastBoard");
       const target = accessible.find((b) => String(b.id) === last) || accessible[0];
-      location.replace(`/?board=${target.id}`);
-      return;
+      // Adopt it here rather than navigating to it. At this point nothing has
+      // rendered and nothing below reads the board back out of the address:
+      // `params` was captured above, and syncFiltersToUrl only ever writes
+      // f/fx/u, so it preserves ?board= rather than deriving from it. A
+      // navigation would therefore spend a second document fetch, and a second
+      // parse and evaluation of the whole bundle, to arrive at the state this
+      // function is already holding — measured at ~100ms, and more on a slow
+      // machine (planning/app-loading-plan.md, Stage 3).
+      //
+      // replaceState, matching the location.replace it replaces: the current
+      // history entry is overwritten either way, so Back still returns to
+      // wherever the reader came from rather than to a bare /.
+      state.boardId = String(target.id);
+      landed = accessible;
+      const url = new URL(location.href);
+      url.searchParams.set("board", state.boardId);
+      history.replaceState(null, "", url.pathname + url.search);
     }
     // Zero boards is not an empty board — it's a boardless page. Everything
     // below is item-scoped: the toolbar collapses to the logo, and the grid
@@ -105,7 +123,11 @@ async function main() {
     // has words for itself (and, for an admin, the button that fixes it).
     // The landing rule for a reader who HAS boards is unchanged — last board,
     // not a gate (planning/boards-page-plan.md, "Entry points" #4).
-    if (Array.isArray(accessible)) {
+    //
+    // `else if`, not a second `if`: the branch above no longer returns, so a
+    // bare `if` here would send every reader who just adopted a board to the
+    // boards page — a non-empty array is still an array.
+    else if (Array.isArray(accessible)) {
       location.replace("/boards");
       return;
     }
@@ -128,7 +150,9 @@ async function main() {
     state.boardId
       ? fetch(`/api/crates?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
       : Promise.resolve([]),
-    fetch("/api/boards", { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => []),
+    // The landing rule above already asked this when it had to pick a board;
+    // asking again would be the same answer, one round trip later.
+    landed || fetch("/api/boards", { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => []),
     state.boardId
       ? fetch(`/api/filter-configs?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
       : Promise.resolve([]),
@@ -219,7 +243,25 @@ async function main() {
   // the page opens becomes the baseline instead of three toasts on arrival.
   startAnnouncing();
   // Rest of the board streams in behind the first paint.
-  drainItems(firstPage.nextCursor);
+  //
+  // …and only once it has, warm what the reader is most likely to reach for
+  // next: the toolbar's modals and the detail view. This is what keeps the lazy
+  // split from being a trade — the bytes leave the critical path but still
+  // arrive before anyone asks for them, and because they are content-hashed and
+  // immutable it costs one fetch ever rather than one per visit.
+  //
+  // AFTER the drain, not beside it. These two chunks are about as large as the
+  // whole boot payload, and an import() is a high-priority script fetch while
+  // the grid's thumbnails are low-priority images — warming them while the
+  // board is still streaming puts them in front of the pictures the reader is
+  // actually looking at. drainItems resolves immediately when there is no
+  // cursor, so a board that fits in one page still warms at once. A click that
+  // lands first just awaits the same in-flight promise, which the door handles.
+  const warmChunks = () => { preloadModals(); preloadDetail(); };
+  drainItems(firstPage.nextCursor).finally(() => {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(warmChunks, { timeout: 3000 });
+    else setTimeout(warmChunks, 1500);
+  });
 
   // Alert deep links: ?event= swings the grid into one firing's entities
   // (openAlertEvent renders when the fetch lands); ?item= opens the lightbox
@@ -244,7 +286,7 @@ async function main() {
     const tryOpen = () => {
       const item = state.items.find((i) => i.id === itemId);
       if (!item) return false;
-      openLightbox(item);
+      openDetail(item);
       // Consumed — strip the param so browsing on (and a later reload)
       // doesn't keep re-opening the same lightbox.
       const url = new URL(location.href);

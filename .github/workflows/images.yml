@@ -53,7 +53,7 @@ jobs:
             else
               build=''
               # the app's inputs are what .dockerignore admits into its context
-              hit '^(server/|public/|examples/|package(-lock)?\.json$|Dockerfile$|\.dockerignore$)' && build="$build app"
+              hit '^(server/|public/|examples/|scripts/build-frontend\.mjs$|package(-lock)?\.json$|Dockerfile$|\.dockerignore$)' && build="$build app"
               hit '^extractor/' && build="$build extractor"
               hit '^transcriber/' && build="$build transcriber"
               hit '^object-detector/' && build="$build object-detector"

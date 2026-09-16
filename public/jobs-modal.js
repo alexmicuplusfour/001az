@@ -12,7 +12,8 @@ import { state } from './state.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
 import { ACTIVE, QUEUED, setBoardPaused, setWork } from './data.js';
 import { fmtDuration, pill, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
-import { unseen, markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
+import { markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
+import { jobsUnseen, jobsModalOpen, setJobsOpen } from './jobs-state.js';
 import { toast } from './toast.js';
 import { api } from './api.js';
 
@@ -27,7 +28,6 @@ import { api } from './api.js';
 // local watermark — the Tagging-consistency dot's arrangement exactly. The scope
 // string itself lives in seen-mark.js, which owns the keyspace, because the
 // boards index compares against this same mark.
-export const jobsUnseen = () => unseen(SEEN, state.boardId, state.jobsFailedAt);
 export const markJobsSeen = () => markSeen(SEEN, state.boardId, state.jobsFailedAt);
 
 // Is the newest failure among the rows currently on screen? This is the whole
@@ -303,21 +303,12 @@ function liveItemRow(item) {
   return row;
 }
 
-let modalEl = null;
-
-// While the dialog is up it polls the board's stamp four times as often as the
-// background tick and acknowledges what it draws, so it is the authority on
-// state.jobsFailedAt for as long as it lives. signals.js stands its own read
-// down against this — see the `when` on the jobErrors signal for why a second
-// writer here is not merely redundant but wrong.
-export const jobsModalOpen = () => !!modalEl;
-
 // `kind` preselects the history filter — the Usage tab's drill-down deep-link
 // (#jobs/<kind>, app.js) lands here. Optional and destructured, so the two
 // callers that pass nothing (the toolbar chip, announce's toast action —
 // which hands over a click event) fall through to "all" untouched.
 export function openJobsModal({ kind } = {}) {
-  if (modalEl) return; // already open
+  if (jobsModalOpen()) return; // already open
   let timer = null;
   // Everything pause repaints rides the app's render tick, so setBoardPaused's
   // dispatch is the single path whether the flip came from this button or from
@@ -327,12 +318,12 @@ export function openJobsModal({ kind } = {}) {
     title: "Jobs",
     id: "jobs-modal",
     onClose: () => {
-      modalEl = null;
+      setJobsOpen(false);
       clearInterval(timer);
       document.removeEventListener("app:render", onRender);
     },
   });
-  modalEl = overlay;
+  setJobsOpen(true);
 
   // Read BEFORE anything acknowledges, and held for the life of the dialog:
   // reading the log is what moves the watermark, so a copy taken later always

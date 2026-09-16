@@ -4,7 +4,7 @@
 // its in-memory backlog on every connect (same reason onopen clears the pane
 // before the replay lands, so auto-reconnects don't duplicate rows). The
 // expand button lifts the console over the whole page; Escape drops it back.
-import { ICONS } from "/utils.js";
+import { ICONS } from "./utils.js";
 
 const content = document.getElementById("logs-content");
 const MAX_ROWS = 2000;

@@ -33,8 +33,14 @@ import { hashPassword } from "../../server/password.js";
 // ~300ms; reusing it across tests in a file keeps that off every case, while a
 // new page (its own cookies, its own localStorage) keeps them from leaking into
 // each other.
+// FRONTEND_DIR points the suite at BUILT assets instead of source:
+//   npm run build:frontend && FRONTEND_DIR=public/dist npm run test:browser
+// Nothing in the test files changes —
+// they all arrive through openApp — and the default stays public/ source, so a
+// bare run is exactly what it was. This is the one check that exercises the
+// bundled output by CLICKING it rather than by loading it.
 export async function openApp({ headed = false } = {}) {
-  const srv = await startServer({ frontend: true });
+  const srv = await startServer({ frontend: true, staticDir: process.env.FRONTEND_DIR || null });
 
   let browser;
   try {

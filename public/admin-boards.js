@@ -1,11 +1,11 @@
 // Boards tab: one row per board with item counts and per-row actions — edit (shared board
 // modal), access (member/board-admin dropdown), retag, tag-held, stop, delete —
 // plus "+ New board". Self-guards on /api/me, so it no-ops for non-admins.
-import { toast } from "/toast.js";
-import { api } from "/api.js";
-import { openBoardModal } from "/board-modal.js";
-import { openDropdown, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty, openFacetScopePop } from "/dropdown.js";
-import { ICONS } from "/utils.js";
+import { toast } from "./toast.js";
+import { api } from "./api.js";
+import { openBoardModal } from "./board-modal.js";
+import { openDropdown, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty, openFacetScopePop } from "./dropdown.js";
+import { ICONS } from "./utils.js";
 
 const boardsContent = document.getElementById("boards-content");
 

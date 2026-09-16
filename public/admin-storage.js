@@ -12,9 +12,9 @@
 // move). Store labels arrive on the wire (storage.js STORE_DEFS): this module
 // renders the vocabulary it is handed and invents none — an id the map
 // doesn't know shows as itself, never dropped.
-import { api } from "/api.js";
-import { kpi, fmtSize, fmtQty } from "/utils.js";
-import { sparkline } from "/sparkline.js";
+import { api } from "./api.js";
+import { kpi, fmtSize, fmtQty } from "./utils.js";
+import { sparkline } from "./sparkline.js";
 
 const storageContent = document.getElementById("storage-content");
 

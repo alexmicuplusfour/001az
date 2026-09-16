@@ -3684,6 +3684,18 @@ sources.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayloa
 // Frontend assets (same-origin /api during host dev; in the container the app
 // is the only file server and Caddy just proxies).
 //
+// Everything under /_ is content-hashed by scripts/build-frontend.mjs, so a
+// given name can never describe different bytes — which makes a year-long
+// max-age the honest answer rather than a gamble, and means a warm visit
+// issues no request for JS or CSS at all. Mounted ahead of the general handler.
+// When STATIC_DIR is source rather than a build (host dev, the test suite) the
+// directory is simply absent and this is a no-op.
+app.use("/_", express.static(path.join(STATIC_DIR, "_"), { immutable: true, maxAge: "1y" }));
+
+// Everything else: the HTML that carries those hashed references, plus the few
+// unhashed assets beside it (notification.mp3, vendor/). These must revalidate,
+// because the whole scheme depends on the HTML being fresh.
+//
 // Sending no Cache-Control is not "do not cache" — it is "no instructions", and
 // a browser with no instructions invents a freshness lifetime of roughly a tenth
 // of the file's age (RFC 9111 4.2.2). That made staleness scale with how long
@@ -3693,10 +3705,13 @@ sources.backfillDims(await listItemPayloads(db), (id, patch) => updateItemPayloa
 // spell. no-cache is the opposite of how it reads: store the file, but
 // revalidate before every use. The ETag express.static derives from size+mtime
 // (and COPY carries the host mtime into the image) then answers most of those
-// with a ~150-byte 304. Filenames here are not content-hashed, so this is the
-// ceiling: a year-long max-age would need fingerprinting, which would need a
-// build step this frontend does not have. Uploads under /gallery and
-// /thumbnails do have unrepeatable names, which is why those get to cache hard.
+// with a ~150-byte 304.
+//
+// This used to be the ceiling for the whole frontend, on the grounds that a
+// year-long max-age would need fingerprinting and fingerprinting would need a
+// build step this frontend did not have. It has one now, and the /_ mount above
+// is what that paragraph was waiting for. Uploads under /gallery and /thumbnails
+// cache hard for the same reason, having always had unrepeatable names.
 app.use(express.static(STATIC_DIR, {
   extensions: ["html"],
   setHeaders: (res) => res.setHeader("Cache-Control", "no-cache"),

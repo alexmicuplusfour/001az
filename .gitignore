@@ -3,6 +3,10 @@ node_modules/
 # python sidecar bytecode (extractor/, transcriber/)
 __pycache__/
 
+# frontend build output (scripts/build-frontend.mjs; the image serves it via
+# STATIC_DIR, host dev and the tests serve public/ source)
+public/dist/
+
 # server-owned data — lives on the droplet, never in git
 gallery/
 thumbnails/

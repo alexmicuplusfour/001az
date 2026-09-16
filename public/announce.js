@@ -21,9 +21,11 @@
 import { state } from './state.js';
 import { toast } from './toast.js';
 import { chime } from './chime.js';
-import { alertsUnseen, openAlertHistory } from './alerts-modal.js';
-import { jobsUnseen, openJobsModal } from './jobs-modal.js';
-import { diagnosticsUnseen, canSeeDiagnostics } from './facet-diagnostics.js';
+import { alertsUnseen } from './alerts-state.js';
+import { jobsUnseen } from './jobs-state.js';
+// Both surfaces a toast can open fetch their own code (modal-door.js).
+import { openAlertHistory, openJobsModal } from './modal-door.js';
+import { diagnosticsUnseen, canSeeDiagnostics } from './facet-diagnosis.js';
 import { signalLanded } from './signals.js';
 import { openDiagnosticsDoor } from './toolbar.js';
 

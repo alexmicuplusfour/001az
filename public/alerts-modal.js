@@ -12,11 +12,9 @@ import { createModal, sectionHeadingEl, busy } from './modal.js';
 import { ddRow, ddSep, ddEmpty, ddHead } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { halvesOf, selEntry, wireEntry, selSize } from './facet-match.js';
-import { switchRow } from './board-modal.js';
+import { switchRow } from './switch.js';
 import { openAlertEvent, clearAlertEvent, resetListFilters } from './alert-event.js';
 import { ensurePolling } from './data.js';
-
-export const alertsUnseen = () => state.alerts.reduce((n, a) => n + (a.unseen || 0), 0);
 
 
 // ── the plus-menu section ──

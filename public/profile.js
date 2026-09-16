@@ -1,10 +1,10 @@
 // Profile page: any signed-in member's own settings. Mirrors the admin
 // shell's gate pattern — /api/me flips #profile-ui visible or bounces to login.
-import { toast } from "/toast.js";
-import { api } from "/api.js";
-import { ICONS } from "/utils.js";
-import { createCheckbox } from "/checkbox.js";
-import { chime, soundOn, setSoundOn } from "/chime.js";
+import { toast } from "./toast.js";
+import { api } from "./api.js";
+import { ICONS } from "./utils.js";
+import { createCheckbox } from "./checkbox.js";
+import { chime, soundOn, setSoundOn } from "./chime.js";
 
 // The rail names its glyphs in data-icon; fill them in before the gate resolves
 // so nothing renders half-drawn. Mirrors admin.js.

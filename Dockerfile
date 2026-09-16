@@ -20,13 +20,18 @@ RUN npm ci --omit=dev
 
 COPY . .
 
-# The repo's commentary stays in the repo: served JS/CSS ships bare. esbuild
-# reprints each file without comments — no bundling, no minify, no renames,
-# ES modules preserved — which halves what a browser downloads (public/ is
-# ~1MB, 40%+ comments). Top-level only on purpose: vendor/ is already
-# minified and carries its own license file, and server/ never reaches a
-# browser — stripping it would only desync stack traces from the repo.
-RUN npx -y esbuild@0.24.2 public/*.js public/*.css --outdir=public --allow-overwrite --format=esm --legal-comments=none
+# Build the frontend into public/dist: one bundled, minified, content-hashed
+# JS and CSS file per page, with each HTML rewritten to point at them. STATIC_DIR
+# below sends the server there; public/ source is untouched, which is what keeps
+# host dev (`npm run server`) and the test suite serving plain modules with no
+# build step and no watcher. The script owns the flags and the reasoning; it
+# also verifies its own output and fails the image build rather than shipping
+# HTML that references files it never emitted.
+#
+# This replaces a comment-stripping pass that did the same job far less well —
+# the repo's commentary still stays in the repo (no sourcemaps, deliberately),
+# but the board page now costs 2 requests instead of 58.
+RUN node scripts/build-frontend.mjs
 
 # Server-owned state (uploads + thumbnails) lives on a volume at /data.
 # The transformers cache dir must be node-owned before we switch users so the
@@ -42,6 +47,7 @@ RUN node -e "import('@huggingface/transformers').then(({pipeline})=>pipeline('fe
 
 ENV HOST=0.0.0.0 \
     PORT=3001 \
+    STATIC_DIR=/app/public/dist \
     GALLERY_DIR=/data/gallery \
     THUMBS_DIR=/data/thumbnails \
     PLUGINS_DIR=/data/plugins \

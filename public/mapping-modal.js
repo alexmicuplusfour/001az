@@ -16,7 +16,7 @@
 import { toast } from "./toast.js";
 import { openDropdown, ddRow, ddNote, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
 import { ICONS, glyphEl, sentence } from "./utils.js";
-import { switchRow } from "./board-modal.js";
+import { switchRow } from "./switch.js";
 import { sectionHeadingEl, provBand, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, busy } from "./modal.js";
 import { fillSelect } from "./select.js";
 

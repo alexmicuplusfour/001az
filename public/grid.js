@@ -8,6 +8,7 @@ import { openCratePop } from './crates.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
 import { kindFor } from './kinds.js';
+import { openDetail } from './detail-open.js';
 import { effectiveView } from './view.js';
 import { runSimilar, runSimilarMeaning } from './search.js';
 import { MIN_TAGS } from './patterns.js';
@@ -503,7 +504,7 @@ export function cardFor(item) {
   }
   card.addEventListener("click", () => {
     if (state.bulkSelected.size) { toggleBulkSelect(item, card); return; }
-    kindFor(item).openDetail(item);
+    openDetail(item);
   });
 
   if (state.me) {

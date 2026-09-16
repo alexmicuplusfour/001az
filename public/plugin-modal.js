@@ -12,13 +12,14 @@
 // through the plugins API, the ai-keys routes, and
 // /api/admin/capabilities/:id/{bind,probe} — this file owns no state of its
 // own.
-import { toast } from "/toast.js";
-import { api } from "/api.js";
-import { createModal, sectionHeading, sectionHeadingEl, busy, createDrawer, drawerHeadParts, dwGroup, tileRow } from "/modal.js";
-import { syncModelPicker, switchRow } from "/board-modal.js";
-import { fillSelect, isUnset } from "/select.js";
-import { fmtDuration, relTime } from "/utils.js";
-import { planSection, domainStatus, domainDefault, fmtProbe, keyRoles, removalStory } from "/capability-present.js";
+import { toast } from "./toast.js";
+import { api } from "./api.js";
+import { createModal, sectionHeading, sectionHeadingEl, busy, createDrawer, drawerHeadParts, dwGroup, tileRow } from "./modal.js";
+import { syncModelPicker } from "./board-modal.js";
+import { switchRow } from "./switch.js";
+import { fillSelect, isUnset } from "./select.js";
+import { fmtDuration, relTime } from "./utils.js";
+import { planSection, domainStatus, domainDefault, fmtProbe, keyRoles, removalStory } from "./capability-present.js";
 
 
 const LABEL_CSS = "display:block;font-size:12px;color:#6b6b72;margin-bottom:4px;";

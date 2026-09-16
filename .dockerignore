@@ -1,13 +1,20 @@
 # deps are installed inside the image (host node_modules has win32 binaries)
 node_modules
 
+# frontend build output — the image builds its own (scripts/build-frontend.mjs),
+# so a host copy would only be copied in and immediately deleted
+public/dist
+
 # server-owned data — volumes, never image layers
 gallery
 thumbnails
+backups
+ingest-root
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+*.log
 
 # secrets / local config
 .env
@@ -21,8 +28,14 @@ deploy.local.json
 *.md
 deploy.ps1
 scripts
+# …except the frontend build, which the image runs (a trailing # is NOT a
+# comment in .dockerignore — it would become part of the pattern)
+!scripts/build-frontend.mjs
 test
+docs
 pets-test
+emma-test
+resumes-test
 docker-compose.yml
 docker-compose.prod.yml
 Dockerfile

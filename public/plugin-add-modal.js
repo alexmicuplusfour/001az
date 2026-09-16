@@ -5,10 +5,10 @@
 // across reopens, not just within one session. Above the list, an "Install from
 // URL" field fetches, installs, and loads a community plugin live (GitHub / npm /
 // tarball); the browse list below is the catalog that ships with the app.
-import { toast } from "/toast.js";
-import { api } from "/api.js";
-import { createModal, busy } from "/modal.js";
-import { tagFor } from "/admin-plugins.js";
+import { toast } from "./toast.js";
+import { api } from "./api.js";
+import { createModal, busy } from "./modal.js";
+import { tagFor } from "./admin-plugins.js";
 
 export function openAddPluginModal(connections, ctx) {
   const { body, close } = createModal({

@@ -15,11 +15,11 @@
 // vocabulary. Getting that wrong is the one unfixable mistake in the whole
 // arc — a rate a factor of a million out passes every validator and stamps into
 // a cost_micros nothing recomputes.
-import { api } from "/api.js";
-import { toast } from "/toast.js";
-import { fillSelect } from "/select.js";
-import { fmtUsd } from "/utils.js";
-import { createModal } from "/modal.js";
+import { api } from "./api.js";
+import { toast } from "./toast.js";
+import { fillSelect } from "./select.js";
+import { fmtUsd } from "./utils.js";
+import { createModal } from "./modal.js";
 
 // Micro-dollars per unit ⇄ the number a person reads and types.
 const toRate = (micros, rate) => (micros * rate.per) / 1e6;

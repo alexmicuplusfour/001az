@@ -55,7 +55,12 @@ function withClipboard(clipboard, fn) {
 // Depth-first text of a built block, which is what a reader actually sees.
 const textOf = (n) => (n.textContent || "") + n.children.map(textOf).join("");
 const find = (n, cls) => (n.className?.split(" ").includes(cls) ? n : n.children.reduce((h, c) => h || find(c, cls), null));
-const { diagnosisState, diagnosticsUnseen, markDiagnosticsSeen, canSeeDiagnostics, diagnosisBlock } = await import("../public/facet-diagnostics.js");
+// The engine (state, dot predicates) and the surface (the rendered block) are
+// separate modules now — the surface is fetched when something opens it, the
+// engine runs every render. Both are under test here because the split is an
+// implementation detail of one feature.
+const { diagnosisState, diagnosticsUnseen, markDiagnosticsSeen, canSeeDiagnostics } = await import("../public/facet-diagnosis.js");
+const { diagnosisBlock } = await import("../public/facet-diagnostics.js");
 
 // The server's own gates, not a copy of them. A literal here drifts the moment a
 // threshold is retuned — which is the exact failure the GATES export exists to

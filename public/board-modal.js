@@ -25,50 +25,8 @@ import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
 import { fillSelect, isUnset } from "./select.js";
+import { switchRow } from "./switch.js";
 import { planBoardPicker, planBoardConfig } from "./capability-present.js";
-
-// Reusable toggle switch: a button that flips .on and reports the new state.
-// opts.small for compact contexts (e.g. facet rows).
-export function makeSwitch(checked, onChange, opts = {}) {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "switch" + (opts.small ? " sm" : "") + (checked ? " on" : "");
-  btn.setAttribute("role", "switch");
-  btn.setAttribute("aria-checked", String(!!checked));
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const on = !btn.classList.contains("on");
-    btn.classList.toggle("on", on);
-    btn.setAttribute("aria-checked", String(on));
-    if (onChange) onChange(on);
-  });
-  return btn;
-}
-
-// Labeled switch row — clicking anywhere on the row toggles. The row carries a
-// `setSwitch(on)` for callers that need to move the knob from code (a mode
-// change forcing the value, a mutual exclusion): it updates the visual state
-// WITHOUT firing onChange, since the caller is already setting the model.
-export function switchRow(label, hint, checked, onChange, opts = {}) {
-  const row = document.createElement("div");
-  row.className = "switch-row";
-  const sw = makeSwitch(checked, onChange, opts);
-  row.setSwitch = (on) => {
-    sw.classList.toggle("on", on);
-    sw.setAttribute("aria-checked", String(on));
-  };
-  const text = document.createElement("span");
-  text.append(label);
-  if (hint) {
-    const h = document.createElement("span");
-    h.style.cssText = "font-weight:400;color:#9aa0aa;";
-    h.append(" " + hint);
-    text.appendChild(h);
-  }
-  row.append(sw, text);
-  row.addEventListener("click", (e) => { if (e.target === row || e.target === text) sw.click(); });
-  return row;
-}
 
 // A facet's key, derived from its label: lowercase, spaces to dashes, nothing
 // else survives. Derived exactly twice — while a new facet's label is still

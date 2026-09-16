@@ -26,8 +26,8 @@
 import { state } from './state.js';
 import { createTicker } from './ticker.js';
 import { ensurePolling, setWork } from './data.js';
-import { refreshFacetStats, canSeeDiagnostics } from './facet-diagnostics.js';
-import { jobsModalOpen } from './jobs-modal.js';
+import { refreshFacetStats, canSeeDiagnostics } from './facet-diagnosis.js';
+import { jobsModalOpen } from './jobs-state.js';
 import { noteServerNow } from './seen-mark.js';
 
 // "Has this signal's data ever landed?" — which is the BASELINE's question and

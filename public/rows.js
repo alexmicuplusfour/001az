@@ -11,7 +11,7 @@
 import { state } from './state.js';
 import { cardFor, cardSig, releaseCard, progressLane, pinWhileOpen, emptyNote } from './grid.js';
 import { thumbUrl } from './kinds.js';
-import { openLightboxAt } from './lightbox.js';
+import { openDetailAt } from './detail-open.js';
 import { selectFace } from './face-select.js';
 import { taggedFiltered, instanceMatches } from './filters.js';
 import { effectiveView } from './view.js';
@@ -240,7 +240,7 @@ function tileFor(item, inst, faceId) {
       if (card) toggleBulkSelect(item, card);
       return;
     }
-    openLightboxAt(item, inst.id);
+    openDetailAt(item, inst.id);
   });
 
   tile.addEventListener("pointerenter", () => {

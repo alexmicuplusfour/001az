@@ -56,7 +56,12 @@ process.env.EXTRACTOR_URL = DEAD_SIDECAR;
 // `frontend: true` serves the REAL public/ instead of the empty temp dir — the
 // browser tests (test/browser/) need the actual page; every API test is faster
 // without it.
-export async function startServer({ frontend = false } = {}) {
+//
+// `staticDir` overrides where those assets come from, which is how the browser
+// tests can run against BUILT output (scripts/build-frontend.mjs -> public/dist)
+// as well as source. It has to be a parameter rather than a pre-set STATIC_DIR:
+// this function assigns that env var, so an outer value would be overwritten.
+export async function startServer({ frontend = false, staticDir = null } = {}) {
   const name = "gallery_test_" + crypto.randomBytes(6).toString("hex");
   // max 2: files run in parallel, and every worker holds one of these alongside
   // the app's own pool. The admin pool only creates and drops a database, so two
@@ -91,7 +96,7 @@ export async function startServer({ frontend = false } = {}) {
   process.env.THUMBS_DIR = thumbsDir;
   process.env.BACKUPS_DIR = backupsDir;
   process.env.PLUGINS_DIR = pluginsDir;
-  process.env.STATIC_DIR = frontend ? PUBLIC_DIR : tmp; // no real frontend needed for API tests
+  process.env.STATIC_DIR = staticDir || (frontend ? PUBLIC_DIR : tmp); // no real frontend needed for API tests
   process.env.CONNECTOR_RPM = "1000000"; // don't rate-limit stubbed provider calls in tests
   process.env.CONNECTOR_BURST = "1000000";
   process.env.AI_RPM = "1000000"; // same for the AI wire's per-key pacing

@@ -23,8 +23,13 @@ import { localStore as store } from "./browser-stub.js";
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
 const { state } = await import("../public/state.js");
-const { jobsUnseen, markJobsSeen, failureDrawn } = await import("../public/jobs-modal.js");
-const { diagnosticsUnseen, markDiagnosticsSeen } = await import("../public/facet-diagnostics.js");
+// The two "is the dot lit?" predicates are asked on every render, so they live
+// apart from the modals they describe — those are fetched on the click that
+// opens them (jobs-state.js / facet-diagnosis.js). The marks they compare
+// against still come from the surfaces that write them.
+const { jobsUnseen } = await import("../public/jobs-state.js");
+const { markJobsSeen, failureDrawn } = await import("../public/jobs-modal.js");
+const { diagnosticsUnseen, markDiagnosticsSeen } = await import("../public/facet-diagnosis.js");
 const { signalLanded, refreshAlerts, refreshJobErrors } = await import("../public/signals.js");
 const { noteServerNow } = await import("../public/seen-mark.js");
 

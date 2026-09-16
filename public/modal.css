@@ -514,8 +514,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .clip-btn:hover { border-color: #999; color: #111; }
 
 /* ─── entity mapping modal ───
-   The field-ROW component family (.mm-row/.mm-key-locked/.mm-live-*/
-   .mm-connector-badge/.mm-locked-badge/.mm-face-prefer/.mm-intro) died with
+   The field-ROW component family (.mm-row/.mm-key-locked/.mm-connector-badge/
+   .mm-locked-badge/.mm-face-prefer/.mm-intro/.mm-live-*) died with
    the three-section pane — fields are .tile objects now (shared vocabulary,
    below), and cadence/config live in the drawer. What survives here is what
    the rebuilt pane still draws. */

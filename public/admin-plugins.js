@@ -5,14 +5,14 @@
 // plugin's config modal, Remove takes it off the page (disabled for
 // built-ins). "Add plugin" browses what's available. Everything renders from
 // GET /api/admin/plugins; this module holds no catalog knowledge of its own.
-import { toast } from "/toast.js";
-import { api } from "/api.js";
-import { openPluginModal } from "/plugin-modal.js";
-import { busy } from "/modal.js";
-import { openAddPluginModal } from "/plugin-add-modal.js";
-import { renderCapabilities } from "/admin-capabilities.js";
-import { servingRoles, roleBadge } from "/capability-present.js";
-import { ICONS } from "/utils.js";
+import { toast } from "./toast.js";
+import { api } from "./api.js";
+import { openPluginModal } from "./plugin-modal.js";
+import { busy } from "./modal.js";
+import { openAddPluginModal } from "./plugin-add-modal.js";
+import { renderCapabilities } from "./admin-capabilities.js";
+import { servingRoles, roleBadge } from "./capability-present.js";
+import { ICONS } from "./utils.js";
 
 // The kind filter above the list: chip labels per card family, in display
 // order. "all" is the default; the selection lives at module level so the

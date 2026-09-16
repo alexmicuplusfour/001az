@@ -3,10 +3,10 @@
 // the whole admin shell: it flips #admin-ui visible once /api/me confirms an
 // admin, so it runs first from admin.js. The boards and AI tabs each re-check
 // access themselves.
-import { toast } from "/toast.js";
-import { api, copy } from "/api.js";
-import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty } from "/dropdown.js";
-import { ICONS } from "/utils.js";
+import { toast } from "./toast.js";
+import { api, copy } from "./api.js";
+import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty } from "./dropdown.js";
+import { ICONS } from "./utils.js";
 
 const content = document.getElementById("content");
 const gate = document.getElementById("gate");

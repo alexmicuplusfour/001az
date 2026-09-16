@@ -1,4 +1,4 @@
-// switchRow's programmatic setter (board-modal.js). It exists because three
+// switchRow's programmatic setter (switch.js). It exists because three
 // call sites need to move a knob from code rather than from a click: the
 // double-check/web-research mutual exclusion, and the ingestion modal forcing
 // `enabled` on when the trigger goes manual.
@@ -40,18 +40,18 @@ const node = (tag) => {
     click() { (this.listeners.click || []).forEach((fn) => fn({ stopPropagation() {}, target: this })); },
   };
 };
-// `body` because board-modal's import graph reaches toast.js, which mounts its
-// host element at module scope; the listener hooks because data.js registers on
-// load. Neither is under test — they just have to exist for the import.
+// createElement is the whole of it. This stub used to need a `body`, a
+// listener hook and a dispatchEvent as well, because the control lived in
+// board-modal.js and importing it dragged in toast.js (which mounts a host
+// element at module scope) and data.js (which registers listeners on load).
+// switch.js imports nothing, so none of that is reachable any more — which is
+// the extraction, stated as a test fixture.
 globalThis.document = {
   createElement: node,
   createTextNode: (t) => ({ tag: "#text", textContent: t }),
-  body: node("body"),
-  addEventListener() {},
-  dispatchEvent() { return true; },
 };
 
-const { switchRow } = await import("../public/board-modal.js");
+const { switchRow } = await import("../public/switch.js");
 
 const knob = (row) => row.children.find((c) => c.classList.contains("switch"));
 const read = (row) => {

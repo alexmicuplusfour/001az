@@ -17,7 +17,7 @@ import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, createDrawer, tileRow, busy, statusChip } from './modal.js';
 import { presentIngest } from './ingest-present.js';
 import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
-import { switchRow } from './board-modal.js';
+import { switchRow } from './switch.js';
 import { openDropdown, ddRow, ddNote } from './dropdown.js';
 import { openSourceChooser, pathKeyFor, sourceGlyph, fmtLocation, sourceRootLabel } from './source-chooser.js';
 import { fillSelect } from './select.js';

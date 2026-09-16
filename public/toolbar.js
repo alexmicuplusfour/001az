@@ -1,7 +1,15 @@
 import { state } from './state.js';
 import { nudgeBoardIngest, ACTIVE, QUEUED } from './data.js';
 import { ICONS, toolBtn, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot } from './utils.js';
-import { openJobsModal, jobsUnseen } from './jobs-modal.js';
+import { jobsUnseen } from './jobs-state.js';
+// The modals this toolbar opens fetch their own code — none is reachable
+// without a click, and together they were about half of what the board page
+// downloaded before it could draw. These read as ordinary functions; only the
+// alert menu below needs the raw door, and there is a comment there saying why.
+import {
+  openIngestModal, openBoardModal, openConnectorBrowse, openJobsModal,
+  openDiagnosticsModal, withModals,
+} from './modal-door.js';
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep, ddAction, ddHead } from './dropdown.js';
 import { userMenuButton } from './user-menu.js';
@@ -10,12 +18,9 @@ import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
-import { openIngestModal } from './ingest-modal.js';
 import { presentIngest } from './ingest-present.js';
-import { openBoardModal } from './board-modal.js';
-import { openConnectorBrowse } from './connector-browse.js';
-import { appendAlertMenu, appendAlertFooter, alertsUnseen } from './alerts-modal.js';
-import { openDiagnosticsModal, diagnosticsUnseen, ensureFacetStats, canSeeDiagnostics } from './facet-diagnostics.js';
+import { alertsUnseen } from './alerts-state.js';
+import { diagnosticsUnseen, ensureFacetStats, canSeeDiagnostics } from './facet-diagnosis.js';
 import { clearAlertEvent } from './alert-event.js';
 import { sortCatalog, defaultDir, saveSort, restoreSort } from './sort.js';
 import { effectiveView, toggleView, rowsRelevant } from './view.js';
@@ -117,6 +122,8 @@ function ingestChip() {
 // they wire is how one of them quietly loses `onEdit` — the hand-off to the
 // only surface that can act on a finding, and the reason the modal is worth
 // opening at all.
+// Both of these fetch the modal chunk themselves, and it is the same chunk, so
+// the hand-off from the survey to the editor cannot stall on a second load.
 export const openDiagnosticsDoor = () => openDiagnosticsModal({
   onEdit: () => openBoardModal(state.boardId, {
     canEditAI: !!state.me?.is_admin,
@@ -486,10 +493,12 @@ export function renderToolbar(resultCount) {
       const plusWrap = document.createElement("div");
       plusWrap.className = "board-group";
       const plusBtn = toolBtn(ICONS.plus, "upload", null); // onClick set below
-      plusBtn.addEventListener("click", () => {
-        if (connectorName) openConnectorBrowse(connectorName);
-        else triggerFilePicker();
-      });
+      // A connector board browses its source; everything else opens the file
+      // picker. Which of the two this button is never changes within a render,
+      // so it is decided here rather than on every click.
+      plusBtn.addEventListener("click", connectorName
+        ? () => openConnectorBrowse(connectorName)
+        : triggerFilePicker);
       plusWrap.appendChild(plusBtn);
       const plusMenu = document.createElement("button");
       plusMenu.className = "tool-btn plus-caret dd-caret";
@@ -499,22 +508,26 @@ export function renderToolbar(resultCount) {
       // The ambient "an alert fired while you were away" signal — without it
       // a record-only alert is invisible until you think to look.
       if (alertsUnseen() > 0) attachBtnDot(plusMenu);
-      plusMenu.addEventListener("click", () => openDropdown(plusMenu, {
+      // Resolved before openDropdown, not inside build(): dropdown.js calls
+      // build and footer synchronously, so the module has to be in hand by the
+      // time the menu opens. Awaiting out here is what lets dropdown.js stay
+      // exactly as it is rather than learning to accept a promise for one caller.
+      plusMenu.addEventListener("click", withModals((m) => openDropdown(plusMenu, {
         align: "end",
         minWidth: 200,
         build: (body, { close }) => {
           body.appendChild(ddRow({
             label: "Automatic ingestion…",
-            onClick: () => { close(); openIngestModal(); },
+            onClick: () => { close(); m.openIngestModal(); },
           }));
-          appendAlertMenu(body, close);
+          m.appendAlertMenu(body, close);
         },
         // The create door needs a selection to watch — no pills, no footer
         // (the body's empty-state hint teaches the flow instead).
         footer: Object.keys(selectedAsConfig()).length
-          ? (foot, { close }) => appendAlertFooter(foot, close)
+          ? (foot, { close }) => m.appendAlertFooter(foot, close)
           : undefined,
-      }));
+      })));
       plusWrap.appendChild(plusMenu);
       auth.appendChild(plusWrap);
     }
