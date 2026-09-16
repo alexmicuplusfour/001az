@@ -107,10 +107,30 @@
 .mm-template-label { color: var(--text, #111); }
 .modal-section-title { margin-bottom: 12px; }
 .dw-label { color: #8a8a92; }
-/* A section heading with controls parked on its right — the heading keeps its
-   own margins, so pass the row's bottom spacing inline where the section
-   needs it. */
+/* A section heading with controls parked on its right. */
 .section-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+/* ── who owns the space between a section's children ──────────────────────
+   A .modal-section is a BLOCK, so each child owns the air above (or below)
+   itself: .im-hint 8px up, .im-status 12px, .im-filters 8px down. A flex-gap
+   parent is the other regime — there the PARENT owns it and a child that
+   also carried a margin would double up.
+
+   Two shared components were written for the second regime and had no
+   spacing of their own, because every call site until now was a drawer, a
+   .im-row, or a jobs header. Dropped into a block they came out flush, and
+   the fix each time was an inline style at the call site: the same 12px
+   hand-written under FIVE headings across four files. The switch row simply
+   never landed in a section until the ingest filters put one there, so it had
+   no inherited workaround to copy and sat against the line above it.
+
+   Scoped to the direct-child case, which is exactly "I am a block-level
+   sibling": the gapped parents above are untouched, and no call site has to
+   know the number. A switch row that opens a section still gets nothing —
+   the section's own padding is already the space above it. */
+.modal-section > .section-heading,
+.modal-section > .section-head-row { margin-bottom: 12px; }
+.modal-section > .switch-row:not(:first-child) { margin-top: 12px; }
 
 /* base element styles — mirrors admin.html globals so the modal looks the same on all pages.
 

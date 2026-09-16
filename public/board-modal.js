@@ -553,7 +553,7 @@ export async function openBoardModal(boardId, opts = {}) {
         </div>
       </div>
       <div class="modal-section">
-        <div class="section-head-row" id="board-modal-guidance-head" style="margin-bottom:12px;">
+        <div class="section-head-row" id="board-modal-guidance-head">
           ${sectionHeading("Tagging Guidance")}
         </div>
         <label style="display:block;font-size:12px;color:#6b6b72;margin:0 0 4px;">AI context <span style="font-weight:400;color:#9aa0aa">(what this board is for, what the items are, any guidance for tagging)</span></label>

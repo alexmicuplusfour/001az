@@ -1329,9 +1329,7 @@ export function openIngestModal() {
   function section(title) {
     const el = document.createElement("div");
     el.className = "modal-section";
-    const t = sectionHeadingEl(title);
-    t.style.marginBottom = "12px"; // the caps title's old spacing to the section content
-    el.appendChild(t);
+    el.appendChild(sectionHeadingEl(title));
     return el;
   }
 }

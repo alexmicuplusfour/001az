@@ -279,7 +279,7 @@ export function keepPlace(node, render) {
 // an HTML string: 16px title plus an optional gray sub line. `style` adds css
 // to the wrapper — e.g. a bottom margin when no flex gap provides the spacing.
 export function sectionHeading(title, sub, style = "") {
-  return `<div${style ? ` style="${style}"` : ""}><h2 style="font-size:16px;margin:0 0 2px;">${title}</h2>${
+  return `<div class="section-heading"${style ? ` style="${style}"` : ""}><h2 style="font-size:16px;margin:0 0 2px;">${title}</h2>${
     sub ? `<p style="margin:0;color:#6b6b72;">${sub}</p>` : ""}</div>`;
 }
 

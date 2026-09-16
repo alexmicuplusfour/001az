@@ -177,7 +177,6 @@ export function openAlertEditor(existing) {
   const condSection = document.createElement("div");
   condSection.className = "modal-section";
   const condHead = sectionHeadingEl("Condition", "New items matching every facet below (any of its values, none of its struck ones) trigger the alert.");
-  condHead.style.marginBottom = "12px";
   condSection.appendChild(condHead);
   const condBox = document.createElement("div");
   condBox.className = "al-cond";
@@ -252,7 +251,6 @@ export function openAlertEditor(existing) {
   const delSection = document.createElement("div");
   delSection.className = "modal-section";
   const delHead = sectionHeadingEl("Delivery");
-  delHead.style.marginBottom = "12px";
   delSection.appendChild(delHead);
   const delRow = document.createElement("div");
   delRow.className = "im-row";
@@ -284,7 +282,6 @@ export function openAlertEditor(existing) {
   const hookSection = document.createElement("div");
   hookSection.className = "modal-section";
   const hookHead = sectionHeadingEl("Webhook", "A JSON POST per delivery — points at Discord/Slack/ntfy, an automation, or your own script.");
-  hookHead.style.marginBottom = "12px";
   hookSection.appendChild(hookHead);
   const urlInput = document.createElement("input");
   urlInput.type = "url";
