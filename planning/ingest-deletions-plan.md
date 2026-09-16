@@ -464,7 +464,13 @@ problem past Gemini, after this thread had spent itself on synonyms.)
     SIMULATION  -> Preview, which now EXPLAINS ITS OWN NUMBER inline. Nobody
                    cares what was left out until the count looks too small,
                    and that is exactly when they are looking at it.
-    HATCH       -> the footer, pushed to the far side, out of the task flow.
+    HATCH       -> the far side of the run-state line, out of the task flow.
+                   NOT the footer: that row is Save and Run now, the two
+                   things the modal is for, and a footer `button` rule
+                   outranks .im-link there — a quiet maintenance link came
+                   out looking like a third primary. It pairs naturally with
+                   the run line anyway: what happened, and how to undo what
+                   the app remembers about it.
 
 ### The modal
 
@@ -487,9 +493,10 @@ Preview
   1,497 already on the board.
   2,336 excluded because you deleted them.        Re-include >
   3 couldn't be read.                             Retry >
-  Last run 18h ago - added 0
+
+  Last run 18h ago - added 0           Clear ingestion records...
 --------------------------------------------------------------
-[Save] [Run now]                    Clear ingestion records...
+[Save] [Run now]
 ```
 
 Every line under the count renders only when non-zero, so a first run shows
@@ -573,9 +580,10 @@ one false claim in the first draft and two things it had not decided.
 6. **Client**: delete the memory section; move the switch into Filters below
    the hint (a standing rule, not an editable filter row, and inert for
    non-editors like every other control); relabel the count; add the
-   on-board line and the two exception lines under it; add the footer control
-   (`margin-left:auto` — the Paused switch in this same modal already does
-   that); drop the Jobs-modal link and its import. `invalidatePreview()` must
+   on-board line and the two exception lines under it; put the reset on the
+   run-state line, pushed right; drop the Jobs-modal link and its import.
+   One shared `.im-line` — a fact with the verb answering it on the far side
+   — serves both the exception rows and that last row. `invalidatePreview()` must
    hide the whole block, not just the count — a stale "2,336 excluded" after
    a filter edit is precisely the lie it exists to prevent.
 
@@ -602,7 +610,7 @@ one false claim in the first draft and two things it had not decided.
 - The stored config key stays `ingest.rememberDeletions` while every visible
   word is now "skip". Renaming is cosmetic and would silently flip any board
   that had saved it off.
-- The footer hatch hides when the board has no records at all.
+- The reset hides when the board has no records at all.
 - **The count on the door is smaller than what opens behind it.** The button
   says "1,500 to ingest" and the results view pages the whole matching window
   — every row badged with what happened to it. That is deliberate: the rows

@@ -8,7 +8,8 @@
 //
 // The rest is stage 6's information architecture: the deletion rule is a
 // FILTER, the preview EXPLAINS ITS OWN COUNT, and the whole-ledger reset is a
-// footer hatch — three intents that used to share one unnameable section.
+// quiet link on the run-state line — three intents that used to share one
+// unnameable section.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { window } from './jsdom-stub.js';
@@ -63,7 +64,7 @@ let calls = [];
 let LEDGER = { total: 0, on_board: 0, held: 0, unprocessable: 0 };
 // What the preview route answers — the numbers the count and its explanation
 // lines are read off. Filter-scoped server-side, unlike LEDGER above, which is
-// the whole ledger and feeds only the footer hatch.
+// the whole ledger and feeds only the records reset.
 let PREVIEW = { count: 0, new: 0, on_board: 0, held: 0, unprocessable: 0, capped: false, truncated: false };
 let CLEARED = 0;
 let SAFE = true;
@@ -166,7 +167,7 @@ const link = (modal, re) => [...modal.querySelectorAll('.im-link')]
   .find((b) => re.test(b.textContent) && shown(b));
 // The visible explanation lines under the count, label text only — the verb
 // beside each one is asserted separately, by name.
-const lines = (modal) => [...modal.querySelectorAll('.im-exception')]
+const lines = (modal) => [...modal.querySelectorAll('.im-exceptions .im-line')]
   .filter(shown)
   .map((r) => r.querySelector('span').textContent);
 
@@ -259,7 +260,7 @@ test('a truncated window marks every number it reports as a floor', async (t) =>
   assert.deepEqual(lines(modal), ['4+ already on the board.', '5+ excluded because you deleted them.']);
 });
 
-test('the footer reset is ledger-wide, warns per descriptor, and hides at zero', async (t) => {
+test('the records reset is ledger-wide, warns per descriptor, and hides at zero', async (t) => {
   // Not safe to forget (the file adapter can't recognize pre-provenance
   // items), and the warning comes from the descriptor, never a payload sniff.
   SAFE = false;
@@ -268,8 +269,11 @@ test('the footer reset is ledger-wide, warns per descriptor, and hides at zero',
   let modal = await openBuilt(t);
   const hatch = link(modal, /^Clear ingestion records/);
   assert.ok(hatch, 'the hatch names records, not history or memory');
-  assert.equal(hatch.closest('.modal-footer, div')?.contains(btn(modal, /^Save$/)), true,
-    'it sits in the footer beside Save, out of the task flow');
+  // NOT in the footer: that row is Save and Run now, and a footer `button`
+  // rule outranks .im-link there — a quiet maintenance link came out looking
+  // like a third primary. It rides the last-run line instead, pushed right.
+  assert.equal(hatch.closest('.modal-footer'), null);
+  assert.ok(hatch.closest('.im-line'), 'it shares the run-state line');
   hatch.click();
   await tick(); await tick();
   assert.match(confirmMsg, /duplicated/);

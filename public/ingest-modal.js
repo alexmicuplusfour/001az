@@ -900,7 +900,7 @@ export function openIngestModal() {
     // array of rows in step with the data by index.
     const paintLines = LINES.map((L) => {
       const row = document.createElement("div");
-      row.className = "im-exception";
+      row.className = "im-line";
       row.style.display = "none";
       const label = document.createElement("span");
       row.appendChild(label);
@@ -954,6 +954,18 @@ export function openIngestModal() {
       else invalidatePreview(); // the whole-ledger reset moved every number
     }
 
+    // The settings view's last row: what happened on the left, and pushed to
+    // the far side, the hatch for undoing what the app remembers about it.
+    // The hatch answers "why is this number odd?" — a question nobody has
+    // while configuring — so it stays out of the task flow. It does NOT
+    // belong in the footer: that row is Save and Run now, the two things this
+    // modal is for, and a footer `button` rule outranks .im-link there, so a
+    // quiet maintenance link renders as a third primary.
+    const lastRow = document.createElement("div");
+    lastRow.className = "im-line";
+    lastRow.style.marginTop = "12px";
+    settingsView.appendChild(lastRow);
+
     // Status line from the sweep-owned run state — history, not state (the
     // header chip's job; two facts, two lines). It re-renders on the chip's
     // 1s tick because "Last run 21s ago" is a claim about NOW, and a watch
@@ -962,17 +974,45 @@ export function openIngestModal() {
       const st = info.state;
       const line = document.createElement("p");
       renderRunLine = () => {
-        // Class rides the render, not the build: the clear button below can
-        // drop last_error mid-view, and a red line about a wiped verdict
-        // would outlive the verdict.
-        line.className = "im-status" + (st.last_error ? " error" : "");
+        // Class rides the render, not the build: the reset beside it can drop
+        // last_error mid-view, and a red line about a wiped verdict would
+        // outlive the verdict. `flush` because the row owns the spacing now.
+        line.className = "im-status flush" + (st.last_error ? " error" : "");
         const text = st.last_error
           ? `Last run ${relTime(st.last_run_at)} — error: ${st.last_error}`
           : `Last run ${relTime(st.last_run_at)} — added ${st.last_added ?? 0}${st.drain_left ? ` (${st.drain_left} still draining)` : ""}`;
         if (line.textContent !== text) line.textContent = text;
       };
       renderRunLine();
-      settingsView.appendChild(line);
+      lastRow.appendChild(line);
+    }
+
+    if (canEdit) {
+      // "Records" because this is current bookkeeping, not an archive
+      // ("history" would collide with the Jobs modal's run log) and not
+      // implementation ("memory", "ledger"). Unlike the two scoped verbs
+      // under Preview, this one is ledger-wide: it is the only clear not read
+      // off a windowed number.
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "im-link quiet";
+      clearBtn.textContent = "Clear ingestion records…";
+      clearBtn.title = "Forget everything this board remembers about what it has ingested";
+      clearBtn.addEventListener("click", busy(clearBtn, async () => {
+        const n = info.ledger.total;
+        if (!n) return;
+        // The file adapter can't recognize items admitted before provenance
+        // existed, so a full clear duplicates them — the descriptor says
+        // which adapters are safe, and nothing here sniffs the payload.
+        if (!confirm(desc.forgetAllIsSafe
+          ? `Clear everything this board remembers about ingestion (${n.toLocaleString()} record${n === 1 ? "" : "s"})? Items still on the board stay put; ones you deleted will be re-added by the next run.`
+          : `Clear everything this board remembers about ingestion (${n.toLocaleString()} record${n === 1 ? "" : "s"})? The next run treats the source as never seen — everything imports again, INCLUDING items still on this board, which will be duplicated. Best used after deleting the board's ingested items.`))
+          return;
+        await forget("all", false, (m) => `${m.toLocaleString()} record${m === 1 ? "" : "s"} cleared`);
+      }));
+      renderHatch = () => { clearBtn.style.display = info.ledger.total > 0 ? "" : "none"; };
+      renderHatch();
+      lastRow.appendChild(clearBtn);
     }
 
     // A config edit makes a shown count a lie — drop the whole block until
@@ -1277,34 +1317,7 @@ export function openIngestModal() {
           toast.error("Run failed");
         }
       });
-      // The maintenance hatch: pushed to the far side, out of the task flow,
-      // and quiet — it answers "why is this number odd?", which is a question
-      // nobody has while they are configuring. "Records" because this is
-      // current bookkeeping, not an archive ("history" would collide with the
-      // Jobs modal's run log) and not implementation ("memory", "ledger").
-      // Unlike the two scoped verbs above it, this one is ledger-wide: it is
-      // the only clear not read off a windowed number.
-      const clearBtn = document.createElement("button");
-      clearBtn.type = "button";
-      clearBtn.className = "im-link quiet";
-      clearBtn.style.marginLeft = "auto";
-      clearBtn.textContent = "Clear ingestion records…";
-      clearBtn.title = "Forget everything this board remembers about what it has ingested";
-      clearBtn.addEventListener("click", busy(clearBtn, async () => {
-        const n = info.ledger.total;
-        if (!n) return;
-        // The file adapter can't recognize items admitted before provenance
-        // existed, so a full clear duplicates them — the descriptor says
-        // which adapters are safe, and nothing here sniffs the payload.
-        if (!confirm(desc.forgetAllIsSafe
-          ? `Clear everything this board remembers about ingestion (${n.toLocaleString()} record${n === 1 ? "" : "s"})? Items still on the board stay put; ones you deleted will be re-added by the next run.`
-          : `Clear everything this board remembers about ingestion (${n.toLocaleString()} record${n === 1 ? "" : "s"})? The next run treats the source as never seen — everything imports again, INCLUDING items still on this board, which will be duplicated. Best used after deleting the board's ingested items.`))
-          return;
-        await forget("all", false, (n) => `${n.toLocaleString()} record${n === 1 ? "" : "s"} cleared`);
-      }));
-      renderHatch = () => { clearBtn.style.display = info.ledger.total > 0 ? "" : "none"; };
-      renderHatch();
-      footerSettings.append(saveBtn, runBtn, clearBtn);
+      footerSettings.append(saveBtn, runBtn);
     } else {
       const note = document.createElement("p");
       note.style.cssText = "font-size:12px;color:#8a8a92;margin:0;";

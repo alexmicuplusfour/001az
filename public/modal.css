@@ -695,10 +695,11 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 }
 .im-link:hover { text-decoration: underline; }
 .im-link.quiet { font-size: 12px; font-weight: 400; color: #6b6b72; }
-/* Preview's exception lines: a fact, and the verb that undoes it pushed to
-   the far side. Same 12px accounting voice as .im-status. */
-.im-exceptions { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
-.im-exception {
+/* A line that states a fact with the verb answering it pushed to the far side.
+   Preview's exception lines are a stack of them; the settings view's last row
+   is one more, pairing the run-state line with the records reset. Same 12px
+   accounting voice as .im-status, which sits inside it .flush. */
+.im-line {
   display: flex;
   align-items: baseline;
   gap: 12px;
@@ -706,7 +707,8 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
   color: #6b6b72;
   line-height: 1.4;
 }
-.im-exception > .im-link { margin-left: auto; white-space: nowrap; }
+.im-line > .im-link { margin-left: auto; white-space: nowrap; }
+.im-exceptions { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
 /* Modal-body status line — shared vocabulary like .im-btn, not ingest-only:
    one 12px line whose tone IS the verdict. Base = neutral accounting ("Last
    run 2m ago — added 3"). Tones borrow the app's existing families rather
