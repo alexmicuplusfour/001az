@@ -381,7 +381,7 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
       const rmBtn = document.createElement("button");
       rmBtn.className = "lbp-file-remove";
       rmBtn.title = "Remove this file";
-      rmBtn.innerHTML = ICONS.x;
+      rmBtn.innerHTML = ICONS.trash;
       rmBtn.addEventListener("click", busy(rmBtn, async (e) => {
         e.stopPropagation();
         try {
