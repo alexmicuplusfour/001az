@@ -1,6 +1,6 @@
 # Duplicating a board — config, not content (2026-09-17)
 
-**Status: BUILT 2026-09-17 (both stages) + simplify pass, uncommitted. Suite
+**Status: SHIPPED 2026-09-17 (b46a199) — both stages + simplify pass. Suite
 1604 green (8 new in [board-duplicate.test.js](../test/board-duplicate.test.js)).**
 Server verified against Postgres; the row button is linted but not yet clicked
 in a browser — the running compose image predates the change. The content fork
