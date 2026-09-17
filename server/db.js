@@ -1578,16 +1578,21 @@ export const BOARD_BINDING_COLS = [...new Set([...BOARD_PIN_COLS, ...BOARD_CONFI
 
 // boards.type still exists in the schema (unread legacy; drop in a later
 // schema pass) but is deliberately not selected anywhere.
-const BOARD_COLS =
-  "id, name, facets, context, ai_reasoning, ai_research, ai_votes, " +
-  BOARD_BINDING_COLS.join(", ") + ", " +
-  "auto_tag, auto_tag_periodic, auto_tag_every_min, auto_tag_skip_weekends, auto_tag_next_run_at, mapping, gather_every_min, retag_on_refresh, paused, " +
-  "ingest, ingest_next_run_at, ingest_state, facet_diagnostics, created_at";
+export const BOARD_COL_LIST = [
+  "id", "name", "facets", "context", "ai_reasoning", "ai_research", "ai_votes",
+  ...BOARD_BINDING_COLS,
+  "auto_tag", "auto_tag_periodic", "auto_tag_every_min", "auto_tag_skip_weekends",
+  "auto_tag_next_run_at", "mapping", "gather_every_min", "retag_on_refresh",
+  "paused", "ingest", "ingest_next_run_at", "ingest_state", "facet_diagnostics",
+  "created_at",
+];
+const BOARD_COLS = BOARD_COL_LIST.join(", ");
 // Hand-written, so a new column is invisible until it is named here — which is
 // how a feature evaporates into "it never writes anything" with a green suite.
 // facet_diagnostics is read by the board modal and the diagnostics surface; the
 // worker's own loop selects it explicitly (boardsWithVotes) and does not rely on
-// this list.
+// this list. An array that joins, rather than a string, so NOT_DUPLICATED can
+// subtract from it.
 
 // The row a new board is born with — column-named, exactly as getBoard reads
 // it back. createBoard's INSERT below writes these values; the create route
@@ -1620,6 +1625,73 @@ export async function createBoard(db, name, facets = [], context = "", aiReasoni
     ]
   );
   return id;
+}
+
+// What a COPY does not inherit. Everything else in BOARD_COL_LIST travels.
+//
+// A DENY-list on purpose. The allow-list version of this — naming the columns
+// to copy — is the same shape as BOARD_COLS above, and would rot the same way:
+// add a board setting, forget the second list, and duplication silently stops
+// carrying it with every test still green. Subtracting inverts the failure —
+// a new setting is copied by default, and only a column someone consciously
+// excluded is left behind. Each entry below needs a reason, and these are the
+// only kinds there are.
+export const NOT_DUPLICATED = new Set([
+  // the copy's own
+  "id", "name", "created_at",
+  // timers: the sweep arms them. An armed ingest timer on a copy would race the
+  // original over one source, and its empty ingest_log means it re-admits
+  // everything the original ever took, deletions included.
+  "auto_tag_next_run_at", "ingest_next_run_at",
+  // run status of a board that has not run
+  "ingest_state",
+  // measured against items the copy does not have
+  "facet_diagnostics",
+  // a copy starts unpaused
+  "paused",
+]);
+
+// The statement text, built once: both the list and the deny-list are frozen at
+// module load, so rebuilding this per call is pure repeated work.
+const DUP_COLS = BOARD_COL_LIST.filter((c) => !NOT_DUPLICATED.has(c)).join(", ");
+const COPY_BOARD_SQL =
+  `INSERT INTO boards (id, name, created_at, ${DUP_COLS})
+     SELECT $1, $2, $3, ${DUP_COLS} FROM boards WHERE id=$4`;
+
+// Copy a board's CONFIGURATION to a new board — no items, no entities, no
+// files, no history (planning/board-duplicate-plan.md). Returns
+// { id, members } or null when the source is gone.
+//
+// Deliberately not routed through the create route's validation trunk: a
+// duplicate takes no user input, so there is nothing to validate — the source
+// row went through that trunk when it was saved. This is a copy, not a create.
+//
+// pauseIngest: switch the copy's feed off. Decided by the CALLER, because the
+// rule for "is this feed on a schedule" is ingestMode() (ingestion/index.js)
+// and db.js cannot import it — ingestion/files.js imports db.js, so the edge
+// would close a cycle. Spelling the predicate in jsonb paths here instead
+// would make it a third, untestable copy of that rule.
+export async function duplicateBoard(db, srcId, name, { pauseIngest = false } = {}) {
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  return withTx(db, async (client) => {
+    const ins = await client.query(COPY_BOARD_SQL, [id, name, now, srcId]);
+    if (ins.rowCount === 0) return null; // source gone between the read and here
+    if (pauseIngest) {
+      await client.query(
+        "UPDATE boards SET ingest = jsonb_set(ingest, '{enabled}', 'false') WHERE id=$1",
+        [id]
+      );
+    }
+    // Membership, roles included — a board-admin on the original is one on the
+    // copy. A raw statement rather than setBoardMembers, which opens its own
+    // withTx (db.connect()) and so cannot nest inside this one; it lives beside
+    // ADD_BOARD_MEMBER as COPY_BOARD_MEMBERS, with the other writers of this
+    // row shape, so a column added to board_members is visibly a change to all
+    // three.
+    const mem = await client.query(COPY_BOARD_MEMBERS, [id, now, srcId]);
+    return { id, members: mem.rowCount };
+  });
 }
 
 // Creation order, which is the INSTANCE's order — the admin board table reads
@@ -2327,12 +2399,21 @@ export async function getBoardAdminIds(db, boardId) {
   return rows.map((r) => r.user_id);
 }
 
-// The row shape both membership editors write. Kept in one place so a column
-// added here can't reach one writer and miss the other — the two functions
+// The row shape every membership writer writes. Kept in one place so a column
+// added here can't reach one writer and miss the others — the two functions
 // below stay separate (their DELETE scopes are the point), but they insert the
 // same row.
 const ADD_BOARD_MEMBER =
   "INSERT INTO board_members (board_id, user_id, role, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING";
+
+// The third writer: duplicateBoard, carrying a board's whole membership to its
+// copy. Set-based rather than row-by-row, so it cannot reuse the VALUES
+// statement above — but it lives here so the column tuple is maintained in one
+// place with the others, and `role` travels verbatim rather than being taken
+// apart into setBoardMembers' (userIds, adminIds) and rebuilt.
+const COPY_BOARD_MEMBERS =
+  `INSERT INTO board_members (board_id, user_id, role, created_at)
+     SELECT $1, user_id, role, $2 FROM board_members WHERE board_id=$3`;
 
 // Replace a board's membership. adminIds get role='admin' (only if also members);
 // everyone else is a plain 'member'. adminIds defaults to none.

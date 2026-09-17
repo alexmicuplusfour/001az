@@ -1,11 +1,13 @@
 // Boards tab: one row per board with item counts and per-row actions — edit (shared board
-// modal), access (member/board-admin dropdown), retag, tag-held, stop, delete —
-// plus "+ New board". Self-guards on /api/me, so it no-ops for non-admins.
+// modal), duplicate, access (member/board-admin dropdown), retag, tag-held,
+// stop, delete — plus "+ New board". Self-guards on /api/me, so it no-ops for
+// non-admins.
 import { toast } from "./toast.js";
 import { api } from "./api.js";
 import { openBoardModal } from "./board-modal.js";
 import { openDropdown, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty, openFacetScopePop } from "./dropdown.js";
 import { ICONS } from "./utils.js";
+import { busy } from "./modal.js";
 
 const boardsContent = document.getElementById("boards-content");
 
@@ -54,6 +56,28 @@ export async function renderBoards() {
     editBtn.textContent = "edit";
     editBtn.onclick = () => openBoardModal(b.id, { canEditAI: true, onSaved: renderBoards });
     wrap.appendChild(editBtn);
+
+    // No confirm: it costs nothing and destroys nothing, and `delete` is a few
+    // buttons along if it was a mistake. Plain text like the `edit` it sits
+    // beside; busy() carries the in-flight state, so the label restores itself
+    // on failure and a second click during the round-trip is a no-op.
+    const dupBtn = document.createElement("button");
+    dupBtn.className = "ghost";
+    dupBtn.textContent = "duplicate";
+    dupBtn.title = "Create a new board with this board's settings, taxonomy and mapping — without its items";
+    dupBtn.onclick = busy(dupBtn, async () => {
+      try {
+        const copy = await api("POST", `/api/admin/boards/${b.id}/duplicate`);
+        // Only what actually happened: the member count when there were any,
+        // and the feed only when there was one to switch off.
+        const notes = [];
+        if (copy.members) notes.push(`${copy.members} member${copy.members === 1 ? "" : "s"} copied`);
+        if (copy.ingestPaused) notes.push("automatic ingestion is switched off");
+        toast(`Board "${copy.name}" created${notes.length ? ` — ${notes.join("; ")}` : ""}`);
+        renderBoards();
+      } catch (err) { toast.error(err.message); }
+    });
+    wrap.appendChild(dupBtn);
 
     const accessBtn = document.createElement("button");
     accessBtn.className = "ghost";

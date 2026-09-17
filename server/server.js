@@ -64,6 +64,7 @@ import {
   firingMatches,
   markAlertFiringsSeen,
   createBoard,
+  duplicateBoard,
   NEW_BOARD_DEFAULTS,
   listBoards,
   getBoard,
@@ -2228,6 +2229,30 @@ app.post("/api/admin/boards", requireAdmin, wrap(async (req, res) => {
     ai_votes: update.aiVotes ?? 1,
     mapping: update.mapping ?? null,
   });
+}));
+
+// Duplicate a board's configuration, with none of its content — see
+// duplicateBoard (db.js) for what travels. Takes no body: the name is derived
+// and everything else is the source row.
+//
+// requireAdmin matches the create route above (making a board is a global-admin
+// power); requireBoardManager after it only 404s a missing board and attaches
+// req.board, since a global admin always passes its role check — the same
+// composition PATCH /api/admin/boards/:id uses.
+app.post("/api/admin/boards/:id/duplicate", requireAdmin, requireBoardManager, wrap(async (req, res) => {
+  const src = req.board;
+  const name = `Copy of ${src.name}`;
+  // The feed arrives off. Only a SCHEDULED one can arm a timer and start
+  // racing the original over one source, so only that one is held — and
+  // ingestMode is the single place that decides which is which (a manual feed
+  // outranks `enabled`, and an already-paused one needs nothing done to it).
+  const pauseIngest = ingestMode(src.ingest) === "scheduled";
+  const copy = await duplicateBoard(db, src.id, name, { pauseIngest });
+  // The source went away between the middleware's read and the copy — the same
+  // answer as if it had never been there.
+  if (!copy) return res.status(404).json({ error: "not found" });
+  console.log(`duplicated board ${src.id} -> "${name}" ${copy.id}`);
+  res.json({ id: copy.id, name, members: copy.members, ingestPaused: pauseIngest });
 }));
 
 // The kinds a scalar field can hold, for the sources that don't narrow it
