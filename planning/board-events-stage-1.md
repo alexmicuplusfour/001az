@@ -4,7 +4,11 @@
 > transport (SSE, one stream per browser, events name a slice rather than carry
 > it). This is what the code has to do, after reading it.
 
-**Status:** planned, not started. Suite at 1696.
+**Status:** SHIPPED in `3ca490f`. Suite 1731.
+
+Built as written, with four corrections found while building and four more by an
+adversarial pass over the finished code — recorded below where each applies.
+Steps 1–6 of §8 all landed; §6's excluded list is unchanged.
 
 ---
 
@@ -221,3 +225,47 @@ the line to watch. The fix is Postgres `LISTEN`/`NOTIFY` behind the same
 dedicated connection outside a `max: 5` pool, and row-level triggers costing 13×
 on bulk writes (statement-level with transition tables, 2×) on the worker's hot
 path, to make a crate appear.
+
+---
+
+## 10 — What the build changed, and what a review pass found after
+
+Recorded because each was a wrong assumption in the plan above, not a detail.
+
+**The plan's §5 test list was optimistic about "settled".** A `tagged` item with
+no embedding sits in the embed lane, so `work.queued` is non-empty, so
+`pollDelay()` returns 30000 and the delta poll **never stops**. The worker does
+not run under test, so nothing drains it — the browser test had to stamp
+`embed_error` to get a genuinely settled board, and without that it passed with
+the whole feature switched off. Worth knowing beyond the test: on an instance
+with no embedder configured, every board with an un-embedded card polls every
+30s forever.
+
+**Four defects in the first cut**, all found by trying to break it rather than
+read it: the ordering guard compared a sequence number *after* `await run()`, by
+which point the stale answer was already in state and only the repaint was
+suppressed (state and screen disagreeing, which is worse than either); `onopen`
+refreshed all four slices on the FIRST open too, duplicating boot's own
+`Promise.all` — four wasted round trips on every page load, measured; the route
+checked `canAccessBoard` without `boardExists`, and that short-circuits true for
+an admin, so any string opened a stream; and the heartbeat was a named `event:`
+frame rather than a `:` comment, so every consumer had to filter it.
+
+**Routes were emitting mid-handler.** Six did, before `res.json()`, so the
+guarantee the finish hook advertises — committed and answered, under 400 — held
+for its own events and not for theirs, and the crate toggle sent its two halves
+at different moments for one indivisible change. Routes now queue with
+`onBoard`/`onUser`; `emitBoard`/`emitUser` are private to the module.
+
+**`setCratePublic` was the only crate write that did not stamp its cards**
+(§ reported from two real windows). `crateIds` in the list payload is filtered by
+crate visibility, so the flip changes what every card in the crate reports to
+everyone else — and writes no row the delta selects on. Announcing `items` alone
+would not have fixed it. `touchCrateMembers` now serves the flip and the delete,
+the latter stamping *before* the cascade removes the membership it reads.
+
+**Still open, deliberately:** self-echo (the acting tab refetches its own change,
+one delta per action); private crates waking the whole board, where the
+filter-config reasoning argues for `emitUser`; the three field names the finish
+hook reads for one fact; and a `requireBoardAccess` guard for the ~20 sites that
+hand-roll `canAccessBoard`.

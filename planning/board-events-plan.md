@@ -1,6 +1,6 @@
 # Board events — how an open gallery learns about a change it didn't make
 
-**Status:** planned, not started.
+**Status:** SHIPPED in `3ca490f` — see [board-events-stage-1.md](board-events-stage-1.md) for what the code actually does.
 **Prompted by:** an agent saving a crate over MCP (`mcp-stage-3.md` §2) while the
 gallery sat open beside it, and nothing happening until a reload.
 
