@@ -300,7 +300,16 @@ test("the quiet section names them, marks them, and says what the feed says", as
 
   // Shut, it wears its marks on the right: what is inside, at a glance.
   assert.equal(await page.locator("#w-others").isVisible(), false);
+  // Waited for, not counted on arrival: #w-disclose existing does not mean its
+  // marks have been painted, and counting them in that gap reads 0. Rare on an
+  // idle machine, regular under the full parallel suite — which is the only
+  // place this test was failing.
   const marks = page.locator("#w-disclose-marks svg");
+  await page.waitForFunction(
+    () => document.querySelectorAll("#w-disclose-marks svg").length >= 3,
+    null,
+    { timeout: 15000 }
+  );
   assert.ok(await marks.count() >= 3, "a mark per row while collapsed");
 
   await page.locator("#w-disclose").click();

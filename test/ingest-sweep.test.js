@@ -392,7 +392,12 @@ test("a touched file is recognized by content and stops drifting", async () => {
   // and the run reports no duplicate either.
   board = await runOnce(id, board.ingest_state.last_run_at);
   assert.equal(board.ingest_state.last_added, 0);
-  assert.equal((await jobRows(id))[0].detail.duplicates ?? 0, 0,
+  // Three runs, so three settled rows — waited for, not assumed. runOnce
+  // returns on the run-state stamp, and the job-log row is written separately
+  // (see jobRowsAtLeast above), so reading [0] straight after can hand back the
+  // PREVIOUS run's row and blame this one for it. Rare alone, regular under a
+  // full parallel suite, which is where this test kept failing.
+  assert.equal((await jobRowsAtLeast(id, 3))[0].detail.duplicates ?? 0, 0,
     "a settled slot is skipped by the cheap check — the file is never re-read");
 });
 
@@ -427,7 +432,8 @@ test("renames: a live file is recognized, a deleted one stays deleted", async ()
 
   // A held-back rename is an EVENT: it ledgers a key permanently, so the run
   // row is its only trace and must survive.
-  const latest = (await jobRows(id))[0];
+  // Two runs, two settled rows — waited for, for the reason above.
+  const latest = (await jobRowsAtLeast(id, 2))[0];
   assert.equal(latest.detail.held, 1);
   assert.deepEqual(latest.detail.held_labels, ["gone-2024.txt"]);
 
