@@ -15,7 +15,10 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-gallery}:${POSTGRES_PASSWORD:-gallery}@db:5432/${POSTGRES_DB:-gallery}
       INGEST_ROOT: /data/ingest
-      BASE_URL: http://localhost:8001 # must match the port above
+      # The address this instance claims: invite links, alert links and MCP
+      # asset links all mint from it, and it is the origin the MCP endpoint
+      # trusts. A host reachable at a real name overrides it in .env.
+      BASE_URL: ${BASE_URL:-http://localhost:8001} # must match the port above
     volumes:
       - appdata:/data
       - ./ingest-root:/data/ingest

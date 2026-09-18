@@ -216,7 +216,11 @@ const STORAGE_DIRS = {
   galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR, backupsDir: BACKUPS_DIR,
   pluginsDir: pluginsDir(), npmCacheDir: process.env.NPM_CACHE_DIR || null,
 };
-const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
+// Trailing slash stripped once, here: several call sites append to this
+// (`${BASE_URL}/auth/...`, `${baseUrl}/mcp/...`) and only alerts.js was
+// normalizing on its own, so a config with a trailing slash minted //-links
+// from every other one.
+const BASE_URL = (process.env.BASE_URL || `http://127.0.0.1:${PORT}`).replace(/\/+$/, "");
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "";
 
 // --- live log capture: mirror console output into a ring buffer + SSE clients ---
