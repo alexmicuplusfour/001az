@@ -414,3 +414,40 @@ export async function until(fn, ms = 8000) {
     await new Promise((r) => setTimeout(r, 60));
   }
 }
+
+// --- MCP ---------------------------------------------------------------------
+
+// One JSON-RPC call to /mcp. `req` above speaks cookies, which is exactly what
+// MCP does not: a client carries a bearer token (or nothing, on loopback) and
+// the protocol version in headers. `xff` fakes a non-loopback client — the app
+// sets `trust proxy` 1, so an X-Forwarded-For from the test's own 127.0.0.1 is
+// honoured, which is the only way to exercise the off-this-machine rules.
+export async function mcp(base, body, { token, origin, version, xff, method = "POST" } = {}) {
+  const headers = { Accept: "application/json, text/event-stream" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (version !== null) headers["MCP-Protocol-Version"] = version || "2025-06-18";
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (origin) headers.Origin = origin;
+  if (xff) headers["X-Forwarded-For"] = xff;
+  const res = await fetch(base + "/mcp", {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* 202 has no body; 405 may be JSON */ }
+  return { status: res.status, json, text };
+}
+
+// `tools/call` and hand back the tool RESULT, which is where a tool's own
+// errors live (isError) — protocol errors stay on the envelope.
+export async function callTool(base, name, args = {}, opts = {}) {
+  const r = await mcp(base, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, opts);
+  return { ...r, result: r.json?.result, error: r.json?.error };
+}
+
+// Every text block of a tool result, joined — what the model would read.
+export const toolText = (result) =>
+  (result?.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+export const toolImages = (result) => (result?.content || []).filter((c) => c.type === "image");

@@ -41,7 +41,9 @@ export function restoreGate(runtime) {
       return res.json({ job: publicJob(), restoring: true });
     }
     res.set("Retry-After", "5");
-    if (req.path.startsWith("/api/") || req.path.startsWith("/auth/")) {
+    // /mcp answers JSON-RPC: handing an MCP client the prose below would be a
+    // parse error on its side, not a retryable outage.
+    if (req.path.startsWith("/api/") || req.path.startsWith("/auth/") || req.path === "/mcp") {
       return res.status(503).json({ error: "restore in progress" });
     }
     res.status(503).type("text/plain").send("Restore in progress — back in a moment.");

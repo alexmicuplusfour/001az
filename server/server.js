@@ -103,6 +103,9 @@ import {
   updateAiKey,
   deleteAiKey,
   boardEmbeddings,
+  bestByEntity,
+  entityIdsFor,
+  entityNames,
   embeddingVec,
   listItemPayloads,
   updateItemPayload,
@@ -159,7 +162,7 @@ import { startWorker, invalidateBoardCache, invalidateAllBoardCaches, resolveEmb
 // The pure k-means both cluster flavors share — a dependency-free public
 // module, imported here the same way the test suite imports public modules.
 import { clusterVectors, carve, handleFor, kFor, floorFor, MIN_GROUP as CLUSTER_MIN_GROUP, LEVEL_MAX as CLUSTER_LEVEL_MAX } from "../public/cluster-core.js";
-import { halvesOf, wireEntry } from "../public/facet-match.js";
+import { halvesOf, wireEntry, cleanSelection } from "../public/facet-match.js";
 import { sidecarCatalogs, applySidecarCatalogs, startSidecarWatch, stopSidecarWatch } from "./sidecar-catalog.js";
 import { evaluateItemAlerts, sendAlertWebhook, nextDailyAt, seedAlertBaseline, sameCondition } from "./alerts.js";
 import { facetRollup, editedFacets, GATES, storedFindingAt } from "./facet-diagnosis.js";
@@ -186,6 +189,7 @@ import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
 import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits, bundledPlugins } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
+import { mountMcp } from "./mcp.js";
 import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
 import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, nextScheduledIngestRun, CONTINUOUS_MS, ENUM_CAP } from "./ingestion/index.js";
 import { applySort, runWindow, settledRow } from "./ingestion/filter-engine.js";
@@ -659,23 +663,6 @@ app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => 
 }));
 
 // --- saved filter configs (any logged-in user) ---
-
-// One selection cleaning for the stored shapes — filter configs and alert
-// conditions share it (they were near-identical twins before the exclusion
-// arc unified them). Entry shapes are facet-match.js's (halvesOf in,
-// wireEntry out); this adds only what an API boundary owes: strings only,
-// caps enforced, both-empty entries dropped.
-function cleanSelection(raw) {
-  const out = {};
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
-  const strings = (a) => a.filter((x) => typeof x === "string").slice(0, 100);
-  for (const [k, v] of Object.entries(raw)) {
-    const halves = halvesOf(v);
-    const wire = wireEntry(strings(halves.any), strings(halves.not));
-    if (wire) out[String(k).slice(0, 100)] = wire;
-  }
-  return out;
-}
 
 app.get("/api/filter-configs", requireAuth, wrap(async (req, res) => {
   res.json(await listFilterConfigs(db, req.user.id, req.query.board || ""));
@@ -3091,15 +3078,9 @@ app.get("/api/search", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 30 }),
   await meterAiCall(db, boardId, { capability: "embed", provider: embedder.provider, model: embedder.model }, usage);
   // Vectors are per instance; results speak in entity ids (what cards are),
   // so multiple matching instances collapse to their entity's best score.
-  const best = new Map();
-  for (const row of await boardEmbeddings(db, boardId, embedder.model)) {
-    const v = embeddingVec(row);
-    if (v.length !== qv.length) continue; // stale dims mid-model-change
-    let s = 0;
-    for (let i = 0; i < v.length; i++) s += v[i] * qv[i];
-    const eid = row.entity_id ?? row.id;
-    if (!best.has(eid) || best.get(eid) < s) best.set(eid, s);
-  }
+  // An instance can belong to SEVERAL entities (classify mode) and scores for
+  // all of them — the photo is evidence about each person in it.
+  const best = bestByEntity(await boardEmbeddings(db, boardId, embedder.model), [qv]);
   const scored = [...best].map(([id, score]) => ({ id, score }));
   scored.sort((a, b) => b.score - a.score);
   // Relative cutoff: keep everything within 0.15 of the best hit — absolute
@@ -3125,23 +3106,11 @@ app.get("/api/search/similar", requireAuth, wrap(async (req, res) => {
   const rows = await boardEmbeddings(db, boardId, embedder.model);
   // The anchor may be several instances of one entity; a candidate reads
   // against all of them and keeps its best, then collapses per entity like
-  // any search result.
-  const anchors = rows.filter((r) => String(r.entity_id ?? r.id) === itemId).map(embeddingVec);
+  // any search result. Membership is a SET test, not an equality one: an
+  // instance the anchor shares with another entity is still the anchor's.
+  const anchors = rows.filter((r) => entityIdsFor(r).some((e) => String(e) === itemId)).map(embeddingVec);
   if (!anchors.length) return res.status(404).json({ error: "item not embedded yet" });
-  const best = new Map();
-  for (const row of rows) {
-    const v = embeddingVec(row);
-    let s = -Infinity;
-    for (const a of anchors) {
-      if (v.length !== a.length) continue; // stale dims mid-model-change
-      let d = 0;
-      for (let i = 0; i < v.length; i++) d += v[i] * a[i];
-      if (d > s) s = d;
-    }
-    if (s === -Infinity) continue;
-    const eid = row.entity_id ?? row.id;
-    if (!best.has(eid) || best.get(eid) < s) best.set(eid, s);
-  }
+  const best = bestByEntity(rows, anchors);
   const scored = [...best].map(([id, score]) => ({ id, score }));
   // The id tiebreak matters only for EXACT score ties — duplicated embed
   // texts — but a tie straddling the cap would otherwise flicker membership
@@ -3190,6 +3159,8 @@ app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) =
   if (corpus?.fp !== fp) {
     // Entity = normalized mean of its instance vectors, collapsed BEFORE
     // clustering so membership speaks entity ids like every search result.
+    // An instance belonging to several entities (classify mode) contributes
+    // to each of their means — it is evidence about all of them.
     const rows = await boardEmbeddings(db, boardId, embedder.model);
     const byEnt = new Map();
     let dims = 0;
@@ -3197,13 +3168,20 @@ app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) =
       const v = embeddingVec(row);
       if (!dims) dims = v.length;
       if (v.length !== dims) continue; // stale dims mid-model-change
-      const eid = row.entity_id ?? row.id;
-      let e = byEnt.get(eid);
-      if (!e) byEnt.set(eid, e = { sum: new Float64Array(dims), name: String(row.ident || row.fname || eid) });
-      for (let j = 0; j < dims; j++) e.sum[j] += v[j];
+      for (const eid of entityIdsFor(row)) {
+        let e = byEnt.get(eid);
+        if (!e) byEnt.set(eid, e = { sum: new Float64Array(dims) });
+        for (let j = 0; j < dims; j++) e.sum[j] += v[j];
+      }
     }
     const ids = [...byEnt.keys()];
     const n = ids.length;
+    // The medoid title and the handle hash both need a name for an ENTITY, so
+    // they come from the entities table. They used to come off the instance
+    // payload, which is the wrong grain twice over: a shared instance would
+    // title two clusters identically, and on a derived board the payload's
+    // identity is the stored filename while the entity is called "emma watson".
+    const names = await entityNames(db, ids);
     const vecs = new Float64Array(n * dims);
     ids.forEach((id, i) => {
       const { sum } = byEnt.get(id);
@@ -3212,7 +3190,7 @@ app.get("/api/boards/:id/meaning-clusters", requireAuth, wrap(async (req, res) =
       s = Math.sqrt(s) || 1;
       for (let j = 0; j < dims; j++) vecs[i * dims + j] = sum[j] / s;
     });
-    corpus = { fp, ids, keys: ids.map((id) => byEnt.get(id).name), vecs, dims, n };
+    corpus = { fp, ids, keys: ids.map((id) => names.get(id) || String(id)), vecs, dims, n };
     meaningCorpusCache.set(boardId, corpus);
     capCache(meaningCorpusCache, 16);
   }
@@ -3729,6 +3707,16 @@ const backups = mountBackups(app, {
   backupsDir: BACKUPS_DIR,
   dirs: { galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR, pluginsDir: pluginsDir() },
   runtime,
+  adminEmail: ADMIN_EMAIL,
+});
+// The MCP endpoint + the Agents tab's routes (planning/mcp-stage-1.md). Mounted
+// like its siblings and after attachUser: /mcp resolves its own user from the
+// stored token and never reads the cookie, while /api/admin/mcp is an ordinary
+// requireAdmin route on the session.
+mountMcp(app, {
+  db,
+  dirs: { galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR },
+  baseUrl: BASE_URL,
   adminEmail: ADMIN_EMAIL,
 });
 app.use("/gallery", requireAuth, express.static(GALLERY_DIR, {

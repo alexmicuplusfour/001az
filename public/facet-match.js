@@ -94,3 +94,27 @@ export function decodePairs(str) {
   }
   return map;
 }
+
+// The API boundary's cleaning, for every stored or received selection: filter
+// configs, alert conditions, and an MCP tool's `facets` argument. It lives here
+// because it is the WIRE form's own rule — strings only, caps enforced,
+// both-empty entries dropped — and a third caller copying it is exactly what
+// this file exists to prevent.
+//
+// Note what it does NOT decide: a result with no keys means "nothing was
+// selected", and what that means is the caller's call. A filter config refuses
+// it (an empty saved view is a mistake), an alert condition refuses it (an
+// empty condition would fire on everything), and an MCP search treats it as
+// UNCONSTRAINED and skips matching entirely. Same cleaning, three verdicts —
+// which is why the verdict stays out here.
+export function cleanSelection(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const strings = (a) => a.filter((x) => typeof x === "string").slice(0, 100);
+  for (const [k, v] of Object.entries(raw)) {
+    const halves = halvesOf(v);
+    const wire = wireEntry(strings(halves.any), strings(halves.not));
+    if (wire) out[String(k).slice(0, 100)] = wire;
+  }
+  return out;
+}

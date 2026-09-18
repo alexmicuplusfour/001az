@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Board results</title>
+<!--
+  The MCP App view (planning/mcp-stage-4.md §3, scope B): the grid a host
+  renders in the conversation for a search_board result, with tick boxes and
+  one Save button wired to save_to_crate.
+
+  ONE FILE, BY CONSTRAINT, NOT BY TASTE. A ui:// resource runs in a sandboxed
+  iframe whose default CSP is:
+
+      default-src 'none'; script-src 'self' 'unsafe-inline';
+      style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'
+
+  so there is no fetch, no CDN, no second file to load. Everything this view
+  knows arrives over postMessage; everything it shows comes from <img> URLs the
+  server signed. That is also why none of public/ is here: grid.js pulls 22
+  modules and 253 KB of source containing 20 fetch() calls, which is a gallery,
+  not a grid component (§2.2).
+
+  The one origin this page reaches is the instance's own, for thumbnails, and
+  the server declares it in _meta.ui.csp.resourceDomains at read time.
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #14141a; --muted: #6b6b72;
+    --line: #e5e5ea; --tile: #f4f4f6; --accent: #14141a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #17171b; --fg: #f2f2f4; --muted: #9a9aa2;
+            --line: #2c2c33; --tile: #202027; --accent: #f2f2f4; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px 16px 84px;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+  .head b { font-size: 14px; font-weight: 600; }
+  .head span { color: var(--muted); }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .tile { position: relative; border-radius: 8px; overflow: hidden; background: var(--tile);
+          border: 1px solid var(--line); cursor: pointer; }
+  .tile img { display: block; width: 100%; height: 100%; object-fit: cover; aspect-ratio: 4 / 3; }
+  /* A picked tile wears a solid border, the same signal the gallery's chooser
+     cards use — fill is for hover, border means selected. */
+  .tile[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
+  .tile .cap { position: absolute; inset: auto 0 0 0; padding: 5px 7px; font-size: 11px;
+               color: #fff; background: linear-gradient(transparent, rgba(0,0,0,.72));
+               opacity: 0; transition: opacity .12s; pointer-events: none; }
+  .tile:hover .cap, .tile:focus-visible .cap { opacity: 1; }
+  .tile .tick { position: absolute; top: 6px; left: 6px; width: 18px; height: 18px;
+                border-radius: 4px; border: 1px solid rgba(255,255,255,.8);
+                background: rgba(0,0,0,.35); pointer-events: none; }
+  .tile[aria-pressed="true"] .tick { background: var(--accent); border-color: var(--accent); }
+  .tile[aria-pressed="true"] .tick::after {
+    content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 10px;
+    border: solid var(--bg); border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  .bar { position: fixed; inset: auto 0 0 0; display: none; gap: 8px; align-items: center;
+         padding: 10px 16px; background: var(--bg); border-top: 1px solid var(--line); }
+  .bar.on { display: flex; }
+  .bar input { flex: 1; min-width: 0; padding: 6px 9px; font: inherit; color: var(--fg);
+               background: var(--tile); border: 1px solid var(--line); border-radius: 6px; }
+  .bar button { padding: 6px 13px; font: inherit; font-weight: 500; cursor: pointer;
+                color: var(--bg); background: var(--accent); border: 0; border-radius: 6px; }
+  .bar button[disabled] { opacity: .5; cursor: default; }
+  .note { color: var(--muted); padding: 0 0 8px; min-height: 1em; }
+  .note:empty { padding: 0; }
+  .note.bad { color: #c8474a; }
+</style>
+</head>
+<body>
+  <div class="head" id="head"></div>
+  <!-- The status line sits OUTSIDE the bar. Inside it, a successful save read
+       its own confirmation out and then hid it in the same tick, because
+       clearing the selection is what takes the bar away. -->
+  <div class="note" id="note" role="status"></div>
+  <div class="grid" id="grid"></div>
+  <div class="bar" id="bar">
+    <span id="count"></span>
+    <input id="crate" placeholder="Crate name" maxlength="64" />
+    <button id="save">Save</button>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  // --- JSON-RPC 2.0 over postMessage -----------------------------------------
+  // The whole host channel, hand-rolled. It is ~40 lines, and the alternative
+  // was putting a third-party bundle inside a sandboxed iframe that we ask
+  // hosts to security-review — the wrong direction for a repo strangers read.
+  let nextId = 1;
+  const pending = new Map();
+  const send = (msg) => window.parent.postMessage({ jsonrpc: "2.0", ...msg }, "*");
+  const call = (method, params) =>
+    new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      send({ id, method, params });
+    });
+  const notify = (method, params) => send({ method, params });
+
+  window.addEventListener("message", (e) => {
+    // Only the host that framed us. The view has no secrets, but a page that
+    // renders whatever any frame posts at it is a page that renders anything.
+    if (e.source !== window.parent) return;
+    const msg = e.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.id != null && pending.has(msg.id)) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      msg.error ? reject(new Error(msg.error.message || "call failed")) : resolve(msg.result);
+      return;
+    }
+    if (msg.method === "ui/notifications/tool-result") render(msg.params || {});
+  });
+
+  // --- state -----------------------------------------------------------------
+  let data = { cards: [], board: null, matched: 0, canSave: false };
+  const picked = new Set();
+
+  const el = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function render(params) {
+    // structuredContent is the view's data; `content` is the model's. Both are
+    // in every result, and the text half is what a host with no UI support
+    // shows — which is most of them today (§0).
+    const s = params.structuredContent;
+    if (!s || !Array.isArray(s.cards)) return;
+    data = s;
+    picked.clear();
+
+    el("head").innerHTML =
+      `<b>${esc(s.board && s.board.name)}</b>` +
+      `<span>${s.matched} matched · showing ${s.cards.length}</span>`;
+
+    el("grid").innerHTML = s.cards.map((c, i) => `
+      <div class="tile" role="button" tabindex="0" aria-pressed="false" data-i="${i}">
+        ${s.canSave ? '<span class="tick"></span>' : ""}
+        <img src="${esc(c.thumb)}" alt="" loading="lazy"
+             ${c.w && c.h ? `style="aspect-ratio:${c.w}/${c.h}"` : ""} />
+        ${c.caption ? `<span class="cap">${esc(c.caption)}</span>` : ""}
+      </div>`).join("");
+
+    for (const tile of document.querySelectorAll(".tile")) {
+      const hit = () => toggle(tile);
+      tile.addEventListener("click", hit);
+      tile.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); hit(); }
+      });
+    }
+    paintBar();
+  }
+
+  function toggle(tile) {
+    const card = data.cards[Number(tile.dataset.i)];
+    if (!card) return;
+    // With saving switched off on the instance there is nothing a selection
+    // could do, so tiles open rather than pick.
+    if (!data.canSave) {
+      call("ui/open-link", { url: card.thumb }).catch(() => {});
+      return;
+    }
+    const on = !picked.has(card.id);
+    on ? picked.add(card.id) : picked.delete(card.id);
+    tile.setAttribute("aria-pressed", String(on));
+    paintBar();
+  }
+
+  function paintBar() {
+    const n = picked.size;
+    el("bar").classList.toggle("on", n > 0);
+    el("count").textContent = `${n} picked`;
+    el("save").disabled = n === 0;
+  }
+
+  el("save").addEventListener("click", async () => {
+    const name = el("crate").value.trim();
+    const note = el("note");
+    if (!name) { note.className = "note bad"; note.textContent = "Name the crate first."; return; }
+    el("save").disabled = true;
+    note.className = "note";
+    note.textContent = "Saving…";
+    try {
+      // The same tool the model calls, with the same rules — additive, and a
+      // no-op when a card is already in the crate, so a double click costs
+      // nothing. The host may put a consent prompt in front of this; that is
+      // the host's call and the reason tools/call is the channel.
+      const r = await call("tools/call", {
+        name: "save_to_crate",
+        arguments: { board: data.board.id, crate: name, ids: [...picked] },
+      });
+      const said = (r && r.content || []).filter((c) => c.type === "text").map((c) => c.text).join(" ");
+      note.className = r && r.isError ? "note bad" : "note";
+      note.textContent = said.split("\n")[0] || "Saved.";
+      if (!(r && r.isError)) {
+        picked.clear();
+        for (const t of document.querySelectorAll(".tile")) t.setAttribute("aria-pressed", "false");
+        paintBar();
+      }
+    } catch (err) {
+      note.className = "note bad";
+      note.textContent = err.message || "Could not save.";
+    } finally {
+      el("save").disabled = picked.size === 0;
+    }
+  });
+
+  // --- handshake -------------------------------------------------------------
+  call("ui/initialize", {
+    appCapabilities: { availableDisplayModes: ["inline"] },
+    appInfo: { name: "001az board grid", version: "1" },
+  })
+    .then((res) => {
+      notify("ui/notifications/initialized", {});
+      // Some hosts hand the first tool result back with the initialize reply
+      // rather than as a later notification; take it either way.
+      if (res && res.toolResult) render(res.toolResult);
+    })
+    .catch(() => {
+      el("head").innerHTML = '<span class="note bad">This view could not reach its host.</span>';
+    });
+})();
+</script>
+</body>
+</html>

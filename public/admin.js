@@ -10,6 +10,7 @@ import { renderStorage } from "./admin-storage.js";
 import { renderPluginSurfaces } from "./admin-plugins.js";
 import { renderBackups } from "./admin-backups.js";
 import { renderLogs, setLogsActive } from "./admin-logs.js";
+import { renderMcp } from "./admin-mcp.js";
 
 // --- Tabs ---
 // The rail's markup names its glyphs (data-icon) instead of carrying them; fill
@@ -19,7 +20,7 @@ for (const el of document.querySelectorAll("[data-icon]")) {
   el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon]);
 }
 
-const TAB_NAMES = ["members", "boards", "usage", "storage", "capabilities", "plugins", "backups", "logs"];
+const TAB_NAMES = ["members", "boards", "usage", "storage", "capabilities", "plugins", "backups", "logs", "mcp"];
 const tabBtns = [...document.querySelectorAll(".tab")];
 function selectTab(name) {
   tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
@@ -47,3 +48,4 @@ renderUsage().catch(() => {});
 renderPluginSurfaces().catch(() => {}); // Capabilities + Plugins: one state fetch, both tabs
 renderBackups().catch(() => {});
 renderLogs().catch(() => {});
+renderMcp().catch(() => {});

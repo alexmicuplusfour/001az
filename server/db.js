@@ -260,10 +260,21 @@ function instanceEntry(r) {
 // - since: only entities changed after the given ms stamp — their own
 //   updated_at or any of their instances'. Timestamps are BIGINT ms, so
 //   cursors round-trip exactly (see the type-parser note at the top).
-export async function listItems(db, userId = null, boardId = null, { limit = null, after = null, since = null } = {}) {
+export async function listItems(db, userId = null, boardId = null, { limit = null, after = null, since = null, ids = null } = {}) {
   const params = [userId, boardId];
   const where = ["($2::text IS NULL OR e.board_id = $2)"];
   let tail = "";
+  // `ids` names the entities wanted outright — the MCP get_items shape, which
+  // knows exactly which half-dozen cards it is about. Without it that tool read
+  // the WHOLE board (measured: 95ms and 7.4MB of assembled JSON on the ui
+  // board) to reach six rows. It rides here rather than in a second assembly
+  // function because face selection, the instance->entity tag union and
+  // aggregateStatus all live in this one, and a parallel copy of them is
+  // exactly the drift this arc keeps finding.
+  if (ids != null) {
+    params.push(ids);
+    where.push(`e.id = ANY($${params.length}::bigint[])`);
+  }
   if (since != null) {
     params.push(since);
     where.push(`(e.updated_at > $3 OR e.id IN (SELECT unnest(entity_ids) FROM items WHERE board_id = $2 AND updated_at > $3))`);
@@ -294,7 +305,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
   // A page/delta covers a known set of entities — fetch just their instances
   // (an entity needs ALL of them for aggregateStatus and the face mirror).
   // The full listing keeps the board-wide query.
-  const partial = limit != null || after != null || since != null;
+  const partial = limit != null || after != null || since != null || ids != null;
   const { rows: insts } = await db.query(
     partial
       ? `SELECT id, entity_ids, status, tags, undecided, payload FROM items
@@ -1340,6 +1351,18 @@ export async function heartNames(db, itemId) {
 
 // --- crates ---
 
+// Does this board show this person any crates at all? The gallery's crates
+// control only appears once the answer is yes, which is the one thing
+// save_to_crate's closing line needs to know. Asking `listCrates` instead ran
+// a correlated COUNT per crate to compute item counts it then threw away.
+export async function hasCrates(db, userId, boardId) {
+  const { rows } = await db.query(
+    "SELECT 1 FROM crates WHERE board_id=$1 AND (user_id=$2 OR public = TRUE) LIMIT 1",
+    [boardId, userId]
+  );
+  return rows.length > 0;
+}
+
 export async function listCrates(db, userId, boardId) {
   const { rows } = await db.query(
     `SELECT c.id, c.name, c.public, c.user_id = $1 AS owned,
@@ -1392,34 +1415,88 @@ export async function setCratePublic(db, userId, crateId, isPublic) {
   };
 }
 
+// A crate's members, as a set of entity ids. The MCP's `crate` search filter
+// is the caller: it needs membership WITHOUT the crateIds join listItems does,
+// because that join is per-entity work on a whole-board read and this is one
+// small lookup for the rare call that asks for it.
+export async function crateItemIds(db, crateId) {
+  const { rows } = await db.query("SELECT item_id FROM crate_items WHERE crate_id=$1", [crateId]);
+  return new Set(rows.map((r) => r.item_id));
+}
+
 export async function deleteCrate(db, userId, crateId) {
   // crate_images cascades.
   const result = await db.query("DELETE FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
   return result.rowCount > 0;
 }
 
+// Put cards into a crate, ADDITIVELY. toggleCrateItem below is a checkbox's
+// primitive: called twice with the same id it removes what it added, which is
+// right for a checkbox and wrong for anything that retries. The MCP's
+// save_to_crate is the caller that made the difference matter — a model unsure
+// whether its call landed calls again, and so does a transport-level retry.
+//
+// ON CONFLICT DO NOTHING is what makes a second call a no-op, and RETURNING
+// says which ids the insert actually took, so the answer can tell "added" from
+// "was already there" without a second read.
+//
+// null when the crate is not this user's — the same "not yours reads as not
+// found" the toggle gives. Otherwise { added, already, skipped, count }, where
+// `skipped` names ids that are not cards on the crate's own board.
+// Which of these ids are cards on this board — the board-is-the-authority rule
+// `get_items` states in the same words: an id belonging to another board simply
+// does not resolve, and cannot become reachable because the caller knew it.
+// Shared so that "a crate only holds entities from its own board" is one
+// sentence of SQL rather than one per writer.
+export async function entitiesOnBoard(db, ids, boardId) {
+  if (!ids.length) return new Set();
+  const { rows } = await db.query(
+    "SELECT id FROM entities WHERE id = ANY($1::bigint[]) AND board_id=$2",
+    [ids, boardId]
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+export async function addCrateItems(db, userId, crateId, entityIds) {
+  const crate = await db.query("SELECT board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
+  if (!crate.rows.length) return null;
+  const ids = [...new Set((entityIds || []).map(Number).filter(Number.isInteger))];
+  const valid = await entitiesOnBoard(db, ids, crate.rows[0].board_id);
+  const { rows: inserted } = valid.size
+    ? await db.query(
+        `INSERT INTO crate_items (crate_id, item_id, created_at)
+         SELECT $1, unnest($2::bigint[]), $3 ON CONFLICT DO NOTHING RETURNING item_id`,
+        [crateId, [...valid], Date.now()]
+      )
+    : { rows: [] };
+  // crateIds ride in the entity's list payload — stamp for delta polls. Only
+  // the ones that actually moved: an id that was already in the crate saw no
+  // change, and stamping it would tell every open poll otherwise.
+  await touchEntities(db, inserted.map((r) => r.item_id));
+  const { rows } = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [crateId]);
+  // No `skipped` here. The only caller that reports one — save_to_crate —
+  // validates before it opens the crate and passes in just the survivors, so
+  // this could only ever have returned an empty array.
+  return { added: inserted.length, already: valid.size - inserted.length, count: rows[0].c };
+}
+
 export async function toggleCrateItem(db, userId, crateId, itemId) {
-  const crate = await db.query("SELECT id, board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
+  const crate = await db.query("SELECT id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
   if (!crate.rows.length) return null;
   const exists = (
     await db.query("SELECT 1 FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId])
   ).rows.length > 0;
-  if (exists) {
-    await db.query("DELETE FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId]);
-  } else {
-    // A crate only holds entities from its own board.
-    const item = await db.query("SELECT 1 FROM entities WHERE id=$1 AND board_id=$2", [itemId, crate.rows[0].board_id]);
-    if (!item.rows.length) return null;
-    await db.query("INSERT INTO crate_items (crate_id, item_id, created_at) VALUES ($1, $2, $3)", [
-      crateId,
-      itemId,
-      Date.now(),
-    ]);
+  if (!exists) {
+    // The add half is addCrateItems with one id — same insert, same board
+    // check, same stamp. A checkbox toggling is the only difference between
+    // the two, so it is the only thing left here.
+    const r = await addCrateItems(db, userId, crateId, [itemId]);
+    return r?.added ? { added: true, count: r.count } : null;
   }
-  // crateIds ride in the entity's list payload — stamp for delta polls.
+  await db.query("DELETE FROM crate_items WHERE crate_id=$1 AND item_id=$2", [crateId, itemId]);
   await touchEntity(db, itemId);
   const { rows } = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [crateId]);
-  return { added: !exists, count: rows[0].c };
+  return { added: false, count: rows[0].c };
 }
 
 // --- filter configs (named facet-selection snapshots, per user per board) ---
@@ -2487,6 +2564,15 @@ export async function getSetting(db, key) {
   return rows.length ? rows[0].value : null;
 }
 
+// Several settings in ONE round trip, as a { key: value } object with missing
+// keys absent. Reading a handful one at a time is the shape that got the MCP
+// endpoint to seven queries per thumbnail — and a grid renders thirty of them
+// against a five-connection pool. Promise.all makes those concurrent, not free.
+export async function getSettings(db, keys) {
+  const { rows } = await db.query("SELECT key, value FROM settings WHERE key = ANY($1::text[])", [keys]);
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
 export async function setSetting(db, key, value) {
   if (value === null || value === undefined || value === "") {
     await db.query("DELETE FROM settings WHERE key=$1", [key]);
@@ -2850,7 +2936,15 @@ export async function markEntityProvisional(db, id) {
 // losing an instance, gaining/losing a heart or crate membership — so delta
 // polls (?since=) see the entity as changed.
 export async function touchEntity(db, id) {
-  await db.query("UPDATE entities SET updated_at=$1 WHERE id=$2", [Date.now(), id]);
+  await touchEntities(db, [id]);
+}
+
+// The same stamp for a set of them, in ONE statement. save_to_crate takes up
+// to 100 ids at a time, and a stamp each was measured at 280ms against 7.4ms
+// for one — 100 sequential round trips for a single UPDATE's worth of work.
+export async function touchEntities(db, ids) {
+  if (!ids.length) return;
+  await db.query("UPDATE entities SET updated_at=$1 WHERE id = ANY($2::bigint[])", [Date.now(), ids]);
 }
 
 // Set an instance's entity membership — the ordered set of entities it belongs
@@ -3672,23 +3766,102 @@ export async function oneAudioNeedingTranscription(db, excludeIds = [], served =
 
 // Current-model vectors for one board (the search corpus). Stale vectors are
 // excluded rather than compared wrongly; they reappear once re-embedded.
-// entity_id rides along so search results can speak in card (entity) ids;
-// the identity/filename columns are for the meaning-clusters route's medoid
-// titles and handle hashes (search ignores them — two small strings a row).
+//
+// entity_ids rides along WHOLE so results can speak in card (entity) ids. This
+// used to project `entity_ids[1] AS entity_id`, which is only right when an
+// instance belongs to exactly one entity — the extract-mode norm, but not
+// classify mode, where one photo of two people is one instance with two
+// entities (setItemEntities, above). The second entity was dropped from every
+// consumer: never returned by /api/search, absent from the clusters carving,
+// and — the loudest one — answered as "not embedded yet" by /api/search/similar
+// although its instance carries a perfectly good vector. Fanning out in SQL
+// with unnest would duplicate the bytea per entity, and the bytea is the whole
+// cost of this read (measured 7010 kB of vectors against 132 kB of arrays on
+// the ui board), so the fan-out is the caller's loop.
+//
+// No medoid-title columns either: they were the INSTANCE's identity, which is
+// the wrong grain once a row can name two entities, and was already wrong on
+// every derived board (an emma item's payload identity is its filename, while
+// its entity is "emma watson"). The clusters route names entities from the
+// entities table instead — see meaning-clusters in server.js.
 export async function boardEmbeddings(db, boardId, model) {
   const { rows } = await db.query(
-    `SELECT id, entity_ids[1] AS entity_id, embedding, payload->>'identity' AS ident,
-            payload->'files'->0->>'original_name' AS fname
+    `SELECT id, entity_ids, embedding
      FROM items WHERE board_id=$1 AND embedding IS NOT NULL AND embedding_model=$2`,
     [boardId, model]
   );
   return rows;
 }
 
+// Identities for a set of entities, for callers that have collapsed instance
+// rows into entity ids and now need something to CALL each one. Display name
+// first — it is the AI's original casing ("Maya Chen") where the identity key
+// is lowercased — falling back to the key itself.
+export async function entityNames(db, ids) {
+  if (!ids.length) return new Map();
+  const { rows } = await db.query(
+    "SELECT id, identity, display_name FROM entities WHERE id = ANY($1::bigint[])",
+    [ids]
+  );
+  return new Map(rows.map((r) => [r.id, r.display_name || r.identity || String(r.id)]));
+}
+
 // The stored vector, decoded once — the "this bytea is float32" fact has one
 // home instead of one per route.
 export const embeddingVec = (row) =>
   new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+
+// The entity ids one vector row scores for. Four callers collapse instances
+// into entities — /api/search, /api/search/similar, meaning-clusters and the
+// MCP's rank() — and the rule is theirs in common, so it lives here rather
+// than four times over.
+//
+// The empty fallback preserves what `entity_ids[1] ?? row.id` did before the
+// fan-out. Production cannot reach it (insertItem always writes an entity, and
+// deleteEntity deletes sole-home instances rather than emptying their arrays —
+// live count: zero), but test fixtures make entity-less items freely, and
+// narrowing the behaviour of rows this fix is not about is how a correctness
+// fix turns into a regression somewhere else.
+//
+// Know what that fallback is, though: an ITEM id standing in an entity-id
+// slot, and the two sequences OVERLAP (the crate route says the same thing in
+// server.js). A caller that looks the result up in `entities` can therefore
+// match an unrelated row. That is survivable only because the fallback is
+// unreachable outside fixtures — so if a real path ever empties an array, this
+// is the line to revisit first, not the four loops downstream of it.
+export const entityIdsFor = (row) => (row.entity_ids?.length ? row.entity_ids : [row.id]);
+
+// Score every vector row against the probes and collapse to one score per
+// ENTITY — its best instance's, because a card can hold several images and the
+// strongest is what the card is about. Returns entityId -> score.
+//
+// One probe is a meaning query; several are the instances of a find-similar
+// anchor. /api/search and /api/search/similar ran character-for-character the
+// same loop around `embeddingVec` and `entityIdsFor`, and the `entity_ids[1]`
+// bug this pair was fixed for lived in exactly that kind of copy — so the rule
+// lives here beside the two helpers it is made of.
+//
+// NOT used by the MCP's rank(): that one scores only the survivors of a facet
+// filter, and running this over the whole board to throw most of it away would
+// be the wrong trade on a 4,673-row corpus.
+export function bestByEntity(rows, probes) {
+  const best = new Map();
+  for (const row of rows) {
+    const v = embeddingVec(row);
+    let s = -Infinity;
+    for (const p of probes) {
+      if (v.length !== p.length) continue; // stale dims mid-model-change
+      let d = 0;
+      for (let i = 0; i < v.length; i++) d += v[i] * p[i];
+      if (d > s) s = d;
+    }
+    if (s === -Infinity) continue;
+    for (const eid of entityIdsFor(row)) {
+      if (!best.has(eid) || best.get(eid) < s) best.set(eid, s);
+    }
+  }
+  return best;
+}
 
 // Backfill progress for the admin panel: how many tagged items exist, how
 // many already carry a current-model vector, and how many were skipped after
