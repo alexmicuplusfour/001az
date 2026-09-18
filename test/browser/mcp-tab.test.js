@@ -1,4 +1,4 @@
-// The Agents tab in a real browser (planning/mcp-stage-1.md §6).
+// The MCP tab in a real browser (planning/mcp-stage-1.md §6).
 //
 // This file exists because of a bug the node suite could not see. The pane
 // re-renders from whatever a write ANSWERS, and PATCH/rotate used to answer the
@@ -21,7 +21,7 @@ import { setPassword, createBoard, setSetting } from "../../server/db.js";
 import { toolSpecs } from "../../server/mcp-tools.js";
 import { hashPassword } from "../../server/password.js";
 
-let app, admin, scopeBoard;
+let app, admin;
 
 before(async () => {
   app = await openApp();
@@ -29,7 +29,8 @@ before(async () => {
   // A passwordless account is a half-created one — /api/me says needs_password
   // and the page bounces to /login.html before rendering.
   await setPassword(app.db, admin.id, await hashPassword("mcp-tab-pw"));
-  scopeBoard = await createBoard(app.db, "Scope A", [], "");
+  // Named, not held by id: the scope popover is addressed by board NAME now.
+  await createBoard(app.db, "Scope A", [], "");
   await createBoard(app.db, "Scope B", [], "");
 });
 after(() => app?.close());
@@ -44,15 +45,26 @@ async function openTab() {
   return page;
 }
 
+// Both switches are switch.js's `.switch` button — a real <button role=switch>
+// rather than a checkbox, so state is aria-checked and not `.checked`.
+const switchOn = async (page, sel) => (await page.getAttribute(`${sel} .switch`, "aria-checked")) === "true";
+const flip = (page, sel) => page.click(`${sel} .switch`);
+
 const turnOn = async (page) => {
-  if (!(await page.isChecked("#mcp-on"))) await page.click("#mcp-on");
+  if (!(await switchOn(page, "#mcp-on"))) await flip(page, "#mcp-on");
   await page.waitForSelector("#mcp-cmd");
 };
 
+// The tool list's machine names — what a caller actually types.
+const toolNames = (page) => page.$$eval(".mcp-t code", (els) => els.map((e) => e.textContent));
+
 test("off by default, and switching on paints a complete, copyable command", async () => {
   const page = await openTab();
-  assert.equal(await page.textContent("#mcp-content h2"), "Agents");
-  assert.equal(await page.isChecked("#mcp-on"), false);
+  // The tab and its heading name the protocol. "Agents" said nothing about what
+  // this speaks, which is the one thing an operator needs in order to use it.
+  assert.equal(await page.textContent('[data-tab="mcp"]'), "MCP");
+  assert.equal(await page.textContent("#mcp-content h2"), "MCP");
+  assert.equal(await switchOn(page, "#mcp-on"), false);
   // The body stays hidden while it is off — there is no command to give out.
   assert.equal(await page.isHidden("#mcp-body"), true);
 
@@ -66,8 +78,24 @@ test("off by default, and switching on paints a complete, copyable command", asy
 
   // The tool list — served, not hardcoded — rendered its rows. Compared against
   // the registry itself, so adding a tool cannot make this test wrong.
-  const names = await page.$$eval(".mcp-tools code", (els) => els.map((e) => e.textContent));
-  assert.deepEqual(names.sort(), toolSpecs().map((t) => t.name).sort());
+  assert.deepEqual((await toolNames(page)).sort(), toolSpecs().map((t) => t.name).sort());
+  // Each row carries the human title the server has always sent and this pane
+  // used to throw away. It does NOT carry the tool's `description`, which is
+  // written for the model and cost half the page to say nothing an operator
+  // acts on — the regression this asserts against is putting it back.
+  const titles = await page.$$eval(".mcp-t .t", (els) => els.map((e) => e.textContent));
+  assert.deepEqual(titles.sort(), toolSpecs().map((t) => t.title).sort());
+  assert.doesNotMatch(
+    await page.textContent(".mcp-tools"),
+    /Call this before|Prefer ONE composed call/,
+    "the model-facing description stays out of the operator's pane"
+  );
+  // Read and write are groups with counts, so the saving switch has a
+  // structural readout rather than one row leaving a list of five.
+  assert.deepEqual(
+    await page.$$eval(".mcp-group", (els) => els.map((e) => e.textContent.trim())),
+    [`read${toolSpecs(false).length}`, "write1"]
+  );
 
   // The saving switch is ON with nothing stored — absence is not a choice —
   // and the table below it is its readout: untick it and the write tool leaves
@@ -79,39 +107,46 @@ test("off by default, and switching on paints a complete, copyable command", asy
   // shape of the bug this whole file exists for. Ticking it back afterwards
   // proved nothing and cost another PATCH, and the second one was enough to
   // start failing welcome.test.js in the parallel run again.
-  assert.equal(await page.isChecked("#mcp-write"), true);
-  await page.uncheck("#mcp-write");
+  assert.equal(await switchOn(page, "#mcp-write"), true);
+  await flip(page, "#mcp-write");
   await page.waitForFunction(
-    (n) => document.querySelectorAll(".mcp-tools code").length === n,
+    (n) => document.querySelectorAll(".mcp-t code").length === n,
     toolSpecs(false).length
   );
-  const withoutWrite = await page.$$eval(".mcp-tools code", (els) => els.map((e) => e.textContent));
-  assert.deepEqual(withoutWrite.sort(), toolSpecs(false).map((t) => t.name).sort());
+  assert.deepEqual((await toolNames(page)).sort(), toolSpecs(false).map((t) => t.name).sort());
+  // The whole `write` group went with it, not just its row.
+  assert.deepEqual(await page.$$eval(".mcp-group", (els) => els.length), 1);
 
   // Switching back off hides the body again. waitForSelector waits for VISIBLE
   // by default and the claim is that it went away, so ask the element itself.
-  await page.click("#mcp-on");
+  await flip(page, "#mcp-on");
   await page.waitForFunction(() => document.getElementById("mcp-body")?.hidden === true);
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
 });
 
-test("the token: masked, revealed, rotated, cleared", async () => {
+// The command IS the token surface now — there is no second place it appears,
+// which is what makes masking it mean anything. It used to be dotted out in a
+// Token section while printed in full in the command directly above.
+test("the token: masked in the command, revealed, rotated, cleared", async () => {
   const page = await openTab();
   await turnOn(page);
 
-  assert.match(await page.textContent("#mcp-tok"), /·{6,}/, "masked until asked for");
+  const bearer = async () => (await page.textContent("#mcp-cmd")).match(/Bearer (\S+)/)?.[1];
+  assert.match(await bearer(), /·{6,}/, "masked until asked for");
   await page.click("#mcp-show");
-  const shown = await page.textContent("#mcp-tok");
-  assert.doesNotMatch(shown, /·/, "show reveals the whole token");
+  const shown = await bearer();
+  assert.doesNotMatch(shown, /·/, "show reveals the whole token, in place");
 
   await page.click("#mcp-rotate");
-  await page.waitForFunction((old) => document.getElementById("mcp-tok")?.textContent !== old, shown);
-  const rotated = await page.textContent("#mcp-tok");
+  await page.waitForFunction(
+    (old) => !document.getElementById("mcp-cmd")?.textContent.includes(old),
+    shown
+  );
+  const rotated = await bearer();
   assert.notEqual(rotated, shown);
   // A rotate that left the token hidden would hand back something unpastable.
   assert.doesNotMatch(rotated, /·/);
-  assert.ok((await page.textContent("#mcp-cmd")).includes(rotated), "the command carries the new token");
 
   await page.click("#mcp-clear");
   await page.waitForSelector("#mcp-rotate:has-text('create')");
@@ -270,29 +305,35 @@ test("board scope persists, and last used renders both states", async () => {
 
   assert.match(await page.textContent("#mcp-body"), /never used yet/);
 
-  const labels = await page.$$eval("label:has([data-board])", (els) => els.map((e) => e.textContent.trim()));
+  // Scope is the Members tab's chip + access popover, so the closed state is a
+  // SENTENCE, not a row of boxes: the two ways of saying everything (all ticked,
+  // none ticked) have one readout, which they could not have as checkboxes.
+  assert.equal(await page.textContent("#mcp-scope"), "All boards");
+
+  await page.click("#mcp-scope");
+  await page.waitForSelector(".dd-check");
+  const labels = await page.$$eval(".dd-check .cb-text", (els) => els.map((e) => e.textContent.trim()));
   assert.ok(labels.includes("Scope A") && labels.includes("Scope B"));
   // An empty scope reads as everything ticked, because that is what empty MEANS.
-  // Scoped to [data-board], not to the container: the saving switch shares
-  // that container now, and counting it here would make "every box ticked"
-  // mean something else.
-  assert.equal(await page.$$eval("[data-board]:not(:checked)", (e) => e.length), 0);
+  assert.equal(await page.$$eval(".dd-check .cb-input:not(:checked)", (e) => e.length), 0);
 
-  await page.uncheck(`[data-board="${scopeBoard}"]`);
-  await page.waitForFunction((id) => document.querySelector(`[data-board="${id}"]`)?.checked === false, scopeBoard);
+  // Untick one and Save. The popover batches, so this is ONE PATCH and one
+  // repaint — as checkboxes it was a PATCH and a full pane rebuild per tick.
+  // The row IS the <label>; .cb-box is pointer-events:none by design.
+  await page.click(`.dd-check:has-text("Scope A")`);
+  await page.click(".dd-footer .dd-action");
+  await page.waitForFunction(() => document.getElementById("mcp-scope")?.textContent === "1 of 2 boards");
 
   // Persistence and the "last used" copy in ONE reload rather than two: both
   // are facts about what a freshly loaded pane says.
   await setSetting(app.db, "mcp_last_used", String(Date.now() - 3 * 3600 * 1000));
   const again = await openTab();
-  await again.waitForSelector("label:has([data-board])");
-  assert.equal(await again.isChecked(`[data-board="${scopeBoard}"]`), false, "the untick survived");
+  await again.waitForSelector("#mcp-scope");
+  assert.equal(await again.textContent("#mcp-scope"), "1 of 2 boards", "the untick survived");
   // relTime's vocabulary — the admin shell's one phrasing for "when", not a
   // sixth private copy of it (utils.js:458 says so in as many words).
   assert.match(await again.textContent("#mcp-body"), /last used 3h ago/);
 
-  await again.check(`[data-board="${scopeBoard}"]`);
-  await again.waitForFunction((id) => document.querySelector(`[data-board="${id}"]`)?.checked === true, scopeBoard);
   assert.deepEqual(page.errors, []);
   assert.deepEqual(again.errors, []);
 });

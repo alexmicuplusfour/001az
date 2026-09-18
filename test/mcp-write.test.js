@@ -181,7 +181,7 @@ test("writes off: a stale client's call is a readable refusal, not METHOD_NOT_FO
     // This one it can read out to the person who can fix it.
     assert.equal(r.error, undefined, "not a JSON-RPC error");
     assert.equal(r.result.isError, true);
-    assert.match(toolText(r.result), /switched off .* Agents in the admin settings/);
+    assert.match(toolText(r.result), /switched off .* MCP in the admin settings/);
     assert.equal(await crateNamed("Denied"), undefined);
   } finally {
     await setSetting(db, "mcp_write", null);

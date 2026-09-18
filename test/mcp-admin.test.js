@@ -1,4 +1,4 @@
-// The Agents tab's routes: what the pane reads, what its controls write, and
+// The MCP tab's routes: what the pane reads, what its controls write, and
 // the one pin that keeps the pane honest — the tools it advertises must be the
 // tools the protocol actually serves.
 import { test, before, after } from "node:test";

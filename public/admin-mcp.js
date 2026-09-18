@@ -1,5 +1,6 @@
-// Agents tab: the MCP endpoint's switch, its token, and the command that
-// connects a client to it (planning/mcp-stage-1.md §6).
+// MCP tab: the endpoint's switch, the one command that connects a client to it,
+// which boards that client may reach, and what it can do there
+// (planning/mcp-stage-1.md §6).
 //
 // The copy button is why this is a tab rather than three environment
 // variables. Everything else here could have lived in a .env — a working
@@ -7,12 +8,22 @@
 // already in it, could not.
 //
 // The tool list is SERVED, not written here: GET /api/admin/mcp returns the
-// same specs tools/list hands a client, so a fourth tool appears in this pane
-// with no edit to this file. Same stance admin-capabilities.js takes — the
-// module renders the vocabulary it is handed and invents none.
+// same specs tools/list hands a client, down to which of them write, so a
+// sixth tool appears in this pane with no edit to this file. Same stance
+// admin-capabilities.js takes — the module renders the vocabulary it is
+// handed and invents none.
+//
+// NOTHING VISUAL HERE IS THIS TAB'S OWN. The switches are switch.js, the board
+// scope is the .boards-chip + access popover the Members tab opens, the badges
+// are .p-note, and the page's section rhythm is `.section > h2`. This module
+// used to inject a <style> at runtime holding its own copies of most of that;
+// admin CSS lives in admin.html, and the handful of rules that really are this
+// tab's are stated there beside every other tab's.
 import { api, copy } from "./api.js";
-import { relTime } from "./utils.js";
+import { relTime, ICONS } from "./utils.js";
 import { toast } from "./toast.js";
+import { switchRow } from "./switch.js";
+import { openDropdown, ddCheckRow, ddAction, ddEmpty } from "./dropdown.js";
 
 const content = document.getElementById("mcp-content");
 let shown = false; // the token is masked until asked for, per render
@@ -27,98 +38,204 @@ async function load() {
   paint(await api("GET", "/api/admin/mcp"));
 }
 
+const mask = (t) => (t.length > 10 ? `${t.slice(0, 6)}${"·".repeat(12)}${t.slice(-4)}` : "·".repeat(12));
+
 // The line an operator pastes. Quoted for a POSIX shell; the token is the only
 // part that varies, and a cleared token drops the header entirely because that
 // is exactly the local-no-auth case.
-const command = (d) =>
+//
+// `masked` exists because this is now the ONLY place the token is shown. It
+// used to be printed here in full while a separate Token section below it
+// rendered the same string behind dots — a mask guarding a door with no wall
+// beside it. Hiding it here is what makes hiding it mean anything; copy still
+// copies the real thing, since a masked command is not a command.
+const command = (d, masked = false) =>
   [
     "claude mcp add --transport http boards \\",
     `  ${d.endpoint}` + (d.token ? " \\" : ""),
-    ...(d.token ? [`  --header "Authorization: Bearer ${d.token}"`] : []),
+    ...(d.token ? [`  --header "Authorization: Bearer ${masked ? mask(d.token) : d.token}"`] : []),
   ].join("\n");
 
-const mask = (t) => (t.length > 10 ? `${t.slice(0, 6)}${"·".repeat(12)}${t.slice(-4)}` : "·".repeat(12));
+// How many boards the scope names, as the chip says it. Empty MEANS all, so
+// there is no "0" state to render: the two ways of saying everything (every
+// box ticked, no box ticked) have one readout, which is the whole reason this
+// is a chip and not twelve checkboxes that looked different while agreeing.
+const scopeLabel = (d) => {
+  const on = d.allBoards.filter((b) => b.on).length;
+  if (!d.allBoards.length) return "No boards yet";
+  return on === d.allBoards.length ? "All boards" : `${on} of ${d.allBoards.length} boards`;
+};
 
 function paint(d) {
-  content.innerHTML = `
-    <h2>Agents</h2>
-    <p class="sub">Let an AI client — Claude, ChatGPT, Cursor, anything that speaks
-    <b>MCP</b> — search this instance's boards. It can read boards and their taxonomies
-    and collect what it finds into crates; it cannot change a board, its facets or
-    anyone's tags.</p>
+  const secs = document.createDocumentFragment();
 
-    <div class="mcp-checks mcp-switch">
-      <label><input type="checkbox" id="mcp-on" ${d.enabled ? "checked" : ""} />
-        Accept connections from AI clients</label>
+  // --- what this is, and whether it is on -----------------------------------
+  // The heading is the acronym; the sub is the one place it gets spelled out.
+  const head = section(`<h2>MCP</h2>
+    <p class="sub">Let an AI client — Claude, ChatGPT, Cursor, anything that speaks the
+    Model Context Protocol — search this instance's boards. It cannot change a board,
+    its facets or anyone's tags.</p>`);
+  const onRow = switchRow("Enable MCP", "", d.enabled, (on) => save({ enabled: on }));
+  onRow.id = "mcp-on";
+  head.appendChild(onRow);
+  secs.appendChild(head);
+
+  const body = document.createElement("div");
+  body.id = "mcp-body";
+  if (!d.enabled) body.hidden = true;
+  secs.appendChild(body);
+
+  // --- the connection: one command, carrying the token ----------------------
+  // The command needs no caption: it is a line of shell with a copy button.
+  const conn = section(`<h2>Connection</h2>
+    <pre class="mcp-cmd" id="mcp-cmd">${esc(command(d, !shown))}</pre>
+    <div class="mcp-cmd-actions">
+      <button id="mcp-copy" class="sm">copy</button>
+      <span class="gap"></span>
+      ${d.token ? `<button id="mcp-show" class="sm ghost">${shown ? "hide" : "show"} token</button>` : ""}
+      <button id="mcp-rotate" class="sm ghost" title="${d.token ? "Disconnects every client until each is given the new token" : "Mint a token"}">${d.token ? "rotate" : "create token"}</button>
+      ${d.token ? `<button id="mcp-clear" class="sm danger" title="Leaves only loopback clients able to connect">clear</button>` : ""}
     </div>
+    <p class="sub">Acts as ${d.actingAs ? esc(d.actingAs) : "the admin account"} · ${
+      d.lastUsed ? `last used ${esc(relTime(d.lastUsed))}` : "never used yet"
+    }${
+      d.token
+        ? ". The token is stored as written — a database backup contains it."
+        : ". With no token only a <b>loopback</b> client can connect, which under Docker is nothing outside the container."
+    }</p>`);
+  body.appendChild(conn);
 
-    <div id="mcp-body" ${d.enabled ? "" : "hidden"}>
-      <h3>Connect a client</h3>
-      <pre class="mcp-cmd" id="mcp-cmd">${esc(command(d))}</pre>
-      <div class="mcp-actions"><button id="mcp-copy" class="ghost">copy</button></div>
+  // --- access: the two questions an operator actually has -------------------
+  // One section, because "which boards" and "may it write" are one decision
+  // with two halves. They were two headings and four lines of prose.
+  const access = section(`<h2>Access</h2>`);
+  const rows = document.createElement("div");
+  rows.className = "mcp-access";
+  const boardsRow = document.createElement("div");
+  boardsRow.className = "mcp-row";
+  boardsRow.innerHTML = `<span class="k">Boards</span>`;
+  const scopeCell = document.createElement("span");
+  boardsRow.appendChild(scopeCell);
+  renderScopeChip(d, scopeCell);
 
-      <h3>Token</h3>
-      <div class="mcp-token">
-        <code id="mcp-tok">${d.token ? esc(shown ? d.token : mask(d.token)) : "<span class='muted'>none — loopback clients only</span>"}</code>
-        ${d.token ? `<button id="mcp-show" class="ghost">${shown ? "hide" : "show"}</button>` : ""}
-        <button id="mcp-rotate" class="ghost">${d.token ? "rotate" : "create"}</button>
-        ${d.token ? `<button id="mcp-clear" class="ghost">clear</button>` : ""}
-      </div>
-      <p class="sub">${
-        d.token
-          ? "Every client needs this. Rotating disconnects all of them until each is given the new one. It is stored as written, so anyone who can read the database or a backup can read it too."
-          : "With no token, only a client reaching the server over <b>loopback</b> can connect — which under Docker means nothing outside the container, since a published port arrives from the bridge network. Create one unless you are running the server directly on this machine."
-      }</p>
+  const savingRow = document.createElement("div");
+  savingRow.className = "mcp-row";
+  savingRow.innerHTML = `<span class="k">Saving</span>`;
+  const writeRow = switchRow("Let agents save cards to crates", "", d.write, (on) => save({ write: on }));
+  writeRow.id = "mcp-write";
+  savingRow.appendChild(writeRow);
 
-      <p class="sub">Connections act as ${d.actingAs ? esc(d.actingAs) : "the admin account"}${
-        d.lastUsed ? ` · last used ${esc(relTime(d.lastUsed))}` : " · never used yet"
-      }.</p>
+  rows.append(boardsRow, savingRow);
+  access.appendChild(rows);
+  access.insertAdjacentHTML(
+    "beforeend",
+    `<p class="sub mcp-after-list">No board selected means all of them, including ones added later.
+    Crates appear in the gallery under ${d.actingAs ? esc(d.actingAs) : "the admin"}'s account; an agent
+    can add to one, never take cards out.</p>`
+  );
+  body.appendChild(access);
 
-      <h3>Boards an agent can reach</h3>
-      <div class="mcp-checks">${d.allBoards
-        .map((b) => `<label><input type="checkbox" data-board="${esc(b.id)}" ${b.on ? "checked" : ""} /> ${esc(b.name)}</label>`)
-        .join("")}</div>
-      <p class="sub">Unticking every box means <b>all of them</b>, not none — an empty
-      selection is the absence of a choice, not a rule that hides everything. A board
-      added later is reachable by default.</p>
+  // --- what it can do -------------------------------------------------------
+  const tools = section(`<h2>Tools</h2>
+    <div class="mcp-tools">${toolGroups(d.tools)}</div>
+    <p class="sub mcp-after-list"><b>grid</b> — results also render as a pickable grid in clients
+    that support MCP Apps. Claude Code shows text and preview images instead.</p>
 
-      <h3>Saving</h3>
-      <div class="mcp-checks"><label><input type="checkbox" id="mcp-write" ${d.write ? "checked" : ""} />
-        Let agents save cards to crates</label></div>
-      <p class="sub">Saved sets appear in the <b>crates</b> menu in the gallery, under
-      ${d.actingAs ? esc(d.actingAs) : "the admin"}'s account — and that menu only appears
-      on a board once it has one. An agent can add to a crate and create new ones; it
-      cannot take cards out, rename or delete.</p>
+    <details class="mcp-adv">
+      <summary>Advanced</summary>
+      <label for="mcp-origins">Allowed browser origins</label>
+      <input id="mcp-origins" value="${esc(d.origins)}" placeholder="same-origin only" />
+      <p class="sub">Comma-separated. Real MCP clients send no origin and are unaffected —
+      this only widens which <i>web pages</i> may call the endpoint.</p>
+    </details>`);
+  body.appendChild(tools);
 
-      <h3>What a connected agent can do</h3>
-      <table class="mcp-tools">
-        <tbody>${d.tools
-          .map((t) => `<tr><td><code>${esc(t.name)}</code></td><td>${esc(t.summary)}</td></tr>`)
-          .join("")}</tbody>
-      </table>
-      <p class="sub">Searches also ship an <b>interactive grid</b> — pick cards and save them
-      without leaving the conversation. Claude on the web and desktop, VS Code and Goose render
-      it; <b>Claude Code does not</b>, and shows the results as text and preview images instead.
-      Nothing is lost either way — the grid is an extra, not the answer.</p>
+  content.replaceChildren(secs);
+  wire(d);
+}
 
-      <details class="mcp-adv">
-        <summary>Advanced</summary>
-        <label for="mcp-origins">Allowed browser origins</label>
-        <input id="mcp-origins" value="${esc(d.origins)}" placeholder="same-origin only" />
-        <p class="sub">Comma-separated. Real MCP clients send no origin and are unaffected —
-        this only widens which <i>web pages</i> may call the endpoint, and the default (empty)
-        is the safe one.</p>
-      </details>
-    </div>`;
+const section = (html) => {
+  const el = document.createElement("div");
+  el.className = "section";
+  el.innerHTML = html;
+  return el;
+};
 
-  ensureStyles();
+// The tool list: one line per tool, under a Read/Write header carrying a count.
+//
+// A tool's `summary` is NOT rendered, deliberately. It is the first line of the
+// tool's `description`, which is written FOR THE MODEL — it teaches an LLM to
+// compose a query ("Call this before search_board so your facet filters use the
+// board's exact keys and values…"). Printing that in the operator's pane cost
+// half the page to say nothing they act on. What an operator reads is the name
+// they will see in their client's logs, and the title saying what it is for.
+//
+// Read and write are GROUPS rather than per-row badges so the saving switch has
+// a structural readout: turning it off takes a whole labelled group away, which
+// is visible at a glance in a way one row leaving a list of five is not.
+const toolGroups = (tools) =>
+  [["read", tools.filter((t) => !t.write)], ["write", tools.filter((t) => t.write)]]
+    .filter(([, ts]) => ts.length)
+    .map(([kind, ts]) => `
+      <div class="mcp-group"><span>${kind}</span><span class="n">${ts.length}</span></div>
+      ${ts.map((t) => `
+        <div class="mcp-t">
+          <code>${esc(t.name)}</code>
+          <span class="t">${esc(t.title || "")}</span>
+          ${t.ui ? `<span class="p-note">grid</span>` : ""}
+        </div>`).join("")}`)
+    .join("");
 
-  document.getElementById("mcp-on").onchange = (e) => save({ enabled: e.target.checked });
-  // No confirm(). Rotate and clear ask because they break working clients
-  // irreversibly; this one changes what the NEXT call may do, and is as
-  // reversible as the click that made it.
-  const write = document.getElementById("mcp-write");
-  if (write) write.onchange = () => save({ write: write.checked });
+function renderScopeChip(d, cell) {
+  const chip = document.createElement("button");
+  chip.className = "boards-chip";
+  chip.id = "mcp-scope";
+  chip.innerHTML = ICONS.grid + `<span>${esc(scopeLabel(d))}</span>`;
+  if (!d.allBoards.length) {
+    chip.classList.add("empty");
+    chip.disabled = true;
+  } else {
+    chip.setAttribute("aria-label", `Boards an agent can reach — ${scopeLabel(d)}`);
+    chip.addEventListener("click", () => openScope(d, chip));
+  }
+  cell.replaceChildren(chip);
+}
+
+// The scope picker: the Members tab's access popover with one column instead of
+// two. No fetch — unlike that one, the full board list already rode in with the
+// pane — so the rows build synchronously and Save is live from the first frame.
+//
+// Batching behind Save is not only for consistency: a tick used to PATCH and
+// repaint the entire pane, so scoping six boards rebuilt this tab six times.
+function openScope(d, chip) {
+  let rows = [];
+  const ctx = openDropdown(chip, {
+    variant: "light",
+    align: "start",
+    minWidth: 230,
+    maxItems: 12,
+    build: (body) => {
+      if (!d.allBoards.length) return void body.appendChild(ddEmpty("No boards yet."));
+      rows = d.allBoards.map((b) => {
+        const row = ddCheckRow({ variant: "light", checked: b.on, label: b.name });
+        body.appendChild(row.el);
+        return { id: b.id, row };
+      });
+    },
+    footer: (foot, { close }) => {
+      foot.appendChild(ddAction({
+        label: "Save",
+        onClick: async () => {
+          close();
+          await save({ boards: rows.filter((r) => r.row.checked).map((r) => r.id) });
+        },
+      }));
+    },
+  });
+  if (!ctx) return; // second click on the same chip: toggled closed
+}
+
+function wire(d) {
   document.getElementById("mcp-copy")?.addEventListener("click", (e) => copy(command(d), e.target));
   document.getElementById("mcp-show")?.addEventListener("click", () => { shown = !shown; paint(d); });
   document.getElementById("mcp-rotate")?.addEventListener("click", async () => {
@@ -135,10 +252,6 @@ function paint(d) {
   });
   const origins = document.getElementById("mcp-origins");
   if (origins) origins.onchange = () => save({ origins: origins.value });
-  for (const box of document.querySelectorAll("[data-board]")) {
-    box.onchange = () =>
-      save({ boards: [...document.querySelectorAll("[data-board]")].filter((b) => b.checked).map((b) => b.dataset.board) });
-  }
 }
 
 async function save(patch) {
@@ -152,33 +265,3 @@ async function save(patch) {
 
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-function ensureStyles() {
-  if (document.getElementById("mcp-styles")) return;
-  const style = document.createElement("style");
-  style.id = "mcp-styles";
-  style.textContent = `
-    .mcp-switch { margin-top: 16px; }
-    /* the global input rule is flex:1 + min-width:140px — pin the box down */
-    #mcp-body h3 { font-size: 13px; margin: 22px 0 8px; }
-    .mcp-cmd { margin: 0; padding: 12px 14px; border: 1px solid #ececef; border-radius: 8px; background: #f7f7f9;
-      font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-    .mcp-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-    .mcp-token { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .mcp-token code { font-size: 12px; padding: 6px 10px; border: 1px solid #ececef; border-radius: 8px; background: #f7f7f9; }
-    .mcp-tools { font-size: 13px; }
-    .mcp-tools td { padding: 5px 14px 5px 0; vertical-align: top; }
-    .mcp-tools code { font-size: 12px; }
-    /* A wrapped row of checkbox labels. Named for its SHAPE, not its content:
-       the board scope list had it first and the saving switch adopted it, and
-       a class called .mcp-boards holding a non-board checkbox is how the next
-       person ends up writing a second copy of these three lines. */
-    .mcp-checks { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
-    .mcp-checks label { display: inline-flex; gap: 7px; align-items: center; cursor: pointer; }
-    .mcp-checks input[type=checkbox] { flex: none; width: auto; min-width: 0; padding: 0; cursor: pointer; }
-    .mcp-adv { margin-top: 22px; font-size: 13px; }
-    .mcp-adv summary { cursor: pointer; color: #6b6b72; }
-    .mcp-adv label { display: block; margin: 12px 0 6px; }
-    .mcp-adv input { max-width: 420px; }`;
-  document.head.appendChild(style);
-}

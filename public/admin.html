@@ -100,6 +100,51 @@
       .cap-config select { flex: 0 0 auto; } /* sized by its options, unlike the fixed numeric input */
       .cap-config .hint { color: #9aa0aa; }
 
+      /* agents tab — the MCP endpoint (admin-mcp.js). Almost everything that
+         pane draws is borrowed: .section > h2 for the rhythm, .switch-row for
+         both switches, .boards-chip + the access popover for board scope, and
+         .p-note for the badges. What is left here is the command block, the two
+         Access rows, and the one-line tool list. */
+      /* The pane's sections live inside #mcp-body so that switching the
+         endpoint off takes all of them away at once. That wrapper breaks the
+         `.section + .section` adjacency panel.css spaces sections with, so the
+         first one inside it sat flush against the switch — the body takes the
+         gap instead, and the sections inside stay adjacent to each other. */
+      .panel .section + #mcp-body { margin-top: 40px; }
+
+      .mcp-cmd { margin: 0; padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; background: #f7f7f9;
+        font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap; word-break: break-all; }
+      /* copy sits alone on the left. Rotate and clear break every connected
+         client and copy does not, so the gap between them is the point. */
+      .mcp-cmd-actions { display: flex; gap: 8px; align-items: center; margin: 10px 0 18px; }
+      .mcp-cmd-actions .gap { margin-left: auto; }
+      /* the two rows of Access: a fixed label column, then the control */
+      .mcp-access { display: flex; flex-direction: column; gap: 12px; }
+      .mcp-row { display: flex; align-items: center; gap: 16px; }
+      .mcp-row > .k { flex: 0 0 62px; color: #6b6b72; }
+      /* a tool is ONE LINE — the name a client will log, and what it is for.
+         Its description belongs to the model, not to this pane. */
+      .mcp-tools { display: flex; flex-direction: column; }
+      .mcp-group { display: flex; align-items: center; gap: 7px; margin: 16px 0 5px;
+        font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #9aa0aa; }
+      .mcp-group:first-child { margin-top: 0; }
+      .mcp-group .n { color: #b6bbc4; }
+      .mcp-t { display: flex; align-items: baseline; gap: 14px; padding: 4px 0; font-size: 13px; }
+      .mcp-t code { flex: 0 0 132px; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      /* the title column is fixed so a badge after it lands in one column too,
+         without being flung to the far edge of a wide pane by margin-left:auto */
+      .mcp-t .t { flex: 0 0 210px; color: #6b6b72; }
+      /* a .sub explaining the controls ABOVE it, not the heading above them —
+         .section .sub's 18px is a gap before content, wrong in that position */
+      .section .mcp-after-list { margin: 18px 0 0; }
+      .mcp-adv { margin-top: 26px; font-size: 13px; }
+      .mcp-adv summary { cursor: pointer; color: #6b6b72; }
+      .mcp-adv label { display: block; margin: 12px 0 6px; }
+      /* the global `input` rule is flex:1 + min-width:140px, which on a block
+         label stretches this to the panel — the one place that needs saying */
+      .mcp-adv input { max-width: 420px; }
+
       /* the headline KPI strip — grown on the usage tab, renamed neutral when
          storage became the second wearer (the .pill-row precedent); everything
          below a strip is stock .section + table + .pill-row */
@@ -174,9 +219,9 @@
           <button class="tab" data-tab="storage" data-icon="hardDrive">Storage</button>
           <button class="tab" data-tab="capabilities" data-icon="activity">Capabilities</button>
           <button class="tab" data-tab="plugins" data-icon="plugin">Plugins</button>
+          <button class="tab" data-tab="mcp" data-icon="srcSparkle">MCP</button>
           <button class="tab" data-tab="backups" data-icon="database">Backups</button>
           <button class="tab" data-tab="logs" data-icon="terminal">Logs</button>
-          <button class="tab" data-tab="mcp" data-icon="sparkle">Agents</button>
           <a class="tab-link" href="/" data-icon="arrowLeft">Gallery</a>
         </nav>
         <main class="panels">
@@ -200,11 +245,11 @@
           <section class="panel" id="panel-plugins" hidden>
             <div id="plugins-content"></div>
           </section>
-          <section class="panel" id="panel-backups" hidden>
-            <div id="backups-content" class="section"></div>
-          </section>
           <section class="panel" id="panel-mcp" hidden>
             <div id="mcp-content"></div>
+          </section>
+          <section class="panel" id="panel-backups" hidden>
+            <div id="backups-content" class="section"></div>
           </section>
           <section class="panel" id="panel-logs" hidden>
             <h2>Logs</h2>

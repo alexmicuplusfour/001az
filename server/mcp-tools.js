@@ -10,7 +10,7 @@
 // test/mcp-tools.js pins the two against each other, and a second
 // implementation here is the failure that test exists to catch.
 //
-// TOOLS is also the tab's copy: /api/admin/mcp serves this list, so the Agents
+// TOOLS is also the tab's copy: /api/admin/mcp serves this list, so the MCP
 // pane renders the vocabulary it is handed and a fourth tool appears there with
 // no client edit (the admin-capabilities.js stance).
 import fs from "node:fs";
@@ -939,7 +939,7 @@ async function rank(ctx, board, rows, args, notes) {
   return { rows: ordered, scores };
 }
 
-// What tools/list answers with, and what the Agents tab renders. `handler` and
+// What tools/list answers with, and what the MCP tab renders. `handler` and
 // `write` are ours, not the protocol's, so neither goes out.
 //
 // A switched-off write is ABSENT here rather than present-and-refusing: a

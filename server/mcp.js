@@ -1,6 +1,6 @@
 // The MCP endpoint (planning/mcp-stage-1.md) — how an AI client reaches this
 // instance's boards. Two halves in one module because they are one feature:
-// the JSON-RPC transport at /mcp, and the admin routes the Agents tab reads
+// the JSON-RPC transport at /mcp, and the admin routes the MCP tab reads
 // and writes. Neither knows anything about boards; mcp-tools.js owns that.
 //
 // Hand-rolled rather than @modelcontextprotocol/sdk. The spec's minimum for a
@@ -142,7 +142,7 @@ const ASSET_TIERS = {
 // and every tool still returns a meaningful text result — which the spec
 // REQUIRES and which is also the only thing most clients will ever show: Claude
 // Code does not advertise this extension at all (anthropics/claude-code#95149),
-// and it is the client the Agents tab's own copy-command sets up.
+// and it is the client the MCP tab's own copy-command sets up.
 const UI_EXT = "io.modelcontextprotocol/ui";
 const UI_MIME = "text/html;profile=mcp-app";
 const UI_URI = `ui://${SERVER_NAME}/board-grid`;
@@ -307,7 +307,7 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
     } else if (!isLoopback(req)) {
       res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
       res.status(401).json({
-        error: "no token is set, so only a client reaching the server over loopback may connect — create one on the Agents tab",
+        error: "no token is set, so only a client reaching the server over loopback may connect — create one on the MCP tab",
       });
       return null;
     }
@@ -427,7 +427,7 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
           // Echo what they asked for when we speak it; otherwise answer with
           // ours and let the client decide whether it can live with that.
           protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
-          // No listChanged. The list is NOT a constant — the Agents tab's
+          // No listChanged. The list is NOT a constant — the MCP tab's
           // saving switch adds and removes a tool at runtime — but the
           // capability declares whether we will EMIT notifications, and we
           // have no channel to emit on: GET is 405 by design and there is no
@@ -487,7 +487,7 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
         // one it can read out to the person who can fix it.
         if (tool.write && !cfg.write) {
           return rpcResult(id, {
-            content: [{ type: "text", text: "Saving is switched off for agents on this instance. The person running it can turn it back on under Agents in the admin settings." }],
+            content: [{ type: "text", text: "Saving is switched off for agents on this instance. The person running it can turn it back on under MCP in the admin settings." }],
             isError: true,
           });
         }
@@ -522,7 +522,7 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
     }
   }
 
-  // --- the Agents tab's routes ---------------------------------------------
+  // --- the MCP tab's routes ---------------------------------------------
 
   // Everything the pane draws, including the TOOL LIST — so it renders the
   // vocabulary it is handed and invents none, and a fourth tool appears there
@@ -551,12 +551,20 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
       allBoards: boardRows.map((b) => ({ ...b, on: !scoped.size || scoped.has(b.id) })),
       actingAs: user?.email || null,
       // Filtered by the saving switch, exactly as tools/list is — so the
-      // table below the switch IS its readout: untick it and the row goes.
-      tools: toolSpecs(cfg.write).map(({ name, title, description }) => ({
+      // list below the switch IS its readout: turn it off and the row goes.
+      //
+      // `write` and `ui` are DERIVED from the spec a client is handed, never
+      // restated: `readOnlyHint` is already how a caller learns a tool writes,
+      // and the ui `_meta` is already what makes one ship a grid. A pane that
+      // kept its own copy of either could disagree with tools/list, and the
+      // whole point of serving this list is that it cannot.
+      tools: toolSpecs(cfg.write, UI_URI).map(({ name, title, description, annotations, _meta }) => ({
         name,
         title,
         // The pane wants a line, not the query-writing essay the model needs.
         summary: description.split("\n")[0],
+        write: !annotations.readOnlyHint,
+        ui: !!_meta?.ui,
       })),
     };
   }

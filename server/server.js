@@ -3713,7 +3713,7 @@ const backups = mountBackups(app, {
   runtime,
   adminEmail: ADMIN_EMAIL,
 });
-// The MCP endpoint + the Agents tab's routes (planning/mcp-stage-1.md). Mounted
+// The MCP endpoint + the MCP tab's routes (planning/mcp-stage-1.md). Mounted
 // like its siblings and after attachUser: /mcp resolves its own user from the
 // stored token and never reads the cookie, while /api/admin/mcp is an ordinary
 // requireAdmin route on the session.

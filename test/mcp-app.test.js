@@ -2,7 +2,7 @@
 // of a search result (planning/mcp-stage-4.md).
 //
 // The load-bearing test here is the LAST one. Most clients will never render
-// this — Claude Code, which the Agents tab's own copy-command sets up, does not
+// this — Claude Code, which the MCP tab's own copy-command sets up, does not
 // advertise the extension at all — so the text result is the contract, and it
 // has to be byte-identical whether or not the UI half exists.
 import { test, before, after } from "node:test";
@@ -225,7 +225,7 @@ test("the tool points at the template, and only the one with a view does", async
 
 test("the text result is untouched by any of this", async () => {
   // What every client without MCP Apps support shows — which today is most of
-  // them, including the one the Agents tab tells you to set up. If adding a
+  // them, including the one the MCP tab tells you to set up. If adding a
   // view changed the prose, stage 4 would have cost stages 1-3 something.
   const { result } = await search();
   const body = toolText(result);
