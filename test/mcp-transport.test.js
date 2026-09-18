@@ -206,4 +206,11 @@ test("no token means local clients only", async () => {
   const remote = await rpc("tools/list", null, { xff: "203.0.113.7" });
   assert.equal(remote.status, 401);
   assert.match(remote.json.error, /token/);
+
+  // And the same caller CLAIMING to be local. `trust proxy` makes req.ip
+  // whatever the last X-Forwarded-For entry says, so this was answered 200 —
+  // every tool, no token, to anyone who could reach the published port. The
+  // rule reads the socket now, and a declared hop is never this machine.
+  assert.equal((await rpc("tools/list", null, { xff: "127.0.0.1" })).status, 401);
+  assert.equal((await rpc("tools/list", null, { xff: "203.0.113.7, 127.0.0.1" })).status, 401);
 });

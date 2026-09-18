@@ -171,8 +171,17 @@ const uiMeta = (baseUrl) => ({
 
 // --- the gates --------------------------------------------------------------
 
-// Express gives ::ffff:127.0.0.1 for a v4 client on a dual-stack socket, and
-// `trust proxy` is already 1, so this is the real client behind Caddy.
+// THE SOCKET, NOT `req.ip`. `trust proxy` is 1, so req.ip is simply the last
+// X-Forwarded-For entry — whatever the caller wrote. A client sending
+// `X-Forwarded-For: 127.0.0.1` straight at the published port was answered 200
+// with no token at all. That is the same mistake originAllowed refuses three
+// lines down in those words: Host is whatever the caller wrote, and so is this.
+//
+// The header check is the other half, and it is not belt-and-braces. The socket
+// ALONE is wrong in the opposite direction: a reverse proxy on the same host
+// makes every request in the world arrive from 127.0.0.1. So loopback here
+// means both — the peer really is this machine, and nobody declared a hop.
+// Express gives ::ffff:127.0.0.1 for a v4 client on a dual-stack socket.
 //
 // UNDER DOCKER THIS IS ALMOST NEVER TRUE, and deliberately so. A published
 // port (8001:3001) is NATed, so a request from the operator's own terminal
@@ -183,7 +192,11 @@ const uiMeta = (baseUrl) => ({
 // and nothing else, the tab says so in those words, and switching the feature
 // on mints a token precisely so the normal install never meets this rule.
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-const isLoopback = (req) => LOOPBACK.has(req.ip) || req.ip?.startsWith("127.");
+const isLoopback = (req) => {
+  if (req.get("x-forwarded-for")) return false; // a declared hop is not this machine
+  const peer = req.socket?.remoteAddress;
+  return LOOPBACK.has(peer) || !!peer?.startsWith("127.");
+};
 
 // DNS-rebinding defence, and the spec MANDATES it. It is also what makes the
 // cleared-token loopback path safe: a page in the operator's browser can POST
@@ -225,7 +238,16 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
 
   // Abuse throttling, not a security boundary — the same stance
   // ratelimit.js's header states, and the same window /api/search uses.
+  //
+  // TWO buckets, because one was two features spending the same budget. An MCP
+  // App's grid is one <img> per card, so a 30-card result fires 30 GETs at the
+  // asset route; sharing this window meant the SECOND render of a minute took
+  // the agent's next tools/call down with it — the model's call refused because
+  // the person's browser loaded pictures. Measured: two renders, and request 61
+  // is a 429. Images are cheap and arrive in bursts, JSON-RPC is neither, so
+  // they get windows sized for what they are.
   const limiter = rateLimit({ windowMs: 60_000, max: 60 });
+  const assetLimiter = rateLimit({ windowMs: 60_000, max: 600 }); // twenty full grids
 
   // Who an MCP call acts as. One instance-wide token, so it acts as the admin
   // and canAccessBoard / board_members ride unchanged. Per-connection identity
@@ -339,7 +361,7 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
   // exactly which file it rendered; having this route re-resolve an entity's
   // face would be a second implementation of that choice, free to disagree
   // with the first on any item with several instances.
-  app.get("/mcp/:kind(asset|thumb)/:name/:exp/:sig", limiter, wrap(async (req, res) => {
+  app.get("/mcp/:kind(asset|thumb)/:name/:exp/:sig", assetLimiter, wrap(async (req, res) => {
     // The two rows this route needs, in one query. It used to call readConfig
     // — six selects — to read one boolean, and then a seventh for the secret.
     // This is the arc's hottest path by a wide margin: the MCP App's grid

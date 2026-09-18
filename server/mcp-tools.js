@@ -172,14 +172,29 @@ async function resolveBoard({ db, user }, raw) {
 
 const facetList = (board) => (Array.isArray(board.facets) ? board.facets : []);
 
-// "facet/value" counts for one board, live. One group-by over the tag arrays —
-// measured at 15ms on a 4,673-item board, which is why describe_board can
-// afford to answer with real numbers instead of the declared vocabulary alone.
+// "facet/value" counts for one board, live — measured at 23ms on a 4,673-item
+// board, which is why describe_board can afford real numbers instead of the
+// declared vocabulary alone.
+//
+// COUNTED IN CARDS, which is the only grain anything else here speaks. `items`
+// is one row per IMAGE; a card is an entity, and its tags are the UNION of its
+// instances' (listItems). So a card with two photos tagged `sports` used to
+// count twice, and describe_board answered 18 where search_board matched 10 and
+// the gallery's own filter drawer said 10 — the same tool that advertises
+// itself as the cheap way to answer counting questions. COUNT(DISTINCT eid) is
+// exactly the set matchesCondition then matches: one selection, one number,
+// whichever door.
+//
+// The two set-returning functions MUST stay in the FROM clause. Written into
+// the SELECT list they run in lockstep (PG10+), not as a cross product, and the
+// second tag of a one-entity row pairs with a NULL eid — which answers 0 for
+// every facet that happens to be tagged second, silently.
 async function tagCounts(db, boardId) {
   const { rows } = await db.query(
-    `SELECT tag, COUNT(*)::int AS n FROM (
-       SELECT jsonb_array_elements_text(tags) AS tag FROM items WHERE board_id = $1
-     ) t GROUP BY 1`,
+    `SELECT tag, COUNT(DISTINCT eid)::int AS n
+       FROM items i, unnest(i.entity_ids) AS eid, jsonb_array_elements_text(i.tags) AS tag
+      WHERE i.board_id = $1
+      GROUP BY 1`,
     [boardId]
   );
   return new Map(rows.map((r) => [r.tag, r.n]));

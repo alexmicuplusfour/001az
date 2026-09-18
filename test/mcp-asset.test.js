@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { startServer, callTool, toolText } from "./helpers.js";
+import { startServer, callTool, toolText, mcp } from "./helpers.js";
 import { createBoard, createEntity, insertItem, setSetting, getSetting } from "../server/db.js";
 
 let srv, db, base, boardId, entityId, fileName;
@@ -142,6 +142,20 @@ test("switching the feature off kills outstanding links", async () => {
   await setSetting(db, "mcp_enabled", null);
   assert.equal((await fetchLink(url)).status, 404, "404 like /mcp itself — absent, not broken");
   await setSetting(db, "mcp_enabled", "1");
+});
+
+test("a grid's images do not spend the agent's request budget", async () => {
+  // An MCP App renders one <img> per card, so two 30-card results are 60 GETs
+  // inside one window. These 403 on the signature, which is beside the point —
+  // the limiter runs before the handler either way, and the budget is what is
+  // being measured. Sharing one bucket with /mcp meant the 61st request was a
+  // 429 and the model's next tools/call died because the person's browser had
+  // loaded pictures.
+  for (let i = 0; i < 61; i++) {
+    const r = await fetch(`${base}/mcp/thumb/x${i}.jpg/${Date.now() + 60_000}/nope`);
+    assert.equal(r.status, 403, `image ${i} was throttled, not refused on its signature`);
+  }
+  assert.equal((await mcp(base, { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 200);
 });
 
 test("the restore gate answers /mcp in JSON and the asset path in text", async () => {

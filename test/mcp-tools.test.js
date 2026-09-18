@@ -53,9 +53,9 @@ const SEED = [
   { id: "f", tags: [] },
 ];
 
-async function seedCard(boardId, identity, tags) {
-  const name = `${identity}.png`;
-  const eid = await createEntity(db, boardId, { identity });
+// One INSTANCE on a card that already exists. Split out of seedCard for the
+// counting test, which needs a card carrying two of them.
+async function seedInstance(boardId, eid, identity, name, tags) {
   const id = await insertItem(
     db,
     boardId,
@@ -72,7 +72,12 @@ async function seedCard(boardId, identity, tags) {
   // are never parsed — the tool base64s the bytes — so anything is a thumbnail
   // for this purpose.
   fs.writeFileSync(path.join(srv.thumbsDir, name + ".webp"), Buffer.from("RIFF....WEBPVP8 "));
-  return { eid, id };
+  return id;
+}
+
+async function seedCard(boardId, identity, tags) {
+  const eid = await createEntity(db, boardId, { identity });
+  return { eid, id: await seedInstance(boardId, eid, identity, `${identity}.png`, tags) };
 }
 
 before(async () => {
@@ -274,18 +279,33 @@ test("describe_board hands over the vocabulary with live counts", async () => {
   assert.match(text, /mixed \(0\)/);
 });
 
-test("describe_board counts equal a direct group-by", async () => {
-  const { rows } = await db.query(
-    `SELECT tag, COUNT(*)::int AS n FROM (
-       SELECT jsonb_array_elements_text(tags) AS tag FROM items WHERE board_id=$1
-     ) t GROUP BY 1`,
-    [boardId]
-  );
-  const text = toolText((await callTool(base, "describe_board", { board: boardId })).result);
-  for (const r of rows) {
-    const [, value] = r.tag.split("/");
-    assert.match(text, new RegExp(`\\s${value} \\(${r.n}\\)`), `${r.tag} counted as ${r.n}`);
-  }
+test("describe_board counts what search_board matches, in cards", async () => {
+  // Against the OTHER DOOR, never a restatement of this one's SQL. The old
+  // version of this test asserted describe_board against a copy-paste of its
+  // own group-by, so it agreed with the implementation by construction — which
+  // it went on doing while that implementation counted image ROWS and answered
+  // 18 where the search matched 10.
+  //
+  // The fixture has to fail against that bug, so `two-shots` is ONE card with
+  // TWO instances carrying the same tag: counting rows says 3, counting cards
+  // says 2. A board of one-image cards passes either way and proves nothing —
+  // the trap mcp-entity-fanout.test.js names in its own header.
+  const board = await createBoard(db, "Multi board", [FACETS[0]], "");
+  await seedCard(board, "solo", ["theme/dark"]);
+  const pair = await createEntity(db, board, { identity: "two-shots" });
+  await seedInstance(board, pair, "two-shots", "two-shots-1.png", ["theme/dark"]);
+  await seedInstance(board, pair, "two-shots", "two-shots-2.png", ["theme/dark"]);
+
+  const text = toolText((await callTool(base, "describe_board", { board })).result);
+  assert.match(text, /2 cards/);
+  assert.match(text, /\sdark \(2\)/, "two cards carry it, not three rows");
+
+  const hit = await callTool(base, "search_board", {
+    board,
+    facets: { theme: { any: ["dark"] } },
+    include_images: false,
+  });
+  assert.match(toolText(hit.result), /matched 2/, "the count is the search's count");
 });
 
 // --- errors and access -------------------------------------------------------
