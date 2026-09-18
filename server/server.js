@@ -190,6 +190,7 @@ import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, 
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { mountMcp } from "./mcp.js";
+import { mountEvents, onBoard, onUser, flushEvents, closeAllStreams } from "./events.js";
 import { measureStorage, writeSample, readSeries, sampleStorageDue, STORE_DEFS } from "./storage.js";
 import { resolveIngestAdapter, validateIngest, ingestMode, ingestStatus, nextScheduledIngestRun, CONTINUOUS_MS, ENUM_CAP } from "./ingestion/index.js";
 import { applySort, runWindow, settledRow } from "./ingestion/filter-engine.js";
@@ -352,9 +353,53 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on("finish", () => {
     const p = req.path;
-    if (p === "/api/logs/stream") return;
+    if (p === "/api/logs/stream" || p === "/api/events") return;
     if (res.statusCode < 400 && !(p.startsWith("/api/") || p.startsWith("/auth/"))) return;
     console.log(`${req.method} ${res.statusCode} ${Date.now() - start}ms ${p}`);
+  });
+  next();
+});
+
+// Board events: tell anyone watching this board that its ITEMS moved
+// (planning/board-events-stage-1.md §2).
+//
+// ONE hook, not an emit() at each of the twenty writes in db.js. A rule you have
+// to remember twenty times is one you will eventually forget, and forgetting is
+// invisible here — a missing event looks exactly like a board where nothing
+// happened.
+//
+// It can be one hook because the ACCESS GUARDS already did the work: every
+// item-mutating route passes requireEntityAccess or requireItemAccess, which
+// resolve the board to authorise the request and attach it as req.entityBoardId
+// / req.itemBoardId. Twelve routes today, and any route added later that uses
+// the same guards is covered without knowing this exists.
+//
+// A writer outside those guards sets `req.touchedBoard` itself — one extra name,
+// existing only for this, so the hook's condition stays "did this request change
+// something on a board" rather than growing a list of special cases.
+//
+// The ingest sweep is NOT one of them: it has no request to hang off, and its
+// admissions create lane work, which the signals tick already discovers and
+// hands to setWork — the existing "a sweep started server-side has no
+// client-side event" path (server.js, the jobs/errors reader). A second
+// mechanism for the same arrival would be two things to keep agreeing.
+//
+// `finish` + non-GET + under 400: only what actually happened, after it is
+// committed and answered. A handler that 404s or throws says nothing.
+//
+// NOT hooked, deliberately: the worker. While it churns, every client's poll is
+// already awake at 4s (data.js `needsPoll`/`workRunning`), so an emit per tagged
+// item would be thousands of messages asking clients to do what they are already
+// doing. This channel is for changes that land while a board is SETTLED.
+app.use((req, res, next) => {
+  res.on("finish", () => {
+    if (req.method === "GET" || res.statusCode >= 400) return;
+    // The guards already resolved a board to authorise the request, and any
+    // successful mutation behind them changed this board's items. Everything
+    // else a route wants to announce it queued with onBoard/onUser.
+    const board = req.entityBoardId || req.itemBoardId || req.touchedBoard;
+    if (board) onBoard(req, board, "items");
+    flushEvents(req);
   });
   next();
 });
@@ -636,12 +681,20 @@ app.post("/api/crates", requireAuth, wrap(async (req, res) => {
     return res.status(404).json({ error: "board not found" });
   const crate = await createCrate(db, req.user.id, boardId, name);
   if (!crate) return res.status(400).json({ error: "invalid name" });
+  // The board, not the user: a crate made public is everyone's, and listCrates
+  // filters per reader anyway, so the audience is whoever is looking at it. A
+  // brand new crate holds no cards, so `items` is untouched.
+  onBoard(req, boardId, "crates");
   res.json({ crate });
 }));
 
 app.delete("/api/crates/:id", requireAuth, wrap(async (req, res) => {
-  if (!(await deleteCrate(db, req.user.id, Number(req.params.id))))
-    return res.status(404).json({ error: "not found" });
+  const boardId = await deleteCrate(db, req.user.id, Number(req.params.id));
+  if (!boardId) return res.status(404).json({ error: "not found" });
+  // BOTH, because crate_items cascades: every card that was in it just lost a
+  // crateId, and that lives on the items payload rather than the crate list.
+  onBoard(req, boardId, "crates");
+  onBoard(req, boardId, "items");
   res.json({ ok: true });
 }));
 
@@ -649,9 +702,15 @@ app.patch("/api/crates/:id", requireAuth, wrap(async (req, res) => {
   const crateId = Number(req.params.id);
   if (!Number.isInteger(crateId) || crateId <= 0) return res.status(404).json({ error: "not found" });
   if (typeof req.body?.public !== "boolean") return res.status(400).json({ error: "public required" });
-  const crate = await setCratePublic(db, req.user.id, crateId, req.body.public);
-  if (!crate) return res.status(404).json({ error: "not found" });
-  res.json({ crate });
+  const updated = await setCratePublic(db, req.user.id, crateId, req.body.public);
+  if (!updated) return res.status(404).json({ error: "not found" });
+  // BOTH, and the second one is the half that was missing. The flip is how the
+  // crate enters everyone else's LIST — and it also changes what every card in
+  // it reports, because `crateIds` is filtered by crate visibility. Announcing
+  // only the list gave other members a Crates button that filtered to nothing.
+  onBoard(req, updated.boardId, "crates");
+  onBoard(req, updated.boardId, "items");
+  res.json({ crate: updated.crate });
 }));
 
 app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => {
@@ -663,6 +722,13 @@ app.post("/api/crates/:id/items/:itemId", requireAuth, wrap(async (req, res) => 
     return res.status(404).json({ error: "not found" });
   const result = await toggleCrateItem(db, req.user.id, Number(req.params.id), itemId);
   if (!result) return res.status(404).json({ error: "not found" });
+  // This route resolves its own board rather than going through
+  // requireEntityAccess, so the finish hook cannot see it — naming the board is
+  // what gets the ITEMS half, and membership is carried there (item.crateIds).
+  // Without it, ticking a crate in one tab leaves another tab's cards believing
+  // they are not in it.
+  onBoard(req, ent.board_id, "items");   // membership rides item.crateIds
+  onBoard(req, ent.board_id, "crates");  // …and the count, which lives on the list
   res.json(result);
 }));
 
@@ -682,12 +748,19 @@ app.post("/api/filter-configs", requireAuth, wrap(async (req, res) => {
   if (!Object.keys(config).length) return res.status(400).json({ error: "empty config" });
   const saved = await saveFilterConfig(db, req.user.id, boardId, name, config);
   if (!saved) return res.status(400).json({ error: "invalid name" });
+  // Per-USER, not per-board: listFilterConfigs is `WHERE user_id=$1`, so nobody
+  // else's list can have moved and telling the board would be five people
+  // refetching what only one of them could have changed. Carries no board id —
+  // a user-scoped event does not need one, because the tab receiving it knows
+  // which board it is on and refetches for that.
+  onUser(req, req.user.id, "filterConfigs");
   res.json({ config: saved });
 }));
 
 app.delete("/api/filter-configs/:id", requireAuth, wrap(async (req, res) => {
   if (!(await deleteFilterConfig(db, req.user.id, Number(req.params.id))))
     return res.status(404).json({ error: "not found" });
+  onUser(req, req.user.id, "filterConfigs"); // your other tabs; see the save above
   res.json({ ok: true });
 }));
 
@@ -916,6 +989,11 @@ app.patch("/api/admin/users/:id/boards", requireAdmin, wrap(async (req, res) => 
   const known = await existingBoardIds(db, [...new Set([...wanted, ...admins])]);
   const live = (list) => list.filter((bid) => known.has(bid));
   await setUserBoards(db, user.id, live(wanted), live(admins));
+  // To the person whose access just changed, not to the admin who changed it.
+  // This is the one boards-list case worth wiring: an admin grants you a board
+  // and your switcher gains it without a reload. Board create/rename/delete
+  // move other ADMINS' lists, which needs a fan-out nobody has asked for.
+  onUser(req, user.id, "boards");
   res.json({ ok: true });
 }));
 
@@ -3722,6 +3800,10 @@ mountMcp(app, {
   dirs: { galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR },
   baseUrl: BASE_URL,
 });
+
+// The board event channel (planning/board-events-stage-1.md). A route like any
+// other — the emitting is the middleware near the top of this file, not here.
+mountEvents(app, { db });
 app.use("/gallery", requireAuth, express.static(GALLERY_DIR, {
   maxAge: "7d",
   immutable: true,
@@ -3836,6 +3918,7 @@ if (isMain) {
     stopSidecarWatch();
     server.close();
     for (const res of logClients) res.end();
+    closeAllStreams();
     server.closeAllConnections();
     await Promise.race([drained, new Promise((r) => setTimeout(r, 5000).unref())]);
     await sources.close?.();

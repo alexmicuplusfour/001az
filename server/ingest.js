@@ -131,6 +131,12 @@ export function mountIngest(app, { db, sources }) {
       for (const f of req.files || []) await fs.promises.unlink(f.path).catch(() => {});
       return res.status(400).json({ error: "valid board required" });
     }
+    // Upload is the one user action that adds items without passing through
+    // requireEntityAccess/requireItemAccess — there is no entity in the URL yet.
+    // Naming the board here is what tells the board-events hook (server.js) that
+    // someone else's gallery should go and look. Set after the access check, so
+    // a refused upload announces nothing.
+    req.touchedBoard = board.id;
 
     const now = Date.now();
     // Per-file original modified time, sent by the client (File.lastModified),

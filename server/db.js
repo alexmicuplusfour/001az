@@ -1493,17 +1493,38 @@ export async function createCrate(db, userId, boardId, name) {
 export async function setCratePublic(db, userId, crateId, isPublic) {
   const { rows } = await db.query(
     `UPDATE crates SET public = $3 WHERE id = $1 AND user_id = $2
-     RETURNING id, name, public`,
+     RETURNING id, name, public, board_id`,
     [crateId, userId, !!isPublic]
   );
   if (!rows.length) return null;
+  // The flip changes what every card in this crate reports to OTHER people:
+  // `crateIds` in the list payload is filtered by crate visibility
+  // (`c.user_id = $1 OR c.public = TRUE` in listItems), so going public adds an
+  // id to those cards for everyone else and going private takes it away.
+  //
+  // Nothing on items or entities changes here, so without this stamp the delta
+  // poll — which selects on their updated_at — carries nothing, and another
+  // member's cards keep the answer they were given before. Reported from two
+  // real windows: the crate appeared in their toolbar and filtered to nothing.
+  //
+  // Every other crate write already does this and says why (addCrateItems,
+  // toggleCrateItem). This was the one that did not.
+  await touchCrateMembers(db, crateId);
   const count = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [crateId]);
+  // `boardId` OUTSIDE the crate, not a field on it. The route sends the crate
+  // to the client verbatim, and listCrates/createCrate both answer without a
+  // board_id — putting one here would make state.crates hold two shapes of the
+  // same thing depending on which call produced it. The route needs the board
+  // to announce the change; the client has never needed it.
   return {
-    id: rows[0].id,
-    name: rows[0].name,
-    public: rows[0].public,
-    owned: true,
-    item_count: count.rows[0].c,
+    crate: {
+      id: rows[0].id,
+      name: rows[0].name,
+      public: rows[0].public,
+      owned: true,
+      item_count: count.rows[0].c,
+    },
+    boardId: rows[0].board_id,
   };
 }
 
@@ -1516,10 +1537,28 @@ export async function crateItemIds(db, crateId) {
   return new Set(rows.map((r) => r.item_id));
 }
 
+// Stamp every card in a crate, because something about the CRATE changed that
+// its cards report — membership visibility, or the crate ceasing to exist. The
+// cards' own rows are untouched by those writes, so this is the only thing that
+// puts them in a delta poll's answer.
+async function touchCrateMembers(db, crateId) {
+  const { rows } = await db.query("SELECT item_id FROM crate_items WHERE crate_id=$1", [crateId]);
+  await touchEntities(db, rows.map((r) => r.item_id));
+}
+
+// Answers the board it was on, not a boolean: the caller has to tell everyone
+// watching that board, and after the DELETE there is nothing left to look it up
+// from. null means nothing was deleted.
 export async function deleteCrate(db, userId, crateId) {
-  // crate_images cascades.
-  const result = await db.query("DELETE FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
-  return result.rowCount > 0;
+  // BEFORE the delete — crate_items cascades, so afterwards there is nothing
+  // left to read the membership from. Same reason as the flip above: the cards
+  // each lose a crateId and nothing on their own rows moves to say so.
+  await touchCrateMembers(db, crateId);
+  const { rows } = await db.query(
+    "DELETE FROM crates WHERE id=$1 AND user_id=$2 RETURNING board_id",
+    [crateId, userId]
+  );
+  return rows[0]?.board_id ?? null;
 }
 
 // Put cards into a crate, ADDITIVELY. toggleCrateItem below is a checkbox's

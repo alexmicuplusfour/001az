@@ -841,6 +841,17 @@ export const TOOLS = [
       const r = await addCrateItems(db, user.id, crate.id, [...valid]);
       if (!r) return fail(`Could not write to the crate "${crate.name}".`);
 
+      // Tell anyone with this board open. This is the whole reason the event
+      // channel exists (planning/board-events-stage-1.md): an agent writes while
+      // a person is looking, and until now their screen simply stayed wrong.
+      //
+      // BOTH, and they are different facts. `crates` is the list, which gates
+      // the toolbar's Crates button — a board's first crate makes a control
+      // appear. `items` is membership, which rides the card payload as
+      // item.crateIds, and without it the button would filter the grid to
+      // nothing. ONE event each, however many cards were saved.
+      ctx.touched = board.id;
+
       const skipped = ids.filter((id) => !valid.has(id));
       const lines = [
         `Saved ${r.added} ${r.added === 1 ? "card" : "cards"} to "${crate.name}" on "${board.name}".` +

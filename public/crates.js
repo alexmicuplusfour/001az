@@ -1,4 +1,5 @@
 import { state } from './state.js';
+import { getJson } from './api.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { createCheckbox } from './checkbox.js';
@@ -6,6 +7,29 @@ import { toast } from './toast.js';
 import { pinWhileOpen } from './grid.js';
 
 let crateState = null; // { close, card } for the currently open crate pop
+
+// The board's crates, as this reader sees them: their own plus the public ones.
+// ONE implementation — boot calls it and so does the event channel, the way
+// data.js's refreshItemsOnce serves both the poll and an event. Two copies of
+// "how crates arrive" is how the two come to disagree about a field.
+//
+// `setCrates` is separate because the invariant below belongs to every writer,
+// not just this fetch: doDeleteCrate clears the same selection by hand, and a
+// third writer would have had to remember it a third time.
+export async function loadCrates() {
+  const { data } = await getJson(`/api/crates?board=${encodeURIComponent(state.boardId)}`, { cache: "no-store" });
+  if (Array.isArray(data)) setCrates(data);
+}
+
+// A crate that is gone cannot stay selected. Nothing else notices: filters.js
+// keeps matching item.crateIds against an id no crate has, so the grid empties
+// with nothing on screen to say why.
+export function setCrates(list) {
+  state.crates = list;
+  if (state.selectedCrateId != null && !list.some((c) => c.id === state.selectedCrateId)) {
+    state.selectedCrateId = null;
+  }
+}
 
 export function closeCratePop(skipTeardown = false) {
   crateState?.close(skipTeardown ? "keep-card" : "manual");
@@ -40,9 +64,8 @@ async function doDeleteCrate(crate, onClose) {
   try {
     const r = await fetch(`/api/crates/${crate.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
-    state.crates = state.crates.filter((c) => c.id !== crate.id);
+    setCrates(state.crates.filter((c) => c.id !== crate.id));
     for (const item of state.items) item.crateIds.delete(crate.id);
-    if (state.selectedCrateId === crate.id) state.selectedCrateId = null;
     onClose();
     document.dispatchEvent(new Event('app:render'));
   } catch {

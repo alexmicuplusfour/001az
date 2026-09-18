@@ -9,6 +9,7 @@
 // owns the ROWS, not the behavior — the flip/persist/repaint is the lenses'.
 
 import { state } from './state.js';
+import { getJson } from './api.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddHead, ddSep, ddInput, ddEmpty, ddToggleRow } from './dropdown.js';
 import { toast } from './toast.js';
@@ -64,6 +65,18 @@ async function saveCurrentAs(name, onClose) {
 // The drawer header carries the same chevron as the toolbar split button,
 // opening the same dropdown (the toolbar one is behind the drawer's scrim).
 // Called at boot once state.me is known.
+// This reader's own saved filters (the endpoint is WHERE user_id = $1). One
+// implementation for boot and for the event channel, as with crates.
+//
+// Note what this does NOT do: call initFilterConfigsUI. That binds a click
+// listener and is a boot call — running it per refresh would bind a second one
+// and open the dropdown twice per click. It needs no re-run, because the pop
+// reads state.filterConfigs at the moment it opens.
+export async function loadFilterConfigs() {
+  const { data } = await getJson(`/api/filter-configs?board=${encodeURIComponent(state.boardId)}`, { cache: "no-store" });
+  if (Array.isArray(data)) state.filterConfigs = data;
+}
+
 export function initFilterConfigsUI() {
   const btn = document.getElementById("filter-drawer-saved");
   btn.hidden = !state.me; // configs are per-user

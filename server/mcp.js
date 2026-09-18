@@ -26,6 +26,7 @@ import {
 } from "./db.js";
 import { rateLimit } from "./ratelimit.js";
 import { toolSpecs, findTool, liveScope, visibleBoards } from "./mcp-tools.js";
+import { onBoard } from "./events.js";
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -528,7 +529,20 @@ export function mountMcp(app, { db, dirs, baseUrl }) {
         // carries a token, and a token carries its owner.
         const user = req.mcpUser;
         const started = Date.now();
-        const result = await tool.handler({ db, dirs, user, assetLink, thumbLinks, write: cfg.write }, args);
+        // `touched` is how a write tool names the board it changed. The tool
+        // itself does not emit: /mcp is an ordinary POST, so it goes through
+        // server.js's finish hook like every other write in the app and gets
+        // the same guarantee — announced only once the call actually answered.
+        //
+        // Read from the ctx rather than hardcoded per tool: save_to_crate is the
+        // only writer today, and the next one would otherwise look exactly like
+        // a board where nothing happened.
+        const ctx = { db, dirs, user, assetLink, thumbLinks, write: cfg.write };
+        const result = await tool.handler(ctx, args);
+        if (ctx.touched && !result?.isError) {
+          onBoard(req, ctx.touched, "crates");
+          onBoard(req, ctx.touched, "items");
+        }
         // task_intent lands HERE and nowhere else. A parameter the model
         // spends tokens writing and the server discards is a lie in the
         // schema; in the log it makes the Logs tab answer WHY calls are

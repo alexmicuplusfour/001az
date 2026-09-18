@@ -330,15 +330,21 @@ function schedule(delay) {
   pollTimer = setTimeout(pollTick, delay);
 }
 
-async function pollTick() {
-  if (!pollDelay()) {
-    polling = false;
-    // The last item's tokens land just after its status flips to tagged, so
-    // catch that final bump once the queue has drained.
-    await refreshTokens();
-    document.dispatchEvent(new Event('app:render'));
-    return;
-  }
+// ONE delta fetch, merged into state. Extracted from pollTick because a SETTLED
+// board has a second reason to want one: the board-events channel
+// (planning/board-events-stage-1.md) says "something moved" and this is what
+// answers it. Every change another person makes — a tag edit, a heart, an
+// upload, a crate — is carried by exactly this payload, which is why the server
+// stamps entities for it (db.js:1337).
+//
+// Deliberately NOT reachable through ensurePolling(): that starts a CADENCE,
+// and pollDelay() correctly returns 0 on a settled board, so it would decline.
+// This is the single tick, with no opinion about whether another should follow.
+//
+// Swallows its own failures, like refreshTokens beside it: a bad fetch leaves
+// the last known items in place, which is what every caller wants.
+export async function refreshItemsOnce() {
+  if (!state.boardId) return;
   try {
     // Delta poll when we have a cursor: only entities changed since the last
     // tick, plus the board's full id list for merge/delete detection.
@@ -355,14 +361,28 @@ async function pollTick() {
       if (typeof data.now === 'number') state.itemsSince = data.now;
       setWork(data.work); // the lane half rides the same tick
     }
-    // Any other shape (proxy error body, partial JSON): skip the tick rather
-    // than feed reconcile an empty presentIds set — that reads as "everything
-    // merged away" and would wrongly drop in-flight items.
+    // Any other shape (proxy error body, partial JSON): skip it rather than
+    // feed reconcile an empty presentIds set — that reads as "everything merged
+    // away" and would wrongly drop in-flight items.
+  } catch { /* keep the last known items */ }
+}
+
+async function pollTick() {
+  if (!pollDelay()) {
+    polling = false;
+    // The last item's tokens land just after its status flips to tagged, so
+    // catch that final bump once the queue has drained.
     await refreshTokens();
     document.dispatchEvent(new Event('app:render'));
-  } catch {
-    /* keep polling */
+    return;
   }
+  // Both swallow their own failures, so a tick whose fetch failed now repaints
+  // the state it still has rather than skipping the paint. That is a change,
+  // and a harmless one: render is idempotent, and the alternative was a frame
+  // silently dropped whenever the network blipped.
+  await refreshItemsOnce();
+  await refreshTokens();
+  document.dispatchEvent(new Event('app:render'));
   schedule(pollDelay()); // recomputed — the queue may have settled or refilled
 }
 

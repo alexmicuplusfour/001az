@@ -9,12 +9,14 @@ import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
 import { resolveView, restoreView } from './view.js';
 import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
-import { initFilterConfigsUI } from './filterconfigs.js';
+import { initFilterConfigsUI, loadFilterConfigs } from './filterconfigs.js';
 import { initUpload } from './upload.js';
 import { openDetail, preloadDetail } from './detail-open.js';
 import { openAlertEvent } from './alert-event.js';
 import { startSignals, refreshAlerts, refreshJobErrors } from './signals.js';
 import { startAnnouncing } from './announce.js';
+import { startEvents } from './events.js';
+import { loadCrates } from './crates.js';
 import { restoreSort } from './sort.js';
 import { restoreOdds, restoreClusters, restoreMeaningClusters, refreshClusters } from './patterns.js';
 import { initHeaderScroll } from './header-scroll.js';
@@ -135,7 +137,7 @@ async function main() {
     // visitor to login with the interrupted URL intact.
   }
 
-  const [boardRes, itemsData, meData, cratesData, boardsData, filterConfigsData] = await Promise.all([
+  const [boardRes, itemsData, meData, , boardsData] = await Promise.all([
     // getJson, not the `r.ok ? json : null` idiom its siblings below use: this
     // is the one fetch in the batch whose failure decides where the reader ends
     // up, so "the server said no" and "there was no answer" have to arrive
@@ -147,15 +149,15 @@ async function main() {
       ? fetch(`/api/items?board=${state.boardId}&limit=200`, { cache: "no-store" }).then((r) => r.json()).catch(() => [])
       : Promise.resolve([]),
     fetch("/api/me", { cache: "no-store" }).then((r) => r.json()).catch(() => null),
-    state.boardId
-      ? fetch(`/api/crates?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
-      : Promise.resolve([]),
+    // Crates and saved filters ride this batch for the parallelism, not for a
+    // return value: they write state themselves, so boot and the event channel
+    // share one implementation apiece instead of two that can drift. Same shape
+    // as refreshAlerts/refreshJobErrors below.
+    state.boardId ? loadCrates() : Promise.resolve(),
     // The landing rule above already asked this when it had to pick a board;
     // asking again would be the same answer, one round trip later.
     landed || fetch("/api/boards", { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => []),
-    state.boardId
-      ? fetch(`/api/filter-configs?board=${state.boardId}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : []).catch(() => [])
-      : Promise.resolve([]),
+    state.boardId ? loadFilterConfigs() : Promise.resolve(),
     // The header's dots, filled by the same functions that keep them fresh
     // afterwards (signals.js) — they write state themselves, so they ride the
     // boot batch for the parallelism rather than for a return value.
@@ -226,8 +228,7 @@ async function main() {
   // The lane half of in-flight work rides the first page: opening a board
   // mid-transcription lights the chip on arrival, not a signals tick later.
   setWork(firstPage.work);
-  state.crates = Array.isArray(cratesData) ? cratesData : [];
-  state.filterConfigs = Array.isArray(filterConfigsData) ? filterConfigsData : [];
+  // state.crates / state.filterConfigs were written by their loaders above.
   initFilterConfigsUI();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   // The viewer's per-board sort — needs boardMapping (identity mode) in place.
@@ -242,6 +243,10 @@ async function main() {
   // …and their voice. After the first render, so whatever is ALREADY lit when
   // the page opens becomes the baseline instead of three toasts on arrival.
   startAnnouncing();
+  // What other people did while you were looking (planning/board-events-stage-1.md).
+  // After the first paint for the same reason as the two above: its `onopen`
+  // refetches, and that is wasted work while boot's own fetches are still landing.
+  startEvents();
   // Rest of the board streams in behind the first paint.
   //
   // …and only once it has, warm what the reader is most likely to reach for
