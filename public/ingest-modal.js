@@ -1085,16 +1085,31 @@ export function openIngestModal() {
       return { ...cfg, filters: cfg.filters.filter((f) => !unfinishedFilter(f)) };
     }
 
-    // The whole PATCH body the footer would send — the one reading Save uses
-    // and the one the save gate compares against what the modal opened with.
-    // No source added is the REMOVE gesture, and that is a different body, so
-    // it belongs in here too: a board that opened unconfigured and is still
-    // unconfigured has nothing to save, and its Save says so by staying dead.
+    // Everything this editor holds, as ONE value — what the save gate compares
+    // against what the modal opened with, and what Save sends once wireBody
+    // below has turned it into a PATCH.
+    //
+    // `added` rides ALONGSIDE the config instead of collapsing it, and that
+    // separation is load-bearing. The body for a board with no source is
+    // `{ ingest: null }` whatever else is on the form, so a gate reading the
+    // BODY saw a filter edit, a sort change, a schedule pick and the deletion
+    // switch as the same value it started with, and left Save dead through
+    // every one of them — on exactly the board where the whole form is new.
+    // What the reader changed and what the wire happens to carry are two
+    // different questions, and only the first one is the gate's.
     function draft() {
-      return sourceAdded()
-        ? { ingest: { ...configPayload(), trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" } } }
-        : { ingest: null };
+      return {
+        added: sourceAdded(),
+        ingest: { ...configPayload(), trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" } },
+      };
     }
+    // The PATCH body. No source added is the REMOVE gesture — Save clears the
+    // board's ingestion outright rather than writing a config that would mean
+    // "watch the whole ingest root". Editing the rest of the form with nothing
+    // added is therefore still a live Save, and it lands on the "Add a source
+    // first" refusal below — which is an answer, where a button that never
+    // lights is not.
+    const wireBody = (d) => (d.added ? { ingest: d.ingest } : { ingest: null });
 
     // ── Results view: read-only paged list, connector-browse chrome ──
     const { scroll, thead, tbody, note, moreBtn } = pagedTableScaffold();
@@ -1279,7 +1294,7 @@ export function openIngestModal() {
             return;
           }
         }
-        const body = draft();
+        const body = wireBody(draft());
         try {
           const r = await fetch(`/api/boards/${state.boardId}`, {
             method: "PATCH",
@@ -1339,17 +1354,28 @@ export function openIngestModal() {
       saveBtn.addEventListener("click", () => saveConfig());
       const runBtn = document.createElement("button");
       runBtn.className = "ghost";
-      // Named for both halves because it does both: the old "Run now" ran the
-      // STORED config, so editing and then running silently ran the old one.
-      runBtn.textContent = "Save and run now";
-      runBtn.title = "Save this configuration, then run it on the next worker tick";
+      // It saves FIRST — /ingest/run executes the stored config, so a run that
+      // didn't save would silently run the previous one, and that ordering is
+      // the reason this button exists rather than a bare run route. The label
+      // spelled both halves out for a while and has gone back to naming the
+      // intent: you press this to make a run happen. Two buttons both starting
+      // with "Save" read as two kinds of save, which got worse once Save
+      // started greying out — "Save and run now" sitting live beside a dead
+      // "Save" is a puzzle, not a pair. The mechanism moves to the title,
+      // where it is still one hover away.
+      //
+      // Only the NAME went back; the ordering did not. Nothing here may call
+      // /ingest/run without saving first.
+      runBtn.textContent = "Run now";
+      runBtn.title = "Saves this configuration first, then runs it on the next worker tick";
       runBtn.addEventListener("click", () => saveConfig({ run: true }));
       footerSettings.append(saveBtn, runBtn);
-      // Only Save is gated. This modal is the ONE way to trigger a run, and a
-      // run is real work whether or not the config in front of you differs
-      // from the stored one — so gating the run button on edits would take a
-      // capability away rather than stop a no-op. Root is the dialog: the
-      // source chooser opens in a drawer mounted there, outside the body.
+      // Only Save is gated. Run now names an action, not a write: this modal
+      // is the ONE way to trigger a run, and a run is real work whether or not
+      // the config in front of you differs from the stored one — so gating it
+      // on edits would take a capability away rather than stop a no-op. Root
+      // is the dialog: the source chooser opens in a drawer mounted there,
+      // outside the body.
       saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
     } else {
       const note = document.createElement("p");

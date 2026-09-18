@@ -61,7 +61,7 @@ export function presentIngest({ mode = null, nextRunAt = null, error = false, tr
     return verdict(held ? "held-failed" : "off-failed", "error", `${held ? "Paused" : "Off"} — last run failed`,
       held ? "The schedule is held, and its last run failed." : "The last run failed.", { dim: true });
   }
-  if (held) return verdict("paused", "neutral", "Paused", "The schedule is held — Save and run now still works.", { dim: true });
+  if (held) return verdict("paused", "neutral", "Paused", "The schedule is held — Run now still works.", { dim: true });
   if (mode === "scheduled") {
     // Armed but not yet stamped — the sweep hands out the first stamp on its
     // next tick. Say the mode; skip the countdown it doesn't have yet.

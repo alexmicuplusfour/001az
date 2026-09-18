@@ -71,6 +71,12 @@ let CLEARED = 0;
 // after a refused save. Reset in the test's finally, never left armed.
 let SAVE_FAILS = null;
 let SAFE = true;
+// The board flavour. `sources: null` is a connector board, whose universe IS
+// its source — so sourceAdded() is always true. A non-null list is a file
+// board, which has no source until one is added, and that is the state the
+// "+ Add source" screen shows.
+let SOURCES = null;
+let CONFIG = SAVED;
 // Answer to the next confirm(). Stubbed here beside fetch rather than inside a
 // test, so no test can leave a live auto-accept behind for the next one.
 let CONFIRMED = true;
@@ -86,8 +92,10 @@ globalThis.fetch = async (url, opts = {}) => {
     return { ok: true, json: async () => ({ cleared: CLEARED, ledger: LEDGER }) };
   if (String(url).endsWith('/ingest'))
     return { ok: true, json: async () => ({
-      available: true, descriptor: { ...DESCRIPTOR, forgetAllIsSafe: SAFE }, sources: null,
-      config: structuredClone(SAVED), state: null, rootPath: null, ledger: LEDGER,
+      available: true, descriptor: { ...DESCRIPTOR, forgetAllIsSafe: SAFE },
+      sources: SOURCES && structuredClone(SOURCES),
+      config: CONFIG && structuredClone(CONFIG), state: null,
+      rootPath: SOURCES ? '/ingest' : null, ledger: LEDGER,
     }) };
   return { ok: true, json: async () => ({}) };
 };
@@ -129,13 +137,16 @@ async function savedPatch(modal) {
   return JSON.parse(patch.opts.body).ingest;
 }
 
-// The footer's second button used to be "Run now", and it ran the STORED
-// config — so editing, hitting it, and closing ran the OLD config and threw
-// the edits away, invisibly. It saves first now, and closes like Save does.
-test('Save and run now: PATCH first, then the run, then the modal closes', async (t) => {
+// The footer's second button ran the STORED config once — so editing, hitting
+// it, and closing ran the OLD config and threw the edits away, invisibly. It
+// saves first now, and closes like Save does. The label went back to "Run now"
+// afterwards; the ORDERING is what the fix was, and this test is what stops
+// the name taking the behaviour with it.
+test('Run now: PATCH first, then the run, then the modal closes', async (t) => {
   const modal = await openBuilt(t);
-  const run = btn(modal, /^Save and run now$/);
-  assert.ok(run, 'the button names both halves');
+  const run = btn(modal, /^Run now$/);
+  assert.ok(run, 'the button names the intent');
+  assert.match(run.title, /^Saves this configuration first/, 'and the title carries the mechanism');
 
   run.click();
   await tick(); await tick(); await tick();
@@ -147,11 +158,11 @@ test('Save and run now: PATCH first, then the run, then the modal closes', async
   await until(() => !modal.isConnected, 2000);
 });
 
-test('Save and run now: a save that fails never runs', async (t) => {
+test('Run now: a save that fails never runs', async (t) => {
   const modal = await openBuilt(t);
   SAVE_FAILS = 'that folder is gone';
   try {
-    btn(modal, /^Save and run now$/).click();
+    btn(modal, /^Run now$/).click();
     await tick(); await tick(); await tick();
     assert.equal(calls.filter((c) => String(c.url).endsWith('/ingest/run')).length, 0,
       'the run never fired — it would have run the PREVIOUS config');
@@ -197,6 +208,49 @@ test('a saved config loads whole, and Save stays dead while it is untouched', as
   await tick();
   assert.equal(saveBtn(modal).getAttribute('aria-disabled'), 'true',
     'typed back to the saved value — dead again');
+});
+
+// The bug the screenshot showed: on a board with no source added, the PATCH
+// body is `{ ingest: null }` NO MATTER what else is on the form — so a gate
+// comparing the body saw a filter edit, a sort change and a schedule pick as
+// the same value the modal opened with, and left Save dead through all of
+// them. Only adding or removing a source ever moved it. What the reader
+// changed and what the wire happens to carry are two different questions.
+test('on a board with no source yet, every other edit still arms Save', async (t) => {
+  SOURCES = [{ type: 'folder', label: 'Server folder', ready: true }];
+  CONFIG = null;
+  t.after(() => { SOURCES = null; CONFIG = SAVED; });
+  const modal = await openBuilt(t);
+  assert.ok(btn(modal, /Add source/), 'a file board with nothing added');
+  assert.equal(saveBtn(modal).getAttribute('aria-disabled'), 'true', 'opens with nothing to save');
+
+  // A knob.
+  const total = knobInput(modal, 'Keep top');
+  total.value = '500';
+  total.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).hasAttribute('aria-disabled'), false, 'Keep top armed it');
+  total.value = '';
+  total.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).getAttribute('aria-disabled'), 'true', 'and undoing it disarmed it');
+
+  // A select.
+  const sort = [...modal.querySelectorAll('select')].find((el) => [...el.options].some((o) => o.textContent === 'Name'));
+  sort.value = 'name';
+  sort.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).hasAttribute('aria-disabled'), false, 'the sort armed it');
+
+  // A switch.
+  sort.value = 'market_cap';
+  sort.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).getAttribute('aria-disabled'), 'true', 'back to the opening sort');
+  const sw = modal.querySelector('.im-settings button.switch');
+  sw.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).hasAttribute('aria-disabled'), false, 'the deletion-memory switch armed it');
 });
 
 test('an edited knob writes through; everything else still round-trips', async (t) => {
