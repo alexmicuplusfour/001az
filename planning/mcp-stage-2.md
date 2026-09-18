@@ -2,7 +2,7 @@
 
 > Companion to [mcp-server-plan.md](mcp-server-plan.md) (the arc) and
 > [mcp-stage-1.md](mcp-stage-1.md) (transport, auth, the three read tools, the
-> Agents tab — shipped).
+> MCP tab — shipped).
 >
 > **Status: SHIPPED 2026-09-18 in 7eca785.** Suite 1663 (browser included)
 > green, exercised against the live `ui` board. §11 records what was built and

@@ -9,7 +9,7 @@
 > full runs, live-verified on the `ui` board. §8 records what was built and
 > the three things the build changed.
 >
-> §0 still stands as written: the client the Agents tab sets up cannot render
+> §0 still stands as written: the client the MCP tab sets up cannot render
 > any of this, and the text result it falls back to is what §5's last test
 > exists to protect.
 >
@@ -29,7 +29,7 @@ question not "how" but "for whom".
 
 ## 0 — The finding that should decide this
 
-`claude mcp add --transport http boards …` is the line the Agents tab hands the
+`claude mcp add --transport http boards …` is the line the MCP tab hands the
 operator. It configures **Claude Code**. From
 [anthropics/claude-code#95149](https://github.com/anthropics/claude-code/issues/95149),
 opened **2026-09-17** — yesterday — and still open with no maintainer response:

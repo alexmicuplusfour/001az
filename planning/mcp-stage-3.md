@@ -2,7 +2,7 @@
 
 > Companion to [mcp-server-plan.md](mcp-server-plan.md) (the arc),
 > [mcp-stage-1.md](mcp-stage-1.md) (transport, auth, three read tools, the
-> Agents tab) and [mcp-stage-2.md](mcp-stage-2.md) (`get_items`, the signed
+> MCP tab) and [mcp-stage-2.md](mcp-stage-2.md) (`get_items`, the signed
 > asset route, board scope).
 >
 > **Status: SHIPPED 2026-09-18 in 7eca785.** Suite 1679 (browser included)
@@ -397,7 +397,7 @@ corrected it: config lives in `settings` and shows up on the tab, because an env
 var makes the feature undiscoverable and un-tellable — there is no way to hand
 the operator a working command from a page that cannot see the setting.
 
-So: **one switch on the Agents tab**, stored as `mcp_write`.
+So: **one switch on the MCP tab**, stored as `mcp_write`.
 
 ### 3.1 — Default on
 
@@ -537,7 +537,7 @@ reversible acts.
   smuggled in behind "the write stage".
 - **`usage_meter.provider` namespacing.** Still open, still not this arc — the
   MCP adds no provider and stage 3 spends no tokens.
-- **A README screenshot of the Agents tab.** Still owed (every other admin tab has
+- **A README screenshot of the MCP tab.** Still owed (every other admin tab has
   `docs/screens/back/01..06`); still blocked on the README being a prose-free WIP
   placeholder.
 

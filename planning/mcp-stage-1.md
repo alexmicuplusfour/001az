@@ -13,7 +13,7 @@
 
 ## Done when
 
-The Agents tab is switched on, its **copy** button hands over a working command,
+The MCP tab is switched on, its **copy** button hands over a working command,
 pasting it connects a client, *"find me dark developer-centric dashboards with a
 data table"* returns twelve correct screens with readable images, and `npm test`
 is green.
@@ -162,7 +162,7 @@ Knows nothing about HTTP. Schemas are pure data; one handler each. The split
 means the protocol half tests with no database and the tools half with no HTTP.
 
 **The schema table is also the tab's copy** (§6): `GET /api/admin/mcp` serves the
-tool list so the Agents tab renders the vocabulary it is handed and invents none
+tool list so the MCP tab renders the vocabulary it is handed and invents none
 — the standing rule the metering readers earned the hard way.
 
 ### 4.1 — `list_boards`
@@ -426,11 +426,32 @@ design.
 
 ---
 
-## 6 — The Agents tab
+## 6 — The MCP tab
 
 A ninth tab in `admin.html`, after Logs. The eight existing tabs are all plain
 nouns; **"Agents"** says what it is for, with the MCP term prominent inside for
 anyone searching for it.
+
+> **Amended 2026-09-18 (`4e6b374`).** That naming call was wrong and the pane it
+> described was too big. The tab is **MCP**, sits after Plugins, and wears the
+> single-sparkle glyph the rest of the app already uses for AI. "Agents" named
+> the audience, not the thing — an operator who has heard of MCP could not find
+> it, and one who had not learned nothing from the word.
+>
+> The pane below is also superseded (it went 1440px → 876px). The Token block
+> merged into the command, which is now the only place the token appears — it was
+> dotted out in one place while printed in full in the other. The board checklist
+> became the Members tab's chip + access popover. "Boards an agent can reach" and
+> "Saving" became one **Access** section. Both switches are `switch.js`.
+>
+> The tool list is the real lesson: it rendered `description.split("\n")[0]`,
+> which is the line written **for the model** ("Call this before search_board so
+> your facet filters use the board's exact keys and values…"). It cost half the
+> page to print the prompt at the operator. Each tool is now one line — the name
+> a client logs, and the `title` the payload always carried and the pane threw
+> away — under `READ 4` / `WRITE 1` group headers, so the saving switch removes a
+> labelled group rather than one row out of five. A browser test asserts the
+> model-facing text stays out.
 
 ### Why a tab and not somewhere existing
 
@@ -676,7 +697,7 @@ JSON-RPC envelope with the right `Accept`, `MCP-Protocol-Version` and optional
 |---|---|
 | `server/mcp.js` | transport + the three admin routes, ~250 lines |
 | `server/mcp-tools.js` | `list_boards`, `describe_board`, `search_board` |
-| `public/admin-mcp.js` | the Agents tab |
+| `public/admin-mcp.js` | the MCP tab |
 | `public/facet-match.js` | gained `cleanSelection`, moved out of `server.js` — MCP is its third consumer, not a copy |
 | `public/admin.html` / `admin.js` | one tab button, one panel, three lines |
 | `server/server.js` | one import, one `mountMcp` call |

@@ -725,7 +725,7 @@ own facets* · `task_intent` with its privacy clause · errors as instructions.
 
 **Full spec: [mcp-stage-1.md](mcp-stage-1.md).** In brief: `server/mcp.js` +
 `server/mcp-tools.js`, `mountMcp` in `server.js`, the `restoreGate` clause,
-Origin validation, the rate limiter, and **an Agents tab** in admin. Tools:
+Origin validation, the rate limiter, and **an MCP tab** in admin. Tools:
 `list_boards`, `describe_board`, `search_board` (facets + query + similar,
 images inline, `exclude_ids`).
 
