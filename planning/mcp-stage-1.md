@@ -3,7 +3,7 @@
 > Companion to [mcp-server-plan.md](mcp-server-plan.md), which holds the research
 > and the arc. Transport, auth, three read tools, and the admin tab.
 >
-> **Status: SHIPPED 2026-09-18, uncommitted.** Suite 1641 green. Exercised
+> **Status: SHIPPED 2026-09-18 in 7eca785.** Suite 1641 green at the time. Exercised
 > against the live `ui` board (4,673 cards) through a rebuilt container — the
 > numbers are in §12, and one finding there (§12.2) changed the auth copy.
 >

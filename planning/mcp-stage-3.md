@@ -5,7 +5,7 @@
 > Agents tab) and [mcp-stage-2.md](mcp-stage-2.md) (`get_items`, the signed
 > asset route, board scope).
 >
-> **Status: SHIPPED 2026-09-18, uncommitted.** Suite 1679 (browser included)
+> **Status: SHIPPED 2026-09-18 in 7eca785.** Suite 1679 (browser included)
 > green across three consecutive full runs, exercised against the live `ui`
 > board. §10 records what was built and the two things the build changed.
 >

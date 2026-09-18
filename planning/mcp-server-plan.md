@@ -799,8 +799,9 @@ of source containing 20 `fetch()` calls, and a UI resource runs under
 evidence, answers the same way: still no.
 
 The gate stays "used in anger", and the thing blocking that is not stage 4 — it
-is that stages 1–3 are uncommitted, so no deployed instance has an MCP endpoint
-for any client to use.
+was that stages 1–3 sat uncommitted, so no deployed instance had an MCP
+endpoint for any client to use. All four stages are on main as of 7eca785; a
+droplet deploy is what now stands between the arc and its first real use.
 
 ---
 

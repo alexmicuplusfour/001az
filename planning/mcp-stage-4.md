@@ -1,10 +1,10 @@
 # MCP stage 4 — MCP Apps, and the client that cannot see them (2026-09-18)
 
 > Companion to [mcp-server-plan.md](mcp-server-plan.md) (the arc) and stages
-> [1](mcp-stage-1.md) / [2](mcp-stage-2.md) / [3](mcp-stage-3.md), all shipped
-> and all uncommitted.
+> [1](mcp-stage-1.md) / [2](mcp-stage-2.md) / [3](mcp-stage-3.md) — the whole
+> arc shipped together in 7eca785.
 >
-> **Status: SHIPPED 2026-09-18, uncommitted** — built on the user's call after
+> **Status: SHIPPED 2026-09-18 in 7eca785** — built on the user's call after
 > §0's recommendation not to. Suite **1692** green across three consecutive
 > full runs, live-verified on the `ui` board. §8 records what was built and
 > the three things the build changed.
@@ -343,10 +343,11 @@ sandboxed iframe needs. Build it when either:
   is the thing that is missing — which is the arc's own "used in anger" gate,
   and which requires the prod instance to have this code at all.
 
-That second clause is the more pressing fact in this document: **stages 1, 2 and
-3 are all uncommitted.** `001.itsalex.me` does not have an MCP endpoint. Nothing
-downstream of this arc can be used in anger, by any client, until that changes —
-and that is worth more than a fourth stage.
+That second clause was the more pressing fact in this document while it was
+true: stages 1–3 sat uncommitted, so `001.itsalex.me` had no MCP endpoint and
+nothing downstream of this arc could be used in anger by any client. **Resolved
+2026-09-18 — the whole arc is on main (7eca785).** Deploying it to the droplet
+is the step that remains.
 
 Two things to check before committing to the design, both cheap and both better
 answered by experiment than by reading:

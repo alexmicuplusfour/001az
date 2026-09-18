@@ -4,7 +4,7 @@
 > [mcp-stage-1.md](mcp-stage-1.md) (transport, auth, the three read tools, the
 > Agents tab — shipped).
 >
-> **Status: SHIPPED 2026-09-18, uncommitted.** Suite 1663 (browser included)
+> **Status: SHIPPED 2026-09-18 in 7eca785.** Suite 1663 (browser included)
 > green, exercised against the live `ui` board. §11 records what was built and
 > the one defect the live run turned up; §12 the review pass after it.
 >
