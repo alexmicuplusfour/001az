@@ -187,30 +187,26 @@ test("Origin is validated — the DNS-rebinding gate", async () => {
   await setSetting(db, "mcp_origins", null);
 });
 
-test("a stored token is required, and compared exactly", async () => {
-  await setSetting(db, "mcp_token", "sekrit-token-value");
-  assert.equal((await rpc("tools/list")).status, 401);
+test("a token is required, and an unknown one names nobody", async () => {
+  // The bearer is looked up, not compared: it has to resolve to a person, so a
+  // token no row carries is refused for the same reason a missing one is.
+  assert.equal((await rpc("tools/list", null, { token: null })).status, 401);
   assert.equal((await rpc("tools/list", null, { token: "wrong" })).status, 401);
-  // Same length, different bytes — the case a naive prefix compare would pass.
-  assert.equal((await rpc("tools/list", null, { token: "sekrit-token-valuX" })).status, 401);
-  assert.equal((await rpc("tools/list", null, { token: "sekrit-token-value" })).status, 200);
-  await setSetting(db, "mcp_token", null);
+  // Same length as a real one, different bytes.
+  assert.equal((await rpc("tools/list", null, { token: "x".repeat(32) })).status, 401);
+  // The harness's own, which belongs to the seeded admin.
+  assert.equal((await rpc("tools/list")).status, 200);
 });
 
-test("no token means local clients only", async () => {
-  // The ease-of-setup path: nothing configured, and the machine it runs on can
-  // talk to it.
-  assert.equal((await rpc("tools/list")).status, 200);
-  // The app sets `trust proxy` 1, so this is what a request from anywhere else
-  // looks like — and without a token it must be refused.
-  const remote = await rpc("tools/list", null, { xff: "203.0.113.7" });
-  assert.equal(remote.status, 401);
-  assert.match(remote.json.error, /token/);
-
-  // And the same caller CLAIMING to be local. `trust proxy` makes req.ip
-  // whatever the last X-Forwarded-For entry says, so this was answered 200 —
-  // every tool, no token, to anyone who could reach the published port. The
-  // rule reads the socket now, and a declared hop is never this machine.
-  assert.equal((await rpc("tools/list", null, { xff: "127.0.0.1" })).status, 401);
-  assert.equal((await rpc("tools/list", null, { xff: "203.0.113.7, 127.0.0.1" })).status, 401);
+test("no token is 401, whatever the request claims to be", async () => {
+  // There used to be a tokenless path for a client on the server's own machine,
+  // and it trusted `req.ip` — which `trust proxy` makes the last
+  // X-Forwarded-For entry, i.e. whatever the caller wrote. Sending
+  // `X-Forwarded-For: 127.0.0.1` at a published port was answered 200, with
+  // every tool, as the admin. The path is gone, so the claim buys nothing.
+  for (const xff of [null, "127.0.0.1", "203.0.113.7", "203.0.113.7, 127.0.0.1"]) {
+    const r = await rpc("tools/list", null, { token: null, ...(xff ? { xff } : {}) });
+    assert.equal(r.status, 401, `X-Forwarded-For: ${xff}`);
+    assert.match(r.json.error, /token/);
+  }
 });

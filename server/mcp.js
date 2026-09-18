@@ -18,10 +18,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { requireAdmin } from "./auth.js";
-import { getSetting, getSettings, setSetting, getUserByEmail } from "./db.js";
+import { requireAdmin, requireAuth } from "./auth.js";
+import {
+  getSetting, getSettings, setSetting,
+  resolveMcpToken, mcpTokenFor, setMcpToken, touchMcpToken,
+  listMcpTokens, deleteMcpToken,
+} from "./db.js";
 import { rateLimit } from "./ratelimit.js";
-import { toolSpecs, findTool, liveScope } from "./mcp-tools.js";
+import { toolSpecs, findTool, liveScope, visibleBoards } from "./mcp-tools.js";
 
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
@@ -47,28 +51,29 @@ Images returned inline are low-resolution previews for you to read.`;
 // ONE round trip. This used to be six `getSetting` calls in a Promise.all,
 // which makes them concurrent but not free — six connection checkouts from a
 // pool of five, on a path the gate runs for every single request.
-const CONFIG_KEYS = ["mcp_enabled", "mcp_token", "mcp_origins", "mcp_boards", "mcp_last_used", "mcp_write"];
+//
+// FOUR keys, not six: the token and its last-used stamp belong to a person now
+// and live in `mcp_tokens` (planning/mcp-members-plan.md §3). What is left here
+// is what is true of the INSTANCE — whether the feature is on, which origins
+// may call it, which boards it may reach at all, and whether agents may save.
+const CONFIG_KEYS = ["mcp_enabled", "mcp_origins", "mcp_boards", "mcp_write"];
 
 const readConfig = async (db) => {
   const s = await getSettings(db, CONFIG_KEYS);
-  const [enabled, token, origins, boards, lastUsed, write] =
-    CONFIG_KEYS.map((k) => s[k] ?? null);
   return {
-    enabled: enabled === "1",
+    enabled: s.mcp_enabled === "1",
     // The NEGATIVE is what gets stored, so absence reads as ON — the same
     // stance liveScope takes about an empty board list on this very pane.
     // Absence is not a choice, and a write switch that defaults to off makes
     // every operator opt in a second time to the feature they just enabled.
-    write: write !== "0",
-    token: token || null,
-    origins: origins || "",
+    write: s.mcp_write !== "0",
+    origins: s.mcp_origins || "",
     // The raw stored list. What it MEANS is liveScope's rule (mcp-tools.js):
     // intersected with the boards that still exist, and empty reads as ALL —
     // "no selection" is absence, not a claim, and a scope control whose empty
     // state silently switches the feature off would be a trap. Stated in one
     // place so the tools and the checklist cannot come to differ about it.
-    boards: boards ? boards.split(",").filter(Boolean) : [],
-    lastUsed: lastUsed ? Number(lastUsed) : null,
+    boards: s.mcp_boards ? s.mcp_boards.split(",").filter(Boolean) : [],
   };
 };
 
@@ -118,7 +123,9 @@ const signAsset = (secret, kind, name, exp) =>
   crypto.createHmac("sha256", secret).update(`${kind}:${name}.${exp}`).digest("base64url").slice(0, 22);
 
 // Constant-time, and length-checked first because timingSafeEqual throws on a
-// mismatch — the same shape the bearer compare uses.
+// mismatch. This is the last constant-time compare in the file: the bearer is
+// an indexed lookup now, because it has to name a person rather than match a
+// stored string.
 function sigOk(secret, kind, name, exp, sig) {
   const want = Buffer.from(signAsset(secret, kind, name, exp));
   const got = Buffer.from(String(sig || ""));
@@ -171,39 +178,21 @@ const uiMeta = (baseUrl) => ({
 
 // --- the gates --------------------------------------------------------------
 
-// THE SOCKET, NOT `req.ip`. `trust proxy` is 1, so req.ip is simply the last
-// X-Forwarded-For entry — whatever the caller wrote. A client sending
-// `X-Forwarded-For: 127.0.0.1` straight at the published port was answered 200
-// with no token at all. That is the same mistake originAllowed refuses three
-// lines down in those words: Host is whatever the caller wrote, and so is this.
-//
-// The header check is the other half, and it is not belt-and-braces. The socket
-// ALONE is wrong in the opposite direction: a reverse proxy on the same host
-// makes every request in the world arrive from 127.0.0.1. So loopback here
-// means both — the peer really is this machine, and nobody declared a hop.
-// Express gives ::ffff:127.0.0.1 for a v4 client on a dual-stack socket.
-//
-// UNDER DOCKER THIS IS ALMOST NEVER TRUE, and deliberately so. A published
-// port (8001:3001) is NATed, so a request from the operator's own terminal
-// arrives from the bridge gateway — indistinguishable from one sent by anyone
-// else on the LAN, because the port is published on 0.0.0.0. Treating the
-// bridge as local would therefore hand the whole gallery to the network, not
-// to the operator. So the tokenless path serves `npm run server` on the host
-// and nothing else, the tab says so in those words, and switching the feature
-// on mints a token precisely so the normal install never meets this rule.
-const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-const isLoopback = (req) => {
-  if (req.get("x-forwarded-for")) return false; // a declared hop is not this machine
-  const peer = req.socket?.remoteAddress;
-  return LOOPBACK.has(peer) || !!peer?.startsWith("127.");
-};
+// THE TOKENLESS LOOPBACK PATH IS GONE (planning/mcp-members-plan.md §4). It let
+// a client on the server's own machine connect with no token at all, acting as
+// whoever ADMIN_EMAIL named. Two things killed it. It was the path that trusted
+// `req.ip` — a header the caller writes — and answered 200 to anyone who sent
+// `X-Forwarded-For: 127.0.0.1` at a published port. And once a token names a
+// PERSON, "no token" names nobody: the honest answer to "who is this?" would
+// have had to be "the admin, by convention", which is the thing this arc is
+// removing. The admin holds a token like everyone else; pasting it is the same
+// gesture the shortcut saved.
 
-// DNS-rebinding defence, and the spec MANDATES it. It is also what makes the
-// cleared-token loopback path safe: a page in the operator's browser can POST
-// to http://localhost:8001/mcp, the app's CSP constrains its own pages rather
-// than other origins, and cookie auth is irrelevant because MCP does not use
-// cookies. A real MCP client sends no Origin at all, so this costs legitimate
-// callers nothing.
+// DNS-rebinding defence, and the spec MANDATES it. A page in the operator's
+// browser can POST to http://localhost:8001/mcp, the app's CSP constrains its
+// own pages rather than other origins, and cookie auth is irrelevant because
+// MCP does not use cookies. A real MCP client sends no Origin at all, so this
+// costs legitimate callers nothing.
 function originAllowed(req, origins, baseUrl) {
   const origin = req.get("origin");
   if (!origin) return true; // not a browser — the normal case
@@ -230,7 +219,7 @@ const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
 const INTERNAL_ERROR = -32603;
 
-export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
+export function mountMcp(app, { db, dirs, baseUrl }) {
   if (process.env.MCP_DISABLE === "1") {
     console.log("mcp: disabled by MCP_DISABLE");
     return;
@@ -239,21 +228,30 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
   // Abuse throttling, not a security boundary — the same stance
   // ratelimit.js's header states, and the same window /api/search uses.
   //
-  // TWO buckets, because one was two features spending the same budget. An MCP
-  // App's grid is one <img> per card, so a 30-card result fires 30 GETs at the
-  // asset route; sharing this window meant the SECOND render of a minute took
-  // the agent's next tools/call down with it — the model's call refused because
-  // the person's browser loaded pictures. Measured: two renders, and request 61
-  // is a 429. Images are cheap and arrive in bursts, JSON-RPC is neither, so
-  // they get windows sized for what they are.
-  const limiter = rateLimit({ windowMs: 60_000, max: 60 });
-  const assetLimiter = rateLimit({ windowMs: 60_000, max: 600 }); // twenty full grids
-
-  // Who an MCP call acts as. One instance-wide token, so it acts as the admin
-  // and canAccessBoard / board_members ride unchanged. Per-connection identity
-  // is the api_tokens table, which is a later problem if one token ever stops
-  // being enough.
-  const actingUser = () => getUserByEmail(db, adminEmail);
+  // THREE counters, and what separates them is whose budget they are, NOT how
+  // big they are. Each rateLimit() owns a private map, so these never share a
+  // bucket; sharing one was the bug (an MCP App's grid is one <img> per card,
+  // so a 30-card result fired 30 GETs at the asset route and took the agent's
+  // next tools/call down with it — the model refused because the person's
+  // browser loaded pictures).
+  //
+  // The PER-USER window is the one that binds, and the other two have to stay
+  // well above it. Every authenticated request is counted by IP too, and under
+  // Docker every member NATs to the same bridge address — so an IP ceiling at
+  // the per-user figure would cap the whole instance there however many people
+  // hold tokens, which is the exact problem the fair-share window exists to
+  // solve. Stated as a ratio in code rather than as two numbers a later tuner
+  // could move apart without noticing.
+  const PER_USER = 60; // one member's minute
+  const HEADROOM = 10; // …and how many of them a shared address may carry
+  const limiter = rateLimit({ windowMs: 60_000, max: PER_USER * HEADROOM });
+  const assetLimiter = rateLimit({ windowMs: 60_000, max: PER_USER * HEADROOM }); // ~20 full grids
+  // Keyed on the PERSON the token named. Stage 1 of the arc predicted this:
+  // per-IP "becomes wrong the day callers are distinguishable". Mounted after
+  // `identify`, which is the only reason it can key on anyone. The id is
+  // stringified because a falsy key reads as "unknown" in ratelimit.js — not
+  // because it could collide with an IP, which a private map already prevents.
+  const userLimiter = rateLimit({ windowMs: 60_000, max: PER_USER, key: (req) => String(req.mcpUser.id) });
 
   // Fixed for the life of the mount, so it is built once rather than per
   // request. Both `resources/list` and `resources/read` carry it, because a
@@ -286,55 +284,61 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
   const assetLink = async (name) => (await linksTo("asset", [name]))[0];
   const thumbLinks = (names) => linksTo("thumb", names);
 
-  // "Is anything actually connected?" is the question an operator has after
-  // setting this up, and it is the only activity signal stage 2 ships (the
-  // alternatives both misfit — see mcp-stage-2.md §5).
+  // "When did this client last run?" is the question an operator has after
+  // setting this up, and it is now answerable per CONNECTION rather than per
+  // instance — which is what makes it worth asking with several members.
   //
-  // Throttled against the STORED stamp, not a module variable: gate() already
-  // read it, so this costs nothing, it survives a restart, and it cannot go
-  // stale the way an in-process clock does. A settings UPSERT on every request
-  // would be a write per read for a number nobody consults to the second.
-  function touchLastUsed(lastUsed) {
+  // Throttled against the stamp the token lookup ALREADY returned, so it costs
+  // nothing to check, it survives a restart, and it cannot go stale the way an
+  // in-process clock does. An UPDATE on every request would be a write per read
+  // for a number nobody consults to the second.
+  function touchLastUsed(token) {
     const now = Date.now();
-    if (lastUsed && now - lastUsed < 60_000) return;
-    setSetting(db, "mcp_last_used", String(now)).catch(() => {});
+    if (token.lastUsedAt && now - token.lastUsedAt < 60_000) return;
+    touchMcpToken(db, token.id).catch(() => {});
   }
 
-  // Everything /mcp answers passes here first. The checks are per-REQUEST
-  // rather than per-mount because the config is now runtime-mutable from the
-  // tab — flipping the switch must take effect without a restart.
-  async function gate(req, res) {
-    const cfg = await readConfig(db);
+  // Everything /mcp answers passes here first, as MIDDLEWARE rather than a call
+  // inside the handler: the per-user rate window below cannot key on a person
+  // until the token has named one, so identity has to finish before it starts.
+  //
+  // The checks are per-REQUEST rather than per-mount because the config is
+  // runtime-mutable from the tab — flipping the switch must take effect without
+  // a restart.
+  async function identify(req, res, next) {
+    // Both reads at once. They do not depend on each other, and the ORDER OF
+    // THE ANSWERS below is what matters, not the order of the queries —
+    // measured 1.56ms sequential against 0.82ms together, on every request
+    // including the cheap ones. What the concurrency spends that waiting did
+    // not is one indexed probe (0.08ms) on the disabled and bad-origin paths,
+    // which are not the paths anybody is on.
+    //
+    // The lookup answers "is this token real" and "whose is it" together, where
+    // the old compare only ever answered the first. It is a b-tree probe rather
+    // than a timingSafeEqual, which is how every cookie-bearing request in this
+    // app already resolves its person (getSessionUser) — and against 192 bits
+    // of randomness a timing signal on an index is not a way in.
+    const bearer = /^Bearer (.+)$/.exec(req.get("authorization") || "")?.[1] || "";
+    const [cfg, caller] = await Promise.all([readConfig(db), resolveMcpToken(db, bearer)]);
+
     // Off is 404, not 503: a feature nobody switched on is absent, not broken,
     // and 503 would tell a client to retry something that will never answer.
-    if (!cfg.enabled) {
-      res.status(404).json({ error: "not found" });
-      return null;
-    }
+    // FIRST, so a caller who is not allowed to know this endpoint exists learns
+    // nothing from the answers below.
+    if (!cfg.enabled) return res.status(404).json({ error: "not found" });
     if (!originAllowed(req, cfg.origins, baseUrl)) {
-      res.status(403).json({ error: "origin not allowed" });
-      return null;
+      return res.status(403).json({ error: "origin not allowed" });
     }
-    if (cfg.token) {
-      const sent = /^Bearer (.+)$/.exec(req.get("authorization") || "")?.[1] || "";
-      const a = Buffer.from(sent);
-      const b = Buffer.from(cfg.token);
-      // timingSafeEqual throws on a length mismatch, so the length check has
-      // to come first — and a wrong length is already a wrong token.
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-        res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
-        res.status(401).json({ error: "unauthorized" });
-        return null;
-      }
-    } else if (!isLoopback(req)) {
+    if (!caller) {
       res.setHeader("WWW-Authenticate", 'Bearer realm="mcp"');
-      res.status(401).json({
-        error: "no token is set, so only a client reaching the server over loopback may connect — create one on the MCP tab",
+      return res.status(401).json({
+        error: "a token is required — create one under MCP on your account page",
       });
-      return null;
     }
-    touchLastUsed(cfg.lastUsed);
-    return cfg;
+    touchLastUsed(caller.token);
+    req.mcpCfg = cfg;
+    req.mcpUser = caller.user;
+    next();
   }
 
   // The MCP endpoint MUST support POST and GET on one path. We offer no
@@ -402,14 +406,13 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
     });
   }));
 
-  app.post("/mcp", limiter, wrap(async (req, res) => {
+  // IP first, identity second, the person's own window third. The order is the
+  // point: the IP window is what keeps an unauthenticated flood from costing a
+  // database lookup each, and the per-user window is what stops one member's
+  // agent spending everybody's budget — which under Docker it otherwise would,
+  // since every member NATs to the same bridge address.
+  app.post("/mcp", limiter, wrap(identify), userLimiter, wrap(async (req, res) => {
     res.setHeader("Cache-Control", "no-store"); // the /api no-store rule is path-scoped and misses us
-    // The gate stays FIRST. A server nobody switched on is 404 before it is
-    // anything else — answering 400 for a protocol version would confirm the
-    // endpoint exists to a caller who is not allowed to know that.
-    const cfg = await gate(req, res);
-    if (!cfg) return;
-
     const version = req.get("mcp-protocol-version") || ASSUMED_PROTOCOL;
     if (!PROTOCOLS.includes(version)) {
       return res.status(400).json({ error: `unsupported MCP-Protocol-Version: ${version}` });
@@ -433,15 +436,18 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
     }
 
     try {
-      return res.json(await dispatch(msg, cfg));
+      return res.json(await dispatch(msg, req));
     } catch (err) {
       console.log(`mcp: ${msg.method} failed — ${err.message}`);
       return res.json(rpcError(msg.id, INTERNAL_ERROR, "Internal error"));
     }
   }));
 
-  async function dispatch(msg, cfg) {
+  // `req` carries both halves identify resolved — the instance config and the
+  // person — so it is the only thing this needs beyond the message.
+  async function dispatch(msg, req) {
     const { id, method, params } = msg;
+    const cfg = req.mcpCfg;
     switch (method) {
       case "initialize": {
         const asked = params?.protocolVersion;
@@ -517,13 +523,10 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
         if (typeof args !== "object" || Array.isArray(args)) {
           return rpcError(id, INVALID_PARAMS, "arguments must be an object");
         }
-        const user = await actingUser();
-        if (!user) {
-          return rpcResult(id, {
-            content: [{ type: "text", text: "This instance has no admin account configured, so no board is reachable." }],
-            isError: true,
-          });
-        }
+        // The person the token named, resolved by `identify`. There is no
+        // "configured admin" to be missing any more — a call that got this far
+        // carries a token, and a token carries its owner.
+        const user = req.mcpUser;
         const started = Date.now();
         const result = await tool.handler({ db, dirs, user, assetLink, thumbLinks, write: cfg.write }, args);
         // task_intent lands HERE and nowhere else. A parameter the model
@@ -536,7 +539,11 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
         // just as worth having: both answer "why is this call happening" from
         // the Logs tab, which is the whole reason task_intent lands here.
         const what = typeof args.crate === "string" ? ` · crate "${args.crate.slice(0, 64)}"` : "";
-        console.log(`mcp ${tool.name} ${Date.now() - started}ms${where}${what}${why}${result.isError ? " (tool error)" : ""}`);
+        // WHO, now that there is more than one answer. This line was complete
+        // while every call was the same caller; with tokens naming people the
+        // connections list says "Bob's agent ran 3m ago" and this line could
+        // not say which of them was Bob (planning/mcp-members-plan.md §10.21).
+        console.log(`mcp ${tool.name} ${Date.now() - started}ms · ${user.email}${where}${what}${why}${result.isError ? " (tool error)" : ""}`);
         return rpcResult(id, result);
       }
       default:
@@ -555,11 +562,38 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
   // the first click on the switch painted `undefined` for the endpoint and
   // threw on a missing tool list. A reader that re-renders from a WRITE's
   // answer has to be handed the same shape the READ gave it.
-  async function paneState() {
-    const [cfg, user, { rows: boardRows }] = await Promise.all([
+  // The tool table both panes render. Filtered by the saving switch exactly as
+  // tools/list is — so the list IS the switch's readout: turn it off and the
+  // row goes.
+  //
+  // `write` and `ui` are DERIVED from the spec a client is handed, never
+  // restated: `readOnlyHint` is already how a caller learns a tool writes, and
+  // the ui `_meta` is already what makes one ship a grid. A pane that kept its
+  // own copy of either could disagree with tools/list, and the whole point of
+  // serving this list is that it cannot.
+  const toolRows = (write) =>
+    toolSpecs(write, UI_URI).map(({ name, title, description, annotations, _meta }) => ({
+      name,
+      title,
+      // The pane wants a line, not the query-writing essay the model needs.
+      summary: description.split("\n")[0],
+      write: !annotations.readOnlyHint,
+      ui: !!_meta?.ui,
+    }));
+
+  // THE INSTANCE, and nothing personal. Tokens moved to the account page in
+  // stage 2, so this no longer answers "what is mine" for anybody — an admin
+  // reads their own connection where every other member reads theirs.
+  async function adminState() {
+    const [cfg, { rows: boardRows }, connections] = await Promise.all([
       readConfig(db),
-      actingUser(),
       db.query("SELECT id, name FROM boards ORDER BY created_at ASC"),
+      // Folded into this payload rather than served from a route of its own,
+      // because the pane re-renders from whatever a WRITE answers (see above) —
+      // so a separate route would mean every switch flip either dropped the
+      // table or paid a second fetch, and revoke would need a refresh path
+      // nothing else on this pane has (planning/mcp-members-plan.md §10.18).
+      listMcpTokens(db),
     ]);
     // The same rule the tools apply, from the same function: a scope naming
     // only deleted boards is no scope, and the checklist must say so.
@@ -571,48 +605,64 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
       // it is handed rather than intersecting two lists itself. An empty
       // scope reads as every box ticked, which is what empty MEANS.
       allBoards: boardRows.map((b) => ({ ...b, on: !scoped.size || scoped.has(b.id) })),
-      actingAs: user?.email || null,
-      // Filtered by the saving switch, exactly as tools/list is — so the
-      // list below the switch IS its readout: turn it off and the row goes.
-      //
-      // `write` and `ui` are DERIVED from the spec a client is handed, never
-      // restated: `readOnlyHint` is already how a caller learns a tool writes,
-      // and the ui `_meta` is already what makes one ship a grid. A pane that
-      // kept its own copy of either could disagree with tools/list, and the
-      // whole point of serving this list is that it cannot.
-      tools: toolSpecs(cfg.write, UI_URI).map(({ name, title, description, annotations, _meta }) => ({
-        name,
-        title,
-        // The pane wants a line, not the query-writing essay the model needs.
-        summary: description.split("\n")[0],
-        write: !annotations.readOnlyHint,
-        ui: !!_meta?.ui,
+      // Who has an agent pointed at this instance, and when did it last run.
+      // The one question the old instance-wide `mcp_last_used` could never
+      // answer once callers became distinguishable. Nothing here is the token:
+      // listMcpTokens does not select it, so there is no masking decision to
+      // get wrong on the way out.
+      connections: connections.map((t) => ({
+        id: t.id,
+        email: t.email,
+        name: t.name,
+        isAdmin: t.is_admin,
+        created: t.created_at,
+        lastUsed: t.last_used_at,
       })),
+      tools: toolRows(cfg.write),
+    };
+  }
+
+  // ONE PERSON'S CONNECTION, for the account page. The three facts the admin
+  // pane used to carry about its reader, now where they belong — plus the
+  // boards their agent can actually reach, which is `visibleBoards` and not a
+  // second query, so this page cannot promise access the tool then refuses.
+  async function accountState(user) {
+    const [cfg, token, boards] = await Promise.all([
+      readConfig(db),
+      mcpTokenFor(db, user.id),
+      visibleBoards(db, user),
+    ]);
+    return {
+      enabled: cfg.enabled,
+      // Read-only here. Whether agents may save is the instance's answer, and
+      // this page states it rather than offering to change it.
+      write: cfg.write,
+      endpoint: `${baseUrl}/mcp`,
+      token: token?.token || null,
+      lastUsed: token?.last_used_at ? Number(token.last_used_at) : null,
+      actingAs: user.email,
+      boards: boards.map((b) => ({ id: b.id, name: b.name })),
+      tools: toolRows(cfg.write),
     };
   }
 
   app.get("/api/admin/mcp", requireAdmin, wrap(async (_req, res) => {
-    res.json(await paneState());
+    res.json(await adminState());
   }));
 
   app.patch("/api/admin/mcp", requireAdmin, wrap(async (req, res) => {
     const b = req.body || {};
-    if (b.enabled !== undefined) {
-      await setSetting(db, "mcp_enabled", b.enabled ? "1" : null);
-      // Switching it on with no token mints one, so the pane always has a
-      // working command to hand over. Clearing the token stays a deliberate,
-      // separate act (token: null below).
-      if (b.enabled && !(await getSetting(db, "mcp_token")) && b.token === undefined) {
-        await setSetting(db, "mcp_token", mintToken());
-      }
-    }
+    // Enabling MINTS NOTHING. Stage 1 had it mint for whoever threw the switch,
+    // because the admin tab was then the only place a token could exist and one
+    // click between switching on and a working command was the whole reason
+    // this is a tab. The account page is that place now, so the same mint would
+    // hand an admin a token they did not ask for, on a page that no longer
+    // shows it (planning/mcp-members-plan.md §10.14).
+    if (b.enabled !== undefined) await setSetting(db, "mcp_enabled", b.enabled ? "1" : null);
     // The NEGATIVE is stored, so clearing the row means ON. Absence is not a
     // choice, and a default-off write switch would make the operator opt in a
     // second time to the feature they just switched on — see readConfig.
     if (b.write !== undefined) await setSetting(db, "mcp_write", b.write ? null : "0");
-    // null clears — the documented way to say "let local clients connect
-    // without one". setSetting already treats null as a delete.
-    if (b.token === null) await setSetting(db, "mcp_token", null);
     if (b.origins !== undefined) await setSetting(db, "mcp_origins", String(b.origins || "").slice(0, 1000) || null);
     if (b.boards !== undefined) {
       const ids = Array.isArray(b.boards) ? b.boards.filter((x) => typeof x === "string").slice(0, 500) : [];
@@ -624,11 +674,46 @@ export function mountMcp(app, { db, dirs, baseUrl, adminEmail }) {
       // silently excluded by a list written before it existed.
       await setSetting(db, "mcp_boards", keep.length && keep.length < real.size ? keep.join(",") : null);
     }
-    res.json(await paneState());
+    res.json(await adminState());
   }));
 
-  app.post("/api/admin/mcp/rotate", requireAdmin, wrap(async (_req, res) => {
-    await setSetting(db, "mcp_token", mintToken());
-    res.json(await paneState());
+  // Revoking a connection: the admin's half of a token's life, and the only
+  // thing they can do to one. It names a ROW rather than a person — see
+  // deleteMcpToken — and answers the whole pane state, so the table redraws by
+  // the same path every switch on this tab already uses.
+  //
+  // AN ID ALREADY GONE IS NOT AN ERROR. Two admins with this tab open is the
+  // normal case, and the second one got exactly what they asked for; a 404
+  // would be the pane arguing with a reader who is right. What is guarded is
+  // the id being a NUMBER at all: `Number("x")` is NaN, which Postgres rejects
+  // for a bigint with "invalid input syntax", and a 500 in the log is a worse
+  // answer to a junk URL than a 404.
+  app.delete("/api/admin/mcp/connections/:id", requireAdmin, wrap(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(404).json({ error: "not found" });
+    await deleteMcpToken(db, id);
+    res.json(await adminState());
+  }));
+
+  // --- the account page's routes ----------------------------------------
+  //
+  // requireAuth, not requireAdmin: a token is a personal thing and every member
+  // holds their own. `req.user.id` is the only id these touch, so minting for
+  // somebody else is not a shape this allows rather than a check it performs.
+
+  app.get("/api/account/mcp", requireAuth, wrap(async (req, res) => {
+    res.json(await accountState(req.user));
+  }));
+
+  // Mint and rotate are one act — setMcpToken replaces this person's row, so
+  // there is no second code path that has to remember there is one each.
+  app.post("/api/account/mcp/token", requireAuth, wrap(async (req, res) => {
+    await setMcpToken(db, req.user.id, mintToken());
+    res.json(await accountState(req.user));
+  }));
+
+  app.delete("/api/account/mcp/token", requireAuth, wrap(async (req, res) => {
+    await setMcpToken(db, req.user.id, null);
+    res.json(await accountState(req.user));
   }));
 }

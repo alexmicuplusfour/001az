@@ -3721,7 +3721,6 @@ mountMcp(app, {
   db,
   dirs: { galleryDir: GALLERY_DIR, thumbsDir: THUMBS_DIR },
   baseUrl: BASE_URL,
-  adminEmail: ADMIN_EMAIL,
 });
 app.use("/gallery", requireAuth, express.static(GALLERY_DIR, {
   maxAge: "7d",

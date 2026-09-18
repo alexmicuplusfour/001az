@@ -1,19 +1,28 @@
-// The MCP tab's routes: what the pane reads, what its controls write, and
-// the one pin that keeps the pane honest — the tools it advertises must be the
+// The MCP tab's routes: what the INSTANCE pane reads, what its controls write,
+// and the one pin that keeps it honest — the tools it advertises must be the
 // tools the protocol actually serves.
+//
+// Nothing about tokens lives here any more. They belong to people, so they are
+// mcp-account.test.js's subject (planning/mcp-members-plan.md §10.12); this
+// file is the admin's half, which is the instance and only the instance.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { startServer, adminSession, seedUser, req, mcp, until } from "./helpers.js";
-import { getSetting, setSetting, createBoard } from "../server/db.js";
+import { startServer, adminSession, seedUser, req, mcp, mcpToken, until } from "./helpers.js";
+import {
+  getSetting, setSetting, createBoard, setMcpToken, mcpTokenFor, deleteUser,
+} from "../server/db.js";
 
 let srv, db, base, admin;
 
 const BASE = "https://boards.example";
 const get = (sid = admin.sid) => req(base, "GET", "/api/admin/mcp", { sid });
 const patch = (body, sid = admin.sid) => req(base, "PATCH", "/api/admin/mcp", { sid, body });
-const rotate = (sid = admin.sid) => req(base, "POST", "/api/admin/mcp/rotate", { sid, body: {} });
 const tools = (token) =>
   mcp(base, { jsonrpc: "2.0", id: 1, method: "tools/list" }, token ? { token } : {});
+const revoke = (id, sid = admin.sid) =>
+  req(base, "DELETE", `/api/admin/mcp/connections/${id}`, { sid });
+const rowFor = async (email) =>
+  (await get()).json.connections.find((c) => c.email === email);
 
 before(async () => {
   // server.js reads BASE_URL at import, and each startServer imports fresh —
@@ -32,16 +41,20 @@ test("the pane is admin-only", async () => {
   const member = await seedUser(db, "nosy@test.local");
   assert.equal((await get(member.sid)).status, 403);
   assert.equal((await patch({ enabled: true }, member.sid)).status, 403);
-  assert.equal((await rotate(member.sid)).status, 403);
   assert.equal((await get()).status, 200);
 });
 
-test("it starts off, with nothing minted", async () => {
+test("it starts off, and the pane carries nothing personal", async () => {
   const { json } = await get();
   assert.equal(json.enabled, false);
-  assert.equal(json.token, null);
   // A listening surface nobody asked for is the thing this default prevents.
   assert.equal((await tools()).status, 404);
+  // The instance, and only the instance: a token, its stamp and whose it is
+  // moved to the account page, and a pane still shipping them would be a second
+  // copy of one person's connection (§10.14).
+  for (const gone of ["token", "lastUsed", "actingAs"]) {
+    assert.equal(json[gone], undefined, `${gone} is not the admin pane's`);
+  }
 });
 
 test("the endpoint is the address invite links already use", async () => {
@@ -86,44 +99,6 @@ test("the pane advertises exactly the tools the protocol serves", async () => {
   assert.equal(await getSetting(db, "mcp_write"), null);
 });
 
-test("switching it on mints a token", async () => {
-  await setSetting(db, "mcp_enabled", null);
-  await setSetting(db, "mcp_token", null);
-  const { json } = await patch({ enabled: true });
-  assert.equal(json.enabled, true);
-  assert.ok(json.token?.length >= 24, "there is a token to put in the command");
-  // Which means the copy button always has something that works.
-  assert.equal((await tools(json.token)).status, 200);
-});
-
-test("switching it back on does not re-mint", async () => {
-  const before = (await get()).json.token;
-  await patch({ enabled: false });
-  await patch({ enabled: true });
-  assert.equal((await get()).json.token, before, "an existing client keeps working");
-});
-
-test("rotate replaces the token and the old one stops", async () => {
-  const old = (await get()).json.token;
-  const { json } = await rotate();
-  assert.notEqual(json.token, old);
-  assert.equal((await tools(old)).status, 401);
-  assert.equal((await tools(json.token)).status, 200);
-});
-
-test("clearing the token is the local-only mode", async () => {
-  const { json } = await patch({ token: null });
-  assert.equal(json.token, null);
-  assert.equal(await getSetting(db, "mcp_token"), null);
-  // The test client IS loopback, so it still works...
-  assert.equal((await tools()).status, 200);
-  // ...and anyone else does not.
-  assert.equal(
-    (await mcp(base, { jsonrpc: "2.0", id: 1, method: "tools/list" }, { xff: "203.0.113.9" })).status,
-    401
-  );
-});
-
 test("origins round-trip and reach the gate", async () => {
   assert.equal((await patch({ origins: "https://a.example,https://b.example" })).json.origins,
     "https://a.example,https://b.example");
@@ -163,19 +138,6 @@ test("the pane carries every board with its scope state", async () => {
   await patch({ boards: [] });
 });
 
-test("last used starts empty and advances once something calls", async () => {
-  await setSetting(db, "mcp_last_used", null);
-  assert.equal((await get()).json.lastUsed, null);
-  await patch({ enabled: true });
-  await tools((await get()).json.token);
-  // The stamp is written fire-and-forget inside the gate — deliberately, since
-  // awaiting it would put a second round trip on every MCP call for a number
-  // nobody reads to the second. So the ANSWER can land before the write does,
-  // and a test that reads straight after is racing its own subject.
-  const stamp = await until(async () => (await get()).json.lastUsed);
-  assert.ok(stamp > Date.now() - 10_000, "the stamp is from just now");
-});
-
 test("a scope naming only deleted boards reads as no scope", async () => {
   // Nothing cascades into settings when a board is deleted — deleteBoard even
   // purges usage_meter by hand for the same reason — so a scope list goes stale
@@ -189,4 +151,96 @@ test("a scope naming only deleted boards reads as no scope", async () => {
   const after = await get();
   assert.ok(after.json.allBoards.every((b) => b.on), "every box reads as ticked again");
   await patch({ boards: [] });
+});
+
+// --- stage 3: oversight (planning/mcp-members-plan.md §10.18-10.19) ----------
+//
+// Every token below belongs to a BURNER member. The admin's own row is in this
+// list too and every other call in this file rides on that token by default
+// (helpers.js), so a test that revoked it would close the door behind itself —
+// §10.8 recorded three tests that learned this the confusing way.
+
+test("the connections list says who is connected, and never what with", async () => {
+  await patch({ enabled: true });
+  const bob = await seedUser(db, "bob-conn@test.local");
+  await setMcpToken(db, bob.id, "conn-list-token-bbbbbbbbbbbb");
+
+  const row = await rowFor("bob-conn@test.local");
+  assert.ok(row, "one row per token");
+  assert.equal(row.isAdmin, false);
+  assert.ok(row.created > Date.now() - 60_000, "created just now");
+  assert.equal(row.lastUsed, null, "and never used");
+
+  // The admin's own connection is in the list. Leaving it out would be the pane
+  // pretending the admin is not a member, which is the thing this arc undid.
+  const { json } = await get();
+  assert.ok(json.connections.some((c) => c.isAdmin), "including the admin's own");
+
+  // §3's promise, asserted against the WIRE rather than trusted to a SELECT
+  // list: an admin reads who, never what. Both tokens, because the harness's is
+  // the one certain to be in the table.
+  assert.doesNotMatch(JSON.stringify(json), /conn-list-token/, "not the member's");
+  assert.doesNotMatch(JSON.stringify(json), new RegExp(await mcpToken(base)), "not the admin's");
+
+  // And the stamp advances once that member's client calls — the signal the old
+  // instance-wide mcp_last_used could only ever give for everyone at once.
+  await tools("conn-list-token-bbbbbbbbbbbb");
+  const stamp = await until(async () => (await rowFor("bob-conn@test.local")).lastUsed);
+  assert.ok(stamp > Date.now() - 10_000);
+});
+
+test("revoking one connection stops it on the next call, and no other", async () => {
+  await patch({ enabled: true });
+  const gone = await seedUser(db, "revoke-me@test.local");
+  const kept = await seedUser(db, "keep-me@test.local");
+  await setMcpToken(db, gone.id, "revoke-token-111111111111");
+  await setMcpToken(db, kept.id, "revoke-token-222222222222");
+  assert.equal((await tools("revoke-token-111111111111")).status, 200);
+
+  const res = await revoke((await rowFor("revoke-me@test.local")).id);
+  assert.equal(res.status, 200);
+  // The write answers the WHOLE pane, because the table redraws from whatever a
+  // write returns exactly as every switch on this tab does.
+  assert.ok(Array.isArray(res.json.allBoards) && Array.isArray(res.json.tools));
+  assert.ok(!res.json.connections.some((c) => c.email === "revoke-me@test.local"));
+
+  // The stage's done-when. Nothing caches a token, so the NEXT call is the one
+  // that answers 401.
+  assert.equal((await tools("revoke-token-111111111111")).status, 401);
+  assert.equal((await tools("revoke-token-222222222222")).status, 200, "nobody else was touched");
+  assert.equal(await mcpTokenFor(db, gone.id), null);
+});
+
+test("revoking is the admin's alone, and a bad id is not a 500", async () => {
+  const member = await seedUser(db, "not-admin@test.local");
+  const bystander = await seedUser(db, "collateral@test.local");
+  await setMcpToken(db, bystander.id, "collateral-token-cccccccccc");
+  const { id } = await rowFor("collateral@test.local");
+
+  assert.equal((await revoke(id, member.sid)).status, 403);
+  assert.ok(await mcpTokenFor(db, bystander.id), "and it is still there");
+
+  // Two admins with this tab open is the normal case: the second one asked for
+  // a state that already holds, and a 404 would be the pane arguing with a
+  // reader who is right.
+  assert.equal((await revoke(id)).status, 200);
+  const again = await revoke(id);
+  assert.equal(again.status, 200);
+  assert.ok(!again.json.connections.some((c) => c.email === "collateral@test.local"));
+
+  // Number("nope") is NaN, which Postgres rejects for a bigint — so without the
+  // guard a junk URL is a 500 in the log rather than an answer.
+  assert.equal((await revoke("nope")).status, 404);
+});
+
+test("removing a member takes their connection with them", async () => {
+  const doomed = await seedUser(db, "doomed-conn@test.local");
+  await setMcpToken(db, doomed.id, "doomed-token-dddddddddddd");
+  assert.ok(await rowFor("doomed-conn@test.local"));
+
+  // The FK cascade, not a display filter: a list showing a row for an account
+  // that no longer exists is an admin chasing a connection nobody holds.
+  await deleteUser(db, doomed.id);
+  assert.equal(await rowFor("doomed-conn@test.local"), undefined);
+  assert.equal((await tools("doomed-token-dddddddddddd")).status, 401);
 });

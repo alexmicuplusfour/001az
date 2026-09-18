@@ -3,6 +3,7 @@
 // because it also gates the shell visible, while the boards/plugins renders
 // re-check access and no-op for non-admins.
 import { ICONS } from "./utils.js";
+import { mountTabs } from "./tabs.js";
 import { renderMembers } from "./admin-members.js";
 import { renderBoards } from "./admin-boards.js";
 import { renderUsage } from "./admin-usage.js";
@@ -20,27 +21,19 @@ for (const el of document.querySelectorAll("[data-icon]")) {
   el.insertAdjacentHTML("afterbegin", ICONS[el.dataset.icon]);
 }
 
-const TAB_NAMES = ["members", "boards", "usage", "storage", "capabilities", "plugins", "backups", "logs", "mcp"];
-const tabBtns = [...document.querySelectorAll(".tab")];
-function selectTab(name) {
-  tabBtns.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
-  document.querySelectorAll(".panel").forEach((p) => (p.hidden = p.id !== "panel-" + name));
-  // A deep-link suffix (#capabilities/tag) survives selection; anything else
-  // normalizes to the bare tab hash.
-  const keep = location.hash.startsWith("#" + name + "/") ? location.hash : "#" + name;
-  history.replaceState(null, "", name === "members" ? location.pathname : keep);
-  setLogsActive(name === "logs"); // the SSE stream follows tab visibility
-  // Storage renders on SELECT, not at boot like its siblings: its GET walks
-  // the filesystem server-side and exists to be live — the user looking IS
-  // the sample (storage-plan.md). Re-opening re-measures; that's the point.
-  if (name === "storage") renderStorage().catch(() => {});
-}
-tabBtns.forEach((t) => (t.onclick = () => selectTab(t.dataset.tab)));
-// The tab is the hash's first segment — in-page links (the Plugins tab's
-// "default tagger" badges → #capabilities/tag) switch tabs through this.
-const tabFromHash = () => location.hash.slice(1).split("/")[0];
-if (TAB_NAMES.includes(tabFromHash())) selectTab(tabFromHash());
-addEventListener("hashchange", () => { if (TAB_NAMES.includes(tabFromHash())) selectTab(tabFromHash()); });
+// The switcher itself is tabs.js, shared with the account page. What stays
+// here is the part that is this page's: two renders that hang off visibility.
+mountTabs({
+  names: ["members", "boards", "usage", "storage", "capabilities", "plugins", "backups", "logs", "mcp"],
+  defaultTab: "members",
+  onSelect: (name) => {
+    setLogsActive(name === "logs"); // the SSE stream follows tab visibility
+    // Storage renders on SELECT, not at boot like its siblings: its GET walks
+    // the filesystem server-side and exists to be live — the user looking IS
+    // the sample (storage-plan.md). Re-opening re-measures; that's the point.
+    if (name === "storage") renderStorage().catch(() => {});
+  },
+});
 
 renderMembers().catch(() => (document.getElementById("gate").innerHTML = 'Error loading. <a href="/">Back</a>'));
 renderBoards().catch(() => {});

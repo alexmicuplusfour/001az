@@ -3,30 +3,33 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>001az - profile</title>
+    <title>001az - account</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
     <link rel="stylesheet" href="/toast.css" />
     <link rel="stylesheet" href="/panel.css" />
     <link rel="stylesheet" href="/checkbox.css" />
+    <!-- The connection block and the tool table, shared with the admin tab. -->
+    <link rel="stylesheet" href="/mcp.css" />
     <style>
       #name-form { max-width: 420px; }
     </style>
   </head>
   <body>
     <div id="gate" class="gate">Checking access…</div>
-    <div id="profile-ui" hidden>
+    <div id="account-ui" hidden>
       <div class="page-head">
-        <h1>Profile</h1>
+        <h1>Account</h1>
       </div>
       <div class="layout">
         <nav class="tabs">
-          <button class="tab active" data-icon="user">Account</button>
+          <button class="tab active" data-tab="profile" data-icon="user">Profile</button>
+          <button class="tab" data-tab="mcp" data-icon="srcSparkle">MCP</button>
           <a class="tab-link" href="/" data-icon="arrowLeft">Gallery</a>
         </nav>
         <main class="panels">
-          <section class="panel">
+          <section class="panel" id="panel-profile">
             <div class="section">
               <h2>Name</h2>
               <p class="sub">Shown with your hearts and anywhere members are listed.</p>
@@ -38,7 +41,7 @@
             <div class="section">
               <h2>Password</h2>
               <p class="sub">Changing it signs you out everywhere else.</p>
-              <a href="/login.html?change=1&amp;next=%2Fprofile.html">Change password</a>
+              <a href="/login.html?change=1&amp;next=%2Faccount.html">Change password</a>
             </div>
             <div class="section">
               <h2>Notifications</h2>
@@ -49,9 +52,12 @@
               <div id="sound-row"></div>
             </div>
           </section>
+          <section class="panel" id="panel-mcp" hidden>
+            <div id="mcp-content"></div>
+          </section>
         </main>
       </div>
     </div>
-    <script src="profile.js" type="module"></script>
+    <script src="account.js" type="module"></script>
   </body>
 </html>

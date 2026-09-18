@@ -1295,6 +1295,98 @@ export async function deleteSession(db, sid) {
   if (sid) await db.query("DELETE FROM sessions WHERE id=$1", [hashToken(sid)]);
 }
 
+// --- MCP tokens (planning/mcp-members-plan.md §3) ---
+//
+// Beside the sessions above because they answer the same question in the same
+// shape — a bearer arrives, a person comes back — for a caller that has no
+// cookie to offer. The whole user row, because canAccessBoard reads is_admin
+// and id, and the tools want the person, not an identifier.
+//
+// NOT hashed, unlike a session id or an invite. The MCP tab exists to hand over
+// a complete, working command whenever it is asked, and a digest can only ever
+// show one once. The trade is argued in full in the plan (§3): per-member
+// tokens make a leak smaller than today's single admin-level one, and the
+// reader this would defend against holds the database already.
+// TWO THINGS, NOT ONE FLATTENED ROW. The user goes on to be `ctx.user` in
+// every tool handler, so it has to be a users row and nothing else — a
+// `u.*, t.id AS mcp_token_id` composite would hand every tool token metadata it
+// has no business with, under column names that lie about which table they came
+// from. One query still; the split happens here, at the boundary that knows.
+export async function resolveMcpToken(db, token) {
+  if (!token) return null;
+  const { rows } = await db.query(
+    `SELECT u.*, t.id AS t_id, t.last_used_at AS t_last_used_at
+       FROM mcp_tokens t JOIN users u ON u.id = t.user_id
+      WHERE t.token = $1`,
+    [token]
+  );
+  if (!rows.length) return null;
+  const { t_id: id, t_last_used_at: lastUsedAt, ...user } = rows[0];
+  return { user, token: { id, lastUsedAt: lastUsedAt == null ? null : Number(lastUsedAt) } };
+}
+
+export async function mcpTokenFor(db, userId) {
+  const { rows } = await db.query(
+    `SELECT id, token, created_at, last_used_at FROM mcp_tokens
+      WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1`,
+    [userId]
+  );
+  return rows[0] || null;
+}
+
+// Mint, rotate and clear are ONE function: each is "this person's token is now
+// X, or nothing". Rotating is minting over the top, and a separate rotate would
+// be a second place that has to remember there is only one per person.
+//
+// The transaction is the point, not ceremony. Folding it into one data-modifying
+// CTE is measurably cheaper (2.8ms against 4.6) and wrong: within a single
+// statement the DELETE's index entry is not yet invisible to the INSERT, so
+// re-setting a person's CURRENT token raises a duplicate-key error instead of
+// being the no-op it reads as. Nobody mints the same random token twice, but a
+// caller restoring a known value does, and that trap is worth 1.8ms.
+export async function setMcpToken(db, userId, token) {
+  await withTx(db, async (client) => {
+    await client.query("DELETE FROM mcp_tokens WHERE user_id=$1", [userId]);
+    if (!token) return;
+    await client.query("INSERT INTO mcp_tokens (user_id, token, created_at) VALUES ($1, $2, $3)", [
+      userId,
+      token,
+      Date.now(),
+    ]);
+  });
+}
+
+export async function touchMcpToken(db, id) {
+  await db.query("UPDATE mcp_tokens SET last_used_at=$1 WHERE id=$2", [Date.now(), id]);
+}
+
+// Every token on the instance, with whose it is — the admin's connections list
+// (planning/mcp-members-plan.md §10.18). The question it answers is "who has an
+// agent pointed at this instance, and when did it last run", so it reads in
+// ACTIVITY order rather than listUsers' roster order, and the never-used sink.
+//
+// NO TOKEN COLUMN, and not a masked one either. A member reads their own on
+// their own page; the admin's list has never shown one and must not start (§3).
+// A masked prefix would be a correlation handle with nothing to correlate
+// against — no log line carries a token.
+export async function listMcpTokens(db) {
+  const { rows } = await db.query(
+    `SELECT t.id, t.created_at, t.last_used_at, u.email, u.name, u.is_admin
+       FROM mcp_tokens t JOIN users u ON u.id = t.user_id
+      ORDER BY t.last_used_at DESC NULLS LAST, t.created_at DESC`
+  );
+  return rows;
+}
+
+// Revoking names a ROW, which is why this is not setMcpToken(userId, null).
+// `user_id` is deliberately not unique (§3), so clearing by owner would take out
+// a second device nobody picked — and the list an admin clicks is keyed by token
+// id, so reaching for the owner's id from it is an indirection that happens to
+// be correct only while there is one each.
+export async function deleteMcpToken(db, id) {
+  await db.query("DELETE FROM mcp_tokens WHERE id=$1", [id]);
+}
+
 // Password change revokes every other session; the caller's own sid survives.
 export async function deleteOtherSessions(db, userId, keepSid) {
   await db.query("DELETE FROM sessions WHERE user_id=$1 AND id <> $2", [userId, hashToken(keepSid || "")]);

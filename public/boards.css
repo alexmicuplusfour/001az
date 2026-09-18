@@ -1,7 +1,7 @@
 /* Boards page (planning/boards-page-plan.md): the member-facing index of
    accessible boards, as a card gallery.
 
-   The page wears the GALLERY's chrome, not the admin/profile panel chrome:
+   The page wears the GALLERY's chrome, not the admin/account panel chrome:
    styles.css supplies the tinted body, the floating sticky header, #toolbar
    and .tool-btn, so the boards index and a board read as one product. This
    file adds only the grid and its cards.

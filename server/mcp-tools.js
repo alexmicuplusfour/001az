@@ -19,7 +19,6 @@ import { matchesCondition } from "./alerts.js";
 import { cleanSelection } from "../public/facet-match.js";
 import {
   listBoards,
-  getBoard,
   canAccessBoard,
   listItems,
   boardEmbeddings,
@@ -119,7 +118,11 @@ const cleanIds = (raw) => [...new Set((Array.isArray(raw) ? raw : []).map(Number
 // membership check runs regardless. Empty means all (mcp-stage-2.md §7).
 // ONE implementation, so list_boards, describe_board, search_board and
 // get_items cannot disagree about what is in scope.
-async function visibleBoards(db, user) {
+// Exported because the account page renders the SAME list: what a member's
+// agent can reach is membership intersected with the instance ceiling, and a
+// page that worked it out separately could promise access the tool then
+// refuses (planning/mcp-members-plan.md §10.12).
+export async function visibleBoards(db, user) {
   const [all, scope] = await Promise.all([listBoards(db), getSetting(db, "mcp_boards")]);
   const live = liveScope(all, (scope || "").split(","));
   const allowed = live.size ? all.filter((b) => live.has(b.id)) : all;
@@ -869,7 +872,7 @@ export const TOOLS = [
 // embedder still answers its facet query rather than refusing the whole call,
 // which is where /api/search's 404 would be the wrong answer through this door.
 async function rank(ctx, board, rows, args, notes) {
-  const { db, user } = ctx;
+  const { db } = ctx;
   const embedder = await resolveEmbedder(db).catch(() => null);
   if (!embedder) {
     notes.push("Meaning ranking is unavailable: this instance has no embedding provider configured. Results above are the facet filter only, newest first.");

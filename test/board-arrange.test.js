@@ -104,7 +104,7 @@ test("the column can't be used as storage", async () => {
 });
 
 test("name and order are independent halves of the same route", async () => {
-  // The profile page sends a name alone and must not disturb the arrangement.
+  // The account page sends a name alone and must not disturb the arrangement.
   const named = await req(base, "PATCH", "/api/account", { sid: member.sid, body: { name: "Arranger" } });
   assert.equal(named.json.name, "Arranger");
   assert.equal(named.json.board_order, undefined);

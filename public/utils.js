@@ -143,7 +143,7 @@ export const plural = (word) => {
 // one currentColor stroke with round caps and joins. `glyph` is where that
 // agreement lives, so an entry below is its paths and nothing else. Written out
 // per icon, the attribute block had already drifted — `plus` lost its
-// stroke-linejoin, and the copies of it in admin.html and profile.html had
+// stroke-linejoin, and the copies of it in admin.html and account.html had
 // picked up a stray 2.2 weight.
 //
 // `stroke` is in the 24-unit box, so it scales with the icon: what the eye gets
@@ -271,7 +271,7 @@ export const ICONS = {
   // `var(--text-dim)` and brightens on hover, and a hard-coded fill ignores both.
   doubleCheck: glyph('<path d="M1.61 13.66 6.77 18.25 14.3 5.25"/><path d="M11.92 16.01 14.61 18.25 22.13 5.25"/>'),
 
-  // ── The member pages (admin.html, profile.html) ─────────────────────────────
+  // ── The member pages (admin.html, account.html) ────────────────────────────
   // Everything below was hand-pasted markup in those two pages and the
   // admin-*.js renders — the exact drift this file exists to stop. It had
   // already started: `key` carried its own 2.2, `grid` was a third copy of the
@@ -460,6 +460,29 @@ export function fmtDuration(ms) {
 // how a shared half ends up with five private wholes. One name, so the next
 // surface that needs the phrase finds it instead of writing a sixth.
 export const relTime = (ts) => `${fmtDuration(Date.now() - ts)} ago`;
+
+// HTML-escape a value on its way into an innerHTML template. Three identical
+// copies of this had accumulated across the MCP panes — one per surface, each
+// written the same afternoon — which is how a shared half ends up with three
+// private wholes. Same reason relTime is up here.
+export const esc = (s) =>
+  String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// One person in a table row: the glyph, their name, the admin badge, and the
+// email under it. The Members tab and the MCP tab's connections list render
+// exactly this, so it is one function rather than the second copy.
+//
+// ESCAPED, which the copy this replaces was not. A member sets their own name
+// from Account -> Profile and the server stores it verbatim (trim + 80 chars),
+// so `<img src=x onerror=...>` typed there was PARSED as markup in the admin's
+// Members tab — measured: one injected element, and the literal text absent.
+// Only CSP's `script-src 'self'` kept that from being script execution, and a
+// header is the wrong last line of defence for an interpolation that should
+// never have been raw.
+export const memberCell = ({ name, email, isAdmin }) =>
+  `<div class="name-cell">${ICONS.user}<div><div>${esc(name || "—")}${
+    isAdmin ? ' <span class="badge">admin</span>' : ""
+  }</div><div class="email">${esc(email)}</div></div></div>`;
 
 // The small trailing note on a button or pill. `cls` is what it's a note ABOUT
 // — "count" for the tally every chip carries, "mult" for the odds lens's ×N

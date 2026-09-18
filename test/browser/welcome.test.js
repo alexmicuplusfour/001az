@@ -376,7 +376,7 @@ test("the user menu has no Setup row — the strip is the way back", async () =>
   await page.locator(".user-menu-pop").waitFor({ timeout: 15000 });
 
   const rows = await page.locator(".user-menu-pop .dd-row").allTextContents();
-  assert.deepEqual(rows, ["Admin", "Profile", "Sign out"]);
+  assert.deepEqual(rows, ["Admin", "Account", "Sign out"]);
   assert.equal(await page.locator('.user-menu-pop a.dd-row[href="/welcome"]').count(), 0,
     "nothing in this menu points at the first-run screen");
   assert.deepEqual(page.errors, []);
@@ -389,7 +389,7 @@ test("the user menu has no Setup row — the strip is the way back", async () =>
   await theirs.locator(".user-menu-btn").waitFor({ timeout: 15000 });
   await theirs.locator(".user-menu-btn").click();
   await theirs.locator(".user-menu-pop").waitFor({ timeout: 15000 });
-  assert.deepEqual(await theirs.locator(".user-menu-pop .dd-row").allTextContents(), ["Profile", "Sign out"]);
+  assert.deepEqual(await theirs.locator(".user-menu-pop .dd-row").allTextContents(), ["Account", "Sign out"]);
   assert.deepEqual(theirs.errors, []);
   assert.deepEqual(theirs.failures, [], "and their page asked for nothing it isn’t allowed to have");
 });

@@ -10,14 +10,18 @@ import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import { startServer, callTool, toolText, mcp } from "./helpers.js";
-import { createBoard, createEntity, insertItem, setSetting, getSetting } from "../server/db.js";
+import {
+  createBoard, createEntity, insertItem, setSetting, getSetting,
+  getUserByEmail, setMcpToken,
+} from "../server/db.js";
 
-let srv, db, base, boardId, entityId, fileName;
+let srv, db, base, boardId, entityId, fileName, admin;
 
 before(async () => {
   srv = await startServer();
   ({ db, base } = srv);
   await setSetting(db, "mcp_enabled", "1");
+  admin = await getUserByEmail(db, process.env.ADMIN_EMAIL);
   boardId = await createBoard(db, "Asset board", [], "");
   fileName = "asset-fixture.png";
   // A real PNG, because the route hands the file to express's sendFile and the
@@ -127,13 +131,12 @@ test("rotating the token does NOT break links; clearing the asset secret does", 
   const url = await link();
   // Rotation is about disconnecting clients. A download already handed out is
   // not a client, and killing it would be a surprise nobody asked for.
-  await setSetting(db, "mcp_token", "a-brand-new-token-value");
+  await setMcpToken(db, admin.id, "a-brand-new-token-value");
   assert.equal((await fetchLink(url)).status, 200);
 
   // Clearing the asset secret is the separate, deliberate revocation.
   await setSetting(db, "mcp_asset_secret", null);
   assert.equal((await fetchLink(url)).status, 403);
-  await setSetting(db, "mcp_token", null);
 });
 
 test("switching the feature off kills outstanding links", async () => {

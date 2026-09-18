@@ -1,0 +1,40 @@
+/* The MCP pane's two SHARED blocks — the connection command and the tool
+   table — loaded by both member pages (admin.html and account.html).
+
+   Promoted out of admin.html's inline <style> when the account page grew an
+   MCP tab (planning/mcp-members-plan.md §10.10): a component's styles get one
+   home the moment a second surface renders it, rather than a copy each.
+
+   What stayed behind in admin.html is genuinely that tab's — the Access rows,
+   the Advanced <details>, and the #mcp-body wrapper the enable switch hides. */
+
+.mcp-cmd { margin: 0; padding: 12px 14px; border: 1px solid #ececef; border-radius: 10px; background: #f7f7f9;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap; word-break: break-all; }
+/* copy sits alone on the left. Rotate and clear break every connected
+   client and copy does not, so the gap between them is the point. */
+.mcp-cmd-actions { display: flex; gap: 8px; align-items: center; margin: 10px 0 18px; }
+.mcp-cmd-actions .gap { margin-left: auto; }
+
+/* a tool is ONE LINE — the name a client will log, and what it is for.
+   Its description belongs to the model, not to this pane. */
+.mcp-tools { display: flex; flex-direction: column; }
+.mcp-group { display: flex; align-items: center; gap: 7px; margin: 16px 0 5px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #9aa0aa; }
+.mcp-group:first-child { margin-top: 0; }
+.mcp-group .n { color: #b6bbc4; }
+.mcp-t { display: flex; align-items: baseline; gap: 14px; padding: 4px 0; font-size: 13px; }
+.mcp-t code { flex: 0 0 132px; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+/* the title column is fixed so a badge after it lands in one column too,
+   without being flung to the far edge of a wide pane by margin-left:auto */
+.mcp-t .t { flex: 0 0 210px; color: #6b6b72; }
+
+/* a .sub explaining the controls ABOVE it, not the heading above them —
+   .section .sub's 18px is a gap before content, wrong in that position */
+.section .mcp-after-list { margin: 18px 0 0; }
+
+/* The boards an agent can reach, on the account page: a read-only list, not
+   the admin's editable chip. One line each, the same rhythm as a tool row. */
+.mcp-boards { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.mcp-boards span { padding: 3px 9px; border: 1px solid #ececef; border-radius: 999px; font-size: 13px; }
+.mcp-boards.none { color: #6b6b72; }

@@ -49,7 +49,7 @@ function open(anchorEl, me, afterSignOut) {
       // tagging isn't working and says what is wrong, which is the thing a
       // standing menu row could never do.
       if (me.is_admin) body.appendChild(ddRow({ label: "Admin", href: "/admin.html" }));
-      body.appendChild(ddRow({ label: "Profile", href: "/profile.html" }));
+      body.appendChild(ddRow({ label: "Account", href: "/account.html" }));
       body.appendChild(ddSep());
       body.appendChild(ddRow({
         label: "Sign out",

@@ -258,7 +258,7 @@ let bad = 0;
 for (const page of Object.keys(hashed)) {
   const html = await fs.readFile(path.join(OUT, `${page}.html`), "utf8");
   // Asset references only — <link rel=stylesheet href> and <script src>. Plain
-  // <a href> is page navigation (profile.html links /login.html?change=1&…),
+  // <a href> is page navigation (account.html links /login.html?change=1&…),
   // which is the server's business, not a file that has to sit in dist.
   const local = (u) => !/^(https?:)?\/\//.test(u) && !u.startsWith("data:");
   const sheetHrefs = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map((m) => m[1]);

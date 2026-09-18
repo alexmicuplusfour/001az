@@ -1,10 +1,14 @@
-// Profile page: any signed-in member's own settings. Mirrors the admin
-// shell's gate pattern — /api/me flips #profile-ui visible or bounces to login.
+// Account page: any signed-in member's own settings, in two tabs — Profile
+// (name, password, notifications) and MCP (their own agent connection).
+// Mirrors the admin shell's gate pattern: /api/me flips #account-ui visible or
+// bounces to login.
 import { toast } from "./toast.js";
 import { api } from "./api.js";
 import { ICONS } from "./utils.js";
 import { createCheckbox } from "./checkbox.js";
 import { chime, soundOn, setSoundOn } from "./chime.js";
+import { mountTabs } from "./tabs.js";
+import { renderAccountMcp } from "./account-mcp.js";
 
 // The rail names its glyphs in data-icon; fill them in before the gate resolves
 // so nothing renders half-drawn. Mirrors admin.js.
@@ -14,10 +18,10 @@ for (const el of document.querySelectorAll("[data-icon]")) {
 
 const me = await fetch("/api/me", { cache: "no-store" }).then((r) => r.json()).catch(() => null);
 if (!me) {
-  location.replace("/login.html?next=%2Fprofile.html");
+  location.replace("/login.html?next=%2Faccount.html");
 } else {
   document.getElementById("gate").hidden = true;
-  document.getElementById("profile-ui").hidden = false;
+  document.getElementById("account-ui").hidden = false;
 
   const input = document.getElementById("name-input");
   input.value = me.name || "";
@@ -60,4 +64,13 @@ if (!me) {
     onChange: () => { setSoundOn(sound.checked); if (sound.checked) chime(); },
   });
   document.getElementById("sound-row").appendChild(sound.el);
+
+  // The same switcher the admin shell uses, with none of its hooks: this page
+  // has no SSE stream to follow visibility and nothing to re-measure on select.
+  // `#mcp` deep-links here from the admin tab's Connection pointer.
+  mountTabs({ names: ["profile", "mcp"], defaultTab: "profile" });
+
+  // At boot rather than on select, like every admin tab but Storage: one small
+  // GET, and a pane that is already drawn when the tab is clicked.
+  renderAccountMcp().catch((err) => toast.error(err.message));
 }

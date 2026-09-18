@@ -15,11 +15,13 @@ import { fileURLToPath } from "node:url";
 import {
   createUser,
   getUserByEmail,
+  mcpTokenFor,
   createSession,
   createBoard,
   setBoardMembers,
   createEntity,
   insertItem,
+  setMcpToken,
   setPluginState,
   usageRows,
 } from "../server/db.js";
@@ -30,6 +32,13 @@ import {
 import { clearSidecarHealth, seedSidecarHealth, sweepSidecars } from "../server/sidecar-catalog.js";
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
+
+// base -> how to look up that server's admin token. A LOOKUP, not the string:
+// the database owns this value, and anything that changes it there (a rotate
+// through the API, a clear in the UI, another file's setMcpToken) would leave a
+// cached copy stale with no signal. Tests were hand-syncing it back, which is
+// the same fact living in two places.
+const MCP_TOKENS = new Map();
 
 const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgres://gallery:gallery@127.0.0.1:5433/postgres";
 const TEMPLATE_DB = process.env.TEST_TEMPLATE_DB || "gallery_test_template";
@@ -123,7 +132,23 @@ export async function startServer({ frontend = false, staticDir = null } = {}) {
   });
   const base = `http://127.0.0.1:${server.address().port}`;
 
+  // Every MCP call needs a bearer now (planning/mcp-members-plan.md §10.6):
+  // the tokenless loopback path is gone. Mint one for the seeded admin and let
+  // `mcp()` send it by default, so that change lives here and not at the ~78
+  // call sites that never cared about tokens.
+  //
+  // Keyed by `base`, not a module variable — test files run concurrently, each
+  // with its own server, and two of them sharing one token is the bug this
+  // shape avoids.
+  // seedAdmin runs at import against the ADMIN_EMAIL set above, so this row is
+  // always there — no guard, because a missing one would silently leave every
+  // MCP call in the file unauthenticated and 401ing for no visible reason.
+  const adminUser = await getUserByEmail(db, ADMIN_EMAIL);
+  await setMcpToken(db, adminUser.id, `test-mcp-${name}`);
+  MCP_TOKENS.set(base, () => mcpTokenFor(db, adminUser.id));
+
   async function close() {
+    MCP_TOKENS.delete(base);
     await new Promise((r) => server.close(r));
     await db.end();
     await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -418,15 +443,24 @@ export async function until(fn, ms = 8000) {
 // --- MCP ---------------------------------------------------------------------
 
 // One JSON-RPC call to /mcp. `req` above speaks cookies, which is exactly what
-// MCP does not: a client carries a bearer token (or nothing, on loopback) and
-// the protocol version in headers. `xff` fakes a non-loopback client — the app
-// sets `trust proxy` 1, so an X-Forwarded-For from the test's own 127.0.0.1 is
-// honoured, which is the only way to exercise the off-this-machine rules.
+// MCP does not: a client carries a bearer token and the protocol version in
+// headers. `xff` moves which per-IP rate bucket a call lands in, which is the
+// only thing that header still decides here.
+
+// Whatever this server's admin holds RIGHT NOW. Read through rather than
+// remembered, so a test that rotates or clears the token does not have to tell
+// the harness about it.
+export const mcpToken = async (base) => (await MCP_TOKENS.get(base)?.())?.token ?? null;
+
 export async function mcp(base, body, { token, origin, version, xff, method = "POST" } = {}) {
   const headers = { Accept: "application/json, text/event-stream" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (version !== null) headers["MCP-Protocol-Version"] = version || "2025-06-18";
-  if (token) headers.Authorization = `Bearer ${token}`;
+  // UNDEFINED means "whatever this server's admin holds" — the normal case, and
+  // what keeps every tool test from having to know a token exists. `null` still
+  // means send no header, which is how the gate's own tests ask to be refused.
+  const bearer = token === undefined ? await mcpToken(base) : token;
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
   if (origin) headers.Origin = origin;
   if (xff) headers["X-Forwarded-For"] = xff;
   const res = await fetch(base + "/mcp", {

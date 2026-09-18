@@ -45,7 +45,7 @@ test("a signed-out visitor is sent to login, not left on a broken page", async (
 
 // The landing rule — arriving with no ?board=. Worth its own coverage twice
 // over: it is where every sign-in lands (login.js) and where the "Gallery"
-// back-link on the admin and profile pages goes, and until now nothing
+// back-link on the admin and account pages goes, and until now nothing
 // exercised it at all — every test above opens a board, a page, or login
 // directly. planning/app-loading-plan.md, Stage 3.
 test("landing on / adopts a board without a second page load", async () => {

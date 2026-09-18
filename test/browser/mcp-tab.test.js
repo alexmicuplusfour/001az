@@ -16,8 +16,8 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { openApp } from "./harness.js";
-import { adminSession } from "../helpers.js";
-import { setPassword, createBoard, setSetting } from "../../server/db.js";
+import { adminSession, seedUser, mcpToken, ADMIN_EMAIL } from "../helpers.js";
+import { setPassword, createBoard, setSetting, setMcpToken, setUserName } from "../../server/db.js";
 import { toolSpecs } from "../../server/mcp-tools.js";
 import { hashPassword } from "../../server/password.js";
 
@@ -32,6 +32,15 @@ before(async () => {
   // Named, not held by id: the scope popover is addressed by board NAME now.
   await createBoard(app.db, "Scope A", [], "");
   await createBoard(app.db, "Scope B", [], "");
+  // A burner connection for the Connections list to revoke. NOT the admin's:
+  // that token is what every other call in this file defaults to (helpers.js),
+  // and §10.8 recorded three tests that broke by disturbing it.
+  const victim = await seedUser(app.db, "revoked@test.local");
+  await setMcpToken(app.db, victim.id, "browser-revoke-token-vvvvv");
+  // Named with markup on purpose. A member sets their own name from Account ->
+  // Profile and the server stores it verbatim, so the person cell is the one
+  // place on an admin page where member-controlled text meets innerHTML.
+  await setUserName(app.db, victim.id, '<img src=x onerror="window.__xss = 1">');
 });
 after(() => app?.close());
 
@@ -52,29 +61,33 @@ const flip = (page, sel) => page.click(`${sel} .switch`);
 
 const turnOn = async (page) => {
   if (!(await switchOn(page, "#mcp-on"))) await flip(page, "#mcp-on");
-  await page.waitForSelector("#mcp-cmd");
+  // The saving switch, which is this tab's and inside the body the enable
+  // switch hides. It used to wait on the command — that moved to the account
+  // page with the token it carries.
+  await page.waitForSelector("#mcp-write");
 };
 
 // The tool list's machine names — what a caller actually types.
 const toolNames = (page) => page.$$eval(".mcp-t code", (els) => els.map((e) => e.textContent));
 
-test("off by default, and switching on paints a complete, copyable command", async () => {
+test("off by default, and switching on paints the instance's controls", async () => {
   const page = await openTab();
   // The tab and its heading name the protocol. "Agents" said nothing about what
   // this speaks, which is the one thing an operator needs in order to use it.
   assert.equal(await page.textContent('[data-tab="mcp"]'), "MCP");
   assert.equal(await page.textContent("#mcp-content h2"), "MCP");
   assert.equal(await switchOn(page, "#mcp-on"), false);
-  // The body stays hidden while it is off — there is no command to give out.
+  // The body stays hidden while it is off — there is nothing to set up yet.
   assert.equal(await page.isHidden("#mcp-body"), true);
 
   await turnOn(page);
-  const cmd = await page.textContent("#mcp-cmd");
-  // The exact failure the paneState fix was for: a re-render from the PATCH
-  // answer must know the endpoint and must carry the freshly minted token.
-  assert.match(cmd, /claude mcp add --transport http boards/);
-  assert.doesNotMatch(cmd, /undefined/, "the write's answer carried the endpoint");
-  assert.match(cmd, /Authorization: Bearer \S+/, "enabling minted a token");
+  // NO COMMAND HERE. A token belongs to a person, so this tab points at the
+  // page where every member reads their own — carrying a second copy would be
+  // one connection with two rotate buttons (§10.14).
+  assert.equal(await page.$$eval("#mcp-cmd", (e) => e.length), 0, "no command on the instance tab");
+  const body = await page.textContent("#mcp-body");
+  assert.match(body, /Account → MCP/);
+  assert.equal(await page.getAttribute('#mcp-body a[href^="/account.html"]', "href"), "/account.html#mcp");
 
   // The tool list — served, not hardcoded — rendered its rows. Compared against
   // the registry itself, so adding a tool cannot make this test wrong.
@@ -117,6 +130,40 @@ test("off by default, and switching on paints a complete, copyable command", asy
   // The whole `write` group went with it, not just its row.
   assert.deepEqual(await page.$$eval(".mcp-group", (els) => els.length), 1);
 
+  // The Connections list — the oversight half of this tab, and the only thing
+  // here that acts on somebody else. Two rows: the admin's own (the token every
+  // other call in this file rides on) and the burner seeded above.
+  const connected = () => page.$$eval("#mcp-connections .email", (els) => els.map((e) => e.textContent));
+  const before = await connected();
+  assert.ok(before.includes("revoked@test.local"), "the burner's connection is listed");
+  assert.ok(before.includes(ADMIN_EMAIL), "and the admin's own, not hidden from itself");
+  // No token anywhere on the page, masked or otherwise (§3) — an admin reads
+  // who is connected, never what with. outerHTML rather than textContent: a
+  // token parked in a data- attribute or a title would pass the softer check.
+  const tableHtml = await page.$eval("#mcp-connections", (el) => el.outerHTML);
+  assert.doesNotMatch(tableHtml, /browser-revoke-token/);
+
+  // And the person cell renders a member's name as TEXT. Before utils.js owned
+  // this cell, the Members tab interpolated it raw and a name like the one
+  // seeded above became an ELEMENT in the admin's DOM — only CSP's
+  // `script-src 'self'` stood between that and script execution.
+  assert.equal(await page.$$eval("#mcp-connections .name-cell img", (els) => els.length), 0);
+  assert.equal(await page.evaluate(() => window.__xss), undefined);
+  assert.match(await page.textContent("#mcp-connections"), /<img src=x/, "shown, not parsed");
+
+  // Addressed by row INDEX off the rendered order rather than a :has-text
+  // selector, so this says what it means when the list grows a row.
+  await page.click(
+    `#mcp-connections tbody tr:nth-child(${before.indexOf("revoked@test.local") + 1}) button.danger`
+  );
+  await page.waitForFunction(
+    (n) => document.querySelectorAll("#mcp-connections tbody tr").length === n,
+    before.length - 1
+  );
+  const after = await connected();
+  assert.ok(!after.includes("revoked@test.local"), "the row that was clicked went");
+  assert.ok(after.includes(ADMIN_EMAIL), "and the one that was not did not");
+
   // Switching back off hides the body again. waitForSelector waits for VISIBLE
   // by default and the claim is that it went away, so ask the element itself.
   await flip(page, "#mcp-on");
@@ -125,36 +172,52 @@ test("off by default, and switching on paints a complete, copyable command", asy
   assert.deepEqual(page.failures, []);
 });
 
-// The command IS the token surface now — there is no second place it appears,
-// which is what makes masking it mean anything. It used to be dotted out in a
-// Token section while printed in full in the command directly above.
-test("the token: masked in the command, revealed, rotated, cleared", async () => {
-  const page = await openTab();
-  await turnOn(page);
+// The account page's MCP tab — a NON-ADMIN doing the whole thing for
+// themselves, which is what stage 2 is for. In this file rather than its own
+// because a new browser FILE is a new Chromium and a new Postgres clone, and
+// that cost is what made welcome.test.js flake in the parallel run.
+test("a member mints their own token on the account page", async () => {
+  // The test above leaves the instance switched off (it checks that hiding the
+  // body works), and a member's pane correctly says so rather than offering a
+  // token that could not connect. Switch it on directly: whether the admin's
+  // switch works is the subject up there, not here.
+  await setSetting(app.db, "mcp_enabled", "1");
+  const { user } = await app.signIn({ email: "member@test.local", boardName: "Their board" });
+  const page = await app.open("/account.html", { sid: user.sid });
+  page.on("dialog", (d) => d.accept());
 
-  const bearer = async () => (await page.textContent("#mcp-cmd")).match(/Bearer (\S+)/)?.[1];
-  assert.match(await bearer(), /·{6,}/, "masked until asked for");
-  await page.click("#mcp-show");
-  const shown = await bearer();
-  assert.doesNotMatch(shown, /·/, "show reveals the whole token, in place");
+  // The page is Account, and the tab that used to be its only one is Profile.
+  assert.equal(await page.textContent("h1"), "Account");
+  assert.equal(await page.textContent('[data-tab="profile"]'), "Profile");
+  // The older half still works after the rename.
+  assert.equal(await page.inputValue("#name-input"), "");
+
+  await page.click('[data-tab="mcp"]');
+  await page.waitForSelector("#mcp-cmd");
+  // No token yet: a line asking for one, not a command that cannot connect.
+  assert.match(await page.textContent("#mcp-cmd"), /Create a token/);
+  // Their board, from the same rule the tools apply.
+  assert.match(await page.textContent(".mcp-boards"), /Their board/);
 
   await page.click("#mcp-rotate");
-  await page.waitForFunction(
-    (old) => !document.getElementById("mcp-cmd")?.textContent.includes(old),
-    shown
-  );
-  const rotated = await bearer();
-  assert.notEqual(rotated, shown);
-  // A rotate that left the token hidden would hand back something unpastable.
-  assert.doesNotMatch(rotated, /·/);
+  await page.waitForSelector("#mcp-copy");
+  const cmd = await page.textContent("#mcp-cmd");
+  assert.match(cmd, /claude mcp add --transport http boards/);
+  assert.match(cmd, /Authorization: Bearer \S+/, "minted, and in the command");
+  assert.doesNotMatch(cmd, /undefined/, "the write's answer carried the endpoint");
+  // Freshly minted is revealed, not masked — a token you cannot see is a token
+  // you cannot paste.
+  assert.doesNotMatch(cmd.match(/Bearer (\S+)/)[1], /·/);
+
+  await page.click("#mcp-show");
+  assert.match((await page.textContent("#mcp-cmd")).match(/Bearer (\S+)/)[1], /·{6,}/, "hide masks it again");
 
   await page.click("#mcp-clear");
   await page.waitForSelector("#mcp-rotate:has-text('create')");
-  const cmd = await page.textContent("#mcp-cmd");
-  assert.doesNotMatch(cmd, /Authorization/, "no token, no header — the local-only shape");
-  assert.doesNotMatch(cmd, /\\\s*$/, "and no dangling line continuation");
-  assert.match(await page.textContent("#mcp-content"), /loopback/);
+  assert.doesNotMatch(await page.textContent("#mcp-cmd"), /Authorization/);
+
   assert.deepEqual(page.errors, []);
+  assert.deepEqual(page.failures, []);
 });
 
 // The MCP App view (planning/mcp-stage-4.md §3). It lives in this file, not its
@@ -256,7 +319,13 @@ test("a host's CSP, built from what we serve, admits our thumbnails", async () =
   await setSetting(app.db, "mcp_enabled", "1");
   const read = await fetch(app.base + "/mcp", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "MCP-Protocol-Version": "2025-06-18" },
+    headers: {
+      "Content-Type": "application/json",
+      "MCP-Protocol-Version": "2025-06-18",
+      // A bearer names a person now, and there is no tokenless path left for a
+      // caller on the machine itself (planning/mcp-members-plan.md §4).
+      Authorization: `Bearer ${await mcpToken(app.base)}`,
+    },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "resources/read", params: { uri: "ui://001az-boards/board-grid" } }),
   }).then((r) => r.json());
   const { resourceDomains } = read.result.contents[0]._meta.ui.csp;
@@ -298,12 +367,9 @@ test("a host's CSP, built from what we serve, admits our thumbnails", async () =
   await setSetting(app.db, "mcp_enabled", null);
 });
 
-test("board scope persists, and last used renders both states", async () => {
-  await setSetting(app.db, "mcp_last_used", null);
+test("board scope persists across a reload", async () => {
   const page = await openTab();
   await turnOn(page);
-
-  assert.match(await page.textContent("#mcp-body"), /never used yet/);
 
   // Scope is the Members tab's chip + access popover, so the closed state is a
   // SENTENCE, not a row of boxes: the two ways of saying everything (all ticked,
@@ -320,19 +386,19 @@ test("board scope persists, and last used renders both states", async () => {
   // Untick one and Save. The popover batches, so this is ONE PATCH and one
   // repaint — as checkboxes it was a PATCH and a full pane rebuild per tick.
   // The row IS the <label>; .cb-box is pointer-events:none by design.
+  //
+  // Counted off the chip rather than written down: other tests in this file
+  // seed boards of their own, and a hardcoded "1 of 2" makes this test depend
+  // on how many of them ran first.
+  const want = `${labels.length - 1} of ${labels.length} boards`;
   await page.click(`.dd-check:has-text("Scope A")`);
   await page.click(".dd-footer .dd-action");
-  await page.waitForFunction(() => document.getElementById("mcp-scope")?.textContent === "1 of 2 boards");
+  await page.waitForFunction((t) => document.getElementById("mcp-scope")?.textContent === t, want);
 
-  // Persistence and the "last used" copy in ONE reload rather than two: both
-  // are facts about what a freshly loaded pane says.
-  await setSetting(app.db, "mcp_last_used", String(Date.now() - 3 * 3600 * 1000));
+  // Persistence, on a freshly loaded pane.
   const again = await openTab();
   await again.waitForSelector("#mcp-scope");
-  assert.equal(await again.textContent("#mcp-scope"), "1 of 2 boards", "the untick survived");
-  // relTime's vocabulary — the admin shell's one phrasing for "when", not a
-  // sixth private copy of it (utils.js:458 says so in as many words).
-  assert.match(await again.textContent("#mcp-body"), /last used 3h ago/);
+  assert.equal(await again.textContent("#mcp-scope"), want, "the untick survived");
 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(again.errors, []);
