@@ -7,6 +7,7 @@ import { toast } from "./toast.js";
 import { api, copy } from "./api.js";
 import { openDropdown, ddRow, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty } from "./dropdown.js";
 import { ICONS, memberCell } from "./utils.js";
+import { saveGate } from "./save-gate.js";
 
 const content = document.getElementById("content");
 const gate = document.getElementById("gate");
@@ -201,11 +202,12 @@ function openAccess(u, chip) {
     maxItems: 12,
     onClose: () => { live = false; },
     build: (body) => body.appendChild(ddEmpty("Loading…")),
-    // Save is dead until the list lands — see the same footer in
-    // admin-boards.js: acting on rows that haven't arrived means acting on
-    // none, and "none" is a full revoke.
+    // Save is dead until the list lands, and then until a box moves — see the
+    // same footer in admin-boards.js. Both come from the save gate below,
+    // which opens on an empty `rows`: acting on rows that haven't arrived
+    // means acting on none, and "none" is a full revoke.
     footer: (foot) => {
-      saveBtn = ddAction({ label: "Save", disabled: true, onClick: () => save() });
+      saveBtn = ddAction({ label: "Save", onClick: () => save() });
       foot.appendChild(saveBtn);
     },
   });
@@ -214,6 +216,14 @@ function openAccess(u, chip) {
   const memberSet = new Set(u.boards.map((b) => b.id));
   const adminSet = new Set(u.boards.filter((b) => b.role === "admin").map((b) => b.id));
   let rows = [];    // { id, name, member, admin } — the handles, not the DOM
+  // Reading the row handles rather than the payload: a member ticked off and
+  // back on has to land on the same answer, and it does, because both halves
+  // of every row are in the reading.
+  const gate = saveGate({
+    root: ctx.body,
+    read: () => rows.map((r) => [r.id, r.member.checked, !!r.admin?.checked]),
+    buttons: [saveBtn],
+  });
 
   async function save() {
     // Built once, in the shape the row carries, and the payload derived from
@@ -263,7 +273,8 @@ function openAccess(u, chip) {
       return { id: b.id, name: b.name, member, admin };
     });
     ctx.body.replaceChildren(list);
-    saveBtn.disabled = false;
+    // The rows the popover OPENED with, now that they exist — not an edit.
+    gate.rebase();
     ctx.reposition(); // the body just changed height
   }).catch(() => { if (live) ctx.close(); });
 }

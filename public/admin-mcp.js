@@ -26,6 +26,7 @@ import { toolGroups } from "./mcp-pane.js";
 import { toast } from "./toast.js";
 import { switchRow } from "./switch.js";
 import { openDropdown, ddCheckRow, ddAction, ddEmpty } from "./dropdown.js";
+import { saveGate } from "./save-gate.js";
 
 const content = document.getElementById("mcp-content");
 export async function renderMcp() {
@@ -210,12 +211,14 @@ function renderScopeChip(d, cell) {
 
 // The scope picker: the Members tab's access popover with one column instead of
 // two. No fetch — unlike that one, the full board list already rode in with the
-// pane — so the rows build synchronously and Save is live from the first frame.
+// pane — so the rows build synchronously and there is nothing to wait for; its
+// Save is dead only because nothing has been ticked yet (save-gate.js).
 //
 // Batching behind Save is not only for consistency: a tick used to PATCH and
 // repaint the entire pane, so scoping six boards rebuilt this tab six times.
 function openScope(d, chip) {
   let rows = [];
+  let saveBtn;    // assigned by the footer builder, which runs inside the call
   const ctx = openDropdown(chip, {
     variant: "light",
     align: "start",
@@ -230,16 +233,20 @@ function openScope(d, chip) {
       });
     },
     footer: (foot, { close }) => {
-      foot.appendChild(ddAction({
+      saveBtn = ddAction({
         label: "Save",
         onClick: async () => {
           close();
           await save({ boards: rows.filter((r) => r.row.checked).map((r) => r.id) });
         },
-      }));
+      });
+      foot.appendChild(saveBtn);
     },
   });
   if (!ctx) return; // second click on the same chip: toggled closed
+  // Nothing to rebase — the rows were built before openDropdown returned, so
+  // the scope this agent already has IS the baseline.
+  saveGate({ root: ctx.body, read: () => rows.map((r) => [r.id, r.row.checked]), buttons: [saveBtn] });
 }
 
 // EVERY write on this pane, in one place: each route answers the whole state, so

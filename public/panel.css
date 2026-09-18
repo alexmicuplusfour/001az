@@ -73,7 +73,9 @@ button {
   background: #111;
   color: #fff;
 }
-button:disabled { opacity: .5; cursor: default; }
+/* aria-disabled = nothing to save (save-gate.js); :disabled = mid-request. */
+button:disabled,
+button[aria-disabled="true"] { opacity: .5; cursor: default; }
 /* A button that carries a glyph — same contract as the gallery's .tool-btn: the
    caller passes `ICONS.foo + "<span>Label</span>"` and the BUTTON owns the size
    and the gap, so any glyph in the set drops in and lines up. The span is what

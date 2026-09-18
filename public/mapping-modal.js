@@ -19,6 +19,7 @@ import { ICONS, glyphEl, sentence } from "./utils.js";
 import { switchRow } from "./switch.js";
 import { sectionHeadingEl, provBand, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, busy } from "./modal.js";
 import { fillSelect } from "./select.js";
+import { draftKey } from "./save-gate.js";
 
 // Refresh cadence choices (minutes) this pane OFFERS. 0 = once: the field is
 // fetched when the entity is added and never re-pulled. The words are the
@@ -130,10 +131,11 @@ const normalizeKey = (v) =>
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, collect, setBands }: the host folds collect()'s payload
-// into its one PATCH/POST, and names the models behind the provenance bands
-// via setBands. Fully parameterized (no gallery-state reads), so it works on
-// admin.html and for not-yet-created boards:
+// Returns { isDirty, snapshot, collect, setBands }: the host folds collect()'s
+// payload into its one PATCH/POST when isDirty() says the pane was really
+// edited, reads snapshot() into its own save gate, and names the models behind
+// the provenance bands via setBands. Fully parameterized (no gallery-state
+// reads), so it works on admin.html and for not-yet-created boards:
 //   isAdmin  — editable pane; false = read-only view
 //   mapping  — the board's current mapping (null for a new/unmapped board)
 //   hasItems — locks the connector-template picker (templates rewire the whole
@@ -141,11 +143,6 @@ const normalizeKey = (v) =>
 //   onCapabilityChange — a band's "Change" action, handed the capability id:
 //              the host opens its AI-models strip at that capability's row
 export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, onCapabilityChange = null }) {
-  // Any user edit flips the pane dirty, so a pure-tagging save omits `mapping`
-  // and doesn't needlessly re-run the server's reschedule/backfill.
-  let dirty = false;
-  const markDirty = () => { dirty = true; };
-
   // Clone the current mapping so edits are buffered until Save. The state IS
   // the new wire shape — no per-slot from/hint/candidates translation layer.
   let fields = (mapping?.fields || []).map((f) => ({ ...f }));
@@ -264,13 +261,24 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   let drawerInst = null;
   const drawer = () => (drawerInst ??= createDrawer(container.closest(".modal-dialog") || container));
 
+  // ── Was this pane edited? ─────────────────────────────────────────────────
+  // The whole draft, as a comparable value. The four `let`s above ARE the
+  // pane's state, so there is nothing else to ask. Not collect(): that one
+  // validates and toasts, and a question about dirtiness must do neither.
+  //
+  // This replaced a sticky flag set by any input/change event under the
+  // container, which was wrong in both directions. It latched on a select
+  // being re-picked to the value it already held, and it never un-latched when
+  // an edit was undone — so a pane the user opened, poked and put back told
+  // the host to send `mapping`, and the server answered a no-op edit with a
+  // full reschedule and backfill.
+  const snapshot = () => ({ input: inputConnector, identity: identityCfg, face: faceCfg, fields });
+  const opened = draftKey(snapshot());
+  const isDirty = () => draftKey(snapshot()) !== opened;
+
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
   // where an inline display:flex would defeat the host's display:none.
-  // Real data edits fire input/change; the drawer commits and the structural
-  // ops (add/remove/apply-template) call markDirty() at their handlers.
-  container.addEventListener("input", markDirty, true);
-  container.addEventListener("change", markDirty, true);
   const body = container;
 
   // ── Template row ──────────────────────────────────────────────────────────
@@ -540,7 +548,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       onRemove: isAdmin
         ? () => {
             fields.splice(i, 1);
-            markDirty();
             render();
           }
         : null,
@@ -585,7 +592,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       : `${cat.label || cat.key} · ${kindWord(cat.kind)}${cat.note ? ` · ${cat.note}` : ""}`,
     onClick: () => {
       fields.push({ key: cat.key, kind: cat.kind, source: sourceId, fn: cat.fn });
-      markDirty();
       close();
       render();
     },
@@ -649,7 +655,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // a drawer supplies.
   const commit = (write) => {
     write();
-    markDirty();
     drawer().close();
     render();
   };
@@ -1132,7 +1137,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     identityCfg = t.identity ? clone(t.identity) : null;
     faceCfg = t.face ? clone(t.face) : null;
     fields = (t.fields || []).map((f) => ({ ...f }));
-    markDirty();
     bindConnector(row);
   }
 
@@ -1148,7 +1152,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     identityCfg = null;
     faceCfg = null;
     fields = [];
-    markDirty();
     loadFileFields(); // the file source's menu section needs a catalog it never fetched
     bindConnector(null);
   }
@@ -1289,5 +1292,5 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return { ok: true, payload: { mapping: out } };
   }
 
-  return { isDirty: () => dirty, collect, setBands };
+  return { isDirty, snapshot, collect, setBands };
 }

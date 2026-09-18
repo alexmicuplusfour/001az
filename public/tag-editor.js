@@ -5,6 +5,7 @@ import { api } from './api.js';
 import { toast } from './toast.js';
 import { kindFor, thumbUrl } from './kinds.js';
 import { mountModal, busy } from './modal.js';
+import { saveGate } from './save-gate.js';
 
 // Tags live on instances. The grid's edit affordance targets the first
 // instance (the common case is a single-instance entity, where that's
@@ -89,12 +90,23 @@ export function openTagEditor(item, inst = item.instances?.[0]) {
   closeBtn.onclick = close;
   cancelBtn.onclick = close;
 
-  saveBtn.addEventListener("click", busy(saveBtn, async () => {
+  // The ticked pills, in facet order — what the PATCH sends, and what the gate
+  // holds the opening set of. A single-value facet re-picked to the value it
+  // already had unticks one box and ticks another, which is two events and no
+  // change; comparing the tag list rather than the clicks is what keeps Save
+  // dead through that.
+  const draft = () => {
     const tags = [];
     for (const f of state.facets) {
       const cbMap = checkMap.get(f.key) || {};
       for (const [v, cb] of Object.entries(cbMap)) if (cb.checked) tags.push(`${f.key}/${v}`);
     }
+    return tags;
+  };
+  saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
+
+  saveBtn.addEventListener("click", busy(saveBtn, async () => {
+    const tags = draft();
     try {
       if (!inst) throw new Error();
       const { tags: saved, entities } = await api("PATCH", `/api/instances/${inst.id}/tags`, { tags });

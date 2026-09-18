@@ -21,6 +21,7 @@
 import { toast } from "./toast.js";
 import { ICONS, glyphEl } from "./utils.js";
 import { createModal, sectionHeading, provBand, keepPlace, busy } from "./modal.js";
+import { saveGate } from "./save-gate.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
 import { diagnosisBlock } from "./facet-diagnostics.js";
@@ -362,7 +363,14 @@ function attachLiveModels(sel, keyId, kind, current, placeholder) {
     // apply button went on comparing against a selection that had changed
     // underneath it. A picker that moves on its own has to say so — what you
     // see and what you save are the same claim.
-    if (sel.value !== before) sel.dispatchEvent(new Event("change"));
+    if (sel.value !== before) {
+      sel.dispatchEvent(new Event("change"));
+      // ...and separately: that move was the PICKER's, not the person's. A
+      // save gate above (save-gate.js) takes the new value as its baseline
+      // rather than as an edit — otherwise a board editor lights its own Save
+      // a second after opening, over a change nobody made.
+      sel.dispatchEvent(new Event("gate:rebase", { bubbles: true }));
+    }
   }).catch(() => {});
 }
 
@@ -781,6 +789,11 @@ export async function openBoardModal(boardId, opts = {}) {
   // this needs no feed and no admin rights.
   if (!isNew) mountCapConfigs(board.capability_config);
 
+  // The save gate, assigned at the bottom once every piece draft() reads
+  // exists. Declared up here because the capability fetch below outlives that
+  // point and has to rebase through it.
+  let gate = null;
+
   // Per-board capability pins (admin only) — one strip row per capability the
   // capabilities feed says boards may pin, each planned by planBoardPicker
   // (capability-present.js, pure and node-tested: rows, preselect, model axis,
@@ -953,6 +966,11 @@ export async function openBoardModal(boardId, opts = {}) {
       };
       updateAiPresentation();
       aiLoaded = true;
+      // The strip just filled in, and filling it in moved every pin this board
+      // already had into draft()'s answer. That is the state the editor
+      // OPENED in — the fetch was simply slower than the render — so it
+      // becomes the baseline rather than reading as five edits.
+      gate?.rebase();
     }).catch(() => {});
   }
 
@@ -964,17 +982,16 @@ export async function openBoardModal(boardId, opts = {}) {
   if (isNew) document.getElementById("board-modal-name").focus();
 
   document.getElementById("board-modal-cancel").onclick = close;
-  // busy() is also the double-submit guard this handler never had: an
-  // unguarded double-click on a slow save could POST two new boards.
-  const saveBtn = document.getElementById("board-modal-save");
-  saveBtn.onclick = busy(saveBtn, async () => {
-    const name = document.getElementById("board-modal-name").value.trim();
-    if (!name) return toast.warn("Name required");
-    const context = contextTextarea.value.trim();
-    let facets;
-    try { facets = JSON.parse(facetsTextarea.value); }
-    catch { return toast.warn("Facets JSON is invalid"); }
-    if (!Array.isArray(facets)) return toast.warn("Facets must be a JSON array");
+
+  // ── What the editor currently holds, as the body it would send ────────────
+  // ONE builder, read by two callers: Save, and the save gate that decides
+  // whether Save would do anything at all. Two builders would drift, and a
+  // drifted gate is the worst of both — a greyed-out button arguing about a
+  // payload that isn't the one the click sends.
+  //
+  // Throws on unparseable taxonomy JSON. The gate reads that as "changed"
+  // (so the fix is always saveable); Save catches it and names the problem.
+  function draft() {
     // Full-state per capability: every pin column rides every save (nulls
     // clear), in the column names the feed shipped. Gated on aiLoaded so a
     // quick Save before the registry lands can't wipe stored pins.
@@ -989,8 +1006,10 @@ export async function openBoardModal(boardId, opts = {}) {
     // the column and the board follows the app default again. The array is
     // empty until the rows mount, so an early save leaves the columns alone.
     for (const c of capConfigs) Object.assign(aiOverride, c.plan.payload(c.sel.value));
-    const payload = {
-      name, context, facets,
+    return {
+      name: document.getElementById("board-modal-name").value.trim(),
+      context: contextTextarea.value.trim(),
+      facets: JSON.parse(facetsTextarea.value),
       ai_reasoning: aiReasoning,
       ai_research: aiResearch,
       ai_votes: dc.on ? dc.passes : 1,
@@ -1000,13 +1019,30 @@ export async function openBoardModal(boardId, opts = {}) {
       auto_tag_every_min: at.everyMin,
       auto_tag_skip_weekends: at.skipWeekends,
       retag_on_refresh: at.retagOnRefresh,
+      // For COMPARISON only — Save re-collects the real one below. An
+      // untouched pane contributes null whether or not it was ever built, so
+      // merely clicking over to the Mapping tab is not an edit.
+      mapping: mappingPane?.isDirty() ? mappingPane.snapshot() : null,
     };
+  }
+
+  // busy() is also the double-submit guard this handler never had: an
+  // unguarded double-click on a slow save could POST two new boards.
+  const saveBtn = document.getElementById("board-modal-save");
+  saveBtn.onclick = busy(saveBtn, async () => {
+    let payload;
+    try { payload = draft(); }
+    catch { return toast.warn("Facets JSON is invalid"); }
+    const name = payload.name;
+    if (!name) return toast.warn("Name required");
+    if (!Array.isArray(payload.facets)) return toast.warn("Facets must be a JSON array");
     // Fold a touched mapping into the same save. Only when the admin actually
     // edited it — an untouched pane omits `mapping` so an edit stays a light
     // tagging update (no server-side reschedule/backfill). The canEditAI gate
     // mirrors the server's own rule (mapping is an admin-layered field; a
     // non-admin body carrying one is ignored), so an editable pane and a
     // saveable mapping are the same population.
+    delete payload.mapping; // the draft's copy is the gate's, not the wire's
     if (mappingPane && canEditAI && mappingPane.isDirty()) {
       const res = mappingPane.collect();
       if (!res.ok) return; // collect() already toasted the reason
@@ -1025,4 +1061,10 @@ export async function openBoardModal(boardId, opts = {}) {
       toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);
     } catch (err) { toast.error(err.message); }
   });
+
+  // Root is the DIALOG, not the body: the AI-models strip and the mapping
+  // pane's drawer are both outside the scrolling body, and a pin chosen in the
+  // strip is exactly the kind of edit this must not miss. A new board's Save
+  // starts dead too — with nothing typed there is no board to create.
+  gate = saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
 }

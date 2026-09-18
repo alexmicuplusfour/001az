@@ -359,17 +359,17 @@ export function ddRow({ label, labelEl, sublabel, active = false, href, leading,
 // as a real <a> (middle-click opens a tab); one that acts is a <button>. They
 // are only ever built here, so the two render as the same box — callers pick
 // the element by passing href or onClick, not by hand-rolling the markup.
-export function ddAction({ label, icon, href, onClick, disabled = false } = {}) {
+// A footer action that must open INERT — a pop whose Save acts on rows the
+// body hasn't fetched yet — says so through a save gate (save-gate.js) rather
+// than a flag here: the gate answers the same question ("is there anything to
+// save") for the whole life of the pop, not just its first frame.
+export function ddAction({ label, icon, href, onClick } = {}) {
   const el = document.createElement(href ? "a" : "button");
   // An action with an icon is a row and reads left-to-right from its glyph. One
   // without is a button, and a button's label belongs in the middle of it.
   el.className = "dd-action" + (icon ? "" : " dd-action--plain");
   if (href) el.href = href;
   else el.type = "button";
-  // `disabled` is here because a pop that fills from a fetch has to open with
-  // its Save inert — a footer action that acts on rows the body hasn't got yet
-  // acts on nothing, and "nothing" is a destructive answer for a picker.
-  if (disabled) el.disabled = true;
   if (icon) {
     const wrap = document.createElement("span");
     wrap.className = "dd-icon";

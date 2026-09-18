@@ -9,6 +9,7 @@ import { createCheckbox } from "./checkbox.js";
 import { chime, soundOn, setSoundOn } from "./chime.js";
 import { mountTabs } from "./tabs.js";
 import { renderAccountMcp } from "./account-mcp.js";
+import { saveGate } from "./save-gate.js";
 
 // The rail names its glyphs in data-icon; fill them in before the gate resolves
 // so nothing renders half-drawn. Mirrors admin.js.
@@ -26,18 +27,39 @@ if (!me) {
   const input = document.getElementById("name-input");
   input.value = me.name || "";
 
-  document.getElementById("name-form").addEventListener("submit", async (e) => {
+  const nameForm = document.getElementById("name-form");
+  // The same gate the modals use (save-gate.js): Save is dead until the box
+  // holds something other than the name you already have. The server's answer
+  // becomes the new baseline — it normalizes, so what came back is what is
+  // stored — and a failed save leaves the edit standing and the button live.
+  const nameGate = saveGate({
+    root: nameForm,
+    read: () => input.value.trim(),
+    buttons: [nameForm.querySelector("button")],
+  });
+  // The gate owns the BUTTON; this owns the REQUEST. They are separate because
+  // a click anywhere in the form is one of the gate's re-read signals, so a
+  // click on Save mid-flight can hand the button back while the PATCH is still
+  // out — which is a second PATCH without the flag. (The modals get this from
+  // busy(), which this page doesn't load the styles for.)
+  let saving = false;
+  nameForm.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (saving) return;
+    saving = true;
     const btn = e.target.querySelector("button");
     btn.disabled = true;
     try {
       const { name } = await api("PATCH", "/api/account", { name: input.value });
       input.value = name || "";
+      nameGate.rebase();
       toast("Name updated");
     } catch (err) {
       toast.error(err.message);
     } finally {
-      btn.disabled = false;
+      saving = false;
+      btn.disabled = false; // the gate holds aria-disabled; `disabled` is ours
+      nameGate.sync();
     }
   });
 

@@ -8,6 +8,7 @@ import { openBoardModal } from "./board-modal.js";
 import { openDropdown, ddCheckRow, ddChildCheckRow, ddAction, ddEmpty, openFacetScopePop } from "./dropdown.js";
 import { ICONS } from "./utils.js";
 import { busy } from "./modal.js";
+import { saveGate } from "./save-gate.js";
 
 const boardsContent = document.getElementById("boards-content");
 
@@ -237,11 +238,13 @@ function openAccessPop(board, anchorEl) {
     maxItems: 12,
     onClose: () => { live = false; },
     build: (body) => body.appendChild(ddEmpty("Loading…")),
-    // Dead until the user list lands. `rows` is empty until then and an empty
-    // save clears the board's whole membership, so a slow fetch would otherwise
-    // leave "remove everyone" sitting exactly where the user expects "Save".
+    // Dead until the user list lands, and then dead until a box moves — both
+    // from the save gate below, which opens on an EMPTY `rows` and so reads
+    // "nothing to save" for the whole fetch. That matters: an empty save
+    // clears the board's whole membership, so a slow fetch must never leave
+    // "remove everyone" sitting where the user expects "Save".
     footer: (foot) => {
-      saveBtn = ddAction({ label: "Save", disabled: true, onClick: () => save() });
+      saveBtn = ddAction({ label: "Save", onClick: () => save() });
       foot.appendChild(saveBtn);
     },
   });
@@ -250,6 +253,13 @@ function openAccessPop(board, anchorEl) {
   const memberSet = new Set(board.memberIds || []);
   const adminSet = new Set(board.adminIds || []);
   let rows = []; // { id, member, admin } — the handles, not the DOM
+  // A global admin's row is checked and dead, so it reads the same forever and
+  // simply never contributes a change.
+  const gate = saveGate({
+    root: ctx.body,
+    read: () => rows.map((r) => [r.id, r.member.checked, !!r.admin?.checked]),
+    buttons: [saveBtn],
+  });
 
   async function save() {
     const memberIds = rows.filter((r) => !r.member.disabled && r.member.checked).map((r) => r.id);
@@ -294,7 +304,8 @@ function openAccessPop(board, anchorEl) {
       return { id: u.id, member, admin };
     });
     ctx.body.replaceChildren(list);
-    saveBtn.disabled = false;
+    // The rows the popover OPENED with, now that they exist — not an edit.
+    gate.rebase();
     ctx.reposition(); // the body just changed height
   }).catch(() => { if (live) ctx.close(); });
 }

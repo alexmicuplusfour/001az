@@ -631,10 +631,18 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 /* Same four wearers as the rule above — a busy Connect on the welcome screen
    and a submitting Sign in were left undimmed only because this list was
    copied short. */
+/* Two spellings, one look. `disabled` is a button that is WORKING (modal.js
+   busy()); aria-disabled is one with nothing to save (save-gate.js), held
+   focusable on purpose so it can carry the tooltip that says so. A reader
+   should not be able to tell the difference by looking. */
 .modal-footer button:disabled,
 .drawer-foot button:disabled,
 .w-actions button:disabled,
-.login-card button:disabled { opacity: .5; cursor: default; }
+.login-card button:disabled,
+.modal-footer button[aria-disabled="true"],
+.drawer-foot button[aria-disabled="true"],
+.w-actions button[aria-disabled="true"],
+.login-card button[aria-disabled="true"] { opacity: .5; cursor: default; }
 
 /* ── price editor (prices-modal.js) ───────────────────────────────────────── */
 /* Wide, because the table is Provider × Model × one column per metered unit and

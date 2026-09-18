@@ -9,6 +9,7 @@ import { state } from './state.js';
 import { ICONS, fmtDuration, relTime } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
+import { saveGate } from './save-gate.js';
 import { ddRow, ddSep, ddEmpty, ddHead } from './dropdown.js';
 import { selectedAsConfig, applyFilterConfig, SYSTEM_FACETS } from './filters.js';
 import { halvesOf, selEntry, wireEntry, selSize } from './facet-match.js';
@@ -155,7 +156,7 @@ export function openAlertEditor(existing) {
   let enabled = isNew ? true : !!existing.enabled;
   let secretCleared = false;
 
-  const { body, footer, close } = createModal({ title: isNew ? "New alert" : "Edit alert", id: "alert-modal" });
+  const { body, footer, close, dialog } = createModal({ title: isNew ? "New alert" : "Edit alert", id: "alert-modal" });
 
   // ── name ──
   const nameRow = document.createElement("div");
@@ -364,27 +365,43 @@ export function openAlertEditor(existing) {
   }
 
   // ── save ──
+  // Everything the editor holds, in one reading — the save's own values, and
+  // the value the gate compares against what the editor opened with. The
+  // secret is a THREE-state answer rather than the box's contents: an
+  // untouched box means "keep", and the client never sees the stored secret to
+  // compare a typed one against anyway.
+  const draft = () => ({
+    name: nameInput.value.trim(),
+    condition: wireCondition(condition),
+    delivery: modeSel.value,
+    daily_at: modeSel.value === "daily" ? atInput.value : null,
+    webhook_url: urlInput.value.trim(),
+    enabled,
+    secret: secretInput.value ? "set" : secretCleared ? "cleared" : "keep",
+  });
+
   const saveBtn = document.createElement("button");
   saveBtn.textContent = isNew ? "Create alert" : "Save";
   saveBtn.addEventListener("click", busy(saveBtn, async () => {
-    const name = nameInput.value.trim();
+    const d = draft();
+    const name = d.name;
     if (!name) return toast.error("Give the alert a name");
     if (!Object.keys(condition).length) return toast.error("The condition is empty");
-    if (modeSel.value === "daily" && !atInput.value) return toast.error("Pick a digest time");
+    if (d.delivery === "daily" && !d.daily_at) return toast.error("Pick a digest time");
     const payload = {
       name,
-      condition: wireCondition(condition),
-      delivery: modeSel.value,
+      condition: d.condition,
+      delivery: d.delivery,
       // daily_at only travels on daily saves — absent means keep (the secret
       // pattern), so flipping to immediate and back doesn't forget the HH:MM.
-      ...(modeSel.value === "daily" ? { daily_at: atInput.value } : {}),
-      webhook_url: urlInput.value.trim(),
-      enabled,
+      ...(d.delivery === "daily" ? { daily_at: d.daily_at } : {}),
+      webhook_url: d.webhook_url,
+      enabled: d.enabled,
     };
     // Secret: omitted = keep, "" = clear, value = set (has_secret is all the
     // client ever sees, so absent must not mean clear).
-    if (secretInput.value) payload.webhook_secret = secretInput.value;
-    else if (secretCleared) payload.webhook_secret = "";
+    if (d.secret === "set") payload.webhook_secret = secretInput.value;
+    else if (d.secret === "cleared") payload.webhook_secret = "";
     try {
       const r = isNew
         ? await fetch("/api/alerts", {
@@ -418,6 +435,12 @@ export function openAlertEditor(existing) {
     }
   }));
   footer.appendChild(saveBtn);
+
+  // A new alert opens on the gallery's current filters, so its condition is
+  // already filled in — what's missing is the name, and Create stays dead
+  // until one is typed. An existing alert's Save is dead until an edit really
+  // changes the body, chip removals included.
+  saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
 }
 
 // ── the history modal ──

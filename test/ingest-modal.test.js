@@ -120,6 +120,8 @@ const knobInput = (modal, label) => [...modal.querySelectorAll('.im-pair')]
   ?.querySelector('input');
 const saveBtn = (modal) => [...modal.querySelectorAll('button')].find((b) => b.textContent === 'Save');
 async function savedPatch(modal) {
+  assert.equal(saveBtn(modal).hasAttribute('aria-disabled'), false,
+    'Save is live — something was edited');
   saveBtn(modal).click();
   await tick(); await tick();
   const patch = calls.find((c) => c.opts.method === 'PATCH');
@@ -159,7 +161,7 @@ test('Save and run now: a save that fails never runs', async (t) => {
   }
 });
 
-test('a saved config round-trips open → Save byte-identical — unknown keys included', async (t) => {
+test('a saved config loads whole, and Save stays dead while it is untouched', async (t) => {
   const modal = await openBuilt(t);
 
   // The visible half of the old bug first: the knobs must SHOW what's saved.
@@ -172,11 +174,29 @@ test('a saved config round-trips open → Save byte-identical — unknown keys i
   const rows = modal.querySelectorAll('.im-filter-row');
   assert.equal(rows[0].querySelector('.im-filter-val select')?.value, 'Stock');
   const presetVal = rows[1].querySelector('.im-filter-val');
-  assert.equal(presetVal.querySelector('select')?.selectedOptions[0]?.textContent, 'Over $1 billion');
   assert.equal(presetVal.querySelector('input'), null, 'a recognised band shows no custom input');
+  assert.equal(presetVal.querySelector('select')?.selectedOptions[0]?.textContent, 'Over $1 billion');
 
-  assert.deepEqual(await savedPatch(modal), SAVED,
-    'every key — including one this build does not know — survives open → Save');
+  // The round-trip, stated by the modal's own save gate: the body it would
+  // send is the body it loaded, so there is nothing to save and Save says so.
+  // (What that body CONTAINS is the next test — an edit that lands with every
+  // other key, known and unknown, intact.)
+  // aria-disabled, not `disabled`: the gate keeps the button focusable so the
+  // tooltip explaining why it is dim is reachable (save-gate.js).
+  assert.equal(saveBtn(modal).getAttribute('aria-disabled'), 'true', 'nothing edited — Save is dead');
+
+  // ...and it is dead because of a COMPARISON, not because it has yet to be
+  // woken: an edit lights it, and undoing that edit puts it back out.
+  const total = knobInput(modal, 'Keep top');
+  total.value = '1000';
+  total.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).hasAttribute('aria-disabled'), false, 'the edit lit Save');
+  total.value = '1500';
+  total.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await tick();
+  assert.equal(saveBtn(modal).getAttribute('aria-disabled'), 'true',
+    'typed back to the saved value — dead again');
 });
 
 test('an edited knob writes through; everything else still round-trips', async (t) => {
@@ -184,8 +204,9 @@ test('an edited knob writes through; everything else still round-trips', async (
   const total = knobInput(modal, 'Keep top');
   total.value = '1000';
   total.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await tick(); // the gate re-reads on a timeout, and Save is dead until it has
   assert.deepEqual(await savedPatch(modal), { ...SAVED, total: 1000 },
-    'the edit lands; no other key is disturbed');
+    'the edit lands; no other key — including one this build does not know — is disturbed');
 });
 
 // Shown on screen, not merely "this element doesn't say display:none" — the

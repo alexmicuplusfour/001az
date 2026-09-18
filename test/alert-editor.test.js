@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { withFetch } from './helpers.js';
-import './jsdom-stub.js';
+import { window } from './jsdom-stub.js';
 
 const { state } = await import('../public/state.js');
 const { openAlertEditor } = await import('../public/alerts-modal.js');
@@ -30,13 +30,23 @@ const chipsOf = (modal) => [...modal.querySelectorAll('.al-chip')]
 // the modal and the alerts list — a successful save arms the arrivals poll
 // (ensurePolling — alerts hold it), and with the list left non-empty the
 // 30s re-arm outlives the whole suite.
+//
+// Save is gated on a real edit now (save-gate.js), and these tests are about
+// what the CONDITION serializes to — so the edit that unlocks the button is a
+// rename, which travels in a different key and can't colour the answer.
 const saveAndCapture = async (modal, saved = { id: 1 }) => {
   let body;
+  const name = modal.querySelector('.al-input');
+  name.value += ' (edited)';
+  name.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 0)); // the gate re-reads on a timeout
   await withFetch(async (_url, opts) => {
     body = JSON.parse(opts.body);
     return { ok: true, json: async () => ({ alert: saved }) };
   }, async () => {
-    [...modal.querySelectorAll('button')].find((b) => b.textContent === 'Save').click();
+    const btn = [...modal.querySelectorAll('button')].find((b) => b.textContent === 'Save');
+    assert.equal(btn.hasAttribute('aria-disabled'), false, 'the rename lit Save');
+    btn.click();
     await new Promise((r) => setTimeout(r, 20)); // busy() wraps the handler async
   });
   closeEditor(modal);

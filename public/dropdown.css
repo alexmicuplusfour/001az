@@ -95,11 +95,19 @@
 .dd-action + .dd-action {
   margin-top: 6px;
 }
-.dd-action:hover,
+.dd-action:hover:not([aria-disabled="true"]),
 .dd-action:focus-visible {
   background: rgba(255, 255, 255, 0.18);
   color: #fff;
 }
+/* A footer action gated on an edit nobody has made yet (save-gate.js) has to
+   READ dead — the same rule .dd-row already follows above. Without this a
+   gated Save looked identical to a live one and still lit up under the
+   pointer. :hover is excluded above; :focus-visible deliberately is NOT —
+   .dd-action sets outline:none, so that rule is the only focus indicator this
+   button has, and the gate keeps it a tab stop precisely so a keyboard user
+   can land on it and read the title saying why it is dim. */
+.dd-action[aria-disabled="true"] { opacity: 0.45; cursor: default; }
 
 .dd-label {
   flex: 1;
@@ -437,7 +445,7 @@
   background: #111;
   color: #fff;
 }
-.dropdown--light .dd-action:hover,
+.dropdown--light .dd-action:hover:not([aria-disabled="true"]),
 .dropdown--light .dd-action:focus-visible {
   background: #000;
   color: #fff;

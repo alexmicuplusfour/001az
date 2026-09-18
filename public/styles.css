@@ -1345,8 +1345,10 @@ body.bulk-mode .heart {
   font-weight: 500;
   cursor: pointer;
 }
-.te-save:disabled { opacity: 0.5; cursor: default; }
-.te-save:hover:not(:disabled) { background: #333; }
+/* aria-disabled = nothing to save (save-gate.js); :disabled = mid-save. */
+.te-save:disabled,
+.te-save[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.te-save:hover:not(:disabled):not([aria-disabled="true"]) { background: #333; }
 .te-cancel {
   padding: 7px 14px;
   background: none;

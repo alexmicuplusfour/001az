@@ -15,6 +15,7 @@ import { state } from './state.js';
 import { fmtDuration, glyphEl, fmtUsd, relTime } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, createDrawer, tileRow, busy, statusChip } from './modal.js';
+import { saveGate } from './save-gate.js';
 import { presentIngest } from './ingest-present.js';
 import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { switchRow } from './switch.js';
@@ -1084,6 +1085,17 @@ export function openIngestModal() {
       return { ...cfg, filters: cfg.filters.filter((f) => !unfinishedFilter(f)) };
     }
 
+    // The whole PATCH body the footer would send — the one reading Save uses
+    // and the one the save gate compares against what the modal opened with.
+    // No source added is the REMOVE gesture, and that is a different body, so
+    // it belongs in here too: a board that opened unconfigured and is still
+    // unconfigured has nothing to save, and its Save says so by staying dead.
+    function draft() {
+      return sourceAdded()
+        ? { ingest: { ...configPayload(), trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" } } }
+        : { ingest: null };
+    }
+
     // ── Results view: read-only paged list, connector-browse chrome ──
     const { scroll, thead, tbody, note, moreBtn } = pagedTableScaffold();
     note.style.display = "none"; // .cb-note pads even when empty — hide until it speaks
@@ -1248,7 +1260,6 @@ export function openIngestModal() {
         // nothing saved either, there's nothing to write; saving the config
         // anyway would mean "watch the whole ingest root", the presumption
         // the add step exists to kill.
-        let body;
         let okToast = "Ingestion saved";
         const removing = !sourceAdded();
         if (removing) {
@@ -1256,7 +1267,6 @@ export function openIngestModal() {
             toast.error("Add a source first — nothing to save.");
             return;
           }
-          body = { ingest: null };
           okToast = "Ingestion removed";
         } else {
           // Preview quietly skips an unfinished filter row, but saving that
@@ -1268,13 +1278,8 @@ export function openIngestModal() {
             toast.error(`The "${label}" filter has no value — fill it in or remove it`);
             return;
           }
-          body = {
-            ingest: {
-              ...configPayload(),
-              trigger: cfg.trigger.mode ? cfg.trigger : { mode: "manual" },
-            },
-          };
         }
+        const body = draft();
         try {
           const r = await fetch(`/api/boards/${state.boardId}`, {
             method: "PATCH",
@@ -1340,6 +1345,12 @@ export function openIngestModal() {
       runBtn.title = "Save this configuration, then run it on the next worker tick";
       runBtn.addEventListener("click", () => saveConfig({ run: true }));
       footerSettings.append(saveBtn, runBtn);
+      // Only Save is gated. This modal is the ONE way to trigger a run, and a
+      // run is real work whether or not the config in front of you differs
+      // from the stored one — so gating the run button on edits would take a
+      // capability away rather than stop a no-op. Root is the dialog: the
+      // source chooser opens in a drawer mounted there, outside the body.
+      saveGate({ root: dialog, read: draft, buttons: [saveBtn] });
     } else {
       const note = document.createElement("p");
       note.style.cssText = "font-size:12px;color:#8a8a92;margin:0;";

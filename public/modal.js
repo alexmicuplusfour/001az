@@ -170,6 +170,12 @@ export function statusChip() {
 // template trigger carries a value span + caret) survive, and code that writes
 // into those inner spans mid-flight still lands.
 //
+// `disabled` here means WORKING, and it is the one use of the attribute that
+// is uncontroversial — it stops the double submit. A button that is ALSO
+// gated on "nothing has changed" (save-gate.js) carries that in
+// aria-disabled, a different attribute, so this restore can hand `disabled`
+// back without ever overruling a gate's answer.
+//
 // The restore rule is a CLAIM contract: the finally puts the label back and
 // re-enables only when fn left the button's content alone. A handler that
 // re-labels the button mid-run — plugin-add's "Added", the lightbox's
