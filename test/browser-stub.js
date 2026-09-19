@@ -32,7 +32,16 @@ globalThis.document ||= {
   addEventListener() {},
   dispatchEvent() { return true; },
   body: { appendChild() {} },
-  createElement: () => ({ appendChild() {}, setAttribute() {} }),
+  // Enough of an element for a module to BUILD one and walk away: toast.js
+  // now runs for real under test (filters.js toasts the filters a moved
+  // taxonomy dropped), and it styles, listens on and removes what it makes.
+  // Plain properties (className, textContent, innerHTML) need nothing here —
+  // only the calls and the nested `style` do.
+  createElement: () => ({
+    style: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    appendChild() {}, append() {}, setAttribute() {}, addEventListener() {}, remove() {},
+  }),
   // filters.js caches its rail containers at module scope, so every importer
   // of it needs this — two test files had grown their own copy of the line,
   // which is the drift this file's header exists to prevent.

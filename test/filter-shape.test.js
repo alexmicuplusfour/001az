@@ -14,12 +14,21 @@ const { toItem } = await import("../public/utils.js");
 const {
   filterKey, toggle, toggleNeg, activeCount, taggedFiltered,
   encodeSelected, encodeExcluded, decodeSelection,
-  selectedAsConfig, applyFilterConfig, configMatchesCurrent,
+  selectedAsConfig, applyFilterConfig, configMatchesCurrent, reconcileSelection,
 } = await import("../public/filters.js");
+
+// Applying a config now checks it against the board it is landing on, so these
+// need a board that declares what they select (planning/stale-filters-plan.md).
+const BOARD = [
+  { key: "color", values: ["red", "blue", "green"] },
+  { key: "size", values: ["big", "huge"] },
+  { key: "mood", values: ["calm"] },
+];
 
 afterEach(() => {
   state.selected = new Map();
   state.items = [];
+  state.facets = [];
 });
 
 test("codec: both halves round-trip through ?f= / ?fx=", () => {
@@ -67,6 +76,7 @@ test("config: legacy array out when exclusion-free, { any, not } when not", () =
 });
 
 test("config: both stored forms apply, and array equals its { any } spelling", () => {
+  state.facets = BOARD;
   applyFilterConfig({ color: ["red"], size: { any: ["big"], not: ["huge"] } });
   assert.deepEqual([...state.selected.get("color").any], ["red"]);
   assert.deepEqual([...state.selected.get("size").not], ["huge"]);
@@ -109,4 +119,50 @@ test("an exclusion filters the grid: NOT holds back holders, keeps the unset", (
   assert.deepEqual(taggedFiltered().map((x) => x.id).sort(), [2, 3], "holder gone, unset kept");
   state.selected = new Map([["color", selEntry(["red", "blue"], ["blue"])]]);
   assert.deepEqual(taggedFiltered().map((x) => x.id), [1], "any and not compose in one facet");
+});
+
+// --- the taxonomy moving under a stored selection ---
+
+test("config: values the board no longer declares don't apply, the rest does", () => {
+  state.facets = BOARD;
+  applyFilterConfig({ color: ["red", "purple"], shape: ["round"] });
+  assert.deepEqual([...state.selected.get("color").any], ["red"], "the half that still exists lands");
+  assert.equal(state.selected.has("shape"), false, "a facet the board dropped brings no key with it");
+  assert.equal(activeCount(), 1, "…and the count agrees, so the Clear button can't offer a filter with no chip");
+});
+
+// The dead end this exists to close: before the gate, a stored selection could
+// leave state.selected holding a pair the rail draws no chip for — "Clear
+// filters (2)" over an empty grid with nothing to click off.
+test("config: nothing survivable leaves nothing behind", () => {
+  state.facets = BOARD;
+  applyFilterConfig({ color: ["purple"] });
+  assert.equal(state.selected.size, 0);
+  assert.equal(activeCount(), 0);
+});
+
+// An unmatchable exclusion excludes nothing, so this one has no symptom at all
+// until the pills are counted.
+test("config: a stale exclusion is dropped like a stale include", () => {
+  state.facets = BOARD;
+  applyFilterConfig({ color: { any: ["red"], not: ["purple", "green"] } });
+  assert.deepEqual([...state.selected.get("color").not], ["green"]);
+});
+
+test("config: system facets survive a board that declares no facets at all", () => {
+  state.facets = [];
+  applyFilterConfig({ "~uploaders": ["7"], color: ["red"] });
+  assert.deepEqual([...state.selected.get("~uploaders").any], ["7"]);
+  assert.equal(state.selected.has("color"), false);
+});
+
+// The board modal's own reader: the value was selected when the taxonomy still
+// had it, and the edit landed without a reload (toolbar.js re-stamps facets).
+test("reconcile: a selection valid when it arrived is re-checked when the board moves", () => {
+  state.facets = BOARD;
+  state.selected = new Map([["color", selEntry(["red"], ["blue"])]]);
+  assert.equal(reconcileSelection(), 0, "nothing to say while the board still declares them");
+  state.facets = [{ key: "color", values: ["blue"] }];
+  assert.equal(reconcileSelection(), 1, "the include the edit removed");
+  assert.deepEqual([...state.selected.get("color").not], ["blue"]);
 });

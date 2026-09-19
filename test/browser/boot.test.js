@@ -100,3 +100,26 @@ test("a toolbar modal still opens, now that its code arrives on the click", asyn
   assert.equal(await page.locator(".modal-overlay .modal-title").first().textContent(), "Jobs");
   assert.deepEqual(page.errors, [], "opening a lazily-loaded modal threw");
 });
+
+// A shared ?f= link outliving a value the board has since dropped
+// (planning/stale-filters-plan.md). Only a real load orders the three things
+// this depends on: the URL is decoded at the top of boot, the board's
+// vocabulary lands ~100 lines later, and the gate has to run between that and
+// the first paint. Every other test of it calls the function directly, which
+// is exactly the ordering a stub can't have wrong.
+test("a link naming a value the board dropped loses that filter and keeps the rest", async () => {
+  const boardId = await createBoard(app.db, "Filter board",
+    [{ key: "color", label: "Colour", values: ["red", "blue"] }], "", true, null, null, { enabled: false });
+  await setBoardMembers(app.db, boardId, [session.user.id]);
+
+  const page = await app.open(`/?board=${boardId}&f=color:red,purple`, { sid: session.user.sid });
+  await page.locator(".tool-btn.upload").waitFor({ timeout: 15000 });
+
+  const clear = await page.locator(".tool-btn.clear").textContent();
+  assert.match(clear, /Clear filters \(1\)/, `red survived and purple didn't — got "${clear}"`);
+  assert.match(await page.locator(".toast-msg").first().textContent(), /Skipped "purple"/);
+  // …and the address stops carrying the dead half, so re-sharing the link
+  // doesn't pass the problem along.
+  assert.ok(!page.url().includes("purple"), `the URL still names it: ${page.url()}`);
+  assert.deepEqual(page.errors, [], "the gate threw during boot");
+});

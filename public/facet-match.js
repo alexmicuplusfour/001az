@@ -118,3 +118,51 @@ export function cleanSelection(raw) {
   }
   return out;
 }
+
+// A selection meets a taxonomy that has moved under it (planning/
+// stale-filters-plan.md): board facets are edited freely, and nothing rewrites
+// the saved configs, ?f= links and alert conditions that name their values.
+// Returns the selection minus every pair the board no longer DECLARES, plus
+// what was taken out, so the caller can say so.
+//
+// The fourth verdict on a selection that doesn't fit, beside cleanSelection's
+// three: a filter config refuses an empty one, an alert condition refuses it,
+// an MCP search reads it as unconstrained — and a selection ARRIVING at a live
+// board skips the parts the board can't answer and keeps the rest. Skipping,
+// not refusing: readFacetScope (server.js) 400s an unknown facet because a
+// typo silently retagging nothing is the worst outcome there; here the caller
+// is a saved view or a shared link written when the value did exist, and
+// refusing it whole would lose the half that still works.
+//
+// Both halves, and the EXCLUDE half is the reason this exists. An include that
+// can't match empties the grid, which at least shows; an exclude that can't
+// match excludes nothing, so "everything except red" quietly starts showing red
+// the day red is renamed, and looks right while it does it.
+//
+// `~` keys are left alone. Their membership comes from a capability's own set
+// rather than the facet list (SYSTEM_FACETS), so `facets` says nothing about
+// them — and their universes move with the DATA, not with anyone's edit: an
+// uploader leaves when their last card is deleted. Nobody made a choice that
+// stopped being available, so there is nothing to skip. The prefix is reserved
+// (facetsReservedKeyError) precisely so this test is exact.
+export function pruneToDeclared(selected, facets) {
+  const declared = new Map((facets || []).map((f) => [f.key, new Set(f.values || [])]));
+  const next = new Map();
+  const dropped = [];
+  for (const [key, entry] of selected) {
+    if (String(key).startsWith("~")) { next.set(key, entry); continue; }
+    const values = declared.get(key); // undefined = the whole facet is gone
+    const keep = selEntry();
+    for (const half of ["any", "not"]) {
+      for (const value of entry[half]) {
+        if (values?.has(value)) keep[half].add(value);
+        else dropped.push({ key, value });
+      }
+    }
+    // An entry emptied by the prune is no filter at all — dropping the key
+    // keeps state.selected in the shape the rows walk-in and activeCount
+    // already assume (an entry present means something is selected).
+    if (selSize(keep)) next.set(key, keep);
+  }
+  return { selected: next, dropped };
+}

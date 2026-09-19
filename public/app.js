@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { getJson } from './api.js';
 import { toItem } from './utils.js';
-import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount } from './filters.js';
+import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount, reconcileSelection } from './filters.js';
 import { selEntry } from './facet-match.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoard, setWork } from './data.js';
 import { renderGrid, layoutGrid, pokeSentinel, initGrid, dropAllCards } from './grid.js';
@@ -230,6 +230,14 @@ async function main() {
   setWork(firstPage.work);
   // state.crates / state.filterConfigs were written by their loaders above.
   initFilterConfigsUI();
+  // ?f=/?fx= were decoded at the top of boot, ~100 lines before this board's
+  // vocabulary existed to check them against — a link can name values the board
+  // has since dropped, and an exclude half that can't match is invisible.
+  // Gated on `boardData`: an empty facet list is also what a board fetch that
+  // FAILED leaves behind, and taking someone's filters away over a 500 is worse
+  // than the stale ones. After the two redirects above, so a board that isn't
+  // ours doesn't toast on its way off the page.
+  if (boardData) reconcileSelection();
   state.boards = Array.isArray(boardsData) ? boardsData : [];
   // The viewer's per-board sort — needs boardMapping (identity mode) in place.
   restoreSort();

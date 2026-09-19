@@ -1,11 +1,12 @@
 import { state } from './state.js';
 import { tag, pill, pillAction, appendCount, ICONS } from './utils.js';
-import { facetPass, selEntry, halvesOf, wireEntry, canonEntry, selSize, selHas, selValues, encodePairs, decodePairs } from './facet-match.js';
+import { facetPass, selEntry, halvesOf, wireEntry, canonEntry, selSize, selHas, selValues, encodePairs, decodePairs, pruneToDeclared } from './facet-match.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
 import { chipOdds, clusterSet, clusterValues, clusterLevel, stepClusters } from './patterns.js';
 import { LEVEL_MAX } from './cluster-core.js';
 import { lockScroll, unlockScroll } from './modal.js';
+import { toast } from './toast.js';
 
 const elFilters = document.getElementById("filters");
 const elFilterDrawer = document.getElementById("filter-drawer");
@@ -360,7 +361,37 @@ export function applyFilterConfig(config) {
       return [k, selEntry(any, not)];
     })
   );
+  reconcileSelection();
   document.dispatchEvent(new Event('app:render'));
+}
+
+// THE gate for a selection that came from outside the rail — a saved config, a
+// ?f= link, an alert's condition, and the sentence-to-selection search being
+// built (conversational-search-plan.md), which is an AI naming facet values and
+// so the one caller certain to name one that never existed. Every one of them
+// writes state.selected and then lands here rather than carrying its own check;
+// a fifth road to this Map is a matter of time, and the check it would have
+// copied is the drift this replaces.
+//
+// Also the half a door can't see: a selection that was VALID when it arrived
+// and stopped being valid while it sat there, which is what the board modal
+// does to its own reader (toolbar.js re-stamps state.facets on save). That is
+// the likeliest way anyone reaches this state at all — you delete the value you
+// are standing on — so the modal calls this too.
+//
+// Silent when there is nothing to say. Otherwise a plain toast: the pills that
+// vanish are the only other evidence, and the rail draws no chip for a value
+// the board stopped declaring, so without this the filter count just changes on
+// its own. Names the value while there is one to name — "red" is the whole
+// explanation; a count is all that's left past that.
+export function reconcileSelection() {
+  const { selected, dropped } = pruneToDeclared(state.selected, state.facets);
+  if (!dropped.length) return 0;
+  state.selected = selected;
+  toast(dropped.length === 1
+    ? `Skipped "${dropped[0].value}" — this board doesn't have it any more`
+    : `Skipped ${dropped.length} filters — this board doesn't have them any more`);
+  return dropped.length;
 }
 
 // True when a config matches the current pills exactly — pure feedback for

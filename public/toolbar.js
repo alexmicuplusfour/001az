@@ -13,7 +13,7 @@ import {
 import { Odometer } from './odometer.js';
 import { openDropdown, ddRow, ddSep, ddAction, ddHead } from './dropdown.js';
 import { userMenuButton } from './user-menu.js';
-import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig } from './filters.js';
+import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig, reconcileSelection } from './filters.js';
 import { openCratePop, appendCrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
@@ -380,6 +380,11 @@ export function renderToolbar(resultCount) {
         onSaved: (payload) => {
           state.boardName = payload.name;
           state.facets = payload.facets;
+          // The save that just removed a value may have removed one this reader
+          // is standing on — no reload separates the two, so the filter goes
+          // dead in the same breath as the edit. Straight after the facets land
+          // and before anything reads them back.
+          reconcileSelection();
           state.aiReasoning = payload.ai_reasoning !== false;
           // Both PATCH routes take ai_votes (buildBoardContentUpdate), so a save
           // can turn vote mode on or off from right here — sync it or anything
