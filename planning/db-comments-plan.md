@@ -1,6 +1,6 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-8 DONE (2026-09-20). Suite 1808 green throughout,
+**Status: STAGES 1-9 DONE (2026-09-20). Suite 1808 green throughout,
 comments-only diffs, LF clean.**
 
 | stage | section | comment lines | cut | big blocks |
@@ -14,9 +14,10 @@ comments-only diffs, LF clean.**
 | 6 | job log | 178 → 158 | -11% | 7 → 6 |
 | 7 | queue helpers + entities + connector liveness | 166 → 149 | -10% | 6 → 3 |
 | 8 | long tail (users, MCP, crates, keys, membership, alerts) | 281 → 252 | -10% | 11 → 6 |
+| 9 | top-of-file (parsers, status maps, derivations) | 239 → 213 | -11% | 8 → 6 |
 
-**File vs `ddd41e0`: 4,952 → 4,689 lines, 1,900 → 1,635 comment lines, -18,383
-bytes, density 41.2% → 37.6%. Stages 9-10 open.**
+**File vs `ddd41e0`: 4,952 → 4,663 lines, 1,900 → 1,609 comment lines, -20,014
+bytes, density 41.2% → 37.2%. Stage 10 open.**
 
 ### Measurement correction (2026-09-20)
 
@@ -39,9 +40,14 @@ the spread is the interesting part: 30, 16, 19, 18, 18, 11, 10. Stage 1's 30%
 was the most pure narration in the file, and the trend since is downward as the
 pass reaches the machinery — the queue claim, the landings, the fences — where
 almost every line is a contract. **The rate a section yields is a measurement of
-that section**, not of how hard the pass tried. Expect the remaining stages to
-keep falling; stage 9 (top-of-file) may yield almost nothing, which is the
-correct answer there. The rubric keeps far more than the first read of this file
+that section**, not of how hard the pass tried.
+
+The prediction that stage 9 would yield almost nothing was **wrong** — it gave
+11%, because a section being invariant-dense on average says nothing about any
+one block in it. `TAG_QUEUE` sat under a 15-line postmortem (a measured
+before/after table, three affected surfaces, and a note that the first fix
+missed two states) wrapped around a five-line rule. Density is not uniform, and
+predicting a section's yield before reading it is not a thing worth doing. The rubric keeps far more than the first read of this file
 suggested, because most long blocks here turn out to be a trap or a contract
 rather than a defence of a choice. That is the finding, not a failure to cut
 hard enough.

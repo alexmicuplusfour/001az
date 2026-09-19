@@ -46,13 +46,12 @@ export async function initDb(db) {
 }
 
 // Ensure every entity on a board with wanted connector fields has a refresh_at.
-// Covers boards configured before this feature deployed (or before a build
-// that scheduled them) — otherwise their entities sit with refresh_at NULL and
-// the sweep never sees them until the mapping is re-saved. Idempotent: it just
-// recomputes the correct next-due each boot — which, since the absent-key term
-// (schedule.js nextRefreshAt), also stamps due-now any entity missing a mapped
-// field, so a static field added while a build without this rule ran still
-// backfills on the next boot.
+// Covers boards configured before this feature deployed — otherwise their
+// entities sit with refresh_at NULL and the sweep never sees them until the
+// mapping is re-saved. Idempotent: it recomputes the correct next-due each boot,
+// and since nextRefreshAt carries an absent-key term it also stamps due-now any
+// entity missing a mapped field, so a static field added under an older build
+// still backfills.
 async function reconcileLiveSchedules(db) {
   const { rows } = await db.query("SELECT id, mapping FROM boards WHERE mapping IS NOT NULL");
   for (const b of rows) {
@@ -111,58 +110,42 @@ const REQUEUE_ARMS = Object.entries(IN_FLIGHT_FOR)
 const IN_FLIGHT_SQL = `(${Object.values(IN_FLIGHT_FOR).map((s) => `'${s}'`).join(",")})`;
 
 // The cancel verbs' status lists (job-control-plan.md Stages 2/3), derived here
-// with their siblings for the same reason — a fifth leg lands in both verbs
-// without anyone remembering cancelBoardQueue exists. One rule, applied per
-// leg: soft cancel takes a leg's QUEUED half, abort takes both halves. The
-// fetch lane (cancelFetchLane) is the one whose UNFETCHED rows DELETE (a
-// vehicle whose provider data never landed is a name-only shell); fetched
-// vehicles re-buying their data (Stage 3a reprocess) and every other leg pull
-// back to a settled state — cancelBoardQueue splits the lane on the payload
-// flag. Under abort the lists still cover IN_FLIGHT_STATES exactly, so
-// nothing is left running.
+// with their siblings so a fifth leg lands in both verbs without anyone
+// remembering cancelBoardQueue exists. One rule per leg: soft cancel takes a
+// leg's QUEUED half, abort takes both. The fetch lane is the one whose UNFETCHED
+// rows DELETE (a vehicle whose provider data never landed is a name-only shell);
+// everything else pulls back to a settled state. Under abort the lists still
+// cover IN_FLIGHT_STATES exactly, so nothing is left running.
 const legHalves = (abort) => ([queued, inFlight]) => (abort ? [queued, inFlight] : [queued]);
 const cancelFetchLane = (abort) => legHalves(abort)(["pending_fetch", IN_FLIGHT_FOR.pending_fetch]);
 const cancelPulls = (abort) =>
   Object.entries(IN_FLIGHT_FOR).filter(([queued]) => queued !== "pending_fetch").flatMap(legHalves(abort));
 
 // Every state that means "this item's tags are about to be rewritten" — both
-// halves of all four legs, eight in total. DERIVED rather than written out, so
-// a fifth leg cannot be added without this following it. (The fetch leg's
-// inclusion mildly over-counts tagQueueDepth's "N waiting on the tagger" —
-// accepted: those items do reach the tag leg.)
+// halves of all four legs, eight in total. DERIVED rather than written out, so a
+// fifth leg cannot be added without this following it. (The fetch leg's inclusion
+// mildly over-counts tagQueueDepth's "N waiting on the tagger" — accepted: those
+// items do reach the tag leg.)
 //
-// Facet diagnosis had this as `('pending','processing')` in three separate
-// queries, and retagBoard does not queue items uniformly: it routes each one by
-// payload, so an item carrying a `mapping` it has not been extracted under enters
-// 'pending_extract' and a connector vehicle with no rendered file enters
-// 'pending_face'. On a mapped or connector board a full retag therefore produced
-// no 'pending' row at all. Measured, same retag, two boards differing only in
-// payload:
-//
-//   plain (payload has extracted_at)   21 -> pending          hook marked ["shape"]
-//   mapped (payload has mapping)       21 -> pending_extract  hook marked []
-//
-// So supersedeFacetDiagnostics found nothing queued and left every finding
-// standing, boardTagActivity called the board quiet mid-sweep, and the roll-up
-// reported nothing in flight — which put "Not measured against the current
-// wording yet. Re-tag this board" over a board being re-tagged as the user read
-// it. Three surfaces, one missing set of strings, and the first fix for it named
-// four states and still missed the two the worker claims into.
+// Not `('pending','processing')`: retagBoard routes each item by payload, so one
+// carrying a `mapping` it has not been extracted under enters 'pending_extract'
+// and a connector vehicle with no rendered file enters 'pending_face'. On a
+// mapped or connector board a full retag produces no 'pending' row at all, and
+// every reader that names fewer states calls such a board quiet mid-sweep.
 const TAG_QUEUE = `(${IN_FLIGHT_STATES.map((s) => `'${s}'`).join(",")})`;
 
 // The pause gate (job-control-plan.md Stage 1). Every query that lets a board
-// SPEND carries it; pause gates execution, never intake — the queues keep
-// filling and resume continues where it left off. The roster, so the next
-// sweep's author has something to find and `grep -c notPaused` answers "is the
-// gate complete?": claimFairBatch, dueBoards, dueIngestBoards, dueLiveEntities,
-// itemsNeedingEmbedding, oneAudioNeedingTranscription, boardsWithVotes.
-// Deliberately NOT gated: deliverDueAlerts (delivery of matches found before
-// the pause; alerts have their own `enabled`), recoverStuck (its requeues land
-// in pending, where the claim gate holds them), and the prune/reap sweeps.
+// SPEND carries it; pause gates execution, never intake — the queues keep filling
+// and resume continues where it left off. The roster, so `grep -c notPaused`
+// answers "is the gate complete?": claimFairBatch, dueBoards, dueIngestBoards,
+// dueLiveEntities, itemsNeedingEmbedding, oneAudioNeedingTranscription,
+// boardsWithVotes. NOT gated: deliverDueAlerts (matches found before the pause;
+// alerts have their own `enabled`), recoverStuck (its requeues land in pending,
+// where the claim gate holds them), and the prune/reap sweeps.
 //
-// `IS NOT TRUE`, not `NOT`: oneAudioNeedingTranscription LEFT JOINs boards, so
-// an unmatched row yields NULL there and `NOT NULL` would drop it. One spelling
-// everywhere rather than two that a later reader would "harmonize" wrongly.
+// `IS NOT TRUE`, not `NOT`: oneAudioNeedingTranscription LEFT JOINs boards, so an
+// unmatched row yields NULL and `NOT NULL` would drop it. One spelling
+// everywhere, so a later reader cannot "harmonize" the two wrongly.
 const notPaused = (alias = "") => `${alias ? `${alias}.` : ""}paused IS NOT TRUE`;
 export function aggregateStatus(instances) {
   if (!instances.length) return "tagged";
@@ -171,25 +154,21 @@ export function aggregateStatus(instances) {
   return "tagged";
 }
 
-// The routed-status report behind every per-card / per-instance re-queue
-// response (`{ ok, entities: [{ id, status, instances }] }` — reprocess,
-// retag, re-extract): each affected entity with its fresh aggregate and
-// instance statuses, read AFTER the re-route landed.
+// The routed-status report behind every per-card / per-instance re-queue response
+// (`{ ok, entities: [{ id, status, instances }] }` — reprocess, retag,
+// re-extract): each affected entity with its fresh aggregate and instance
+// statuses, read AFTER the re-route landed.
 //
 // `affected` comes from the caller's own UPDATE — every re-queue statement
 // RETURNs the entity_ids of the rows it moved, and their union IS the set of
-// cards whose aggregate changed (an entity's aggregate moves only if one of
-// ITS instances moved). That covers classify mode exactly: an instance can
-// belong to several entities, so re-queuing it moves every one of those
-// cards, and answering for just the clicked one would rebuild the client's
-// status guessing a level up. Deriving it from the UPDATE rather than
-// re-deriving it here is also what keeps this to ONE query.
+// cards whose aggregate changed. That covers classify mode exactly: an instance
+// can belong to several entities, so re-queuing it moves every one of those
+// cards, and answering for just the clicked one would leave the client guessing
+// a level up. Deriving it from the UPDATE also keeps this to ONE query.
 //
-// The read is after the write on purpose: an affected entity's OTHER
-// instances were not touched and their statuses are part of its aggregate.
-// If a worker claimed a row in the gap (pending → processing) the report is
-// simply more current, and every status it can carry is already in the
-// client's vocabulary.
+// The read is after the write on purpose: an affected entity's OTHER instances
+// were not touched and their statuses are part of its aggregate. A worker
+// claiming a row in the gap only makes the report more current.
 export async function routedEntities(db, affected) {
   if (!affected?.length) return [];
   const { rows } = await db.query(
@@ -253,19 +232,17 @@ function instanceEntry(r) {
 
 // The board listing: entities, each carrying its instances. Face fields
 // (name/w/h/kind/label) mirror the instance selectFace picks (the board's
-// mapping.face { prefer, pick }; oldest by default) so the card path needs no
-// special cases; tags at the entity level are the union across instances
-// (what filtering and facet counts consume), per-instance tags ride inside.
+// mapping.face; oldest by default) so the card path needs no special cases; tags
+// at the entity level are the union across instances, per-instance tags ride inside.
 //
 // Three modes, one query shape:
 // - no opts: the whole board (legacy full list).
-// - limit/after: one keyset page, walking (created_at DESC, id DESC); the
-//   cursor is the last row's (created_at, id) pair. Returns nextCursor while
-//   pages remain (emitted only on exactly-full pages, so an exact-multiple
-//   total costs one final empty page).
-// - since: only entities changed after the given ms stamp — their own
-//   updated_at or any of their instances'. Timestamps are BIGINT ms, so
-//   cursors round-trip exactly (see the type-parser note at the top).
+// - limit/after: one keyset page walking (created_at DESC, id DESC); the cursor
+//   is the last row's pair. nextCursor is emitted only on exactly-full pages, so
+//   an exact-multiple total costs one final empty page.
+// - since: only entities changed after the given ms stamp — their own updated_at
+//   or any of their instances'. Timestamps are BIGINT ms, so cursors round-trip
+//   exactly (see the type-parser note at the top).
 export async function listItems(db, userId = null, boardId = null, { limit = null, after = null, since = null, ids = null } = {}) {
   const params = [userId, boardId];
   const where = ["($2::text IS NULL OR e.board_id = $2)"];
@@ -517,16 +494,14 @@ export async function getItemBoard(db, id) {
   return rows[0] || null;
 }
 
-// Originals held per board, from the sizes upload stamped on payload file
-// entries (storage-plan.md, Stage 2). ATTRIBUTION, not disk truth: thumbnails,
-// sidecars and embeddings belong to no cheap per-board sum, and the tab that
-// draws this says so beside the walk's numbers. `unsized` carries the entries
-// with no recorded size — legacy uploads the enrich backfill hasn't reached
-// and old generated faces — because folding them into a silent 0 would render
-// "0 B" as a claim about sizes that are simply unknown. The LATERAL drops
-// fileless rows (connector tag vehicles), which hold no bytes. SUM(bigint) is
-// NUMERIC, which the int8 parser doesn't cover — the ::bigint casts are what
-// keep this reader shipping numbers like everything else.
+// Originals held per board, from the sizes upload stamped on payload file entries
+// (storage-plan.md, Stage 2). ATTRIBUTION, not disk truth: thumbnails, sidecars
+// and embeddings belong to no cheap per-board sum. `unsized` carries the entries
+// with no recorded size — legacy uploads and old generated faces — because
+// folding them into a silent 0 would render "0 B" as a claim about sizes that are
+// simply unknown. The LATERAL drops fileless rows (connector tag vehicles).
+// SUM(bigint) is NUMERIC, which the int8 parser doesn't cover — the ::bigint
+// casts are what keep this reader shipping numbers like everything else.
 export async function boardFileBytes(db) {
   const { rows } = await db.query(
     `SELECT i.board_id AS id, b.name AS label,
@@ -591,13 +566,12 @@ const sameTagSet = (a, b) => {
 };
 
 // Append one row of judgment history (see tag_snapshots in 0001_baseline.sql).
-// History records CHANGES — the mirror of field_snapshots' moved-only
-// discipline: a tagging that lands the same tags and verdict as the item's
-// latest snapshot appends nothing. Reasoning is excluded from the comparison
-// (the model re-words it every call — presentation, not judgment), and so is
-// source (a user's no-op save is still a no-op). Without this, a periodic
-// retag re-records every stable item's unchanged judgment each pass, and a
-// retag_on_refresh live board writes ~1.4k identical rows per item per day.
+// History records CHANGES — the mirror of field_snapshots' moved-only discipline:
+// a tagging that lands the same tags and verdict as the item's latest snapshot
+// appends nothing. Reasoning is excluded from the comparison (the model re-words
+// it every call — presentation, not judgment), and so is source (a user's no-op
+// save is still a no-op). Without this, a retag_on_refresh live board writes
+// ~1.4k identical rows per item per day.
 async function addTagSnapshot(db, itemId, source, tags, reasoning, undecided) {
   const { rows: [last] } = await db.query(
     "SELECT tags, undecided FROM tag_snapshots WHERE item_id=$1 ORDER BY tagged_at DESC, id DESC LIMIT 1",
