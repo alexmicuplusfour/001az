@@ -1,6 +1,6 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-6 DONE (2026-09-20). Suite 1808 green throughout,
+**Status: STAGES 1-7 DONE (2026-09-20). Suite 1808 green throughout,
 comments-only diffs, LF clean.**
 
 | stage | section | comment lines | cut | big blocks |
@@ -12,9 +12,10 @@ comments-only diffs, LF clean.**
 | 4 | boards | 184 → 150 | -18% | 11 → 6 |
 | 5 | run fence + automatic ingestion | 150 → 123 | -18% | 8 → 4 |
 | 6 | job log | 178 → 158 | -11% | 7 → 6 |
+| 7 | queue helpers + entities + connector liveness | 166 → 149 | -10% | 6 → 3 |
 
-**File vs `ddd41e0`: 4,952 → 4,734 lines, 1,900 → 1,681 comment lines, -15,386
-bytes, density 41.2% → 38.2%. Stages 7-10 open.**
+**File vs `ddd41e0`: 4,952 → 4,717 lines, 1,900 → 1,664 comment lines, -16,579
+bytes, density 41.2% → 38.0%. Stages 8-10 open.**
 
 ### Measurement correction (2026-09-20)
 
@@ -33,11 +34,13 @@ let the first stand in for the second.
 
 
 **Recalibration:** on the honest measure the rate is **~18% per section**, and
-the spread is the interesting part: 30, 16, 19, 18, 18, 11. Stage 1's 30% was
-the most pure narration in the file; stage 6's 11% is the most contract, and a
-section that gives up a ninth of its comments because the rest are traps is a
-correct outcome, not a failed one. **The rate a section yields is a measurement
-of that section**, not of how hard the pass tried. The rubric keeps far more than the first read of this file
+the spread is the interesting part: 30, 16, 19, 18, 18, 11, 10. Stage 1's 30%
+was the most pure narration in the file, and the trend since is downward as the
+pass reaches the machinery — the queue claim, the landings, the fences — where
+almost every line is a contract. **The rate a section yields is a measurement of
+that section**, not of how hard the pass tried. Expect the remaining stages to
+keep falling; stage 9 (top-of-file) may yield almost nothing, which is the
+correct answer there. The rubric keeps far more than the first read of this file
 suggested, because most long blocks here turn out to be a trap or a contract
 rather than a defence of a choice. That is the finding, not a failure to cut
 hard enough.

@@ -2738,40 +2738,31 @@ export async function deleteExternalPlugin(db, id) {
 // claimNextWork below is its LIMIT-1 wrapper.
 //
 // Atomically takes the oldest ready items — whatever stage each is in — and marks
-// them with that stage's in-flight status. ONE queue, one policy: oldest work first
-// (created_at, id), so an item flows extract → face → tag to completion before
-// newer items start (it re-enters the queue with its original created_at and
-// stays at the front). There are no per-stage legs to starve: a bulk upload's
-// extractions and other boards' tagging interleave by age. The returned row's
-// status ('extracting' | 'facing' | 'processing') tells the worker which step
-// to run.
+// them with that stage's in-flight status. ONE queue, one policy: oldest work
+// first (created_at, id), so an item flows extract → face → tag to completion
+// before newer items start, re-entering the queue with its original created_at.
+// No per-stage legs to starve. The returned row's status ('extracting' |
+// 'facing' | 'processing') tells the worker which step to run.
 //
-// SKIP LOCKED keeps concurrent claimers (or a second worker) from grabbing the
-// same row. When no default key is configured, boards without their own key
-// are skipped for the AI stages — their items stay queued until a key appears
-// (never failed for a missing key) — while faces and fetches still claim
-// (rendering a chart and pulling provider data are data steps, no model
-// call). Rows whose retry_at is still in the future (a spaced transient
-// retry) are skipped; every requeue path that wants an immediate run clears
-// retry_at.
+// SKIP LOCKED keeps concurrent claimers off the same row. With no default key,
+// boards without their own key are skipped for the AI stages — queued until a key
+// appears, never failed for a missing key — while faces and fetches still claim
+// (rendering a chart and pulling provider data are data steps, no model call).
+// Rows whose retry_at is still in the future are skipped; every requeue path
+// wanting an immediate run clears it. A paused board is skipped for ALL four
+// stages (notPaused, top of file).
 //
-// A paused board is skipped the same way, but for ALL four stages — see
-// notPaused at the top of this file for the gate and its roster.
+// `stages` is the set of pending statuses the caller accepts — the dispatcher
+// passes only the stages whose lane has a free slot, so a full sidecar lane
+// doesn't stop tag work being claimed. Default = all four.
 //
-// `stages` is the set of pending statuses the caller will accept — the worker's
-// dispatcher passes only the stages whose lane has a free slot (worker-rework
-// Stage 1: capacity-aware claiming), so a full sidecar lane doesn't stop tag work
-// from being claimed. Default = all four (the single-flight/test path, unchanged).
-//
-// The ranking: each board's ready items are ranked by age (row_number per
-// board), then rank 0 of every board is served before rank 1, etc. — so a small
-// board's work interleaves ahead of a large board's backlog instead of waiting
-// behind it. Holds while active boards ≤ the batch size and degrades to plain
-// FIFO beyond (no worse than before). Claimed as ONE snapshot of `limit` rows:
-// single-row claims would collapse to FIFO (removing a head promotes the same
-// board's next item). The window function forbids FOR UPDATE, so the pick
-// (ranked, unlocked) and the lock (by id, SKIP LOCKED) are separate CTEs
-// feeding the UPDATE.
+// The ranking: each board's ready items ranked by age, then rank 0 of every board
+// served before rank 1 — a small board interleaves ahead of a large board's
+// backlog. Holds while active boards ≤ the batch size, plain FIFO beyond. ONE
+// snapshot of `limit` rows: single-row claims would collapse to FIFO (removing a
+// head promotes the same board's next item). The window function forbids FOR
+// UPDATE, so the pick (ranked, unlocked) and the lock (by id, SKIP LOCKED) are
+// separate CTEs feeding the UPDATE.
 export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1) {
   const now = Date.now();
   const { rows } = await db.query(
@@ -2814,14 +2805,12 @@ export async function setEntityFaceAt(db, id, at) {
 // Write extracted fields into payload and advance. Extraction is part of the
 // item's definition (identity, fields), so it runs regardless of auto-tagging;
 // auto_tag gates only the TAG leg. Items born on an auto-tag-off board carry
-// `park`: definition done, they return to held instead of flowing into
-// tagging. Explicit runs (reprocess/re-extract/release) carry no park and go
-// all the way — the toggle gates the automatic flow, not the user's hand.
-// The board is re-checked so a mid-flight auto-tag flip beats a stale park.
-// extracted_at records that the extract leg ran, so a later release routes
-// the item to the tag leg rather than paying for a second extraction.
-// Value-fenced like markTagged: lands only while the row is still
-// 'extracting'; a mid-flight re-route/delete discards (returns false).
+// `park`: definition done, they return to held instead of flowing into tagging.
+// Explicit runs carry no park and go all the way. The board is re-checked so a
+// mid-flight auto-tag flip beats a stale park. extracted_at records that the
+// extract leg ran, so a later release routes to the tag leg rather than paying
+// for a second extraction. Value-fenced like markTagged: lands only while still
+// 'extracting'.
 export async function markExtracted(db, id, fields) {
   const { rowCount } = await db.query(
     `UPDATE items
@@ -2840,14 +2829,12 @@ export async function markExtracted(db, id, fields) {
 }
 
 // The fetch leg's advance: provider data landed on the entity, so the vehicle
-// moves on to whichever leg the board wants next (the caller computes
-// toStatus from a fresh board read: face leg, tag leg, or held). Clears the
-// 'unfetched' routing stamp — park is NOT consumed here; the face leg and the
-// held-park rule read it later — and folds the true provider source into the
-// payload in the same fenced statement, because updateItemPayload has no
-// fence and a stale fetch must not splat provider data over a re-routed row.
-// Value-fenced like its siblings: lands only while the row is still
-// 'fetching'; false = discarded (deleted or re-routed mid-fetch).
+// moves on to whichever leg the board wants next (the caller computes toStatus
+// from a fresh board read). Clears the 'unfetched' routing stamp — park is NOT
+// consumed here, the face leg and the held-park rule read it later — and folds
+// the true provider source into the payload in the SAME fenced statement,
+// because updateItemPayload has no fence and a stale fetch must not splat
+// provider data over a re-routed row. Lands only while still 'fetching'.
 export async function advanceFetched(db, id, toStatus, patch = {}) {
   const { rowCount } = await db.query(
     `UPDATE items
@@ -3042,13 +3029,11 @@ export async function reconcileEntities(db, entityIds) {
 
 // Reap ghost entities: rows no instance points at any longer, settled empty for
 // at least `olderThanMs`. A zero-instance entity should never persist — reconcile
-// (after a membership change) and deleteEntity clean up inline — but entity_ids
-// carries no FK cascade, so a crash between the membership write and its reconcile,
-// or a concurrent last-two-instance delete, can strand one, and it renders as a
-// blank card with nothing to remove it. The age floor is load-bearing: upload
-// creates the entity and its instance in two statements, so a freshly empty entity
-// is an in-flight upload, not a ghost — only settled ones are reaped. Returns the
-// count deleted.
+// and deleteEntity clean up inline — but entity_ids carries no FK cascade, so a
+// crash between the membership write and its reconcile can strand one, and it
+// renders as a blank card with nothing to remove it. The age floor is
+// load-bearing: upload creates the entity and its instance in two statements, so
+// a freshly empty entity is an in-flight upload, not a ghost.
 export async function reapEmptyEntities(db, olderThanMs) {
   const { rowCount } = await db.query(
     `DELETE FROM entities e
@@ -3059,14 +3044,13 @@ export async function reapEmptyEntities(db, olderThanMs) {
   return rowCount;
 }
 
-// Delete an entity and the instances it's the SOLE home of; instances shared
-// with another entity survive, just losing this id from their array. Returns the
-// orphaned instances' file entries so the caller can clean the stores. The row is
-// locked FOR UPDATE before the orphan read so two concurrent deletes of the same
-// entity serialize instead of both reading — and double-returning — its files.
-// entity_ids carries no FK cascade anymore, so an extraction resolving to this
-// entity can still append its id right after the scrub (a dangling id / re-emptied
-// entity); the empty-entity reaper (reapEmptyEntities) backstops that.
+// Delete an entity and the instances it's the SOLE home of; instances shared with
+// another entity survive, losing this id from their array. Returns the orphaned
+// instances' file entries so the caller can clean the stores. The row is locked
+// FOR UPDATE before the orphan read so two concurrent deletes serialize instead
+// of both double-returning its files. entity_ids carries no FK cascade, so an
+// extraction resolving here can still append its id right after the scrub —
+// reapEmptyEntities backstops that.
 export async function deleteEntity(db, id) {
   return withTx(db, async (client) => {
     const locked = await client.query("SELECT 1 FROM entities WHERE id=$1 FOR UPDATE", [id]);
@@ -3141,14 +3125,13 @@ export async function dueLiveEntities(db, now, limit = 20) {
 }
 
 // Land a fetch leg's provider answer on an enqueued entity in ONE statement:
-// fields, the (possibly corrected) identity/display_name/symbol, and the
-// first liveness due time. One statement on purpose — composing
-// setEntityIdentity + updateEntityFields would strand a real identity with
-// empty fields if the process died between them, and setEntityIdentity also
-// force-clears identity_provisional, a side effect this path doesn't want.
-// Throws 23505 when the corrected identity collides with an entity already on
-// the board (an enqueue that lacked the symbol, or a provider disagreeing
-// with its own list) — the caller fails the item as a late duplicate.
+// fields, the (possibly corrected) identity/display_name/symbol, and the first
+// liveness due time. One statement on purpose — composing setEntityIdentity +
+// updateEntityFields would strand a real identity with empty fields if the
+// process died between them, and setEntityIdentity also force-clears
+// identity_provisional, which this path doesn't want. Throws 23505 when the
+// corrected identity collides with one already on the board; the caller fails
+// the item as a late duplicate.
 export async function landEntityFetch(db, id, { identity, displayName = null, symbol = null, fields, refreshAt = null }) {
   await db.query(
     `UPDATE entities
