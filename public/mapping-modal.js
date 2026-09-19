@@ -273,8 +273,29 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // the host to send `mapping`, and the server answered a no-op edit with a
   // full reschedule and backfill.
   const snapshot = () => ({ input: inputConnector, identity: identityCfg, face: faceCfg, fields });
-  const opened = draftKey(snapshot());
-  const isDirty = () => draftKey(snapshot()) !== opened;
+  // The baseline is kept as a VALUE, not as its string, because one part of it
+  // has to be re-derived at comparison time. When the connector catalog lands
+  // — a fetch, so tasks after the pane rendered — normalizedFace COERCES a
+  // board saved without a face onto the domain's first producer. That is a
+  // write to the draft nobody asked for, and comparing against a string taken
+  // before it made every connector board read as edited the moment its
+  // catalog arrived: the next real edit anywhere in the modal then dragged
+  // `mapping` into the PATCH, and the server answers a mapping change with a
+  // reschedule and a backfill.
+  //
+  // Running the baseline's face through the SAME coercion is what makes that
+  // exact, rather than rebasing the whole draft when the catalog lands — a
+  // rebase would also swallow a field the user removed while it was still in
+  // flight, and losing an edit silently is worse than the bug it fixes.
+  // Before the catalog arrives the coercion is a no-op on both sides.
+  const opened = {
+    input: inputConnector,
+    identity: clone(identityCfg),
+    face: clone(faceCfg),
+    fields: fields.map((f) => ({ ...f })),
+  };
+  const isDirty = () =>
+    draftKey(snapshot()) !== draftKey({ ...opened, face: normalizedFace(opened.face) });
 
   // The host (board-modal) provides a flex-column container and owns its
   // visibility via the Mapping/Tagging toggle — so we never set `display` here,
@@ -1057,15 +1078,22 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // This also COERCES a board saved without a face (or under a producer that's
   // gone) onto the first declared producer, so the def row never summarizes a
   // face the save wouldn't write. Idempotent — re-runs whenever faces land.
-  function normalizeConnectorFace() {
-    if (!inputConnector || !faces().length) return;
-    const producer = faces().find((p) => p.name === faceCfg?.producer) || faces()[0];
-    const period = faceCfg?.period && producer.periods?.includes(faceCfg.period) ? faceCfg.period
+  // The rule on its own, so isDirty() above can put the BASELINE through it
+  // too — the coercion is the pane correcting its own arrival, and a rule that
+  // only one side of a comparison gets is how that reads as an edit. A no-op
+  // until the faces land, which is what makes it safe to call at any time.
+  function normalizedFace(face) {
+    if (!inputConnector || !faces().length) return face;
+    const producer = faces().find((p) => p.name === face?.producer) || faces()[0];
+    const period = face?.period && producer.periods?.includes(face.period) ? face.period
       : producer.periods?.includes("1y") ? "1y" : producer.periods?.[0];
-    faceCfg = {
+    return {
       source: "connector", producer: producer.name, period,
-      ...(faceCfg?.refresh?.every ? { refresh: { every: faceCfg.refresh.every } } : {}),
+      ...(face?.refresh?.every ? { refresh: { every: face.refresh.every } } : {}),
     };
+  }
+  function normalizeConnectorFace() {
+    faceCfg = normalizedFace(faceCfg);
   }
 
   render();

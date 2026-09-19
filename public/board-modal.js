@@ -53,6 +53,12 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
   root.className = "fe-root";
   textarea.insertAdjacentElement("afterend", root);
 
+  // The textarea is the taxonomy's source of truth — this is the ONE place
+  // that writes it — so writing it raises `input`, the event a person typing
+  // into it would have raised. Setting `.value` from code fires nothing on its
+  // own, and anything listening for edits (the modal's save gate) is entitled
+  // to hear about a change it can see. Cheap to say every time: the gate
+  // coalesces, so an extra signal costs one re-read that finds nothing.
   function sync() {
     textarea.value = JSON.stringify(facets.map((f) => {
       const out = { key: f.key, label: f.label, values: f.values };
@@ -60,6 +66,7 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
       if (f.description && f.description.trim()) out.description = f.description.trim();
       return out;
     }));
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
   // Every edit that changes the shape of the list — remove a value, remove a
@@ -278,11 +285,20 @@ function buildGuidanceClipboard({ contextEl, facetsEl, editor }) {
     setTimeout(() => (b.textContent = "Copy JSON"), 1200);
   });
 
+  // Everything below the await lands in a LATER TASK than the click that ran
+  // it — the clipboard is a permission check and a round trip. So nothing here
+  // may lean on that click having been noticed: by the time the value arrives,
+  // any listener that reacted to the click has already reacted, to the document
+  // as it stood BEFORE the paste. Both writes therefore announce themselves —
+  // the facets half through the editor's own sync().
   chip("Paste JSON", async () => {
     let doc;
     try { doc = normalizeGuidance(JSON.parse(await navigator.clipboard.readText())); }
     catch { return toast.warn('Clipboard doesn\'t contain tagging guidance JSON ({ "context", "facets" })'); }
-    if (doc.context !== undefined) contextEl.value = doc.context;
+    if (doc.context !== undefined) {
+      contextEl.value = doc.context;
+      contextEl.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     if (doc.facets !== undefined) editor.setFacets(doc.facets);
   });
 
