@@ -1,7 +1,7 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-9 DONE (2026-09-20). Suite 1808 green throughout,
-comments-only diffs, LF clean.**
+**Status: ARC COMPLETE (2026-09-20). All 10 stages shipped, one commit each,
+suite 1808 green throughout, every diff comments-only except stage 10's move.**
 
 | stage | section | comment lines | cut | big blocks |
 |---|---|---|---|---|
@@ -15,9 +15,46 @@ comments-only diffs, LF clean.**
 | 7 | queue helpers + entities + connector liveness | 166 → 149 | -10% | 6 → 3 |
 | 8 | long tail (users, MCP, crates, keys, membership, alerts) | 281 → 252 | -10% | 11 → 6 |
 | 9 | top-of-file (parsers, status maps, derivations) | 239 → 213 | -11% | 8 → 6 |
+| 10 | `cancelBoardQueue` (moved, then re-read) | 50 → 33 | -34% | 1 → 1 |
 
-**File vs `ddd41e0`: 4,952 → 4,663 lines, 1,900 → 1,609 comment lines, -20,014
-bytes, density 41.2% → 37.2%. Stage 10 open.**
+**Final, vs `ddd41e0`: 4,952 → 4,646 lines. 1,900 → 1,592 comment lines (-308).
+249,743 → 228,484 bytes (-21,259). Density 41.2% → 37.0%. Blocks of 8+ comment
+lines: 75 → 49. Longest block in the file: 50 → 33 lines.**
+
+The comments no longer outweigh the code: 228KB of file against roughly 120KB of
+code, where the prose alone used to be 130KB.
+
+## What the arc actually found
+
+The headline was never the volume. It was that **seven doc blocks were attached
+to the wrong symbol**, and that **both stale comments in the file were among
+them**. An orphan is not a tidiness problem — it is a comment cut loose from the
+thing that would have kept it honest:
+
+- `BOARD_COL_LIST` — doc floated below the list it documents
+- `usageRows` / `USAGE_DIMS` — two docs fused, left above the wrong declaration
+- `claimFairBatch` — opened by announcing a single-row claim
+- `failOrRequeue` — doc parked on the `RETRY_BACKOFF_MS` constants
+- `meter()` — **had no doc at all**; its contract sat on `APP_SCOPE`
+- `ingestRunGate` — header, preamble and function doc fused into 37 lines
+- `addCrateItems` — **no doc at all**, and the parked block promised a
+  `skipped` field the function does not return (STALE)
+- `boardUsageSummary` — described a token-bucket pivot it no longer does (STALE)
+
+## If this is ever run on another file
+
+1. **Check which symbol each block describes before judging its length.** A long
+   comment in the wrong place reads as bloat and is really a missing one
+   somewhere else.
+2. **Measure against all comment lines in the section**, never against "lines in
+   big blocks" — a 20-line block cut to 7 leaves that census and reads as a
+   total win. This plan reported three stages wrong before the correction.
+3. **Do not predict a section's yield.** Stage 9 was predicted to give almost
+   nothing and gave 11%, because one constant carried a 15-line postmortem.
+   Density is not uniform.
+4. **Expect ~18% and accept 10%.** The rubric keeps far more than a first read
+   suggests, and that is the finding rather than a failure to cut.
+
 
 ### Measurement correction (2026-09-20)
 

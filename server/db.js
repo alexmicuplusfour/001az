@@ -2226,6 +2226,115 @@ export async function stopIngestRun(db, boardId, nextRunAt, now = Date.now()) {
   return { stopped: rows.length > 0, dropped: rows[0]?.dropped || 0 };
 }
 
+// Soft cancel — "Cancel queued" (job-control-plan.md Stage 2), the CONSUMER half
+// of stopIngestRun above: that one stops the producer, this one empties what the
+// producer already queued. Pulls every queued status out of the pipeline in one
+// transaction; only rows a worker is actually holding are beyond it, and they run
+// to their landings.
+//
+// The boundary is queue position, nothing else — NOT "has this pass started",
+// because on a feed board every row queued to tag has by construction already run
+// its fetch/extract/face legs, so a started-ness test protects the whole visible
+// queue and cancels nothing. No money sits behind the earlier boundary either:
+// every paid unit is in the TAG call, which a queued row has not made.
+//
+// One status-independent rule for every queued row:
+//
+//   tags present -> 'tagged'   the pre-queue settled state, restored
+//   never-tagged -> 'held'     parked; the release routers re-enter a held row
+//                              at the leg its payload shape names, which is why
+//                              parking mid-prep strands nothing
+//   unfetched pending_fetch -> DELETE, item + sole-home placeholder: no provider
+//                              data ever landed, so what goes is a name-only
+//                              shell. A FETCHED vehicle in that lane is a
+//                              reprocess re-buying real data and pulls instead.
+//
+// tag_facets=NULL on the touched branches: the queued statuses are exactly the
+// window a scoped pass waits in, so pulling an item out must not leave a scope
+// armed for the next pass. The client's ghost-card sweep picks up the deletions.
+//
+// Returns { restored, parked, removed, finishing }. ABORT (Stage 3) is the same
+// function with the in-flight halves added, so everything settles NOW: no call is
+// cancelled, but the landing fences (markTagged/markExtracted/advanceFaced/
+// advanceFetched all write WHERE status='<in-flight>') drop each result as it
+// returns and the legs record `discarded` with the tokens spent. `discarding`
+// counts those rows, pre-counted; `finishing` reads 0.
+export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
+  // Which statuses each branch touches — the rule and its drift guard live at
+  // the top of this file, with the other IN_FLIGHT_FOR derivations.
+  const pulls = cancelPulls(abort);
+  const fetchLane = cancelFetchLane(abort);
+  return withTx(db, async (client) => {
+    const now = Date.now();
+    // Abort's own count, taken BEFORE the flips: the rows a worker is holding
+    // right now, whose calls will finish in the background and be discarded by
+    // the landing fences. RETURNING can't see pre-update status, hence the
+    // pre-count; a call that lands in this window settles normally and the
+    // pull below catches its landed row — no gap, at most an overcount of one.
+    // It CROSSCUTS `removed` rather than partitioning against it: a `fetching`
+    // row is both in-flight here and deleted below.
+    const discarding = abort
+      ? Number((await client.query(
+          `SELECT COUNT(*)::int AS c FROM items WHERE board_id=$1 AND status IN ${IN_FLIGHT_SQL}`,
+          [boardId]
+        )).rows[0].c)
+      : 0;
+    // UNFETCHED: only a vehicle whose provider data NEVER landed is a
+    // name-only shell. A fetched vehicle in the fetch lane is a reprocess
+    // re-buying its data (Stage 3a) — real fields, hearts, history — and it
+    // pulls back below like every other leg's row instead of being deleted.
+    const del = await client.query(
+      `DELETE FROM items
+       WHERE board_id=$1 AND status = ANY($2::text[]) AND ${UNFETCHED}
+       RETURNING id, entity_ids`,
+      [boardId, fetchLane]
+    );
+    // A cancelled queued FEED add is "don't re-add" — unledgered, the next
+    // sweep tick would silently un-do this cancel. Stamped `deleted`, the
+    // cancel holds and the bring-back surface can reverse it. Hand-browsed
+    // adds have no ledger row; the stamp is a no-op for them.
+    await stampIngestDeleted(client, boardId, del.rows.map((r) => r.id));
+    // Sole-home placeholders go with their vehicles (no files exist pre-fetch,
+    // so there is nothing to hand to sources.cleanup); an entity that somehow
+    // has another instance keeps living and only lost this vehicle. A separate
+    // statement, NOT a CTE sibling of the DELETE above: within one statement
+    // the sibling's deletes are invisible to this NOT EXISTS snapshot, so every
+    // entity would still look occupied and none would go.
+    await deleteEmptyEntities(client, [...new Set(del.rows.flatMap((r) => r.entity_ids))]);
+    // ONE statement for both landings — the branch IS the rule, so it can't be
+    // read out of order. (Two statements worked only because the parked one ran
+    // second, on what the restored one had already moved out of the status set;
+    // nothing said so, and swapping them would have parked every restorable row.)
+    // The second status list ($4, the fetch lane) catches the fetched
+    // vehicles the delete arm's unfetched guard spared — they pull back with
+    // everyone else, so the two statements stay exact per-row complements.
+    const { rows: [pulled] } = await client.query(
+      `WITH pulled AS (
+         UPDATE items
+            SET status = CASE WHEN tags != '[]'::jsonb THEN 'tagged' ELSE 'held' END,
+                tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
+          WHERE board_id=$2
+            AND (status = ANY($3::text[])
+                 OR (status = ANY($4::text[]) AND NOT ${UNFETCHED}))
+          RETURNING status)
+       SELECT COUNT(*) FILTER (WHERE status='tagged')::int AS restored,
+              COUNT(*) FILTER (WHERE status='held')::int AS parked
+         FROM pulled`,
+      [now, boardId, pulls, fetchLane]
+    );
+    // What the cancel LEFT RUNNING: the in-flight rows it cannot reach. Not
+    // derivable from the counts above — they report what was touched. Abort
+    // skips the query rather than asking a question it has already answered:
+    // its two statements cover IN_FLIGHT_STATES between them
+    // (the fetch lane splits per-row on the unfetched flag), so it leaves
+    // nothing behind by construction.
+    const finishing = abort
+      ? 0
+      : (await boardTagActivity(client, boardId)).busy;
+    return { restored: pulled.restored, parked: pulled.parked, removed: del.rowCount, finishing, discarding };
+  });
+}
+
 // The dedup ledger: every source_key ever ledgered on this board, with what the
 // sweep needs to judge it. Rows outlive their entities on purpose — deleting an
 // item is a user judgment the feed must not overturn on the next scan.
@@ -4177,132 +4286,6 @@ function costOf(units) {
     if (u.quantity > u.priced_quantity) remainder[unit] = u.quantity - u.priced_quantity;
   }
   return priced ? { micros, unpriced: unpricedList(remainder) } : null;
-}
-
-// Soft cancel — "Cancel queued" (job-control-plan.md Stage 2; boundary moved
-// by the 2026-09-10 postmortem). Pulls EVERYTHING a board has waiting — every
-// queued status — out of the pipeline in one transaction; only rows a worker
-// is actually holding (the in-flight statuses) are beyond it, and they run to
-// their landings. The boundary is queue position, nothing else. It was "has
-// this pass started" (a mid_pass marker, 0044) for four days: on a feed board
-// every row queued to tag has, by construction, already run its fetch/extract/
-// face legs, so the soft verb protected the entire visible queue and cancelled
-// nothing across 19 presses while a dead provider's retry timers held 106
-// items. The marker guarded money that isn't there — every paid unit sits in
-// the TAG call, which a queued row hasn't made (fetch is an API hit, extract/
-// face/embed run local) — and parking mid-prep strands nothing: the release
-// routers re-enter a held row at the leg its payload shape names.
-// One status-independent rule for every queued row:
-//
-//   tags present → 'tagged'   (the pre-queue settled state, restored — covers
-//                              pending, a tagged-but-unfaced vehicle at
-//                              pending_face, a pre-extraction-era tagged item
-//                              at pending_extract)
-//   never-tagged → 'held'     (parked; the routers' shared CASE — UNFETCHED
-//                              first, then face/extract/tag — resumes any
-//                              held shape correctly on release. Since Stage 3a
-//                              this also catches FETCHED vehicles a reprocess
-//                              put back in the fetch lane — real data, so they
-//                              pull, never delete)
-//   unfetched pending_fetch → DELETE
-//                             (item + sole-home placeholder entity: no
-//                              provider data ever landed, so what's removed is
-//                              a name-only shell — including, accepted with
-//                              eyes open in the plan, an old failed-fetch
-//                              vehicle a retag re-queued, which is
-//                              column-identical to a fresh bulk add)
-//
-// tag_facets=NULL on the touched branches: the queued statuses are exactly the
-// window a scoped pass waits in, and pulling an item out must not leave a
-// scope armed for the next pass. retry_at cleared with the rest of the triple
-// (the old helper missed it). The ghost-card sweep in the client's delta poll
-// picks up the deletions — vanished queued cards are precisely its job.
-//
-// Returns { restored, parked, removed, finishing } — finishing = the
-// in-flight rows still running, which the soft verb cannot reach; the Jobs
-// modal's cancel row carries all four.
-//
-// ABORT (job-control-plan.md Stage 3) is the same function with the in-flight
-// halves added: `{ abort: true }` widens both status lists, so everything
-// settles NOW. No call is touched
-// — the landing fences (markTagged/markExtracted/advanceFaced/advanceFetched
-// all write WHERE status='<in-flight>') drop each result as it comes back and
-// the legs write their `discarded` rows with the tokens spent. The extra
-// `discarding` count is those rows, pre-counted; `finishing` reads 0.
-export async function cancelBoardQueue(db, boardId, { abort = false } = {}) {
-  // Which statuses each branch touches — the rule and its drift guard live at
-  // the top of this file, with the other IN_FLIGHT_FOR derivations.
-  const pulls = cancelPulls(abort);
-  const fetchLane = cancelFetchLane(abort);
-  return withTx(db, async (client) => {
-    const now = Date.now();
-    // Abort's own count, taken BEFORE the flips: the rows a worker is holding
-    // right now, whose calls will finish in the background and be discarded by
-    // the landing fences. RETURNING can't see pre-update status, hence the
-    // pre-count; a call that lands in this window settles normally and the
-    // pull below catches its landed row — no gap, at most an overcount of one.
-    // It CROSSCUTS `removed` rather than partitioning against it: a `fetching`
-    // row is both in-flight here and deleted below.
-    const discarding = abort
-      ? Number((await client.query(
-          `SELECT COUNT(*)::int AS c FROM items WHERE board_id=$1 AND status IN ${IN_FLIGHT_SQL}`,
-          [boardId]
-        )).rows[0].c)
-      : 0;
-    // UNFETCHED: only a vehicle whose provider data NEVER landed is a
-    // name-only shell. A fetched vehicle in the fetch lane is a reprocess
-    // re-buying its data (Stage 3a) — real fields, hearts, history — and it
-    // pulls back below like every other leg's row instead of being deleted.
-    const del = await client.query(
-      `DELETE FROM items
-       WHERE board_id=$1 AND status = ANY($2::text[]) AND ${UNFETCHED}
-       RETURNING id, entity_ids`,
-      [boardId, fetchLane]
-    );
-    // A cancelled queued FEED add is "don't re-add" — unledgered, the next
-    // sweep tick would silently un-do this cancel. Stamped `deleted`, the
-    // cancel holds and the bring-back surface can reverse it. Hand-browsed
-    // adds have no ledger row; the stamp is a no-op for them.
-    await stampIngestDeleted(client, boardId, del.rows.map((r) => r.id));
-    // Sole-home placeholders go with their vehicles (no files exist pre-fetch,
-    // so there is nothing to hand to sources.cleanup); an entity that somehow
-    // has another instance keeps living and only lost this vehicle. A separate
-    // statement, NOT a CTE sibling of the DELETE above: within one statement
-    // the sibling's deletes are invisible to this NOT EXISTS snapshot, so every
-    // entity would still look occupied and none would go.
-    await deleteEmptyEntities(client, [...new Set(del.rows.flatMap((r) => r.entity_ids))]);
-    // ONE statement for both landings — the branch IS the rule, so it can't be
-    // read out of order. (Two statements worked only because the parked one ran
-    // second, on what the restored one had already moved out of the status set;
-    // nothing said so, and swapping them would have parked every restorable row.)
-    // The second status list ($4, the fetch lane) catches the fetched
-    // vehicles the delete arm's unfetched guard spared — they pull back with
-    // everyone else, so the two statements stay exact per-row complements.
-    const { rows: [pulled] } = await client.query(
-      `WITH pulled AS (
-         UPDATE items
-            SET status = CASE WHEN tags != '[]'::jsonb THEN 'tagged' ELSE 'held' END,
-                tag_facets=NULL, attempts=0, error=NULL, retry_at=NULL, updated_at=$1
-          WHERE board_id=$2
-            AND (status = ANY($3::text[])
-                 OR (status = ANY($4::text[]) AND NOT ${UNFETCHED}))
-          RETURNING status)
-       SELECT COUNT(*) FILTER (WHERE status='tagged')::int AS restored,
-              COUNT(*) FILTER (WHERE status='held')::int AS parked
-         FROM pulled`,
-      [now, boardId, pulls, fetchLane]
-    );
-    // What the cancel LEFT RUNNING: the in-flight rows it cannot reach. Not
-    // derivable from the counts above — they report what was touched. Abort
-    // skips the query rather than asking a question it has already answered:
-    // its two statements cover IN_FLIGHT_STATES between them
-    // (the fetch lane splits per-row on the unfetched flag), so it leaves
-    // nothing behind by construction.
-    const finishing = abort
-      ? 0
-      : (await boardTagActivity(client, boardId)).busy;
-    return { restored: pulled.restored, parked: pulled.parked, removed: del.rowCount, finishing, discarding };
-  });
 }
 
 // --- alerts (watched facet conditions; the matcher and sweep live in alerts.js) ---
