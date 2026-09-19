@@ -350,18 +350,19 @@ img.bc-thumb {
 }
 
 /* Connector entities carry no file — the gallery gives them the placeholder
-   badge (.face-badge.symbol in styles.css); the stack restates it at tile
-   scale, same grey and same ink. */
+   badge (.face-badge.symbol in styles.css); this is the same tile at stack
+   scale, so it takes the same tokens rather than a second copy of the colours
+   (boards.html loads both stylesheets). */
 .bc-thumb.sym {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f1f2f4;
+  background: var(--face-badge-bg);
 }
 .bc-thumb.sym span {
   font: 700 17px/1 "SF Mono", Consolas, monospace;
   letter-spacing: -0.02em;
-  color: #9aa0aa;
+  color: var(--face-badge-ink);
 }
 
 .bc-body {

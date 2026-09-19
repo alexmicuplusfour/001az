@@ -238,6 +238,12 @@ function instanceEntry(r) {
     w: file?.w || null,
     h: file?.h || null,
     kind: file?.kind || (file ? "image" : "connector"),
+    // The app is its own source for this file — a connector price chart, which
+    // has no upload behind it. The card sizes such a face differently from
+    // somebody's photo, and the client re-picks the face off these instances
+    // after a removal, so it has to travel with the rest of the face's fields.
+    // Omitted when false, like `objects`: the common row costs nothing.
+    ...(file?.generated ? { generated: true } : {}),
     status: r.status,
     tags: r.tags,
     undecided: !!r.undecided,
@@ -397,12 +403,7 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
       // connector entities have no files; instanceEntry marks the file-less
       // vehicle "connector" so the client renders the symbol tile face.
       kind: face?.kind || (e.symbol != null ? "connector" : "image"),
-      // The app DREW this face (a connector price chart) rather than receiving
-      // it: it was rendered to a shape of our choosing, so the card shows it
-      // whole in the standard face band instead of letting it set the card's
-      // height the way an uploaded photo's own proportions do. Off the raw file
-      // entry — `face` is instanceEntry's projection, which doesn't carry it.
-      generated: !!faceEntry?.generated,
+      generated: !!face?.generated,
       symbol: e.symbol || null,
       label: face?.label || null,
       // Connector-bound entity fields (AI-extracted fields are per instance).

@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { ICONS, refreshEntityTags, fmtDuration, scopableInstance, facetName } from './utils.js';
+import { ICONS, refreshEntityTags, fmtDuration, scopableInstance, facetName, applyFace } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
 import { openCratePop, closeCratePop } from './crates.js';
@@ -527,8 +527,7 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
           item.instances = item.instances.filter((x) => x.id !== f.id);
           refreshEntityTags(item);
           // The face may have changed; re-pick per the board's face config.
-          const face = selectFace(item.instances, state.boardMapping?.face);
-          if (face) { item.name = face.name; item.w = face.w; item.h = face.h; item.kind = face.kind; item.label = face.label; }
+          applyFace(item, selectFace(item.instances, state.boardMapping?.face));
           if (currentInstIndex >= item.instances.length) currentInstIndex = 0;
           document.dispatchEvent(new Event('app:render'));
           showInstance(Math.min(currentInstIndex, item.instances.length - 1));

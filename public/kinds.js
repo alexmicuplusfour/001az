@@ -47,14 +47,26 @@ function faceBadge(legend, variant) {
   return badge;
 }
 
-// The band a DRAWN face sits in — an audio waveform, a connector price chart.
-// The app chose their shape, so they're shown whole at the standard face
-// height rather than setting the card's height from their own proportions.
-function fitBand(img) {
-  const band = document.createElement("div");
-  band.className = "face-fit";
-  band.appendChild(img);
-  return band;
+// The band that gives a rendered face the shared shape: `doc-preview` crops a
+// page peek, `face-fit` shows a waveform or a price chart whole.
+function band(cls, node) {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.appendChild(node);
+  return el;
+}
+
+// A rendered face in its band. No relayout on decode — the band's height comes
+// from the card's width, so the arriving bytes cannot move the masonry; only
+// the fade-in is left.
+function bandedFace(cls, item) {
+  const img = document.createElement("img");
+  img.src = thumbUrl(item.name);
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.alt = item.displayLabel;
+  img.addEventListener("load", () => img.classList.add("loaded"));
+  return band(cls, img);
 }
 
 // The wrapper a titled face lives in — a media region plus the title strip.
@@ -86,15 +98,19 @@ const imageKind = {
     img.addEventListener("load", () => {
       img.classList.add("loaded");
       card.classList.add("loaded");
-      // Ratio-stamped cards already have their exact height — the loaded
-      // bytes can't move the masonry. Skipping the relayout matters when a
-      // fresh board view trickles in hundreds of lazy thumbnails.
-      if (!card.dataset.ratio) layout();
+      // Only a photo with no stored dimensions can move the masonry when it
+      // decodes; anything with a ratio (stamped on the card or on the img) or
+      // in a band already has its exact height. Skipping the relayout matters
+      // when a fresh board view trickles in hundreds of lazy thumbnails.
+      if (!card.dataset.ratio && !(item.w && item.h)) layout();
     });
     if (img.complete && img.naturalWidth > 0) { img.classList.add("loaded"); card.classList.add("loaded"); }
     if (!hasIdentity(item)) return faceMedia(img);
     // Mapped identity: same title strip documents carry, under the media.
-    return titledFace(item.generated ? fitBand(img) : img, item.displayLabel, item.instances?.length);
+    // A face the app produced for itself — a connector's price chart, with no
+    // upload behind it — goes in the shared band like every other rendered
+    // face. Only the user's own picture gets to set the card's height.
+    return titledFace(item.generated ? band("face-fit", img) : img, item.displayLabel, item.instances?.length);
   },
 
   // Upload placeholders: the local object URL until the server row exists.
@@ -118,70 +134,33 @@ const imageKind = {
 
 const ext = (name) => (name?.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
 
-const docKind = {
-  // A fixed-height (200px) peek at the document — page-1 render cropped from
-  // the top with a fade into the title strip — or an extension badge when
-  // there's no preview; the original filename as the card title. Height is
-  // still content-ish (title strip), so no dataset.ratio: measured lane.
-  face(item, card, layout) {
-    let media;
-    if (item.w && item.h) {
-      media = document.createElement("div");
-      media.className = "doc-preview";
-      const img = document.createElement("img");
-      img.src = thumbUrl(item.name);
-      img.loading = "lazy";
-      img.decoding = "async";
-      img.alt = item.displayLabel;
-      img.addEventListener("load", () => { img.classList.add("loaded"); layout(); });
-      media.appendChild(img);
-    } else {
-      media = faceBadge(ext(item.name));
-    }
-    card.classList.add("loaded");
-    return titledFace(media, item.displayLabel, item.instances?.length);
-  },
-
-  progressFace(p, card) {
-    // Badge face is ready at creation — no shimmer needed (see imageKind).
-    card.classList.add("loaded");
-    return titledFace(faceBadge(ext(p.name)), p.name || "uploading");
-  },
-
-  previewUrl(item) {
-    return item.w && item.h ? thumbUrl(item.name) : null;
-  },
-};
-
-// Audio items carry a waveform face (server/faces/waveform.js) — wide and short,
-// so it's shown WHOLE (object-fit: contain) rather than cover-cropped like a doc
-// page, centred in the shared face band. No waveform (ffmpeg absent at ingest,
-// or not rendered yet) → a ♪ badge in that same band, so the card keeps its
-// height when the waveform lands. Detail view is the player (lightbox.js
-// showMedia branches on kind === "audio").
-const audioKind = {
-  face(item, card, layout) {
-    let media;
-    if (item.w && item.h) {
-      const img = document.createElement("img");
-      img.src = thumbUrl(item.name);
-      img.loading = "lazy";
-      img.decoding = "async";
-      img.alt = item.displayLabel;
-      img.addEventListener("load", () => { img.classList.add("loaded"); layout(); });
-      media = fitBand(img);
-    } else {
-      media = faceBadge("♪", "audio");
-    }
-    card.classList.add("loaded");
+// Documents and audio are the same card: a rendered face in the shared band,
+// or a placeholder badge in that same band when nothing was rendered (no
+// poppler, no ffmpeg, or not yet) — which is why neither ever changes height.
+// They differ in the band their face wants and in what the badge says, so
+// that is all each one states. A file title strip under both; height is
+// content-ish, so no dataset.ratio and they take the measured lane.
+const bandedKind = (bandClass, legend) => ({
+  face(item, card) {
+    card.classList.add("loaded"); // nothing here shimmers: the box is already sized
+    const media = item.w && item.h ? bandedFace(bandClass, item) : faceBadge(...legend(item.name));
     return titledFace(media, item.displayLabel, item.instances?.length);
   },
   progressFace(p, card) {
     card.classList.add("loaded");
-    return titledFace(faceBadge("♪", "audio"), p.name || "uploading");
+    return titledFace(faceBadge(...legend(p.name)), p.name || "uploading");
   },
   previewUrl(item) { return item.w && item.h ? thumbUrl(item.name) : null; },
-};
+});
+
+// Page 1, cropped from the top with a fade into the title strip; the stored
+// name's extension when there's no render.
+const docKind = bandedKind("doc-preview", (name) => [ext(name)]);
+
+// The ffmpeg waveform (server/faces/waveform.js), shown whole rather than
+// cover-cropped — it is wide and short and all of it is content. Detail view
+// is the player (lightbox.js showMedia branches on kind === "audio").
+const audioKind = bandedKind("face-fit", () => ["♪", "audio"]);
 
 // Connector entities have no files. Same card anatomy as documents — face area
 // + title strip — with the ticker on the same placeholder badge a document's

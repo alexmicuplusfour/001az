@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { toItem, toInstance } from './utils.js';
+import { toItem } from './utils.js';
 import { api } from './api.js';
 import { toast } from './toast.js';
 
@@ -142,6 +142,32 @@ export async function requeueToast(url, okMsg, failMsg, body) {
   }
 }
 
+// The exceptions to "a delta row is the truth" — short enough to read in one
+// go, which is the point. Everything not named here follows the server.
+function hold(ex, d) {
+  const kept = {};
+  // The server CLEARS tags while re-queuing, so an empty list mid-flight is a
+  // transit, not an answer — keep what's on screen until a result lands. The
+  // terminal statuses mean the emptiness is real (held is terminal too: a
+  // parked row, e.g. a cancelled retag, may sit that way indefinitely).
+  const settled = d.status === "tagged" || d.status === "failed" || d.status === "held";
+  if (!settled && !(Array.isArray(d.tags) && d.tags.length)) {
+    kept.tags = ex.tags;
+    kept.tagSet = ex.tagSet;
+  }
+  // A row that omits its instances is saying nothing about them, not that
+  // they're gone — and `fields` travels with them.
+  if (!Array.isArray(d.instances)) {
+    kept.instances = ex.instances;
+    kept.fields = ex.fields;
+  }
+  // created_at backfills items uploaded this session, whose upload rows
+  // predate the entity stamp; an absent stamp must not erase the one we have.
+  if (d.created_at == null) kept.created_at = ex.created_at;
+  if (d.updated_at == null) kept.updated_at = ex.updated_at;
+  return kept;
+}
+
 // `presentIds` is every entity id currently on the server — used to tell
 // "absent because unchanged" apart from "absent because merged/deleted". A
 // full-list response IS that set (the default); delta responses carry only
@@ -153,64 +179,20 @@ export function reconcile(data, presentIds = null) {
   for (const d of data) {
     const ex = byId.get(d.id);
     if (ex) {
-      const list = Array.isArray(d.tags) ? d.tags : [];
-      ex.status = d.status;
-      // Server clears tags while re-queuing; keep stale tags until a result
-      // lands. held is terminal too (a parked row — e.g. a cancelled retag —
-      // may sit indefinitely), so an empty list is its truth, not a transit.
-      if (d.status === "tagged" || d.status === "failed" || d.status === "held" || list.length) {
-        ex.tags = list;
-        ex.tagSet = new Set(list);
-      }
-      ex.undecided = !!d.undecided;
-      ex.hearts = d.hearts || 0;
-      ex.favoritedByMe = !!d.favoritedByMe;
-      ex.crateIds = new Set(Array.isArray(d.crateIds) ? d.crateIds : []);
-      // Detected-object union — follow unconditionally (absent = none): unlike
-      // tags, fields are only ever REPLACED whole at extraction landing, so
-      // there's no mid-requeue stale window to keep old values through.
-      ex.objectSet = new Set(d.objects || []);
-      // created_at backfills items uploaded this session (their upload rows
-      // predate the entity stamp); updated_at moves on every delta.
-      if (d.created_at != null) ex.created_at = d.created_at;
-      if (d.updated_at != null) ex.updated_at = d.updated_at;
-      // A re-extract or face swap can change the media bag; live refreshes
-      // change fields — both ride every delta row, follow them.
-      if (d.media !== undefined) ex.media = d.media;
-      // Instances change under merges/splits/removals — take the server list
-      // wholesale (the lightbox re-resolves its selection by instance id).
-      if (Array.isArray(d.instances)) {
-        ex.instances = d.instances.map(toInstance);
-        ex.fields = d.fields || {};
-      }
-      ex.identityProvisional = !!d.identity_provisional;
-      // Pick up derived identity and display name once extraction resolves them.
-      if ((d.identity && d.identity !== ex.identity) || (d.display_name || null) !== ex.display_name || d.name !== ex.name) {
-        ex.name = d.name;
-        ex.identity = d.identity;
-        ex.display_name = d.display_name || null;
-        ex.displayLabel = d.display_name || (d.identity !== d.name ? d.identity : (d.label || d.name));
-        ex.kind = d.kind || ex.kind;
-      }
-      // The FACE, followed as one thing. Which file it is, how big it is and
-      // whether the app DREW it all describe the same object and all change at
-      // the same moment — a connector's chart finishing, a merge swapping which
-      // instance supplies the card, an upload's real dimensions landing after
-      // the optimistic client-side row. This used to copy w/h alone, so a chart
-      // that arrived on an open page rendered as if it were somebody's photo
-      // and only came right on the next page load.
+      // An update is the SAME transcription a first sighting gets — toItem —
+      // written over the existing object so every reference to it stays live
+      // (the lightbox's current item, the selection map, crate membership).
       //
-      // A field added to the listing projection has to be added here too, and
-      // nothing in the code says so. test/delta-reconcile.test.js closes that
-      // by comparing a merged item against toItem() of the same row.
+      // It used to be a second, hand-written copy of the projection, and the
+      // two drifted the moment anyone added a field: `generated` reached
+      // toItem and not the merge, so a connector's price chart arriving on an
+      // open page sized its card like somebody's photo until the next reload.
+      // `label`, `symbol` and `uploadedBy` had gone stale the same way, unseen.
+      // Deriving from toItem means there is one transcription to keep right.
       //
-      // Normalised on both sides: the wire says null for "no face", toItem
-      // stores 0, and comparing the two raw would report a change every tick.
-      if ((d.w || 0) !== ex.w || (d.h || 0) !== ex.h || !!d.generated !== ex.generated) {
-        ex.w = d.w || 0;
-        ex.h = d.h || 0;
-        ex.generated = !!d.generated;
-      }
+      // `hold` is the short list of fields where the delta row is NOT the
+      // truth — everything else follows the server unconditionally.
+      Object.assign(ex, toItem(d), hold(ex, d));
     } else {
       state.items.unshift(toItem(d));
     }

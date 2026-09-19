@@ -14,6 +14,7 @@ export function toInstance(i) {
     w: i.w || 0,
     h: i.h || 0,
     kind: i.kind || "image",
+    generated: !!i.generated,
     status: i.status,
     tags: list,
     tagSet: new Set(list),
@@ -56,7 +57,13 @@ export function toItem(d) {
     w: d.w || 0,
     h: d.h || 0,
     kind: d.kind || "image",
-    generated: !!d.generated,  // face the app drew (connector chart) — shown whole in the face band
+    // This face is the app's own artifact rather than the user's picture — a
+    // connector price chart, which has no upload behind it. NOT "the app drew
+    // it": a pdf page peek and an audio waveform are drawn too and are false
+    // here, because they stand in for a file somebody uploaded. kinds.js asks
+    // this only of an image face, to decide whether its proportions get to set
+    // the card's height.
+    generated: !!d.generated,
     label: d.label || null,
     fields: d.fields || {},  // connector-bound entity fields (per-instance fields come from the reasoning fetch)
     created_at: d.created_at ?? null,
@@ -114,6 +121,20 @@ export const facetName = (f) => f.label || f.key;
 // An item has a mapped identity when extraction (or a connector) gave it an
 // entity key distinct from its stored filename — mirrors displayLabel priority.
 export const hasIdentity = (item) => !!(item.display_name || item.identity !== item.name);
+
+// Move a chosen instance's face onto its entity. Removing an instance can
+// change which one supplies the card, and the client re-picks locally
+// (selectFace) rather than waiting for a re-list — every field the face owns
+// has to travel, or the card is left describing the file that just left.
+export function applyFace(item, face) {
+  if (!face) return;
+  item.name = face.name;
+  item.kind = face.kind;
+  item.label = face.label;
+  item.w = face.w;
+  item.h = face.h;
+  item.generated = face.generated;
+}
 
 export const tag = (facet, value) => `${facet}/${value}`;
 

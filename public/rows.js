@@ -16,7 +16,7 @@ import { selectFace } from './face-select.js';
 import { taggedFiltered, instanceMatches } from './filters.js';
 import { effectiveView } from './view.js';
 import { ACTIVE, QUEUED, requeueToast } from './data.js';
-import { ICONS, actionBtn, refreshEntityTags, mappingHasAiWork } from './utils.js';
+import { ICONS, actionBtn, refreshEntityTags, mappingHasAiWork, applyFace } from './utils.js';
 import { openDropdown, ddAction } from './dropdown.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
@@ -99,8 +99,7 @@ function doRemoveInstance(item, inst) {
       // re-derive the union, re-pick the face per the board's config.
       item.instances = item.instances.filter((x) => x.id !== inst.id);
       refreshEntityTags(item);
-      const face = selectFace(item.instances, state.boardMapping?.face);
-      if (face) { item.name = face.name; item.w = face.w; item.h = face.h; item.kind = face.kind; item.label = face.label; }
+      applyFace(item, selectFace(item.instances, state.boardMapping?.face));
       document.dispatchEvent(new Event('app:render'));
       toast("File removed");
     } catch {

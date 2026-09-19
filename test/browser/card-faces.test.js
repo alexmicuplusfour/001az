@@ -158,52 +158,35 @@ test("every app-controlled face is one height; an uploaded photo keeps its own",
   }
   assert.equal(Object.keys(face).length, seeded.length, "every seeded item drew a card");
 
-  // 1. Every app-controlled face sits in the shared band, whatever it holds —
-  //    one SHAPE, and since every card in a column layout is one width, one
-  //    height. Derived from the card, not hardcoded: the band is a ratio now,
-  //    so a fixed pixel expectation would only be asserting this viewport.
-  const bands = [
+  // The six faces the app controls, in placeholder/real pairs.
+  const banded = [
     "connector-placeholder", "connector-chart",
-    "doc-preview", "doc-badge",
-    "audio-wave", "audio-badge",
+    "doc-badge", "doc-preview",
+    "audio-badge", "audio-wave",
   ];
-  const bandHeights = new Set(bands.map((l) => face[l].band));
-  assert.equal(bandHeights.size, 1,
-    `one band height, got ${bands.map((l) => `${l}=${face[l].band}`).join(" ")}`);
-  const bandH = [...bandHeights][0];
-  assert.ok(bandH > 0, "the band has a height at all");
+  const spread = (pick) => banded.map((l) => `${l}=${pick(face[l])}`).join(" ");
 
-  // 1b. And the chart FILLS it — the complaint that sent me back here was a
-  //     chart floating inside its own card with its area fill stopping short
-  //     of the edges. price-chart.js draws 5:3 and --face-ratio is 5:3, so
-  //     `contain` paints the whole box; this fails the moment they diverge.
+  // 1. One SHAPE, so — every card in a column layout being one width — one
+  //    height, placeholder and real face alike. Compared against each other
+  //    rather than a pixel constant: the band is a ratio, so a hardcoded
+  //    number would only be asserting this viewport.
+  assert.equal(new Set(banded.map((l) => face[l].band)).size, 1,
+    `one band height across mixed material: ${spread((f) => f.band)}`);
+  assert.equal(new Set(banded.map((l) => face[l].card)).size, 1,
+    `and so one card height — a placeholder is as tall as the face that replaces it: ${spread((f) => f.card)}`);
+  assert.ok(face["doc-badge"].band > 0, "the band has a height at all");
+
+  // 2. And the chart FILLS its band. The complaint that sent me back here was
+  //    a chart floating inside its own card with its area fill stopping short
+  //    of the edges: price-chart.js draws 5:3 and --face-ratio is 5:3, so
+  //    `contain` paints the whole box. Fails the moment either side moves.
   const chart = face["connector-chart"].fit;
   assert.deepEqual({ w: chart.w, h: chart.h }, { w: chart.bw, h: chart.bh },
     "the price chart must reach every edge of its band");
 
-  // 2. Which is the point: a placeholder and the face that replaces it are the
-  //    same card. This is the assertion that fails when a producer's own
-  //    proportions leak into the layout.
-  for (const [placeholder, real] of [
-    ["connector-placeholder", "connector-chart"],
-    ["doc-badge", "doc-preview"],
-    ["audio-badge", "audio-wave"],
-  ]) {
-    assert.equal(face[real].card, face[placeholder].card,
-      `${real} must be exactly as tall as the ${placeholder} it replaces`);
-  }
-
-  // 3. And all six are the same card height as each other — one board, one row.
-  const heights = new Set([
-    face["connector-placeholder"].card, face["connector-chart"].card,
-    face["doc-preview"].card, face["doc-badge"].card,
-    face["audio-wave"].card, face["audio-badge"].card,
-  ]);
-  assert.equal(heights.size, 1, `mixed material must line up, got ${[...heights].join(", ")}`);
-
-  // 4. The exemption, asserted so nobody "fixes" it into the band later: a
-  //    photo is sized by its own ratio. 1200x800 and 1000x1500 at the same
-  //    column width cannot both be 200px tall, and neither should be.
+  // 3. The exemption, asserted so nobody "fixes" it into the band later: a
+  //    photo is sized by its own ratio. 1200x800 and 1000x1500 at one column
+  //    width cannot both be band-shaped, and neither should be.
   assert.ok(face["photo-mapped"].band === null && face["photo-bare"].band === null,
     "a photo must not be wearing a fixed band");
   assert.notEqual(face["photo-mapped"].card, face["photo-bare"].card,
@@ -253,15 +236,25 @@ test("the boards page restates the same grey tile for a connector board", async 
 
   const page = await app.open("/boards.html", { sid: admin.sid });
   await page.waitForSelector(".bc-thumb.sym");
+  // Against the TOKENS, not two rgb literals — a third copy of the colours is
+  // the very thing the tokens exist to prevent.
   const tile = await page.evaluate(() => {
     const el = document.querySelector(".bc-thumb.sym");
     const cs = getComputedStyle(el);
-    const ink = getComputedStyle(el.querySelector("span"));
-    return { bg: cs.backgroundColor, img: cs.backgroundImage, ink: ink.color, text: el.textContent };
+    const root = getComputedStyle(document.documentElement);
+    const hex = (c) => "#" + c.match(/\d+/g).map((n) => (+n).toString(16).padStart(2, "0")).join("");
+    return {
+      bg: hex(cs.backgroundColor),
+      img: cs.backgroundImage,
+      ink: hex(getComputedStyle(el.querySelector("span")).color),
+      wantBg: root.getPropertyValue("--face-badge-bg").trim(),
+      wantInk: root.getPropertyValue("--face-badge-ink").trim(),
+      text: el.textContent,
+    };
   });
   assert.equal(tile.img, "none", "no gradient on the boards-page tile either");
-  assert.equal(tile.bg, "rgb(241, 242, 244)", "the gallery placeholder's grey");
-  assert.equal(tile.ink, "rgb(154, 160, 170)", "the gallery placeholder's ink");
+  assert.equal(tile.bg, tile.wantBg, "the gallery placeholder's grey");
+  assert.equal(tile.ink, tile.wantInk, "the gallery placeholder's ink");
   assert.match(tile.text, /BTC|XRP/, "and it is showing a ticker");
 
   assert.deepEqual(page.errors, []);

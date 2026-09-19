@@ -1,6 +1,11 @@
 :root {
   --gap: 14px;
-  --face-ratio: 5 / 3; /* the shape of a titled card face's picture region — see .face-badge */
+  /* Card faces — the shape of the picture region, and the placeholder tile's
+     fill and ink. Stated here because boards.css restates the tile too; the
+     rule they serve is written once, at .doc-preview/.face-fit/.face-badge. */
+  --face-ratio: 5 / 3;
+  --face-badge-bg: #f1f2f4;
+  --face-badge-ink: #9aa0aa;
   --pill-bg: #f1f1f3;
   --pill-bg-hover: #e6e6ea;
   --pill-active: #111;
@@ -851,7 +856,6 @@ body.bulk-mode .inst-tag-chip {
 .doc-preview {
   position: relative;
   overflow: hidden;
-  border-radius: 8px 8px 0 0;
 }
 .doc-preview img {
   width: 100%;
@@ -869,36 +873,40 @@ body.bulk-mode .inst-tag-chip {
   background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #fff);
   pointer-events: none;
 }
-/* Every picture region on a titled face is this SHAPE, whatever it holds — a
-   page peek, a waveform, a price chart, a placeholder badge. Cards in a column
-   layout are all one width, so one shape means one height: no card changes
-   height between the placeholder and the thing it stood in for, and a row of
-   mixed material lines up. A photo is the one exemption — it wears none of
-   these classes and keeps its own proportions, because a masonry of pictures
-   at their own shape is the point of the app.
+/* THE RULE, and the only place it is stated: every picture region on a titled
+   face is this one shape, whatever it holds — page peek, waveform, price
+   chart, placeholder badge. Cards in a column layout are all one width, so one
+   shape is one height: a card never changes height when its real face replaces
+   the placeholder that stood in for it, and a row of mixed material lines up.
+   A photo is the exemption — it wears none of these classes and keeps its own
+   proportions, because a masonry of pictures at their own shape is the app.
 
-   A shape rather than a pixel height because the app's own face producers draw
-   to it: server/faces/price-chart.js renders 600x360, which IS 5:3, so the
-   chart fills this box exactly — edge to edge, no crop, no letterbox, no
-   stretch. A fixed height could not do that at every column width, and the
-   slack showed: a chart's area fill reaches its own edges, so stopping a few
-   px short of the card read as a misaligned thumbnail.
-   test/browser/card-faces.test.js measures all of this in a real browser. */
+   A shape and not a pixel height because the app's own producers draw to it:
+   price-chart.js renders 600x360, which IS 5:3, so a chart fills this box edge
+   to edge — no crop, no letterbox, no stretch. No fixed height could do that
+   at every column width, and the slack showed: a chart's area fill reaches its
+   own edges, so stopping short of the card read as a crooked thumbnail.
+   test/browser/card-faces.test.js measures all of it in a real browser. */
 .doc-preview,
 .face-fit,
 .face-badge {
   aspect-ratio: var(--face-ratio);
+  border-radius: 8px 8px 0 0; /* the strip below carries the bottom corners */
 }
-/* The placeholder face: one grey tile for every kind of material that has no
+/* The placeholder face: one grey tile for every kind of material with no
    picture to show — an extension badge, a ♪, a ticker symbol. Three legends,
-   one tile, so a board of mixed unrendered material reads as one thing. */
+   one tile, so a board of mixed unrendered material reads as one thing. The
+   fill and ink are tokens because boards.css restates this tile at stack
+   scale, and a second literal is how the two drift. */
+.face-fit,
 .face-badge {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px 8px 0 0;
-  background: #f1f2f4;
-  color: #9aa0aa;
+}
+.face-badge {
+  background: var(--face-badge-bg);
+  color: var(--face-badge-ink);
   font-size: 20px;
   font-weight: 600;
   letter-spacing: 1px;
@@ -913,21 +921,12 @@ body.bulk-mode .inst-tag-chip {
   font-size: 46px;
   letter-spacing: 0;
 }
-/* A face the app DREW — an audio waveform, a connector price chart. Unlike an
-   uploaded photo it was rendered to a shape we chose, and every pixel of it
-   (the chart's ticker, its period stamp, the whole of a wave) is content, so
-   it is shown WHOLE rather than cover-cropped like a doc page. A producer that
-   draws at --face-ratio therefore fills the box exactly and `contain` is a
-   no-op; one that doesn't (waveform.js is 3:1) centres, and since both draw on
-   white the band's white absorbs the slack invisibly. `contain` over `cover`
-   so the mismatch degrades to whitespace rather than to a crop that would eat
-   a chart's labels or the head and tail of a track. */
+/* The band for a face where every pixel is content — a waveform end to end, a
+   chart's ticker and period stamp at its corners. `contain`, not the doc
+   peek's `cover`: a producer drawing at --face-ratio fills the box and it
+   costs nothing, and one that doesn't (waveform.js is 3:1) centres in white
+   rather than losing its labels or the head and tail of a track to a crop. */
 .face-fit {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-  border-radius: 8px 8px 0 0;
   background: #fff;
 }
 .face-fit img {
