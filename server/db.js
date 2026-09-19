@@ -896,6 +896,10 @@ export async function demoteFacetDiagnostics(db, boardId, edits) {
 // Contested items order on the RATIO: `of` is how many runs completed, not the
 // configured ai_votes, so a board carries a mix of 2-, 3- and 5-run items and
 // ordering on `agreed` alone would rank 1-of-2 above 2-of-5.
+//
+// These rows ARE the diagnosis freshness key: facet-diagnosis.js hashes them
+// (facetEvidence → exampleKey), so a column added to or dropped from this SELECT
+// re-diagnoses every board. See facet-diagnosis.js for what the key must track.
 export async function facetExamples(db, boardId, key, stamp, { contested, limit }) {
   const { rows } = await db.query(
     `SELECT i.id::text AS id,
@@ -914,22 +918,6 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
   );
   return rows;
 }
-
-// There was a second query here — facetEvidenceIds — returning the ids of the
-// same two groups facetExamples returns, under a comment warning that it "must
-// stay byte-identical to facetExamples in its WHERE and ORDER BY or it would be
-// tracking a different twelve from the ones the model reads". A warning is the
-// weakest possible guard against that, and it was only ever half the problem:
-// ids are not what the model reads. It reads each item's DESCRIPTION and vote
-// TALLY, and the ordering keys on `agreed/of` alone — so a re-measurement that
-// inverts every tally and rewrites every description while preserving the ratios
-// left the id list byte-identical and the freshness key unmoved. Demonstrated,
-// not argued: same key, "a rounded wordmark" becoming "a broad angular slab".
-//
-// So the loop calls facetExamples itself and hashes the rows it gets back
-// (facet-diagnosis.js, facetEvidence). One query pair serves the check and the
-// prompt, which is what makes "the same twelve" true by construction rather than
-// by a comment nobody re-reads.
 
 // Of the given item ids, which are currently queued for tagging. A primary-key
 // lookup over at most a dozen ids per facet — the cheap half of the arming
@@ -1791,8 +1779,17 @@ export const BOARD_CONFIG_COLS = [...new Set(
 )];
 export const BOARD_BINDING_COLS = [...new Set([...BOARD_PIN_COLS, ...BOARD_CONFIG_COLS])];
 
-// boards.type still exists in the schema (unread legacy; drop in a later
-// schema pass) but is deliberately not selected anywhere.
+// Every board column the app reads. Hand-written, so a new column is invisible
+// until it is named here — which is how a feature evaporates into "it never
+// writes anything" with a green suite. An array that joins, rather than a
+// string, so NOT_DUPLICATED can subtract from it.
+//
+// facet_diagnostics is read by the board modal and the diagnostics surface; the
+// worker's own loop selects it explicitly (boardsWithVotes) and does not rely on
+// this list.
+//
+// TODO(schema): drop boards.type — unread legacy (migration 0001_baseline),
+// deliberately not selected here.
 export const BOARD_COL_LIST = [
   "id", "name", "facets", "context", "ai_reasoning", "ai_research", "ai_votes",
   ...BOARD_BINDING_COLS,
@@ -1802,12 +1799,6 @@ export const BOARD_COL_LIST = [
   "created_at",
 ];
 const BOARD_COLS = BOARD_COL_LIST.join(", ");
-// Hand-written, so a new column is invisible until it is named here — which is
-// how a feature evaporates into "it never writes anything" with a green suite.
-// facet_diagnostics is read by the board modal and the diagnostics surface; the
-// worker's own loop selects it explicitly (boardsWithVotes) and does not rely on
-// this list. An array that joins, rather than a string, so NOT_DUPLICATED can
-// subtract from it.
 
 // The row a new board is born with — column-named, exactly as getBoard reads
 // it back. createBoard's INSERT below writes these values; the create route
@@ -2848,8 +2839,11 @@ export async function deleteExternalPlugin(db, id) {
 
 // --- AI tagging queue helpers ---
 
-// Atomically take the oldest ready item — whatever stage it's in — and mark it
-// with that stage's in-flight status. ONE queue, one policy: oldest work first
+// Board-fair batch claim (worker-rework Stage 2) — the queue's one claim path;
+// claimNextWork below is its LIMIT-1 wrapper.
+//
+// Atomically takes the oldest ready items — whatever stage each is in — and marks
+// them with that stage's in-flight status. ONE queue, one policy: oldest work first
 // (created_at, id), so an item flows extract → face → tag to completion before
 // newer items start (it re-enters the queue with its original created_at and
 // stays at the front). There are no per-stage legs to starve: a bulk upload's
@@ -2873,14 +2867,16 @@ export async function deleteExternalPlugin(db, id) {
 // dispatcher passes only the stages whose lane has a free slot (worker-rework
 // Stage 1: capacity-aware claiming), so a full sidecar lane doesn't stop tag work
 // from being claimed. Default = all four (the single-flight/test path, unchanged).
-// Board-fair batch claim (worker-rework Stage 2). Ranks each board's ready items by
-// age (row_number per board), then serves rank 0 of every board before rank 1, etc. —
-// so a small board's work interleaves ahead of a large board's backlog instead of
-// waiting behind it. Fairness holds while active boards ≤ the batch size and degrades
-// to plain FIFO beyond (no worse than before). Claimed as ONE snapshot of `limit` rows:
-// single-row claims would collapse to FIFO (removing a head promotes the same board's
-// next item). The window function forbids FOR UPDATE, so the pick (ranked, unlocked)
-// and the lock (by id, SKIP LOCKED) are separate CTEs feeding the UPDATE.
+//
+// The ranking: each board's ready items are ranked by age (row_number per
+// board), then rank 0 of every board is served before rank 1, etc. — so a small
+// board's work interleaves ahead of a large board's backlog instead of waiting
+// behind it. Holds while active boards ≤ the batch size and degrades to plain
+// FIFO beyond (no worse than before). Claimed as ONE snapshot of `limit` rows:
+// single-row claims would collapse to FIFO (removing a head promotes the same
+// board's next item). The window function forbids FOR UPDATE, so the pick
+// (ranked, unlocked) and the lock (by id, SKIP LOCKED) are separate CTEs
+// feeding the UPDATE.
 export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1) {
   const now = Date.now();
   const { rows } = await db.query(
@@ -3086,9 +3082,9 @@ export async function touchEntities(db, ids) {
 }
 
 // Set an instance's entity membership — the ordered set of entities it belongs
-// to (entity_ids[0] is canonical for logging/faces/search). Replaces the old
-// single-parent reparentItem: merge and split are no longer special moves, just
-// "the array changed". Length 1 is the extract-mode norm; length N is classify.
+// to (entity_ids[0] is canonical for logging/faces/search). Merge and split are
+// not special moves here — both are just "the array changed". Length 1 is the
+// extract-mode norm; length N is classify.
 export async function setItemEntities(db, itemId, entityIds) {
   await db.query("UPDATE items SET entity_ids=$1::bigint[], updated_at=$2 WHERE id=$3", [entityIds, Date.now(), itemId]);
 }
@@ -3808,16 +3804,12 @@ const LANE_NEED = {
   embed: { sql: needsEmbeddingSql(4), args: (lane) => [lane.model] },
 };
 
-// The lane backlogs item statuses can't see — the wire's `queued` half. The
-// caller says which lanes are served, as `[{ kind, model? }]` (worker.js's
-// servedBacklogLanes — resolution lives beside the claim loops, this module
-// only speaks SQL), because a backlog nothing will ever claim is a
-// configuration gap, not work happening, and must not glow. One loop so the
-// exclusions hold for EVERY lane by construction: in-flight statuses (an
-// audio item waiting at `pending` for its transcript is already on the wire
-// as an item) and the ids the running rows carry (`excludeIds`) — one unit
-// of work, one count. No pause gate on purpose: a paused board's backlog is
-// intact and the chip's paused grammar already says "waiting", the truth.
+// The lane backlogs item statuses can't see — the wire's `queued` half, one
+// count per lane kind. The caller names which lanes are served (worker.js
+// servedBacklogLanes): a backlog nothing will ever claim is a configuration
+// gap, not work in progress. Excludes in-flight statuses and the ids running
+// rows carry, so one unit of work is counted once.
+// No pause gate: a paused board's backlog is intact, and "waiting" stays true.
 export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
   const counts = await Promise.all(lanes.map(async (lane) => {
     const need = LANE_NEED[lane.kind];
@@ -3855,27 +3847,18 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 
 // One audio item still needing a transcript — the transcription loop's work
 // queue. Independent of tagging and status: any audio item with neither a
-// `transcript` nor a permanent `transcript_error` qualifies, newest first so
-// fresh uploads transcribe before a backlog. `payload ? 'key'` is the jsonb
-// key-exists test (an empty-string transcript for a silent clip still counts).
-// excludeIds: clips in per-item retry backoff (the worker's in-memory ledger) —
-// skipped so one repeatedly-failing clip doesn't head-of-line-block the lane.
-// `served` is the transcription lane's claim gate, the shape claimFairBatch
-// (above) uses for tagging: don't hand back work no engine can do. When the
-// app-wide chain resolves nothing — no provider bound and the built-in's
-// sidecar isn't on this host (sidecar-presence-plan.md) — only boards carrying
-// their OWN pin are servable, so the filter moves into SQL rather than being
-// approximated in JS, where every unservable clip would still be claimed,
-// resolved, logged and backed off once a minute forever.
+// `transcript` nor a permanent `transcript_error` qualifies, newest first.
+// `payload ? 'key'` is the jsonb key-exists test, so an empty-string transcript
+// for a silent clip still counts. excludeIds skips clips in the worker's
+// in-memory retry backoff so one failing clip can't block the lane.
 //
-// A pin OF the absent built-in is not a pin that can serve, so the floor's
-// provider is excluded by name — the name arrives from the capability registry,
-// never spelled here. `IS DISTINCT FROM` so a null floorProvider (a capability
-// with no built-in) still admits every named pin.
-//
-// Coarse on purpose, exactly like the tag queue's `b.ai_key_id IS NOT NULL`: a
-// pin that exists but can't resolve (its provider uninstalled) passes here and
-// is handled per item, unfailed, by transcribeOne.
+// `served` is the claim gate (sidecar-presence-plan.md): when nothing can serve
+// the lane app-wide, only boards carrying their own pin qualify, filtered in SQL
+// so unservable clips are never claimed. A pin OF the absent built-in cannot
+// serve, so the floor's provider is excluded by name (from the capability
+// registry); `IS DISTINCT FROM` keeps a null floorProvider admitting every pin.
+// Coarse like the tag queue's key check: a pin that exists but can't resolve
+// passes here and is handled per item, unfailed, by transcribeOne.
 export async function oneAudioNeedingTranscription(db, excludeIds = [], served = {}) {
   const { globally = true, pinCols = null, floorProvider = null } = served;
   // The floor's name is bound only where the SQL references it — a caller that
@@ -3905,23 +3888,14 @@ export async function oneAudioNeedingTranscription(db, excludeIds = [], served =
 // Current-model vectors for one board (the search corpus). Stale vectors are
 // excluded rather than compared wrongly; they reappear once re-embedded.
 //
-// entity_ids rides along WHOLE so results can speak in card (entity) ids. This
-// used to project `entity_ids[1] AS entity_id`, which is only right when an
-// instance belongs to exactly one entity — the extract-mode norm, but not
-// classify mode, where one photo of two people is one instance with two
-// entities (setItemEntities, above). The second entity was dropped from every
-// consumer: never returned by /api/search, absent from the clusters carving,
-// and — the loudest one — answered as "not embedded yet" by /api/search/similar
-// although its instance carries a perfectly good vector. Fanning out in SQL
-// with unnest would duplicate the bytea per entity, and the bytea is the whole
-// cost of this read (measured 7010 kB of vectors against 132 kB of arrays on
-// the ui board), so the fan-out is the caller's loop.
+// entity_ids rides along WHOLE — an instance can belong to several entities
+// (classify mode), and projecting one of them drops the rest from every
+// consumer. Fanning out in SQL would duplicate the bytea per entity, and the
+// bytea is the whole cost of this read (measured: 7,010 kB of vectors against
+// 132 kB of arrays), so the fan-out is the caller's loop — entityIdsFor, below.
 //
-// No medoid-title columns either: they were the INSTANCE's identity, which is
-// the wrong grain once a row can name two entities, and was already wrong on
-// every derived board (an emma item's payload identity is its filename, while
-// its entity is "emma watson"). The clusters route names entities from the
-// entities table instead — see meaning-clusters in server.js.
+// No medoid-title columns: those named the INSTANCE, the wrong grain once a row
+// can name two entities; the clusters route names entities from the entities table.
 export async function boardEmbeddings(db, boardId, model) {
   const { rows } = await db.query(
     `SELECT id, entity_ids, embedding
@@ -3950,23 +3924,17 @@ export const embeddingVec = (row) =>
   new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
 
 // The entity ids one vector row scores for. Four callers collapse instances
-// into entities — /api/search, /api/search/similar, meaning-clusters and the
-// MCP's rank() — and the rule is theirs in common, so it lives here rather
-// than four times over.
+// into entities (/api/search, /api/search/similar, meaning-clusters, the MCP's
+// rank()), so the rule lives here rather than four times over.
 //
-// The empty fallback preserves what `entity_ids[1] ?? row.id` did before the
-// fan-out. Production cannot reach it (insertItem always writes an entity, and
-// deleteEntity deletes sole-home instances rather than emptying their arrays —
-// live count: zero), but test fixtures make entity-less items freely, and
-// narrowing the behaviour of rows this fix is not about is how a correctness
-// fix turns into a regression somewhere else.
+// The empty fallback is unreachable in production (insertItem always writes an
+// entity; deleteEntity removes sole-home instances rather than emptying their
+// arrays) but test fixtures make entity-less items freely.
 //
-// Know what that fallback is, though: an ITEM id standing in an entity-id
-// slot, and the two sequences OVERLAP (the crate route says the same thing in
-// server.js). A caller that looks the result up in `entities` can therefore
-// match an unrelated row. That is survivable only because the fallback is
-// unreachable outside fixtures — so if a real path ever empties an array, this
-// is the line to revisit first, not the four loops downstream of it.
+// Know what it is, though: an ITEM id standing in an entity-id slot, and the two
+// sequences OVERLAP — a caller that looks the result up in `entities` can match
+// an unrelated row. Survivable only while the fallback stays unreachable. If a
+// real path ever empties an array, this is the line to revisit first.
 export const entityIdsFor = (row) => (row.entity_ids?.length ? row.entity_ids : [row.id]);
 
 // Score every vector row against the probes and collapse to one score per
@@ -3974,14 +3942,8 @@ export const entityIdsFor = (row) => (row.entity_ids?.length ? row.entity_ids : 
 // strongest is what the card is about. Returns entityId -> score.
 //
 // One probe is a meaning query; several are the instances of a find-similar
-// anchor. /api/search and /api/search/similar ran character-for-character the
-// same loop around `embeddingVec` and `entityIdsFor`, and the `entity_ids[1]`
-// bug this pair was fixed for lived in exactly that kind of copy — so the rule
-// lives here beside the two helpers it is made of.
-//
-// NOT used by the MCP's rank(): that one scores only the survivors of a facet
-// filter, and running this over the whole board to throw most of it away would
-// be the wrong trade on a 4,673-row corpus.
+// anchor. Not used by the MCP's rank(), which scores only the survivors of a
+// facet filter and would waste most of a whole-board pass.
 export function bestByEntity(rows, probes) {
   const best = new Map();
   for (const row of rows) {
@@ -4015,28 +3977,22 @@ export async function embeddingStats(db, model) {
   return { tagged: Number(rows[0].tagged), embedded: Number(rows[0].embedded), failed: Number(rows[0].failed) };
 }
 
-// Route a failed work attempt by what the error says. Three classes:
-//  - permanent (HTTP 4xx except 408/429 — bad request, bad key, too large):
-//    fail on the FIRST attempt; repeating the same rejected call just repeats
-//    the rejection. Providers stamp err.status (compatError / the Anthropic
-//    SDK); no status means we can't prove it's permanent, so we retry.
-//  - transient (429/408/5xx, network errors, model whims — anything else):
-//    requeue with a spaced retry_at (1m, 5m, then 15m — honoring a longer
-//    Retry-After when the provider sent one) so the attempts outlast a
-//    rate-limit window or an outage instead of burning within seconds, and
-//    with TRANSIENT_EXTRA headroom over maxAttempts.
-//  - configuration gaps (err.noCount, e.g. "no API key configured"): requeue
-//    without consuming an attempt at all — the claim gate promises a missing
-//    key never fails an item, and this closes its race.
-// requeueStatus controls which queue the item returns to ('pending' for the
-// tag leg, 'pending_fetch' / 'pending_extract' / 'pending_face' for the
-// definition legs).
-// Returns true if the item was failed.
+// --- failure routing and crash recovery ---
+
 const RETRY_BACKOFF_MS = [60000, 300000, 900000];
 const TRANSIENT_EXTRA = 2;
-// IN_FLIGHT_FOR — the leg map this fences on — is declared with STATUS_PRIORITY
-// at the top of the file, because TAG_QUEUE derives from it too.
 
+// Route a failed work attempt by what the error says. Three classes:
+//  - permanent (HTTP 4xx except 408/429): fail on the FIRST attempt; repeating
+//    a rejected call just repeats the rejection. No err.status means we can't
+//    prove it's permanent, so we retry.
+//  - transient (429/408/5xx, network, anything else): requeue with a spaced
+//    retry_at (1m, 5m, 15m, or a longer Retry-After) so attempts outlast a
+//    rate-limit window, with TRANSIENT_EXTRA headroom over maxAttempts.
+//  - configuration gaps (err.noCount): requeue without consuming an attempt —
+//    the claim gate promises a missing key never fails an item.
+// requeueStatus picks the queue the item returns to. Returns true if it failed.
+// The leg map this fences on (IN_FLIGHT_FOR) lives at the top of the file.
 export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = "pending") {
   const httpStatus = Number(error?.status);
   const permanent =
@@ -4052,17 +4008,13 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
   const ra = Number(error?.retryAfter);
   const wait = Math.max(backoff, Number.isFinite(ra) ? Math.min(ra * 1000, 3600000) : 0);
   // Value-fenced: a stale failure must not stamp error/retry_at over a row the
-  // user re-routed mid-flight (their reprocess/re-extract already reset it and
-  // chose its leg). The fence also closes the attempts read-then-write race —
-  // every writer that resets attempts also moves the row out of this status.
+  // user re-routed mid-flight. The fence also closes the attempts read-then-write
+  // race — every writer that resets attempts also moves the row out of this status.
   //
-  // A REQUEUE keeps any facet scope (0030) — the retry is the same partial pass.
-  // A FAILURE clears it, and that is load-bearing: it is what keeps "a scoped row
-  // is only ever pending or processing" true. A 'failed' row is visible to
-  // retagBoard, queueUntagged and requeueItemForTag, none of which filter on the
-  // scope, so a surviving one would silently narrow the FULL retag that comes to
-  // rescue the item — and narrow it again on every later pass, since a still-broken
-  // item lands back here. (No-op on the definition legs, which never set a scope.)
+  // A REQUEUE keeps any facet scope (0030) — same partial pass. A FAILURE clears
+  // it, which is load-bearing: a 'failed' row is visible to retagBoard,
+  // queueUntagged and requeueItemForTag, none of which filter on the scope, so a
+  // surviving one would silently narrow the full retag that comes to rescue it.
   const { rowCount } = await db.query(
     `UPDATE items SET status=$1, attempts=$2, error=$3, retry_at=$4, updated_at=$5${failed ? ", tag_facets=NULL" : ""}
      WHERE id=$6 AND status=$7`,
@@ -4079,22 +4031,17 @@ export async function failOrRequeue(db, id, error, maxAttempts, requeueStatus = 
   return rowCount > 0 && failed;
 }
 
-// Recover items stranded mid-flight (every claimed in-flight status) by a
-// crash or a shutdown that outlived the 5s drain. Each recovery counts as an
-// attempt — an interruption is evidence — and requeues to its own leg with
-// the same spaced retry_at as transient failures, so a crash-looping poison
-// item stops re-leading the FIFO on every boot and, at the transient ceiling,
-// actually fails. Nothing else can fail it: claims don't check attempts, and
-// failOrRequeue only ever sees CAUGHT errors — a crash reaches neither. The
-// ceiling's headroom means an innocent item must straddle maxAttempts+2
-// separate interruptions (deploys included) before it could be wrongly
-// failed. Returns the number of rows touched.
-// excludeIds: rows THIS worker process is actively holding — the in-memory in-flight
-// set (worker-rework Stage 0: recovery ownership). A live in-flight call can outlast
-// olderThanMs (research tagging runs minutes; the extractor 240 s), so status + age
-// alone can't tell "crashed" from "still working" — ownership can. Recovery then only
-// ever touches rows no live flight owns: genuine crash/drain debris. An empty array
-// excludes nothing (id <> ALL('{}') is vacuously true) — the single-flight / boot path.
+// Recover items stranded mid-flight by a crash or a shutdown that outlived the
+// 5s drain. Each recovery counts as an attempt — an interruption is evidence —
+// and requeues to its own leg with the transient backoff, so a crash-looping
+// poison item stops re-leading the FIFO on every boot and eventually fails.
+// Nothing else can fail it: claims don't check attempts, and failOrRequeue only
+// ever sees CAUGHT errors — a crash reaches neither. Returns rows touched.
+//
+// excludeIds: rows THIS worker is actively holding. A live in-flight call can
+// outlast olderThanMs (research tagging runs minutes), so status + age alone
+// can't tell "crashed" from "still working" — ownership can. An empty array
+// excludes nothing (the single-flight / boot path).
 export async function recoverStuck(db, olderThanMs, maxAttempts = 3, excludeIds = []) {
   const now = Date.now();
   const [b0, b1, b2] = RETRY_BACKOFF_MS;
@@ -4314,14 +4261,6 @@ export async function priceUnpricedMeter(db, rateRows) {
   return { rows: Number(r.n), micros: Number(r.micros) };
 }
 
-// The dimensioned usage read (metering-plan.md, Mechanism 3): group by any
-// subset of the meter's dimensions over any day window. `group` names are the
-// API's, mapped here onto columns — the allowlist is what makes interpolating
-// them into SQL safe, and the route 400s anything not in it before calling.
-// Rows always additionally group by unit (the meter's grain), folded into a
-// per-unit object under each dimension tuple: quantities sum legally within a
-// unit, and cost sums across everything (one currency); nothing else is ever
-// added together.
 // The groupable dimensions, WITH their names. This is the one resolver — the
 // route validates against it AND serves it, so what a client can offer and
 // what the server will accept are the same list by construction (the
@@ -4348,6 +4287,14 @@ export const USAGE_DIMS = {
   model: { column: "model", label: "Model" },
 };
 
+// The dimensioned usage read (metering-plan.md, Mechanism 3): group by any
+// subset of the meter's dimensions over any day window. `group` names are the
+// API's, mapped here onto columns — the allowlist is what makes interpolating
+// them into SQL safe, and the route 400s anything not in it before calling.
+// Rows always additionally group by unit (the meter's grain), folded into a
+// per-unit object under each dimension tuple: quantities sum legally within a
+// unit, and cost sums across everything (one currency); nothing else is ever
+// added together.
 export async function usageRows(db, { from = null, to = null, board = null, capability = null, group = [] } = {}) {
   const cols = group.map((g) => USAGE_DIMS[g]?.column);
   // Also the guard on the interpolation below — every name reaching the SQL
