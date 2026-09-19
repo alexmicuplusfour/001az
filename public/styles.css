@@ -2008,6 +2008,11 @@ body.bulk-mode .heart {
 }
 .lb-chart-media {
   position: relative;
+  /* Keep the chart's internal layering internal. `position: relative` with
+     `z-index: auto` is NOT a stacking context, so .lb-chart-readout's z-index:3
+     — which only ever meant "above the library's canvases" — was escaping into
+     the lightbox and painting over the details panel. */
+  isolation: isolate;
   height: clamp(280px, 52vh, 520px);
   background: #fff;
   border-radius: 12px;
@@ -2127,8 +2132,22 @@ body.bulk-mode .heart {
   pointer-events: none;
 }
 
+/* ── Stacking inside the lightbox ────────────────────────────────────────────
+   The stage's content is the bottom layer and every control the reader operates
+   sits above it, stated rather than inherited from DOM order. Without this the
+   order is an accident: #lightbox-prev is written before the stage, so anything
+   positioned that a renderer mounts paints over it, and a renderer that reaches
+   for a z-index of its own (the chart's crosshair readout) climbs over the
+   arrows and the panel too. Renderers own the inside of their own box; the
+   chrome owns the lightbox.
+     1  the stage and whatever is mounted in it   (default)
+     2  .lb-det-overlay — boxes on the image, under the controls
+     3  arrows, action pills, the counter pill
+     4  the details panel, which is the widest and wins ties
+   ───────────────────────────────────────────────────────────────────────── */
 .lightbox-controls {
   position: absolute;
+  z-index: 3;
   top: 24px;
   right: 24px;
   display: flex;
@@ -2171,6 +2190,7 @@ body.bulk-mode .heart {
 
 .lightbox-nav {
   position: absolute;
+  z-index: 3;
   top: 50%;
   transform: translateY(-50%);
   width: 44px;
@@ -2203,6 +2223,7 @@ body.bulk-mode .heart {
 }
 .lightbox-count {
   position: absolute;
+  z-index: 3;
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
@@ -2233,6 +2254,7 @@ body.bulk-mode .heart {
 }
 .lightbox-panel {
   position: absolute;
+  z-index: 4;
   top: 0;
   right: 0;
   bottom: 0;
