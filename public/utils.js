@@ -511,10 +511,19 @@ export function toolBtn(label, cls, onClick, count) {
   return b;
 }
 
+// The label rides its own element so it can be the ONE part that gives way:
+// a value long enough to outrun the rail (the mobile drawer is the narrow
+// case) ellipsises, while the count — the whole reason the chip carries a
+// number — stays whole. The title is the only way back to the full string
+// once the ellipsis eats it.
 export function pill(label, count, active, muted, onClick) {
   const b = document.createElement("button");
   b.className = "pill" + (active ? " active" : "") + (muted ? " muted" : "");
-  b.textContent = label;
+  b.title = label;
+  const text = document.createElement("span");
+  text.className = "pill-label";
+  text.textContent = label;
+  b.appendChild(text);
   appendCount(b, count);
   b.addEventListener("click", onClick);
   return b;

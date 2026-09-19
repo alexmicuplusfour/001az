@@ -367,6 +367,11 @@ header.header-collapsed #toolbar-fold {
 }
 
 .pill {
+  /* a row, so the label can be told to give way on its own (.pill-label) —
+     inline layout has no way to shrink one part of a chip and not another */
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
   border: 1px solid #0a0a181a;
   background: #fff;
   color: var(--text);
@@ -377,6 +382,16 @@ header.header-collapsed #toolbar-fold {
   white-space: nowrap;
   user-select: none;
   transition: background 0.12s, color 0.12s, border-color 0.12s, opacity 0.12s;
+}
+
+/* The only part of a chip that gives way. A cluster signature or a long tag
+   in the mobile drawer used to run past the panel and get cut mid-word with
+   its count over the edge; now the name ellipsises and the count — which is
+   what the chip is answering with — is never the thing that goes missing.
+   The notes below are flex: none for the same reason. */
+.pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .pill:hover {
@@ -406,6 +421,7 @@ header.header-collapsed #toolbar-fold {
 .pill .count,
 .pill .mult {
   margin-left: 5px;
+  flex: none;
 }
 
 /* The odds lens (patterns.js). The count is bookkeeping and wears the dim
@@ -460,19 +476,18 @@ header.header-collapsed #toolbar-fold {
 
 /* An excluded value (chip-exclusion arc): struck label in the warm "less"
    family (green/red stay reserved for price direction). A chosen state like
-   .active, so never muted. The strike must not cross the −N count:
-   text-decoration doesn't propagate into inline-blocks (the .mult badge
-   already leans on this). The alert editor's twin (.al-chip.neg) lives with
+   .active, so never muted. The alert editor's twin (.al-chip.neg) lives with
    its base in modal.css. */
 .pill.neg {
-  text-decoration: line-through;
   color: var(--neg-ink);
   border-color: var(--neg-border);
 }
 
-.pill.neg .count {
-  display: inline-block;
-  text-decoration: none;
+/* the strike belongs to the NAME, not the chip: it used to be set on the pill
+   and kept off the count by making the count an inline-block, which the label
+   element now makes unnecessary — the decoration simply never leaves it */
+.pill.neg .pill-label {
+  text-decoration: line-through;
 }
 
 main#grid {
