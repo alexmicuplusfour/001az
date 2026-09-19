@@ -1,64 +1,29 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGE 1 DONE (2026-09-20). Mechanical pass first (7 fixes, -733 bytes)
-— tombstone deleted, three doc blocks reattached to the symbol they describe, one
-TODO made greppable; that pass cut nothing. Stage 1 then cut the embeddings region
-8 blocks → 6, 129 → 67 lines (-48%). Running total vs `ddd41e0`: -53 lines, -4,339
-bytes, 41.2% → 40.5% comment density. Suite 1808 green throughout. Stages 2-10 open.**
+**Status: STAGES 1-2 DONE (2026-09-20). Mechanical pass first (7 fixes, -733
+bytes) — tombstone deleted, three doc blocks reattached to the symbol they
+describe, one TODO made greppable; that pass cut nothing. Stage 1 (embeddings):
+129 → 67 lines, -48%. Stage 2 (rate map + usage meter): 91 → 40 lines, -56%.
+Running total vs `ddd41e0`: -93 lines, -6,991 bytes, 41.2% → 40.0% density.
+Suite 1808 green throughout. Stages 3-10 open.**
 
-**Recalibration from stage 1:** the 55-60% target is too aggressive as a blanket
-number. That region held more genuine contract than expected — the three error
-classes in `failOrRequeue`, the item-id/entity-id sequence OVERLAP hazard in
-`entityIdsFor`, the facet-scope clearing rule, and recovery's ownership test all
-survived the rubric intact. 48% was the honest answer there. Expect the same
-where a section is mostly mechanism and a much deeper cut where it is mostly
-narrative.
+**Recalibration:** the 55-60% target holds where a section is narrative, not
+where it is mechanism. Stage 1 came in at 48% because that region held real
+contract — the three error classes in `failOrRequeue`, the item-id/entity-id
+sequence OVERLAP hazard in `entityIdsFor`, the facet-scope clearing rule,
+recovery's ownership test. Stage 2 hit 56% because most of its bulk was
+rationale already written down in `metering-plan.md`. Judge per block; the
+number is an outcome, not an input.
 
-## The measurement
-
-```
-4,948 lines · 1,897 comment lines · 41% of non-blank lines
-129,275 bytes of comment vs ~120,000 bytes of code
-76 blocks of 8+ lines, holding 1,076 comment lines
-longest single block: 50 lines (cancelBoardQueue)
-```
-
-The comments are physically bigger than the code they describe. 267 exported
-symbols, and the prose outweighs the implementation.
-
-Counted tics, which are the fingerprint of how this was written — each comment
-composed immediately after the debugging session that produced it, in the voice
-of someone justifying a choice to a reviewer:
-
-| pattern | count |
-|---|---|
-| `rather than` | 55 |
-| `deliberately` / `on purpose` | 29 |
-| SHOUTED words for emphasis (`ONE` 17x, `NOW` 5x) | 241 |
-| comments about what is **not** there | 35 |
-| past-tense history narration | 56 |
-| hardcoded incident dates | 4 |
-
-241 shouted words is one every 8 comment lines. Past roughly three per file,
-emphasis stops being emphasis and becomes texture — which is the core failure:
-there is no signal difference between *"this parser is load-bearing, deleting it
-silently breaks every `expires_at` comparison"* and *"here is why I used a
-deny-list."* Both shout. So a reader skims both, or neither.
-
-## What this is NOT
-
-The comments are **accurate**. This was spot-checked, not assumed:
-
-- the `notPaused` roster names 7 functions; there are exactly 7 call sites
-- `"imports nothing"` on `schedule.js`, `field-sources.js`, `units.js`,
-  `capabilities.js` — all four verified, zero imports each
-- `IN_FLIGHT_FOR` → "eight in total", `STATUS_PRIORITY` ordering — both correct
-
-Only 2 dead identifier references existed in the whole file, and the mechanical
-pass removed both. **Nothing here is rot.** This is not a correctness cleanup and
-must not be run as one. It is a volume and register problem, and the risk runs
-the other way: the file contains perhaps 150–200 lines of genuinely load-bearing
-invariant that a careless pass would take out along with the essays.
+**The orphaning pattern is the most common defect in this file, not the bloat.**
+Four instances found so far, one of them stale and one a duplicate:
+`BOARD_COL_LIST`, `usageRows`/`USAGE_DIMS`, `claimFairBatch`, `failOrRequeue`
+(parked on `RETRY_BACKOFF_MS`), and `meter()` (whose doc sat on `APP_SCOPE`
+while `meter()` itself had none). Stage 2 also found the first genuinely STALE
+comment in the file — a paragraph describing the token-bucket pivot that
+`boardUsageSummary` no longer does, contradicted by an inline comment 30 lines
+below it — and a paragraph duplicating `costOf`'s own doc. **Check every block
+for which symbol it actually describes before judging its length.**
 
 ## The rubric
 

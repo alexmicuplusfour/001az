@@ -4081,27 +4081,10 @@ export function day(ms = Date.now()) {
 
 // --- the usage meter (metering-plan.md, Stage 1) ---
 
-// Record "N units of `unit` consumed by this subject" — the whole contract.
-// The meter does not know AI exists: `units` is { unit: quantity } with any
-// unit string a spender cares to name, and the dimensions are plain text with
-// '' — never NULL — for "doesn't apply" (see 0040 for why NULL would quietly
-// break the upsert). Zero/absent quantities are skipped so the common
-// no-cache, no-search call writes only the rows it has news for. Throws like
-// any db helper — route through meterWrite to make a failure survivable.
-//
-// `rates` is { unit: microsPerUnit } with '*' as a whole-subject wildcard —
-// plain data handed in by the caller (metering.js joins pricing to this;
-// Stage 3). A unit WITH a rate stamps cost_micros = round(q × rate) and
-// counts its whole quantity as priced — rate 0 (on-device) is priced-at-zero,
-// which is a knowledge claim, not an absence. A unit WITHOUT a rate stamps
-// neither, and quantity − priced_quantity stays visible as the unpriced
-// remainder. Cost is computed HERE, at write time, and never recomputed — a
-// later price edit must not rewrite history.
-// The meter's "doesn't apply" sentinel, and what it MEANS — declared once,
-// here, beside the writer that stamps it. Work with no board (a sweep, a
-// connector's quota burn) files under it; readers filter to it as a value and
-// name it from this label rather than each inventing the English (0040 says
-// why it is '' and never NULL).
+// The meter's "doesn't apply" sentinel, declared beside the writer that stamps
+// it. Work with no board (a sweep, a connector's quota burn) files under it;
+// readers filter to it as a value and take the English from this label (0040
+// says why it is '' and never NULL).
 export const APP_SCOPE = "";
 export const APP_SCOPE_LABEL = "outside any board";
 // The model-call axes' own '' has a different meaning and so its own name:
@@ -4119,6 +4102,19 @@ export const UNATTRIBUTED_LABEL = "unattributed";
 // nothing recomputes.
 export const rateOf = (rates, unit) => rates[unit] ?? rates["*"];
 
+// Record "N units of `unit` consumed by this subject" — the whole contract.
+// The meter does not know AI exists: `units` is { unit: quantity } with any
+// unit string a spender names, and the dimensions are plain text with '' —
+// never NULL — for "doesn't apply" (0040 says why NULL breaks the upsert).
+// Zero quantities are skipped. Throws like any db helper; route through
+// meterWrite to make a failure survivable.
+//
+// `rates` is { unit: microsPerUnit }, caller data (metering.js joins pricing
+// in). A unit WITH a rate stamps cost_micros = round(q × rate) and counts its
+// whole quantity as priced — rate 0 is priced-at-zero, a knowledge claim, not
+// an absence. A unit WITHOUT one leaves quantity − priced_quantity as the
+// visible unpriced remainder. Cost is computed at write time and never
+// recomputed: a later price edit must not rewrite history.
 export async function meter(db, { boardId = "", capability, provider = "", model = "" }, units = {}, rates = {}) {
   const rows = Object.entries(units)
     .map(([unit, n]) => [unit, Math.round(Number(n)), rateOf(rates, unit)])
@@ -4220,22 +4216,14 @@ export async function pruneUsageMeter(db, cutoffMs) {
 }
 
 // Stamp rates onto history that metered before any rung knew one — the
-// mechanism under the plan's additive "price unpriced history" admin action
-// (metering.js joins the rates in; a route owns the asking). ONLY the
-// unpriced remainder moves: quantity − priced_quantity is multiplied at the
-// handed-in rate and ADDED to cost_micros, and priced_quantity catches up.
-// Rows whose units were already priced are untouched by construction, so
-// write-time stamping stays the law for priced history — this prices what
-// was never priced, at the rate known NOW, which the surface that offers the
-// action says out loud. Same shape as meter(): rates are caller DATA (here as
-// (provider, model, unit, micros) ROWS, since one call spans many subjects),
-// and ROUND matches meter()'s Math.round for the non-negative values a rate
-// can be.
+// "price unpriced history" admin action (metering.js joins the rates in).
+// ONLY the unpriced remainder moves: quantity − priced_quantity is multiplied
+// at the handed-in rate and ADDED to cost_micros, and priced_quantity catches
+// up. Rows already priced are untouched by construction, so write-time
+// stamping stays the law for priced history.
 //
 // The money is computed ONCE, in `tgt`, and the UPDATE hands that same number
-// back through RETURNING — so the report and the stamp are provably the one
-// figure rather than two identical expressions that could drift, and the
-// count is of rows that actually moved.
+// back through RETURNING, so the report and the stamp are provably one figure.
 export async function priceUnpricedMeter(db, rateRows) {
   if (!rateRows.length) return { rows: 0, micros: 0 };
   const { rows: [r] } = await db.query(
@@ -4261,24 +4249,16 @@ export async function priceUnpricedMeter(db, rateRows) {
   return { rows: Number(r.n), micros: Number(r.micros) };
 }
 
-// The groupable dimensions, WITH their names. This is the one resolver — the
-// route validates against it AND serves it, so what a client can offer and
-// what the server will accept are the same list by construction (the
-// browseFilters rule, connectors/runtime.js). Mechanism 3 asks for three
-// things: the units, their labels, and WHICH BREAKDOWNS EXIST. A Stage 5
-// dimension added here appears in the picker with no client edit — the
-// alternative is a hardcoded list in the tab, which is the mistake this
-// feature has already caught twice (a prose capability list, then a unit-id
-// transform).
+// The groupable dimensions, WITH their names. One resolver: the route
+// validates against it AND serves it, so what a client can offer and what the
+// server accepts are the same list by construction. A new dimension appears in
+// the picker with no client edit.
 //
 // `emptyLabel` is what THIS axis's '' means, stated on the axis rather than
-// branched on by whoever renders it. The sentinel is one schema fact with a
-// different meaning per dimension (no board / no attribution), and the reader
-// had grown one `id === "" ? …` branch per axis in another file — two of them,
-// already disagreeing about whether to compare against the named constant or a
-// bare "". A dimension with no `emptyLabel` has nothing to say about '' and
-// renders it blank, which is the deliberate answer for `model`: under a named
-// provider, "OpenAI · unattributed" would read as a claim.
+// branched on by whoever renders it — the sentinel is one schema fact with a
+// different meaning per dimension (no board / no attribution). A dimension
+// with no `emptyLabel` renders '' blank, which is the answer for `model`:
+// under a named provider, "OpenAI · unattributed" would read as a claim.
 export const USAGE_DIMS = {
   day: { column: "day", label: "Day" },
   board: { column: "board_id", label: "Board", emptyLabel: APP_SCOPE_LABEL },
@@ -4289,12 +4269,10 @@ export const USAGE_DIMS = {
 
 // The dimensioned usage read (metering-plan.md, Mechanism 3): group by any
 // subset of the meter's dimensions over any day window. `group` names are the
-// API's, mapped here onto columns — the allowlist is what makes interpolating
-// them into SQL safe, and the route 400s anything not in it before calling.
-// Rows always additionally group by unit (the meter's grain), folded into a
-// per-unit object under each dimension tuple: quantities sum legally within a
-// unit, and cost sums across everything (one currency); nothing else is ever
-// added together.
+// API's, mapped onto columns here — the allowlist is what makes interpolating
+// them into SQL safe. Rows always also group by unit (the meter's grain),
+// folded into a per-unit object: quantities sum legally within a unit, cost
+// sums across everything (one currency); nothing else is ever added together.
 export async function usageRows(db, { from = null, to = null, board = null, capability = null, group = [] } = {}) {
   const cols = group.map((g) => USAGE_DIMS[g]?.column);
   // Also the guard on the interpolation below — every name reaching the SQL
@@ -4342,33 +4320,14 @@ const unpricedList = (byUnit) =>
       return { unit, label, format, quantity: Number(q) };
     });
 
-// Everything one board's chip and its cost figure need, in ONE pass over its
-// rows: the token buckets kept apart (input and output bill at 3-5× different
-// rates and cache reads at a fraction of input, so adding any of them together
-// produces a figure that means nothing) and the spend.
-//
-// Grouping by unit rather than pivoting per bucket is what keeps this reader
-// free of a unit vocabulary — a Stage 5 unit joins the cost and the remainder
-// with no edit here. The three named buckets are a DISPLAY choice, made where
-// the display is.
-//
-// `cost` is null when nothing was ever priced: "≈$0.00" on a board whose rates
-// we don't know would be a claim, not an absence. A board that ran free
-// on-device DOES get its true $0.00 — rate 0 is priced-at-zero. Note cost is
-// computed for every caller and DISCLOSED by the route (spend is
-// management-visible); it is one query either way, so the gate stays a
-// disclosure rule rather than becoming a second query path.
 // Every (provider, model) the meter recorded usage for that nothing fully
-// priced — the durable half of pricing.js's want list (refreshRateTable seeds
-// from it, so a restart can't orphan a new model's unpriced history; cost is
-// write-time and never recomputed, which is how a $22 opus-5 run stayed
-// invisible across a restart, 2026-09-03). The '' guard is about FETCHING a
-// price, not about pricing: a bare model id is nothing to look up in a
-// community map. metering.js's priceUnpricedHistory deliberately keeps no
-// such guard — a connector's requests meter with no model at all and are
-// priced by a provider-wide rate, so the two filters differ on purpose.
-// Rides usageRows, the one
-// dimensioned reader, for the same reason boardUsageSummary below does.
+// priced — the durable half of pricing.js's want list, so a restart can't
+// orphan a new model's unpriced history (cost is write-time and never
+// recomputed). The '' guard is about FETCHING a price, not about pricing: a
+// bare model id is nothing to look up. metering.js's priceUnpricedHistory
+// keeps no such guard — a connector's requests meter with no model at all and
+// price by a provider-wide rate, so the two filters differ on purpose.
+// Rides usageRows, the one dimensioned reader, like boardUsageSummary below.
 export async function unpricedMeterModels(db) {
   return (await usageRows(db, { group: ["provider", "model"] }))
     .filter((r) => r.provider && r.model &&
@@ -4376,6 +4335,7 @@ export async function unpricedMeterModels(db) {
     .map(({ provider, model }) => ({ provider, model }));
 }
 
+// One board's units and spend, for its chip.
 export async function boardUsageSummary(db, boardId) {
   // The ungrouped read of the dimensioned reader IS this query — one board,
   // every unit. Calling it rather than spelling the same SELECT again is what
