@@ -12,6 +12,7 @@ import { openFacetScopePop } from './dropdown.js';
 import { selectFace } from './face-select.js';
 import { mountDetail } from './detail-view.js';
 import { contentRect, detColor } from './det-geometry.js';
+import { fitInfo, zoomAt, wheelFactor, nativePercent, clipInset } from './zoom-geometry.js';
 
 // Format numeric field values readably based on key conventions.
 function formatFieldNumber(key, v) {
@@ -154,17 +155,27 @@ function objectFieldsOf(fields) {
 // renderer (doc, audio) has none and the overlay stays hidden.
 function positionDetOverlay() {
   if (!elDetOverlay) return;
-  const img = currentHandle?.imgEl;
-  if (!elDetOverlay.childElementCount || !img?.isConnected || !img.naturalWidth) {
+  const img = readyImage();
+  if (!elDetOverlay.childElementCount || !img) {
     elDetOverlay.hidden = true;
     return;
   }
+  // Every measurement first, every write after: this runs once per zoom frame,
+  // and a rect read placed below the writes forces a synchronous layout flush
+  // on each one.
   const r = displayedContentRect(img);
   const host = elLightbox.getBoundingClientRect();
+  // The overlay hangs off the LIGHTBOX, not the stage, so the stage's `clip`
+  // never reaches it — zoomed in, its boxes would paint over the nav arrows and
+  // the count pill. Clip it to the same frame by hand. (Moving it into the
+  // stage instead would put it in front of mountDetail's replaceChildren, which
+  // would delete it on the next navigation and never rebuild it.)
+  const clip = clipInset(r, elLightboxStage.getBoundingClientRect());
   elDetOverlay.style.left = (r.x - host.left) + "px";
   elDetOverlay.style.top = (r.y - host.top) + "px";
   elDetOverlay.style.width = r.w + "px";
   elDetOverlay.style.height = r.h + "px";
+  elDetOverlay.style.clipPath = clip;
   elDetOverlay.hidden = false;
 }
 // Rebuild the boxes for the given fields (percentage-positioned children), then
@@ -201,6 +212,132 @@ function clearDetOverlay() {
 function highlightDet(detKey, on) {
   elDetOverlay?.querySelector(`[data-det="${CSS.escape(detKey)}"]`)?.classList.toggle("det-hi", on);
 }
+
+// ── Scroll-to-zoom (planning/lightbox-zoom-plan.md) ─────────────────────────
+// The wheel scales the image about the cursor. Nothing else changes: a click
+// still closes, there is no drag, and an image that already fits is left
+// exactly as it was. All the arithmetic is in zoom-geometry.js; what lives here
+// is when to re-measure and when to paint.
+//
+// Two pieces of state. `zoomView` is meaningless except against the `zoomFit`
+// it was computed for — which is why a fit carries its own frame and the two
+// are replaced together, in refitZoom().
+const ZOOM_REST = { s: 1, tx: 0, ty: 0 };
+let zoomFit = null;
+let zoomView = ZOOM_REST;
+let zoomFrame = 0; // pending paint
+
+// "The stage is showing an image we can measure." Shared with
+// positionDetOverlay so the overlay and the zoom can never disagree about
+// whether there is an image — `imgEl` is the handle contract's single hook for
+// both (detail-view.js), and a gate written twice is a gate that drifts. A
+// renderer with no image (doc, audio, chart) has none, which is also what hands
+// the chart's own wheel zoom-pan through untouched.
+function readyImage() {
+  const img = currentHandle?.imgEl;
+  return img?.isConnected && img.naturalWidth ? img : null;
+}
+
+// Send the view home without re-measuring — for a media swap, a close, or the
+// `0` key, none of which need a new frame to know the answer is "fitted".
+function resetZoom() {
+  if (zoomFrame) { cancelAnimationFrame(zoomFrame); zoomFrame = 0; }
+  zoomView = ZOOM_REST;
+  paintZoom();
+}
+
+// Re-measure the frame and the resting box inside it, then reset. Called when
+// the frame moves (the stage's ResizeObserver) and when a size first exists
+// (onImageLayout).
+function refitZoom() {
+  const img = readyImage();
+  zoomFit = img
+    ? fitInfo(elLightboxStage.getBoundingClientRect(), img.naturalWidth, img.naturalHeight)
+    : null;
+  resetZoom();
+}
+
+function paintZoom() {
+  const img = readyImage();
+  const zoomed = zoomView.s > 1;
+  if (img && zoomed) {
+    // transform-origin lives in the .zoomed rule, which lands with the class
+    // below — writing a constant here would re-parse it every frame.
+    img.style.transform = `translate(${zoomView.tx}px, ${zoomView.ty}px) scale(${zoomView.s})`;
+  } else if (img) {
+    // Removed, not set to an identity transform: a transformed element is a
+    // containing block and a stacking context, and at rest it should be
+    // neither.
+    img.style.removeProperty("transform");
+  }
+  elLightbox.classList.toggle("zoomed", zoomed);
+  renderLightboxCount();
+  positionDetOverlay();
+}
+
+// One paint per frame however many events arrive in it — a wheel outruns
+// frames, and a trackpad fling badly so.
+function schedulePaint() {
+  if (!zoomFrame) zoomFrame = requestAnimationFrame(() => { zoomFrame = 0; paintZoom(); });
+}
+
+// Scale about a point: the only thing that moves the view. The wheel and the
+// keys differ in where they aim and how far, and in nothing else.
+function applyZoom(cursor, factor) {
+  if (!zoomFit?.zoomable) return;
+  const next = zoomAt(zoomView, cursor, factor, zoomFit);
+  if (next.s === zoomView.s && next.tx === zoomView.tx && next.ty === zoomView.ty) return;
+  zoomView = next; // compound synchronously, so events sharing a frame each count
+  schedulePaint();
+}
+
+// Zoom from the keyboard, about the middle of the stage — the only anchor there
+// is without a pointer. One press is one wheel notch BY CONSTRUCTION
+// (wheelFactor past its own cap), so the two can never drift apart.
+function zoomByKey(factor) {
+  if (!zoomFit?.zoomable) return;
+  const f = zoomFit.frame;
+  applyZoom({ x: f.left + f.width / 2, y: f.top + f.height / 2 }, factor);
+}
+
+function onStageWheel(e) {
+  if (!readyImage()) return; // a chart's wheel bubbles through here; it's not ours
+  if (!zoomFit?.zoomable) {
+    // Nothing to zoom into — but a trackpad pinch arrives as ctrl+wheel, and
+    // letting it page-zoom the browser UNDER a position:fixed overlay is its
+    // own mess. Refuse that much and do nothing else.
+    if (e.ctrlKey) e.preventDefault();
+    return;
+  }
+  e.preventDefault(); // browser page zoom, and macOS option+wheel history nav
+  applyZoom({ x: e.clientX, y: e.clientY }, wheelFactor(e.deltaY, e.deltaMode));
+}
+
+// The pill at the bottom of the stage. Two things want to speak through it —
+// where you are in the board, and how far into the picture you are — and either
+// can be absent, so one function composes it instead of two writers racing for
+// the same textContent. The scale rides as a TAIL (`3 / 461 · 72%`), the
+// modeChip idiom, rather than as a second pill: .lightbox-count is
+// center-anchored with its own panel-open offset, and a neighbour would have to
+// duplicate both and then negotiate against a width that changes with the item
+// count. `:empty` in the stylesheet hides it when neither part speaks.
+let countText = null;
+function renderLightboxCount() {
+  const parts = [];
+  if (lightboxList.length > 1) parts.push(`${lightboxIndex + 1} / ${lightboxList.length}`);
+  // Percent of NATIVE size, so 100% means actual pixels — and the reader can
+  // see why the wheel stops there instead of guessing.
+  if (zoomView.s > 1 && zoomFit) parts.push(`${nativePercent(zoomView.s, zoomFit.maxScale)}%`);
+  const text = parts.join(" · ");
+  // This runs per painted frame, and the pill blurs the backdrop behind it —
+  // an unconditional write re-rasterizes that blur for a string that mostly
+  // hasn't changed (the board position never does mid-gesture, and the percent
+  // is rounded).
+  if (text === countText) return;
+  countText = text;
+  elLightboxCount.textContent = text;
+}
+
 
 // One panel cell: the light-gray card that holds a single facet or field — a
 // header line plus an optional why-sentence. Both the facet loop and
@@ -675,8 +812,9 @@ function setPanel(open) {
   elLightboxInfo.classList.toggle("on", open);
   if (open) renderPanel();
   else clearDetOverlay();
-  // .panel-open shifts the stage padding → the image resizes; track it.
-  requestAnimationFrame(positionDetOverlay);
+  // .panel-open shifts the stage padding, so the stage resizes — which the
+  // ResizeObserver in initLightbox hears, after layout, without this function
+  // having to know it moved anything.
 }
 
 const isDocItem = (it) => it.kind && it.kind !== "image";
@@ -698,8 +836,15 @@ function showMedia(f) {
   currentHandle?.unmount?.();
   currentHandle = mountDetail(elLightboxStage, f, lightboxItem, {
     root: elLightbox,
-    onImageLayout: positionDetOverlay,
+    onImageLayout: refitZoom,
   });
+  // Forget the previous image's zoom the moment the media is swapped, rather
+  // than whenever the new one finishes loading — otherwise navigating away from
+  // a zoomed image leaves it zoomed for the length of the next load. A reset,
+  // deliberately not a refit: measuring here would be wasted on a cold image
+  // (no naturalWidth yet) and redundant on a warm one, since onImageLayout
+  // fires either way.
+  resetZoom();
 }
 
 // Switch the main lightbox view to another instance of the current entity
@@ -730,8 +875,8 @@ function showLightbox() {
     elLightboxCrate.hidden = true;
   }
   renderLightboxInfo();
-  elLightboxCount.textContent =
-    lightboxList.length > 1 ? `${lightboxIndex + 1} / ${lightboxList.length}` : "";
+  // The count is not written here: showMedia's reset paints, and that paint is
+  // the pill's single writer (index and list are already current by then).
   if (panelOpen) renderPanel();
   elLightboxPrev.style.visibility = lightboxIndex > 0 ? "visible" : "hidden";
   elLightboxNext.style.visibility = lightboxIndex < lightboxList.length - 1 ? "visible" : "hidden";
@@ -778,6 +923,7 @@ export function closeLightbox() {
   currentHandle?.unmount?.();
   currentHandle = null;
   elLightboxStage.replaceChildren();
+  resetZoom(); // drop the view and any pending paint; nothing left to measure
   lightboxItem = null;
   lightboxList = [];
   lightboxIndex = -1;
@@ -788,7 +934,16 @@ export function initLightbox() {
   elDetOverlay.className = "lb-det-overlay";
   elDetOverlay.hidden = true;
   elLightbox.appendChild(elDetOverlay);
-  window.addEventListener("resize", positionDetOverlay);
+  // Observe the box rather than enumerating what moves it — the house idiom
+  // (grid.js, header-scroll.js). A window resize is only one of the ways this
+  // frame changes: the panel opening re-pads it, a stylesheet could, browser
+  // page zoom does. It also fires AFTER layout, which is what the panel toggle
+  // otherwise needed a rAF and a comment to arrange.
+  new ResizeObserver(refitZoom).observe(elLightboxStage);
+  // passive:false — the handler preventDefaults, and Chrome would ignore it
+  // otherwise. On the STAGE, not the lightbox: the panel body and the
+  // instances list are outside it and keep scrolling normally.
+  elLightboxStage.addEventListener("wheel", onStageWheel, { passive: false });
 
   elLightbox.addEventListener("click", closeLightbox);
 
@@ -846,6 +1001,15 @@ export function initLightbox() {
     if (e.key === "Escape") panelOpen ? setPanel(false) : closeLightbox();
     else if (e.key === "ArrowLeft") navLightbox(-1);
     else if (e.key === "ArrowRight") navLightbox(1);
+    // Zoom without a mouse. `=` as well as `+` because the unshifted key is
+    // what most layouts actually offer; with ctrl/meta held these belong to the
+    // browser's own page zoom and we keep our hands off them. `0` returns to
+    // the fit — which is also why Escape doesn't grow a third meaning: the
+    // zoom has a key of its own to undo it.
+    else if (e.ctrlKey || e.metaKey) return;
+    else if (e.key === "+" || e.key === "=") zoomByKey(wheelFactor(-100));
+    else if (e.key === "-" || e.key === "_") zoomByKey(wheelFactor(100));
+    else if (e.key === "0") resetZoom();
   });
 
   // Crates module dispatches this when a crate membership changes while the lightbox is open.

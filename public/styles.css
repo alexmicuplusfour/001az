@@ -1821,6 +1821,22 @@ body.bulk-mode .heart {
   height: 100%;
   min-width: 0;
   min-height: 0;
+  /* A zoomed image is larger than this box by definition. `clip`, not
+     `hidden`: hidden would make the stage a scroll container — programmatically
+     scrollable, with a scroll offset for something to knock out of place later
+     — and there is nothing here anyone should ever scroll. */
+  overflow: clip;
+}
+
+/* Zoomed (lightbox.js scroll-to-zoom): the image's own decoration rides the
+   transform — a 3x image wears a 24px/120px shadow and a 12px radius. Scoped to
+   the stage so the panel's file thumbnails keep theirs. The origin is what
+   zoom-geometry's tx/ty are measured from; it belongs with the class rather
+   than being re-parsed inline on every painted frame. */
+.lightbox.zoomed .lightbox-stage img {
+  box-shadow: none;
+  border-radius: 0;
+  transform-origin: 0 0;
 }
 
 /* Inline document view: same-origin frame (browser renders PDF/plain text).
@@ -2197,6 +2213,11 @@ body.bulk-mode .heart {
   border-radius: 999px;
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
+}
+/* Nothing to say — a board of one, not zoomed. Without this the padding and
+   background still paint, as an empty blob at the bottom of the screen. */
+.lightbox-count:empty {
+  display: none;
 }
 
 /* lightbox crate button (same row as fav, to its left) */

@@ -12,7 +12,10 @@
 //   handle = { unmount(), imgEl? }
 //            unmount releases everything the mount acquired (playback, listeners,
 //            nodes); imgEl is exposed by image-bearing renderers so the
-//            object-detection overlay can measure the displayed content rect.
+//            object-detection overlay can measure the displayed content rect
+//            and the lightbox can transform it (scroll-to-zoom writes
+//            `transform`/`transform-origin` on this node, and owns them —
+//            a renderer that sets its own transform would fight it).
 //
 // First match wins and registration order IS specificity order — image is the
 // deliberate catch-all, exactly like `kindFor`'s fallthrough. A plugin-shipped
@@ -218,6 +221,11 @@ const imageDetail = {
       onImageLayout?.();
     };
     img.src = fullUrl(inst.name);
+    // A cached image is `complete` the instant src is assigned, so this skips
+    // the spinner flash. It deliberately does NOT announce layout: `onload`
+    // fires for a cached image too (measured — see the browser test), so the
+    // announcement would be a duplicate, and this one would arrive from inside
+    // mount(), before the handle describing it exists.
     if (img.complete && img.naturalWidth > 0) {
       root.classList.remove("loading");
       img.style.opacity = "1";
