@@ -3229,16 +3229,14 @@ export async function jobLogWrite(fn, label = "") {
   }
 }
 
-// One lane job's lifecycle, owned in one place: open a `running` row, settle
-// it exactly once. Both writes ride jobLogWrite (the cardinal rule above).
-// If the OPEN was lost (id null), settle degrades to writing a settled row
-// outright — the ledger still gets the outcome the running row would have
-// carried. `settle` is idempotent, so a caller's own outcome paths and its
-// catch-all backstop can each call it and only the first one writes; that is
-// what makes "a dangling running row reads as work-in-flight until a restart
-// reaps it" a property the helper guarantees rather than one every lane
-// re-argues. `id` stays visible for the callers that retract instead of
-// stamping (an idle ingest scan, a folded transcribe repeat — deleteJobLog).
+// One lane job's lifecycle, owned in one place: open a `running` row, settle it
+// exactly once. Both writes ride jobLogWrite (the cardinal rule above). If the
+// OPEN was lost (id null), settle degrades to writing a settled row outright.
+// `settle` is idempotent, so a caller's own outcome paths and its catch-all
+// backstop can each call it and only the first writes — which is what makes "a
+// dangling running row reads as work-in-flight until a restart reaps it" a
+// guarantee of the helper rather than something every lane re-argues. `id` stays
+// visible for callers that retract instead of stamping (deleteJobLog).
 export async function openJob(db, fields) {
   const jobId = await jobLogWrite(() => addJobLog(db, fields), `${fields.kind} start`);
   let settled = false;
@@ -3344,28 +3342,23 @@ export async function latestSettledJob(db, boardId, kind, itemId = null) {
   return rows[0] || null;
 }
 
-// The newest FAILED row's stamp — the jobs chip's attention dot, which the
-// client compares against its own "last looked" watermark (public/seen-mark.js).
+// The newest FAILED row's stamp — the jobs chip's attention dot, compared by the
+// client against its own "last looked" watermark (public/seen-mark.js).
 //
-// `failed` ALONE, and the other three non-ok outcomes are excluded on purpose:
-// `requeued` is the pipeline retrying and resolves itself, `discarded` is a
-// stale result dropped by the fence (a merge landed mid-flight — nothing was
-// lost that the user can see), and `interrupted` is a restart, which would put
-// a dot on every reader's header after each deploy. A signal that lights for
-// self-healing states is a signal people learn to ignore.
+// `failed` ALONE, the other three non-ok outcomes excluded on purpose:
+// `requeued` is the pipeline retrying, `discarded` is a stale result the fence
+// dropped, and `interrupted` is a restart — which would put a dot on every
+// header after each deploy. A signal that lights for self-healing states is one
+// people learn to ignore.
 //
-// Keyed on started_at, which is also the history list's ORDER BY — so the dot
-// and the row it sends you to agree about which failure is newest, and a FOLDED
-// repeat (a wedged scan re-stamping one row every 30 s rather than writing
-// 3,000 of them) correctly counts as no news at all. The cost is a job that
-// started before your last look and fails after it: its row is older than the
-// watermark, so it waits for the next distinct failure to be announced.
-// Exported as one string so the test that pins its query PLAN pins the query
-// the app actually runs. This read happens on a background tick, per open tab,
-// and migration 0032 cuts a partial index for exactly this shape; a copy of the
-// SQL in the test would keep passing while this drifted off it — a widened
-// ORDER BY, a second outcome — and the regression is invisible from the outside,
-// since a sequential scan returns the right answer, slowly.
+// Keyed on started_at, the history list's ORDER BY too, so the dot and the row
+// it sends you to agree about which failure is newest and a FOLDED repeat counts
+// as no news. Cost: a job started before your last look that fails after it
+// waits for the next distinct failure.
+//
+// Exported as one string so the plan test and the app run the same query — 0032
+// cuts a partial index for this exact shape, and a divergent copy in the test
+// would pass while a sequential scan here returned the right answer, slowly.
 export const LATEST_JOB_FAILURE_SQL =
   "SELECT started_at FROM job_log WHERE board_id=$1 AND outcome='failed' ORDER BY started_at DESC LIMIT 1";
 
@@ -3375,15 +3368,12 @@ export async function latestJobFailureAt(db, boardId) {
 }
 
 // The same question across a set of boards, for the index's dots
-// (boards-signals-plan.md). LATERAL over unnest rather than
-// `board_id = ANY(...) GROUP BY board_id`: the aggregate form has to reach every
-// failed row of every board to take a MAX, while this walks each board's slice
-// of idx_job_log_failed and stops at the first — the shape boardPreviewFaces
-// already uses one table over, and the reason 0032's partial index exists.
-//
-// CROSS JOIN, so a board with no failures returns no row at all and the caller's
-// default stands. That is also what keeps the payload proportional to the news
-// rather than to the board count.
+// (boards-signals-plan.md). LATERAL over unnest rather than `board_id = ANY(...)
+// GROUP BY board_id`: the aggregate form reaches every failed row of every board
+// to take a MAX, while this walks each board's slice of idx_job_log_failed and
+// stops at the first — the shape boardPreviewFaces uses, and why 0032 exists.
+// CROSS JOIN, so a board with no failures returns no row and the caller's
+// default stands, keeping the payload proportional to the news.
 export const BOARD_FAILURES_SQL =
   `SELECT b.id AS board_id, t.started_at
    FROM unnest($1::text[]) AS b(id)
@@ -3552,12 +3542,10 @@ export async function stripBoardEntityFields(db, boardId, keys, now = Date.now()
 
 // Resume's companion write (job-control-plan.md Stage 1): a board paused for
 // days holds the oldest refresh_at in the system, and dueLiveEntities serves
-// soonest-due first with no board fairness — left in the deep past, the resumed
-// board would monopolize the refresh sweep for its whole drain while every
-// other live board went overdue behind it. Stamping the overdue rows to `now`
-// costs nothing semantically (the entity is due either way, and nextRefreshAt
-// recomputes from the fresh landing) and dissolves the head-of-line queue into
-// the normal batch cadence.
+// soonest-due first with no board fairness — so a resumed board would monopolize
+// the refresh sweep for its whole drain. Stamping overdue rows to `now` costs
+// nothing semantically (the entity is due either way, and nextRefreshAt
+// recomputes from the fresh landing) and dissolves the head-of-line queue.
 export async function floorOverdueRefreshes(db, boardId, now = Date.now()) {
   await db.query(
     "UPDATE entities SET refresh_at=$1 WHERE board_id=$2 AND refresh_at IS NOT NULL AND refresh_at < $1",
@@ -3567,20 +3555,17 @@ export async function floorOverdueRefreshes(db, boardId, now = Date.now()) {
 
 // Re-run the full pipeline for every instance of an entity (the card-level
 // "reprocess"). User-initiated, so the CURRENT board mapping is re-stamped and
-// applied — a mapping edited after upload (or added to a board that had none)
-// actually takes effect here. Connector vehicles restart at the FETCH leg
-// (Stage 3a): a full redo re-buys the provider data, and the fetch landing
-// routes them onward — chart-face boards re-render (connectorLanding's
-// refetch rule), so fresh fields feed a fresh chart feed fresh tags. Other
-// instances restart at the extract leg when there is AI work (current or
-// stamped), else at tagging.
-// Returns the touched rows' entity ids (affectedEntityIds → routedEntities
-// reports where everything landed), or null when the entity is gone.
-// Tags are cleared up front so the card shows a clean reprocessing state
-// either way. The face arm still exists for the no-vehicle edge (a chart face
-// in the applying mapping on a non-connector item — $3 when re-stamped, else
-// the stamp); a vehicle is zero-files (unrendered) or generated-file
-// (rendered chart), never a user upload.
+// applied — a mapping edited after upload, or added to a board that had none,
+// takes effect here. Connector vehicles restart at the FETCH leg: a full redo
+// re-buys the provider data and the fetch landing routes them onward, so fresh
+// fields feed a fresh chart feed fresh tags. Other instances restart at the
+// extract leg when there is AI work, else at tagging. Returns the touched rows'
+// entity ids, or null when the entity is gone.
+//
+// Tags are cleared up front so the card shows a clean reprocessing state. The
+// face arm still exists for the no-vehicle edge (a chart face in the applying
+// mapping on a non-connector item); a vehicle is zero-files or generated-file,
+// never a user upload.
 export async function reprocessEntity(db, entityId, currentEngine = null) {
   const { rows } = await db.query(
     "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
@@ -3588,14 +3573,13 @@ export async function reprocessEntity(db, entityId, currentEngine = null) {
   const current = aiMappingJson(rows[0].mapping);
   // `- 'park'`: an explicit reprocess runs the full pipeline through tagging,
   // even on an auto-tag-off board — park only gates the automatic ingest flow.
-  // `- 'transcript_error'`: a reprocess retries a failed transcription (the loop
-  // re-queues any audio item lacking both transcript + error). A successful
-  // `transcript` is kept — same bytes in, same text out, so redoing it only
-  // re-bills — UNLESS the engine that would transcribe today ($4, resolved by
-  // the route; null when unknown) differs from the stamp the transcript
-  // carries: a different engine can genuinely answer differently, so the
-  // trio drops and the absence-keyed lane re-transcribes. Unstamped legacy
-  // transcripts and a null $4 never drop — no surprise re-billing.
+  // `- 'transcript_error'`: a reprocess retries a failed transcription. A
+  // successful `transcript` is KEPT — same bytes in, same text out, so redoing
+  // it only re-bills — unless the engine that would transcribe today ($4, null
+  // when unknown) differs from the stamp the transcript carries: a different
+  // engine can genuinely answer differently, so the trio drops and the
+  // absence-keyed lane re-transcribes. Unstamped legacy transcripts and a null
+  // $4 never drop — no surprise re-billing.
   const STRIPPED = `(CASE WHEN $4::text IS NOT NULL AND payload ? 'transcript_engine'
                                AND payload->>'transcript_engine' <> $4::text
                           THEN payload - 'transcript' - 'transcript_turns' - 'transcript_engine'
@@ -3618,27 +3602,23 @@ export async function reprocessEntity(db, entityId, currentEngine = null) {
   return touched(result);
 }
 
-// Value-fenced (`AND status='processing'`): the stamp lands only while the row
-// is still this claim's in-flight status. A per-card route (reprocess,
-// re-extract, retag, tag edit) that re-routed the row mid-call wins — the
-// stale result is discarded (returns false) and the snapshot is skipped, so
-// history never records a judgment that was never current. A row deleted
-// mid-call discards the same way instead of FK-erroring on the snapshot.
-// Sound single-process because a stale stamp always executes before any
-// re-claim (single-flight tick); across processes a value fence is NOT
-// ownership — see the worker-queue audit, hole #7.
-// `confidence` is the per-facet vote agreement (vote mode); {} on a single-pass
-// board means NOT MEASURED, never zero — readers must distinguish those.
+// Value-fenced (`AND status='processing'`): the stamp lands only while the row is
+// still this claim's in-flight status. A per-card route that re-routed the row
+// mid-call wins — the stale result is discarded (returns false) and the snapshot
+// skipped, so history never records a judgment that was never current. A row
+// deleted mid-call discards the same way instead of FK-erroring. Sound
+// single-process because a stale stamp always executes before any re-claim;
+// across processes a value fence is NOT ownership (worker-queue audit, hole #7).
+//
+// `confidence` is the per-facet vote agreement; {} on a single-pass board means
+// NOT MEASURED, never zero — readers must distinguish those.
 //
 // `scoped` says this pass only spoke for some of the item's facets (0030). Two
 // consequences, and they must move together:
-//   - `undecided` is NOT written. The verdict is a whole-item judgment and a
-//     scoped pass did not make one; an item flagged undecided while eight
-//     facets keep their tags is incoherent.
-//   - the caller must therefore pass the item's EXISTING flag, because
-//     addTagSnapshot dedupes on it. Handing it a verdict that was never stored
-//     makes the comparison test fiction — appending when the flag "changed",
-//     skipping when it "matched".
+//   - `undecided` is NOT written. The verdict is a whole-item judgment a scoped
+//     pass did not make; undecided while eight facets keep their tags is incoherent.
+//   - the caller must pass the item's EXISTING flag, because addTagSnapshot
+//     dedupes on it. A verdict that was never stored makes that test fiction.
 export async function markTagged(db, id, tags, undecided = false, reasoning = {}, confidence = {}, scoped = false) {
   // Clearing the vector marks the item for the embedding sweep — the text it
   // was embedded from just changed.
