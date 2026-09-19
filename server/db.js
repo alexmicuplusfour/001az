@@ -2162,16 +2162,14 @@ export async function setBoardNextRun(db, boardId, ts) {
 // mapping (adapter resolution) and the ingest config/state (budget, trigger).
 //
 // ingest_next_run_at is the whole truth about "will this fire": the save path
-// nulls it for a paused or manual board, and the sweep only re-arms it when the
-// schedule is live. `enabled` is deliberately NOT a predicate here — that is
-// what lets "Run now" fire a paused feed once without resuming its watch.
+// nulls it for a paused or manual board, the sweep re-arms it only when the
+// schedule is live. `enabled` is NOT a predicate — that is what lets "Run now"
+// fire a paused feed once without resuming its watch.
 //
-// boards.paused IS a predicate, and deliberately the opposite call: the stamp
-// has multiple writers (every config save recomputes it, the sweep re-arms a
-// drain), so a null-on-pause design would need each of them to learn about
-// pause — one WHERE is the single choke point. The cost is stated in the plan:
-// "Run now" on a paused board arms the stamp and DEFERS; the run fires on
-// resume. The button isn't confiscated, its run is queued.
+// boards.paused IS one, and the opposite call on purpose: the stamp has many
+// writers, so null-on-pause would need each to learn about pause; one WHERE is
+// the single choke point. Cost: "Run now" on a paused board arms and DEFERS —
+// the run fires on resume rather than being confiscated.
 export async function dueIngestBoards(db, now) {
   const { rows } = await db.query(
     `SELECT ${BOARD_COLS} FROM boards
@@ -2205,41 +2203,31 @@ export async function clearIngestSuperseded(db, boardId) {
 
 // --- the run fence (job-control-plan.md Stage 5) ---
 //
-// A feed run is the one PRODUCER in this file, and until Stage 5 it was also
-// the only one whose writes weren't value-fenced — so cancelling a board's
-// queue emptied the consumer side while the drain refilled it from the next
-// tick, which is exactly what nineteen presses of "Cancel queued" ran into
-// (the 2026-09-10 postmortem's sibling, 2026-09-17).
+// `ingest_next_run_at` IS a run's identity: dueIngestBoards claims a board at a
+// value, so every continuation of that run is conditional on the value still
+// being there. Whoever re-stamps it supersedes the run in flight — a cancel,
+// "Run now", a save that changes the trigger. A feed run is the one PRODUCER in
+// this file, so without the fence a cancel empties the consumer side while the
+// drain refills it from the next tick.
 //
-// `ingest_next_run_at` IS the run's identity: dueIngestBoards claims a board
-// at a value, so every continuation of that run can be made conditional on the
-// value still being there. Whoever re-stamps it supersedes the run in flight —
-// a cancel, "Run now", a save that changes the trigger — and the fence is what
-// makes that true instead of merely intended. The pairing rule: everyone who
-// re-stamps also settles the budget (dropped, cleared, restarted), because a
-// superseded tick's settle dies and cannot subtract its own admissions from
-// drain_left. NOT superseded, and unchanged by this: a filter-only save and a
-// ledger clear both clear drain_left without re-stamping, so the tick in
-// flight still writes it back — the same pre-existing clobber they had before
-// the fence, left for whoever decides what those two should do to a run that
-// is already importing under the old rules.
-//
+// The pairing rule: everyone who re-stamps also settles the budget (dropped,
+// cleared, restarted), because a superseded tick's settle dies and cannot
+// subtract its own admissions from drain_left. NOT superseded, and unchanged by
+// this: a filter-only save and a ledger clear both clear drain_left without
+// re-stamping, so the tick in flight still writes it back.
+
 // May this tick admit its next row? Asked BETWEEN admissions, so both answers
 // land mid-batch instead of after it — one PK lookup against an admission that
 // creates an entity, an item and a chart job.
 //
-// Two different questions, deliberately answered together because a batch is
-// the only place either can be asked often enough to matter:
+// Two questions, answered together because a batch is the only place either is
+// asked often enough to matter:
 //   armed   is the run this tick claimed still the board's run (the fence)
 //   paused  has the board been held since this tick started
 // They part company at the SETTLE: a superseded run is over and drops its
-// budget, where a paused one is HELD and must keep it — pause's whole contract
-// is that the queue is intact and resumes. Without the pause half, a 250-deep
-// connector batch keeps importing for minutes after the button says stopped,
-// which is the same "the control doesn't do anything" this arc keeps paying
-// for. An admission is the sweep claiming new work onto the board, and pause
-// stops claims — this is the same rule dueIngestBoards' notPaused() applies a
-// tick later, applied at the resolution the work actually happens at.
+// budget, where a paused one is HELD and must keep it — pause's contract is
+// that the queue is intact and resumes. Without the pause half a 250-deep batch
+// keeps importing for minutes after the button says stopped.
 export async function ingestRunGate(db, boardId, fence) {
   const { rows } = await db.query(
     "SELECT (ingest_next_run_at = $2) AS armed, paused FROM boards WHERE id=$1",
@@ -2265,14 +2253,12 @@ export async function settleIngestRun(db, boardId, fence, { state, nextRunAt }) 
 }
 
 // Stop the run in flight (the cancel verbs' producer half). Drops the budget —
-// clearIngestSuperseded's rule, for the same reason: it is the unfinished
-// portion of a run that is now over — and re-stamps, which breaks the fence
-// above and stops the tick that is already running.
+// the unfinished portion of a run that is now over — and re-stamps, which
+// breaks the fence above and stops the tick already running.
 //
-// `<= $3` is what distinguishes A RUN from A SCHEDULE: a board armed for
-// tomorrow's 00:00 is not running, so a cancel must leave it alone and report
-// that it stopped nothing. `nextRunAt` is the caller's nextScheduledIngestRun
-// — the next NATURAL run, null for a manual/one-shot one — so stopping a run
+// `<= $3` distinguishes A RUN from A SCHEDULE: a board armed for tomorrow is
+// not running, so a cancel leaves it alone and reports that it stopped nothing.
+// `nextRunAt` is the next NATURAL run (null for manual), so stopping a run
 // never disarms a live schedule. Returns { stopped, dropped }.
 export async function stopIngestRun(db, boardId, nextRunAt, now = Date.now()) {
   const { rows } = await db.query(
@@ -2288,15 +2274,13 @@ export async function stopIngestRun(db, boardId, nextRunAt, now = Date.now()) {
   return { stopped: rows.length > 0, dropped: rows[0]?.dropped || 0 };
 }
 
-// The dedup ledger: every source_key ever ledgered on this board, with what
-// the sweep needs to judge it. Rows outlive their entities on purpose —
-// deleting an item is a user judgment the feed must not overturn on the next
-// scan. Map(key → { reason, size, modified }): `reason` drives the slot rule
-// (stage 3), and the size/mtime pair drives DRIFT (stage 5) — a known key
-// whose recorded pair no longer matches the listing is a different file in a
-// reused slot, not the one this row remembers. Both null for connector rows
-// and for anything ledgered before stage 2, which is exactly right: nothing
-// to compare means nothing can drift.
+// The dedup ledger: every source_key ever ledgered on this board, with what the
+// sweep needs to judge it. Rows outlive their entities on purpose — deleting an
+// item is a user judgment the feed must not overturn on the next scan.
+// Map(key → { reason, size, modified }): `reason` drives the slot rule, and the
+// size/mtime pair drives DRIFT — a known key whose recorded pair no longer
+// matches the listing is a different file in a reused slot. Both null for
+// connector rows and pre-stage-2 rows: nothing to compare means nothing drifts.
 export async function ingestedKeys(db, boardId) {
   const { rows } = await db.query(
     "SELECT source_key, reason, file_size, modified_at FROM ingest_log WHERE board_id=$1", [boardId]);
@@ -2308,15 +2292,13 @@ export async function ingestedKeys(db, boardId) {
 }
 
 // Is this content already on the board? Asked of the ITEMS (payload
-// provenance), not the ledger, so the answer survives a Forget-all — which
-// makes this the by-content half of the self-heal as well as the rename
-// check. Returns the live item's id, or null. Files only: nothing else
-// carries provenance.
+// provenance), not the ledger, so the answer survives a Forget-all — the
+// by-content half of the self-heal as well as the rename check. Returns the
+// live item's id, or null. Files only: nothing else carries provenance.
 //
 // `payload ? 'provenance'` is restated rather than implied: it is the partial
-// index's predicate (0050), and Postgres cannot derive it from the arrow
-// expression below — without it the probe seq-scans `items` on every
-// admission.
+// index's predicate (0050), which Postgres cannot derive from the arrow
+// expression below — without it this seq-scans `items` on every admission.
 export async function itemByContentHash(db, boardId, hash) {
   if (!hash) return null;
   const { rows } = await db.query(
@@ -2356,23 +2338,19 @@ export async function ingestLedgerCounts(db, boardId) {
   };
 }
 
-// Forget ledger rows, so the next run treats those keys as never seen. ONE
-// verb, three scopes (ingest-deletions-plan.md stage 4) — the blunt reset was
-// only ever the widest of them:
-//   all       the stage-1 button: forget everything
+// Forget ledger rows, so the next run treats those keys as never seen. ONE verb,
+// three scopes (ingest-deletions-plan.md stage 4):
+//   all       forget everything
 //   deleted   "bring back" — the rows a user deletion stamped
 //   skipped   "retry" — unprocessable bytes, worth another pass once the file
 //             (or the handler that refused it) has changed
-// Forgetting is the right mechanism for all three: flipping a row to
-// `admitted` instead would claim the item is on the board AND still keep its
-// key out of `fresh`. Returns how many rows died — the route's receipt.
+// Forgetting rather than flipping a row to `admitted`, which would claim the
+// item is on the board AND keep its key out of `fresh`. Returns rows deleted.
 //
-// `keys` narrows the delete to a caller-supplied source-key set (stage 6):
-// the two scoped verbs are offered beside FILTER-SCOPED counts, so they must
-// act on the window those counts were read off rather than on the whole
-// ledger. The caller supplies keys, never reasons — the scope still owns that
-// mapping here, so no route learns the vocabulary. `all` passes none: it is
-// the whole-ledger reset by definition.
+// `keys` narrows the delete to a caller-supplied source-key set: the scoped
+// verbs sit beside FILTER-SCOPED counts, so they must act on the window those
+// counts were read off. The caller supplies keys, never reasons — the scope
+// owns that mapping here, so no route learns the vocabulary.
 const FORGET_SCOPES = { all: null, deleted: "deleted", skipped: "skipped" };
 export const isForgetScope = (scope) => Object.hasOwn(FORGET_SCOPES, scope);
 export async function clearIngestLog(db, boardId, scope = "all", keys = null) {
@@ -2410,14 +2388,12 @@ export async function recordIngest(dbc, boardId, sourceKey, at,
 
 // The file adapter's self-heal probe: a LIVE item on this board already born
 // from this source key (payload.provenance, stamped at admit — files only).
-// What lets a post-clear scan recognize "already here" without the ledger,
-// the way the connector adapter's unique constraint does.
+// What lets a post-clear scan recognize "already here" without the ledger.
 //
-// Returns { id, size, modified } — the item's recorded facts, not just its
-// id, because a path is only evidence when the SLOT hasn't changed. On a
-// watch folder used as a spool the same name is reused for different files,
-// so the caller compares these before trusting the match and otherwise falls
-// through to reading the bytes (files.js). Null when no item claims the key.
+// Returns { id, size, modified }, not just the id, because a path is only
+// evidence when the SLOT hasn't changed — on a watch folder used as a spool the
+// same name is reused for different files, so the caller compares these before
+// trusting the match. Null when no item claims the key.
 export async function itemBySourceKey(db, boardId, key) {
   const { rows } = await db.query(
     `SELECT id,
@@ -2433,13 +2409,11 @@ export async function itemBySourceKey(db, boardId, key) {
 }
 
 // "Remember deletions" (ingest.rememberDeletions, default true) as a SQL
-// predicate over the owning board. The toggle is FORWARD-looking, so it acts
-// by stopping the stamp rather than by teaching the sweep to ignore one —
-// that would be the retroactive reading, a mass re-import wearing a
-// preference's clothes, and it would make "off, but leave the backlog out"
-// inexpressible. Absent config, absent key, and a board with no ingest at all
-// all read as true. Correlated on ingest_log.board_id so the stamp sites pay
-// no extra round-trip.
+// predicate over the owning board. The toggle is FORWARD-looking, so it acts by
+// stopping the stamp rather than by teaching the sweep to ignore one — the
+// retroactive reading would be a mass re-import wearing a preference's clothes,
+// and would make "off, but leave the backlog out" inexpressible. Absent config,
+// absent key and a board with no ingest all read as true.
 const REMEMBERS_DELETIONS =
   `COALESCE((SELECT (b.ingest->>'rememberDeletions')::boolean FROM boards b WHERE b.id = ingest_log.board_id), TRUE)`;
 

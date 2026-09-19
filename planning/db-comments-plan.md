@@ -1,6 +1,6 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-4 DONE (2026-09-20). Suite 1808 green throughout,
+**Status: STAGES 1-5 DONE (2026-09-20). Suite 1808 green throughout,
 comments-only diffs, LF clean.**
 
 | stage | section | comment lines | cut | big blocks |
@@ -10,9 +10,10 @@ comments-only diffs, LF clean.**
 | 2 | usage meter + rate map | 244 → 204 | -16% | 6 → 5 |
 | 3 | facet confidence roll-up | 232 → 187 | -19% | 11 → 6 |
 | 4 | boards | 184 → 150 | -18% | 11 → 6 |
+| 5 | run fence + automatic ingestion | 150 → 123 | -18% | 8 → 4 |
 
-**File vs `ddd41e0`: 4,952 → 4,780 lines, 1,900 → 1,728 comment lines, 249,743
-→ 237,653 bytes, density 41.2% → 38.9%. Stages 5-10 open.**
+**File vs `ddd41e0`: 4,952 → 4,754 lines, 1,900 → 1,701 comment lines, -13,884
+bytes, density 41.2% → 38.5%. Stages 6-10 open.**
 
 ### Measurement correction (2026-09-20)
 
@@ -30,9 +31,9 @@ let the first stand in for the second.
 
 
 
-**Recalibration:** on the honest measure the rate is **~18-20% per section**,
-and stage 1's 30% is the outlier rather than the norm — that region had the most
-pure narration. The rubric keeps far more than the first read of this file
+**Recalibration:** on the honest measure the rate is **~18% per section** —
+stages 2-5 came in at 16, 19, 18 and 18, and stage 1's 30% is the outlier
+rather than the norm, because that region had the most pure narration. The rubric keeps far more than the first read of this file
 suggested, because most long blocks here turn out to be a trap or a contract
 rather than a defence of a choice. That is the finding, not a failure to cut
 hard enough.
