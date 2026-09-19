@@ -397,6 +397,12 @@ export async function listItems(db, userId = null, boardId = null, { limit = nul
       // connector entities have no files; instanceEntry marks the file-less
       // vehicle "connector" so the client renders the symbol tile face.
       kind: face?.kind || (e.symbol != null ? "connector" : "image"),
+      // The app DREW this face (a connector price chart) rather than receiving
+      // it: it was rendered to a shape of our choosing, so the card shows it
+      // whole in the standard face band instead of letting it set the card's
+      // height the way an uploaded photo's own proportions do. Off the raw file
+      // entry — `face` is instanceEntry's projection, which doesn't carry it.
+      generated: !!faceEntry?.generated,
       symbol: e.symbol || null,
       label: face?.label || null,
       // Connector-bound entity fields (AI-extracted fields are per instance).

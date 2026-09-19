@@ -1,5 +1,6 @@
 :root {
   --gap: 14px;
+  --face-h: 200px; /* the picture region of a titled card face — see .face-badge */
   --pill-bg: #f1f1f3;
   --pill-bg-hover: #e6e6ea;
   --pill-active: #111;
@@ -826,23 +827,29 @@ body.bulk-mode .inst-tag-chip {
   opacity: 1;
 }
 
-/* Document faces: a fixed-height peek at page 1 (cropped from the top,
-   fading into the title strip) or an extension badge, plus the original
-   filename as the card title. These cards take the grid's measured layout
+/* A titled card face: a picture region (page peek, waveform, price chart,
+   mapped photo) or a placeholder badge, above a title strip. Documents, audio,
+   connector entities and identity-mapped images all wear it; an unmapped image
+   is bare media with no strip. These cards take the grid's measured layout
    lane (no dataset.ratio). */
-/* Media region of a card face — heart + select anchor here, above any title strip. */
+/* Media region of a card face — heart + select anchor here, above the title strip. */
 .face-media {
   position: relative;
   display: block;
   line-height: 0;
 }
 
-.doc-face {
+.card-face {
   line-height: normal;
 }
+/* Any picture inside a titled face rounds only its top — the strip below
+   carries the bottom corners. (A bare image face keeps .card img's full 8px.) */
+.card-face img {
+  border-radius: 8px 8px 0 0;
+}
+/* Document peek: page 1 cropped from the top, fading into the title strip. */
 .doc-preview {
   position: relative;
-  height: 200px;
   overflow: hidden;
   border-radius: 8px 8px 0 0;
 }
@@ -851,7 +858,6 @@ body.bulk-mode .inst-tag-chip {
   height: 100%;
   object-fit: cover;
   object-position: top center;
-  border-radius: 8px 8px 0 0;
 }
 .doc-preview::after {
   content: "";
@@ -863,11 +869,25 @@ body.bulk-mode .inst-tag-chip {
   background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #fff);
   pointer-events: none;
 }
-.doc-badge {
+/* Every picture region on a titled face is this tall, whatever it holds — a
+   page peek, a waveform, a price chart, a placeholder badge. One number, so no
+   card ever changes height between the placeholder and the thing it stood in
+   for, and a row of mixed material lines up. A photo is the one exemption: it
+   wears none of these classes and keeps its own proportions, because a masonry
+   of pictures at their own shape is the point of the app.
+   test/browser/card-faces.test.js measures all of this in a real browser. */
+.doc-preview,
+.face-fit,
+.face-badge {
+  height: var(--face-h);
+}
+/* The placeholder face: one grey tile for every kind of material that has no
+   picture to show — an extension badge, a ♪, a ticker symbol. Three legends,
+   one tile, so a board of mixed unrendered material reads as one thing. */
+.face-badge {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 200px;
   border-radius: 8px 8px 0 0;
   background: #f1f2f4;
   color: #9aa0aa;
@@ -875,31 +895,36 @@ body.bulk-mode .inst-tag-chip {
   font-weight: 600;
   letter-spacing: 1px;
 }
-/* Audio card face: the full waveform (shown whole, not cover-cropped like a doc
-   page) in a band above the title strip; a ♪ badge when there's no waveform. */
-.audio-face {
-  line-height: normal;
+/* A connector entity's ticker: its identity, not a file-type stamp, so it gets
+   the larger monospace treatment the boards-page tile stack also uses. */
+.face-badge.symbol {
+  font: 700 32px/1 "SF Mono", Consolas, monospace;
+  letter-spacing: -0.02em;
 }
-.audio-wave {
+.face-badge.audio {
+  font-size: 46px;
+  letter-spacing: 0;
+}
+/* A face the app DREW — an audio waveform, a connector price chart. Unlike an
+   uploaded photo it was rendered to a shape we chose, and every pixel of it
+   (the chart's ticker, its period stamp, the whole of a wave) is content, so
+   it's shown WHOLE rather than cover-cropped like a doc page. It sits centred
+   in the shared band; both producers draw on white, so the band's own white
+   absorbs whatever slack the card's width leaves. */
+.face-fit {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 140px;
   overflow: hidden;
   border-radius: 8px 8px 0 0;
   background: #fff;
 }
-.audio-wave img {
+.face-fit img {
   width: 100%;
   height: 100%;
-  object-fit: contain; /* whole waveform, wide + short — never cropped */
-  border-radius: 8px 8px 0 0;
+  object-fit: contain;
 }
-.audio-badge {
-  font-size: 46px;
-  letter-spacing: 0;
-}
-.doc-title {
+.face-title {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -913,7 +938,7 @@ body.bulk-mode .inst-tag-chip {
      count chip, or chipped cards break the measured masonry lane. */
   line-height: 16px;
 }
-.doc-title-text {
+.face-title-text {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -926,7 +951,7 @@ body.bulk-mode .inst-tag-chip {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  height: 16px; /* matches the .doc-title line box so the chip never grows the strip */
+  height: 16px; /* matches the .face-title line box so the chip never grows the strip */
   box-sizing: border-box;
   border: 1px solid #0a0a181a;
   border-radius: 999px;
@@ -935,15 +960,6 @@ body.bulk-mode .inst-tag-chip {
   line-height: 1;
   color: var(--text-dim);
   background: #fff;
-}
-
-/* Image with a mapped identity: full media at its own ratio, doc-title strip
-   below. Measured layout lane, like doc faces. */
-.image-face {
-  line-height: normal;
-}
-.image-face img {
-  border-radius: 8px 8px 0 0;
 }
 
 /* Already-loaded thumbnails stay at full opacity unless the card is pending. */
@@ -2931,24 +2947,6 @@ div.lbp-file-thumb {
 .lbp-field-at svg {
   width: 10px;
   height: 10px;
-}
-
-/* connector entity card face — the symbol tile fills the doc-face preview
-   slot (same height and top rounding as .doc-preview / .doc-badge) */
-.connector-face {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 200px;
-  border-radius: 8px 8px 0 0;
-  background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
-}
-.connector-symbol {
-  font-size: 32px;
-  font-weight: 700;
-  color: #e0e0f0;
-  font-family: monospace;
-  letter-spacing: -0.02em;
 }
 
 /* provisional identity warning — a .warn-box; two warnings in one panel wearing

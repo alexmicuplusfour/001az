@@ -19,7 +19,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const W = 600; // matches the image/text face width
-const H = 200; // a waveform is wide and short — fills the doc-face preview band
+const H = 200; // a waveform is wide and short — shown whole, centred in the card face band
 // showwavespic decodes the whole track, so work scales with duration — cap it so
 // a pathological/huge file degrades to a badge instead of tying up a worker. The
 // default comfortably covers a full 50 MB (~52 min) audio; overrides beyond that

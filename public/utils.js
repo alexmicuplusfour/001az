@@ -56,6 +56,7 @@ export function toItem(d) {
     w: d.w || 0,
     h: d.h || 0,
     kind: d.kind || "image",
+    generated: !!d.generated,  // face the app drew (connector chart) — shown whole in the face band
     label: d.label || null,
     fields: d.fields || {},  // connector-bound entity fields (per-instance fields come from the reasoning fetch)
     created_at: d.created_at ?? null,

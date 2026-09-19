@@ -349,18 +349,19 @@ img.bc-thumb {
   }
 }
 
-/* Connector entities carry no file — the gallery gives them a symbol tile
-   (.connector-face in styles.css ~2366); the stack restates it at tile scale. */
+/* Connector entities carry no file — the gallery gives them the placeholder
+   badge (.face-badge.symbol in styles.css); the stack restates it at tile
+   scale, same grey and same ink. */
 .bc-thumb.sym {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
+  background: #f1f2f4;
 }
 .bc-thumb.sym span {
   font: 700 17px/1 "SF Mono", Consolas, monospace;
   letter-spacing: -0.02em;
-  color: #e0e0f0;
+  color: #9aa0aa;
 }
 
 .bc-body {

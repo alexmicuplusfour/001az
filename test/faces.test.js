@@ -729,6 +729,23 @@ test("listing: the item face follows mapping.face over a multi-instance entity",
   assert.equal((await list({ identity: { source: "extract", instruction: "t" }, fields: [] })).name, "scan.webp");
 });
 
+test("listing: a DRAWN face says so, so the card can band it instead of sizing to it", async () => {
+  // public/kinds.js shows a face the app rendered (a connector price chart)
+  // whole in the fixed face band; an uploaded photo keeps its own proportions
+  // and sets the card's height. The only thing telling them apart on the wire
+  // is this flag, and it lives on the raw payload file entry — NOT on
+  // instanceEntry's projection, which is what the listing's `face` is.
+  const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "drawn-face-listing" } });
+  const drawn = await createEntity(db, board.id, { identity: "hype", displayName: "Hyperliquid" });
+  await insertItem(db, board.id, { identity: "hype", files: [{ name: "chart.webp", kind: "image", generated: true, w: 600, h: 360 }] }, "tagged", drawn);
+  const shot = await createEntity(db, board.id, { identity: "photo-1", displayName: "A photo" });
+  await insertItem(db, board.id, { identity: "photo-1", files: [{ name: "pic.webp", kind: "image", w: 1200, h: 800 }] }, "tagged", shot);
+
+  const { items } = await listItems(db, admin.id, board.id);
+  assert.equal(items.find((i) => i.id === drawn).generated, true, "the chart is ours — band it");
+  assert.equal(items.find((i) => i.id === shot).generated, false, "an upload keeps its own shape");
+});
+
 // ── migration 0035: legacy tile-faced finance boards ─────────────────────────
 // Kept last in the file: `up` sweeps every board in this database, so it must
 // run after the tests that assert on their own boards' mappings.

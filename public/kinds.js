@@ -12,10 +12,10 @@ export const fullUrl = (name) => `gallery/${encodeURIComponent(name)}`;
 // several instances, a small count chip (filter-pill styling).
 function titleStrip(text, count = 0) {
   const title = document.createElement("div");
-  title.className = "doc-title";
+  title.className = "face-title";
   title.title = text;
   const label = document.createElement("span");
-  label.className = "doc-title-text";
+  label.className = "face-title-text";
   label.textContent = text;
   title.appendChild(label);
   if (count > 1) {
@@ -37,6 +37,34 @@ function faceMedia(...nodes) {
   return wrap;
 }
 
+// The placeholder tile every kind falls back to when it has no picture: an
+// extension for a document, ♪ for audio, the ticker for a connector entity.
+// One grey tile with three legends — the variant only changes the lettering.
+function faceBadge(legend, variant) {
+  const badge = document.createElement("div");
+  badge.className = variant ? `face-badge ${variant}` : "face-badge";
+  badge.textContent = legend;
+  return badge;
+}
+
+// The band a DRAWN face sits in — an audio waveform, a connector price chart.
+// The app chose their shape, so they're shown whole at the standard face
+// height rather than setting the card's height from their own proportions.
+function fitBand(img) {
+  const band = document.createElement("div");
+  band.className = "face-fit";
+  band.appendChild(img);
+  return band;
+}
+
+// The wrapper a titled face lives in — a media region plus the title strip.
+function titledFace(media, text, count) {
+  const wrap = document.createElement("div");
+  wrap.className = "card-face";
+  wrap.append(faceMedia(media), titleStrip(text, count));
+  return wrap;
+}
+
 const imageKind = {
   // The face inside the card frame.
   face(item, card, layout) {
@@ -44,7 +72,9 @@ const imageKind = {
     img.src = thumbUrl(item.name);
     img.loading = "lazy";
     img.decoding = "async";
-    if (item.w && item.h) {
+    // A drawn face (a connector chart) doesn't get to set the card's height —
+    // it goes in the shared band below, so its own proportions are irrelevant.
+    if (item.w && item.h && !item.generated) {
       img.width = item.w;
       img.height = item.h;
       // Pin the ratio to the border box (box-sizing: border-box) so selection
@@ -64,10 +94,7 @@ const imageKind = {
     if (img.complete && img.naturalWidth > 0) { img.classList.add("loaded"); card.classList.add("loaded"); }
     if (!hasIdentity(item)) return faceMedia(img);
     // Mapped identity: same title strip documents carry, under the media.
-    const wrap = document.createElement("div");
-    wrap.className = "image-face";
-    wrap.append(faceMedia(img), titleStrip(item.displayLabel, item.instances?.length));
-    return wrap;
+    return titledFace(item.generated ? fitBand(img) : img, item.displayLabel, item.instances?.length);
   },
 
   // Upload placeholders: the local object URL until the server row exists.
@@ -89,46 +116,36 @@ const imageKind = {
   },
 };
 
+const ext = (name) => (name?.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
+
 const docKind = {
   // A fixed-height (200px) peek at the document — page-1 render cropped from
   // the top with a fade into the title strip — or an extension badge when
   // there's no preview; the original filename as the card title. Height is
   // still content-ish (title strip), so no dataset.ratio: measured lane.
   face(item, card, layout) {
-    const wrap = document.createElement("div");
-    wrap.className = "doc-face";
+    let media;
     if (item.w && item.h) {
-      const preview = document.createElement("div");
-      preview.className = "doc-preview";
+      media = document.createElement("div");
+      media.className = "doc-preview";
       const img = document.createElement("img");
       img.src = thumbUrl(item.name);
       img.loading = "lazy";
       img.decoding = "async";
       img.alt = item.displayLabel;
       img.addEventListener("load", () => { img.classList.add("loaded"); layout(); });
-      preview.appendChild(img);
-      wrap.appendChild(faceMedia(preview));
+      media.appendChild(img);
     } else {
-      const badge = document.createElement("div");
-      badge.className = "doc-badge";
-      badge.textContent = (item.name.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
-      wrap.appendChild(faceMedia(badge));
+      media = faceBadge(ext(item.name));
     }
-    wrap.appendChild(titleStrip(item.displayLabel, item.instances?.length));
     card.classList.add("loaded");
-    return wrap;
+    return titledFace(media, item.displayLabel, item.instances?.length);
   },
 
   progressFace(p, card) {
-    const wrap = document.createElement("div");
-    wrap.className = "doc-face";
-    const badge = document.createElement("div");
-    badge.className = "doc-badge";
-    badge.textContent = (p.name?.match(/\.(\w+)$/)?.[1] || "doc").toUpperCase();
-    wrap.append(badge, titleStrip(p.name || "uploading"));
     // Badge face is ready at creation — no shimmer needed (see imageKind).
     card.classList.add("loaded");
-    return wrap;
+    return titledFace(faceBadge(ext(p.name)), p.name || "uploading");
   },
 
   previewUrl(item) {
@@ -138,61 +155,43 @@ const docKind = {
 
 // Audio items carry a waveform face (server/faces/waveform.js) — wide and short,
 // so it's shown WHOLE (object-fit: contain) rather than cover-cropped like a doc
-// page. No waveform (ffmpeg absent at ingest) → a ♪ badge. Detail view is the
-// player (lightbox.js showMedia branches on kind === "audio").
+// page, centred in the shared face band. No waveform (ffmpeg absent at ingest,
+// or not rendered yet) → a ♪ badge in that same band, so the card keeps its
+// height when the waveform lands. Detail view is the player (lightbox.js
+// showMedia branches on kind === "audio").
 const audioKind = {
   face(item, card, layout) {
-    const wrap = document.createElement("div");
-    wrap.className = "audio-face";
+    let media;
     if (item.w && item.h) {
-      const wave = document.createElement("div");
-      wave.className = "audio-wave";
       const img = document.createElement("img");
       img.src = thumbUrl(item.name);
       img.loading = "lazy";
       img.decoding = "async";
       img.alt = item.displayLabel;
       img.addEventListener("load", () => { img.classList.add("loaded"); layout(); });
-      wave.appendChild(img);
-      wrap.appendChild(faceMedia(wave));
+      media = fitBand(img);
     } else {
-      const badge = document.createElement("div");
-      badge.className = "doc-badge audio-badge";
-      badge.textContent = "♪";
-      wrap.appendChild(faceMedia(badge));
+      media = faceBadge("♪", "audio");
     }
-    wrap.appendChild(titleStrip(item.displayLabel, item.instances?.length));
     card.classList.add("loaded");
-    return wrap;
+    return titledFace(media, item.displayLabel, item.instances?.length);
   },
   progressFace(p, card) {
-    const wrap = document.createElement("div");
-    wrap.className = "audio-face";
-    const badge = document.createElement("div");
-    badge.className = "doc-badge audio-badge";
-    badge.textContent = "♪";
-    wrap.append(faceMedia(badge), titleStrip(p.name || "uploading"));
     card.classList.add("loaded");
-    return wrap;
+    return titledFace(faceBadge("♪", "audio"), p.name || "uploading");
   },
   previewUrl(item) { return item.w && item.h ? thumbUrl(item.name) : null; },
 };
 
-// Connector entities have no files. Same card anatomy as documents —
-// face area + title strip — with a symbol tile standing in for the preview.
+// Connector entities have no files. Same card anatomy as documents — face area
+// + title strip — with the ticker on the same placeholder badge a document's
+// extension gets; a priced entity swaps it for the rendered chart (an image
+// face) as soon as one exists.
 const connectorKind = {
   face(item, card) {
-    const wrap = document.createElement("div");
-    wrap.className = "doc-face";
-    const tile = document.createElement("div");
-    tile.className = "connector-face";
-    const sym = document.createElement("span");
-    sym.className = "connector-symbol";
-    sym.textContent = item.symbol || item.identity?.slice(0, 4).toUpperCase() || "?";
-    tile.appendChild(sym);
-    wrap.append(faceMedia(tile), titleStrip(item.displayLabel, item.instances?.length));
+    const legend = item.symbol || item.identity?.slice(0, 4).toUpperCase() || "?";
     card.classList.add("loaded");
-    return wrap;
+    return titledFace(faceBadge(legend, "symbol"), item.displayLabel, item.instances?.length);
   },
   // No media to load: the symbol tile is ready at creation, so the full face
   // doubles as the progress face. Without this, a just-added coin renders as a
