@@ -192,10 +192,25 @@ export function reconcile(data, presentIds = null) {
         ex.displayLabel = d.display_name || (d.identity !== d.name ? d.identity : (d.label || d.name));
         ex.kind = d.kind || ex.kind;
       }
-      // Fresh uploads are created client-side without dimensions; pick them
-      // up here so their cards get the computed-height layout path. A merge
-      // can also swap the face file — follow the server's dimensions.
-      if (d.w && (!ex.w || ex.w !== d.w || ex.h !== d.h)) { ex.w = d.w; ex.h = d.h || 0; }
+      // The FACE, followed as one thing. Which file it is, how big it is and
+      // whether the app DREW it all describe the same object and all change at
+      // the same moment — a connector's chart finishing, a merge swapping which
+      // instance supplies the card, an upload's real dimensions landing after
+      // the optimistic client-side row. This used to copy w/h alone, so a chart
+      // that arrived on an open page rendered as if it were somebody's photo
+      // and only came right on the next page load.
+      //
+      // A field added to the listing projection has to be added here too, and
+      // nothing in the code says so. test/delta-reconcile.test.js closes that
+      // by comparing a merged item against toItem() of the same row.
+      //
+      // Normalised on both sides: the wire says null for "no face", toItem
+      // stores 0, and comparing the two raw would report a change every tick.
+      if ((d.w || 0) !== ex.w || (d.h || 0) !== ex.h || !!d.generated !== ex.generated) {
+        ex.w = d.w || 0;
+        ex.h = d.h || 0;
+        ex.generated = !!d.generated;
+      }
     } else {
       state.items.unshift(toItem(d));
     }

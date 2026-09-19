@@ -1,6 +1,6 @@
 :root {
   --gap: 14px;
-  --face-h: 200px; /* the picture region of a titled card face — see .face-badge */
+  --face-ratio: 5 / 3; /* the shape of a titled card face's picture region — see .face-badge */
   --pill-bg: #f1f1f3;
   --pill-bg-hover: #e6e6ea;
   --pill-active: #111;
@@ -869,17 +869,25 @@ body.bulk-mode .inst-tag-chip {
   background: linear-gradient(to bottom, rgba(255, 255, 255, 0), #fff);
   pointer-events: none;
 }
-/* Every picture region on a titled face is this tall, whatever it holds — a
-   page peek, a waveform, a price chart, a placeholder badge. One number, so no
-   card ever changes height between the placeholder and the thing it stood in
-   for, and a row of mixed material lines up. A photo is the one exemption: it
-   wears none of these classes and keeps its own proportions, because a masonry
-   of pictures at their own shape is the point of the app.
+/* Every picture region on a titled face is this SHAPE, whatever it holds — a
+   page peek, a waveform, a price chart, a placeholder badge. Cards in a column
+   layout are all one width, so one shape means one height: no card changes
+   height between the placeholder and the thing it stood in for, and a row of
+   mixed material lines up. A photo is the one exemption — it wears none of
+   these classes and keeps its own proportions, because a masonry of pictures
+   at their own shape is the point of the app.
+
+   A shape rather than a pixel height because the app's own face producers draw
+   to it: server/faces/price-chart.js renders 600x360, which IS 5:3, so the
+   chart fills this box exactly — edge to edge, no crop, no letterbox, no
+   stretch. A fixed height could not do that at every column width, and the
+   slack showed: a chart's area fill reaches its own edges, so stopping a few
+   px short of the card read as a misaligned thumbnail.
    test/browser/card-faces.test.js measures all of this in a real browser. */
 .doc-preview,
 .face-fit,
 .face-badge {
-  height: var(--face-h);
+  aspect-ratio: var(--face-ratio);
 }
 /* The placeholder face: one grey tile for every kind of material that has no
    picture to show — an extension badge, a ♪, a ticker symbol. Three legends,
@@ -908,9 +916,12 @@ body.bulk-mode .inst-tag-chip {
 /* A face the app DREW — an audio waveform, a connector price chart. Unlike an
    uploaded photo it was rendered to a shape we chose, and every pixel of it
    (the chart's ticker, its period stamp, the whole of a wave) is content, so
-   it's shown WHOLE rather than cover-cropped like a doc page. It sits centred
-   in the shared band; both producers draw on white, so the band's own white
-   absorbs whatever slack the card's width leaves. */
+   it is shown WHOLE rather than cover-cropped like a doc page. A producer that
+   draws at --face-ratio therefore fills the box exactly and `contain` is a
+   no-op; one that doesn't (waveform.js is 3:1) centres, and since both draw on
+   white the band's white absorbs the slack invisibly. `contain` over `cover`
+   so the mismatch degrades to whitespace rather than to a crop that would eat
+   a chart's labels or the head and tail of a track. */
 .face-fit {
   display: flex;
   align-items: center;

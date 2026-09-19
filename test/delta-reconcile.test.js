@@ -136,3 +136,77 @@ test("poll cadence: fast while work is in flight, slow on a live board, off othe
 
   state.boardMapping = null;
 });
+
+// ── a merged item must equal a freshly-listed one ────────────────────────────
+//
+// reconcile() copies a delta row onto an EXISTING item field by field, while a
+// first sighting goes through toItem(). Two hand-maintained transcriptions of
+// one projection, and nothing makes them agree — add a field to the listing and
+// only the second one learns about it. That is exactly how a connector's
+// rendered price chart kept rendering as if it were an uploaded photo until the
+// page was reloaded: the `generated` flag reached toItem and never reached the
+// merge, so the card sized itself from the chart's own proportions instead of
+// taking the shared face band.
+//
+// So rather than testing one field, test the equivalence: the same row, seen
+// cold and seen as an update, must produce the same item. Anything a future
+// projection field breaks shows up here by name.
+const { toItem } = await import("../public/utils.js");
+
+// A settled row with every face field populated — a connector entity whose
+// chart has just finished rendering, which is the case that broke.
+const chartRow = {
+  id: 77,
+  name: "chart-hype.webp",
+  identity: "hyperliquid",
+  display_name: "Hyperliquid",
+  symbol: "HYPE",
+  status: "tagged",
+  tags: ["risk/blue-chip"],
+  hearts: 0,
+  w: 600,
+  h: 360,
+  kind: "image",
+  generated: true,
+  instances: [],
+  fields: {},
+  created_at: 1000,
+  updated_at: 2000,
+  media: null,
+};
+
+test("a delta lands the same item a fresh listing would have built", () => {
+  // The card as it stood BEFORE the chart rendered: same entity, no face yet.
+  // This is a real intermediate state, not a contrivance — a connector entity
+  // is born file-less and the face arrives on the refresh cadence.
+  const before = { ...chartRow, name: "hyperliquid", w: null, h: null, kind: "connector", generated: false };
+  state.items = [toItem(before)];
+  state.uploading = [];
+
+  reconcile([chartRow], new Set([77]));
+  const merged = state.items[0];
+  const fresh = toItem(chartRow);
+
+  // Sets and Maps don't compare usefully with deepEqual, and `tagSet` etc. are
+  // derived from fields that are compared directly — flatten them out.
+  const plain = (i) => Object.fromEntries(
+    Object.entries(i).filter(([, v]) => !(v instanceof Set) && !(v instanceof Map))
+  );
+  assert.deepEqual(plain(merged), plain(fresh));
+});
+
+test("and the face survives going away again", () => {
+  // The other direction, which the old `if (d.w && ...)` guard could not do:
+  // an instance removal can leave an entity with no face at all, and a card
+  // still claiming dimensions would keep laying itself out around a thumbnail
+  // that no longer exists.
+  state.items = [toItem(chartRow)];
+  state.uploading = [];
+
+  const faceless = { ...chartRow, name: "hyperliquid", w: null, h: null, kind: "connector", generated: false };
+  reconcile([faceless], new Set([77]));
+
+  assert.equal(state.items[0].w, 0);
+  assert.equal(state.items[0].h, 0);
+  assert.equal(state.items[0].generated, false);
+});

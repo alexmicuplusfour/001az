@@ -27,11 +27,6 @@ import { adminSession } from "../helpers.js";
 import { setPassword, createBoard, createEntity, insertItem } from "../../server/db.js";
 import { hashPassword } from "../../server/password.js";
 
-// styles.css --face-h. Stated here as a literal on purpose: a test that read
-// the value out of the page would agree with any change to it, including the
-// one that broke this.
-const FACE_H = 200;
-
 let app, admin, boardId;
 
 // A thumbnail that actually exists, at the dimensions the item claims — the
@@ -129,6 +124,18 @@ test("every app-controlled face is one height; an uploaded photo keeps its own",
   );
 
   const measured = await page.evaluate(() => {
+    // How much of the band an <img> inside it actually covers. object-fit
+    // leaves the element full-size and paints a smaller picture inside it, so
+    // the box tells you nothing — this recomputes what `contain` drew. A
+    // producer whose ratio matches the band covers it exactly; one that
+    // doesn't leaves the slack that reads as a thumbnail sitting off its card.
+    const painted = (band) => {
+      const img = band?.querySelector("img");
+      if (!img) return null;
+      const bw = band.clientWidth, bh = band.clientHeight;
+      const s = Math.min(bw / img.naturalWidth, bh / img.naturalHeight);
+      return { w: Math.round(img.naturalWidth * s), h: Math.round(img.naturalHeight * s), bw, bh };
+    };
     const out = {};
     for (const card of document.querySelectorAll(".card")) {
       const band = card.querySelector(".doc-preview, .face-fit, .face-badge");
@@ -137,6 +144,7 @@ test("every app-controlled face is one height; an uploaded photo keeps its own",
         band: band ? Math.round(band.getBoundingClientRect().height) : null,
         bandClass: band ? band.className : null,
         titled: !!card.querySelector(".face-title"),
+        fit: painted(band),
       };
     }
     return out;
@@ -150,14 +158,28 @@ test("every app-controlled face is one height; an uploaded photo keeps its own",
   }
   assert.equal(Object.keys(face).length, seeded.length, "every seeded item drew a card");
 
-  // 1. Every app-controlled face sits in the shared band, whatever it holds.
-  for (const label of [
+  // 1. Every app-controlled face sits in the shared band, whatever it holds —
+  //    one SHAPE, and since every card in a column layout is one width, one
+  //    height. Derived from the card, not hardcoded: the band is a ratio now,
+  //    so a fixed pixel expectation would only be asserting this viewport.
+  const bands = [
     "connector-placeholder", "connector-chart",
     "doc-preview", "doc-badge",
     "audio-wave", "audio-badge",
-  ]) {
-    assert.equal(face[label].band, FACE_H, `${label} band (${face[label].bandClass})`);
-  }
+  ];
+  const bandHeights = new Set(bands.map((l) => face[l].band));
+  assert.equal(bandHeights.size, 1,
+    `one band height, got ${bands.map((l) => `${l}=${face[l].band}`).join(" ")}`);
+  const bandH = [...bandHeights][0];
+  assert.ok(bandH > 0, "the band has a height at all");
+
+  // 1b. And the chart FILLS it — the complaint that sent me back here was a
+  //     chart floating inside its own card with its area fill stopping short
+  //     of the edges. price-chart.js draws 5:3 and --face-ratio is 5:3, so
+  //     `contain` paints the whole box; this fails the moment they diverge.
+  const chart = face["connector-chart"].fit;
+  assert.deepEqual({ w: chart.w, h: chart.h }, { w: chart.bw, h: chart.bh },
+    "the price chart must reach every edge of its band");
 
   // 2. Which is the point: a placeholder and the face that replaces it are the
   //    same card. This is the assertion that fails when a producer's own

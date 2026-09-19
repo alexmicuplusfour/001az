@@ -5,6 +5,11 @@ import sharp from "sharp";
 
 // White face; the line spans the full width (no lateral padding), small vertical
 // insets so peaks/troughs and the ticker overlay aren't clipped.
+//
+// 600x360 is 5:3, which is --face-ratio in public/styles.css: the card's face
+// band is that shape, so this image fills it edge to edge with no crop and no
+// letterbox. The two are one decision — change this ratio and the chart starts
+// floating inside its own card, with its area fill visibly stopping short.
 const W = 600, H = 360, TOP = 26, BOT = 16;
 const TARGET_POINTS = 150;
 
