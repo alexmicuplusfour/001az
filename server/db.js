@@ -1708,21 +1708,19 @@ export async function clearBoardModelPins(db, boardKeys, provider, models) {
 
 // --- boards ---
 
-// Every per-board capability column, from the registry — so a new
-// board-scoped capability's columns ride into BOARD_COLS, the admin board
-// payload, and updateBoard's boardBindings without a hand edit here. Each
-// capability declares its own columns; the Set just guards that invariant.
+// Every per-board capability column, from the registry — so a new board-scoped
+// capability's columns ride into BOARD_COLS, the admin board payload, and
+// updateBoard's boardBindings without a hand edit here.
 //
 // TWO kinds, and the split is an AUTHORITY boundary, not bookkeeping:
-//   PINS    boardKeys — a provider/key/model pointer. Admin-written (they
-//           select credentials and therefore a spend account), and cleared by
-//           the deleted-key and uninstall loops.
-//   CONFIG  binding.config[].boardColumn — a capability-level knob scoped per
-//           board (tagging's image detail). A cost/quality dial like
-//           ai_votes, so any board MANAGER may set it; not a pointer, so
-//           nothing dangles and no cleanup loop touches it.
-// Both are selected and writable through updateBoard; only the pins are gated
-// behind is_admin in the board payload (server.js).
+//   PINS    boardKeys — a provider/key/model pointer. Admin-written (they pick
+//           credentials and therefore a spend account), cleared by the
+//           deleted-key and uninstall loops.
+//   CONFIG  binding.config[].boardColumn — a per-board capability knob
+//           (tagging's image detail). A cost/quality dial like ai_votes, so any
+//           board MANAGER may set it; not a pointer, so nothing dangles.
+// Both are writable through updateBoard; only the pins are gated behind
+// is_admin in the board payload (server.js).
 export const BOARD_PIN_COLS = [...new Set(
   CAPABILITY_DEFS.flatMap((c) => {
     const bk = c.binding.boardKeys;
@@ -1736,12 +1734,10 @@ export const BOARD_BINDING_COLS = [...new Set([...BOARD_PIN_COLS, ...BOARD_CONFI
 
 // Every board column the app reads. Hand-written, so a new column is invisible
 // until it is named here — which is how a feature evaporates into "it never
-// writes anything" with a green suite. An array that joins, rather than a
-// string, so NOT_DUPLICATED can subtract from it.
-//
-// facet_diagnostics is read by the board modal and the diagnostics surface; the
-// worker's own loop selects it explicitly (boardsWithVotes) and does not rely on
-// this list.
+// writes anything" with a green suite. An array that joins, not a string, so
+// NOT_DUPLICATED can subtract from it. (facet_diagnostics is read by the board
+// modal and the diagnostics surface; boardsWithVotes selects it explicitly and
+// does not rely on this list.)
 //
 // TODO(schema): drop boards.type — unread legacy (migration 0001_baseline),
 // deliberately not selected here.
@@ -1755,14 +1751,12 @@ export const BOARD_COL_LIST = [
 ];
 const BOARD_COLS = BOARD_COL_LIST.join(", ");
 
-// The row a new board is born with — column-named, exactly as getBoard reads
-// it back. createBoard's INSERT below writes these values; the create route
-// (server.js) runs the shared content trunk against this object as its
-// synthetic `prev`, so what the trunk computes for a create (schedule arming,
-// the votes/research exclusion) is judged against the same baseline the
-// INSERT will write. The values live twice — here and in the INSERT's
-// defaults — and a board-manage test pins this object against a freshly
-// inserted row so the pair cannot drift silently.
+// The row a new board is born with — column-named, exactly as getBoard reads it
+// back. The create route runs the shared content trunk against this object as
+// its synthetic `prev`, so schedule arming and the votes/research exclusion are
+// judged against the same baseline the INSERT below writes. The values live
+// twice (here and in the INSERT's defaults) and a board-manage test pins this
+// object against a freshly inserted row so the pair cannot drift.
 export const NEW_BOARD_DEFAULTS = {
   facets: [], context: "", ai_reasoning: true, ai_research: false, ai_votes: 1,
   auto_tag: true, auto_tag_periodic: false, auto_tag_every_min: 1440,
@@ -1790,13 +1784,10 @@ export async function createBoard(db, name, facets = [], context = "", aiReasoni
 
 // What a COPY does not inherit. Everything else in BOARD_COL_LIST travels.
 //
-// A DENY-list on purpose. The allow-list version of this — naming the columns
-// to copy — is the same shape as BOARD_COLS above, and would rot the same way:
-// add a board setting, forget the second list, and duplication silently stops
-// carrying it with every test still green. Subtracting inverts the failure —
-// a new setting is copied by default, and only a column someone consciously
-// excluded is left behind. Each entry below needs a reason, and these are the
-// only kinds there are.
+// A DENY-list on purpose: an allow-list would rot the way BOARD_COLS can — add
+// a board setting, forget the second list, and duplication silently stops
+// carrying it with the suite still green. Subtracting inverts the failure, so a
+// new setting is copied by default. Each entry below needs a reason.
 export const NOT_DUPLICATED = new Set([
   // the copy's own
   "id", "name", "created_at",
@@ -1819,19 +1810,15 @@ const COPY_BOARD_SQL =
   `INSERT INTO boards (id, name, created_at, ${DUP_COLS})
      SELECT $1, $2, $3, ${DUP_COLS} FROM boards WHERE id=$4`;
 
-// Copy a board's CONFIGURATION to a new board — no items, no entities, no
-// files, no history (planning/board-duplicate-plan.md). Returns
-// { id, members } or null when the source is gone.
+// Copy a board's CONFIGURATION to a new board — no items, no entities, no files,
+// no history (planning/board-duplicate-plan.md). Returns { id, members }, or
+// null when the source is gone. Not routed through the create route's validation
+// trunk: a duplicate takes no user input, and the source row was validated when
+// it was saved.
 //
-// Deliberately not routed through the create route's validation trunk: a
-// duplicate takes no user input, so there is nothing to validate — the source
-// row went through that trunk when it was saved. This is a copy, not a create.
-//
-// pauseIngest: switch the copy's feed off. Decided by the CALLER, because the
-// rule for "is this feed on a schedule" is ingestMode() (ingestion/index.js)
-// and db.js cannot import it — ingestion/files.js imports db.js, so the edge
-// would close a cycle. Spelling the predicate in jsonb paths here instead
-// would make it a third, untestable copy of that rule.
+// pauseIngest is the CALLER's decision because "is this feed on a schedule" is
+// ingestMode() (ingestion/index.js), which db.js cannot import — ingestion/
+// files.js imports db.js, so the edge would close a cycle.
 export async function duplicateBoard(db, srcId, name, { pauseIngest = false } = {}) {
   const id = crypto.randomUUID();
   const now = Date.now();
@@ -1873,13 +1860,11 @@ export async function updateBoard(db, id, { name, facets, context, aiReasoning, 
   const sets = [];
   const vals = [];
   // Per-board capability columns as a { column: value } map — BOTH kinds (see
-  // BOARD_PIN_COLS / BOARD_CONFIG_COLS above): pins from boardBindingPatch on
-  // the admin routes, knobs from boardConfigPatch on the manager route too.
-  // The authority split is enforced by which route builds the map; by the time
-  // it reaches here the two are written the same way. Column names come from
-  // the registry via the route — code, never input — and BOARD_BINDING_COLS
-  // (the union) is the allow-list that keeps that true even for a future
-  // caller that forgets.
+  // BOARD_PIN_COLS / BOARD_CONFIG_COLS above). The authority split is enforced
+  // by which route builds the map; by the time it reaches here the two are
+  // written the same way. Column names come from the registry via the route —
+  // code, never input — and BOARD_BINDING_COLS is the allow-list that keeps
+  // that true even for a caller that forgets.
   for (const [col, v] of Object.entries(boardBindings || {})) {
     if (!BOARD_BINDING_COLS.includes(col)) continue;
     vals.push(v);
@@ -1934,14 +1919,10 @@ export async function deleteBoard(db, id) {
   });
 }
 
-// Does this instance have any board at all — one row, or none? Deliberately
-// not a COUNT (the number is nobody's question) and deliberately not
-// listBoards, which selects every column of every row.
-//
-// Its one reader is the first-run predicate (capability-resolve.js
-// setupPending), where it is the rung that tells a NEW instance from a broken
-// one, and where being cheap is the entire reason it exists rather than the
-// caller reusing a list.
+// Does this instance have any board at all — one row, or none. Not a COUNT (the
+// number is nobody's question) and not listBoards, which selects every column of
+// every row. Its one reader is the first-run predicate (capability-resolve.js
+// setupPending), where being cheap is the whole reason it exists.
 export async function anyBoard(db) {
   const { rows } = await db.query("SELECT 1 FROM boards LIMIT 1");
   return rows.length > 0;
@@ -1985,21 +1966,17 @@ export async function boardEntityCounts(db) {
 
 // The boards page's preview stacks: newest n file-carrying instances per board,
 // projected straight from payload.files[0] in the thumbnail vocabulary
-// (name/w/h/kind — instanceEntry's face fields). Deliberately NOT the
-// gallery's selectFace pick (that needs all of an entity's instances plus
-// mapping.face); a preview stack is impressionistic, and on raw boards the two
-// coincide anyway. Boards short of n (connector entities carry no files) top
-// up with their newest entities' symbol tiles — the same fallback face the
-// gallery renders for them. Returns { boardId: entries[] } for every requested
-// id, each entry { name, w, h, kind } or { symbol, display_name }.
+// (name/w/h/kind). NOT the gallery's selectFace pick (that needs all of an
+// entity's instances plus mapping.face) — a preview stack is impressionistic.
+// Boards short of n top up with their newest entities' symbol tiles. Returns
+// { boardId: entries[] } for every requested id.
+//
 // Top-n-per-board is a LATERAL, not a window over the whole table: paired with
-// idx_items_board_created (migration 0028) each board walks its own slice of
-// the index and stops after n, so the cost tracks the number of BOARDS rather
-// than the size of the library. The window form re-read and sorted every row on
-// every board to keep n of them — measured at ~19ms over 8k items and growing
-// linearly, against ~3ms flat here. (The index alone doesn't help the window
-// form: reading `payload` forces a heap visit per row, so nothing terminates
-// early. Both halves of the change are needed.)
+// idx_items_board_created (0028) each board walks its own index slice and stops
+// after n, so cost tracks the number of BOARDS, not the size of the library
+// (~3ms flat, against ~19ms and growing for the window form). Both halves are
+// needed — reading `payload` forces a heap visit per row, so the index alone
+// would not let the window form terminate early.
 export async function boardPreviewFaces(db, boardIds, n = 8) {
   const out = Object.fromEntries(boardIds.map((id) => [id, []]));
   if (!boardIds.length) return out;
@@ -2047,23 +2024,17 @@ export async function boardPreviewFaces(db, boardIds, n = 8) {
 }
 
 // The ONE routing computation behind the three settled-item requeuers.
-// retagBoard, releaseHeld and queueUntagged differ only in WHO they sweep —
-// the WHERE each one passes — never in where an item goes next or which held
-// item adopts the board's mapping, and their SET clauses had already been
-// kept identical by hand (releaseHeld merely omitted the `status='held'`
-// guards its own WHERE makes tautological — the shared spelling keeps one
-// template). Same $1=now, $2=boardId, $3=mapping in all three.
+// retagBoard, releaseHeld and queueUntagged differ only in WHO they sweep — the
+// WHERE each passes — never in where an item goes next or which held item adopts
+// the board's mapping. Same $1=now, $2=boardId, $3=mapping in all three.
 //
-// The routing itself: an unfetched connector vehicle re-enters the FETCH leg
-// (and that arm must stay first — see UNFETCHED above); an unfaced vehicle
-// the face leg; an already-extracted item goes straight to tagging (these
-// requeuers re-JUDGE, they don't re-derive); an item with AI work still owed
-// enters the extract leg; everything else tags. A held item with no stamp
-// adopts the current board mapping — the board may have gained one since
-// upload. reprocessEntity is NOT a fourth caller: its variant differs on
-// purpose (see its comment) — a full redo re-stamps unconditionally and
-// skips the extracted_at shortcut, because "requeue settled work under the
-// current definition" and "redo everything" are different intents.
+// The routing: an unfetched connector vehicle re-enters the FETCH leg (that arm
+// must stay first); an unfaced vehicle the face leg; an already-extracted item
+// goes straight to tagging (these requeuers re-JUDGE, they don't re-derive); an
+// item with AI work still owed enters the extract leg; everything else tags. A
+// held item with no stamp adopts the current board mapping. reprocessEntity is
+// NOT a fourth caller — a full redo re-stamps unconditionally and skips the
+// extracted_at shortcut, a different intent.
 const requeueSettledSql = (where) => `
   UPDATE items
      SET payload = CASE WHEN status='held' AND NOT (payload ? 'mapping') AND NOT (payload ? 'extracted_at') AND $3::jsonb IS NOT NULL
@@ -2079,12 +2050,10 @@ const requeueSettledSql = (where) => `
 
 // Queue a board's settled items for a fresh tagging pass (held ones included —
 // retag is an explicit "tag now"). Returns the count. Only terminal states are
-// touched: items still in the pipeline (any waiting or claimed leg status)
-// already end in the tag leg when their legs finish, so flipping them here
-// would only skip their definition legs and tag them with no fields, identity
-// or face. Unstamped items stay tag-only (bar the held ones the template
-// re-stamps), so retag never turns into a surprise extraction sweep over a
-// whole board.
+// touched: an item still in the pipeline already ends in the tag leg when its
+// legs finish, so flipping it here would skip its definition legs and tag it
+// with no fields, identity or face. Unstamped items stay tag-only, so retag
+// never becomes a surprise extraction sweep.
 export async function retagBoard(db, boardId) {
   const current = await boardAiMappingJson(db, boardId);
   const result = await db.query(
@@ -2096,19 +2065,16 @@ export async function retagBoard(db, boardId) {
 
 // Re-tag a board on SOME of its facets (planning/facet-addressable-tagging-plan.md).
 // The pass still asks the model about every facet; `tag_facets` says which
-// answers are allowed to land, so the others keep what they already have.
-//
-// Only settled, decided rows, and unlike retagBoard there is no status CASE: a
-// facet retag must never turn into a re-extraction or a re-face. An item that
-// never landed has no other facets to preserve, and a held/failed one needs its
-// whole pass — both are retagBoard's job, not this one.
+// answers may land, so the others keep what they have. Only settled, decided
+// rows, and unlike retagBoard there is no status CASE: a facet retag must never
+// become a re-extraction or a re-face — an item that never landed has no other
+// facets to preserve, and a held/failed one needs its whole pass (retagBoard's job).
 //
 // `NOT undecided` is not redundant with status='tagged': an undecided item IS
 // 'tagged' (the verdict rides its own column), so the status filter alone would
-// sweep in exactly the items scoping cannot help. They have nothing to preserve,
-// a scoped pass deliberately does not move the verdict, and the landing would
-// leave an item flagged "the model could not place this" carrying a fresh AI tag
-// — and firing alerts off it, which are recorded once and never retracted.
+// sweep in exactly the items scoping cannot help — and the landing would leave
+// an item flagged "could not place this" carrying a fresh AI tag, firing alerts
+// that are recorded once and never retracted.
 export async function retagBoardFacets(db, boardId, facetKeys) {
   const { rowCount } = await db.query(
     `UPDATE items SET status='pending', tag_facets=$3::text[],

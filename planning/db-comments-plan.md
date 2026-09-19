@@ -1,21 +1,41 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-3 DONE (2026-09-20). Mechanical pass first (7 fixes, -733
-bytes) — tombstone deleted, three doc blocks reattached to the symbol they
-describe, one TODO made greppable; that pass cut nothing. Stage 1 (embeddings):
-129 → 67 lines, -48%. Stage 2 (rate map + usage meter): 91 → 40, -56%. Stage 3
-(facet confidence roll-up): 146 → 73, -50%. Running total vs `ddd41e0`: -138
-lines, -9,957 bytes, 41.2% → 39.4% density. Suite 1808 green throughout.
-Stages 4-10 open.**
+**Status: STAGES 1-4 DONE (2026-09-20). Suite 1808 green throughout,
+comments-only diffs, LF clean.**
 
-**Recalibration:** the 55-60% target holds where a section is narrative, not
-where it is mechanism. Stage 1 came in at 48% because that region held real
-contract — the three error classes in `failOrRequeue`, the item-id/entity-id
-sequence OVERLAP hazard in `entityIdsFor`, the facet-scope clearing rule,
-recovery's ownership test. Stage 2 hit 56% because most of its bulk was
-rationale already written down in `metering-plan.md`. Stage 3 landed at 50% on
-the largest section in the file. Three stages in, the honest expectation is
-**~50%**, not 55-60%; judge per block and treat the number as an outcome.
+| stage | section | comment lines | cut | big blocks |
+|---|---|---|---|---|
+| — | mechanical pass (7 fixes, cut nothing) | — | -733 bytes | — |
+| 1 | embeddings + failure routing | 165 → 115 | -30% | 8 → 6 |
+| 2 | usage meter + rate map | 244 → 204 | -16% | 6 → 5 |
+| 3 | facet confidence roll-up | 232 → 187 | -19% | 11 → 6 |
+| 4 | boards | 184 → 150 | -18% | 11 → 6 |
+
+**File vs `ddd41e0`: 4,952 → 4,780 lines, 1,900 → 1,728 comment lines, 249,743
+→ 237,653 bytes, density 41.2% → 38.9%. Stages 5-10 open.**
+
+### Measurement correction (2026-09-20)
+
+Stages 1-3 were first reported at -48%, -56% and -50%. **Those numbers were
+wrong** — they measured only the lines sitting inside blocks of 8+ comment
+lines, which is a biased denominator: a 20-line block cut to 7 lines leaves that
+census entirely and reads as "20 → 0" although 7 lines are still in the file.
+The table above uses **all comment lines in the section**, which is the honest
+measure. The file-level totals were never affected.
+
+Both numbers are worth tracking and they answer different questions — "big
+blocks" counts walls of text a reader has to wade through, and it really has
+roughly halved; "comment lines" counts volume. Report them separately and never
+let the first stand in for the second.
+
+
+
+**Recalibration:** on the honest measure the rate is **~18-20% per section**,
+and stage 1's 30% is the outlier rather than the norm — that region had the most
+pure narration. The rubric keeps far more than the first read of this file
+suggested, because most long blocks here turn out to be a trap or a contract
+rather than a defence of a choice. That is the finding, not a failure to cut
+hard enough.
 
 **The orphaning pattern is the most common defect in this file, not the bloat.**
 Five instances found so far, one of them stale and one a duplicate:
@@ -133,15 +153,19 @@ Report per stage: blocks touched, lines removed, byte delta, suite count.
 
 ## The target
 
-Roughly **55–60% off the 1,076 lines in large blocks**, landing near 600 lines
-removed and a density around 30% instead of 41%. That is a direction, not a quota
-— a stage that removes 20 lines because the section was genuinely load-bearing is
-a correct outcome, and the rubric decides, not the number.
+Revised on measurement. The original "55-60% off 1,076 lines in large blocks"
+was written against the biased metric and is not reachable on the honest one.
 
-The measure that actually matters: **after this, a reader who sees a 20-line
-comment in db.js should believe it earned the space.** Right now that inference
-is unavailable, which is what makes the load-bearing ones cost as much to read as
-the essays.
+At ~18-20% per section over the remaining stages, the file lands near **1,570
+comment lines and a density around 36%** — down from 1,900 and 41.2%. Roughly
+330 comment lines gone in total, not 600.
+
+The number was never the point, and the measurement error is a good reminder of
+why: the rubric decides each block, and a section that gives up 18% because it
+is mostly contract is a correct outcome. The measure that actually matters is
+unchanged — **after this, a reader who sees a 20-line comment in db.js should
+believe it earned the space.** On that one the "big blocks" count is the better
+signal, and it has gone from 36 blocks to 23 across the four sections done.
 
 ## Appendix: the work queue
 
