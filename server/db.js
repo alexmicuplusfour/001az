@@ -618,24 +618,17 @@ export async function getItemReasoning(db, id) {
 // --- the facet confidence roll-up (planning/facet-diagnosis-plan.md §1) ---
 //
 // Three readers over items.tag_confidence, which vote mode writes per item as
-// { of, agreed, votes, d }. The reasoning lives in facet-diagnosis.js; the SQL
-// lives here like everything else.
+// { of, agreed, votes, d }. The reasoning lives in facet-diagnosis.js.
 //
-// EVERY one of them excludes undecided items, and `status='tagged'` does NOT do
-// that — the verdict rides its own column, so an undecided item IS a tagged one
-// (the same trap as facet-scope-loose-ends #8). It matters more here and in the
-// direction that flatters us: an undecided item has most facets empty, every run
-// picked [], so agreed === of and the facet scores UNANIMOUS. Items the model
-// explicitly declined to place would count as evidence that the taxonomy works.
+// EVERY one excludes undecided items, and `status='tagged'` does NOT do that —
+// the verdict rides its own column, so an undecided item IS a tagged one. It
+// matters in the direction that flatters us: an undecided item has most facets
+// empty, every run picked [], so agreed === of and the facet scores UNANIMOUS.
+// Items the model declined to place would count as evidence the taxonomy works.
 
-// The three queries below read TAG_QUEUE (declared with STATUS_PRIORITY, where
-// the reasoning is) rather than naming statuses themselves.
-//
-// It is NOT extended to boardFacetSegments' scoped-pending clause, which is
-// complete as it stands: that clause needs `tag_facets IS NOT NULL`, and a scope
-// is only ever armed by retagBoardFacets, which sets 'pending' flat with no
-// routing CASE. It holds on that invariant rather than on this list, and the
-// invariant is stated where failOrRequeue clears the scope.
+// The three queries below read TAG_QUEUE (declared with STATUS_PRIORITY).
+// boardFacetSegments' scoped-pending clause deliberately does not: a scope is
+// only ever armed by retagBoardFacets, which sets 'pending' flat.
 
 // Every (facet, definition-stamp) segment on a board with its unanimity count.
 // One query for the whole board rather than two per facet: the caller has to
@@ -686,13 +679,10 @@ export async function boardQueuedScopes(db, boardId) {
 
 // The values the runs actually PARTED on, counted once per item.
 //
-// NOT a sum of the tally. `votes` counts how many runs picked each value, so
-// summing it across the disagreeing items measures frequency rather than
-// tension: three runs, kept set {monoline}, tally {monoline: 3, gradient: 1}
-// contributes 3 to monoline and 1 to gradient, and monoline tops the list
-// precisely because nobody disputed it. A value is in tension on an item when
-// some runs chose it and some didn't — votes[v] < of. The lower bound is free:
-// a value no run picked is absent from the tally entirely.
+// NOT a sum of the tally: `votes` counts how many runs picked each value, so
+// summing it measures frequency, not tension — a value nobody disputed would
+// top the list. A value is in tension on an item when some runs chose it and
+// some didn't: votes[v] < of.
 export async function facetSplitValues(db, boardId, key, stamp) {
   const { rows } = await db.query(
     `SELECT v.key AS value, count(*)::int AS split_on
@@ -759,31 +749,20 @@ export async function countBoardOverrides(db, boardKeys) {
   return rows[0].c;
 }
 
-// The diagnose loop's own setter, on setIngestState's terms — and a jsonb MERGE
-// rather than a whole-column write, because two facets diagnosed in the same
-// pass must not overwrite each other and the user's save may be demoting a third
-// at the same moment.
+// The diagnose loop's setter — a jsonb MERGE, not a whole-column write, because
+// two facets diagnosed in the same pass must not overwrite each other and the
+// user's save may be demoting a third at the same moment.
 //
-// `clearsStale` is the compare-and-swap that keeps invalidate-on-write honest,
-// and without it this setter can destroy the mark that is the WHOLE mechanism.
-// diagnoseDue reads facet_diagnostics ONCE at the top of a pass and diagnoses
-// every facet against that snapshot, sequentially, with a provider call apiece —
-// so the gap between the read and this write is the whole pass, tens of seconds,
-// not the duration of one call. A retag armed anywhere in it sets stale:true, and
-// a plain `||` merge writes an entry with no `stale` straight over it. From there
-// the finding looks current, the loop's freshness key was computed pre-retag, and
-// if the re-measurement reproduces the counts — the key's documented blind spot,
-// and the exact reason the arming hook exists — nothing ever re-asks.
-//
-// So a write may only clear a mark it KNEW about:
+// `clearsStale` is the compare-and-swap that keeps invalidate-on-write honest.
+// diagnoseDue reads facet_diagnostics ONCE per pass and diagnoses every facet
+// against that snapshot, so the gap between read and write is the whole pass —
+// tens of seconds. A retag armed in it sets stale:true, and a plain `||` merge
+// writes an entry with no `stale` straight over it; the finding then looks
+// current and nothing ever re-asks. So a write may only clear a mark it KNEW:
 //
 //   pass read stale, DB stale     the finding is being replaced   -> clear
 //   pass read clean, DB stale     armed mid-pass                  -> KEEP
 //   a recorded failure            answered nothing                -> KEEP (false)
-//
-// The failure path passes false deliberately, which is the other half of the same
-// bug: attempted() rebuilds the entry from scratch and drops `stale` with it, so a
-// provider blip between a retag and its re-diagnosis erased the mark too.
 export async function setFacetDiagnostic(db, boardId, key, entry, clearsStale = false) {
   await db.query(
     `UPDATE boards SET facet_diagnostics = facet_diagnostics || jsonb_build_object($1::text,
@@ -797,19 +776,14 @@ export async function setFacetDiagnostic(db, boardId, key, entry, clearsStale = 
 // A retag has just been armed. Mark stale only the findings it actually
 // undermines — the ones whose stored evidence it is about to re-measure.
 //
-// The question is exact and it is about ROWS, not about size: a finding names
-// the twelve items the model reasoned from, so "does this retag touch any of
-// them" has a yes or no answer. Retag five items on a board of 2,500 and the
-// answer is almost always no, and nothing happens. Retag the board and it is
-// yes for everything. There is no threshold anywhere in it.
+// The question is about ROWS, not size: a finding names the twelve items the
+// model reasoned from, so "does this retag touch any of them" has a yes or no
+// answer. No threshold anywhere in it. A finding with no stored evidence
+// predates this and cannot answer, so it is marked — the safe direction.
 //
-// A finding with no stored evidence predates this and cannot answer, so it is
-// marked — the safe direction, and it drains as findings are rewritten.
-//
-// `stale` rather than a delete: the finding still supplies the sentence the
-// reader shows while it waits, and `stats`/`previous` are the baseline a later
-// facet edit demotes into place. Only attempts/error go, because new data has
-// earned fresh tries.
+// `stale` rather than a delete: the finding still supplies the sentence shown
+// while it waits, and `stats`/`previous` are the baseline a later facet edit
+// demotes into place. Only attempts/error go.
 export async function supersedeFacetDiagnostics(db, boardId, keys = null) {
   const { rows } = await db.query("SELECT facet_diagnostics AS d FROM boards WHERE id=$1", [boardId]);
   const found = rows[0]?.d || {};
@@ -838,21 +812,17 @@ export async function supersedeFacetDiagnostics(db, boardId, keys = null) {
 
 // Demote the findings for facets whose definition the user just changed.
 // `edits` is [{ key, description }] — the description being the wording being
-// REPLACED, which the next diagnosis quotes back to the model so it can say
-// whether the edit helped rather than re-deriving from scratch.
+// REPLACED, which the next diagnosis quotes back to the model.
 //
-// Demote, not drop: the paragraph quotes wording that no longer exists and has
-// to go, but `stats` is the only evidence the user's edit did anything, and it
-// is what "was 60% unanimous, now 88%" is measured against.
+// Demote, not drop: the paragraph quotes wording that no longer exists, but
+// `stats` is the only evidence the edit did anything — it is what "was 60%
+// unanimous, now 88%" is measured against. A second edit before any
+// re-measurement finds no `stats` to move and leaves the older baseline alone;
+// overwriting `previous` with empty stats would destroy the only baseline there is.
 //
-// A second edit before any re-measurement finds no `stats` to move and leaves
-// the older baseline alone. That is deliberately not "overwrite `previous`":
-// overwriting it with a demoted entry's empty stats would destroy the only
-// baseline there is, and nesting would grow a history in a board column.
-//
-// FOR UPDATE rather than a bare read: setFacetDiagnostic is a plain UPDATE from
-// the worker, so the lock is what keeps a diagnosis landing mid-save from being
-// read, dropped and written back.
+// FOR UPDATE, not a bare read: setFacetDiagnostic is a plain UPDATE from the
+// worker, so the lock keeps a diagnosis landing mid-save from being read,
+// dropped and written back.
 export async function demoteFacetDiagnostics(db, boardId, edits) {
   if (!edits?.length) return 0;
   return withTx(db, async (client) => {
@@ -881,25 +851,22 @@ export async function demoteFacetDiagnostics(db, boardId, edits) {
 }
 
 // Worked examples for the diagnosis prompt: items where this facet was contested
-// (agreed < of, most contested first) or unanimous (agreed = of). The two sets
-// are disjoint by construction and the prompt shows them as labelled groups —
-// shown only failures, a model can never reach the "your taxonomy is fine"
-// verdict, so every board would read as broken.
+// (agreed < of, most contested first) or unanimous (agreed = of), shown as
+// labelled groups — given only failures, a model can never reach "your taxonomy
+// is fine".
 //
-// The whole-item `description`, NOT the per-facet sentence (tag_reasoning->>key).
-// That looks like the better source and is systematically absent exactly where
-// it is needed: mergeVotes takes the sentence from the earliest run that
-// selected what was KEPT, and from nowhere when no single run proposed that set
-// — routine on a multi-value facet, and multi-value facets are the unstable
-// ones. Reaching for it would bias the sample toward the items that agreed.
+// The whole-item `description`, NOT the per-facet sentence (tag_reasoning->>key):
+// mergeVotes takes that from the earliest run that selected what was KEPT, and
+// from nowhere when no single run proposed that set — routine on multi-value
+// facets, which are the unstable ones. It would bias the sample toward agreement.
 //
-// Contested items order on the RATIO: `of` is how many runs completed, not the
-// configured ai_votes, so a board carries a mix of 2-, 3- and 5-run items and
-// ordering on `agreed` alone would rank 1-of-2 above 2-of-5.
+// Contested items order on the RATIO: `of` is runs completed, not the configured
+// ai_votes, so a board mixes 2-, 3- and 5-run items and ordering on `agreed`
+// alone would rank 1-of-2 above 2-of-5.
 //
 // These rows ARE the diagnosis freshness key: facet-diagnosis.js hashes them
 // (facetEvidence → exampleKey), so a column added to or dropped from this SELECT
-// re-diagnoses every board. See facet-diagnosis.js for what the key must track.
+// re-diagnoses every board.
 export async function facetExamples(db, boardId, key, stamp, { contested, limit }) {
   const { rows } = await db.query(
     `SELECT i.id::text AS id,
@@ -921,12 +888,9 @@ export async function facetExamples(db, boardId, key, stamp, { contested, limit 
 
 // Of the given item ids, which are currently queued for tagging. A primary-key
 // lookup over at most a dozen ids per facet — the cheap half of the arming
-// check, and the reason it can run inline on a retag.
-//
-// TAG_QUEUE, not 'pending' alone: an item routed through the extract or face leg
-// is every bit as re-measured as one that went straight to tagging, and reading
-// two of the four states made this whole hook a no-op on mapped and connector
-// boards while the route still logged "retag queued: 2,406 item(s)".
+// check, and why it can run inline on a retag. TAG_QUEUE, not 'pending' alone:
+// an item routed through the extract or face leg is every bit as re-measured,
+// and reading two of the four states made this hook a no-op on mapped boards.
 export async function queuedAmong(db, ids) {
   if (!ids?.length) return new Set();
   const { rows } = await db.query(
@@ -976,15 +940,13 @@ const CONNECTOR_VEHICLE =
   `payload->'source'->>'id' IS NOT NULL
                 AND ${APPLYING_MAPPING}->'input'->>'connector' IS NOT NULL`;
 
-// The canonical queue-routing CASE: every router walks the SAME arms in the
-// SAME mandatory order — fetch first (an unfetched vehicle on a chart-face
-// board satisfies the face predicate too, and the face arm would swallow it:
-// rendering a chart from empty fields and then tagging on nothing, which
-// lands as ordinary-looking tags), then face, then the requeue family's
-// already-extracted shortcut, then extract, else tag. The ARMS are fixed
-// here; the PREDICATES are the intent (requeueSettledSql vs reprocessEntity
-// differ on purpose — see each). A fifth leg gets added in this one builder
-// or not at all, which is the IN_FLIGHT_FOR lesson applied to routing.
+// The canonical queue-routing CASE: every router walks the SAME arms in the SAME
+// mandatory order — fetch first (an unfetched vehicle on a chart-face board
+// satisfies the face predicate too, and the face arm would swallow it: a chart
+// rendered from empty fields, then tags on nothing), then face, then the requeue
+// family's already-extracted shortcut, then extract, else tag. The ARMS are fixed
+// here; the PREDICATES are the caller's intent. A fifth leg gets added in this
+// one builder or not at all.
 const routingCase = ({ fetch, face, shortCircuit = null, extract }) => [
   "CASE",
   `WHEN ${fetch} THEN 'pending_fetch'`,
@@ -1012,15 +974,13 @@ async function boardAiMappingJson(db, boardId) {
 const ITEM_SCOPE = `id=$2`;
 const ENTITY_SCOPE = `entity_ids @> ARRAY[$2]::bigint[]`;
 
-// Reset to the extract leg. User-initiated, so the CURRENT board mapping is
-// what applies — it's re-stamped ($3; the stamp an instance was built with
-// only governs automatic replay, e.g. error retries). A board with no AI
-// mapping falls back to replaying the stamp; with neither there is nothing to
-// extract (the WHERE — null return).
-// `- 'park'`: an explicit re-extract runs the full pipeline through tagging,
-// even on an auto-tag-off board — park only gates the automatic ingest flow.
-// `- 'transcript_error'`: for audio the extracted text IS the transcript, so a
-// re-extract retries a failed transcription (a good transcript is kept).
+// Reset to the extract leg. User-initiated, so the CURRENT board mapping applies
+// — re-stamped ($3; the stamp an instance was built with governs only automatic
+// replay). With no AI mapping it replays the stamp; with neither there is
+// nothing to extract (the WHERE — null return).
+// `- 'park'`: an explicit re-extract runs the full pipeline through tagging even
+// on an auto-tag-off board. `- 'transcript_error'`: for audio the extracted text
+// IS the transcript, so this retries a failed transcription (a good one is kept).
 const reextractSql = (scope) => `
   UPDATE items
      SET payload = ${restamped(`payload - 'park' - 'transcript_error'`)},
@@ -1089,19 +1049,14 @@ export async function retranscribeEntity(db, entityId) {
   return touched(await db.query(retranscribeSql(ENTITY_SCOPE), [Date.now(), entityId]));
 }
 
-// Refresh a connector card's data on demand (Stage 4, the caret's "Refresh
-// data + chart"): the vehicle re-enters the fetch leg — fresh fields, then a
-// fresh chart via the refetch landing, then a fresh tag pass — but KEEPS its
-// tags/reasoning/confidence until that pass lands. Retag optics, where
-// reprocess is the clear-first variant of the same trip. Vehicles only, by
-// WHERE (CONNECTOR_VEHICLE — the $3 contract holds: $3 is this verb's
-// re-stamp mapping too), so the null return doubles as the route's 409; no
-// routingCase needed since everything admitted goes to the fetch leg.
-// NO CLEARED_VERDICT — that omission IS this verb: refresh re-buys the data
-// and keeps the card's tags until the fresh pass lands, where reprocess is
-// the clear-first trip. (REQUEUE_RESET still clears tag_facets: a queued
-// scoped pass dies here like on every explicit re-queue. `- 'park'`: an
-// explicit run tags even on an auto-tag-off board.)
+// Refresh a connector card's data on demand: the vehicle re-enters the fetch leg
+// — fresh fields, then a fresh chart via the refetch landing, then a fresh tag
+// pass — but KEEPS its tags/reasoning/confidence until that pass lands.
+// Vehicles only, by WHERE (CONNECTOR_VEHICLE), so the null return doubles as the
+// route's 409; everything admitted goes to the fetch leg, so no routingCase.
+// NO CLEARED_VERDICT — that omission IS this verb; reprocess is the clear-first
+// variant of the same trip. (REQUEUE_RESET still clears tag_facets, and
+// `- 'park'` makes an explicit run tag even on an auto-tag-off board.)
 export async function refreshEntityData(db, entityId) {
   const { rows } = await db.query(
     "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);

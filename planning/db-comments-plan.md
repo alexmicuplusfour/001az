@@ -1,22 +1,24 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-2 DONE (2026-09-20). Mechanical pass first (7 fixes, -733
+**Status: STAGES 1-3 DONE (2026-09-20). Mechanical pass first (7 fixes, -733
 bytes) — tombstone deleted, three doc blocks reattached to the symbol they
 describe, one TODO made greppable; that pass cut nothing. Stage 1 (embeddings):
-129 → 67 lines, -48%. Stage 2 (rate map + usage meter): 91 → 40 lines, -56%.
-Running total vs `ddd41e0`: -93 lines, -6,991 bytes, 41.2% → 40.0% density.
-Suite 1808 green throughout. Stages 3-10 open.**
+129 → 67 lines, -48%. Stage 2 (rate map + usage meter): 91 → 40, -56%. Stage 3
+(facet confidence roll-up): 146 → 73, -50%. Running total vs `ddd41e0`: -138
+lines, -9,957 bytes, 41.2% → 39.4% density. Suite 1808 green throughout.
+Stages 4-10 open.**
 
 **Recalibration:** the 55-60% target holds where a section is narrative, not
 where it is mechanism. Stage 1 came in at 48% because that region held real
 contract — the three error classes in `failOrRequeue`, the item-id/entity-id
 sequence OVERLAP hazard in `entityIdsFor`, the facet-scope clearing rule,
 recovery's ownership test. Stage 2 hit 56% because most of its bulk was
-rationale already written down in `metering-plan.md`. Judge per block; the
-number is an outcome, not an input.
+rationale already written down in `metering-plan.md`. Stage 3 landed at 50% on
+the largest section in the file. Three stages in, the honest expectation is
+**~50%**, not 55-60%; judge per block and treat the number as an outcome.
 
 **The orphaning pattern is the most common defect in this file, not the bloat.**
-Four instances found so far, one of them stale and one a duplicate:
+Five instances found so far, one of them stale and one a duplicate:
 `BOARD_COL_LIST`, `usageRows`/`USAGE_DIMS`, `claimFairBatch`, `failOrRequeue`
 (parked on `RETRY_BACKOFF_MS`), and `meter()` (whose doc sat on `APP_SCOPE`
 while `meter()` itself had none). Stage 2 also found the first genuinely STALE
