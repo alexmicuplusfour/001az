@@ -1152,20 +1152,17 @@ export async function setBoardOrder(db, userId, order) {
 }
 
 export async function listUsers(db) {
-  // No invite token here: it's a bearer credential and only its hash is stored
-  // now anyway. The admin mints a fresh link on demand (POST /users/:id/link).
+  // No invite token here: it's a bearer credential and only its hash is stored.
+  // The admin mints a fresh link on demand (POST /users/:id/link).
   //
   // Board access rides along as a second query — one join for everyone, grouped
-  // below, rather than the query-per-row shape /api/admin/boards still has. The
-  // two don't depend on each other, so they overlap. Board order matches
-  // listBoards, so a member's boards read in the same sequence as the Boards
-  // tab lists them.
+  // below. The two don't depend on each other, so they overlap. Board order
+  // matches listBoards, so a member's boards read in the Boards tab's sequence.
   //
   // A global admin gets nothing from that join, on purpose: canAccessBoard
   // reaches every board from is_admin alone, WITHOUT a board_members row, so
-  // synthesising rows for them would put a second copy of that rule in a
-  // display path. Callers read is_admin and say "all" — the same answer the
-  // board access picker gives when it checks their box and disables it.
+  // synthesising rows for them would put a second copy of that rule in a display
+  // path. Callers read is_admin and say "all".
   const [{ rows }, { rows: memberships }] = await Promise.all([
     db.query(
       `SELECT u.id, u.email, u.name, u.is_admin, u.last_login_at
@@ -1248,20 +1245,18 @@ export async function deleteSession(db, sid) {
 // --- MCP tokens (planning/mcp-members-plan.md §3) ---
 //
 // Beside the sessions above because they answer the same question in the same
-// shape — a bearer arrives, a person comes back — for a caller that has no
-// cookie to offer. The whole user row, because canAccessBoard reads is_admin
-// and id, and the tools want the person, not an identifier.
+// shape — a bearer arrives, a person comes back — for a caller with no cookie.
 //
-// NOT hashed, unlike a session id or an invite. The MCP tab exists to hand over
-// a complete, working command whenever it is asked, and a digest can only ever
-// show one once. The trade is argued in full in the plan (§3): per-member
-// tokens make a leak smaller than today's single admin-level one, and the
-// reader this would defend against holds the database already.
-// TWO THINGS, NOT ONE FLATTENED ROW. The user goes on to be `ctx.user` in
-// every tool handler, so it has to be a users row and nothing else — a
+// NOT hashed, unlike a session id or an invite. The MCP tab exists to hand over a
+// complete, working command whenever asked, and a digest can only show one once.
+// The trade is argued in the plan (§3): per-member tokens make a leak smaller
+// than today's single admin-level one.
+
+// TWO THINGS, NOT ONE FLATTENED ROW. The user goes on to be `ctx.user` in every
+// tool handler, so it has to be a users row and nothing else — a
 // `u.*, t.id AS mcp_token_id` composite would hand every tool token metadata it
-// has no business with, under column names that lie about which table they came
-// from. One query still; the split happens here, at the boundary that knows.
+// has no business with, under column names that lie about their table. One query
+// still; the split happens here, at the boundary that knows.
 export async function resolveMcpToken(db, token) {
   if (!token) return null;
   const { rows } = await db.query(
@@ -1284,16 +1279,15 @@ export async function mcpTokenFor(db, userId) {
   return rows[0] || null;
 }
 
-// Mint, rotate and clear are ONE function: each is "this person's token is now
-// X, or nothing". Rotating is minting over the top, and a separate rotate would
-// be a second place that has to remember there is only one per person.
+// Mint, rotate and clear are ONE function: each is "this person's token is now X,
+// or nothing". Rotating is minting over the top, and a separate rotate would be a
+// second place that has to remember there is only one per person.
 //
 // The transaction is the point, not ceremony. Folding it into one data-modifying
-// CTE is measurably cheaper (2.8ms against 4.6) and wrong: within a single
-// statement the DELETE's index entry is not yet invisible to the INSERT, so
-// re-setting a person's CURRENT token raises a duplicate-key error instead of
-// being the no-op it reads as. Nobody mints the same random token twice, but a
-// caller restoring a known value does, and that trap is worth 1.8ms.
+// CTE is cheaper (2.8ms against 4.6) and wrong: within a single statement the
+// DELETE's index entry is not yet invisible to the INSERT, so re-setting a
+// person's CURRENT token raises a duplicate-key error instead of the no-op it
+// reads as. A caller restoring a known value hits exactly that.
 export async function setMcpToken(db, userId, token) {
   await withTx(db, async (client) => {
     await client.query("DELETE FROM mcp_tokens WHERE user_id=$1", [userId]);
@@ -1310,15 +1304,12 @@ export async function touchMcpToken(db, id) {
   await db.query("UPDATE mcp_tokens SET last_used_at=$1 WHERE id=$2", [Date.now(), id]);
 }
 
-// Every token on the instance, with whose it is — the admin's connections list
-// (planning/mcp-members-plan.md §10.18). The question it answers is "who has an
-// agent pointed at this instance, and when did it last run", so it reads in
-// ACTIVITY order rather than listUsers' roster order, and the never-used sink.
+// Every token on the instance, with whose it is — the admin's connections list.
+// The question is "who has an agent pointed at this instance, and when did it
+// last run", so it reads in ACTIVITY order rather than roster order.
 //
-// NO TOKEN COLUMN, and not a masked one either. A member reads their own on
-// their own page; the admin's list has never shown one and must not start (§3).
-// A masked prefix would be a correlation handle with nothing to correlate
-// against — no log line carries a token.
+// NO TOKEN COLUMN, and not a masked one either. A member reads their own on their
+// own page; the admin's list has never shown one and must not start (§3).
 export async function listMcpTokens(db) {
   const { rows } = await db.query(
     `SELECT t.id, t.created_at, t.last_used_at, u.email, u.name, u.is_admin
@@ -1448,17 +1439,11 @@ export async function setCratePublic(db, userId, crateId, isPublic) {
   );
   if (!rows.length) return null;
   // The flip changes what every card in this crate reports to OTHER people:
-  // `crateIds` in the list payload is filtered by crate visibility
-  // (`c.user_id = $1 OR c.public = TRUE` in listItems), so going public adds an
-  // id to those cards for everyone else and going private takes it away.
-  //
-  // Nothing on items or entities changes here, so without this stamp the delta
-  // poll — which selects on their updated_at — carries nothing, and another
-  // member's cards keep the answer they were given before. Reported from two
-  // real windows: the crate appeared in their toolbar and filtered to nothing.
-  //
-  // Every other crate write already does this and says why (addCrateItems,
-  // toggleCrateItem). This was the one that did not.
+  // `crateIds` in the list payload is filtered by crate visibility, so going
+  // public adds an id to those cards for everyone else and going private takes
+  // it away. Nothing on items or entities changes here, so without this stamp
+  // the delta poll — which selects on their updated_at — carries nothing and
+  // another member's cards keep the answer they were given before.
   await touchCrateMembers(db, crateId);
   const count = await db.query("SELECT COUNT(*) AS c FROM crate_items WHERE crate_id=$1", [crateId]);
   // `boardId` OUTSIDE the crate, not a field on it. The route sends the crate
@@ -1511,24 +1496,11 @@ export async function deleteCrate(db, userId, crateId) {
   return rows[0]?.board_id ?? null;
 }
 
-// Put cards into a crate, ADDITIVELY. toggleCrateItem below is a checkbox's
-// primitive: called twice with the same id it removes what it added, which is
-// right for a checkbox and wrong for anything that retries. The MCP's
-// save_to_crate is the caller that made the difference matter — a model unsure
-// whether its call landed calls again, and so does a transport-level retry.
-//
-// ON CONFLICT DO NOTHING is what makes a second call a no-op, and RETURNING
-// says which ids the insert actually took, so the answer can tell "added" from
-// "was already there" without a second read.
-//
-// null when the crate is not this user's — the same "not yours reads as not
-// found" the toggle gives. Otherwise { added, already, skipped, count }, where
-// `skipped` names ids that are not cards on the crate's own board.
 // Which of these ids are cards on this board — the board-is-the-authority rule
 // `get_items` states in the same words: an id belonging to another board simply
 // does not resolve, and cannot become reachable because the caller knew it.
-// Shared so that "a crate only holds entities from its own board" is one
-// sentence of SQL rather than one per writer.
+// Shared so that "a crate only holds entities from its own board" is one sentence
+// of SQL rather than one per writer.
 export async function entitiesOnBoard(db, ids, boardId) {
   if (!ids.length) return new Set();
   const { rows } = await db.query(
@@ -1538,6 +1510,16 @@ export async function entitiesOnBoard(db, ids, boardId) {
   return new Set(rows.map((r) => r.id));
 }
 
+// Put cards into a crate, ADDITIVELY. toggleCrateItem below is a checkbox's
+// primitive: called twice with the same id it removes what it added, which is
+// right for a checkbox and wrong for anything that retries — the MCP's
+// save_to_crate is the caller that made the difference matter, since a model
+// unsure whether its call landed calls again, and so does a transport retry.
+// ON CONFLICT DO NOTHING makes a second call a no-op, and RETURNING says which
+// ids the insert actually took, so the answer tells "added" from "was already
+// there" without a second read. null when the crate is not this user's — the
+// same "not yours reads as not found" the toggle gives; otherwise
+// { added, already, count }.
 export async function addCrateItems(db, userId, crateId, entityIds) {
   const crate = await db.query("SELECT board_id FROM crates WHERE id=$1 AND user_id=$2", [crateId, userId]);
   if (!crate.rows.length) return null;
@@ -1659,13 +1641,11 @@ export async function updateAiKey(db, id, { name, apiKey, baseUrl }) {
 }
 
 // Boards referencing the key fall back to the default via ON DELETE SET NULL;
-// their model override goes with it, and if the key *was* the default, clear
-// the settings pointer too.
-// A deleted key/connection reverts every binding that pointed at it, honestly,
-// instead of leaving a dead pointer the UI shows as configured while resolution
-// silently falls to the floor. Both loops below iterate CAPABILITY_DEFS rather
-// than naming the capabilities: the hand-written version missed `detect`
-// entirely, and cleared only part of the namespace for the three it did cover.
+// their model override goes with it, and if the key WAS the default the settings
+// pointer is cleared too — a deleted key reverts every binding that pointed at it
+// rather than leaving a dead pointer the UI shows as configured. Both loops below
+// iterate CAPABILITY_DEFS rather than naming capabilities: the hand-written
+// version missed `detect` entirely.
 export async function deleteAiKey(db, id) {
   // Board-scoped bindings first: the key column itself is FK ON DELETE SET NULL,
   // so only the model it pinned needs clearing. Column names come from the
@@ -1688,14 +1668,12 @@ export async function deleteAiKey(db, id) {
   return true;
 }
 
-// The catalog-landing member of the cleanup family above (a deleted key
-// clears by keyId here; an uninstalled plugin clears by name in
-// plugin-loader): NULL every board model pinned to `provider` that names a
-// model outside what its deployed image bakes. Column names come from the
-// registry's boardKeys — module constants, never input, the deleteAiKey
-// rule. Returns the cleared rows: the caller owns the telling (the log
-// line) and the board-cache invalidation, which are its seams, not this
-// module's.
+// The catalog-landing member of the cleanup family above (a deleted key clears by
+// keyId here; an uninstalled plugin clears by name in plugin-loader): NULL every
+// board model pinned to `provider` that names a model outside what its deployed
+// image bakes. Column names come from the registry's boardKeys — module
+// constants, never input. Returns the cleared rows: the caller owns the log line
+// and the board-cache invalidation, which are its seams.
 export async function clearBoardModelPins(db, boardKeys, provider, models) {
   const { rows } = await db.query(
     `UPDATE boards SET ${boardKeys.model}=NULL
@@ -2531,13 +2509,11 @@ export async function setBoardMembers(db, boardId, userIds, adminIds = []) {
 }
 
 // The same table as setBoardMembers, pivoted: replace ONE user's access across
-// every board. The DELETE is scoped to that user, so a save here can't disturb
-// anyone else's membership on the boards it touches — the two editors write
-// disjoint sets of rows and can't clobber each other's people.
-//
-// adminBoardIds take role='admin', and only where the user is also a member:
-// the loop walks boardIds, so an admin grant on a board they can't see is
-// dropped rather than stored as a manage right with no access behind it.
+// every board. The DELETE is scoped to that user, so the two editors write
+// disjoint sets of rows and can't clobber each other's people. adminBoardIds
+// take role='admin', and only where the user is also a member: an admin grant on
+// a board they can't see is dropped rather than stored as a manage right with no
+// access behind it.
 export async function setUserBoards(db, userId, boardIds, adminBoardIds = []) {
   const admins = new Set(adminBoardIds.map(String)); // board ids are TEXT
   await withTx(db, async (client) => {
@@ -4469,15 +4445,13 @@ export async function addAlertBaselineMatches(db, alertId, entityIds) {
 }
 
 // The other half of a condition edit: unfired claims — pending matches and
-// baseline rows — for entities OUTSIDE the edited condition's matching set
-// are stale under the new reading. Pending ones would deliver the old
-// condition's backlog on the next sweep; baseline ones squat on the (alert,
-// entity) key and swallow the entity's real entry into the new set forever.
-// Deleted, not demoted: freeing the key keeps the entity announceable when
-// it genuinely enters the set the alert NOW watches. Fired rows stay —
+// baseline rows — for entities OUTSIDE the edited condition's matching set are
+// stale under the new reading. Pending ones would deliver the old condition's
+// backlog on the next sweep; baseline ones squat on the (alert, entity) key and
+// swallow the entity's real entry into the new set forever. Deleted, not
+// demoted: freeing the key keeps the entity announceable. Fired rows stay —
 // history, announced under the reading of their day. `before` fences the
-// concurrent sweep: a match landing mid-reseed was already evaluated against
-// the updated condition and is real news, not a stale claim.
+// concurrent sweep: a match landing mid-reseed is real news, not a stale claim.
 export async function pruneAlertStaleClaims(db, alertId, keepEntityIds, before) {
   const { rowCount } = await db.query(
     `DELETE FROM alert_matches
@@ -4605,20 +4579,18 @@ export async function listAlerts(db, userId, boardId) {
   return rows;
 }
 
-// listAlerts' unseen subquery, asked once for every board at a time — the
-// index's alert dot (boards-signals-plan.md). Same number in the same
-// vocabulary: new-match ENTITIES across unseen firings, not the firing count.
+// listAlerts' unseen subquery, asked once for every board at a time — the index's
+// alert dot (boards-signals-plan.md). Same number in the same vocabulary:
+// new-match ENTITIES across unseen firings, not the firing count.
 //
 // The user filter is the whole security of this route's alert half. An alert is
-// per-user by construction, so a GROUP BY that lost `a.user_id=$1` would hand
-// one member another's counts on boards they legitimately share — which is why
-// the test for it seeds two users on one board rather than one.
+// per-user by construction, so a GROUP BY that lost `a.user_id=$1` would hand one
+// member another's counts on boards they legitimately share — which is why its
+// test seeds two users on one board.
 //
-// An inner join, so a board whose alerts have nothing unseen produces no row and
-// reads as 0 from the caller's default; there is no state where the two differ.
-// Exported so the plan test pins the query the app actually runs. A copy in the
-// test would keep passing while this moved, and the regression is invisible from
-// outside — a sequential scan returns the right sum, slowly (0037).
+// An inner join, so a board with nothing unseen produces no row and reads as 0
+// from the caller's default. Exported so the plan test pins the query the app
+// runs (0037).
 export const BOARD_ALERT_UNSEEN_SQL =
   `SELECT a.board_id, SUM(f.entity_count)::int AS unseen
    FROM alerts a JOIN alert_firings f ON f.alert_id = a.id AND NOT f.seen

@@ -1,6 +1,6 @@
 # The comments in db.js outweigh the code (2026-09-20)
 
-**Status: STAGES 1-7 DONE (2026-09-20). Suite 1808 green throughout,
+**Status: STAGES 1-8 DONE (2026-09-20). Suite 1808 green throughout,
 comments-only diffs, LF clean.**
 
 | stage | section | comment lines | cut | big blocks |
@@ -13,9 +13,10 @@ comments-only diffs, LF clean.**
 | 5 | run fence + automatic ingestion | 150 → 123 | -18% | 8 → 4 |
 | 6 | job log | 178 → 158 | -11% | 7 → 6 |
 | 7 | queue helpers + entities + connector liveness | 166 → 149 | -10% | 6 → 3 |
+| 8 | long tail (users, MCP, crates, keys, membership, alerts) | 281 → 252 | -10% | 11 → 6 |
 
-**File vs `ddd41e0`: 4,952 → 4,717 lines, 1,900 → 1,664 comment lines, -16,579
-bytes, density 41.2% → 38.0%. Stages 8-10 open.**
+**File vs `ddd41e0`: 4,952 → 4,689 lines, 1,900 → 1,635 comment lines, -18,383
+bytes, density 41.2% → 37.6%. Stages 9-10 open.**
 
 ### Measurement correction (2026-09-20)
 
@@ -46,7 +47,13 @@ rather than a defence of a choice. That is the finding, not a failure to cut
 hard enough.
 
 **The orphaning pattern is the most common defect in this file, not the bloat.**
-Five instances found so far, one of them stale and one a duplicate:
+**Seven instances found so far, TWO of them stale.** The two stale ones were
+both orphans, and that is not a coincidence — a doc parked on the wrong symbol
+drifts because nobody editing the function ever sees it. Stage 8's was the worst:
+`addCrateItems` had no doc at all, and the block describing it sat above
+`entitiesOnBoard` promising a `skipped` field the function does not return, with
+an inline comment 25 lines below explaining why it never could. Someone coding
+against that doc gets `undefined`. The list:
 `BOARD_COL_LIST`, `usageRows`/`USAGE_DIMS`, `claimFairBatch`, `failOrRequeue`
 (parked on `RETRY_BACKOFF_MS`), and `meter()` (whose doc sat on `APP_SCOPE`
 while `meter()` itself had none). Stage 2 also found the first genuinely STALE
