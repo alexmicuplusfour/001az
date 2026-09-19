@@ -260,3 +260,73 @@ test("the boards page restates the same grey tile for a connector board", async 
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
 });
+
+test("the lightbox panel is the chart's shape too, so the chart fills it", async () => {
+  // Same claim as the card, one surface over. The lightbox's chart panel had a
+  // fixed height clamp against a 5:3 picture, so the face sat inset with the
+  // area fill stopping short of the panel's edges — invisible until the card
+  // was made flush and the two stopped agreeing.
+  //
+  // The panel shows this static face whenever the live chart isn't there yet:
+  // while it loads, and permanently in bare mode. A test deployment has no
+  // stocks provider, so the series 404s and bare mode is exactly what renders.
+  const boardId2 = await createBoard(app.db, "Stocks", [], "");
+  // chartDetail only claims the stage on a connector-FACED board.
+  await app.db.query("UPDATE boards SET mapping = $1 WHERE id = $2", [JSON.stringify({
+    input: { connector: "stocks" }, identity: { source: "connector" },
+    face: { source: "connector", producer: "price-chart", period: "5y" }, fields: [],
+  }), boardId2]);
+
+  const eid = await createEntity(app.db, boardId2, { identity: "amzn", displayName: "Amazon.com, Inc.", symbol: "AMZN" });
+  const itemId = await insertItem(app.db, boardId2,
+    { identity: "amzn", files: [{ name: "amzn", kind: "image", generated: true, w: 600, h: 360 }], fields: {} },
+    "tagged", eid);
+  await app.db.query("UPDATE items SET embed_error='none' WHERE id=$1", [itemId]);
+  // price-chart.js's own proportions; the lightbox loads the ORIGINAL, so the
+  // face has to exist in the gallery as well as the thumbnails.
+  const buf = await sharp({ create: { width: 600, height: 360, channels: 3, background: { r: 250, g: 250, b: 250 } } })
+    .webp().toBuffer();
+  fs.writeFileSync(path.join(app.thumbsDir, "amzn.webp"), buf);
+  fs.writeFileSync(path.join(app.galleryDir, "amzn"), buf);
+
+  const page = await app.open(`/?board=${boardId2}`, { sid: admin.sid });
+
+  // TWO viewports, and the tall one is the one that matters. The old rule was
+  // `height: clamp(280px, 52vh, 520px)` against a width capped by that same
+  // 52vh, so wherever the middle term binds the two agree by construction and
+  // the panel is 5:3 either way — a check at one ordinary window size passes
+  // against the bug. They only diverge where the clamp hits a bound: at 1400
+  // tall, 52vh is 728, the clamp pins 520, and the panel goes wide and insets.
+  for (const [width, height, why] of [
+    [1500, 1400, "tall: the height cap is what used to square the panel off"],
+    [1500, 620, "short: without a width capped by the height budget, the panel overflows the stage"],
+  ]) {
+    await page.setViewportSize({ width, height });
+    await page.waitForSelector(".card img");
+    if (!(await page.$(".lb-chart-face"))) await page.click(".card .face-media");
+    await page.waitForSelector(".lb-chart-face");
+    await page.waitForFunction(() => {
+      const i = document.querySelector(".lb-chart-face");
+      return i && i.complete && i.naturalWidth > 0;
+    }, undefined, { timeout: 10000 });
+
+    const fit = await page.evaluate(() => {
+      const media = document.querySelector(".lb-chart-media");
+      const img = document.querySelector(".lb-chart-face");
+      const s = Math.min(media.clientWidth / img.naturalWidth, media.clientHeight / img.naturalHeight);
+      // The WHOLE panel, not just the picture: the stage is overflow:clip, so
+      // a panel taller than it loses its controls off the bottom silently.
+      const panel = document.querySelector(".lb-chart").getBoundingClientRect();
+      const stage = document.querySelector(".lightbox-stage").getBoundingClientRect();
+      return {
+        box: `${media.clientWidth}x${media.clientHeight}`,
+        gapX: media.clientWidth - Math.round(img.naturalWidth * s),
+        gapY: media.clientHeight - Math.round(img.naturalHeight * s),
+        overflow: Math.round(Math.max(0, stage.top - panel.top) + Math.max(0, panel.bottom - stage.bottom)),
+      };
+    });
+    assert.deepEqual({ gapX: fit.gapX, gapY: fit.gapY }, { gapX: 0, gapY: 0 },
+      `the chart must reach every edge of the lightbox panel — ${why} (panel ${fit.box})`);
+    assert.equal(fit.overflow, 0, `and the whole panel must fit the stage — ${why} (panel ${fit.box})`);
+  }
+});

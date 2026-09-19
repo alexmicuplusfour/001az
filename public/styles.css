@@ -2005,11 +2005,17 @@ body.bulk-mode .heart {
    holds the static face (the instant fallback) and the chart canvas stacked;
    whichever state is current shows. cursor:default + a stopPropagation keep
    control clicks from closing the lightbox, like the audio player's. */
+/* Width, not height, is what a height budget buys here: the media box below is
+   the face's own shape, so capping the width at what 52vh of height affords
+   keeps that shape on every viewport instead of squaring the box off and
+   letterboxing the picture inside it. The head and the controls take the same
+   width, so the whole panel lines up with the chart rather than overhanging
+   it. (var(--face-ratio) substitutes textually: calc(52vh * 5 / 3).) */
 .lb-chart {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(940px, 100%);
+  width: min(940px, 100%, calc(52vh * var(--face-ratio)));
   cursor: default;
 }
 .lb-chart-head {
@@ -2054,7 +2060,15 @@ body.bulk-mode .heart {
      — which only ever meant "above the library's canvases" — was escaping into
      the lightbox and painting over the details panel. */
   isolation: isolate;
-  height: clamp(280px, 52vh, 520px);
+  /* The card's face shape, for the same reason the card uses it: the static
+     face is a 5:3 picture, so anything else letterboxes it and the area fill
+     stops short of the panel's edges. One box for both states — the live
+     canvas mounts into this same element (autoSize re-measures), so the panel
+     must not resize when the chart finishes loading. min-height is the phone
+     escape: below it an interactive chart stops being usable, and there the
+     picture gives way instead. */
+  aspect-ratio: var(--face-ratio);
+  min-height: 240px;
   background: #fff;
   border-radius: 12px;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
