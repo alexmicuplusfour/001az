@@ -13,6 +13,7 @@ import { connectorLanding } from "../server/connectors/add.js";
 import { renderChart } from "../server/faces/price-chart.js";
 import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from "../server/faces/index.js";
 import * as runtime from "../server/connectors/runtime.js";
+import { free as poolFree, _reset as resetPool } from "../server/resource-pool.js";
 import * as pacing from "../server/provider-pacing.js";
 import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
@@ -279,19 +280,55 @@ test("callProvider retries a 429 (honoring Retry-After) and surfaces other error
   ); // non-429 propagates immediately
 });
 
+// queue-by-resource-plan.md Stage 5: the refresh sweep's one lane-wide timer —
+// which a single delisted coin could trip for every provider — is gone. The
+// wire now tells the POOL when a provider is unwell, and only then.
+test("a provider that gave up on a 429, answered 5xx or timed out backs off its pool; a 404 backs off nothing", async () => {
+  resetPool();
+  const fast = { rpm: 100000, burst: 100 };
+  const fail = (status) => async () => { const e = new Error(`status ${status}`); if (status) e.status = status; e.retryAfter = "0"; throw e; };
+
+  await assert.rejects(runtime.callProvider(db, "rl-gaveup", fast, fail(429)));
+  assert.equal(poolFree("conn:rl-gaveup"), 0, "retry-exhausted 429: the dispatcher sees no room");
+  await assert.rejects(runtime.callProvider(db, "rl-down", fast, fail(503)));
+  assert.equal(poolFree("conn:rl-down"), 0, "5xx: same");
+  await assert.rejects(runtime.callProvider(db, "rl-unreachable", fast, fail(undefined)));
+  assert.equal(poolFree("conn:rl-unreachable"), 0, "no status at all — unreachable: same");
+
+  await assert.rejects(runtime.callProvider(db, "rl-delisted", fast, fail(404)));
+  assert.ok(poolFree("conn:rl-delisted") > 0, "a 404 is about the id asked for, not the provider");
+  await assert.rejects(runtime.callProvider(db, "rl-badkey", fast, fail(401)));
+  assert.ok(poolFree("conn:rl-badkey") > 0, "a bad key is not unwell, and pausing for it would pin the pause");
+
+  // A 429 that RECOVERED on the retry pauses nothing — only the give-up does.
+  await runtime.callProvider(db, "rl-wobble", fast, async function once() {
+    if (!once.done) { once.done = true; const e = new Error("slow down"); e.status = 429; e.retryAfter = "0"; throw e; }
+    return "ok";
+  });
+  assert.ok(poolFree("conn:rl-wobble") > 0, "one refused call that then succeeded is a wobble, not an outage");
+  resetPool();
+});
+
 test("a 429 slows the bucket down, not just the one call", async () => {
   // The retry alone re-sends at the same pace, so the next call is refused too
   // — and CoinGecko charges for refused requests. The descriptor's rpm is a
   // CLAIM about someone else's tier; this is what makes a wrong claim
   // self-correcting instead of permanent.
   const fast = { rpm: 100000, burst: 100 };
-  assert.equal(pacing._penaltyOf("rl-learn"), 1, "no penalty until a provider objects");
+  // `conn:` since queue-by-resource-plan.md Stage 1: the bucket key is now also
+  // the resource identity the concurrency pool classifies by prefix, so
+  // callProvider namespaces the provider name. Asserting the NAMESPACED key is
+  // what proves both sides moved together — a bare `rl-learn` penalty here
+  // would mean acquire and throttled had drifted onto different buckets, which
+  // is precisely the split this vocabulary exists to prevent.
+  assert.equal(pacing._penaltyOf("conn:rl-learn"), 1, "no penalty until a provider objects");
 
   await runtime.callProvider(db, "rl-learn", fast, async function once() {
     if (!once.done) { once.done = true; const e = new Error("slow down"); e.status = 429; e.retryAfter = "0"; throw e; }
     return "ok";
   });
-  assert.equal(pacing._penaltyOf("rl-learn"), 2, "one 429 halves the effective rate");
+  assert.equal(pacing._penaltyOf("conn:rl-learn"), 2, "one 429 halves the effective rate");
+  assert.equal(pacing._penaltyOf("rl-learn"), 1, "and nothing lands on the un-namespaced name");
 
   // A tier that is badly wrong keeps halving, and the last refusal counts even
   // though we stopped retrying it.
@@ -301,12 +338,12 @@ test("a 429 slows the bucket down, not just the one call", async () => {
       const e = new Error("slow down"); e.status = 429; throw e;
     }), /slow down/);
   } finally { delete process.env.CONNECTOR_RETRY_CAP_MS; }
-  assert.ok(pacing._penaltyOf("rl-learn") >= 8, "sustained refusals keep backing off");
+  assert.ok(pacing._penaltyOf("conn:rl-learn") >= 8, "sustained refusals keep backing off");
 
   // A provider that never objects is never slowed — the penalty is measured,
   // not assumed.
   await runtime.callProvider(db, "rl-clean", fast, async () => "ok");
-  assert.equal(pacing._penaltyOf("rl-clean"), 1);
+  assert.equal(pacing._penaltyOf("conn:rl-clean"), 1);
 
 });
 

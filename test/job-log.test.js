@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import { startServer, seedBoard, seedUser, adminSession, req, primeSidecars } from "./helpers.js";
+import { _reset as resetPool } from "../server/resource-pool.js";
 import {
   addJobLog,
   openJob,
@@ -68,8 +69,17 @@ async function until(fn, ms = 8000) {
   }
 }
 
-const runWorker = (opts = {}) =>
-  startWorker({ db, galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir, ...opts });
+// An engine backoff lives in the resource pool now (queue-by-resource-plan.md
+// Stage 3c), and the pool is process-wide because the RESOURCE is — the same
+// sidecar serves the routes. That is right in production, where one process runs
+// one worker and a restart does not heal a downed engine; here it would let a
+// test that knocks the sidecar over hold the next sixty seconds of this file
+// hostage. Cleared per worker, which is also what "a new worker, fresh backoff"
+// meant back when the timer was a variable inside startWorker.
+const runWorker = (opts = {}) => {
+  resetPool();
+  return startWorker({ db, galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir, ...opts });
+};
 
 const jobsFor = async (boardId) =>
   (await db.query("SELECT * FROM job_log WHERE board_id=$1 ORDER BY id", [boardId])).rows;

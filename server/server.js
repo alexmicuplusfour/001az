@@ -3063,6 +3063,12 @@ app.post("/api/admin/capabilities/:id/bind", requireAdmin, wrap(async (req, res)
     if (config) assertValidCapabilityConfig(req.params.id, config);
     await bindCapability(db, req.params.id, { provider, keyId, model, enabled });
     if (config) await setCapabilityConfig(db, req.params.id, config);
+    // The app-default rebind changes which KEY every unpinned board resolves to,
+    // and therefore which resource its work contends for (worker.js
+    // boardResource). Nothing told the worker before — the board-level edits
+    // invalidate, key deletion invalidates, this one didn't, because until now
+    // nothing cached the resolved binding per board.
+    invalidateAllBoardCaches();
   } catch (err) {
     return res.status(err.status || 400).json({ error: err.message });
   }

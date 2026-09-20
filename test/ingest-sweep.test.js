@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { startServer, seedBoard } from "./helpers.js";
 import { getBoard, updateBoard, dueIngestBoards, setIngestNextRun, setIngestState, stopIngestRun, clearIngestLog, deleteInstance } from "../server/db.js";
-import { startWorker } from "../server/worker.js";
+import { startWorker, boardResource } from "../server/worker.js";
 import { createSources } from "../server/sources/index.js";
 
 let srv, db, sources, root, stop;
@@ -116,6 +116,13 @@ test("dueIngestBoards: armed + due only — the stamp decides, not `enabled`", a
 
   const rows = await dueIngestBoards(db, T);
   assert.deepEqual(rows.map((r) => r.id).sort(), [due, pausedRunNow].sort());
+  // A board mid-run is still due (its stamp moves only at settle), so the kind
+  // hands the query what it is already running — without this a second run
+  // would start under the same fence (Stage 6).
+  assert.deepEqual((await dueIngestBoards(db, T, 20, [due])).map((r) => r.id), [pausedRunNow]);
+  // A file feed contends for nothing: a folder scan is disk, and the loop
+  // launches it regardless of any pool state.
+  assert.equal(await boardResource(db, "ingest", await getBoard(db, due)), null);
   await setIngestNextRun(db, due, null);
   await setIngestNextRun(db, pausedRunNow, null);
 });

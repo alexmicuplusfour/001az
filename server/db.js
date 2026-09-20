@@ -31,7 +31,17 @@ pg.types.setTypeParser(1016, (val) => parseBigintArray(val).map((v) => (v == nul
 const hashToken = (t) => crypto.createHash("sha256").update(String(t)).digest("hex");
 
 export function openDb(databaseUrl) {
-  return new pg.Pool({ connectionString: databaseUrl, max: 5 });
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
+  // An IDLE client that errors — which is exactly what a Postgres restart does
+  // to a pool sitting between queries — emits 'error' on the pool. EventEmitter
+  // throws an unhandled 'error' event, so without this listener a routine `docker
+  // compose up` on the db takes the app process down with an uncaughtException.
+  // Queries in flight still reject normally where they are awaited; this only
+  // covers the idle case, which has no other caller to hand the error to.
+  // (test/helpers.js has swallowed this for years for the same reason — the
+  // harness was immune to a crash production was not.)
+  pool.on("error", (e) => console.error("pg pool error (idle client):", e.message));
+  return pool;
 }
 
 // Bring the schema up to date, then reconcile live-refresh schedules. The schema
@@ -138,12 +148,12 @@ const TAG_QUEUE = `(${IN_FLIGHT_STATES.map((s) => `'${s}'`).join(",")})`;
 // SPEND carries it; pause gates execution, never intake — the queues keep filling
 // and resume continues where it left off. The roster, so `grep -c notPaused`
 // answers "is the gate complete?": claimFairBatch, dueBoards, dueIngestBoards,
-// dueLiveEntities, itemsNeedingEmbedding, oneAudioNeedingTranscription,
+// dueLiveEntities, itemsNeedingEmbedding, audioNeedingTranscription,
 // boardsWithVotes. NOT gated: deliverDueAlerts (matches found before the pause;
 // alerts have their own `enabled`), recoverStuck (its requeues land in pending,
 // where the claim gate holds them), and the prune/reap sweeps.
 //
-// `IS NOT TRUE`, not `NOT`: oneAudioNeedingTranscription LEFT JOINs boards, so an
+// `IS NOT TRUE`, not `NOT`: audioNeedingTranscription LEFT JOINs boards, so an
 // unmatched row yields NULL and `NOT NULL` would drop it. One spelling
 // everywhere, so a later reader cannot "harmonize" the two wrongly.
 const notPaused = (alias = "") => `${alias ? `${alias}.` : ""}paused IS NOT TRUE`;
@@ -2122,13 +2132,22 @@ export async function setBoardNextRun(db, boardId, ts) {
 // writers, so null-on-pause would need each to learn about pause; one WHERE is
 // the single choke point. Cost: "Run now" on a paused board arms and DEFERS —
 // the run fires on resume rather than being confiscated.
-export async function dueIngestBoards(db, now) {
+//
+// `excludeIds` is the boards already mid-run (queue-by-resource-plan.md Stage
+// 6). The stamp only moves when a run SETTLES, so a board is still due for the
+// whole length of its own run — and a caller that launches without awaiting
+// would start a second run under the same fence. Soonest-due first, bounded,
+// now that a tick takes a batch rather than everything.
+export async function dueIngestBoards(db, now, limit = 20, excludeIds = []) {
   const { rows } = await db.query(
     `SELECT ${BOARD_COLS} FROM boards
      WHERE ${notPaused()}
        AND ingest IS NOT NULL
-       AND ingest_next_run_at IS NOT NULL AND ingest_next_run_at <= $1`,
-    [now]
+       AND ingest_next_run_at IS NOT NULL AND ingest_next_run_at <= $1
+       AND NOT (id = ANY($3::text[]))
+     ORDER BY ingest_next_run_at ASC
+     LIMIT $2`,
+    [now, limit, excludeIds]
   );
   return rows;
 }
@@ -2815,6 +2834,25 @@ export async function deleteExternalPlugin(db, id) {
 // passes only the stages whose lane has a free slot, so a full sidecar lane
 // doesn't stop tag work being claimed. Default = all four.
 //
+// `excludeBoards` is the per-resource hold-back (queue-by-resource-plan.md
+// Stage 2): boards whose API key or connector currently has no free slot in the
+// concurrency pool. Deliberately a DENY-list, never an allow-list — the two
+// questions "can this run at all" and "what does it contend for" do not
+// collapse. The first is the clause above (a tag item with no key anywhere
+// waits); the second is this one. A face item on a board with no connector
+// resolves to NO resource and must still claim — it renders nothing and
+// advances, which is real work that completes. An allow-list built from
+// resolvable resources would strand it forever, so anything unresolvable is
+// simply left unconstrained.
+//
+// `onlyBoards` (Stage 3a) is the OTHER list, for the other step of the
+// dispatcher's tick: once a resource's boards are known, a claim sized to
+// exactly that resource's free slots, restricted to those boards. Both lists
+// are honest because they answer different steps — the allow-list sizes a claim
+// to a key that has room; the deny-list keeps saturated keys out of the
+// catch-all that discovers boards nobody has seen yet. NULL = no restriction,
+// so every existing caller is unchanged.
+//
 // The ranking: each board's ready items ranked by age, then rank 0 of every board
 // served before rank 1 — a small board interleaves ahead of a large board's
 // backlog. Holds while active boards ≤ the batch size, plain FIFO beyond. ONE
@@ -2822,7 +2860,7 @@ export async function deleteExternalPlugin(db, id) {
 // head promotes the same board's next item). The window function forbids FOR
 // UPDATE, so the pick (ranked, unlocked) and the lock (by id, SKIP LOCKED) are
 // separate CTEs feeding the UPDATE.
-export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1) {
+export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.keys(IN_FLIGHT_FOR), limit = 1, excludeBoards = [], onlyBoards = null) {
   const now = Date.now();
   const { rows } = await db.query(
     `WITH ready AS (
@@ -2833,6 +2871,8 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.k
          AND ${notPaused("b")}
          AND (i.status IN ('pending_face', 'pending_fetch') OR b.ai_key_id IS NOT NULL OR $2)
          AND (i.retry_at IS NULL OR i.retry_at <= $1)
+         AND NOT (i.board_id = ANY($5::text[]))
+         AND ($6::text[] IS NULL OR i.board_id = ANY($6::text[]))
      ),
      pick AS (
        SELECT id FROM ready ORDER BY board_rank ASC, created_at ASC, id ASC LIMIT $4
@@ -2845,7 +2885,7 @@ export async function claimFairBatch(db, hasDefaultKey = true, stages = Object.k
        updated_at = $1
      WHERE id IN (SELECT id FROM claimed)
      RETURNING *`,
-    [now, hasDefaultKey, stages, limit]
+    [now, hasDefaultKey, stages, limit, excludeBoards, onlyBoards]
   );
   return rows;
 }
@@ -3162,8 +3202,11 @@ export async function deleteInstance(db, id) {
 // Entities due for a live-field or face refresh: refresh_at set and reached.
 // Each rides with its connector instance — matched by `payload ? 'source'` (the
 // tag vehicle's marker; NOT file-count, since a generated face gives it a file)
-// — and its board. Soonest-due first, bounded per sweep.
-export async function dueLiveEntities(db, now, limit = 20) {
+// — and its board. Soonest-due first, bounded per sweep. `excludeIds` is the
+// entities already mid-refresh: refresh_at only moves when the refresh LANDS,
+// so a second tick would otherwise hand the same entity out again
+// (queue-by-resource-plan.md Stage 5).
+export async function dueLiveEntities(db, now, limit = 20, excludeIds = []) {
   const { rows } = await db.query(
     `SELECT e.id AS e_id, e.identity, e.symbol, e.fields, e.refresh_at, e.face_at,
             i.id AS i_id, i.payload AS i_payload,
@@ -3172,9 +3215,10 @@ export async function dueLiveEntities(db, now, limit = 20) {
      JOIN items i ON i.entity_ids @> ARRAY[e.id]::bigint[] AND i.payload ? 'source'
      JOIN boards b ON b.id = e.board_id
      WHERE ${notPaused("b")} AND e.refresh_at IS NOT NULL AND e.refresh_at <= $1
+       AND NOT (e.id = ANY($3::bigint[]))
      ORDER BY e.refresh_at ASC
      LIMIT $2`,
-    [now, limit]
+    [now, limit, excludeIds]
   );
   return rows.map((r) => ({
     entity: { id: r.e_id, identity: r.identity, symbol: r.symbol, fields: r.fields, refresh_at: r.refresh_at, face_at: r.face_at },
@@ -3750,21 +3794,35 @@ export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
 // even when the board doesn't tag). Newest first so fresh uploads become
 // searchable before a long backfill finishes; items the embedder rejected
 // (embed_error) are skipped until they get fresh text.
-export async function itemsNeedingEmbedding(db, model, limit) {
+//
+// `excludeIds` is the rows already being embedded. A row stops qualifying only
+// when its vector lands, so without this a second tick would re-read rows the
+// first one is still mid-call on and pay for them twice. The sweep this was
+// written for ran one batch at a time and awaited it, which is why it could get
+// away with asking the same question twice (queue-by-resource-plan.md Stage 4b).
+export async function itemsNeedingEmbedding(db, model, limit, excludeIds = []) {
   const { rows } = await db.query(
     `SELECT i.id, i.board_id, i.entity_ids, i.tags, i.tag_reasoning, i.payload FROM items i
      JOIN boards b ON b.id = i.board_id
      WHERE ${notPaused("b")}
        AND ${needsEmbeddingSql(1)}
+       AND NOT (i.id = ANY($3::bigint[]))
      ORDER BY i.updated_at DESC, i.id DESC LIMIT $2`,
-    [model, limit]
+    [model, limit, excludeIds]
   );
   return rows;
 }
 
-// One audio item still needing a transcript — the transcription loop's work
-// queue. Independent of tagging and status: any audio item with neither a
-// `transcript` nor a permanent `transcript_error` qualifies, newest first.
+// Audio items still needing a transcript — the transcription kind's work queue.
+// Independent of tagging and status: any audio item with neither a `transcript`
+// nor a permanent `transcript_error` qualifies, newest first.
+//
+// A BATCH, not the one newest clip (queue-by-resource-plan.md Stage 3c). The
+// caller groups what comes back by the ENGINE each clip's board would use and
+// launches what each engine has room for — so a whisper clip waiting on a busy
+// sidecar cannot stand in front of a clip whose board pins a cloud transcriber.
+// `LIMIT 1` made that head-of-line block structural: the newest clip was the
+// only one anybody ever looked at.
 // `payload ? 'key'` is the jsonb key-exists test, so an empty-string transcript
 // for a silent clip still counts. excludeIds skips clips in the worker's
 // in-memory retry backoff so one failing clip can't block the lane.
@@ -3776,13 +3834,13 @@ export async function itemsNeedingEmbedding(db, model, limit) {
 // registry); `IS DISTINCT FROM` keeps a null floorProvider admitting every pin.
 // Coarse like the tag queue's key check: a pin that exists but can't resolve
 // passes here and is handled per item, unfailed, by transcribeOne.
-export async function oneAudioNeedingTranscription(db, excludeIds = [], served = {}) {
+export async function audioNeedingTranscription(db, excludeIds = [], served = {}, limit = 1) {
   const { globally = true, pinCols = null, floorProvider = null } = served;
   // The floor's name is bound only where the SQL references it — a caller that
   // names no pin columns (the plain "give me the next clip" reads) would
   // otherwise send a parameter the statement never mentions, which Postgres
   // refuses outright.
-  const params = [excludeIds, globally];
+  const params = [excludeIds, globally, limit];
   const pins = [];
   if (pinCols?.keyId) pins.push(`b.${pinCols.keyId} IS NOT NULL`);
   if (pinCols?.provider) {
@@ -3796,10 +3854,10 @@ export async function oneAudioNeedingTranscription(db, excludeIds = [], served =
        AND ${NEEDS_TRANSCRIPT_SQL}
        AND NOT (i.id = ANY($1::bigint[]))
        AND ($2 OR ${pins.length ? pins.join(" OR ") : "FALSE"})
-     ORDER BY i.created_at DESC LIMIT 1`,
+     ORDER BY i.created_at DESC LIMIT $3`,
     params
   );
-  return rows[0] || null;
+  return rows;
 }
 
 // Current-model vectors for one board (the search corpus). Stale vectors are
@@ -4480,16 +4538,25 @@ export async function createAlertFiring(db, alertId, withWebhook) {
 // bounds a single tick. Gated on a.enabled like grouping is: the switch says
 // "off pauses matching and delivery", so a pending send freezes with the
 // alert and thaws on re-enable — the dormancy stance, one toggle down.
-export async function pendingWebhookFirings(db, now, limit = 10) {
+// `excludeIds` is the deliveries already in flight, and it is load-bearing
+// rather than an optimisation (queue-by-resource-plan.md Stage 4a). Delivery is
+// send-THEN-stamp on purpose — at-least-once, because a crash between the two
+// resends where the other order would silently lose a notification — so a
+// firing stays `pending`, and therefore stays due, for the whole length of its
+// own send. The old sweep got away with re-reading it because it was sequential
+// and singular; a caller that launches without awaiting would hand the same
+// firing out twice and post it twice.
+export async function pendingWebhookFirings(db, now, limit = 10, excludeIds = []) {
   const { rows } = await db.query(
     `SELECT f.id, f.alert_id, f.fired_at, f.entity_count, f.attempts,
        a.name, a.board_id, a.webhook_url, a.webhook_secret, a.condition
      FROM alert_firings f JOIN alerts a ON a.id = f.alert_id
      WHERE f.webhook_status = 'pending' AND a.enabled
        AND (f.retry_at IS NULL OR f.retry_at <= $1)
+       AND NOT (f.id = ANY($3::bigint[]))
        AND ${ALERT_OWNER_ACCESS}
      ORDER BY f.fired_at ASC LIMIT $2`,
-    [now, limit]
+    [now, limit, excludeIds]
   );
   return rows;
 }

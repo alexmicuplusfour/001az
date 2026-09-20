@@ -531,10 +531,17 @@ const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : 
 
 // Diagnose one facet. Returns the stored entry, or null when nothing was worth
 // spending a call on.
-async function diagnoseFacet(db, deps, board, facet, segment, prior) {
+// The CHECK half of one facet's diagnosis: is there a question worth paying to
+// answer? Everything here is a read. Returns what the answer half needs — the
+// fresh question key, its evidence and examples, the resolved key — or null.
+// Split from the paid half (queue-by-resource-plan.md Stage 7) so the worker's
+// kind can decide in `due` and spend in `run`: the decision has to be made
+// before a unit is handed out, or a board whose every facet skips would cost a
+// whole poll to discover one facet at a time.
+async function diagnoseQuestion(db, deps, board, segment, prior) {
   if (!segment.d) return null;
   // The accurate check, and the one place that can afford it: one ranking query per
-  // unstable facet per tick, in the worker, off every page load.
+  // unstable facet per pass, in the worker, off every page load.
   const { k: fresh, evidence, examples } = await questionKey(db, board.id, segment);
   // Nothing worth spending on — and it is TWO independent questions. The cap is
   // about money against an unchanged question; `stale` is about whether the data
@@ -553,7 +560,15 @@ async function diagnoseFacet(db, deps, board, facet, segment, prior) {
 
   const ai = await deps.resolveAi(board);
   if (!ai) return null; // no key is a configuration gap, not a finding
+  return { fresh, evidence, examples, ai };
+}
 
+// The PAID half: one call, one entry on the board, one job-log row — given a
+// question diagnoseQuestion already let through. Exported for the worker's kind,
+// whose `run` this is. Returns the stored entry, null for an attempt that
+// recorded a failure, and throws only what nobody here owns (a db hiccup), after
+// settling its own job row.
+export async function diagnoseAnswer(db, deps, board, facet, segment, prior, { fresh, evidence, examples, ai }) {
   // The one thing an attempt always leaves behind, so a failure is a fact on the
   // board rather than a line in a log nobody reads.
   //
@@ -733,18 +748,31 @@ async function candidates(db, board) {
   return out.slice(0, MAX_FACETS);
 }
 
-// One pass of the loop. Walks boards from `afterBoardId` and diagnoses the first
-// one with work, returning the id it stopped at so the caller can rotate past it.
+// The rotation, split from the act (queue-by-resource-plan.md Stage 7). Walks
+// boards past `afterBoardId` and hands back every facet on the FIRST board with a
+// real question — one the cap, the stored verdict and the key all let through —
+// as units the worker's kind runs in parallel, returning the id it stopped at so
+// the caller can rotate past it. A unit carries the question it was checked
+// against, so the run spends on exactly what was decided here. `exclude` is the
+// facets already in flight, so a slow call cannot be asked twice.
 //
 // A rotation rather than "the first board that qualifies": nothing here creates
 // claimable work, so there is no row that stops matching once it has been served.
-// A board whose staleness check keeps passing would be re-picked every tick and
+// A board whose staleness check keeps passing would be re-picked every pass and
 // every board behind it would starve — silently, and indefinitely.
-export async function diagnoseDue(db, deps, afterBoardId = null) {
+//
+// "First board with a real QUESTION", not "first board with candidates", and the
+// difference is the rotation's responsiveness: a board whose unstable facets are
+// all already diagnosed is walked past inside this one call, where handing it out
+// and discovering the skips one facet at a time would cost a whole poll per such
+// board — and a retag's re-staled facet fifteen boards along would wait fifteen
+// polls to be noticed.
+export async function diagnoseCandidates(db, deps, afterBoardId = null, exclude = []) {
   const boards = await boardsWithVotes(db);
   if (!boards.length) return null;
   const at = afterBoardId ? boards.findIndex((b) => b.id === afterBoardId) + 1 : 0;
   const start = at > 0 && at < boards.length ? at : 0;
+  const skip = new Set(exclude);
 
   let visited = null;
   for (let i = 0; i < Math.min(SCAN_BOARDS, boards.length); i++) {
@@ -755,12 +783,13 @@ export async function diagnoseDue(db, deps, afterBoardId = null) {
 
     const byKey = new Map((board.facets || []).map((f) => [f.key, f]));
     const prior = board.facet_diagnostics || {};
-    let calls = 0;
+    const units = [];
     for (const segment of segments) {
       const facet = byKey.get(segment.key);
-      if (!facet) continue;
+      if (!facet || skip.has(`${board.id}:${facet.key}`)) continue;
       try {
-        if (await diagnoseFacet(db, deps, board, facet, segment, prior[segment.key])) calls++;
+        const q = await diagnoseQuestion(db, deps, board, segment, prior[segment.key]);
+        if (q) units.push({ board, facet, segment, prior: prior[segment.key], q });
       } catch (e) {
         // Never load-bearing (the evaluateItemAlerts rule): a missing diagnosis
         // costs nothing, and a diagnosis pass that broke tagging would be a serious
@@ -768,7 +797,29 @@ export async function diagnoseDue(db, deps, afterBoardId = null) {
         console.warn(`diagnose failed for board ${board.id} facet ${segment.key}: ${e.message}`);
       }
     }
-    if (calls) return { boardId: board.id, calls };
+    if (units.length) return { boardId: board.id, units };
   }
-  return { boardId: visited, calls: 0 };
+  return { boardId: visited, units: [] };
+}
+
+// One whole pass, synchronously: the rotation, then every question it found
+// answered in turn. What the tests drive, and what "tick the diagnosis once"
+// means outside the worker — which runs the two halves apart, the answers in
+// parallel. One difference from the loop this replaced, deliberate and shared
+// with the kind: a board whose every attempt FAILED ends the pass (the next one
+// moves on), where the old loop tried the next board in the same breath — under
+// a provider outage that is one board's worth of failed calls per pass rather
+// than eight.
+export async function diagnoseDue(db, deps, afterBoardId = null) {
+  const found = await diagnoseCandidates(db, deps, afterBoardId);
+  if (!found) return null;
+  let calls = 0;
+  for (const u of found.units) {
+    try {
+      if (await diagnoseAnswer(db, deps, u.board, u.facet, u.segment, u.prior, u.q)) calls++;
+    } catch (e) {
+      console.warn(`diagnose failed for board ${u.board.id} facet ${u.facet.key}: ${e.message}`);
+    }
+  }
+  return { boardId: found.boardId, calls };
 }

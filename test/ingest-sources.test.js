@@ -13,6 +13,8 @@ import { FtpSrv } from "ftp-srv";
 import { startServer, adminSession, seedUser, seedBoard, req } from "./helpers.js";
 import { backend as ftpBackend, isPathMissing } from "../server/ingestion/sources/ftp.js";
 import * as files from "../server/ingestion/files.js";
+import { registerSource, unregisterSource } from "../server/ingestion/sources/index.js";
+import { resetDefs } from "../server/plugins.js";
 import { readWindow, pruneExpired } from "../server/ingestion/window-cache.js";
 import {
   getBoard, updateBoard, ingestedKeys, setPluginState, recordIngest,
@@ -523,5 +525,50 @@ test("editing a connection drops its cached listing (config isn't in the cache k
     assert.equal(files._windowCacheSize(), before - 1, "the connection's cached window was dropped");
   } finally {
     process.env.INGEST_FEED_CACHE_MS = "0";
+  }
+});
+
+// queue-by-resource-plan.md Stage 6: the sweep runs boards concurrently now, so
+// two boards on one connection can actually collide on the listing. The
+// connector adapter already shared one walk between concurrent callers; the
+// file adapter did not — each would have listed the whole bucket and raced to
+// write the same cache key.
+test("remote enumerate: concurrent callers on one connection share ONE listing (single-flight)", async () => {
+  let release, enteredList;
+  const gate = new Promise((r) => { release = r; });
+  const entered = new Promise((r) => { enteredList = r; });
+  const listCalls = [];
+  registerSource("gated.src", {
+    manifest: { name: "gated.src", label: "Gated", browsable: true, needsConnection: true, sourceSchema: [] },
+    backend: () => ({
+      async list(opts) { listCalls.push(opts); enteredList(); await gate; return { entries: [], truncated: false }; },
+      async fetch() { throw new Error("no files"); },
+      async test() { return { ok: true }; },
+    }),
+  });
+  // What the loader does beside registerSource: the plugin DEFS are memoized,
+  // and an earlier test in this file has already built them without the fake.
+  resetDefs();
+  try {
+    await setPluginState(db, "source:gated.src", { installed: true });
+    const connId = await createSourceConnection(db, "gated.src", "shared", {});
+    const cfg = { source: { type: "gated.src", connectionId: connId, path: "", recursive: true } };
+    // The second caller starts only once the first is provably INSIDE the
+    // listing, which the gate holds open — so the flight is live when it
+    // arrives, and the cache is still empty (the window is written after the
+    // walk), so the flight is the only way it can avoid listing. Its one db
+    // read before the flight is the single clock here; the failure direction
+    // is the safe one (a second listing fails the test, never passes it).
+    const p1 = files.enumerate(db, {}, cfg);
+    await entered;
+    const p2 = files.enumerate(db, {}, cfg);
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    const [r1, r2] = await Promise.all([p1, p2]);
+    assert.equal(listCalls.length, 1, "one listing for both callers, not one each");
+    assert.equal(r1, r2, "the second caller received the first walk's own result, not a copy from anywhere");
+  } finally {
+    unregisterSource("gated.src");
+    resetDefs();
   }
 });

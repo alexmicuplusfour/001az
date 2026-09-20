@@ -14,7 +14,7 @@ import {
 import { up as stampFieldAt } from "../server/migrations/0008_stamp_field_at.js";
 import * as runtime from "../server/connectors/runtime.js";
 import * as coingecko from "../server/connectors/crypto/coingecko.js";
-import { refreshDueEntity } from "../server/worker.js";
+import { refreshDueEntity, boardResource, invalidateAllBoardCaches } from "../server/worker.js";
 
 let srv, db, base, admin;
 before(async () => {
@@ -190,6 +190,28 @@ test("dueLiveEntities surfaces an entity only once refresh_at is reached", async
   await setEntityRefreshAt(db, eid, 1);
   due = await dueLiveEntities(db, Date.now(), 20);
   assert.ok(due.some((r) => r.entity.id === eid));
+  // …and is withheld while this process is already refreshing it: refresh_at
+  // only moves when the refresh LANDS, so without the exclusion a second tick
+  // would hand the same entity out again mid-call (Stage 5).
+  due = await dueLiveEntities(db, Date.now(), 20, [eid]);
+  assert.ok(!due.some((r) => r.entity.id === eid));
+});
+
+// queue-by-resource-plan.md Stage 5. The refresh kind sizes each tick by what
+// the pool reports free for the provider serving it, and the wire backs that
+// provider off when it proves unwell — neither of which does anything if the
+// kind resolves to NULL, because null means "contends for nothing" and the loop
+// launches every due entity every tick regardless of the pool.
+test("a refresh contends for its connector — the same slot the fetch leg claims against", async () => {
+  const board = await createCryptoBoard("live-resource");
+  invalidateAllBoardCaches();
+  const b = await getBoard(db, board.id);
+  const r = await boardResource(db, "refresh", b);
+  assert.match(String(r), /^conn:/, "a refresh is bounded by the provider that serves it");
+  assert.equal(r, await boardResource(db, "fetch", b),
+    "and by the same one the fetch leg uses — one provider, one quota");
+  assert.equal(r, await boardResource(db, "ingest", b),
+    "and a feed run on this board draws on it too (Stage 6) — three kinds, one provider");
 });
 
 test("initDb reconciles refresh_at for entities on already-live boards", async () => {

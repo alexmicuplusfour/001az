@@ -17,7 +17,7 @@ import { withTx, recordIngest, itemBySourceKey, itemByContentHash, deletedByCont
 // MEDIA-side helpers: which extensions a handler accepts, and the ext of a name.
 import { acceptsName, extOf } from "../sources/index.js";
 import { getSourceBackend, sourceModules } from "./sources/index.js";
-import { SAFETY_CAP, cacheTtl, readWindow, writeWindow } from "./window-cache.js";
+import { SAFETY_CAP, cacheTtl, readWindow, writeWindow, singleFlight } from "./window-cache.js";
 import { resolveJailed } from "./sources/folder.js";
 import { pluginInstalled, mediaLimitLookup } from "../plugins.js";
 
@@ -62,6 +62,8 @@ const FILE_TRIGGERS = ["manual", "continuous", "interval", "daily"];
 // sources — a re-pointed or deleted board's stale key, and its full candidate
 // array, doesn't linger for the worker's lifetime.
 const windowCache = new Map();
+// In-flight remote listings, keyed like the cache (singleFlight, window-cache.js).
+const windowFlights = new Map();
 // Test seam: the cache is module-private; tests assert it doesn't accumulate.
 export const _windowCacheSize = () => windowCache.size;
 
@@ -171,20 +173,25 @@ export async function enumerate(db, board, cfg, { limit = Infinity } = {}) {
     // would also buy here. One parameter away if that changes.
     const hit = readWindow(windowCache, key, { ttl });
     if (hit) return hit;
-    const startedAt = Date.now();
-    const be = await resolveBackend(db, cfg.source);
-    // The remote listing is the source's reachability probe — the sweep's
-    // equivalent of the admin Test button. Ledger its outcome on the source
-    // plugin (heal on success, structured error on throw) so a source that's
-    // down turns the gear-modal dot red with its last error and heals when it
-    // recovers, mirroring connector feeds. Only the network call is wrapped;
-    // resolveBackend's config errors (connection removed) aren't a source-health
-    // signal, and a cache hit above rightly probes nothing. Per-file fetch
-    // failures in admit stay board-level (retryable) — list is the coarse
-    // "is this source working" signal, exactly what Test checks.
-    const { entries, truncated } = await withPluginHealth(db, `source:${type}`, () =>
-      be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytesFor: limitFor }));
-    return writeWindow(windowCache, key, ttl, { candidates: toCandidates(entries), truncated }, startedAt);
+    // Two boards on one connection due in the same tick share one listing
+    // rather than each paying for the whole bucket — reachable now that the
+    // sweep runs boards concurrently (queue-by-resource-plan.md Stage 6).
+    return singleFlight(windowFlights, key, async () => {
+      const startedAt = Date.now();
+      const be = await resolveBackend(db, cfg.source);
+      // The remote listing is the source's reachability probe — the sweep's
+      // equivalent of the admin Test button. Ledger its outcome on the source
+      // plugin (heal on success, structured error on throw) so a source that's
+      // down turns the gear-modal dot red with its last error and heals when it
+      // recovers, mirroring connector feeds. Only the network call is wrapped;
+      // resolveBackend's config errors (connection removed) aren't a source-health
+      // signal, and a cache hit above rightly probes nothing. Per-file fetch
+      // failures in admit stay board-level (retryable) — list is the coarse
+      // "is this source working" signal, exactly what Test checks.
+      const { entries, truncated } = await withPluginHealth(db, `source:${type}`, () =>
+        be.list({ path: srcPath, recursive, limit: SAFETY_CAP, accept: acceptsName, maxBytesFor: limitFor }));
+      return writeWindow(windowCache, key, ttl, { candidates: toCandidates(entries), truncated }, startedAt);
+    });
   }
 
   // Local folder: walk fresh each call (cheap, always current), honoring limit.

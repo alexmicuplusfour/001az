@@ -15,6 +15,7 @@
 // plugin, is one descriptor.
 import crypto from "node:crypto";
 import { acquire } from "./provider-pacing.js";
+import { wait as poolWait, release as poolRelease } from "./resource-pool.js";
 import { BUILTIN_PROVIDERS } from "./ai-providers/index.js";
 import { WIRES } from "./ai-providers/wires/index.js";
 import { CAPABILITY } from "./capabilities.js";
@@ -243,7 +244,11 @@ export function unregisterProvider(name) {
 // mechanism (worker-queue-holes §2) — this paces only. Keyless on-device providers
 // (local/whisper) never reach here.
 const DEFAULT_AI_RPM = 300, DEFAULT_AI_BURST = 10;
-const aiKeyBucket = (provider, apiKey) =>
+// Exported since queue-by-resource-plan.md Stage 1: this string is not just the
+// pacing bucket any more, it is the RESOURCE identity the concurrency pool keys
+// on. One builder for both, so the rate limiter and the pool can never end up
+// bounding two different things under one name.
+export const aiKeyBucket = (provider, apiKey) =>
   `ai:${provider}:${apiKey ? crypto.createHash("sha1").update(apiKey).digest("hex").slice(0, 12) : "nokey"}`;
 // rpmOverride/burstOverride carry the per-provider Plugins-page config (read by the
 // worker's aiRate helper); precedence is env > admin override > descriptor default.
@@ -255,6 +260,36 @@ async function paceAi(provider, apiKey, rpmOverride, burstOverride) {
   const rpm = Number(process.env.AI_RPM) || rpmOverride || desc?.rpm || DEFAULT_AI_RPM;
   const burst = Number(process.env.AI_BURST) || burstOverride || desc?.burst || DEFAULT_AI_BURST;
   await acquire(aiKeyBucket(provider, apiKey), rpm, burst);
+}
+
+// Hold one of this key's concurrency slots for the whole call, THEN pace, THEN
+// run (queue-by-resource-plan.md Stage 2). Every dispatcher below shares it —
+// the fourth copy of paceAi-then-call is where the shape becomes a mechanism.
+//
+// THE ORDER IS LOAD-BEARING AND LOOKS BACKWARDS. The slot is taken BEFORE
+// acquire(), so a call asleep in the token bucket is still counted against its
+// key. That is the point: the dispatcher sizes its claims by what the pool
+// reports free, so a throttled key has to read as BUSY while its calls wait.
+// Count only calls genuinely on the wire and a rate-limited key reports full
+// capacity forever — every unit sleeping, nothing in flight — and the
+// dispatcher claims without bound. "Optimising" this so the pool counts only
+// real requests silently disables the whole mechanism.
+//
+// On-device providers skip both. No external quota to pace — and no slot here,
+// because a slot at the wire would count every interactive caller too (search,
+// similar, clusters, the MCP tools all embed one string through this), which
+// would make the sweep read the model as busy because somebody typed. Their
+// bound is `local:` in resource-pool.js, held by the bulk caller instead.
+async function viaKey(provider, apiKey, rpm, burst, run) {
+  if (PROVIDERS[provider]?.onDevice) return run();
+  const resource = aiKeyBucket(provider, apiKey);
+  await poolWait(resource);
+  try {
+    await paceAi(provider, apiKey, rpm, burst);
+    return await run();
+  } finally {
+    poolRelease(resource);
+  }
 }
 
 // --- public dispatchers ---
@@ -269,9 +304,9 @@ async function paceAi(provider, apiKey, rpmOverride, burstOverride) {
 // out of `input` because they bill at a fraction of the input rate. Throws with
 // a readable message on any failure.
 export async function callTagger({ provider, research = false, rpm, burst, ...rest }) {
-  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
-  return desc.wire.tag(desc, { ...rest, research: research && desc.research });
+  return viaKey(provider, rest.apiKey, rpm, burst, () =>
+    desc.wire.tag(desc, { ...rest, research: research && desc.research }));
 }
 
 // Embed a batch of texts (semantic search). Only embeddings-capable providers
@@ -279,9 +314,8 @@ export async function callTagger({ provider, research = false, rpm, burst, ...re
 // on-device `local` provider rides its own wire.embed like any other (paceAi
 // no-ops for keyless), so there's no provider-name branch here.
 export async function embedTexts({ provider, rpm, burst, ...rest }) {
-  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
-  return desc.wire.embed(desc, rest);
+  return viaKey(provider, rest.apiKey, rpm, burst, () => desc.wire.embed(desc, rest));
 }
 
 // Transcribe audio bytes → { text, usage } via a provider's wire. Only
@@ -290,9 +324,8 @@ export async function embedTexts({ provider, rpm, burst, ...rest }) {
 // directly by resolveTranscriber (worker.js) with a null wire, so it never
 // routes here — only keyed provider engines do.
 export async function transcribeAudio({ provider, rpm, burst, ...rest }) {
-  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
-  return desc.wire.transcribe(desc, rest);
+  return viaKey(provider, rest.apiKey, rpm, burst, () => desc.wire.transcribe(desc, rest));
 }
 
 // Detect objects in an image → { objects: [{ label, box, score }], usage } via
@@ -309,9 +342,8 @@ export async function transcribeAudio({ provider, rpm, burst, ...rest }) {
 // (metering-plan.md Stage 5c). Same shape as embed's { vectors, usage } and
 // transcribe's { text, usage } — this was the odd wire out.
 export async function detectObjects({ provider, rpm, burst, ...rest }) {
-  await paceAi(provider, rest.apiKey, rpm, burst);
   const desc = PROVIDERS[provider];
-  const answer = await desc.wire.detect(desc, rest);
+  const answer = await viaKey(provider, rest.apiKey, rpm, burst, () => desc.wire.detect(desc, rest));
   // A plugin written against the pre-5c contract answered the bare array, and
   // it still works: normalized HERE, at the one funnel, the way install()
   // normalizes the three legacy capability-DECLARATION shapes so no reader

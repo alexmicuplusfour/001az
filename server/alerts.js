@@ -214,11 +214,26 @@ export async function sendAlertWebhook(target, entities, opts = {}) {
   }
 }
 
-// The delivery sweep, ticked by the worker's maintenance loop. Three passes:
-// settle-window grouping (immediate + record — record groups identically so
-// history and ?event= links stay uniform, it just never sends), stamp-driven
-// daily grouping, then webhook send/retry for whatever is owed one.
-export async function deliverDueAlerts(db, now = Date.now()) {
+// What a delivery CONTENDS for: the receiving host. Two alerts pointed at two
+// different endpoints have nothing to do with each other and must not queue
+// behind one another — which is all they did when the sweep was one sequential
+// loop. Two pointed at the same host share whatever patience that host has.
+//
+// Spelled here, beside the sender, for the reason aiKeyBucket is spelled in
+// providers.js: one speller, so the pool and the caller cannot end up meaning
+// different things under one name. An unparseable URL contends for nothing —
+// the send fails it immediately, and a resource would be a fiction.
+export const webhookBucket = (url) => {
+  try { return `webhook:${new URL(url).host}`; }
+  catch { return null; }
+};
+
+// Firing CREATION — the first two of the sweep's three passes, and the two that
+// are pure coordination: settle-window grouping (immediate + record — record
+// groups identically so history and ?event= links stay uniform, it just never
+// sends) and stamp-driven daily grouping. No outbound I/O, which is why these
+// run on the maintenance tick while the sending half runs as its own kind.
+export async function createDueFirings(db, now = Date.now()) {
   for (const a of await alertsWithPendingMatches(db)) {
     if (a.newest > now - SETTLE_MS && a.oldest > now - MAX_WAIT_MS) continue;
     const withWebhook = a.delivery !== "record" && !!a.webhook_url;
@@ -234,20 +249,39 @@ export async function deliverDueAlerts(db, now = Date.now()) {
     // would deliver the moment a match landed, at whatever time that is.
     await setAlertNextDelivery(db, a.id, nextDailyAt(a.daily_at_min, now));
   }
-  // Send-then-stamp: a crash between the two resends this firing on the next
-  // sweep — at-least-once, deliberately. Stamp-then-send would turn the same
-  // crash into a silently LOST delivery, and for an alerting system a
-  // repeated notification beats a missing one. Receivers that care dedupe on
-  // payload.firing_id, which is stable across resends.
-  for (const f of await pendingWebhookFirings(db, now)) {
-    const { ok, error } = await sendAlertWebhook(f, await firingMatches(db, f.id));
-    if (ok) {
-      await stampFiringWebhook(db, f.id, "ok", null);
-    } else {
-      const final = f.attempts + 1 >= WEBHOOK_MAX_ATTEMPTS;
-      const backoff = WEBHOOK_RETRY_BACKOFF_MS[Math.min(f.attempts, WEBHOOK_RETRY_BACKOFF_MS.length - 1)];
-      await stampFiringWebhook(db, f.id, final ? "failed" : "pending", error, final ? null : now + backoff);
-      console.warn(`alert webhook ${final ? "failed" : `retrying in ${Math.round(backoff / 1000)}s`} (firing #${f.id}, attempt ${f.attempts + 1}): ${error}`);
-    }
+}
+
+// One firing's delivery. `f` is a pendingWebhookFirings row — the firing JOINed
+// to its alert, which is where the URL and the signing secret live; the firing
+// row on its own carries neither. Send-then-stamp: a crash between the two resends this
+// firing on the next tick — at-least-once, deliberately. Stamp-then-send would
+// turn the same crash into a silently LOST delivery, and for an alerting system
+// a repeated notification beats a missing one. Receivers that care dedupe on
+// payload.firing_id, which is stable across resends. The corollary is that the
+// row stays `pending` for the whole send, so whoever hands these out must not
+// hand this one out again meanwhile — see pendingWebhookFirings' excludeIds.
+//
+// Never throws: every outcome is a stamp. sendAlertWebhook already returns
+// { ok, error } rather than rejecting, and a failure here is the firing's own
+// business, not the engine's — there is nothing for a caller to back off.
+export async function deliverFiring(db, f, now = Date.now()) {
+  const { ok, error } = await sendAlertWebhook(f, await firingMatches(db, f.id));
+  if (ok) {
+    await stampFiringWebhook(db, f.id, "ok", null);
+    return;
   }
+  const final = f.attempts + 1 >= WEBHOOK_MAX_ATTEMPTS;
+  const backoff = WEBHOOK_RETRY_BACKOFF_MS[Math.min(f.attempts, WEBHOOK_RETRY_BACKOFF_MS.length - 1)];
+  await stampFiringWebhook(db, f.id, final ? "failed" : "pending", error, final ? null : now + backoff);
+  console.warn(`alert webhook ${final ? "failed" : `retrying in ${Math.round(backoff / 1000)}s`} (firing #${f.id}, attempt ${f.attempts + 1}): ${error}`);
+}
+
+// Both halves in order — one whole alerts pass, synchronously, for a caller that
+// wants the end state and not a cadence. The worker runs the halves separately
+// (creation on the maintenance tick, delivery as a kind on the resource loop);
+// the tests drive this, and being able to say "tick the whole thing once" is
+// exactly what makes that file deterministic.
+export async function deliverDueAlerts(db, now = Date.now()) {
+  await createDueFirings(db, now);
+  for (const f of await pendingWebhookFirings(db, now)) await deliverFiring(db, f, now);
 }

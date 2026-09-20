@@ -14,7 +14,8 @@ import {
   updateBoard, getBoard, setFacetDiagnostic, demoteFacetDiagnostics, supersedeFacetDiagnostics,
   retagBoard, boardTagActivity, IN_FLIGHT_STATES,
 } from "../server/db.js";
-import { facetStamp, editedFacets, diagnoseDue, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
+import { facetStamp, editedFacets, diagnoseDue, diagnoseCandidates, buildDiagnosePrompt, facetRollup } from "../server/facet-diagnosis.js";
+import { boardsWithVotes } from "../server/db.js";
 import { startWorker } from "../server/worker.js";
 
 // The gates are read at module load, which ESM hoists above anything this file
@@ -1153,6 +1154,41 @@ test("startWorker's diagnose loop reaches a real board through the real tagger",
   assert.equal(usage.calls, 1);
   assert.equal(usage.input, 900);
   assert.equal(usage.output, 120);
+});
+
+// ─── the rotation as the worker's kind sees it (queue-by-resource-plan.md Stage 7)
+
+// Start the walk AT a board: the id just before it in the rotation's own order,
+// or none when it is first. Other tests' boards share this database, so the only
+// deterministic assertions are about the board a walk starts on.
+async function walkFrom(boardId) {
+  const boards = await boardsWithVotes(db);
+  const i = boards.findIndex((b) => b.id === boardId);
+  return i > 0 ? boards[i - 1].id : null;
+}
+
+test("diagnoseCandidates: hands out a real question, withholds a facet in flight, walks past a board with none", async () => {
+  const deps = stubTagger();
+  const fresh = await board("cand-fresh");
+  await seedUnstable(fresh);
+
+  // A real question: the unit carries everything the paid half needs.
+  const found = await diagnoseCandidates(db, deps, await walkFrom(fresh));
+  assert.equal(found.boardId, fresh);
+  assert.equal(found.units.length, 1, "the one unstable facet");
+  assert.equal(found.units[0].facet.key, "shape");
+  assert.ok(found.units[0].q.ai, "and the key it will spend on, resolved here so the run spends on what was decided");
+
+  // In flight: the same walk with that facet excluded hands it out to nobody.
+  const held = await diagnoseCandidates(db, deps, await walkFrom(fresh), [`${fresh}:shape`]);
+  assert.ok(!held.units.some((u) => u.board.id === fresh), "a slow call cannot be asked twice");
+
+  // Diagnosed: once answered, the board has no question left, and the walk goes
+  // past it inside this same call rather than handing it out to discover that.
+  await diagnoseDue(db, deps, await walkFrom(fresh));
+  assert.equal((await diagnosticsOf(fresh)).shape.verdict, "overlapping-values");
+  const past = await diagnoseCandidates(db, deps, await walkFrom(fresh));
+  assert.ok(!past.units.some((u) => u.board.id === fresh), "an already-diagnosed board is walked past, not handed out");
 });
 
 // ─── a failed diagnosis must not become a standing order ─────────────────────

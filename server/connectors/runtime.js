@@ -12,6 +12,7 @@ import { getSetting, getPluginRow, withPluginHealth, APP_SCOPE } from "../db.js"
 import { meterSpend } from "../metering.js";
 import { getFaceProducer } from "../faces/index.js";
 import { acquire, throttled } from "../provider-pacing.js";
+import { wait as poolWait, release as poolRelease, backoff } from "../resource-pool.js";
 import { createTtlCache, keyFingerprint, CHART_LEARN_TTL } from "./chart-series.js";
 import { wantedFields, nextRefreshAt, fieldDueAt } from "./schedule.js";
 import { absentField } from "./project.js";
@@ -55,9 +56,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // counts failed requests against its quota (CoinGecko) charges for every one.
 // So tell the bucket as well — `throttled` halves that key's effective rate,
 // which is what turns a descriptor's rpm from a guess we're stuck with into a
-// starting point. `key` is the bucket key (the provider name), so it lands on
-// the same bucket paceFor spends from.
+// starting point. `key` is the provider name, which connBucket turns into the
+// same bucket paceFor spends from.
+//
+// NAMESPACED since queue-by-resource-plan.md Stage 1. The bucket key is now also
+// the RESOURCE identity the concurrency pool keys on, and the pool classifies by
+// prefix — a bare `coingecko` has none, so it would have been handed the generic
+// ceiling instead of the connector one. Purely an in-memory Map key (the meter
+// files under `name` on its own, untouched), so this renames nothing that is
+// stored anywhere.
+const connBucket = (name) => `conn:${name}`;
 const RATE_STATUS = new Set([429, 401]);
+// How long the dispatcher stops sizing claims for a provider that proved unwell
+// — the same minute the refresh sweep's lane-wide timer used to sleep for, now
+// scoped to the one provider that earned it (queue-by-resource-plan.md Stage 5).
+const PROVIDER_UNWELL_MS = 60000;
 async function withRetry(fn, key, tries = 3) {
   const cap = Number(process.env.CONNECTOR_RETRY_CAP_MS) || 30000;
   for (let i = 0; ; i++) {
@@ -69,7 +82,7 @@ async function withRetry(fn, key, tries = 3) {
       // far more often just a bad key, and throttling a whole provider for that
       // punishes every board for a problem no amount of slowing down fixes
       // (and a permanently-bad key would pin the penalty at its floor).
-      if (e.status === 429) throttled(key); // even on the attempt we're giving up on
+      if (e.status === 429) throttled(connBucket(key)); // even on the attempt we're giving up on
       if (i >= tries) throw e;
       const ra = e.retryAfter != null ? Number(e.retryAfter) : null;
       await sleep(Math.min(Number.isFinite(ra) ? ra * 1000 : 500 * 2 ** i, cap));
@@ -126,7 +139,7 @@ const paceFor = (db, name, provider, board = null) => {
   const rpm = Number(process.env.CONNECTOR_RPM) || provider.rpm || DEFAULT_RPM;
   const burst = Number(process.env.CONNECTOR_BURST) || provider.burst || DEFAULT_BURST;
   return async () => {
-    await acquire(name, rpm, burst);
+    await acquire(connBucket(name), rpm, burst);
     // Never throws (meterWrite) — the cardinal rule: a metering blip must not
     // read as a connector failure to the sweep, the preview, or the health row.
     await meterSpend(db, board ?? APP_SCOPE, { capability: "api", provider: name }, { api_requests: 1 });
@@ -160,10 +173,33 @@ const paceFor = (db, name, provider, board = null) => {
 export function callProvider(db, name, provider, fn, board = null) {
   const pace = paceFor(db, name, provider, board);
   const attempt = provider.pacesRequests ? fn : async () => { await pace(); return fn(); };
-  return withRetry(attempt, name).catch((e) => {
-    if (e?.name === "TimeoutError") throw new Error(`${name}: request timed out`);
-    throw e;
-  });
+  // One of this provider's concurrency slots for the whole attempt — retries
+  // included, since a retry is the same provider's quota being spent again
+  // (queue-by-resource-plan.md Stage 2). Taken around withRetry rather than
+  // inside `attempt` for that reason, and because the backoff sleep between
+  // tries is time this provider is still occupied as far as the dispatcher is
+  // concerned. Same ordering argument as the AI wire's viaKey: the pool counts
+  // what is COMMITTED to a provider, not only what is on the wire, because the
+  // dispatcher sizes its claims by what the pool reports free.
+  return poolWait(connBucket(name)).then(() =>
+    withRetry(attempt, name)
+      .catch((e) => {
+        const err = e?.name === "TimeoutError" ? new Error(`${name}: request timed out`) : e;
+        // The PROVIDER is unwell — not this call's input — when it refused a
+        // retry-exhausted 429, answered 5xx, or could not be reached at all (no
+        // status: a timeout, a socket error). Tell the pool, beside where
+        // withRetry tells the bucket: `free()` reads zero for a minute and the
+        // dispatcher stops sizing claims for this provider, while calls already
+        // committed (and any `wait`) proceed. Only here, after the retries, so a
+        // wobble that recovered on the second try pauses nothing. A 4xx is about
+        // the id that was asked for — a delisted coin, a bad symbol — and backs
+        // off nothing but itself, in its caller. 401 stays out for `throttled`'s
+        // reason: a bad key is not unwell, and pausing claims for it pins the pause.
+        const s = err?.status;
+        if (s === 429 || s >= 500 || s == null) backoff(connBucket(name), PROVIDER_UNWELL_MS);
+        throw err;
+      })
+      .finally(() => poolRelease(connBucket(name))));
 }
 
 // callProvider under the shared plugin health ledger: outcomes (post-retry)

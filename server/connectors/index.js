@@ -65,11 +65,16 @@ export function getConnector(name) {
   return CONNECTORS[name] || null;
 }
 
-// Batch-warm provider quote caches for a refresh sweep's due rows, grouped by
-// connector — the worker calls this once per sweep batch, before the
-// per-entity loop, so a whole board's refreshes collapse into one metered
-// request per provider (see runtime.prefetchRefresh). Never throws: prefetch
-// is an economics move, and a failure only means per-entity retail.
+// Batch-warm provider quote caches for a refresh tick's due rows, grouped by
+// connector — the refresh kind's `prep`, run once per batch before the units
+// launch, so a whole board's refreshes collapse into one metered request per
+// provider (see runtime.prefetchRefresh). Never throws: prefetch is an economics
+// move, and a failure only means per-entity retail.
+//
+// A group of ONE is skipped: a one-id warm is a metered batch call spent on a
+// single id, which the per-entity fetch pays for anyway. Per group rather than
+// per batch, so one crypto entity due beside nineteen stocks costs the stocks
+// their warm nothing.
 export async function prefetchDueRefreshes(db, rows) {
   const byConn = new Map();
   for (const row of rows) {
@@ -81,7 +86,7 @@ export async function prefetchDueRefreshes(db, rows) {
   // Concurrently: the groups are independent by construction — different
   // domains, different providers, separate token buckets — so serialising them
   // only added a provider round-trip to the sweep tick.
-  await Promise.all([...byConn].map(([name, group]) =>
+  await Promise.all([...byConn].filter(([, group]) => group.length > 1).map(([name, group]) =>
     CONNECTORS[name].prefetchRefresh(db, group).catch((e) =>
       console.warn(`${name} refresh prefetch failed (per-entity fallback): ${e.message}`))));
 }

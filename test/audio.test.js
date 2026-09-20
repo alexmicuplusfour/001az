@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { startServer, adminSession, seedBoard, req, meterTotals, primeSidecars, routedStatus } from "./helpers.js";
-import { setPluginState, createAiKey, setSetting, getSetting, oneAudioNeedingTranscription,
+import { setPluginState, createAiKey, setSetting, getSetting, audioNeedingTranscription,
   createEntity, insertItem, reprocessEntity, landTranscript, boardUsageSummary } from "../server/db.js";
 import { boardBindingPatch } from "../server/capability-bind.js";
 import { engineStamp } from "../server/worker.js";
@@ -21,7 +21,9 @@ import { getFaceProducer } from "../server/faces/index.js";
 import { waveform } from "../server/faces/waveform.js";
 import { extractFileFields } from "../server/media/index.js";
 import { resolveTranscriber, transcribeFailurePolicy, embedTextFor, transcribeOne } from "../server/worker.js";
-import { transcribeAudio, providerCatalog } from "../server/providers.js";
+import { transcribeAudio, providerCatalog, aiKeyBucket } from "../server/providers.js";
+import { boardResource, invalidateAllBoardCaches } from "../server/worker.js";
+import { _reset as resetPool, _usedOf, free as poolFree, wait as poolTake, release as poolGive } from "../server/resource-pool.js";
 
 // A minimal valid PCM WAV — music-metadata parses it (container/codec/duration/
 // sampleRate/channels) with no binary, and it's real audio ffmpeg can draw.
@@ -132,7 +134,7 @@ test("transcribeOne: meters the clip's measured duration to its board, priced at
     files: [{ name: "abc123.wav", original_name: "clip.wav", kind: "audio", size: wav.length, meta: { duration: 90.4 } }],
   };
   const id = await insertItem(db, boardId, payload, "tagged");
-  const row = await oneAudioNeedingTranscription(db);
+  const [row] = await audioNeedingTranscription(db);
   assert.equal(row.id, id);
 
   // The whisper sidecar, stubbed at the fetch layer (URL-matched, so nothing
@@ -330,6 +332,89 @@ test("whisper client: deadlineMs bounds an interactive caller's wait (the admin 
     (e) => /busy/.test(e.message) && e.transient === true && e.scope === "job");
 });
 
+// ── the engine as a RESOURCE (queue-by-resource-plan.md Stage 3c) ────────────
+// Audio used to have one lane-wide backoff timer and a LIMIT 1 queue, so a busy
+// whisper sidecar stopped every board's clips including ones pinned to a cloud
+// provider. The engine is a pool resource now; these three say what that means.
+
+const WHISPER = "sidecar:whisper";
+const turns_ = () => new Promise((r) => setImmediate(r));
+
+test("the worker's clip holds the sidecar's slot for the whole job, and hands it back", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; resetPool(); });
+  resetPool();
+  primeSidecars();
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+
+  // The job parks mid-poll until the test lets it finish: the claim is that the
+  // slot is held for the job's WHOLE duration, not just across the submit.
+  let open;
+  const gate = new Promise((r) => { open = r; });
+  globalThis.fetch = async (url, opts = {}) => {
+    if (opts.method === "POST") return { ok: true, status: 202, json: async () => ({ job: "held" }) };
+    await gate;
+    return { ok: true, status: 200, json: async () => ({ status: "done", text: "ok", model: "small" }) };
+  };
+
+  const p = eng.transcribe(Buffer.from("x"), "clip.mp3");
+  for (let i = 0; i < 6; i++) await turns_();
+  assert.equal(_usedOf(WHISPER), 1, "the slot is held while the job runs");
+  assert.equal(poolFree(WHISPER), 0, "so the loop sees no room to launch a second clip");
+  open();
+  await p;
+  assert.equal(_usedOf(WHISPER), 0, "and it comes back when the job settles");
+});
+
+test("an interactive probe never queues behind the worker's clip", async (t) => {
+  // The admin probe calls the same engine with a deadline, and that deadline is
+  // measured from INSIDE transcribe() — so a probe parked in the pool behind a
+  // twenty-minute clip would blow its whole budget without ever checking it. It
+  // submits instead; the sidecar queues it, and the deadline reports "busy".
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; resetPool(); });
+  resetPool();
+  primeSidecars();
+  const db = { query: async () => ({ rows: [] }) };
+  const eng = await resolveTranscriber(db);
+  await poolTake(WHISPER); // a worker clip is holding the engine
+
+  let submitted = false;
+  globalThis.fetch = async (url, opts = {}) => {
+    if (opts.method === "POST") { submitted = true; return { ok: true, status: 202, json: async () => ({ job: "probe" }) }; }
+    return { ok: true, status: 200, json: async () => ({ status: "queued", progress: { done_s: 0 } }) };
+  };
+  await assert.rejects(eng.transcribe(Buffer.from("x"), "probe.wav", { deadlineMs: 100 }),
+    (e) => /busy/.test(e.message) && e.transient === true);
+  assert.equal(submitted, true, "it reached the sidecar rather than parking in the pool");
+  assert.equal(_usedOf(WHISPER), 1, "and it took no slot of its own — the count is still the worker's one");
+  poolGive(WHISPER);
+});
+
+test("boardResource names what a clip contends for: the sidecar, or the board's own key", async (t) => {
+  const { db, close } = await startServer();
+  t.after(() => { close(); invalidateAllBoardCaches(); });
+  invalidateAllBoardCaches();
+  primeSidecars();
+
+  // The presence-gated floor is an on-box engine, and it wears the same name its
+  // own wire waits on — so the loop's sizing and the wire's hold are one count
+  // rather than two limiters agreeing by luck.
+  assert.equal(await boardResource(db, "transcribe", { id: "b-floor" }), WHISPER);
+
+  // A board pinning one of a keyed provider's KEYS (which is how boards pin a
+  // keyed provider — never by name) contends for that key: the same string
+  // tagging on it contends for, which is why a 429 there eases off both.
+  await setPluginState(db, "ai:openai", { installed: true });
+  const created = await createAiKey(db, "k-tr", "openai", "sk-transcribe");
+  const keyId = created.id ?? created;
+  assert.equal(
+    await boardResource(db, "transcribe", { id: "b-key", transcribe_key_id: keyId }),
+    aiKeyBucket("openai", "sk-transcribe"),
+    "the engine's resource is the key's bucket, spelled by the one function that spells it");
+});
+
 test("transcribeFailurePolicy: park / park-capped / backoff-item / backoff-lane", () => {
   const mk = (over) => Object.assign(new Error(over.message || "x"), over);
   // permanent input fault (sidecar 422 or provider 4xx) → park, regardless of attempts
@@ -497,7 +582,7 @@ test("board pin: an on-device engine's model rides its name pin, and a keyed pin
 
 // ── Transcription is decoupled from tagging (its own loop) ───────────────────
 
-test("oneAudioNeedingTranscription: picks audio lacking a transcript; skips transcribed / errored / non-audio", async (t) => {
+test("audioNeedingTranscription: picks audio lacking a transcript; skips transcribed / errored / non-audio", async (t) => {
   const { db, close } = await startServer();
   t.after(close);
   const board = await seedBoard(db, "transc-queue");
@@ -512,13 +597,13 @@ test("oneAudioNeedingTranscription: picks audio lacking a transcript; skips tran
   await ins({ files: [{ name: "c.png", kind: "image" }] });
   const need = await ins({ files: [{ name: "d.mp3", kind: "audio" }] });
 
-  const row = await oneAudioNeedingTranscription(db);
+  const [row] = await audioNeedingTranscription(db);
   assert.equal(row.id, need, "the one audio item with neither a transcript nor an error");
   assert.equal(row.payload.files[0].name, "d.mp3");
 
   // A clip in per-item retry backoff is skipped, so a repeatedly-failing clip
   // can't head-of-line-block the lane while it waits out its backoff.
-  assert.equal(await oneAudioNeedingTranscription(db, [need]), null);
+  assert.deepEqual(await audioNeedingTranscription(db, [need]), []);
 });
 
 test("reprocess clears a transcript_error so a failed transcription retries; a good transcript survives", async (t) => {
@@ -542,7 +627,7 @@ test("reprocess clears a transcript_error so a failed transcription retries; a g
   assert.equal(p[okItem].transcript, "hello there", "a good transcript survives reprocess — no re-billing");
 
   // Only the cleared clip re-enters the transcription queue (the good one is done).
-  const nextUp = await oneAudioNeedingTranscription(db);
+  const [nextUp] = await audioNeedingTranscription(db);
   assert.equal(Number(nextUp.id), badItem);
 });
 
@@ -619,7 +704,7 @@ test("retranscribe route: audio-only, drops the transcript and routes to the tag
   assert.equal(row.payload.transcript, undefined);
   assert.equal(row.payload.transcript_engine, undefined);
   // …and the absence-keyed lane picks the clip up again on its own.
-  assert.equal(Number((await oneAudioNeedingTranscription(db)).id), i);
+  assert.equal(Number((await audioNeedingTranscription(db))[0].id), i);
 
   // The card-level sibling (Stage 4's caret): same verb, entity-scoped.
   await db.query(`UPDATE items SET status='tagged', payload = payload || '{"transcript":"old2"}'::jsonb WHERE id=$1`, [i]);

@@ -9,8 +9,9 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { startServer, adminSession, seedUser, seedBoard, req, meterTotals } from "./helpers.js";
 import { itemsNeedingEmbedding, markTagged, setItemTags, embeddingStats, createAiKey, setSetting, setPluginState, setItemEmbedding } from "../server/db.js";
-import { PROVIDERS } from "../server/providers.js";
-import { embedBatch, embedTextFor } from "../server/worker.js";
+import { PROVIDERS, aiKeyBucket } from "../server/providers.js";
+import { embedBatch, embedTextFor, embedResource } from "../server/worker.js";
+import { maxFor } from "../server/resource-pool.js";
 
 let srv, db, boardId;
 before(async () => {
@@ -354,4 +355,35 @@ test("meaning-clusters route: carves deterministically, hands out distinct handl
   assert.equal(Number(t?.calls || 0), 0, "free: nothing embedded, nothing metered");
   const off = await req(srv.base, "GET", `/api/boards/${bC}/meaning-clusters?level=1`, { sid: member.sid });
   assert.equal(off.status, 404, "no embedder, no carving — like /api/search");
+});
+
+// ── the embedder as a resource (queue-by-resource-plan.md Stage 4b) ──────────
+
+test("rows already being embedded are withheld — a second tick must not pay for them twice", async () => {
+  // A row stops qualifying only when its VECTOR lands, so it stays due for the
+  // whole length of the call that is embedding it. The sweep this replaced ran
+  // one batch and awaited it, which is the only reason it could ask the same
+  // question twice for free.
+  const id = await insertTagged("still in flight");
+  const mine = (rows) => rows.some((r) => Number(r.id) === Number(id));
+  assert.ok(mine(await itemsNeedingEmbedding(db, EMBEDDER.model, 64)), "due before anything holds it");
+  assert.ok(!mine(await itemsNeedingEmbedding(db, EMBEDDER.model, 64, [id])),
+    "and withheld while this process is mid-call on it");
+  await setItemEmbedding(db, id, new Float32Array([1, 0]), EMBEDDER.model); // settle it for later reads
+});
+
+test("a paid embedder contends for its key; the on-device one contends for the box", async () => {
+  // The split that makes 4b safe. A keyed provider is counted at the WIRE, on
+  // the same string tagging on that key uses — one quota, one pool. The
+  // on-device model has no key at all, so it gets a class of its own, and the
+  // ceiling there is 1 because it is one model in one process.
+  assert.equal(embedResource(EMBEDDER), aiKeyBucket("openai", "k"),
+    "a paid embedder buckets exactly as the rate limiter does");
+  assert.equal(maxFor(embedResource(EMBEDDER)), 8, "and draws on the key's ordinary ceiling");
+
+  assert.equal(PROVIDERS.local.onDevice, true, "the built-in embedder runs in-process");
+  assert.equal(embedResource({ provider: "local", apiKey: null }), "local:local");
+  assert.equal(maxFor("local:local"), 1, "one model, one batch at a time");
+  assert.notEqual(embedResource({ provider: "local" }), embedResource(EMBEDDER),
+    "two different pools, so a paid embedder is never capped by the on-device one");
 });

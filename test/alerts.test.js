@@ -16,8 +16,13 @@ import {
   encodeConditionF,
   evaluateItemAlerts,
   deliverDueAlerts,
+  createDueFirings,
+  deliverFiring,
+  webhookBucket,
   buildFiringPayload,
 } from "../server/alerts.js";
+import { pendingWebhookFirings } from "../server/db.js";
+import { maxFor } from "../server/resource-pool.js";
 
 let srv, db, base, admin, boardId;
 
@@ -1000,3 +1005,52 @@ test("migration 0024 heals a pre-baseline alert by seeding today's matching set"
   await req(base, "PATCH", `/api/instances/${item.id}/tags`, { sid: admin.sid, body: { tags: ["kind/a", "color/blue"] } });
   assert.equal((await matchesOf(alert.id)).length, 0);
 });
+
+// ── delivery as a resource (queue-by-resource-plan.md Stage 4a) ──────────────
+// Sending was one sequential loop over every pending firing, so an alert to a
+// slow endpoint delayed every alert to every OTHER endpoint. Delivery is a kind
+// on the resource loop now, keyed by the receiving host.
+
+test("webhookBucket names the receiving host — two endpoints on one host are one resource", () => {
+  assert.equal(webhookBucket("https://hooks.example.com/services/abc"), "webhook:hooks.example.com");
+  assert.equal(
+    webhookBucket("https://hooks.example.com/services/abc"),
+    webhookBucket("https://hooks.example.com/a/completely/different/path"),
+    "same host, same patience — the path is not a second endpoint");
+  assert.notEqual(
+    webhookBucket("https://hooks.example.com/x"),
+    webhookBucket("https://hooks.other.com/x"),
+    "two hosts are two resources, which is the whole point of the stage");
+  assert.equal(webhookBucket("port 25"), null, "an unparseable URL contends for nothing");
+  // Small, and not for our sake: the endpoint belongs to somebody else.
+  assert.equal(maxFor("webhook:hooks.example.com"), 2);
+});
+
+test("a delivery already in flight is not handed out again — the at-least-once window", async () => {
+  // Send-then-stamp means the row stays `pending` for the whole send. The old
+  // sweep re-read it safely because only one send ever existed; a loop that
+  // launches without awaiting would post it twice, and this exclusion is the
+  // only thing between those two facts.
+  const alert = await makeAlert({ name: "in-flight", condition: { color: ["blue"] }, webhook_url: hookUrl });
+  await taggedEntity(["color/blue"]);
+  await backdate(alert.id, 120000);
+  await createDueFirings(db);
+  const [firing] = await firingsOf(alert.id);
+  assert.equal(firing.webhook_status, "pending", "created, owed a webhook, not yet sent");
+
+  const now = Date.now();
+  const due = await pendingWebhookFirings(db, now, 10);
+  assert.deepEqual(due.map((f) => Number(f.id)), [Number(firing.id)],
+    "due while it is still pending — that is what makes at-least-once work");
+  assert.deepEqual(
+    await pendingWebhookFirings(db, now, 10, [firing.id]),
+    [],
+    "and withheld while this process is already sending it");
+
+  // Deliver it for real so the row settles and the file's later reads are clean.
+  // The JOINed row is what carries the URL and the secret, which is why the kind
+  // hands `run` exactly what `due` returned rather than re-reading the firing.
+  await deliverFiring(db, due[0]);
+  assert.equal((await firingsOf(alert.id))[0].webhook_status, "ok");
+});
+

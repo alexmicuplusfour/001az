@@ -12,7 +12,7 @@
 import { getConnector } from "../connectors/index.js";
 import { addConnectorEntity } from "../connectors/add.js";
 import { recordIngest } from "../db.js";
-import { SAFETY_CAP, cacheTtl, readWindow, writeWindow, resetWindow, ageWindow } from "./window-cache.js";
+import { singleFlight, SAFETY_CAP, cacheTtl, readWindow, writeWindow, resetWindow, ageWindow } from "./window-cache.js";
 
 // Browse column kinds are display vocabulary (usd/percent drive client
 // formatting); the filter engine only knows text/number/date.
@@ -123,13 +123,8 @@ const WINDOW_MAX_MS = 6 * 60 * 60 * 1000;
 // the window past the TTL rather than re-walking (`extend`, in enumerate).
 // Everyone else keeps the clock.
 const windowCache = new Map();
-// In-flight fills, keyed like the cache. The cache alone only helps callers
-// who arrive AFTER a walk finishes; concurrent ones (a preview click while
-// the sweep is mid-run, two people on the same board) each used to walk the
-// whole catalog and then race to write the same key. That was 4 requests
-// apiece when the window was rationed to 1000 rows and is ~74 now that it
-// reaches all of CoinGecko — so the second walk is the expensive one to not
-// make. Same single-flight the FMP screener uses, for the same reason.
+// In-flight fills, keyed like the cache — see singleFlight in window-cache.js
+// for why the second concurrent walk is the expensive one to not make.
 const windowFlights = new Map();
 
 // When can the walk stop early? Only when stopping is a PROOF, never when it is
@@ -170,8 +165,8 @@ function exhaustedBy(cfg, sortBy, order, provider) {
 }
 
 // One catalog walk, page by page, into the cache. Split out of `enumerate` so
-// the flight bookkeeping around it stays three readable lines and the body
-// keeps its own scope.
+// the single-flight around it stays one readable line and the body keeps its
+// own scope.
 async function fillWindow(db, conn, { ck, cap, sortBy, order, ttl, pageSize, stop }) {
   const startedAt = Date.now();
   const seen = new Set();
@@ -331,16 +326,8 @@ export function feedAdapter(conn) {
       // sees a catalog no older than the TTL.
       const hit = readWindow(windowCache, ck, { ttl, hold: drain ? WINDOW_MAX_MS : 0 });
       if (hit) return hit;
-      // Join a walk already in progress rather than starting a second one.
-      const flight = windowFlights.get(ck);
-      if (flight) return flight;
-
-      // Released on settle either way: a failed walk must not wedge the key,
-      // and a successful one is served from the cache from here on.
-      const walk = fillWindow(db, conn, { ck, cap, sortBy, order, ttl, pageSize: pageSizeFor(active.provider), stop })
-        .finally(() => windowFlights.delete(ck));
-      windowFlights.set(ck, walk);
-      return walk;
+      return singleFlight(windowFlights, ck, () =>
+        fillWindow(db, conn, { ck, cap, sortBy, order, ttl, pageSize: pageSizeFor(active.provider), stop }));
     },
 
     // Warm the provider's quote cache for a batch about to be admitted, in one

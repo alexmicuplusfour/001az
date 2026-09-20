@@ -92,6 +92,29 @@ export function writeWindow(cache, key, ttl, result, startedAt = Date.now()) {
   return result;
 }
 
+// Join a walk already in progress rather than starting a second one. The cache
+// above only helps callers who arrive AFTER a walk finishes; concurrent ones —
+// a preview click while the sweep is mid-run, two boards due on one connection
+// in the same tick — each walked the whole source and then raced to write the
+// same key. That is ~74 paced requests apiece for a CoinGecko catalog and a
+// whole bucket listing apiece for S3, so the second walk is the expensive one
+// to not make.
+//
+// `flights` is the caller's own Map, keyed exactly like its cache. Released on
+// settle either way: a failed walk must not wedge the key, and a successful one
+// is served from the cache from here on. Lived as a private copy in the
+// connector adapter until the file adapter needed the same three lines
+// (queue-by-resource-plan.md Stage 6 — the sweep runs boards concurrently now,
+// so two on one connection can actually collide); the FMP screener keeps its
+// own, which clears on failure only and replaces its whole cache on success.
+export function singleFlight(flights, key, walk) {
+  const flight = flights.get(key);
+  if (flight) return flight;
+  const p = walk().finally(() => flights.delete(key));
+  flights.set(key, p);
+  return p;
+}
+
 // Test seams (house convention: provider-pacing's _resetBuckets, FMP's
 // _ageScreenerCache). Aging lets a test cross a TTL or a hold without waiting
 // either out; both know the entry's two timestamps, so both live here.

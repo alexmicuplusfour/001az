@@ -18,7 +18,7 @@ import {
   supersedeFacetDiagnostics,
   setBoardNextRun,
   itemsNeedingEmbedding,
-  oneAudioNeedingTranscription,
+  audioNeedingTranscription,
   setItemEmbedding,
   setItemEmbedError,
   getEntity,
@@ -45,6 +45,7 @@ import {
   markInterruptedJobs,
   pruneJobLog,
   pruneUsageMeter,
+  pendingWebhookFirings,
   requeueItemForTag,
   advanceFaced,
   advanceFetched,
@@ -63,15 +64,17 @@ import { meterAiCall, meterAiCalls, spentDetail } from "./metering.js";
 import { learnPrices } from "./price-learner.js";
 import { wantedGeneration } from "./pricing.js";
 import { resolveIngestAdapter, ingestMode, nextScheduledIngestRun, RUN_CAP, CONTINUOUS_MS } from "./ingestion/index.js";
-import { evaluateItemAlerts, deliverDueAlerts } from "./alerts.js";
-import { facetStamp, diagnoseDue } from "./facet-diagnosis.js";
+import { evaluateItemAlerts, createDueFirings, deliverFiring, webhookBucket } from "./alerts.js";
+import { facetStamp, diagnoseCandidates, diagnoseAnswer } from "./facet-diagnosis.js";
 import { applyLimit, runWindow } from "./ingestion/filter-engine.js";
-import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS } from "./providers.js";
+import { callTagger, embedTexts, transcribeAudio, detectObjects, PROVIDERS, aiKeyBucket } from "./providers.js";
+import { wait as poolWait, release as poolRelease, backoff, maxFor } from "./resource-pool.js";
+import { runKinds } from "./resource-loop.js";
 import { sidecarUrl } from "./sidecar-catalog.js";
 import { pluginState } from "./plugins.js";
 import { resolveCapability, capabilityConfig } from "./capability-resolve.js";
 import { getConnector, prefetchDueRefreshes, prefetchClaimedFetches } from "./connectors/index.js";
-import { entityRefreshAt, faceSchedule, firstRefreshAt } from "./connectors/runtime.js";
+import { entityRefreshAt, faceSchedule, firstRefreshAt, activeProvider } from "./connectors/runtime.js";
 import { connectorLanding, fetchProjectedEntity } from "./connectors/add.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
@@ -675,13 +678,96 @@ async function getBoardPrompt(db, boardId, scope = null) {
   return entry;
 }
 
+// What a board's work on a given leg CONTENDS FOR — the resource string the
+// concurrency pool and the rate limiter both key on (queue-by-resource-plan.md
+// Stage 2). Per BOARD, not per item: the key is a property of the board, and
+// resolving it here is strictly cheaper than today's per-item resolveCapability
+// inside tagOne (which has no cache at all).
+//
+// NULL MEANS UNCONSTRAINED, never unclaimable. The two questions — "can this run
+// at all" and "what does it contend for" — do not collapse, and the claim query
+// answers the first on its own. A face item on a board with no connector
+// resolves to null here and must still claim: it renders nothing and advances,
+// which is real work that completes.
+//
+// aiKeyBucket is IMPORTED, not re-spelled, so the pool and the pacing bucket can
+// never bound two different things under one name. extract resolves through its
+// own capability, which falls through to the board's tagger when unpinned — so a
+// board that pins neither has one resource for both legs, which is the truth:
+// one key, one quota.
+const boardResourceCache = new Map(); // boardId -> { [leg]: string|null }
+
+export async function boardResource(db, leg, board) {
+  if (!board) return null;
+  const hit = boardResourceCache.get(board.id);
+  if (hit && leg in hit) return hit[leg];
+  let resource = null;
+  // Which kind of leg this is comes from the capability REGISTRY, not a list
+  // kept here. `tag`, `extract` and `transcribe` name capabilities and resolve
+  // through one; `face`, `fetch` and `refresh` name connector work and contend
+  // for the connector's active provider. Derived because the hand-kept version
+  // was a deny-list of the connector legs, and `refresh` — added in Stage 5,
+  // months after the list — fell through to the capability branch, asked
+  // resolveCapability for a capability that does not exist, and got back a
+  // silent null. Null means UNCONSTRAINED, so every due entity launched every
+  // tick and the pool (with the provider backoff sitting in it) was never
+  // consulted at all.
+  if (CAPABILITY[leg]) {
+    const b = await resolveCapability(db, leg, { board });
+    // The presence-gated floor is an on-box engine rather than a quota, so it
+    // wears the `sidecar:` name its own wire waits on — the same string, which is
+    // the whole discipline here. A keyed provider buckets per account,
+    // keyless-networked per provider (aiKeyBucket's own "nokey" rung), and an
+    // on-device one has no quota to contend for at all.
+    if (b?.viaFloor && leg === "transcribe") resource = WHISPER_RESOURCE;
+    else if (b && !PROVIDERS[b.provider]?.onDevice) resource = aiKeyBucket(b.provider, b.apiKey);
+  } else {
+    const name = board.mapping?.input?.connector;
+    const conn = name ? getConnector(name) : null;
+    // activeProvider THROWS when every provider of the domain is uninstalled.
+    // That is a configuration gap, not a resource — the leg still runs and
+    // degrades (processFaceOne renders nothing and advances), so it must not
+    // become an exception in the dispatcher.
+    if (conn) {
+      try { resource = `conn:${(await activeProvider(db, conn)).name}`; }
+      catch { resource = null; }
+    }
+  }
+  boardResourceCache.set(board.id, { ...(hit || {}), [leg]: resource });
+  return resource;
+}
+
+// The same answer from a board ID, which is what every caller actually holds.
+// The cache is consulted BEFORE the board is read, so a board already seen costs
+// nothing at all — without this the row read happened on every hit and the cache
+// only ever saved the capability resolution. That matters most to the sweeps,
+// which resolve every unit they enumerate including the ones they then drop.
+export async function boardResourceFor(db, leg, boardId) {
+  if (!boardId) return null;
+  const hit = boardResourceCache.get(boardId);
+  if (hit && leg in hit) return hit[leg];
+  return boardResource(db, leg, await getBoard(db, boardId));
+}
+
+// What the app's embedder contends for — app-GLOBAL, unlike boardResource: one
+// embedder serves every board. A keyed provider buckets by account, the same
+// string tagging on that key uses (one quota); an on-device one buckets by the
+// box, the `local:` class whose one-of-a-kind rule is written at resource-pool.js.
+// Not folded into boardResource: on-device returns null there on purpose, since
+// nothing would HOLD a `local:` slot for a tag leg — here the sweep's `run` does.
+export const embedResource = (e) => (PROVIDERS[e.provider]?.onDevice
+  ? `local:${e.provider}`
+  : aiKeyBucket(e.provider, e.apiKey));
+
 // One delete drops every scope variant — see the nesting note above.
 export function invalidateBoardCache(boardId) {
   boardPromptCache.delete(boardId);
+  boardResourceCache.delete(boardId);
 }
 
 export function invalidateAllBoardCaches() {
   boardPromptCache.clear();
+  boardResourceCache.clear();
 }
 
 // Embed one batch of rows (itemsNeedingEmbedding shape), isolating poison
@@ -899,6 +985,11 @@ export async function generateFace(db, { galleryDir, thumbsDir }, entity, inst, 
 //    (visual reading is what those models are for; the caller decides).
 // Exported for tests; the worker binds galleryDir at the call sites.
 const EXTRACTOR_URL = process.env.EXTRACTOR_URL || "http://extractor:3002";
+// The sidecars' resource names, in the pool's `sidecar:` class (max 1 — each is
+// genuinely single-threaded, so a second caller waits at the socket either way).
+// Named constants because each is spelled at a wait and a release, and a typo
+// between the two would leak a slot forever rather than fail.
+const EXTRACTOR_RESOURCE = "sidecar:extractor";
 // Generous by design: the sidecar is single-threaded, so with the extract
 // claims fanned in, a request can legitimately sit behind ~3 OCR jobs
 // (~40 s+ each). A budget that doesn't cover that queue manufactures
@@ -925,6 +1016,11 @@ const TRANSCRIBER_HTTP_TIMEOUT_MS = Number(process.env.TRANSCRIBER_HTTP_TIMEOUT_
 // attempt re-joins or restarts it; the sidecar's own watchdog restarts a truly
 // frozen model). Covers the pre-segment decode+VAD phase of a long clip too.
 const TRANSCRIBER_STALL_MS = Number(process.env.TRANSCRIBER_STALL_MS) || 900000;
+// The whisper sidecar's pool name — same `sidecar:` class as the extractor and
+// detector, same reason for a named constant: it is spelled at a wait, a
+// release, a backoff and boardResource, and a typo between any two of them would
+// leak a slot forever rather than fail.
+const WHISPER_RESOURCE = "sidecar:whisper";
 
 // What a sidecar reports about itself — its model, its baked list, its address
 // — lives in ./sidecar-catalog.js, generic over any descriptor that declares
@@ -962,112 +1058,131 @@ function whisperTranscriber(binding) {
     // for interactive callers like the admin probe, not the worker loop.
     // opts.stallMs: test override for the no-progress window.
     async transcribe(buf, _filename, { deadlineMs = 0, stallMs = TRANSCRIBER_STALL_MS } = {}) {
-      const started = Date.now();
-      let sub;
+      // The sidecar is one model on one box, so the worker runs ONE clip at a time
+      // through it — and the slot is rightly held for minutes, because the sidecar
+      // is busy for every one of them. Six exits below (five throws and the
+      // return) are why this is a `finally` and not a release per path.
+      //
+      // `deadlineMs` marks an interactive caller — today the admin probe — and such
+      // a caller never queues here. It cannot: the deadline is measured from
+      // inside this function, so a probe parked in `wait` behind a twenty-minute
+      // clip would blow its whole budget without once checking it. It submits
+      // instead, the sidecar queues it alongside (submission is async: 202 + a
+      // job id, nothing serializes at the socket), and the deadline below reports
+      // "transcriber busy" exactly as it does today. So the pool here counts the
+      // clips the WORKER has in flight, which is the number that sizes its claims.
+      const pooled = !deadlineMs;
+      if (pooled) await poolWait(WHISPER_RESOURCE);
       try {
-        // The model rides the submit when one is pinned; absent = the
-        // sidecar's own default. An image that predates the axis ignores the
-        // parameter and self-reports what it actually ran, so the job log
-        // still stamps the truth.
-        const url = `${base}/transcribe${binding.model ? `?model=${encodeURIComponent(binding.model)}` : ""}`;
-        sub = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/octet-stream" },
-          body: buf,
-          // covers shipping a 500MB body across the compose network, not the job
-          signal: AbortSignal.timeout(Math.max(TRANSCRIBER_HTTP_TIMEOUT_MS, 120000)),
-        });
-      } catch (e) {
-        const err = new Error(`transcriber unreachable (${e.message}) — will retry`);
-        err.transient = true;
-        throw err;
-      }
-      if (!sub.ok) {
-        // 503 = queue full (lane-wide, transient via 5xx); 422 = bad input.
-        // The body names the reason when the sidecar sent one, so the probe's
-        // toast and the job log say WHY, not just the number.
-        let detail = "";
-        try { detail = String((await sub.json())?.error || ""); } catch {}
-        const e = new Error(`transcriber failed (HTTP ${sub.status})${detail ? `: ${detail}` : ""}`);
-        e.status = sub.status;
-        // A model this image didn't bake (409; older images say 422 with the
-        // same words) means the pinned model and the pulled tag disagree — the
-        // clip is innocent. Lane backoff, like an unwell sidecar: fixing the
-        // pin or the tag revives everything, where parking would turn a config
-        // skew into permanent data loss (the noCount rule's logic).
-        if (sub.status === 409 || /not baked/.test(detail)) e.transient = true;
-        throw e;
-      }
-      const jobId = (await sub.json()).job;
-      // Poll until settled: immediately once (tiny probes finish in seconds),
-      // then backing off 250ms → 30s. Network blips mid-poll are tolerated for
-      // a few rounds — the job keeps running through them.
-      let lastDone = -1, lastAdvance = Date.now(), pollFailures = 0, delay = 0;
-      for (;;) {
-        if (delay) await sleep(delay);
-        delay = Math.min(delay ? delay * 2 : 250, 30000);
-        if (deadlineMs && Date.now() - started > deadlineMs) {
-          const e = new Error("transcriber busy — a longer job holds the queue");
-          e.transient = true;
-          e.scope = "job";
-          throw e;
-        }
-        let res;
+        const started = Date.now();
+        let sub;
         try {
-          res = await fetch(`${base}/jobs/${jobId}`, { signal: AbortSignal.timeout(TRANSCRIBER_HTTP_TIMEOUT_MS) });
+          // The model rides the submit when one is pinned; absent = the
+          // sidecar's own default. An image that predates the axis ignores the
+          // parameter and self-reports what it actually ran, so the job log
+          // still stamps the truth.
+          const url = `${base}/transcribe${binding.model ? `?model=${encodeURIComponent(binding.model)}` : ""}`;
+          sub = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: buf,
+            // covers shipping a 500MB body across the compose network, not the job
+            signal: AbortSignal.timeout(Math.max(TRANSCRIBER_HTTP_TIMEOUT_MS, 120000)),
+          });
         } catch (e) {
-          if (++pollFailures < 5) continue;
-          const err = new Error(`transcriber unreachable mid-job (${e.message}) — will retry`);
+          const err = new Error(`transcriber unreachable (${e.message}) — will retry`);
           err.transient = true;
           throw err;
         }
-        pollFailures = 0;
-        if (res.status === 404) {
-          // The sidecar restarted (jobs are in-memory) — resubmitting on the
-          // next attempt is the recovery, and the content hash dedupes it.
-          const e = new Error("transcriber lost the job (restarted?) — will retry");
-          e.transient = true;
-          e.scope = "job";
+        if (!sub.ok) {
+          // 503 = queue full (lane-wide, transient via 5xx); 422 = bad input.
+          // The body names the reason when the sidecar sent one, so the probe's
+          // toast and the job log say WHY, not just the number.
+          let detail = "";
+          try { detail = String((await sub.json())?.error || ""); } catch {}
+          const e = new Error(`transcriber failed (HTTP ${sub.status})${detail ? `: ${detail}` : ""}`);
+          e.status = sub.status;
+          // A model this image didn't bake (409; older images say 422 with the
+          // same words) means the pinned model and the pulled tag disagree — the
+          // clip is innocent. Lane backoff, like an unwell sidecar: fixing the
+          // pin or the tag revives everything, where parking would turn a config
+          // skew into permanent data loss (the noCount rule's logic).
+          if (sub.status === 409 || /not baked/.test(detail)) e.transient = true;
           throw e;
         }
-        if (!res.ok) {
-          const e = new Error(`transcriber failed (HTTP ${res.status})`);
-          e.status = res.status;
-          e.scope = "job";
-          throw e;
+        const jobId = (await sub.json()).job;
+        // Poll until settled: immediately once (tiny probes finish in seconds),
+        // then backing off 250ms → 30s. Network blips mid-poll are tolerated for
+        // a few rounds — the job keeps running through them.
+        let lastDone = -1, lastAdvance = Date.now(), pollFailures = 0, delay = 0;
+        for (;;) {
+          if (delay) await sleep(delay);
+          delay = Math.min(delay ? delay * 2 : 250, 30000);
+          if (deadlineMs && Date.now() - started > deadlineMs) {
+            const e = new Error("transcriber busy — a longer job holds the queue");
+            e.transient = true;
+            e.scope = "job";
+            throw e;
+          }
+          let res;
+          try {
+            res = await fetch(`${base}/jobs/${jobId}`, { signal: AbortSignal.timeout(TRANSCRIBER_HTTP_TIMEOUT_MS) });
+          } catch (e) {
+            if (++pollFailures < 5) continue;
+            const err = new Error(`transcriber unreachable mid-job (${e.message}) — will retry`);
+            err.transient = true;
+            throw err;
+          }
+          pollFailures = 0;
+          if (res.status === 404) {
+            // The sidecar restarted (jobs are in-memory) — resubmitting on the
+            // next attempt is the recovery, and the content hash dedupes it.
+            const e = new Error("transcriber lost the job (restarted?) — will retry");
+            e.transient = true;
+            e.scope = "job";
+            throw e;
+          }
+          if (!res.ok) {
+            const e = new Error(`transcriber failed (HTTP ${res.status})`);
+            e.status = res.status;
+            e.scope = "job";
+            throw e;
+          }
+          const job = await res.json();
+          if (job.status === "done") {
+            if (job.model) model = job.model;
+            // turns: per-segment { start, end, text, speaker? } — [] = structure
+            // produced, no speech; speaker is a relative slot ("S1") when the
+            // engine diarized, absent otherwise. null when the sidecar image
+            // predates turns — either image can ship first. `text` stays the
+            // canonical material; turns are seek/display structure.
+            return { text: job.text || "", turns: Array.isArray(job.turns) ? job.turns : null };
+          }
+          if (job.status === "failed") {
+            const e = new Error(`transcriber: ${job.error || "unknown failure"}`);
+            e.status = job.permanent ? 422 : 500; // permanent = undecodable input
+            e.scope = "job";
+            throw e;
+          }
+          // Liveness = the SUM of both phases' progress: diarized_s advances
+          // while the sidecar diarizes (done_s sits at 0 for many minutes on a
+          // long clip — it would otherwise trip the stall window), done_s takes
+          // over during ASR. Each is monotonic within a job, so any advance in
+          // either resets the clock; a pre-diarization sidecar sends neither
+          // field's sibling and the sum degrades to plain done_s.
+          const done = (Number(job.progress?.done_s) || 0) + (Number(job.progress?.diarized_s) || 0);
+          if (done > lastDone) {
+            lastDone = done;
+            lastAdvance = Date.now();
+          } else if (Date.now() - lastAdvance > stallMs) {
+            const e = new Error(`transcriber stalled (no progress in ${Math.round(stallMs / 60000)}m) — will retry`);
+            e.transient = true;
+            e.scope = "job";
+            throw e;
+          }
         }
-        const job = await res.json();
-        if (job.status === "done") {
-          if (job.model) model = job.model;
-          // turns: per-segment { start, end, text, speaker? } — [] = structure
-          // produced, no speech; speaker is a relative slot ("S1") when the
-          // engine diarized, absent otherwise. null when the sidecar image
-          // predates turns — either image can ship first. `text` stays the
-          // canonical material; turns are seek/display structure.
-          return { text: job.text || "", turns: Array.isArray(job.turns) ? job.turns : null };
-        }
-        if (job.status === "failed") {
-          const e = new Error(`transcriber: ${job.error || "unknown failure"}`);
-          e.status = job.permanent ? 422 : 500; // permanent = undecodable input
-          e.scope = "job";
-          throw e;
-        }
-        // Liveness = the SUM of both phases' progress: diarized_s advances
-        // while the sidecar diarizes (done_s sits at 0 for many minutes on a
-        // long clip — it would otherwise trip the stall window), done_s takes
-        // over during ASR. Each is monotonic within a job, so any advance in
-        // either resets the clock; a pre-diarization sidecar sends neither
-        // field's sibling and the sum degrades to plain done_s.
-        const done = (Number(job.progress?.done_s) || 0) + (Number(job.progress?.diarized_s) || 0);
-        if (done > lastDone) {
-          lastDone = done;
-          lastAdvance = Date.now();
-        } else if (Date.now() - lastAdvance > stallMs) {
-          const e = new Error(`transcriber stalled (no progress in ${Math.round(stallMs / 60000)}m) — will retry`);
-          e.transient = true;
-          e.scope = "job";
-          throw e;
-        }
+      } finally {
+        if (pooled) poolRelease(WHISPER_RESOURCE);
       }
     },
   };
@@ -1281,6 +1396,7 @@ export async function transcribeOne(db, galleryDir, row, retry) {
 // others (the sidecar is single-threaded) plus a cold model load can run longer,
 // so keep it generous like the extractor.
 const OBJECT_DETECTOR_TIMEOUT_MS = Number(process.env.OBJECT_DETECTOR_TIMEOUT_MS) || 180000;
+const DETECTOR_RESOURCE = "sidecar:detector";
 
 // The on-server object-detector sidecar wrapped as an interchangeable engine
 // { id, model, detect } — the peer of whisperTranscriber(). POSTs the ORIGINAL
@@ -1296,6 +1412,10 @@ function objectDetectorSidecar(binding, threshold) {
     id: binding.provider,
     model: binding.model, // the sidecar's baked default
     detect: async (image, queries) => {
+      // Single-threaded sidecar, same argument as the extractor — and the same
+      // finally, because three of the four exits below are throws.
+      await poolWait(DETECTOR_RESOURCE);
+      try {
       let res;
       try {
         res = await fetch(`${base}/detect`, {
@@ -1325,6 +1445,9 @@ function objectDetectorSidecar(binding, threshold) {
       // report and says so rather than reporting zeros. The caller meters the
       // image it sent, which is the unit this engine's $0 price is quoted in.
       return { objects: Array.isArray(objects) ? objects : [], usage: {} };
+      } finally {
+        poolRelease(DETECTOR_RESOURCE);
+      }
     },
   };
 }
@@ -1446,8 +1569,10 @@ const DETECT_MAX_EDGE = 1333;
 // a truly bad image still reaches the sidecar and 422-parks there (see #detect).
 export async function imageForDetection(buf) {
   try {
-    // Through the shared decode gate: this runs at EXTRACT_CONCURRENCY (2) and
-    // used to decode up to 40MP ungated, concurrent with gated ingest decodes.
+    // Through the shared decode gate: detection decodes run as wide as the extract
+    // leg claims, and used to decode up to 40MP ungated, concurrent with gated
+    // ingest decodes. sharpGate is what bounds the CPU here; the resource pool
+    // bounds the CALLS, which is a different thing and does not cover this.
     return await sharpGate(() =>
       sharp(buf, { pages: 1, limitInputPixels: MAX_DECODE_PIXELS })
         .rotate()
@@ -1483,19 +1608,31 @@ export function clipText(text, max = TEXT_DOC_MAX_CHARS) {
 export async function documentTextFor(galleryDir, file) {
   if (file.kind === "pdf") {
     const buf = await fs.promises.readFile(path.join(galleryDir, file.name));
-    let res;
+    // The extractor is a single-threaded Python server: a second request does
+    // not run, it waits at the socket. Waiting HERE instead makes that visible
+    // to the pool, and the wait is released before the model call this text
+    // feeds — the leg touches the two resources in sequence, never nested.
+    await poolWait(EXTRACTOR_RESOURCE);
     try {
-      res = await fetch(`${EXTRACTOR_URL}/extract`, {
-        method: "POST",
-        headers: { "Content-Type": "application/pdf" },
-        body: buf,
-        signal: AbortSignal.timeout(EXTRACTOR_TIMEOUT_MS),
-      });
-    } catch (e) {
-      throw new Error(`extractor unreachable (${e.message}) — will retry`);
+      let res;
+      try {
+        res = await fetch(`${EXTRACTOR_URL}/extract`, {
+          method: "POST",
+          headers: { "Content-Type": "application/pdf" },
+          body: buf,
+          signal: AbortSignal.timeout(EXTRACTOR_TIMEOUT_MS),
+        });
+      } catch (e) {
+        throw new Error(`extractor unreachable (${e.message}) — will retry`);
+      }
+      if (!res.ok) throw new Error(`extractor failed (HTTP ${res.status}) — will retry`);
+      return (await res.json()).markdown || "";
+    } finally {
+      // Three exits from this branch — unreachable, non-OK, and the read.
+      // Releasing on only the happy one leaks the sidecar's single slot on
+      // every failure, which is the shape that wedges a pool permanently.
+      poolRelease(EXTRACTOR_RESOURCE);
     }
-    if (!res.ok) throw new Error(`extractor failed (HTTP ${res.status}) — will retry`);
-    return (await res.json()).markdown || "";
   }
   if (file.kind === "docx") {
     const html = await fs.promises.readFile(path.join(galleryDir, file.name + ".html"), "utf8").catch(() => "");
@@ -1670,8 +1807,9 @@ export async function modelInputForExtract(galleryDir, payload) {
 // is never handed out twice. The latest derivation wins the display name —
 // identity can be anything (a name, a code, a date), so no cased heuristics.
 //
-// Concurrency: extraction runs EXTRACT_CONCURRENCY-wide and classify mode funnels
-// many items to the same candidate, so a sibling extraction can claim `key`
+// Concurrency: extraction runs as wide as its board's key has room for (Stage 3b
+// widened this from a flat 2) and classify mode funnels many items to the same
+// candidate, so a sibling extraction can claim `key`
 // between our lookup and our write — the unique (board_id, identity) index then
 // throws 23505. We recover by adopting the winner, so a race MERGES into it
 // instead of throwing the leg into a requeue. Module-level (exported) so the
@@ -1715,19 +1853,17 @@ export async function resolveIdentity(db, boardId, key, display, reusable, resol
 
 export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBackup = null, sampleStorage = null }) {
   const POLL_MS = Number(process.env.POLL_MS || 3000);
-  // The diagnose loop's own cadence. Its settle gate is ten minutes wide, so
-  // ticking it at POLL_MS would re-fail that gate two hundred times to no end.
+  // The diagnose kind's own cadence, and it paces SPEND as much as scanning: its
+  // settle gate is three minutes wide, and every facet it passes is a paid call.
   const DIAGNOSE_POLL_MS = Number(process.env.DIAGNOSE_POLL_MS || 60000);
   const STUCK_MS = Number(process.env.STUCK_MS || 180000);
   const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 3);
-  // Per-resource lanes (worker-rework Stage 1) replace the single global "4": AI
-  // in-flight is a memory/cost fuse (the provider RATE is the per-key token bucket in
-  // providers.js), the extractor sidecar is single-threaded so its lane is ≈1-2, and
-  // faces are light. TAG_CONCURRENCY stays as a deprecated alias for AI_INFLIGHT.
-  const AI_INFLIGHT = Math.max(1, Number(process.env.AI_INFLIGHT) || Number(process.env.TAG_CONCURRENCY) || 8);
-  const EXTRACT_CONCURRENCY = Math.max(1, Number(process.env.EXTRACT_CONCURRENCY) || 2);
-  const FACE_CONCURRENCY = Math.max(1, Number(process.env.FACE_CONCURRENCY) || 2);
-  const FETCH_CONCURRENCY = Math.max(1, Number(process.env.FETCH_CONCURRENCY) || 3);
+  // Concurrency is bounded per RESOURCE now (queue-by-resource-plan.md Stage 3b),
+  // so nothing here sizes a lane. `AI_INFLIGHT` (with its `TAG_CONCURRENCY` alias)
+  // and `FETCH_CONCURRENCY` survive as the pool's `ai:` and `conn:` class ceilings,
+  // read there by maxFor — same names, one place. `EXTRACT_CONCURRENCY` and
+  // `FACE_CONCURRENCY` are gone: extract contends for an AI KEY and face for a
+  // CONNECTOR, so once the lanes went neither name bounded anything.
 
   // Job-log rows still `running` were orphaned by the previous process (a
   // crash or stop mid-transcription/mid-ingest) — stamp them interrupted so
@@ -1863,40 +1999,6 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   }
 
-  // Embedding sweep: (re)vectorize tagged items with no current-model vector.
-  // This single path covers fresh tags (markTagged clears the vector), manual
-  // edits, turning the feature on late, and model changes — one batched API
-  // call per pass (embedBatch isolates poison inputs so one bad item can't
-  // wedge the backfill). Batch-level failures back off for a minute so a bad
-  // key or outage doesn't turn the poll loop into an API hammer. Driven by
-  // embedLoop (Stage 3); returns true after a FULL batch so the loop drains a
-  // backlog fast instead of one batch per tick.
-  const EMBED_BATCH = Math.max(1, Number(process.env.EMBED_BATCH) || 64);
-  let embedBackoffUntil = 0;
-  async function embedDue() {
-    if (Date.now() < embedBackoffUntil) return false;
-    const embedder = await resolveEmbedder(db);
-    if (!embedder) return false;
-    const rows = await itemsNeedingEmbedding(db, embedder.model, EMBED_BATCH);
-    if (!rows.length) return false;
-    try {
-      const { embedded, skipped } = await embedBatch(db, embedder, rows);
-      console.log(`embedded ${embedded} item(s)${skipped ? `, skipped ${skipped}` : ""} [${embedder.model}]`);
-      return rows.length === EMBED_BATCH; // full batch → more likely waiting, drain fast
-    } catch (err) {
-      embedBackoffUntil = Date.now() + 60000;
-      console.warn(`embed error (retrying in 60s): ${err.message}`);
-      return false;
-    }
-  }
-
-  // Liveness sweep: refresh entities whose live connector fields are due. Same
-  // bounded-batch + backoff discipline as embedDue so a provider outage can't
-  // turn the sweep into an API hammer. The per-entity work is refreshDueEntity
-  // (module scope, exported for tests).
-  const REFRESH_BATCH = Math.max(1, Number(process.env.REFRESH_BATCH) || 20);
-  let refreshBackoffUntil = 0;
-
   // History retention, checked hourly not per tick — the DELETEs are cheap but
   // there's no point running them every 3s. 0 disables a prune (keep forever).
   // ONE table, not one hand-written block per ledger: the old shape repeated
@@ -1985,269 +2087,249 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     priceLearnInFlight = learnPrices(db).finally(() => { priceLearnInFlight = null; });
   };
 
-  async function refreshDue() {
-    if (Date.now() < refreshBackoffUntil) return false;
-    const rows = await dueLiveEntities(db, Date.now(), REFRESH_BATCH);
-    // Warm provider quote caches for the whole batch first (one metered call
-    // per provider instead of one per entity — see prefetchDueRefreshes);
-    // the per-entity loop below is unchanged and pays retail on a cache miss.
-    if (rows.length > 1) await prefetchDueRefreshes(db, rows);
-    for (const row of rows) {
-      try {
-        await refreshDueEntity(db, row, Date.now(), DIRS);
-      } catch (err) {
-        refreshBackoffUntil = Date.now() + 60000;
-        await setEntityRefreshAt(db, row.entity.id, Date.now() + 60000); // retry later, don't wedge the sweep
-        console.warn(`refresh error entity #${row.entity.id} (retrying in 60s): ${err.message}`);
-        return false; // backed off — nothing to drain fast for
-      }
-    }
-    return rows.length === REFRESH_BATCH; // full batch → more may be due, drain fast
-  }
-
-  // Ingestion sweep: run due boards' feeds (the ingest loop's pass is the cron — a
-  // "continuous" folder watch is just a 30s rescan). Per board: enumerate the
+  // One feed run for one due board — the ingest kind's `run` (its tick is the
+  // cron: a "continuous" folder watch is just a 30s rescan). Enumerate the
   // source, drop everything ever ledgered (ingest_log — deletion in the app is
   // a user judgment the feed must not overturn), then filter/sort/limit with
   // the shared engine and admit through the adapter. Admissions are capped per
-  // tick; a bigger logical run drains across ticks with next_run_at=now,
-  // resuming from drain_left so the run's `limit` stays exact. Per-board
-  // failures land in ingest_state with a 5-minute backoff — never the loop.
-  async function ingestDue() {
-    let draining = false; // any board mid-run → the loop polls short instead of idling
-    for (const b of await dueIngestBoards(db, Date.now())) {
-      const cfg = b.ingest;
-      const now = Date.now();
-      // The stamp this tick claimed the board under IS this run's identity
-      // (job-control-plan.md Stage 5). Everything below is fenced on it, so
-      // whoever re-stamps mid-flight — a cancel, "Run now", a save that
-      // changes the trigger — stops this run where it stands instead of
-      // losing to it.
-      const fence = b.ingest_next_run_at;
-      // Not the schedule's run: a manual board, or a paused one that only got
-      // here because "Run now" armed it. Either way it's one run — nothing
-      // re-arms afterwards, nothing retries, and the row it leaves in the job
-      // log always stands (somebody asked, so "0 admitted" is the answer).
-      const oneShot = ingestMode(cfg) !== "scheduled";
-      // One run = one job-log row, `running` while the feed is enumerated and
-      // admitted — ingest has no other in-flight representation. ingest_state
-      // keeps only the LAST run; these rows are where the history lives.
-      const job = await openJob(db, {
-        boardId: b.id, kind: "ingest", startedAt: now,
-        detail: { trigger: cfg?.trigger?.mode || null },
-      });
-      try {
-        const adapter = resolveIngestAdapter(b);
-        if (!adapter) throw new Error("ingestion is not available for this board");
-        if (!sources) throw new Error("ingestion is not available (worker started without sources)");
-        const descriptor = adapter.descriptor();
-        const catalog = descriptor.filters;
-        // Budget: a drain tick resumes what's left of the current logical run
-        // instead of re-slicing a fresh limit (keeps "top-N" semantics exact).
-        // Read before enumerating: mid-drain is also what lets an adapter hold
-        // the window it is draining instead of re-walking a metered catalog per
-        // tick (`drain` — see connector.js).
-        const drainLeft = Number(b.ingest_state?.drain_left) || 0;
-        const { candidates } = await adapter.enumerate(db, b, cfg, { drain: drainLeft > 0 });
-        const known = await ingestedKeys(db, b.id);
-        // Membership vs admission — two different subtractions since stage 3
-        // (a user-deleted key backfills its `total` slot but never re-admits)
-        // — and both live in runWindow, shared with the preview route so a
-        // count and a run can never disagree. `fresh` arrives sorted, so
-        // order survives into the budget slice.
-        // `changed` is the adapter's own "has this slot stopped holding the
-        // bytes we recorded" (files.js); without it a reused path is
-        // invisible forever — the spool case.
-        const { fresh, tally } = runWindow(candidates, cfg, catalog, known,
-          { changed: adapter.changed });
-        const budget = drainLeft > 0 ? drainLeft : (Number(cfg.limit) || Infinity);
-        const picked = applyLimit(fresh, budget);
-        const batch = picked.slice(0, RUN_CAP(descriptor.runCap));
-        // One batched warm ahead of the per-item admissions; the economics and
-        // the best-effort contract live with it, in connector.js `prewarm`.
-        // Whether a batch is big enough to be worth batching is the runtime's
-        // call (runtime.warmIds), not this loop's.
-        if (adapter.prewarm && batch.length) await adapter.prewarm(db, b, batch);
-        let added = 0;
-        let dups = 0;
-        const errors = [];
-        const skips = []; // labels — the "why did my file never get picked up" answer
-        const held = []; // labels — recognized as content you deleted (stage 5)
-        let superseded = false;
-        let pausedMid = false; // held by the board's pause, NOT superseded
-        let processed = 0;     // candidates dealt with, however they went
-        // What this run still owes, published before the first admission so the
-        // Jobs modal can say "importing 0 of 200" the moment the row appears —
-        // `picked` is the logical run's remainder, `batch` only this tick's
-        // slice of it. Progress is then republished every few admissions: the
-        // modal polls at 5s, so anything finer is writes nobody reads.
-        const planned = picked.length;
-        await job.progress({ planned, admitted: 0 });
-        let sinceProgress = 0;
-        for (const c of batch) {
-          // Between admissions, not just between ticks: a connector batch is
-          // 250 admissions deep, so "after the batch" would still be a flood
-          // arriving after a cancel — or minutes of importing after a pause.
-          const gate = await ingestRunGate(db, b.id, fence);
-          if (!gate.armed) { superseded = true; break; }
-          if (gate.paused) { pausedMid = true; break; }
-          try {
-            await adapter.admit(db, b, c, { sources });
-            added++;
-          } catch (err) {
-            // duplicate (already on the board), skip (unsupported bytes) and
-            // held (stage 5: the bytes are something you deleted) are all
-            // ledger-and-forget: stop rescanning them. Real errors stay
-            // unledgered so the next run retries them. The reason stamped is
-            // what the history reads back — a corrupt file is not a rejection
-            // and a rejection is not a duplicate. `err.ledger` carries the
-            // slot's re-read facts (hash/size/mtime) where the bytes were
-            // actually read, which is what stops a merely-touched file from
-            // drifting and being re-fetched on every single tick; the sweep
-            // passes it through without looking inside, staying adapter-blind.
-            if (err.duplicate || err.skip || err.held) {
-              await recordIngest(db, b.id, c.key, Date.now(), {
-                ...(err.ledger || {}),
-                reason: err.skip ? "skipped" : err.held ? "deleted" : "admitted",
-                itemId: err.itemId ?? null,
-              });
-              if (err.skip) skips.push(c.label);
-              else if (err.held) held.push(c.label);
-              else dups++;
-            } else errors.push(`${c.label}: ${err.message}`);
-          }
-          processed++;
-          if (++sinceProgress >= 5) { sinceProgress = 0; await job.progress({ admitted: added }); }
-        }
-        // A superseded run has no remainder to hand on: whoever re-stamped
-        // decided what happens next, and drain_left is the budget of a run
-        // that is over. A PAUSED one is the opposite — it keeps every row it
-        // did not get to, which is what makes unpausing resume rather than
-        // restart. Counting what was PROCESSED rather than the batch length is
-        // what makes a mid-batch break honest in both cases.
-        const remaining = superseded ? 0 : picked.length - processed;
-        // Not while held: the board is out of dueIngestBoards until it comes
-        // back, so a fast drain poll would just spin on an empty answer.
-        if (remaining > 0 && !pausedMid) draining = true;
-        // A drain continues regardless of how the run started — it's already in
-        // flight and somebody asked for all of it. Otherwise only a live
-        // schedule re-arms (nextScheduledIngestRun owns that rule). The fence
-        // decides whether either lands: false = this run was superseded while
-        // it worked, and its state write dies with it.
-        const stopped = !(await settleIngestRun(db, b.id, fence, {
-          state: {
-            last_run_at: now,
-            last_added: added,
-            last_error: errors[0] ?? null,
-            ...(remaining > 0 ? { drain_left: remaining } : {}),
-          },
-          nextRunAt: remaining > 0
-            ? Date.now()
-            : nextScheduledIngestRun(cfg, Date.now(), { continuousMs: CONTINUOUS_MS() }),
-        }));
-        // A completed run is `ok` even with per-item errors (they're the run's
-        // findings, carried in error/skipped) — `failed` means the run itself
-        // died (the catch below). But an idle SCHEDULED scan (admitted
-        // nothing, ledgered nothing, erred nothing, nothing draining) is a
-        // flat tick, and a continuous watch flat-ticks every 30 seconds — the
-        // tag_snapshots volume lesson. Retract its running row instead of
-        // stamping it. A MANUAL run always keeps its row: the user asked, and
-        // "0 admitted" is the answer. Skips and duplicates COUNT as events:
-        // both ledger the file out of every future scan permanently, and the
-        // row naming it is the only trace that ever happened.
-        // Keys this run ledgered out of every future scan. Named once: the
-        // three predicates below all ask the same question, and a fourth
-        // disposition that updated only two of them would silently undo the
-        // volume guard they exist to enforce.
-        const ledgered = skips.length + dups + held.length;
-        // `stopped` counts as an event: the row is the trace of a run that
-        // ended early, and the cancel that ended it is looking for company.
-        const eventful = added > 0 || errors.length > 0 || remaining > 0 || ledgered > 0 || stopped;
-        if (!eventful && !oneShot && job.id != null) {
-          await jobLogWrite(() => deleteJobLog(db, job.id));
-        } else {
-          // A scan whose ONLY news is the same per-item error as the prior
-          // row's is a flat tick too (a wedged file on a continuous watch
-          // ≈ 2,880 rows/day) — fold it instead of stamping a fresh row.
-          const errorOnly = errors.length > 0 && !added && !ledgered && remaining === 0;
-          const prior = errorOnly && !oneShot && job.id != null
-            ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
-            : null;
-          // Compare the STORED form — addJobLog caps error at 500 chars.
-          const quiet = (d) => !Number(d?.admitted) && !Number(d?.skipped)
-            && !Number(d?.duplicates) && !Number(d?.held) && !Number(d?.drain_left);
-          const sameStory = prior?.outcome === "ok"
-            && prior.error === String(errors[0] ?? "").slice(0, 500) && quiet(prior.detail);
-          if (sameStory) {
-            await foldJobRepeat(db, prior, job.id, {
-              outcome: "ok", error: errors[0],
-              detail: { scanned: candidates.length, fresh: fresh.length },
+  // run; a bigger logical run drains across runs with next_run_at=now, resuming
+  // from drain_left so the run's `limit` stays exact — and because the settle
+  // re-arms the board as due, the kind's own settle-wake takes it straight back
+  // up. Per-board failures land in ingest_state with a 5-minute backoff and
+  // nowhere wider; backing off the PROVIDER is the wire's job (runtime.js
+  // callProvider), and it reaches a catalog walk exactly as it reaches a fetch.
+  async function ingestBoard(b) {
+    let added = 0; // admissions are claimable rows for the legs — see the finally
+    const cfg = b.ingest;
+    const now = Date.now();
+    // The stamp this run claimed the board under IS this run's identity
+    // (job-control-plan.md Stage 5). Everything below is fenced on it, so
+    // whoever re-stamps mid-flight — a cancel, "Run now", a save that
+    // changes the trigger — stops this run where it stands instead of
+    // losing to it.
+    const fence = b.ingest_next_run_at;
+    // Not the schedule's run: a manual board, or a paused one that only got
+    // here because "Run now" armed it. Either way it's one run — nothing
+    // re-arms afterwards, nothing retries, and the row it leaves in the job
+    // log always stands (somebody asked, so "0 admitted" is the answer).
+    const oneShot = ingestMode(cfg) !== "scheduled";
+    // One run = one job-log row, `running` while the feed is enumerated and
+    // admitted — ingest has no other in-flight representation. ingest_state
+    // keeps only the LAST run; these rows are where the history lives.
+    const job = await openJob(db, {
+      boardId: b.id, kind: "ingest", startedAt: now,
+      detail: { trigger: cfg?.trigger?.mode || null },
+    });
+    try {
+      const adapter = resolveIngestAdapter(b);
+      if (!adapter) throw new Error("ingestion is not available for this board");
+      if (!sources) throw new Error("ingestion is not available (worker started without sources)");
+      const descriptor = adapter.descriptor();
+      const catalog = descriptor.filters;
+      // Budget: a drain run resumes what's left of the current logical run
+      // instead of re-slicing a fresh limit (keeps "top-N" semantics exact).
+      // Read before enumerating: mid-drain is also what lets an adapter hold
+      // the window it is draining instead of re-walking a metered catalog per
+      // run (`drain` — see connector.js).
+      const drainLeft = Number(b.ingest_state?.drain_left) || 0;
+      const { candidates } = await adapter.enumerate(db, b, cfg, { drain: drainLeft > 0 });
+      const known = await ingestedKeys(db, b.id);
+      // Membership vs admission — two different subtractions since stage 3
+      // (a user-deleted key backfills its `total` slot but never re-admits)
+      // — and both live in runWindow, shared with the preview route so a
+      // count and a run can never disagree. `fresh` arrives sorted, so
+      // order survives into the budget slice.
+      // `changed` is the adapter's own "has this slot stopped holding the
+      // bytes we recorded" (files.js); without it a reused path is
+      // invisible forever — the spool case.
+      const { fresh, tally } = runWindow(candidates, cfg, catalog, known,
+        { changed: adapter.changed });
+      const budget = drainLeft > 0 ? drainLeft : (Number(cfg.limit) || Infinity);
+      const picked = applyLimit(fresh, budget);
+      const batch = picked.slice(0, RUN_CAP(descriptor.runCap));
+      // One batched warm ahead of the per-item admissions; the economics and
+      // the best-effort contract live with it, in connector.js `prewarm`.
+      // Whether a batch is big enough to be worth batching is the runtime's
+      // call (runtime.warmIds), not this run's.
+      if (adapter.prewarm && batch.length) await adapter.prewarm(db, b, batch);
+      let dups = 0;
+      const errors = [];
+      const skips = []; // labels — the "why did my file never get picked up" answer
+      const held = []; // labels — recognized as content you deleted (stage 5)
+      let superseded = false;
+      let pausedMid = false; // held by the board's pause, NOT superseded
+      let processed = 0;     // candidates dealt with, however they went
+      // What this run still owes, published before the first admission so the
+      // Jobs modal can say "importing 0 of 200" the moment the row appears —
+      // `picked` is the logical run's remainder, `batch` only this invocation's
+      // slice of it. Progress is then republished every few admissions: the
+      // modal polls at 5s, so anything finer is writes nobody reads.
+      const planned = picked.length;
+      await job.progress({ planned, admitted: 0 });
+      let sinceProgress = 0;
+      for (const c of batch) {
+        // Between admissions, not just between runs: a connector batch is
+        // 250 admissions deep, so "after the batch" would still be a flood
+        // arriving after a cancel — or minutes of importing after a pause.
+        const gate = await ingestRunGate(db, b.id, fence);
+        if (!gate.armed) { superseded = true; break; }
+        if (gate.paused) { pausedMid = true; break; }
+        try {
+          await adapter.admit(db, b, c, { sources });
+          added++;
+        } catch (err) {
+          // duplicate (already on the board), skip (unsupported bytes) and
+          // held (stage 5: the bytes are something you deleted) are all
+          // ledger-and-forget: stop rescanning them. Real errors stay
+          // unledgered so the next run retries them. The reason stamped is
+          // what the history reads back — a corrupt file is not a rejection
+          // and a rejection is not a duplicate. `err.ledger` carries the
+          // slot's re-read facts (hash/size/mtime) where the bytes were
+          // actually read, which is what stops a merely-touched file from
+          // drifting and being re-fetched on every single scan; the run
+          // passes it through without looking inside, staying adapter-blind.
+          if (err.duplicate || err.skip || err.held) {
+            await recordIngest(db, b.id, c.key, Date.now(), {
+              ...(err.ledger || {}),
+              reason: err.skip ? "skipped" : err.held ? "deleted" : "admitted",
+              itemId: err.itemId ?? null,
             });
-          } else {
-            await job.settle({
-              outcome: "ok", error: errors[0] ?? null,
-              detail: {
-                scanned: candidates.length, fresh: fresh.length, admitted: added,
-                skipped: skips.length, drain_left: remaining > 0 ? remaining : 0,
-                ...(skips.length ? { skipped_labels: skips.slice(0, 20) } : {}),
-                ...(dups ? { duplicates: dups } : {}),
-                // Recognized as content you deleted, under a name the ledger
-                // had never seen. An EVENT, unlike `ignored` below: it
-                // ledgers a new key permanently, so this row is its only
-                // trace — the same argument skips make.
-                ...(held.length ? { held: held.length, held_labels: held.slice(0, 20) } : {}),
-                // How many matches a user deletion is holding back. A
-                // STANDING number, not an event of this run — which is why
-                // it touches neither `eventful` above nor `sameStory`
-                // below: a continuous watch would otherwise stamp a fresh
-                // "1433 ignored" row every 30s, the volume lesson those two
-                // exist to prevent. It rides rows that earned their place
-                // some other way.
-                ...(tally.held ? { ignored: tally.held } : {}),
-                ...(stopped ? { stopped: true } : {}),
-              },
-            });
-          }
+            if (err.skip) skips.push(c.label);
+            else if (err.held) held.push(c.label);
+            else dups++;
+          } else errors.push(`${c.label}: ${err.message}`);
         }
-        if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
-      } catch (err) {
-        // Live schedules back off 5 minutes and retry; a one-shot run was asked
-        // for ONCE — its outcome is this error (visible in the modal status
-        // line), not a silent retry loop that runs forever until the source
-        // heals. "Run now" re-arms it whenever the user wants.
-        // One fenced write (Stage 5): the schedule and the error land
-        // together — last_error is what observers poll for, so everything it
-        // implies (disarmed/backed off) must already be true when it lands —
-        // and a run cancelled mid-failure doesn't get to re-arm its retry.
-        // The mid-drain budget is preserved across a failure: wiping it would
-        // hand the retry a fresh `limit` and over-admit the logical run.
-        const drainLeft = Number(b.ingest_state?.drain_left) || 0;
-        await settleIngestRun(db, b.id, fence, {
-          state: {
-            last_run_at: now,
-            last_added: 0,
-            last_error: err.message,
-            ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
-          },
-          nextRunAt: oneShot ? null : Date.now() + 5 * 60000,
-        }).catch(() => {});
-        // The same failure repeating on the retry cadence (a dead source =
-        // one row per 5-minute backoff) folds into its prior row; a hand-fired
-        // run was asked for, so its row always stands alone.
-        const prior = !oneShot && job.id != null
+        processed++;
+        if (++sinceProgress >= 5) { sinceProgress = 0; await job.progress({ admitted: added }); }
+      }
+      // A superseded run has no remainder to hand on: whoever re-stamped
+      // decided what happens next, and drain_left is the budget of a run
+      // that is over. A PAUSED one is the opposite — it keeps every row it
+      // did not get to, which is what makes unpausing resume rather than
+      // restart. Counting what was PROCESSED rather than the batch length is
+      // what makes a mid-batch break honest in both cases.
+      const remaining = superseded ? 0 : picked.length - processed;
+      // A drain continues regardless of how the run started — it's already in
+      // flight and somebody asked for all of it. Otherwise only a live
+      // schedule re-arms (nextScheduledIngestRun owns that rule). The fence
+      // decides whether either lands: false = this run was superseded while
+      // it worked, and its state write dies with it.
+      const stopped = !(await settleIngestRun(db, b.id, fence, {
+        state: {
+          last_run_at: now,
+          last_added: added,
+          last_error: errors[0] ?? null,
+          ...(remaining > 0 ? { drain_left: remaining } : {}),
+        },
+        nextRunAt: remaining > 0
+          ? Date.now()
+          : nextScheduledIngestRun(cfg, Date.now(), { continuousMs: CONTINUOUS_MS() }),
+      }));
+      // A completed run is `ok` even with per-item errors (they're the run's
+      // findings, carried in error/skipped) — `failed` means the run itself
+      // died (the catch below). But an idle SCHEDULED scan (admitted
+      // nothing, ledgered nothing, erred nothing, nothing draining) is a
+      // flat tick, and a continuous watch flat-ticks every 30 seconds — the
+      // tag_snapshots volume lesson. Retract its running row instead of
+      // stamping it. A MANUAL run always keeps its row: the user asked, and
+      // "0 admitted" is the answer. Skips and duplicates COUNT as events:
+      // both ledger the file out of every future scan permanently, and the
+      // row naming it is the only trace that ever happened.
+      // Keys this run ledgered out of every future scan. Named once: the
+      // three predicates below all ask the same question, and a fourth
+      // disposition that updated only two of them would silently undo the
+      // volume guard they exist to enforce.
+      const ledgered = skips.length + dups + held.length;
+      // `stopped` counts as an event: the row is the trace of a run that
+      // ended early, and the cancel that ended it is looking for company.
+      const eventful = added > 0 || errors.length > 0 || remaining > 0 || ledgered > 0 || stopped;
+      if (!eventful && !oneShot && job.id != null) {
+        await jobLogWrite(() => deleteJobLog(db, job.id));
+      } else {
+        // A scan whose ONLY news is the same per-item error as the prior
+        // row's is a flat tick too (a wedged file on a continuous watch
+        // ≈ 2,880 rows/day) — fold it instead of stamping a fresh row.
+        const errorOnly = errors.length > 0 && !added && !ledgered && remaining === 0;
+        const prior = errorOnly && !oneShot && job.id != null
           ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
           : null;
-        if (prior?.outcome === "failed" && prior.error === String(err.message).slice(0, 500)) {
-          await foldJobRepeat(db, prior, job.id, { outcome: "failed", error: err.message });
+        // Compare the STORED form — addJobLog caps error at 500 chars.
+        const quiet = (d) => !Number(d?.admitted) && !Number(d?.skipped)
+          && !Number(d?.duplicates) && !Number(d?.held) && !Number(d?.drain_left);
+        const sameStory = prior?.outcome === "ok"
+          && prior.error === String(errors[0] ?? "").slice(0, 500) && quiet(prior.detail);
+        if (sameStory) {
+          await foldJobRepeat(db, prior, job.id, {
+            outcome: "ok", error: errors[0],
+            detail: { scanned: candidates.length, fresh: fresh.length },
+          });
         } else {
-          await job.settle({ outcome: "failed", error: err.message });
+          await job.settle({
+            outcome: "ok", error: errors[0] ?? null,
+            detail: {
+              scanned: candidates.length, fresh: fresh.length, admitted: added,
+              skipped: skips.length, drain_left: remaining > 0 ? remaining : 0,
+              ...(skips.length ? { skipped_labels: skips.slice(0, 20) } : {}),
+              ...(dups ? { duplicates: dups } : {}),
+              // Recognized as content you deleted, under a name the ledger
+              // had never seen. An EVENT, unlike `ignored` below: it
+              // ledgers a new key permanently, so this row is its only
+              // trace — the same argument skips make.
+              ...(held.length ? { held: held.length, held_labels: held.slice(0, 20) } : {}),
+              // How many matches a user deletion is holding back. A
+              // STANDING number, not an event of this run — which is why
+              // it touches neither `eventful` above nor `sameStory`
+              // below: a continuous watch would otherwise stamp a fresh
+              // "1433 ignored" row every 30s, the volume lesson those two
+              // exist to prevent. It rides rows that earned their place
+              // some other way.
+              ...(tally.held ? { ignored: tally.held } : {}),
+              ...(stopped ? { stopped: true } : {}),
+            },
+          });
         }
-        console.warn(`ingest error board "${b.name}" (${oneShot ? "not retried" : "retrying in 5m"}): ${err.message}`);
       }
+      if (added) console.log(`ingest: board "${b.name}" +${added} item(s)${remaining ? ` (${remaining} to drain)` : ""}`);
+    } catch (err) {
+      // Live schedules back off 5 minutes and retry; a one-shot run was asked
+      // for ONCE — its outcome is this error (visible in the modal status
+      // line), not a silent retry loop that runs forever until the source
+      // heals. "Run now" re-arms it whenever the user wants.
+      // One fenced write (Stage 5): the schedule and the error land
+      // together — last_error is what observers poll for, so everything it
+      // implies (disarmed/backed off) must already be true when it lands —
+      // and a run cancelled mid-failure doesn't get to re-arm its retry.
+      // The mid-drain budget is preserved across a failure: wiping it would
+      // hand the retry a fresh `limit` and over-admit the logical run.
+      const drainLeft = Number(b.ingest_state?.drain_left) || 0;
+      await settleIngestRun(db, b.id, fence, {
+        state: {
+          last_run_at: now,
+          last_added: 0,
+          last_error: err.message,
+          ...(drainLeft > 0 ? { drain_left: drainLeft } : {}),
+        },
+        nextRunAt: oneShot ? null : Date.now() + 5 * 60000,
+      }).catch(() => {});
+      // The same failure repeating on the retry cadence (a dead source =
+      // one row per 5-minute backoff) folds into its prior row; a hand-fired
+      // run was asked for, so its row always stands alone.
+      const prior = !oneShot && job.id != null
+        ? await jobLogWrite(() => latestSettledJob(db, b.id, "ingest"))
+        : null;
+      if (prior?.outcome === "failed" && prior.error === String(err.message).slice(0, 500)) {
+        await foldJobRepeat(db, prior, job.id, { outcome: "failed", error: err.message });
+      } else {
+        await job.settle({ outcome: "failed", error: err.message });
+      }
+      console.warn(`ingest error board "${b.name}" (${oneShot ? "not retried" : "retrying in 5m"}): ${err.message}`);
+    } finally {
+      // Admissions are claimable rows for the tag and face legs, and a kind's
+      // settle wakes only the kinds sharing its own in-flight set — the refresh
+      // kind's rule, once more. In a finally so a run that admitted and then
+      // failed to settle still hands its rows on.
+      if (added) wakeAll();
     }
-    // A failed board is backed off, not draining — only a live remainder earns
-    // the short poll, so a dead source can't spin the loop at 200ms.
-    return draining;
   }
 
   // One completed job-log row per pipeline-leg attempt (tag/extract/face).
@@ -2804,87 +2886,270 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   }
 
-  // The claimed row's in-flight status names the step it needs.
-  const STEP = { extracting: processExtractOne, facing: processFaceOne, processing: processOne, fetching: processFetchOne };
+  // --- the work, as kinds on the resource loop (queue-by-resource-plan.md) ---
+  // Each kind hands server/resource-loop.js what is ready, what a unit contends
+  // for, and how to run one; the loop owns how many and when. What a unit
+  // contends for is the RESOURCE that will actually serve it — the API key behind
+  // a board's tagger, the connector's active provider, the sidecar, the receiving
+  // webhook host — so a throttled key costs only the boards on that key. A lane
+  // sized by pipeline stage could not express that, and the rate limiter
+  // underneath was keyed the other way.
 
-  // --- per-resource lanes (worker-rework Stage 1) ---
-  // The single-flight tick is gone. A dispatcher claims fair work and LAUNCHES it
-  // without awaiting, bounded per resource by a lane counter, so each work type runs
-  // at its own capacity and one lane's wait — a paced AI call, a slow OCR — never
-  // blocks another. Maintenance (recovery + sweeps) runs on its own loop, so a slow
-  // sweep can't stall the dispatcher either.
-  const lane = (max) => { let used = 0; return { free: () => used < max, freeSlots: () => max - used, take: () => { used++; }, release: () => { used--; } }; };
-  const aiLane = lane(AI_INFLIGHT), extractLane = lane(EXTRACT_CONCURRENCY), faceLane = lane(FACE_CONCURRENCY), fetchLane = lane(FETCH_CONCURRENCY);
-
-  // inFlight: ids this process is actively holding — recoverStuck skips them so it
-  // can't reclaim a live call as "stuck" (Stage 0: recovery ownership). pipelines:
-  // the live promises, awaited by stop() to drain on shutdown.
+  // The four pipeline legs: CLAIMING kinds, sharing ONE in-flight set because
+  // the ids are item ids in one namespace — recoverStuck reads it so it cannot
+  // reclaim a live call as stuck, and the legs hand rows to each other
+  // (markExtracted and advanceFaced both land `pending`, the tag leg's queue),
+  // which is why the loop wakes every kind on a shared set when one settles.
+  //
+  // `exclude` is ignored on purpose: a claiming `due` FLIPS the row's status, so
+  // a row this process is already running is not in any stage list the next
+  // claim asks for. The sweeps below do need it — their `due` is a read.
   const inFlight = new Set();
-  const pipelines = new Set();
-  let hasDefault = false; // refreshed each maintenance pass; read by the dispatcher
+  let hasDefault = false; // refreshed each maintenance pass; read by every claim
+  const leg = (name, stage, run, prep) => ({
+    name, claims: true, inFlight, prep,
+    due: (d, { limit, onlyBoards = null, excludeBoards = [] }) =>
+      claimFairBatch(d, hasDefault, [stage], limit, excludeBoards, onlyBoards),
+    boardOf: (row) => row.board_id,
+    // A throw here reads as "unconstrained" to the loop, which is the safe
+    // direction: the board claims exactly as it did before the arc.
+    resourceOf: (d, row) => boardResourceFor(d, name, row.board_id),
+    run: (_d, row) => run(row),
+  });
+
+  // Transcription: a SWEEP, because audio has no items.status leg — a clip
+  // qualifies by the ABSENCE of a transcript, and landing one flips no status
+  // (it writes the payload and clears the vector, which is the embed sweep's
+  // business). Its own in-flight set for the same reason.
+  //
+  // Per-clip retry ledger: itemId → { attempts, until }. A fault tied to ONE
+  // clip — its job stalled, vanished, or hit an inference error — backs off and
+  // caps here, so a pathological clip cannot freeze the whole audio queue. The
+  // query skips clips still inside their backoff; that is `waiting` below.
+  const transcribeRetry = new Map();
+  // Whether the app-wide chain resolves at all. Its floor is presence-gated
+  // (sidecar-presence-plan.md), so on a host running no sidecar with nothing
+  // bound this is false and ONLY boards carrying their own pin are servable.
+  // This is the CAN-RUN question and it stays in SQL, where board pins are a
+  // column test: on an engine-less host nothing is read, failed or logged. What
+  // a clip CONTENDS for is a different question — resourceOf below — and the
+  // two do not collapse: letting them would make an unservable clip unclaimable
+  // and an unconstrained one invisible.
+  const transcribeServed = async () => ({
+    globally: !!(await resolveCapability(db, "transcribe")),
+    pinCols: CAPABILITY.transcribe.binding.boardKeys,
+    floorProvider: CAPABILITY.transcribe.floor?.provider ?? null,
+  });
+  const transcribeKind = {
+    name: "transcribe",
+    due: async (d, { exclude, limit }) => {
+      const waiting = [...transcribeRetry].filter(([, r]) => r.until > Date.now()).map(([id]) => id);
+      return audioNeedingTranscription(d, [...exclude, ...waiting], await transcribeServed(), limit);
+    },
+    // The whisper sidecar, or the key behind a cloud transcriber. The loop
+    // launches at most `free()` per engine, so a clip waiting on a busy sidecar
+    // no longer stands in front of one whose board pins a provider.
+    resourceOf: (d, row) => boardResourceFor(d, "transcribe", row.board_id),
+    run: async (d, row) => {
+      // transcribeOne never throws and handles every answer but one itself.
+      // "The engine is unwell" is the one about the RESOURCE rather than the
+      // clip: zero its free slots for a minute and the loop stops sizing work for
+      // it while every board on a different engine carries on. On a cloud
+      // transcriber that resource is the board's API key, so a 429 here also
+      // eases off tagging on that key for the window — one key, one quota.
+      if (await transcribeOne(d, galleryDir, row, transcribeRetry) !== "backoff-lane") return;
+      const r = await boardResourceFor(d, "transcribe", row.board_id);
+      if (r) backoff(r, 60000);
+    },
+  };
+
+  // Alert delivery: a SWEEP over the firings owed a webhook, and the one kind
+  // whose `exclude` is a correctness requirement. Delivery is send-then-stamp
+  // (at-least-once, deliberately), so a firing stays `pending` — and therefore
+  // due — for the whole length of its own send; without the exclusion an
+  // overlapping tick would post it twice. Nothing backs off here: a failing
+  // endpoint has its own per-firing retry schedule in the row, which is per
+  // firing, survives a restart, and is visible in the ledger.
+  const alertsKind = {
+    name: "alerts", limit: 10,
+    due: (d, { exclude, limit }) => pendingWebhookFirings(d, Date.now(), limit, exclude),
+    resourceOf: (_d, f) => webhookBucket(f.webhook_url),
+    run: (d, f) => deliverFiring(d, f),
+  };
+
+  // Embedding: (re)vectorize items with no current-model vector — fresh tags,
+  // manual edits, search turned on late, a model change. A unit is a BOARD
+  // GROUP, not a row, because the wire answers one usage total per call and a
+  // call spanning boards would leave the per-board split a guess; every group
+  // in a tick contends for the same thing, since the embedder is app-global.
+  const EMBED_BATCH = Math.max(1, Number(process.env.EMBED_BATCH) || 64);
+  const embedKind = {
+    name: "embed", limit: EMBED_BATCH,
+    due: async (d, { exclude, limit }) => {
+      const embedder = await resolveEmbedder(d);
+      if (!embedder) return []; // the feature is off, or nothing usable is bound
+      const rows = await itemsNeedingEmbedding(d, embedder.model, limit, exclude);
+      const groups = new Map();
+      for (const r of rows) {
+        if (!groups.has(r.board_id)) groups.set(r.board_id, []);
+        groups.get(r.board_id).push(r);
+      }
+      return [...groups.values()].map((rs) => ({ embedder, rows: rs }));
+    },
+    keys: (g) => g.rows.map((r) => r.id),
+    resourceOf: (_d, g) => embedResource(g.embedder),
+    run: async (d, g) => {
+      const resource = embedResource(g.embedder);
+      // On-device only: a keyed provider's slot is already held at the wire
+      // (providers.js viaKey), and taking it again here would be the same string
+      // twice on one call — a self-deadlock the moment the ceiling is 1.
+      const bulk = !!PROVIDERS[g.embedder.provider]?.onDevice;
+      if (bulk) await poolWait(resource);
+      try {
+        const { embedded, skipped } = await embedBatch(d, g.embedder, g.rows);
+        console.log(`embedded ${embedded} item(s)${skipped ? `, skipped ${skipped}` : ""} [${g.embedder.model}]`);
+      } catch (err) {
+        // A batch-level failure is about the ENGINE, not these rows — embedBatch
+        // has already ruled out one poison item, retrying them alone and only
+        // re-throwing when nothing succeeded that way. Zero the resource's free
+        // slots for a minute; the rows never left the queue and come back.
+        backoff(resource, 60000);
+        console.warn(`embed error (retrying in 60s): ${err.message}`);
+      } finally {
+        if (bulk) poolRelease(resource);
+      }
+    },
+  };
+
+  // Liveness refresh: entities whose live connector fields (or chart face) are
+  // due. A SWEEP — refresh_at only moves when the refresh LANDS — over units
+  // that already carry their board row, so what one contends for costs no read:
+  // the connector's active provider, the same `conn:` the fetch leg claims
+  // against. That is one quota, honestly: up to `free(conn:<p>)` refreshes now
+  // run at once per provider where the old sweep did one entity at a time, and
+  // they share those slots with fetches. The wire counts them (runtime.js
+  // callProvider), so `run` holds nothing.
+  //
+  // Failure splits in two, where the old sweep had one lane-wide timer that a
+  // single delisted coin could trip for everyone. THIS ENTITY is wrong → its own
+  // refresh_at moves a minute out, here. THE PROVIDER is unwell → the wire backs
+  // off `conn:<p>` in the pool and the loop stops sizing work for it, while every
+  // other provider's entities refresh on cadence.
+  const REFRESH_BATCH = Math.max(1, Number(process.env.REFRESH_BATCH) || 20);
+  const refreshKind = {
+    name: "refresh", limit: REFRESH_BATCH, prep: prefetchDueRefreshes,
+    due: (d, { exclude, limit }) => dueLiveEntities(d, Date.now(), limit, exclude),
+    keys: (row) => [row.entity.id],
+    resourceOf: (d, row) => boardResource(d, "refresh", row.board),
+    run: async (d, row) => {
+      try {
+        // A moved field can requeue the entity's item for re-tag — claimable
+        // work for the tag leg, which cannot see this kind's settle.
+        if ((await refreshDueEntity(d, row, Date.now(), DIRS)).requeued) wakeAll();
+      } catch (err) {
+        await setEntityRefreshAt(d, row.entity.id, Date.now() + 60000);
+        console.warn(`refresh error entity #${row.entity.id} (retrying in 60s): ${err.message}`);
+      }
+    },
+  };
+
+  // Ingestion: a SWEEP over due feed boards. A board stays due until its run
+  // SETTLES and re-stamps ingest_next_run_at, so `exclude` is what stops a
+  // second run of the same board starting under the same fence while the first
+  // is still admitting — the sequential loop this replaces awaited each run,
+  // which hid it. "Run now" mid-run is unchanged: the route re-stamps, the run
+  // in flight fails its gate and stops, the board stays excluded until it
+  // returns, and the next tick takes it up under the new stamp.
+  //
+  // A connector feed contends for the provider serving it — the same `conn:`
+  // the fetch leg and the refresh kind draw on, and the one the wire backs off
+  // when a catalog walk finds it unwell. A file feed contends for nothing worth
+  // naming: a folder scan is disk, an S3 listing is a bucket that handles
+  // concurrency fine and is single-flighted per connection besides.
+  const ingestKind = {
+    name: "ingest",
+    due: (d, { exclude, limit }) => dueIngestBoards(d, Date.now(), limit, exclude),
+    resourceOf: (d, b) => boardResource(d, "ingest", b),
+    run: (_d, b) => ingestBoard(b),
+  };
+
+  // Facet diagnosis (planning/facet-diagnosis-plan.md §4): the rotation walk is
+  // `due`, the paid call is `run`. The provider and the tagger are injected:
+  // facet-diagnosis.js sits BELOW this file in the import graph — worker.js
+  // reaches in there for facetStamp — so it must never reach back, and passing
+  // the two functions is what keeps that true.
+  //
+  // The poll here is load-bearing in a way no other kind's is. The loop re-ticks
+  // 200 ms after any tick that launched, and on every settle; for a kind that
+  // rotates to a NEW board each call, that would walk the whole install as fast
+  // as calls settle — every unstable facet diagnosed in a burst on a key tagging
+  // shares, and the settle-gate rollups run once per settled call instead of
+  // once a poll. Same total spend, arriving all at once. So `due` opens once per
+  // poll: a time check, no query while closed, and the re-ticks and wakes fall
+  // through to `pollMs` for free. What the kind buys over the loop it replaces
+  // is that one board's unstable facets run in PARALLEL up to its key's free
+  // slots, where the loop answered them one after another.
+  //
+  // The cursor lives here rather than in the module: it is an ordering, not
+  // state worth a column, and a restart re-starting at the lowest board id costs
+  // one redundant staleness check.
+  const diagnoseDeps = {
+    resolveAi: (board) => resolveBoardAi(db, { aiKeyId: board.ai_key_id, aiModel: board.ai_model }),
+    tagger: (args) => trackedTagger(db, args),
+  };
+  let diagnoseCursor = null;
+  let diagnoseHandedAt = 0;
+  const diagnoseKind = {
+    name: "diagnose", pollMs: DIAGNOSE_POLL_MS,
+    due: async (d, { exclude }) => {
+      if (Date.now() - diagnoseHandedAt < DIAGNOSE_POLL_MS) return [];
+      const found = await diagnoseCandidates(d, diagnoseDeps, diagnoseCursor, exclude);
+      diagnoseCursor = found?.boardId ?? null;
+      if (!found?.units.length) return [];
+      diagnoseHandedAt = Date.now();
+      return found.units;
+    },
+    keys: (u) => [`${u.board.id}:${u.facet.key}`],
+    resourceOf: (d, u) => boardResourceFor(d, "tag", u.board.id),
+    run: async (d, u) => {
+      if (await diagnoseAnswer(d, diagnoseDeps, u.board, u.facet, u.segment, u.prior, u.q)) {
+        console.log(`diagnosed facet ${u.facet.key} on board ${u.board.id}`);
+      }
+    },
+  };
+
+  // Declared here rather than after `work` because two runs above call it
+  // (refresh on a requeue, ingest on an admission) and `work` is what provides it. Nothing can call it before the assignment
+  // below: every tick opens by awaiting `due`, so the first `run` is at least a
+  // turn away.
+  let wakeAll = () => {};
+
+  const work = runKinds([
+    leg("tag", "pending", processOne),
+    leg("extract", "pending_extract", processExtractOne),
+    leg("face", "pending_face", processFaceOne),
+    leg("fetch", "pending_fetch", processFetchOne, prefetchClaimedFetches),
+    transcribeKind,
+    alertsKind,
+    embedKind,
+    refreshKind,
+    ingestKind,
+    diagnoseKind,
+  ], { db, pollMs: POLL_MS });
+
+  // Nudge everything above. Three writers create claimable rows without knowing
+  // which kind picks them up — a scheduled retag, a moved live field, a feed
+  // admission — and an extra idle tick on a kind that had nothing to do is far
+  // cheaper than a row waiting out a poll for a wake nobody sent.
+  wakeAll = () => work.wakeAll();
 
   let running = true;
-  let wake = () => {};          // nudge the dispatcher (a lane freed, or new work)
   let maintainWake = () => {};
-  let embedWake = () => {};
-  let refreshWake = () => {};
-  let ingestWake = () => {};
-  let transcribeWake = () => {};
-  let alertsWake = () => {};
-  let diagnoseWake = () => {};
 
-  // Fill one lane that has room with a single board-fair BATCH of its stage, sized to
-  // the free slots — so boards interleave (a small board's items claim ahead of a big
-  // board's backlog) instead of the oldest board monopolizing the lane. A batch, not
-  // one-at-a-time: single-row claims collapse to FIFO. Each pipeline is fire-and-tracked
-  // — on settle it frees its lane, leaves the in-flight sets, and nudges the dispatcher.
-  async function fillLane(ln, stage, prep = null) {
-    const rows = await claimFairBatch(db, hasDefault, [stage], ln.freeSlots());
-    // prep is an economics hook (cache prewarm) — a throw here must not strand
-    // rows the claim already flipped in-flight, so it can never abort the loop.
-    if (prep && rows.length) { try { await prep(rows); } catch (e) { console.warn(`lane prep failed (continuing): ${e.message}`); } }
-    for (const row of rows) {
-      ln.take();
-      inFlight.add(row.id);
-      const p = STEP[row.status](row).finally(() => {
-        ln.release();
-        inFlight.delete(row.id);
-        pipelines.delete(p);
-        wake();
-      });
-      pipelines.add(p);
-    }
-  }
-
-  // One pass over the lanes with room. Stops claiming once `running` is false so
-  // shutdown drains cleanly; the dispatcher re-runs this on every completion/poll.
-  async function fillLanes() {
-    if (running && aiLane.free()) await fillLane(aiLane, "pending");
-    if (running && extractLane.free()) await fillLane(extractLane, "pending_extract");
-    if (running && faceLane.free()) await fillLane(faceLane, "pending_face");
-    if (running && fetchLane.free()) await fillLane(fetchLane, "pending_fetch", (rows) => prefetchClaimedFetches(db, rows));
-  }
-
-  // The dispatcher: keep the lanes full. Poll short while work is in flight (a
-  // completion frees a lane — refill promptly, and cover any missed wake), long when
-  // idle. wake() short-circuits the sleep.
-  const dispatchLoop = (async () => {
-    while (running) {
-      try { await fillLanes(); }
-      catch (e) { console.error("worker dispatch error:", e.message); }
-      if (!running) break;
-      await new Promise((r) => {
-        const t = setTimeout(r, inFlight.size ? 250 : POLL_MS);
-        wake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
-  // Maintenance: recovery + the LIGHT coordination sweeps (retag scheduling,
-  // prune) on a cadence, off the dispatcher's path so a slow sweep can't stall claims.
-  // The heavy throughput sweeps (embedding, liveness refresh, ingestion) moved to their
-  // own loops below, so a big embed backlog or a slow connector can't delay recovery.
-  // Nudges the dispatcher after, since retag may have created work.
+  // Maintenance: recovery + the LIGHT coordination work (retag scheduling, alert
+  // firing, prune) on a cadence, off the claiming path so a slow sweep can't
+  // stall it. Everything that talks to a provider is a kind on the resource loop
+  // above. Nudges every kind after, since retag may have created work.
   const maintainLoop = (async () => {
     while (running) {
       try {
@@ -2892,6 +3157,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         if (recovered) console.log(`worker: recovered ${recovered} stuck item(s)`);
         hasDefault = !!(await resolveDefaultAi(db));
         await retagDue();
+        // Firing creation — pure coordination, no outbound I/O, which is exactly
+        // what this loop is for. It sits above the hourly and best-effort work
+        // below so a slow backup walk cannot delay an alert, and the `wakeAll()`
+        // at the end of this pass nudges the delivery kind, so a firing created
+        // here is sent on the same tick rather than waiting out a poll.
+        await createDueFirings(db);
         await pruneSnapshots();
         await reapGhostEntities();
         await learnPricesDue();
@@ -2904,7 +3175,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
         if (sampleStorage) await sampleStorage();
       } catch (e) { console.error("worker maintain error:", e.message); }
       if (!running) break;
-      wake();
+      wakeAll();
       await new Promise((r) => {
         const t = setTimeout(r, POLL_MS);
         maintainWake = () => { clearTimeout(t); r(); };
@@ -2912,190 +3183,30 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     }
   })();
 
-  // Embedding sweep on its own loop (Stage 3): the vector backfill runs off the
-  // coordination tick, so a slow provider or a big backlog can't delay recovery,
-  // ingestion, or the scheduled retag. Drains fast — polls short after a full batch,
-  // idles at POLL_MS otherwise (its own backoff still gates provider errors).
-  const embedLoop = (async () => {
-    while (running) {
-      let more = false;
-      try { more = await embedDue(); }
-      catch (e) { console.error("worker embed error:", e.message); }
-      if (!running) break;
-      await new Promise((r) => {
-        const t = setTimeout(r, more ? 200 : POLL_MS);
-        embedWake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
-  // Liveness refresh on its own loop (Stage 3): same reasoning as embedLoop — a slow
-  // connector refreshing due entities can't stall the coordination tick, and a full
-  // batch drains fast rather than one per maintenance pass. Unlike embedLoop it nudges
-  // the dispatcher after each pass: a moved field can requeue an entity for re-tag
-  // (retag_on_refresh), and maintainLoop used to deliver that wake when refreshDue lived
-  // there. Embedding never creates claimable work, so embedLoop needs no such wake.
-  const refreshLoop = (async () => {
-    while (running) {
-      let more = false;
-      try { more = await refreshDue(); }
-      catch (e) { console.error("worker refresh error:", e.message); }
-      if (!running) break;
-      wake();
-      await new Promise((r) => {
-        const t = setTimeout(r, more ? 200 : POLL_MS);
-        refreshWake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
-  // Ingestion on its own loop, for the embedLoop/refreshLoop reason and then some:
-  // a feed run is not a light sweep any more. Enumerating a metered catalog is
-  // minutes of paced HTTP (a full CoinGecko pass is ~74 requests at 10 rpm), and a
-  // big run drains across back-to-back ticks — so on the maintenance tick a single
-  // draining board held recovery, retag scheduling and the backup check hostage for
-  // as long as the drain lasted, which is hours. Same shape as refreshLoop: drain
-  // fast while a run has more to give, idle at POLL_MS, and nudge the dispatcher
-  // after each pass because admissions land claimable items (pending/pending_face).
-  const ingestLoop = (async () => {
-    while (running) {
-      let more = false;
-      try { more = await ingestDue(); }
-      catch (e) { console.error("worker ingest error:", e.message); }
-      if (!running) break;
-      wake();
-      await new Promise((r) => {
-        const t = setTimeout(r, more ? 200 : POLL_MS);
-        ingestWake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
-  // Alert delivery on its own loop (the embedLoop reasoning): a webhook send
-  // is outbound I/O with a 10s timeout, and a hung endpoint retried across
-  // several firings would otherwise sit inside the maintenance tick, delaying
-  // recovery and ingestion. Nothing here creates claimable work — no wake().
-  const alertsLoop = (async () => {
-    while (running) {
-      try { await deliverDueAlerts(db); }
-      catch (e) { console.error("worker alerts error:", e.message); }
-      if (!running) break;
-      await new Promise((r) => {
-        const t = setTimeout(r, POLL_MS);
-        alertsWake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
-  // Facet diagnosis (planning/facet-diagnosis-plan.md §4), on its own loop for
-  // the alertsLoop reason: this is outbound provider I/O and must not sit inside
-  // the maintenance tick delaying recovery, ingestion or scheduled retags.
-  // Nothing here creates claimable work, so no wake() — the alertsLoop precedent
-  // again. It runs on the slow cadence because its own settle gate is ten
-  // minutes wide; ticking it at POLL_MS would just re-fail that gate 200 times.
-  //
-  // The cursor lives here rather than in the module: it is an ordering, not
-  // state worth a column, and a restart re-starting at the lowest board id costs
-  // one redundant staleness check.
-  //
-  // The provider and the tagger are injected. facet-diagnosis.js sits BELOW this
-  // file in the import graph — worker.js reaches in there for facetStamp — so it
-  // must never reach back, and passing the two functions is what keeps that true.
-  let diagnoseCursor = null;
-  const diagnoseDeps = {
-    resolveAi: (board) => resolveBoardAi(db, { aiKeyId: board.ai_key_id, aiModel: board.ai_model }),
-    tagger: (args) => trackedTagger(db, args),
-  };
-  const diagnoseLoop = (async () => {
-    while (running) {
-      try {
-        const done = await diagnoseDue(db, diagnoseDeps, diagnoseCursor);
-        diagnoseCursor = done?.boardId ?? null;
-        if (done?.calls) console.log(`diagnosed ${done.calls} facet(s) on board ${done.boardId}`);
-      } catch (e) { console.error("worker diagnose error:", e.message); }
-      if (!running) break;
-      await new Promise((r) => {
-        const t = setTimeout(r, DIAGNOSE_POLL_MS);
-        diagnoseWake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
-  // Transcription loop — dedicated, separate from the tick, so a multi-minute
-  // clip never blocks tagging/embedding/ingestion. It's I/O-bound (awaits the
-  // sidecar), so it runs concurrently. It queries audio by payload (not status),
-  // so EVERY audio item is transcribed regardless of tagging; the transcript
-  // lands on payload.transcript for the tagger, the embedder, and the lightbox.
-  let transcribeBackoffUntil = 0; // lane-wide: the engine itself is unwell
-  // Per-clip retry ledger: itemId → { attempts, until }. A fault tied to ONE
-  // clip (its job stalled, vanished, or hit an inference error) backs off and
-  // caps here, so a pathological clip can't freeze the whole audio lane the way
-  // the old single global backoff did — the query below skips clips in backoff.
-  const transcribeRetry = new Map();
-  // Whether the app-wide chain resolves at all — its floor is presence-gated
-  // since sidecar-presence-plan.md, so on a host running no sidecar with
-  // nothing bound this is false and ONLY boards with their own pin are
-  // servable. The claim query takes it from here (board pins are a column
-  // test, so it filters them in SQL rather than claiming clips it would only
-  // put back): on an engine-less host the lane idles without touching an item
-  // — nothing claimed, failed, or logged — and the first tick after an engine
-  // appears picks the backlog straight up.
-  const transcribeServed = async () => ({
-    globally: !!(await resolveCapability(db, "transcribe")),
-    pinCols: CAPABILITY.transcribe.binding.boardKeys,
-    floorProvider: CAPABILITY.transcribe.floor?.provider ?? null,
-  });
-  const transcribeLoop = (async () => {
-    while (running) {
-      let did = false;
-      try {
-        if (Date.now() >= transcribeBackoffUntil) {
-          const waiting = [...transcribeRetry.entries()].filter(([, r]) => r.until > Date.now()).map(([id]) => id);
-          const row = await oneAudioNeedingTranscription(db, waiting, await transcribeServed());
-          if (row) {
-            did = true;
-            if (await transcribeOne(db, galleryDir, row, transcribeRetry) === "backoff-lane") {
-              transcribeBackoffUntil = Date.now() + 60000;
-              did = false; // nothing else would succeed either — sleep the full poll
-            }
-          }
-        }
-      } catch (e) {
-        console.error("transcribe loop error:", e.message);
-      }
-      if (!running) break;
-      await new Promise((r) => {
-        const t = setTimeout(r, did ? 200 : POLL_MS);
-        transcribeWake = () => { clearTimeout(t); r(); };
-      });
-    }
-  })();
-
+  // Asked of the pool rather than mirrored from env, so the line cannot claim a
+  // ceiling the pool does not actually enforce.
+  const ceilings = `in flight at once: ${maxFor("ai:")} per AI key, ${maxFor("conn:")} per connector, ${maxFor("sidecar:")} per sidecar`;
   resolveDefaultAi(db).then((ai) => {
     if (ai) {
-      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face / ${FETCH_CONCURRENCY} fetch).`);
+      console.log(`AI tagging worker started (default ${ai.provider}/${ai.model}, per-board overrides in board settings; ${ceilings}).`);
     } else {
-      console.log(`AI tagging worker started (no default key — only boards with their own key will tag; lanes ${AI_INFLIGHT} AI / ${EXTRACT_CONCURRENCY} extract / ${FACE_CONCURRENCY} face / ${FETCH_CONCURRENCY} fetch).`);
+      console.log(`AI tagging worker started (no default key — only boards with their own key will tag; ${ceilings}).`);
     }
   }).catch((e) => console.warn(`worker: default-AI probe failed at start: ${e.message}`)); // log-only — an unhandled rejection here would crash the boot
   // Stop claiming immediately; the returned promise resolves once the
   // in-flight tick (if any) has finished, so callers can drain before exit.
   return () => {
     running = false;
-    wake();
+    // Stop claiming now; this resolves once every kind has left its tick AND every
+    // launched run has settled. Started here so they stop at the same instant
+    // `running` goes false, exactly as they did when one flag held the dispatcher.
+    const drained = work.stop();
     maintainWake();
-    embedWake();
-    refreshWake();
-    ingestWake();
-    transcribeWake();
-    alertsWake();
-    diagnoseWake();
-    // Drain: let the loops finish their current pass and stop claiming, THEN await the
-    // in-flight pipelines (captured after the loops settle, so a final fill's launches
-    // are included). server.js caps the total wait.
+    // Drain: let the maintenance pass finish, then the kinds' own drain.
+    // server.js caps the total wait.
     return (async () => {
-      await Promise.all([dispatchLoop, maintainLoop, embedLoop, refreshLoop, ingestLoop, transcribeLoop, alertsLoop, diagnoseLoop]);
-      await Promise.all([...pipelines]);
+      await maintainLoop;
+      await drained;
     })();
   };
 }

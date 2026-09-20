@@ -16,7 +16,7 @@ import {
   itemsNeedingEmbedding,
   boardsWithVotes,
   getBoard,
-  oneAudioNeedingTranscription,
+  audioNeedingTranscription,
 } from "../server/db.js";
 
 let srv, db, base;
@@ -81,9 +81,9 @@ test("embed sweep: a paused board's tagged items are skipped", async () => {
 test("transcribe lane: a paused board's audio is skipped", async () => {
   const bid = await seedBoard(db, "pause-audio");
   const { id } = await seedInstance(db, bid, "held", { payload: { files: [{ name: "a.mp3", kind: "audio" }] } });
-  assert.equal((await oneAudioNeedingTranscription(db, [], { globally: true }))?.id, id, "claims while running");
+  assert.equal((await audioNeedingTranscription(db, [], { globally: true }))[0]?.id, id, "claims while running");
   await updateBoard(db, bid, { paused: true });
-  assert.notEqual((await oneAudioNeedingTranscription(db, [], { globally: true }))?.id, id, "skipped while paused");
+  assert.notEqual((await audioNeedingTranscription(db, [], { globally: true }))[0]?.id, id, "skipped while paused");
   await db.query("UPDATE items SET payload = payload || '{\"transcript\": \"\"}' WHERE id=$1", [id]);
 });
 
