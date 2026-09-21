@@ -1,10 +1,10 @@
 // The board editor — the same Mapping|Tagging modal everywhere it opens:
 // admin.html (edit + create) and the gallery toolbar (pencil + New board).
 // Admins get the full editor — including the AI-models strip (per-board
-// capability pins) and the "Using …" provenance bands; board-admins a
+// capability pins, opened from the header's glyph button); board-admins a
 // content-only Tagging pane and a read-only Mapping view. Styling for
-// .switch / .switch-row / .modal-section / .modal-strip / .frow-* / .prov /
-// .disclosure / .fe-* / .clip-* / .mm-* lives in modal.css, which both pages
+// .switch / .switch-row / .modal-section / .modal-strip / .frow-* / .glyph-btn
+// / .disclosure / .fe-* / .clip-* / .mm-* lives in modal.css, which both pages
 // load (plus dropdown.css for the pane's menus). Caches the provider catalog
 // module-side.
 // Relative, not root-absolute, and the distinction is not stylistic. An ES
@@ -20,7 +20,7 @@
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
 import { ICONS, glyphEl } from "./utils.js";
-import { createModal, sectionHeading, provBand, keepPlace, busy } from "./modal.js";
+import { createModal, sectionHeading, keepPlace, busy } from "./modal.js";
 import { saveGate } from "./save-gate.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
@@ -208,7 +208,7 @@ export function buildFacetEditor(textarea, { stats = [], gates = {} } = {}) {
   };
 }
 
-// What "Paste JSON" accepts, and what it means. Exported for the test, and
+// What Paste accepts, and what it means. Exported for the test, and
 // because the rule is the feature: this is the only place that decides what a
 // pasted guidance document is allowed to be.
 //
@@ -275,14 +275,14 @@ function buildGuidanceClipboard({ contextEl, facetsEl, editor }) {
     bar.appendChild(b);
   };
 
-  chip("Copy JSON", async (b) => {
+  chip("Copy", async (b) => {
     let facets = [];
     try { facets = JSON.parse(facetsEl.value) || []; } catch {}
     const doc = { context: contextEl.value.trim(), facets };
     try { await navigator.clipboard.writeText(JSON.stringify(doc, null, 2)); }
     catch { return toast.error("Couldn't write to the clipboard"); }
     b.textContent = "Copied!";
-    setTimeout(() => (b.textContent = "Copy JSON"), 1200);
+    setTimeout(() => (b.textContent = "Copy"), 1200);
   });
 
   // Everything below the await lands in a LATER TASK than the click that ran
@@ -291,7 +291,7 @@ function buildGuidanceClipboard({ contextEl, facetsEl, editor }) {
   // any listener that reacted to the click has already reacted, to the document
   // as it stood BEFORE the paste. Both writes therefore announce themselves —
   // the facets half through the editor's own sync().
-  chip("Paste JSON", async () => {
+  chip("Paste", async () => {
     let doc;
     try { doc = normalizeGuidance(JSON.parse(await navigator.clipboard.readText())); }
     catch { return toast.warn('Clipboard doesn\'t contain tagging guidance JSON ({ "context", "facets" })'); }
@@ -411,13 +411,20 @@ export function syncModelPicker(sel, entry, keyId, { kind = null, saved = null, 
 
 // Wire a fold (.modal-strip / .disclosure): the head's click toggles, and
 // aria-expanded stays true to the state. Returns the setter, for callers that
-// also open the fold themselves (the provenance bands' Change links).
-function wireFold(el, headSel) {
-  const head = el.querySelector(headSel);
+// also open the fold themselves (a glyph that opens the strip at one row).
+//
+// `head` is a selector to find INSIDE the fold, or the element itself — the
+// AI-models strip's head is the button in the modal header, which is not the
+// strip's descendant. Either way this is the one place that knows a fold's
+// open state and its head's aria-expanded are the same fact, which is why the
+// seed below is here and not written out again at each call site.
+function wireFold(el, head) {
+  if (typeof head === "string") head = el.querySelector(head);
   const set = (open) => {
     el.classList.toggle("open", open);
     head.setAttribute("aria-expanded", String(open));
   };
+  set(el.classList.contains("open"));
   head.addEventListener("click", () => set(!el.classList.contains("open")));
   return set;
 }
@@ -429,8 +436,9 @@ function wireFold(el, headSel) {
 //                    always fetched fresh via /api/boards/:id/settings, which
 //                    carries everything the modal needs (incl. mapping and
 //                    has_items for the Mapping pane).
-//   opts.canEditAI — show the AI-models strip (per-board capability pins) and
-//                    the "Using …" bands, and allow mapping edits. false =
+//   opts.canEditAI — show the AI-models strip (per-board capability pins,
+//                    with the header button that opens it), and allow mapping
+//                    edits. false =
 //                    content-only and the Mapping pane is read-only. A UI
 //                    flag ONLY: every edit saves via PATCH /api/boards/:id,
 //                    and the server layers the admin-only fields off the
@@ -458,28 +466,36 @@ export async function openBoardModal(boardId, opts = {}) {
     }
   }
 
-  const { body, footer, close, dialog } = createModal({
+  const { header, statusEl, body, footer, close, dialog } = createModal({
     id: "board-edit-modal",
-    title: isNew ? "New board" : board.name,
+    title: isNew ? "New board" : "Edit board",
     onClose: () => document.removeEventListener("keydown", onStripKey, true),
   });
 
+  // The name lives in the header block, on its own row under the title — the
+  // title is chrome ("New board" / "Edit board") and the name is the one
+  // field that identifies the thing, so it sits above every setting rather
+  // than as the first of them. No label: the placeholder names the field.
+  // A .modal-subhead sibling, inserted like the strip below, so the header
+  // row itself keeps its contract (title never shrinks, status slot yields).
+  const subhead = document.createElement("div");
+  subhead.className = "modal-subhead";
+  subhead.innerHTML = `<input id="board-modal-name" placeholder="Board name" style="width:100%" />`;
+  header.after(subhead);
+
   // ── The AI-models strip: a full-bleed fold between the modal header and the
   // scrolling body, shared by both panes. It holds every per-board capability
-  // picker; the panes keep one-line "Using …" bands that point here. While
+  // picker; the header's AI-models glyphs summarize it and open it. While
   // open, a scrim dims everything below it — body and footer both (click it,
   // or Esc, to fold). Admin-only: the pickers read admin feeds, and pins are
   // admin-written.
   let stripEl = null;
   let setStripOpen = () => {};
+  let capBtn = null; // the header's glyph button; the feed fills it with marks
   if (canEditAI) {
     stripEl = document.createElement("div");
     stripEl.className = "modal-strip";
-    stripEl.innerHTML = `
-      <button type="button" class="strip-head" aria-expanded="false">
-        <span class="chev">${ICONS.chevron}</span>AI models<span class="fold-summary" id="board-modal-models-summary"></span>
-      </button>
-      <div class="strip-body"><div id="board-modal-caps"></div></div>`;
+    stripEl.innerHTML = `<div class="strip-body"><div id="board-modal-caps"></div></div>`;
     dialog.insertBefore(stripEl, body);
     // The scrim needs a positioned box that is exactly what the open strip
     // supersedes — the body AND the footer under it, since Save is as much
@@ -495,7 +511,21 @@ export async function openBoardModal(boardId, opts = {}) {
     scrim.className = "modal-strip-scrim";
     scrim.setAttribute("aria-hidden", "true");
     wrap.appendChild(scrim);
-    setStripOpen = wireFold(stripEl, ".strip-head");
+    // The strip has no head of its own: it is opened from the header slot,
+    // which holds a caption and the button that is the fold's head. Both are
+    // built NOW, empty — the capability feed below only appends the marks —
+    // so the fold is wired once, here, instead of through a nullable bridge.
+    // An empty button draws nothing (.glyph-btn:empty, the same rule the slot
+    // itself uses), so the feed's arrival adds marks rather than a control.
+    const slotLabel = document.createElement("span");
+    slotLabel.className = "slot-label";
+    slotLabel.textContent = "AI models";
+    capBtn = document.createElement("button");
+    capBtn.type = "button";
+    capBtn.className = "glyph-btn";
+    capBtn.setAttribute("aria-label", "AI models");
+    statusEl.append(slotLabel, capBtn);
+    setStripOpen = wireFold(stripEl, capBtn);
     scrim.addEventListener("click", () => setStripOpen(false));
     document.addEventListener("keydown", onStripKey, true);
   }
@@ -507,19 +537,11 @@ export async function openBoardModal(boardId, opts = {}) {
       <button type="button" class="pane-toggle-btn" data-pane="mapping">Mapping</button>
       <button type="button" class="pane-toggle-btn active" data-pane="tagging">Tagging</button>
     </div>`;
-  // The tagging provenance band: which model tags this board, in one line where
-  // the behavior settings are — the pickers themselves live in the strip. Built
-  // now, filled when the capability feed lands (hidden until then); its Change
-  // reaches the strip through a closure the feed handler replaces, the same way
-  // the Mapping pane's does. Admin-only, like the strip.
-  let openTagRow = () => {};
-  const tagBand = canEditAI ? provBand(() => openTagRow()) : null;
   body.innerHTML = `
-    <label>Board name</label>
-    <input id="board-modal-name" placeholder="e.g. Wardrobe Items" style="width:100%" />
     ${paneToggle}
     <div id="board-modal-tagging">
       <div class="modal-section" style="border-top:none;margin-top:0;padding-top:0;">
+        ${sectionHeading("Tagging Settings")}
         <div id="board-modal-autotag" style="font-size:13px"></div>
         <div class="disclosure" id="board-modal-adv" style="margin-top:12px;">
           <button type="button" class="disc-head" aria-expanded="false">
@@ -545,13 +567,9 @@ export async function openBoardModal(boardId, opts = {}) {
       </div>
     </div>
     <div id="board-modal-mapping" style="display:none;flex-direction:column;gap:12px;"></div>`;
-  body.querySelector("#board-modal-name").value = isNew ? "" : board.name;
+  subhead.querySelector("#board-modal-name").value = isNew ? "" : board.name;
   body.querySelector("#board-modal-context").value = isNew ? "" : board.context || "";
   body.querySelector("#board-modal-facets").value = isNew ? "[]" : JSON.stringify(board.facets, null, 2);
-  if (tagBand) {
-    tagBand.el.style.margin = "0 0 14px";
-    document.getElementById("board-modal-tagging").prepend(tagBand.el);
-  }
 
   footer.innerHTML = `<button id="board-modal-save">${isNew ? "Create board" : "Save"}</button><button class="ghost" id="board-modal-cancel">Cancel</button>`;
 
@@ -592,14 +610,8 @@ export async function openBoardModal(boardId, opts = {}) {
           isAdmin: canEditAI,
           mapping: board?.mapping || null,
           hasItems: !!board?.has_items,
-          onCapabilityChange: (capId) => openCapRow(capId),
         });
       }
-      // A reveal re-pushes the bands' labels — one push here covers every way
-      // the pickers moved while Mapping was hidden, including a provider's
-      // live model list landing (which repaints a select without firing
-      // `change`).
-      if (showMapping) mappingPane?.setBands(mappingBands());
     });
   }
 
@@ -818,14 +830,6 @@ export async function openBoardModal(boardId, opts = {}) {
   // board-scoped capability gets its row with no edit here.
   const capPickers = []; // { cap, plan, row, valEl, srcEl, keySel, modelSel }
   let aiLoaded = false;
-  // The bands resolve through delegation (an unset extractor follows the
-  // tagger), so they derive from closures set once the feed lands; until then
-  // the bands stay hidden and the strip head says nothing.
-  // Bands for the Mapping pane, keyed by capability id — one entry per
-  // mappingBand capability in the feed (extract, detect, and whatever a future
-  // source's capability declares). {} until the feed lands.
-  let mappingBands = () => ({});
-  let openCapRow = () => {};
   if (canEditAI) {
     const wrap = document.getElementById("board-modal-caps");
     Promise.all([
@@ -897,16 +901,10 @@ export async function openBoardModal(boardId, opts = {}) {
       // here). Same field shape either way — see mountCapConfigs.
       if (isNew) mountCapConfigs(caps.flatMap((c) => c.config || []));
 
-      // Which pickers feed which bands comes from data, not names: every
-      // capability flagged mappingBand gets a band in the Mapping pane (keyed
-      // by capability id — the pane joins them to sources via the source
-      // table's `capability`). The one that delegates (extract → tag) also
-      // names the Tagging pane's band, same as before.
-      const bandCaps = caps.filter((c) => c.mappingBand);
-      const bandPickers = bandCaps
-        .map((c) => capPickers.find((p) => p.cap.id === c.id))
-        .filter(Boolean);
-      const delegatingCap = bandCaps.find((c) => c.delegatesTo);
+      // The tagger is whatever the delegating capability (extract) falls back
+      // to — read off the feed's own delegatesTo, never by name. Web research
+      // below is a modifier of it.
+      const delegatingCap = caps.find((c) => c.delegatesTo);
       const tagPicker = capPickers.find((p) => p.cap.id === delegatingCap?.delegatesTo) || null;
 
       const chosen = (p) => p.plan.chosenLabel(p.keySel.value, p.modelSel.hidden ? null : p.modelSel.value || null);
@@ -920,33 +918,6 @@ export async function openBoardModal(boardId, opts = {}) {
       // band named the tagger's model while extraction ran on its own binding.
       const decider = (p) =>
         (!p.keySel.value && p.plan.delegated && capPickers.find((x) => x.cap.id === p.cap.delegatesTo)) || p;
-      const resolved = (p) => chosen(decider(p));
-      // What a BAND should say: the model that will run, or null plus the copy
-      // for having none. A band is a sentence, so it asks `configured` first —
-      // "Using none configured" is the claim it exists not to make. The agent
-      // noun comes from whichever capability actually decides, so an unset
-      // extractor short of a tagger names the tagger.
-      const bandState = (p) => {
-        const d = decider(p);
-        return {
-          label: d.plan.configured(d.keySel.value) ? chosen(d) : null,
-          empty: `No ${d.cap.agent} configured`,
-        };
-      };
-      mappingBands = () =>
-        Object.fromEntries(bandPickers.map((p) => [p.cap.id, bandState(p)]));
-
-      const openStripAt = (p) => {
-        if (!p) return;
-        setStripOpen(true);
-        for (const x of capPickers) x.row.classList.toggle("open", x === p);
-        p.row.classList.remove("flash");
-        void p.row.offsetWidth; // restart the highlight animation
-        p.row.classList.add("flash");
-        p.row.scrollIntoView({ block: "nearest" });
-      };
-      openCapRow = (capId) => openStripAt(capPickers.find((p) => p.cap.id === capId));
-      openTagRow = () => openStripAt(tagPicker);
 
       // Web research is a modifier of the tagging capability: available only
       // while the tagging provider advertises it. Provider-level truth from
@@ -964,20 +935,42 @@ export async function openBoardModal(boardId, opts = {}) {
         };
       }
 
-      const summaryEl = document.getElementById("board-modal-models-summary");
+      // ── The header button's marks: one glyph per capability, each the
+      // capability's own (cap.icon — the same mark its strip row wears), in
+      // the button's ink. Amber means NOTHING would run for it: no board pin,
+      // no app default, and for a delegating capability nothing at the end of
+      // the delegation either — so it asks the decider, never its own select.
+      // Following the app default is the normal state and looks like it.
+      //
+      // The marks READ, they do not act: the button is one target that opens
+      // the strip, where every capability has its row. Per-glyph clicks were
+      // tried and dropped — four hit areas inside one 90px control, each
+      // landing somewhere different, is a puzzle rather than an affordance.
+      // Each still carries its own tooltip naming the capability and the
+      // model, which is what keeps amber from being a colour alone.
+      for (const p of capPickers) {
+        p.glyph = glyphEl(p.cap.icon, false);
+        capBtn.appendChild(p.glyph);
+      }
+
       const updateAiPresentation = () => {
         for (const p of capPickers) {
-          p.valEl.textContent = chosen(p);
-          p.srcEl.textContent = p.keySel.value
+          // ONE resolution per row, read by the row and by its mark: which
+          // picker actually decides, what it chose, and where that came from.
+          const d = decider(p);
+          const origin = p.keySel.value
             ? "chosen for this board"
-            : p.plan.delegated ? resolved(p) : "app default";
+            : d !== p ? `follows ${d.cap.label.toLowerCase()}` : "app default";
+          p.valEl.textContent = chosen(p);
+          // The ROW names the model an unset delegate inherits; the MARK names
+          // the relationship — a row is a value, a tooltip is a sentence.
+          p.srcEl.textContent = p.keySel.value || !p.plan.delegated ? origin : chosen(d);
+          const runs = d.plan.configured(d.keySel.value);
+          p.glyph.classList.toggle("warn", !runs);
+          p.glyph.title = runs
+            ? `${p.cap.label} · ${chosen(d)} · ${origin}`
+            : `${p.cap.label}: no model configured`;
         }
-        const n = capPickers.filter((p) => p.keySel.value).length;
-        summaryEl.textContent = tagPicker
-          ? chosen(tagPicker) + (n ? ` · ${n} board choice${n === 1 ? "" : "s"}` : " · all app defaults")
-          : "";
-        tagBand?.set(tagPicker ? bandState(tagPicker) : null);
-        mappingPane?.setBands(mappingBands());
         syncAi(); // research availability follows the tagging selection
       };
       updateAiPresentation();

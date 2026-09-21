@@ -190,6 +190,13 @@ export const plural = (word) => {
 export const glyph = (body, { stroke = 2 } = {}) =>
   `<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
 
+// The scan bracket — four corners of a frame, drawn open. Shared by the two
+// marks that both mean "look at this item": detect (a circle inside) and
+// extract (text lines inside). The one path in the set with two wearers, so
+// it is written once — a re-centred bracket that landed on one and missed the
+// other would split the family without looking like a change.
+const SCAN_CORNERS = '<path d="M4 8.5V5.5a1.5 1.5 0 0 1 1.5-1.5h3M15.5 4h3A1.5 1.5 0 0 1 20 5.5v3M20 15.5v3a1.5 1.5 0 0 1-1.5 1.5h-3M8.5 20h-3A1.5 1.5 0 0 1 4 18.5v-3"/>';
+
 export const ICONS = {
   viewRows: glyph('<rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/>'),
   tag: glyph('<path d="M12.6 2.6A2 2 0 0 0 11.2 2H4a2 2 0 0 0-2 2v7.2a2 2 0 0 0 .6 1.4l8.7 8.7a2 2 0 0 0 2.8 0l6.6-6.6a2 2 0 0 0 0-2.8z"/><circle cx="7" cy="7" r="1.3" fill="currentColor"/>'),
@@ -206,18 +213,23 @@ export const ICONS = {
   // grid and stroke as their neighbours. They are not dead code to sweep.
   srcFile: glyph('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
   srcGlobe: glyph('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5a13 13 0 0 1 0 17a13 13 0 0 1 0-17z"/>'),
-  srcSparkle: glyph('<path d="M12 2.5 L14.5 9.5 L21.5 12 L14.5 14.5 L12 21.5 L9.5 14.5 L2.5 12 L9.5 9.5 Z"/>'),
-  srcFrame: glyph('<path d="M4 8.5V5.5a1.5 1.5 0 0 1 1.5-1.5h3M15.5 4h3A1.5 1.5 0 0 1 20 5.5v3M20 15.5v3a1.5 1.5 0 0 1-1.5 1.5h-3M8.5 20h-3A1.5 1.5 0 0 1 4 18.5v-3"/><circle cx="12" cy="12" r="2.6"/>'),
+  // Extraction: srcFrame's corners (look at the item) with text lines where
+  // detect has its circle — read values out vs find a thing. Two lines, not
+  // three: at 12px the third turns the mark to mush. It replaced a four-point
+  // star, which named a technology ("a model did this") rather than a job.
+  srcExtract: glyph(SCAN_CORNERS + '<path d="M8 10h8M8 14h5"/>'),
+  srcFrame: glyph(SCAN_CORNERS + '<circle cx="12" cy="12" r="2.6"/>'),
   srcPerson: glyph('<circle cx="12" cy="9.5" r="3.3"/><path d="M5.5 20.5a6.5 6.5 0 0 1 13 0"/>'),
   srcWave: glyph('<path d="M4 10.5v3M8 7.5v9M12 4.5v15M16 7.5v9M20 10.5v3"/>'),
   srcDot: glyph('<circle cx="12" cy="12" r="3.4"/>'),
   // Embeddings' own mark, and the reason it exists: CAPABILITY_DEFS used to
   // give that capability `icon: "search"` — the magnifier below — which is
   // what embeddings are FOR, not what they are, and the only borrowed glyph in
-  // the set. Points scattered in a plane is the thing itself. Filled dots
-  // rather than a stroked figure because at 15px a five-part outline closes up;
-  // the fill rides the glyph helper's currentColor like every other mark.
-  embed: glyph('<circle cx="6" cy="9" r="1.7" fill="currentColor" stroke="none"/><circle cx="11.5" cy="6" r="1.7" fill="currentColor" stroke="none"/><circle cx="10" cy="13.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="17" cy="10.5" r="1.7" fill="currentColor" stroke="none"/><circle cx="14" cy="17.5" r="1.7" fill="currentColor" stroke="none"/>'),
+  // the set. Points in a plane is the thing itself — four, in a flat rhombus
+  // (a fifth read as a smudge at 13px). Filled dots rather than a stroked
+  // figure because small, an outline closes up; the fill rides the glyph
+  // helper's currentColor like every other mark.
+  embed: glyph('<circle cx="4" cy="12" r="1.9" fill="currentColor" stroke="none"/><circle cx="12" cy="7" r="1.9" fill="currentColor" stroke="none"/><circle cx="20" cy="12" r="1.9" fill="currentColor" stroke="none"/><circle cx="12" cy="17" r="1.9" fill="currentColor" stroke="none"/>'),
   // Ingestion source kinds join the set here (sourceGlyph in
   // source-chooser.js): the local folder and an S3 bucket get their own
   // marks; other remote servers (FTP, installed source plugins) ride
@@ -312,6 +324,10 @@ export const ICONS = {
   // say the same thing and keep every entry here the same kind of object.
   terminal: glyph('<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>'),
   arrowLeft: glyph('<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>'),
+  // MCP — the tab where agents connect. A bot head: it used to wear the
+  // extraction star, the same borrowed-"AI" glyph the embed comment above
+  // is about.
+  bot: glyph('<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>'),
   // A puzzle piece: one rounded shoulder top-right, a tab out of the left edge
   // and one out of the bottom, each a semicircle on a short neck, centred on
   // the edge it leaves. Drawn in Illustrator; the export sat off-centre enough

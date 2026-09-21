@@ -135,7 +135,7 @@ export const CAPABILITY_DEFS = [
     noun: "field extraction",
     label: "Field extraction",
     blurb: "reads a board's structured fields out of an item",
-    icon: "srcSparkle",
+    icon: "srcExtract",
     // Extraction rides the TAGGING declaration and wire (text-only), so it is a
     // distinct capability sharing a wire — which is why `declaredBy` is a field
     // rather than just the id.
@@ -151,12 +151,6 @@ export const CAPABILITY_DEFS = [
       keys: { provider: null, keyId: "extract_key_id", model: "extract_model", enabled: null },
       boardKeys: { keyId: "extract_key_id", model: "extract_model" },
     },
-    // Presentation, not resolution: this capability's picker lives in the board
-    // modal's AI-models strip like every other, but the Mapping pane surfaces
-    // its provenance ("Using <model>") beside the AI fields it powers — and the
-    // Tagging pane's band finds the tagger through this capability's
-    // delegatesTo. Data, not a name check in the client.
-    mappingBand: true,
     floor: { kind: "delegate", to: "tag" },
   },
   {
@@ -241,10 +235,6 @@ export const CAPABILITY_DEFS = [
     blurb: "finds objects in an image so items can be searched by what is in them",
     icon: "srcFrame",
     declaredBy: "detect", verb: "detect", models: true,
-    // The Mapping pane surfaces this capability's provenance beside the detect
-    // fields it powers — same flag, same consumer as extract's band. Data, not
-    // a name check in the client (field-sources.js `capability` is the join).
-    mappingBand: true,
     // A pinned model must be one the provider advertises: otherwise every call
     // throws at the wire and the item requeues for ever. Only these two check —
     // tagging and embeddings accept any id, because live model lists mean the

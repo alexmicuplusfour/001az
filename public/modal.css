@@ -59,9 +59,17 @@
    (margin-left: auto absorbs the free space); under pressure it yields FIRST
    (min-width: 0) — the chip's label ellipsizes, its dot and tint survive.
    Empty = invisible: an unused slot must cost no gap. */
-.modal-status { margin-left: auto; min-width: 0; display: inline-flex; }
+.modal-status { margin-left: auto; min-width: 0; display: inline-flex; align-items: center; }
 .modal-status:empty { display: none; }
 .modal-status .status-chip { max-width: 100%; }
+/* A second header row, for a modal whose one identifying field belongs
+   above the settings rather than among them (the board editor's name). A
+   sibling of .modal-header, never a wrap inside it: wrapping the header row
+   would let the status slot drop to a new line instead of ellipsizing. The
+   header's hairline moves down under the sub-row so the two read as one
+   block. */
+.modal-subhead { flex-shrink: 0; padding: 0 20px 16px; border-bottom: 1px solid #eee; }
+.modal-header:has(+ .modal-subhead) { border-bottom: 0; }
 .modal-close {
   background: none;
   border: none;
@@ -131,6 +139,11 @@
 .modal-section > .section-heading,
 .modal-section > .section-head-row { margin-bottom: 12px; }
 .modal-section > .switch-row:not(:first-child) { margin-top: 12px; }
+/* Same rule one level up: a body's own padding is the air above its first
+   child, so a component that carries its own top margin gives it back there.
+   The board editor's pane toggle opens its body (the name row moved into the
+   header block above it). */
+.modal-body > .pane-toggle:first-child { margin-top: 0; }
 
 /* base element styles — mirrors admin.html globals so the modal looks the same on all pages.
 
@@ -331,51 +344,10 @@ button.is-busy .busy-spin {
    editor's AI-models fold is one user. Flat by design: the strip is chrome,
    and whatever it holds is hairline-separated, never boxes in boxes. Pair
    with .modal-strip-wrap/.modal-strip-scrim to dim what sits below it. ─── */
-/* Closed, the band is a thin seam between header and body and wants its rule.
-   Open, it is the surface in hand and ends in the scrim below it — a hairline
-   there only draws that edge twice. */
-.modal-strip {
-  flex-shrink: 0;
-  background: #fbfbfc;
-  border-bottom: 1px solid #eee;
-}
-.modal-strip.open { border-bottom-color: transparent; }
-/* the two fold heads share everything but their padding */
-.strip-head,
-.disc-head {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: none;
-  border: none;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text, #111);
-  cursor: pointer;
-  text-align: left;
-}
-.strip-head { padding: 9px 20px; }
-/* fold caret — shared by every collapsible head (strip, disclosure). Holds
-   ICONS.chevron (a down caret, 1em, currentColor), so it sizes and colors
-   with the text it accompanies; closed points right, open points down. */
-.chev {
-  flex: none;
-  display: inline-flex;
-  transform: rotate(-90deg);
-  transition: transform 0.12s;
-}
-.modal-strip.open > .strip-head .chev,
-.disclosure.open > .disc-head .chev { transform: rotate(0deg); }
-/* the collapsed head's status text — a fold summarizes, it never hides state */
-.fold-summary {
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 400;
-  color: #9a9aa6;
-  text-align: right;
-}
+/* Closed, the strip is nothing: it has no head of its own (the board editor
+   opens it from a header button), and a zero-height band with a hairline
+   would draw one under the header's. Open, it ends in the scrim below it. */
+.modal-strip { flex-shrink: 0; background: #fbfbfc; }
 .strip-body {
   display: none;
   padding: 0 20px 12px;
@@ -408,11 +380,6 @@ button.is-busy .busy-spin {
 .frow-src { display: block; font-size: 11px; color: #9a9aa6; margin-top: 1px; }
 .frow-edit { display: none; padding: 0 0 12px; gap: 8px; }
 .frow.open .frow-edit { display: flex; }
-.frow.flash { animation: frow-flash 1.2s ease-out; }
-@keyframes frow-flash {
-  0% { background: #edf2fe; }
-  100% { background: transparent; }
-}
 
 /* the wrapper + scrim while a strip is open. The host modal moves everything
    below the strip — .modal-body AND .modal-footer — in here, so the scrim has
@@ -441,40 +408,45 @@ button.is-busy .busy-spin {
   pointer-events: auto;
 }
 
-/* ─── provenance band — "Using <model> Change", centered on a soft ground ─── */
-.prov {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #6b6b72;
-  background: #f7f7fa;
-  border-radius: 8px;
-  padding: 8px 12px;
-  text-align: center;
-}
-.prov b { font-weight: 550; color: var(--text, #111); }
-/* the band starts hidden until its label resolves; `hidden` alone loses to
-   the display:flex above (same rule as every [hidden] override in styles.css) */
-.prov[hidden] { display: none; }
-.linkbtn {
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
-  font-size: 12px;
-  color: #2563eb;
-  cursor: pointer;
-}
-.linkbtn:hover { text-decoration: underline; }
 
 /* ─── disclosure: a boxed in-flow fold (the board editor's Advanced section is
-   one user). Chevron rotation and .fold-summary come from the shared fold
-   rules above. ─── */
+   one user). The head vocabulary below used to be shared with the modal
+   strip's own head; the strip is opened from a header button now, so this is
+   where a fold's head, caret and summary live. ─── */
 .disclosure { border: 1px solid #eee; border-radius: 9px; }
-.disc-head { padding: 10px 12px; }
+.disc-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text, #111);
+  cursor: pointer;
+  text-align: left;
+}
+/* fold caret — holds ICONS.chevron (a down caret, 1em, currentColor), so it
+   sizes and colors with the text it accompanies; closed points right, open
+   points down. */
+.chev {
+  flex: none;
+  display: inline-flex;
+  transform: rotate(-90deg);
+  transition: transform 0.12s;
+}
+.disclosure.open > .disc-head .chev { transform: rotate(0deg); }
+/* the collapsed head's status text — a fold summarizes, it never hides state */
+.fold-summary {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: #9a9aa6;
+  text-align: right;
+}
 .disc-body {
   display: none;
   padding: 4px 12px 12px;
@@ -487,7 +459,6 @@ button.is-busy .busy-spin {
   .modal-strip-scrim {
     transition: none;
   }
-  .frow.flash { animation: none; }
 }
 
 /* ─── facet editor (admin board modal + any future modal) ─── */
@@ -772,15 +743,22 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    no hover, no cursor — the chip is a verdict, not a control. The DOM half
    is statusChip() in modal.js; the words come from a pure presenter
    (ingest-present.js is the first). */
-.status-chip {
+/* The pill both header-slot components are drawn on. Only the shape is
+   shared: a verdict (.status-chip) and a button carrying marks (.glyph-btn)
+   have nothing else in common, and sharing the CLASS instead of the shape
+   made .warn mean an amber ground on one and amber ink on the other. */
+.status-chip,
+.glyph-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
   min-width: 0;
-  font-size: 12px;
-  color: #6b6b72;
   background: #f6f6f9;
   border-radius: 6px;
+}
+.status-chip {
+  gap: 6px;
+  font-size: 12px;
+  color: #6b6b72;
   padding: 3px 10px 3px 8px;
 }
 .status-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -796,10 +774,38 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 .status-chip.ok { color: #14532d; background: #f0fdf4; }
 .status-chip.ok .status-dot { color: #16a34a; }
 .status-chip.warn { color: #7a5b12; background: #fff7e6; }
-.status-chip.warn .status-dot { color: #e09f3e; }
+/* the one minted ink in the set, worn by a verdict's dot and by a capability
+   mark with nothing behind it */
+.status-chip.warn .status-dot,
+.glyph-btn .warn { color: #e09f3e; }
 .status-chip.error { color: #b4232a; background: #fdeaea; }
 .status-chip.error .status-dot { color: #e5484d; }
 .status-chip.dim { opacity: 0.6; }
+/* The header slot's caption + glyph button (board-modal.js): the words sit
+   outside the pill in the slot's grey; the marks inside are the capabilities'
+   own glyphs, in the button's ink rather than the set's own source grey.
+   Empty until the capability feed lands, and invisible until then — the same
+   :empty rule the slot itself uses. */
+.modal-status .slot-label { font-size: 13px; color: #6b6b72; margin-right: 8px; white-space: nowrap; }
+.glyph-btn {
+  gap: 7px;
+  padding: 5px 8px;
+  border: 0;
+  font: inherit;
+  color: var(--text, #111);
+  /* currentColor, NOT inherit: a CSS-wide keyword on a custom property is
+     handled at the property level ("take the parent's --glyph-ink", which is
+     unset) instead of being stored as the token var() substitutes. */
+  --glyph-ink: currentColor;
+  cursor: pointer;
+}
+.glyph-btn:empty { display: none; }
+.glyph-btn:hover { background: #ededf2; }
+/* 15px, the set's own stroke ratio kept: at 13px a 2-unit stroke in a 24
+   viewBox lands near 1px, and an antialiased 1px line of #111 reads as grey
+   however the ink is declared. This is the size the marks stop being a tint
+   and start being marks. */
+.glyph-btn svg { width: 15px; height: 15px; }
 /* the ripple is a scaled+faded ring, transform/opacity only — .live is a
    steady state (a watch pulses for the life of the modal), and a box-shadow
    spread here would repaint every frame of it */
@@ -1022,10 +1028,6 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    screen's tile could claim in a comment to match the modal card "verbatim"
    with nothing enforcing it. Now the claim is the cascade's.
 
-   .prov (the provenance band) keeps a literal #f7f7fa on purpose: it is a
-   borderless tinted strip that happens to share the value, not a card, and
-   binding it here would hand it the card family's next repaint.
-
    --card-bg-hover has one wearer that does NOT take --card-bg with it: the
    welcome tile rests white, because that page's ground is tinted and a tile
    starting at --card-bg would have no edges. It is the same step, from a
@@ -1120,7 +1122,10 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
    Promoted out of the mapping pane when the ingest modal adopted them; built
    by glyphEl (utils.js) and tileRow (modal.js). Mapping's def rows and source
    cards keep their mm- prefix — single-consumer, still the pane's own. */
-.glyph { flex: none; display: inline-flex; color: #868c96; }
+/* The set's own ink is a DEFAULT, not an assertion: a host that owns the ink
+   says so on itself (--glyph-ink: currentColor on .glyph-btn) rather than
+   having to out-specify this rule with a descendant selector. */
+.glyph { flex: none; display: inline-flex; color: var(--glyph-ink, #868c96); }
 .glyph.ai { color: var(--ai-ink); }
 
 /* Object tiles: a bounded object per row at one height; violet tint = a model

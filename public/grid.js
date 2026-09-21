@@ -176,7 +176,7 @@ function verbsFor(item) {
     }
   }
   if (mappingHasAiWork(state.boardMapping)) {
-    out.push({ label: "Re-extract fields", icon: ICONS.srcSparkle, url: u("reextract"), ok: "Re-extraction queued", fail: "Re-extract failed" });
+    out.push({ label: "Re-extract fields", icon: ICONS.srcExtract, url: u("reextract"), ok: "Re-extraction queued", fail: "Re-extract failed" });
   }
   if (state.boardMapping?.input?.connector) {
     out.push({ label: "Refresh data + chart", icon: ICONS.srcGlobe, url: u("refresh"), ok: "Refresh queued", fail: "Refresh failed" });
@@ -345,7 +345,7 @@ function openTagPop(chip, item) {
       }));
       if (canEdit) act("Edit tags", ICONS.pencil, () => openTagEditor(item));
       if (canSimilar) act("Find similar by tags", ICONS.search, () => runSimilar(item));
-      if (canMeaning) act("Find similar by meaning", ICONS.srcSparkle, () => runSimilarMeaning(item));
+      if (canMeaning) act("Find similar by meaning", ICONS.embed, () => runSimilarMeaning(item));
     } : undefined,
     onClose: pin.release,
   });

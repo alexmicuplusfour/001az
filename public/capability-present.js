@@ -364,21 +364,23 @@ export function planBoardPicker(cap, keys, board, catalog) {
     // claim about nothing? A pinned key or engine is a choice by definition;
     // only the app-default row can come up empty, and `chosenLabel` answers
     // that case with "none configured" — fine in a status list, a lie in a
-    // sentence ("Using none configured"). The bands ask this first. Kept
-    // separate from `chosenLabel` because the ROW must still name the state:
+    // sentence. The board modal's capability marks ask this first, to decide
+    // which of them warn. Kept separate from `chosenLabel` because the ROW
+    // must still name the state:
     // "App default (none configured)" is exactly what that row should read.
     configured(sel) {
       return sel ? true : !!cap.running;
     },
-    // What the current selection is called mid-sentence — the "Using …" bands
-    // read off this. The unset delegate answers with its relationship, not a
-    // model; shells that need the resolved model follow delegatesTo themselves.
+    // What the current selection is called mid-sentence — a strip row's value
+    // and a capability mark's tooltip read off this. The unset delegate answers
+    // with its relationship, not a model; shells that need the resolved model
+    // follow delegatesTo themselves.
     chosenLabel(sel, model) {
       if (!sel) return delegated ? unsetLabel : inherit;
       const key = keyFor(sel);
       if (key) return `${key.name} — ${key.provider}${model ? ` · ${model}` : ""}`;
-      // A named engine names its model too when it had one to choose — the
-      // "Using …" bands must not go quieter than a keyed pin's for the same act.
+      // A named engine names its model too when it had one to choose — it must
+      // not go quieter than a keyed pin's for the same act.
       return `${rows.find((r) => r.value === sel)?.label || sel}${model ? ` · ${model}` : ""}`;
     },
     // The save body, in the feed's column names. Full-state per capability:

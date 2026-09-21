@@ -34,7 +34,7 @@ const BOARD = {
 const CAPS = {
   capabilities: [{
     id: 'tag', label: 'Tagging', noun: 'tagging', agent: 'tagger', declaredBy: 'tag',
-    icon: 'srcSparkle', binding: { provider: false, enable: false, global: true },
+    icon: 'srcExtract', binding: { provider: false, enable: false, global: true },
     floor: { kind: 'blocked' },
     boardBinding: { keyId: 'ai_key_id', model: 'ai_model' },
     running: { provider: 'openai', model: 'gpt-5-mini', keyId: 7 },
@@ -313,7 +313,7 @@ test('Paste JSON arms Save on its own — the write lands long after the click',
     context: 'Catalogue these garments.',
     facets: [{ label: 'Season', values: ['summer', 'winter'] }],
   });
-  const paste = [...modal.querySelectorAll('.clip-btn')].find((b) => b.textContent === 'Paste JSON');
+  const paste = [...modal.querySelectorAll('.clip-btn')].find((b) => b.textContent === 'Paste');
   assert.ok(paste, 'the paste chip is there');
   paste.click();
   await settle();
@@ -333,7 +333,7 @@ test('Paste JSON arms Save on its own — the write lands long after the click',
 test('a paste of only the context still arms Save', async () => {
   const modal = await open();
   CLIPBOARD = JSON.stringify({ context: 'Only the context moved.' });
-  [...modal.querySelectorAll('.clip-btn')].find((b) => b.textContent === 'Paste JSON').click();
+  [...modal.querySelectorAll('.clip-btn')].find((b) => b.textContent === 'Paste').click();
   await settle();
   assert.equal(off(), false);
   shut(modal);

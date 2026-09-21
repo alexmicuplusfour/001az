@@ -239,10 +239,6 @@ async function aiEntry(db, cap, catalog, presence) {
             keyId: cap.binding.boardKeys.keyId,
             ...(cap.binding.boardKeys.model ? { model: cap.binding.boardKeys.model } : {}),
           },
-          // Which capability's provenance the Mapping pane surfaces beside the
-          // AI fields it powers ("Using <model>") — presentation, not
-          // resolution; the picker itself sits in the modal's strip like all.
-          ...(cap.mappingBand ? { mappingBand: true } : {}),
         }
       : {}),
     // Conditional spreads on the new fields, deliberately: detect's tests pin

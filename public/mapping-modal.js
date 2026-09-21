@@ -17,7 +17,7 @@ import { toast } from "./toast.js";
 import { openDropdown, ddRow, ddNote, ddSep, ddEmpty, ddChips, ddHead } from "./dropdown.js";
 import { ICONS, glyphEl, sentence } from "./utils.js";
 import { switchRow } from "./switch.js";
-import { sectionHeadingEl, provBand, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, busy } from "./modal.js";
+import { sectionHeadingEl, keepPlace, createDrawer, drawerHeadParts, tileRow, dwGroup as group, busy } from "./modal.js";
 import { fillSelect } from "./select.js";
 import { draftKey } from "./save-gate.js";
 
@@ -50,8 +50,8 @@ const clone = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)));
 // a row here (plus its server row) rather than another arm in three switches.
 //
 //   glyph       ICONS name; `ai` decides its ink (.glyph.ai = violet).
-//   capability  which capability runs it — drives the provenance bands; null =
-//               deterministic, no model, no band.
+//   capability  which capability runs it (the join to server/field-sources.js,
+//               which resolves the model); null = deterministic, no model.
 //   catalog     bound to a closed vocabulary, named with the server's own
 //               vocabulary ids ("connector" | "media"): the entry decides key,
 //               kind AND fn together, so the menu lists entries and no drawer
@@ -95,7 +95,7 @@ const SOURCES = {
     tile: (f) => `From the file · ${kindWord(f.kind)}`,
   },
   extract: {
-    id: "extract", glyph: "srcSparkle", ai: true, capability: "extract",
+    id: "extract", glyph: "srcExtract", ai: true, capability: "extract",
     kinds: ["text", "number", "date", "url"], cap: 12,
     ask: {
       label: "AI instruction",
@@ -131,18 +131,16 @@ const normalizeKey = (v) =>
 
 // Builds the entity-mapping editor into `container` — a pane inside the board
 // modal (board-modal.js), which owns the modal chrome + the single Save button.
-// Returns { isDirty, snapshot, collect, setBands }: the host folds collect()'s
-// payload into its one PATCH/POST when isDirty() says the pane was really
-// edited, reads snapshot() into its own save gate, and names the models behind
-// the provenance bands via setBands. Fully parameterized (no gallery-state
-// reads), so it works on admin.html and for not-yet-created boards:
+// Returns { isDirty, snapshot, collect }: the host folds collect()'s payload
+// into its one PATCH/POST when isDirty() says the pane was really edited, and
+// reads snapshot() into its own save gate. Fully parameterized (no
+// gallery-state reads), so it works on admin.html and for not-yet-created
+// boards:
 //   isAdmin  — editable pane; false = read-only view
 //   mapping  — the board's current mapping (null for a new/unmapped board)
 //   hasItems — locks the connector-template picker (templates rewire the whole
 //              mapping, only sane while the board is empty)
-//   onCapabilityChange — a band's "Change" action, handed the capability id:
-//              the host opens its AI-models strip at that capability's row
-export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false, onCapabilityChange = null }) {
+export function buildMappingPane({ container, isAdmin = false, mapping = null, hasItems = false }) {
   // Clone the current mapping so edits are buffered until Save. The state IS
   // the new wire shape — no per-slot from/hint/candidates translation layer.
   let fields = (mapping?.fields || []).map((f) => ({ ...f }));
@@ -180,48 +178,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   const ctx = { get connectorLabel() { return conn?.label || null; } };
   const srcLabel = (def) => def.label(ctx);
   const tileSum = (f) => (SOURCES[f.source] ? SOURCES[f.source].tile(f, ctx) : f.source);
-
-  // ── Provenance bands, one per capability ──────────────────────────────────
-  // Which capability runs a source comes from the table, never a name — a
-  // future capability-backed source is covered by its row alone. The host
-  // pushes the whole map via setBands (only it can see the strip's unsaved
-  // edits and follow delegation); the pane decides which bands are VISIBLE:
-  // one line per capability the current edited mapping actually uses. The
-  // pushed map is stored and re-applied after every re-render — same problem
-  // the old setExtractionBand pattern solved, same fix: the band elements are
-  // stable, only their state is replayed.
-  const bands = new Map(); // capability id → provBand
-  if (isAdmin) {
-    for (const def of Object.values(SOURCES)) {
-      if (def.capability && !bands.has(def.capability)) {
-        const capId = def.capability;
-        const band = provBand(() => onCapabilityChange?.(capId));
-        band.el.style.margin = "2px 0";
-        bands.set(capId, band);
-      }
-    }
-  }
-  let lastBands = {};
-  const usedCapabilities = () => {
-    const used = new Set();
-    // Slots and fields alike ask the table for their capability — never a name
-    // check, so a future capability-backed source (the planned face/voice
-    // matching) is covered by its SOURCES row alone.
-    for (const slot of [identityCfg, faceCfg]) {
-      const cap = SOURCES[slot?.source]?.capability;
-      if (cap) used.add(cap);
-    }
-    for (const f of fields) {
-      const cap = SOURCES[f.source]?.capability;
-      if (cap) used.add(cap);
-    }
-    return used;
-  };
-  const applyBands = () => {
-    const used = usedCapabilities();
-    for (const [capId, band] of bands) band.set(used.has(capId) ? lastBands[capId] ?? null : null);
-  };
-  const setBands = (map) => { lastBands = map || {}; applyBands(); };
 
   // ── Small builders (glyphEl/drawerHeadParts/tileRow live in utils/modal) ──
   // A select over [value, label] pairs. Options go through select.js's
@@ -428,7 +384,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     unavailBanner.textContent = `${cause}, so this board can't fetch or refresh its data. ${remedy}`;
   }
 
-  // ── The sheet: def rows, tiles, bands ─────────────────────────────────────
+  // ── The sheet: def rows and tiles ─────────────────────────────────────────
   // One render that is always right, rebuilt wholesale on every structural
   // edit and wrapped in keepPlace (modal.js) — the pane lives in a scrolling
   // modal body, and without it any edit dropped the reader at the top. Def
@@ -440,6 +396,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   const render = keepPlace(sheet, () => {
     sheet.replaceChildren();
 
+    // "Card": what one card IS (identity) and what it SHOWS (face) — the
+    // rows' own word ("each file is its own card"), beside Extract Fields.
+    const cardHeading = sectionHeadingEl("Card");
+    cardHeading.style.margin = "0 0 8px";
+    sheet.appendChild(cardHeading);
     const defs = el("div", "mm-def");
     defs.append(identityDefRow(), faceDefRow());
     sheet.appendChild(defs);
@@ -462,14 +423,6 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       tiles.appendChild(el("p", "mm-empty", "No fields defined."));
     }
     sheet.appendChild(tiles);
-
-    if (bands.size) {
-      const prov = document.createElement("div");
-      prov.style.cssText = "display:flex;flex-direction:column;gap:4px;margin-top:12px;";
-      for (const band of bands.values()) prov.appendChild(band.el);
-      sheet.appendChild(prov);
-    }
-    applyBands();
   });
 
   // A definition row: glyph + small mono label + plain value line (+ options
@@ -507,7 +460,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     }
     const bound = identityCfg?.source === "extract";
     return defRow({
-      glyph: bound ? "srcSparkle" : "srcDot", ai: bound, label: "identity",
+      glyph: bound ? "srcExtract" : "srcDot", ai: bound, label: "identity",
       value: bound ? (identityCfg.instruction || "not said yet") : "each file is its own card",
       none: !bound,
       more: bound && identityCfg.options?.length
@@ -859,7 +812,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         // The head follows the current pick — it names what the slot would be
         // saved as, not what it was when the drawer opened.
         head.g.className = "glyph" + (isAi ? " ai" : "");
-        head.g.innerHTML = isAi ? ICONS.srcSparkle : ICONS.srcDot;
+        head.g.innerHTML = isAi ? ICONS.srcExtract : ICONS.srcDot;
         head.s.textContent = isAi ? "AI extraction" : "Filename";
 
         const row = el("div", "mm-srcrow");
@@ -870,7 +823,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
             onPick: () => { ed.draft = null; drawer().refresh(); },
           }),
           srcCard({
-            glyph: "srcSparkle", ai: true, lab: "AI extraction", note: "the AI derives it",
+            glyph: "srcExtract", ai: true, lab: "AI extraction", note: "the AI derives it",
             pressed: isAi,
             onPick: () => {
               // Re-picking AI restores what was saved rather than a blank —
@@ -1320,5 +1273,5 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return { ok: true, payload: { mapping: out } };
   }
 
-  return { isDirty, snapshot, collect, setBands };
+  return { isDirty, snapshot, collect };
 }
