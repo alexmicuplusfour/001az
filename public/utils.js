@@ -211,8 +211,15 @@ export const ICONS = {
   // FIELD_SOURCE_DEFS row + one CAPABILITY_DEFS entry each). Drawn now, with
   // the rest of the set, because that is the only way they end up on the same
   // grid and stroke as their neighbours. They are not dead code to sweep.
+  //
+  // srcSparkle has no source row either, and it is the one that never will:
+  // it USED to be extraction's mark until that job got srcExtract, which draws
+  // the job rather than the technology. What is left is the plain "a model is
+  // behind this" star, and it keeps the src prefix because it keeps the shape
+  // — the MCP tab wears it (agents are the thing on the other end).
   srcFile: glyph('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
   srcGlobe: glyph('<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5a13 13 0 0 1 0 17a13 13 0 0 1 0-17z"/>'),
+  srcSparkle: glyph('<path d="M12 2.5 L14.5 9.5 L21.5 12 L14.5 14.5 L12 21.5 L9.5 14.5 L2.5 12 L9.5 9.5 Z"/>'),
   // Extraction: srcFrame's corners (look at the item) with text lines where
   // detect has its circle — read values out vs find a thing. Two lines, not
   // three: at 12px the third turns the mark to mush. It replaced a four-point
@@ -324,10 +331,6 @@ export const ICONS = {
   // say the same thing and keep every entry here the same kind of object.
   terminal: glyph('<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>'),
   arrowLeft: glyph('<path d="M19 12H5"/><path d="m12 19-7-7 7-7"/>'),
-  // MCP — the tab where agents connect. A bot head: it used to wear the
-  // extraction star, the same borrowed-"AI" glyph the embed comment above
-  // is about.
-  bot: glyph('<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>'),
   // A puzzle piece: one rounded shoulder top-right, a tab out of the left edge
   // and one out of the bottom, each a semicircle on a short neck, centred on
   // the edge it leaves. Drawn in Illustrator; the export sat off-centre enough
