@@ -49,3 +49,33 @@ test("setWork ignores an absent payload and drained work lets the poll wind down
   assert.equal(workInFlight(), false);
   assert.equal(pollDelay(), 0);
 });
+
+test("a pipeline leg's backlog is fast-tier work; paused, it waits on the slow tier", () => {
+  // The worker's next tick takes a waiting leg — unlike a lane backlog, which
+  // drains at transcription pace — so the poll follows it at claim pace. The
+  // server marked the lane `leg`; nothing here knows which kinds are legs.
+  setWork({ running: [], queued: [{ kind: "tag", label: "Tagging", n: 18, leg: true }] });
+  assert.equal(workRunning(), false);
+  assert.equal(pollDelay(), 4000, "a waiting leg is followed at claim pace");
+  state.boardPaused = true;
+  assert.equal(pollDelay(), 30000, "paused: the queue is intact and nothing is on the way");
+  state.boardPaused = false;
+  setWork({ running: [{ id: null, kind: "extract", label: "Extraction", leg: true }], queued: [] });
+  assert.equal(pollDelay(), 4000, "a claimed leg is work moving, like any running row");
+  // Drain, as the test above does: setWork woke the poll, and its pending tick
+  // must find nothing to follow — or the file never exits.
+  setWork({ running: [], queued: [] });
+  assert.equal(pollDelay(), 0);
+});
+
+test("requeue mirrors the answer's work — the chip lights in the same render, not a poll later", async () => {
+  // A per-card route answers the routed report AND the work it queued
+  // (instance-work-plan.md, Stage 2 G1); requeue writes both into state.
+  const { requeue } = await import("../public/data.js");
+  const answer = { running: [], queued: [{ kind: "tag", label: "Tagging", n: 1, leg: true }] };
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, entities: [], work: answer }) });
+  await requeue("/api/items/1/reprocess");
+  assert.deepEqual(state.work, answer, "the answer's work is in state before any poll ran");
+  assert.equal(pollDelay(), 4000, "…and the poll follows it at claim pace");
+  setWork({ running: [], queued: [] }); // drain, as above
+});

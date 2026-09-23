@@ -129,6 +129,7 @@ import {
   listJobLog,
   listRunningJobs,
   boardLaneQueues,
+  pipelineWork,
   latestJobFailureAt,
   boardLatestFailures,
   clearJobLog,
@@ -1226,24 +1227,45 @@ async function workFor(boardId, board = null) {
     listRunningJobs(db, boardId),
     servedBacklogLanes(db, boardId, board),
   ]);
-  const queued = await boardLaneQueues(db, boardId, lanes,
-    running.map((j) => j.item_id).filter((x) => x != null));
+  // The running rows' own items, excluded from every count AND from the
+  // pipeline rows (planning/instance-work-plan.md, close read F2): the tag
+  // leg claims an audio row and only then finds its transcript missing, so
+  // for a moment one clip is both a claimed row and the transcribe lane's
+  // running row. One unit of work, one record — decided here, once.
+  const runningIds = running.map((j) => j.item_id).filter((x) => x != null);
+  const [queued, legs] = await Promise.all([
+    boardLaneQueues(db, boardId, lanes, runningIds),
+    pipelineWork(db, boardId, runningIds),
+  ]);
+  const labelled = (r) => ({ ...r, label: capabilityLabel(r.kind) });
   return {
-    running: running.map((j) => ({
-      id: j.id, kind: j.kind, label: capabilityLabel(j.kind), target: j.target,
-      // `detail` rides along because a running row can carry PROGRESS (a feed
-      // run's planned/admitted). Settled rows already serve theirs to History;
-      // withholding it here is what left a three-minute import showing as the
-      // word "running".
-      detail: j.detail,
-      // entity_id is the dedup key: the client's cards are entities, and a
-      // running row whose entity already shows as an in-flight item is one
-      // unit of work wearing two records.
-      item_id: j.item_id, entity_id: j.entity_id,
-      entity_display: j.entity_display || j.target || j.entity_identity,
-      started_at: j.started_at,
-    })),
-    queued: queued.map((q) => ({ ...q, label: capabilityLabel(q.kind) })),
+    // Job rows and claimed instances in ONE list, oldest first, wearing the
+    // kind vocabulary either way — the same badges History wears.
+    running: [
+      ...running.map((j) => ({
+        id: j.id, kind: j.kind, label: capabilityLabel(j.kind), target: j.target,
+        // `detail` rides along because a running row can carry PROGRESS (a feed
+        // run's planned/admitted). Settled rows already serve theirs to History;
+        // withholding it here is what left a three-minute import showing as the
+        // word "running".
+        detail: j.detail,
+        item_id: j.item_id, entity_id: j.entity_id,
+        // The card's own name, or nothing — `target` (the frozen original
+        // filename) travels beside it and the client composes the label
+        // (close read F3). Never the identity: on a raw board that is the
+        // stored hex name.
+        entity_display: j.entity_display,
+        started_at: j.started_at,
+      })),
+      ...legs.running.map((r) => ({ ...labelled(r), leg: true })),
+    ].sort((a, b) => a.started_at - b.started_at),
+    // The pipeline queues first, in pipeline order, marked `leg` — the one
+    // fact the cancel verb and the poll cadence need (D3, F5) — then the
+    // lane backlogs.
+    queued: [
+      ...legs.queued.map((q) => ({ ...labelled(q), leg: true })),
+      ...queued.map(labelled),
+    ],
   };
 }
 
@@ -1255,10 +1277,11 @@ app.get("/api/boards/:id/jobs", requireAuth, wrap(async (req, res) => {
   const pick = (j) => ({
     id: j.id, kind: j.kind, outcome: j.outcome, error: j.error, detail: j.detail,
     target: j.target, entity_id: j.entity_id, item_id: j.item_id,
-    // A real display name wins; then the frozen target (the ORIGINAL
-    // filename) — a provisional upload entity's identity is the stored hex
-    // name, so it comes last, not ahead of the label people recognize.
-    entity_display: j.entity_display || j.target || j.entity_identity,
+    // The card's own name, or nothing — `target` (the frozen ORIGINAL
+    // filename) travels beside it and the client composes the label
+    // (instance-work-plan.md, close read F3). Never the identity: a
+    // provisional upload entity's identity is the stored hex name.
+    entity_display: j.entity_display,
     started_at: j.started_at, ended_at: j.ended_at,
   });
   // kind=refresh serves field_snapshots wearing the same row shape — refresh
@@ -2568,7 +2591,10 @@ app.post("/api/admin/boards/:id/reprocess", requireAdmin, wrap(async (req, res) 
   if (queued === null) return res.status(404).json({ error: "not found" });
   invalidateBoardCache(board.id);
   console.log(`reprocess queued: ${queued} item(s) in board ${board.id}`);
-  res.json({ ok: true, queued });
+  // The fifth `work` carrier (instance-work-plan.md): the queue this call
+  // just filled, in the same shape the poll and the jobs page serve, so the
+  // gallery's chip and modal read it in the same render as the click.
+  res.json({ ok: true, queued, work: await workFor(board.id, board) });
 }));
 
 // "Tag now" for a scheduled board: release held items without waiting for
@@ -3403,7 +3429,7 @@ app.patch("/api/instances/:id/tags", requireAuth, requireItemAccess, wrap(async 
   // routes this does NOT 404 on a null: the save itself succeeded, and a row
   // that vanished under it just has no card left to report (routedEntities
   // answers [] for the empty seed).
-  res.json({ ok: true, tags: clean, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected, { tags: clean });
 }));
 
 // Delete the whole entity: instances cascade, all their files are cleaned.
@@ -3414,6 +3440,21 @@ app.delete("/api/items/:id", requireAuth, requireEntityAccess, wrap(async (req, 
   console.log(`deleted entity #${req.entityId}`);
   res.json({ ok: true });
 }));
+
+// Every route a GALLERY surface calls to start work answers the same way
+// (instance-work-plan.md, Stage 2 G1): the routed report for the cards it
+// moved — where each instance landed and each affected card's fresh
+// aggregate — and the `work` payload the chip and the modal read, so a
+// click's answer carries the work in the same render, per card exactly as
+// the board reprocess does. The guard already resolved the board. Both are
+// read AFTER the re-route landed, as routedEntities insists.
+async function answerRouted(req, res, affected, extra = {}) {
+  const [entities, work] = await Promise.all([
+    routedEntities(db, affected),
+    workFor(req.entityBoardId || req.itemBoardId),
+  ]);
+  res.json({ ok: true, entities, work, ...extra });
+}
 
 // Card-level reprocess: re-run the whole pipeline for every instance. Each
 // instance restarts at the leg its payload calls for (fetch/face/extract/tag
@@ -3440,7 +3481,7 @@ app.post("/api/items/:id/reprocess", requireAuth, requireEntityAccess, wrap(asyn
   const affected = await reprocessEntity(db, req.entityId, engine);
   if (!affected) return res.status(404).json({ error: "not found" });
   console.log(`reprocess queued entity #${req.entityId}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected);
 }));
 
 // Card-level retag (Stage 3c): re-tag every instance from its existing
@@ -3463,7 +3504,7 @@ app.post("/api/items/:id/retag", requireAuth, requireEntityAccess, wrap(async (r
     if (!affected) return res.status(404).json({ error: "not found" });
   }
   console.log(`retag queued entity #${req.entityId}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected), ...(scope ? { facets: scope } : {}) });
+  await answerRouted(req, res, affected, scope ? { facets: scope } : {});
 }));
 
 // Card-level re-extract (Stage 3c): every instance re-enters the extract leg.
@@ -3473,7 +3514,7 @@ app.post("/api/items/:id/reextract", requireAuth, requireEntityAccess, wrap(asyn
   const affected = await reextractEntity(db, req.entityId);
   if (!affected) return res.status(409).json({ error: "nothing to extract on this item" });
   console.log(`reextract queued entity #${req.entityId}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected);
 }));
 
 // Card-level re-transcribe (Stage 4): every audio instance forgets its
@@ -3483,7 +3524,7 @@ app.post("/api/items/:id/retranscribe", requireAuth, requireEntityAccess, wrap(a
   const affected = await retranscribeEntity(db, req.entityId);
   if (!affected) return res.status(409).json({ error: "only audio can be re-transcribed" });
   console.log(`retranscribe queued entity #${req.entityId}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected);
 }));
 
 // Refresh a connector card's data on demand (Stage 4): fetch → face → tag
@@ -3493,7 +3534,7 @@ app.post("/api/items/:id/refresh", requireAuth, requireEntityAccess, wrap(async 
   const affected = await refreshEntityData(db, req.entityId);
   if (!affected) return res.status(409).json({ error: "not a connector item" });
   console.log(`refresh queued entity #${req.entityId}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected);
 }));
 
 // Re-run extraction for one instance that has a stamped mapping (409 without
@@ -3502,7 +3543,7 @@ app.post("/api/instances/:id/reextract", requireAuth, requireItemAccess, wrap(as
   const affected = await reextractItem(db, req.itemId);
   if (!affected) return res.status(409).json({ error: "item has no stamped mapping" });
   console.log(`reextract queued instance #${req.itemId}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected);
 }));
 
 // Force a fresh transcription (Stage 3b) — the one artifact reprocess
@@ -3516,7 +3557,7 @@ app.post("/api/instances/:id/retranscribe", requireAuth, requireItemAccess, wrap
   const affected = await retranscribeItem(db, req.itemId);
   if (!affected) return res.status(409).json({ error: "only audio can be re-transcribed" });
   console.log(`retranscribe queued instance #${req.itemId}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected) });
+  await answerRouted(req, res, affected);
 }));
 
 // Re-tag one instance from its existing material and fields — the per-instance,
@@ -3538,7 +3579,7 @@ app.post("/api/instances/:id/retag", requireAuth, requireItemAccess, wrap(async 
     if (!affected) return res.status(404).json({ error: "not found" });
   }
   console.log(`retag queued instance #${req.itemId}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
-  res.json({ ok: true, entities: await routedEntities(db, affected), ...(scope ? { facets: scope } : {}) });
+  await answerRouted(req, res, affected, scope ? { facets: scope } : {});
 }));
 
 // Remove one instance from its entity (file included). The last instance
@@ -3701,7 +3742,12 @@ app.post("/api/boards/:id/entities/bulk", requireAuth, wrap(async (req, res) => 
       skipped.push({ id: row.id, reason: err.message });
     }
   }
-  res.json({ added, skipped });
+  // The work these adds just queued, beside the rows themselves — a vehicle
+  // enters at the fetch leg, so this is a gallery surface starting work and it
+  // answers like every other one (instance-work-plan.md, second pass P1). The
+  // client mirrors it next to the rows it unshifts, so the chip lights on the
+  // same click rather than on the next poll.
+  res.json({ added, skipped, work: await workFor(board.id, board) });
 }));
 
 // The lightbox detail view's live chart: one entity's price series from the
@@ -3827,7 +3873,12 @@ app.get("/api/boards/:id/connector-list", requireAuth, wrap(async (req, res) => 
 // safe. Login required: without it the bytes are world-readable to anyone
 // holding a URL; within a session the 64-bit random filenames are the
 // per-board barrier — they only surface through the board-ACL'd /api/items.
-mountIngest(app, { db, sources });
+// `workFor` rides in because /api/upload is a gallery surface that STARTS work
+// — the rows it mints enter the pipeline — so its answer carries the same
+// `work` payload every other such route answers (instance-work-plan.md P1).
+// Passed rather than imported: the composer closes over this module's `db`,
+// and ingest.js is mounted from here, so an import would be a cycle.
+mountIngest(app, { db, sources, workFor });
 const backups = mountBackups(app, {
   db,
   backupsDir: BACKUPS_DIR,

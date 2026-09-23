@@ -107,6 +107,15 @@ const STATUS_PRIORITY = ["fetching", "pending_fetch", "facing", "pending_face", 
 // back to 'processing' and matches nothing).
 const IN_FLIGHT_FOR = { pending_fetch: "fetching", pending: "processing", pending_extract: "extracting", pending_face: "facing" };
 
+// …and the job kind each leg's rows wear (legLog in worker.js, KIND_DEFS in
+// capabilities.js), keyed by the wait state in PIPELINE order — fetch, face,
+// extract, tag — which is the order the wire lists the queues in
+// (pipelineWork). Only the tag leg breaks the `pending_<x> → <x>` pattern,
+// so this is a table and not a string rule. A fifth leg is one entry here
+// and one in IN_FLIGHT_FOR.
+const LEG_KIND = { pending_fetch: "fetch", pending_face: "face", pending_extract: "extract", pending: "tag" };
+const ACTIVE_KIND = Object.fromEntries(Object.entries(LEG_KIND).map(([wait, kind]) => [IN_FLIGHT_FOR[wait], kind]));
+
 // …and the derived spellings the SQL below composes, so the claim CASE, the
 // recovery arms and the in-flight WHERE lists cannot drift from the map (they
 // did: recoverStuck's hand-written lists survived one leg addition only
@@ -3396,7 +3405,11 @@ export async function stampJobLog(db, id, { outcome, error = null, detail = null
 // History page for the jobs view: newest first, keyset on (started_at, id) —
 // the /api/items cursor pattern. Settled rows only; running rows are a
 // separate, tiny, unpaginated fetch (listRunningJobs). The entity join is for
-// display: live rows get the current name, deleted ones fall back to `target`.
+// display, and it takes the display NAME alone: a card has a name of its own
+// exactly when it has one, and the row's `target` (the frozen original
+// filename) is what names the instance beside it — the client composes the two
+// (instance-work-plan.md F3). Never `identity`: on a raw board that is the
+// stored hex name, which is why this join used to need a fallback chain.
 export async function listJobLog(db, boardId, { after = null, kind = null, outcome = null, limit = 50 } = {}) {
   const cond = ["j.board_id=$1", "j.outcome <> 'running'"];
   const args = [boardId];
@@ -3411,7 +3424,7 @@ export async function listJobLog(db, boardId, { after = null, kind = null, outco
   }
   args.push(limit);
   const { rows } = await db.query(
-    `SELECT j.*, e.display_name AS entity_display, e.identity AS entity_identity
+    `SELECT j.*, e.display_name AS entity_display
        FROM job_log j LEFT JOIN entities e ON e.id = j.entity_id
       WHERE ${cond.join(" AND ")}
       ORDER BY j.started_at DESC, j.id DESC LIMIT $${args.length}`,
@@ -3421,14 +3434,19 @@ export async function listJobLog(db, boardId, { after = null, kind = null, outco
   return { jobs: rows, nextCursor: rows.length === limit ? `${last.started_at}_${last.id}` : null };
 }
 
-export async function listRunningJobs(db, boardId) {
-  const { rows } = await db.query(
-    `SELECT j.*, e.display_name AS entity_display, e.identity AS entity_identity
+// Served by idx_job_log_running, the partial index cut for exactly this
+// predicate (migration 0053): every work read runs this — the delta poll per
+// open tab, the signals tick, the jobs page, every per-card click — and
+// without it the whole ledger was scanned to find a handful of transient rows.
+// Exported as a string so its test pins the plan against the app's own SQL
+// rather than a copy of it, the arrangement LATEST_JOB_FAILURE_SQL already has.
+export const RUNNING_JOBS_SQL = `SELECT j.*, e.display_name AS entity_display
        FROM job_log j LEFT JOIN entities e ON e.id = j.entity_id
       WHERE j.board_id=$1 AND j.outcome='running'
-      ORDER BY j.started_at ASC`,
-    [boardId]
-  );
+      ORDER BY j.started_at ASC`;
+
+export async function listRunningJobs(db, boardId) {
+  const { rows } = await db.query(RUNNING_JOBS_SQL, [boardId]);
   return rows;
 }
 
@@ -3825,6 +3843,50 @@ export async function boardLaneQueues(db, boardId, lanes, excludeIds = []) {
     return { kind: lane.kind, n: Number(rows[0].n) };
   }));
   return counts.filter((c) => c && c.n > 0);
+}
+
+// The pipeline legs as the wire's two halves (planning/instance-work-plan.md):
+// every claimed instance is a `running` row wearing its leg's job kind and
+// the file it is working on; every waiting one is a count under its leg.
+// DERIVED from items.status at read time — the legs still write no `running`
+// job_log rows (the ledger's rule) — and bounded by what the worker claims.
+//
+// Same exclusion frame as boardLaneQueues, and it is load-bearing here:
+// `excludeIds` is the running job rows' items, and the tag/extract legs
+// CLAIM an audio row before finding its transcript missing, so for a moment
+// one clip is both a claimed row and the transcribe lane's running row. One
+// unit of work, one record. No pause gate, like the lanes: a paused board's
+// queue is intact and "waiting" stays true. `started_at` is the claim stamp
+// — claimFairBatch writes updated_at, and nothing else touches a claimed row
+// until it lands.
+export async function pipelineWork(db, boardId, excludeIds = []) {
+  const [{ rows: active }, { rows: waiting }] = await Promise.all([
+    db.query(
+      `SELECT i.id, i.entity_ids, i.status, i.updated_at,
+              COALESCE(i.payload->'files'->0->>'original_name', i.payload->>'identity') AS target,
+              e.display_name AS entity_display
+         FROM items i LEFT JOIN entities e ON e.id = i.entity_ids[1]
+        WHERE i.board_id=$1 AND i.status = ANY($2::text[]) AND NOT (i.id = ANY($3::bigint[]))
+        ORDER BY i.updated_at ASC, i.id ASC`,
+      [boardId, Object.keys(ACTIVE_KIND), excludeIds]
+    ),
+    db.query(
+      `SELECT status, COUNT(*)::int AS n FROM items
+        WHERE board_id=$1 AND status = ANY($2::text[]) AND NOT (id = ANY($3::bigint[]))
+        GROUP BY status`,
+      [boardId, Object.keys(LEG_KIND), excludeIds]
+    ),
+  ]);
+  const byWait = new Map(waiting.map((r) => [r.status, r.n]));
+  return {
+    running: active.map((r) => ({
+      id: null, kind: ACTIVE_KIND[r.status], item_id: r.id,
+      entity_id: r.entity_ids?.[0] ?? null, target: r.target,
+      entity_display: r.entity_display, started_at: r.updated_at,
+    })),
+    queued: Object.entries(LEG_KIND).flatMap(([wait, kind]) =>
+      byWait.has(wait) ? [{ kind, n: byWait.get(wait) }] : []),
+  };
 }
 
 // The embedding sweep's work queue: items whose vector is missing or from

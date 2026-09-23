@@ -626,7 +626,18 @@ test("reprocessBoard: every instance on the board re-enters the pipeline, board-
   await db.query("UPDATE items SET status='tagged' WHERE board_id=$1", [boardId]);
   const r = await req(base, "POST", `/api/admin/boards/${boardId}/reprocess`, { sid: admin.sid });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json, { ok: true, queued: 2 });
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.queued, 2);
+  // …and the answer carries the queue it just filled, leg by leg, in the
+  // shape every other work carrier serves (instance-work-plan.md): the
+  // stamped instance waits to extract, the unstamped one to tag.
+  assert.deepEqual(r.json.work, {
+    running: [],
+    queued: [
+      { kind: "extract", n: 1, label: "Extraction", leg: true },
+      { kind: "tag", n: 1, label: "Tagging", leg: true },
+    ],
+  });
   assert.equal((await req(base, "POST", `/api/admin/boards/00000000-0000-4000-8000-000000000000/reprocess`, { sid: admin.sid })).status, 404);
 });
 

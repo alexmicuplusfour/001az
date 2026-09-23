@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "./browser-stub.js"; // globals first — jobs-modal.js pulls in client modules
 
-const { summaryFor, imageTitle, runningStatus } = await import("../public/jobs-modal.js");
+const { summaryFor, imageTitle, runningStatus, labelFor } = await import("../public/jobs-modal.js");
 
 const tagRow = (image) => ({ kind: "tag", outcome: "ok", detail: { tags: 7, model: "gpt-5-mini", ...(image ? { image } : {}) } });
 
@@ -68,8 +68,8 @@ test("rows with nothing to count keep the plain word", () => {
   assert.equal(runningStatus({ kind: "ingest", detail: { trigger: "daily" } }), "running",
     "a run from before progress shipped, or one still enumerating");
   assert.equal(runningStatus({ kind: "ingest", detail: { planned: 0 } }), "running", "zero is not a countdown");
-  assert.equal(runningStatus({ kind: "tag", detail: {} }), "running");
-  assert.equal(runningStatus({ kind: "transcribe" }), "transcribing", "the one kind with its own verb");
+  assert.equal(runningStatus({ kind: "diagnose", detail: {} }), "running", "a kind with no verb of its own");
+  assert.equal(runningStatus({ kind: "transcribe" }), "transcribing", "a kind with one");
 });
 
 // --- the cancel row: honest about both what it did and what it could not reach ---
@@ -183,4 +183,37 @@ test("a row with no image gets no title of its own", () => {
   // Text items, PDFs, transcriptions — the hover must stay free for `engine`.
   assert.equal(imageTitle(undefined), "");
   assert.equal(imageTitle(null), "");
+});
+
+// --- what a row is about: the instance first, its card second (instance-work-plan.md D4) ---
+
+test("a raw board's row is its file alone — the card has no name of its own", () => {
+  assert.equal(labelFor({ kind: "tag", target: "photo.png", entity_display: null, item_id: 9 }), "photo.png");
+});
+
+test("a derived board's row names the file, then the card", () => {
+  assert.equal(labelFor({ kind: "extract", target: "2jNX7ZT.jpg", entity_display: "emma watson", item_id: 5248 }), "2jNX7ZT.jpg · emma watson");
+});
+
+test("a connector vehicle reads ticker, then company — that is the vehicle", () => {
+  assert.equal(labelFor({ kind: "fetch", target: "snyr", entity_display: "Synergy CHC Corp.", item_id: 1 }), "snyr · Synergy CHC Corp.");
+});
+
+test("the same string is shown once; a refresh row (no file) is the card alone", () => {
+  assert.equal(labelFor({ kind: "tag", target: "bitcoin", entity_display: "bitcoin", item_id: 2 }), "bitcoin");
+  assert.equal(labelFor({ kind: "refresh", target: null, entity_display: "bitcoin", item_id: null }), "bitcoin");
+});
+
+test("a board-level row needs no label, a feed run has its own, an orphan names its id", () => {
+  assert.equal(labelFor({ kind: "retag", target: null, entity_display: null, item_id: null }), "");
+  assert.equal(labelFor({ kind: "ingest", target: null, entity_display: null, item_id: null }), "Feed run");
+  assert.equal(labelFor({ kind: "tag", target: null, entity_display: null, item_id: 42 }), "item 42");
+});
+
+test("a claimed instance says what its leg is doing, by kind", () => {
+  assert.equal(runningStatus({ kind: "extract", leg: true }), "extracting");
+  assert.equal(runningStatus({ kind: "tag", leg: true }), "tagging");
+  assert.equal(runningStatus({ kind: "face", leg: true }), "rendering chart");
+  assert.equal(runningStatus({ kind: "fetch", leg: true }), "fetching data");
+  assert.equal(runningStatus({ kind: "diagnose" }), "running");
 });

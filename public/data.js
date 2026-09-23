@@ -15,9 +15,12 @@ document.addEventListener('app:uploads-pending-tag', (e) => {
   pendingBatches.push(e.detail);
 });
 // A whole-board reprocess queued from the board modal (its "cards were
-// generated from the old key" reminder): every card is about to move through
-// the pipeline, so start the status poll and repaint as it lands.
-document.addEventListener('app:board-reprocessed', () => {
+// generated from the old key" reminder). The answer carries the `work` the
+// route just queued, in the shape every carrier serves — mirror it, then make
+// sure the poll follows: setWork's own wake fires only on the none → some
+// edge, and right after any tagging an embed backlog is usually there already.
+document.addEventListener('app:board-reprocessed', (e) => {
+  setWork(e.detail?.work);
   ensurePolling();
   document.dispatchEvent(new Event('app:render'));
 });
@@ -59,6 +62,12 @@ const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 // (The server filters queued to n > 0, so presence is the test.)
 export const workRunning = () => state.work.running.length > 0;
 export const workInFlight = () => workRunning() || state.work.queued.length > 0;
+// A pipeline leg's backlog is work WAITING that drains at claim pace — the
+// worker's next tick takes it — unlike a lane backlog (a transcription is
+// minutes), so it earns the fast tier the cards' own pending statuses always
+// did. The server marks the leg lanes; no client-side list of which kinds
+// are legs (instance-work-plan.md, D3/F5).
+export const workLegQueued = () => state.work.queued.some((q) => q.leg);
 export function setWork(w) {
   if (!w) return; // absent on a server that predates the payload — keep the last known state
   const had = workInFlight();
@@ -125,8 +134,13 @@ export function applyRoutedEntities(entities = []) {
 // and its mirror stay in one place as Stage 4 adds more entries. Throws on
 // failure (api unwraps the server's `{error}`); callers own the toast.
 export async function requeue(url, body) {
-  const { entities } = await api("POST", url, body);
+  const { entities, work } = await api("POST", url, body);
   applyRoutedEntities(entities);
+  // …and the `work` the same answer carries (instance-work-plan.md G1): the
+  // chip and the modal read the payload, not the cards, so the click lights
+  // them in this render rather than a poll later. Last write wins — every
+  // carrier's copy is the same server truth.
+  setWork(work);
   document.dispatchEvent(new Event('app:render'));
   ensurePolling();
 }
@@ -317,7 +331,11 @@ export function pollDelay() {
   // earn the fast tier — only work genuinely moving does: an upload landing
   // (pause gates execution, never intake) or a row pause let finish. Without
   // this a paused backlog would hold the 4s poll open indefinitely.
-  if (needsPoll() || workRunning()) return state.boardPaused && !moving() ? 30000 : 4000;
+  // Both carriers of "something is in flight" are read: the cards (the
+  // per-card routes mirror their report there instantly) and the work
+  // payload (a claimed leg is a running row; a waiting leg drains at claim
+  // pace, so its lane is fast-tier work too).
+  if (needsPoll() || workRunning() || workLegQueued()) return state.boardPaused && !moving() ? 30000 : 4000;
   // A lane backlog with nothing running drains at sweep pace (one clip at a
   // time, a transcription is minutes) — the slow tier tracks it without
   // holding the fast poll open for hours behind a lane backoff, and the

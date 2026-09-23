@@ -1,16 +1,17 @@
 // The per-board jobs view (planning/job-log-plan.md, Stage 2): transparency
 // into in-flight and finished work, visible to every member. Two sections —
-// "In progress" merges the client's own in-flight items (the queue statuses
-// the delta poll already streams into state.items) with the server's running
-// sweep jobs (a transcription or ingest run has no items.status leg, so its
-// `running` job-log row is the only place it exists); "History" pages the
-// job_log newest-first with kind filter pills. The in-progress half re-renders
-// on every app:render for free; the server half refreshes on a modest interval
-// while the modal is open — history only re-pulls page one, so a reader deep
-// in Load-more pages isn't yanked back to the top.
+// "In progress" is the server's `work` payload, whole (instance-work-plan.md):
+// every claimed instance and every running sweep row, then one note per
+// waiting lane — one payload, composed server-side, the same one the chip
+// counts, so the two cannot disagree and neither reads the cards; "History"
+// pages the job_log newest-first with kind filter pills. The in-progress half
+// re-renders on every app:render for free (the delta poll writes state.work);
+// the server half refreshes on a modest interval while the modal is open —
+// history only re-pulls page one, so a reader deep in Load-more pages isn't
+// yanked back to the top.
 import { state } from './state.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
-import { ACTIVE, QUEUED, setBoardPaused, setWork } from './data.js';
+import { setBoardPaused, setWork } from './data.js';
 import { fmtDuration, pill, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
 import { markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
 import { jobsUnseen, jobsModalOpen, setJobsOpen } from './jobs-state.js';
@@ -54,18 +55,6 @@ const OUTCOME_LABELS = {
   discarded: "discarded",
   interrupted: "interrupted",
 };
-// items.status → the human lane label for the in-progress section.
-const STATUS_LABELS = {
-  processing: "tagging",
-  extracting: "extracting",
-  facing: "rendering chart",
-  fetching: "fetching data",
-  pending: "queued to tag",
-  pending_extract: "queued to extract",
-  pending_face: "queued for chart",
-  pending_fetch: "queued to fetch",
-};
-
 // The cancel control's two strengths, in one place, so re-wording a verb (or
 // adding a third) is one entry rather than a hunt through the handler and the
 // renderer.
@@ -83,7 +72,6 @@ const CANCEL_VERBS = {
 };
 
 const REFRESH_MS = 5000;
-const QUEUED_SHOWN = 20; // a 300-item retag is one summary line, not 300 rows
 
 // ── what the tagger was actually shown ──
 // The AI rendition ladder (ai-image-input-plan.md) is designed to be invisible:
@@ -246,7 +234,7 @@ function jobRow(j, newSince = 0) {
 
   const label = document.createElement("span");
   label.className = "job-label";
-  label.textContent = j.kind === "ingest" ? "Feed run" : (j.entity_display || j.target || `item ${j.item_id ?? ""}`);
+  label.textContent = labelFor(j);
   if (j.detail?.trigger) label.title = `trigger: ${j.detail.trigger}`;
 
   const outcome = document.createElement("span");
@@ -273,16 +261,34 @@ function jobRow(j, newSince = 0) {
 }
 
 // A server `running` row: elapsed instead of outcome, no summary yet.
-// What a running row SAYS it is doing. A feed run publishes progress onto its
-// job row (worker.js), and that is the difference between "running" and a
-// number you can decide against — the row is a long single pass, not a queue
-// you can count on screen. Pure and exported for the same reason summaryFor is.
+// What a running row SAYS it is doing, by kind — the sweep rows and the
+// claimed instances share one list, and each leg has its verb. A feed run
+// publishes progress onto its job row (worker.js), and that is the difference
+// between "running" and a number you can decide against — the row is a long
+// single pass, not a queue you can count on screen. Pure and exported for the
+// same reason summaryFor is.
+const RUNNING_VERBS = { transcribe: "transcribing", extract: "extracting", tag: "tagging", face: "rendering chart", fetch: "fetching data" };
 export function runningStatus(j) {
-  if (j.kind === "transcribe") return "transcribing";
+  if (RUNNING_VERBS[j.kind]) return RUNNING_VERBS[j.kind];
   const planned = Number(j.detail?.planned);
   if (j.kind === "ingest" && Number.isFinite(planned) && planned > 0)
     return `importing ${Number(j.detail?.admitted) || 0} of ${planned}`;
   return "running";
+}
+
+// What a row is ABOUT, running or settled: the instance's file first, its
+// card second when the card has a name of its own and it is a different
+// string — `2jNX7ZT.jpg · emma watson` (instance-work-plan.md D4). A raw
+// board's row is the file alone; a refresh row (no file) the card alone; a
+// connector vehicle reads `snyr · Synergy CHC Corp.`, which is the vehicle.
+// A board-level row (a retag pass, a cancel) wears its kind badge and needs
+// no label — it used to render the literal "item " there.
+export function labelFor(j) {
+  if (j.kind === "ingest") return "Feed run";
+  const bits = [];
+  for (const s of [j.target, j.entity_display]) if (s && !bits.includes(s)) bits.push(s);
+  if (bits.length) return bits.join(" · ");
+  return j.item_id != null ? `item ${j.item_id}` : "";
 }
 
 function runningRow(j) {
@@ -290,10 +296,12 @@ function runningRow(j) {
   row.className = "job-row job-running";
   const badge = document.createElement("span");
   badge.className = `job-kind job-kind-${j.kind}`;
-  badge.textContent = kindLabel(j.kind);
+  // A work row carries its own served label (the chip reads the same one);
+  // the vocabulary list is the fallback for a row from an older server.
+  badge.textContent = j.label || kindLabel(j.kind);
   const label = document.createElement("span");
   label.className = "job-label";
-  label.textContent = j.kind === "ingest" ? "Feed run" : (j.entity_display || j.target || "");
+  label.textContent = labelFor(j);
   const status = document.createElement("span");
   status.className = "job-outcome job-outcome-running";
   status.textContent = runningStatus(j);
@@ -301,23 +309,6 @@ function runningRow(j) {
   when.className = "job-when";
   when.textContent = `for ${fmtDuration(Date.now() - j.started_at)}`;
   row.append(badge, label, status, when);
-  return row;
-}
-
-// A client-side in-flight item (the pipeline legs — live via the delta poll).
-function liveItemRow(item) {
-  const row = document.createElement("div");
-  row.className = "job-row job-running";
-  const badge = document.createElement("span");
-  badge.className = "job-kind job-kind-queue";
-  badge.textContent = "Pipeline";
-  const label = document.createElement("span");
-  label.className = "job-label";
-  label.textContent = item.displayLabel || item.name;
-  const status = document.createElement("span");
-  status.className = "job-outcome " + (ACTIVE.has(item.status) ? "job-outcome-running" : "job-outcome-queued");
-  status.textContent = STATUS_LABELS[item.status] || item.status;
-  row.append(badge, label, status);
   return row;
 }
 
@@ -370,18 +361,21 @@ export function openJobsModal({ kind } = {}) {
   let cancelBtn = null;
   let cancelLabel = null;
   // Is the hard verb on offer? A board fact, not this tab's: the newest cancel
-  // row said it had to leave work running, and something is still actively
-  // running for it to catch. ACTIVE alone on purpose — since the boundary
-  // moved to queue position (the 2026-09-10 postmortem), a QUEUED row is
-  // never beyond the soft verb, so Abort earns the button only over calls in
-  // the air. Same answer in every tab, and it survives a reload.
+  // row said it had to leave work running, and a pipeline leg is still running
+  // for it to catch. Leg rows only, on purpose — since the boundary moved to
+  // queue position (the 2026-09-10 postmortem), a waiting lane is never beyond
+  // the soft verb, and a running transcription is not a queue item (abort
+  // cannot reach it; its confirm text says so). Same answer in every tab, and
+  // it survives a reload.
   const abortOffered = () =>
-    state.items.some((i) => ACTIVE.has(i.status)) &&
+    state.work.running.some((j) => j.leg) &&
     (jobs.find((j) => j.kind === "cancel")?.detail?.finishing ?? 0) > 0;
-  // QUEUED means every kind of work this board is waiting to do — pipeline rows
-  // AND the un-admitted remainder of a feed run, which is queued work that
+  // QUEUED means every kind of work this board is waiting to do — the pipeline
+  // lanes AND the un-admitted remainder of a feed run, which is queued work that
   // simply hasn't been written down as rows yet. One verb over the lot, because
-  // they are one decision: the route has always cancelled both.
+  // they are one decision: the route has always cancelled both. The lanes the
+  // verb reaches are the ones the server marked `leg` — no client-side list of
+  // which kinds are pipeline legs.
   //
   // This started as two names ("Cancel queued" / "Stop feed run") picked by
   // whether any pipeline row happened to be waiting right then — and on a board
@@ -389,7 +383,13 @@ export function openJobsModal({ kind } = {}) {
   // pointer every poll. A destructive button whose verb changes while you read
   // it is worse than either name.
   const feedRunning = () => state.work.running.some((j) => j.kind === "ingest");
-  const anythingQueued = () => feedRunning() || state.items.some((i) => QUEUED.has(i.status));
+  const anythingQueued = () => feedRunning() || state.work.queued.some((q) => q.leg);
+  // What Abort would take: the claimed legs whose landings it discards plus
+  // the waiting ones it pulls — the full remainder, not just the calls in the
+  // air. Instances, the unit History counts in.
+  const legsLeft = () =>
+    state.work.running.filter((j) => j.leg).length +
+    state.work.queued.reduce((k, q) => k + (q.leg ? q.n : 0), 0);
   const cancelKey = () => (abortOffered() ? "abort" : "queued");
   const renderPause = () => {
     if (!pauseLabel) return;
@@ -565,22 +565,11 @@ export function openJobsModal({ kind } = {}) {
   function renderLive() {
     if (!overlay.isConnected) return;
     liveList.replaceChildren();
+    // The payload, whole and in its own order (oldest first): the sweep rows
+    // and every claimed instance, each wearing its kind badge — the badges
+    // History wears — then one note per waiting lane, named from the served
+    // vocabulary. Nothing here reads the cards.
     for (const j of state.work.running) liveList.appendChild(runningRow(j));
-    const inFlight = state.items.filter((i) => ACTIVE.has(i.status) || QUEUED.has(i.status));
-    const active = inFlight.filter((i) => ACTIVE.has(i.status));
-    // state.items is newest-first, but the worker claims oldest-first (FIFO —
-    // see claimFairBatch). So the front of the line is the END of this list:
-    // reverse to oldest-first so the next item to tag sits right under the ones
-    // being tagged, and the sliced-off overflow is the newest (furthest back in
-    // line) rather than the next up — the rows that feed into tagging are the
-    // ones on screen.
-    const queuedItems = inFlight.filter((i) => QUEUED.has(i.status)).reverse();
-    for (const item of active) liveList.appendChild(liveItemRow(item));
-    for (const item of queuedItems.slice(0, QUEUED_SHOWN)) liveList.appendChild(liveItemRow(item));
-    if (queuedItems.length > QUEUED_SHOWN) note(liveList, `…and ${queuedItems.length - QUEUED_SHOWN} more queued`);
-    // The lane backlogs — waiting work no items.status carries (clips still
-    // to transcribe, items awaiting embedding), named from the served
-    // vocabulary like everything else here.
     for (const q of state.work.queued) note(liveList, `${q.n} waiting — ${q.label}`);
     if (!liveList.children.length) note(liveList, "Nothing in flight.");
     // Which verb, and over how many: Cancel counts the queue it would pull;
@@ -590,12 +579,13 @@ export function openJobsModal({ kind } = {}) {
     if (cancelBtn) {
       const key = cancelKey();
       const verb = CANCEL_VERBS[key];
-      const show = key === "abort" ? inFlight.length > 0 : anythingQueued();
+      const left = legsLeft();
+      const show = key === "abort" ? left > 0 : anythingQueued();
       cancelBtn.style.display = show ? "" : "none";
       // Abort names its count because it is the escalation and the number IS
       // the warning. Cancel doesn't: its number changes every poll, and a
       // count on the label is the same restlessness as a changing verb.
-      cancelLabel.textContent = key === "abort" ? `${verb.label} — ${inFlight.length} left` : verb.label;
+      cancelLabel.textContent = key === "abort" ? `${verb.label} — ${left} left` : verb.label;
       cancelBtn.title = verb.title;
     }
   }

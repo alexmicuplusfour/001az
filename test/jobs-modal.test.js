@@ -9,7 +9,7 @@
 // second, so the queue is usually empty while the feed fills it. Then the fix
 // gave the feed run its own verb, and the label flickered between two names
 // under the pointer as rows came and went. Same work, same request, same word.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import './jsdom-stub.js';
 import { until } from './helpers.js';
@@ -23,9 +23,10 @@ state.boardId = 'b1';
 state.boardManage = true;
 state.boardPaused = false;
 
-// The served /jobs payload, per test. `work.running` is the server's list of
-// running job rows (the feed run lives here); state.items is the client's own
-// pipeline view, which is where queued rows come from.
+// The served /jobs payload, per test — the ONE source the dialog's In progress
+// half reads (instance-work-plan.md): running rows (the feed run, a claimed
+// instance) and the waiting lanes, pipeline legs marked `leg`. state.items is
+// the grid's; the dialog never reads it, and the tests below say so.
 let WORK = { running: [], queued: [] };
 let JOBS = [];
 let SCHEDULED = { ingest_next_run_at: null, retag_next_run_at: null, refresh_next_at: null };
@@ -91,10 +92,10 @@ test('a feed run alone earns the control: nothing queued, and still something to
   assert.match(sched.textContent, /next refresh/, 'the other schedules still show');
 });
 
-test('the same verb when pipeline rows are waiting too — no flicker', async (t) => {
-  WORK = { running: [feedRun({ planned: 400, admitted: 47 })], queued: [] };
+test('the same verb when a pipeline lane is waiting too — no flicker', async (t) => {
+  WORK = { running: [feedRun({ planned: 400, admitted: 47 })], queued: [{ kind: 'face', label: 'Chart', n: 1, leg: true }] };
   JOBS = [];
-  state.items = [{ id: 1, status: 'pending', name: 'ACME' }];
+  state.items = [];
   const modal = await openModal(t);
 
   const btn = cancelBtn(modal);
@@ -114,3 +115,59 @@ test('an idle board offers nothing', async (t) => {
   assert.equal(shown(cancelBtn(modal)), false, 'no run, no queue, no button');
   assert.ok(jobsModalOpen(), 'the dialog itself is still up');
 });
+
+// ── the pipeline legs are rows and lanes of the payload, never the cards ──
+
+test('a claimed instance is a row wearing its kind, its file and its card; a waiting leg is a count', async (t) => {
+  WORK = {
+    running: [{ id: null, kind: 'extract', label: 'Extraction', target: '2jNX7ZT.jpg', item_id: 5248, entity_id: 33215,
+      entity_display: 'emma watson', started_at: Date.now() - 12000, leg: true }],
+    queued: [{ kind: 'tag', label: 'Tagging', n: 18, leg: true }],
+  };
+  JOBS = [];
+  state.items = [{ id: 33215, status: 'processing', name: 'emma watson' }];
+  const modal = await openModal(t);
+  const rows = [...modal.querySelectorAll('.job-running')];
+  assert.equal(rows.length, 1, 'one row per claimed instance — the card is not a row');
+  assert.match(rows[0].textContent, /Extraction/, 'the kind badge History wears');
+  assert.match(rows[0].textContent, /2jNX7ZT\.jpg · emma watson/, 'the file, then the card');
+  assert.match(rows[0].textContent, /extracting/, "the leg's verb");
+  const notes = [...modal.querySelectorAll('.jobs-note')].map((n) => n.textContent);
+  assert.ok(notes.includes('18 waiting — Tagging'), 'the waiting leg is a count under its lane');
+  const btn = cancelBtn(modal);
+  assert.ok(shown(btn), 'a waiting leg is something to cancel');
+  assert.equal(btn.textContent, LABEL);
+});
+
+test('cards in flight with nothing in the payload show nothing — the dialog reads the payload', async (t) => {
+  WORK = { running: [], queued: [] };
+  JOBS = [];
+  state.items = [{ id: 1, status: 'processing', name: 'ACME' }, { id: 2, status: 'pending', name: 'BETA' }];
+  const modal = await openModal(t);
+  assert.equal(modal.querySelectorAll('.job-running').length, 0);
+  assert.ok([...modal.querySelectorAll('.jobs-note')].some((n) => n.textContent === 'Nothing in flight.'));
+  assert.equal(shown(cancelBtn(modal)), false);
+});
+
+test('Abort counts the legs it would take, in instances', async (t) => {
+  WORK = {
+    running: [
+      { id: null, kind: 'tag', label: 'Tagging', target: 'a.png', item_id: 1, entity_id: 1, entity_display: null, started_at: Date.now() - 3000, leg: true },
+      { id: 9, kind: 'transcribe', label: 'Transcription', target: 'clip.mp3', item_id: 2, entity_id: 2, entity_display: null, started_at: Date.now() - 30000 },
+    ],
+    queued: [{ kind: 'tag', label: 'Tagging', n: 4, leg: true }, { kind: 'embed', label: 'Embedding', n: 7 }],
+  };
+  // The newest cancel row left calls running — the escalation is on offer.
+  JOBS = [{ id: 3, kind: 'cancel', outcome: 'ok', error: null, detail: { mode: 'queued', finishing: 3 }, target: null,
+    entity_id: null, item_id: null, entity_display: null, started_at: Date.now() - 1000, ended_at: Date.now() - 1000 }];
+  state.items = [];
+  const modal = await openModal(t);
+  const btn = cancelBtn(modal);
+  assert.ok(shown(btn));
+  assert.equal(btn.textContent, 'Abort — 5 left',
+    "one claimed leg + four waiting; the transcription and the embed backlog are not the verb's to take");
+});
+
+// Every open wrote the served work into state and woke the delta poll; its
+// pending tick must find nothing left to follow, or this file never exits.
+after(() => { state.work = { running: [], queued: [] }; });

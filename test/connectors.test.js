@@ -935,6 +935,12 @@ test("POST /api/boards/:id/entities/bulk: enqueues many with NO provider I/O, sk
     assert.equal(it.status, "pending_fetch");
     assert.equal(it.payload.unfetched, true, "the routing stamp the fetch leg consumes");
     assert.equal(it.payload.source.id, "bitcoin", "the provider id rides along for the fetch");
+    // …and the answer carries the work it queued, like every gallery surface
+    // that starts work (instance-work-plan.md, second pass P1): two vehicles
+    // waiting at the fetch leg, marked `leg` so the chip counts them and the
+    // cancel verb knows it reaches them.
+    assert.deepEqual(r.json.work.queued, [{ kind: "fetch", n: 2, label: "Data fetch", leg: true }]);
+    assert.deepEqual(r.json.work.running, []);
 
     r = await req(base, "POST", `/api/boards/${board.id}/entities/bulk`, { sid: admin.sid, body: { connector: "crypto", ids: [{ id: "bitcoin", symbol: "BTC", name: "Bitcoin" }] } });
     assert.equal(r.json.added.length, 0);

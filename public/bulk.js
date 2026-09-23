@@ -2,7 +2,7 @@ import { state } from './state.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { toast } from './toast.js';
-import { ensurePolling, applyRoutedEntities } from './data.js';
+import { ensurePolling, applyRoutedEntities, setWork } from './data.js';
 
 let bar = null;
 let countEl = null;
@@ -90,7 +90,9 @@ async function doBulkReprocess() {
   const results = await Promise.allSettled(items.map(async (item) => {
     const r = await fetch(`/api/items/${item.id}/reprocess`, { method: "POST" });
     if (!r.ok) throw new Error();
-    applyRoutedEntities((await r.json()).entities);
+    const answer = await r.json();
+    applyRoutedEntities(answer.entities);
+    setWork(answer.work); // every answer's copy is the same truth — last write wins
   }));
   const failed = results.filter((r) => r.status === "rejected").length;
   clearBulk();

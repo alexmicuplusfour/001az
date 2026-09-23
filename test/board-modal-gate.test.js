@@ -77,10 +77,13 @@ const CONNECTORS = [{
 
 let patched = null;
 let posted = [];
+// What the board reprocess answers beside its count: the work it just queued,
+// in the carriers' shape (instance-work-plan.md) — the gallery mirrors it.
+const WORK_ANSWER = { running: [], queued: [{ kind: 'tag', n: 7, label: 'Tagging', leg: true }] };
 globalThis.fetch = async (url, opts = {}) => {
   const u = String(url);
   if (opts.method === 'PATCH') { patched = JSON.parse(opts.body); return { ok: true, json: async () => ({}) }; }
-  if (opts.method === 'POST') { posted.push(u); return { ok: true, json: async () => ({ ok: true, queued: 7 }) }; }
+  if (opts.method === 'POST') { posted.push(u); return { ok: true, json: async () => ({ ok: true, queued: 7, work: structuredClone(WORK_ANSWER) }) }; }
   const body =
     u.endsWith('/b3/settings') ? structuredClone(CARD_BOARD)
     : u.endsWith('/b2/settings') ? structuredClone(CONNECTOR_BOARD)
@@ -489,9 +492,15 @@ test('moving the card key on a board with items: an info toast names both keys, 
   assert.match(t.textContent, /^Reprocess the board to generate cards from event\./);
   const btn = [...t.querySelectorAll('button')].find((b) => b.textContent === 'Reprocess');
   assert.ok(btn, 'it carries the verb');
+  // The event is the contract with the gallery: it carries the answer's work
+  // so the chip and the modal light in the same render; the boards and admin
+  // pages have no listener and nothing to mirror.
+  let carried = null;
+  document.addEventListener('app:board-reprocessed', (e) => { carried = e.detail; }, { once: true });
   click(btn);
   await settle();
   assert.deepEqual(posted, ['/api/admin/boards/b3/reprocess']);
+  assert.deepEqual(carried, { boardId: 'b3', work: WORK_ANSWER }, "the event carries the answer's work");
   assert.equal(infoToast(), null, 'acting on it closes it');
   shut(modal);
 });

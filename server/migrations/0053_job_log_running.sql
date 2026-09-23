@@ -1,0 +1,14 @@
+-- The in-flight half of the job ledger, indexed (planning/instance-work-plan.md,
+-- second pass P2). listRunningJobs asks "which rows on this board are running"
+-- on every work read — the delta poll's 4s heartbeat per open tab, the signals
+-- tick, the jobs page, and now every per-card click, which means every item of
+-- a bulk fan-out. job_log had no index for it: idx_job_log_board leads with
+-- board_id but carries every settled row of the board's history, so the planner
+-- took a SEQ SCAN of the whole ledger — measured 4.3ms at 7208 rows, growing
+-- for the life of the instance.
+--
+-- Partial on the outcome, exactly like idx_job_log_failed beside it: `running`
+-- rows are transient and always a handful, so the index stays tiny however long
+-- the history grows. started_at rides along to serve the ORDER BY. Measured on
+-- the same data: 0.083ms, index scan, no sort.
+CREATE INDEX IF NOT EXISTS idx_job_log_running ON job_log(board_id, started_at) WHERE outcome = 'running';

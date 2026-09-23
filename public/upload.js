@@ -1,7 +1,7 @@
 import { state } from './state.js';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
-import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount } from './data.js';
+import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount, setWork } from './data.js';
 
 const UPLOAD_CHUNK_FILES = 20;
 const UPLOAD_CHUNK_BYTES = 32 * 1024 * 1024;
@@ -212,6 +212,11 @@ async function uploadChunk(chunk) {
   if (data) {
     const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
     uploadStats.pendingIds.push(...mergeUploadedRows(rows));
+    // The rows go to the grid; the work they queued goes to the chip and the
+    // jobs modal, which read the `work` payload alone (instance-work-plan.md
+    // P1). Both halves of the same answer, applied in the same tick — without
+    // this the chip sat dark for a poll while the drop was already queued.
+    setWork(data.work);
     uploadStats.uploaded += rows.length;
     for (const r of data.rejected || []) {
       uploadStats.skipped.set(r.reason, (uploadStats.skipped.get(r.reason) || 0) + 1);

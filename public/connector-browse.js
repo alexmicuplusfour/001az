@@ -4,7 +4,7 @@ import { toast } from './toast.js';
 import { createModal, busy } from './modal.js';
 import { pagedTableScaffold, fmtNumber, fmtPercent, ALIGN_END } from './paged-table.js';
 import { fillSelect } from './select.js';
-import { ensurePolling } from './data.js';
+import { ensurePolling, setWork } from './data.js';
 
 // Browse-and-add ingestion modal for connector boards. Completely connector-
 // agnostic: the connector's manifest supplies the sort options and the display
@@ -230,11 +230,15 @@ export function openConnectorBrowse(connectorName) {
           toast.error(b.error || "Failed to add");
           break;
         }
-        const { added = [], skipped: chunkSkipped = [] } = await res.json();
+        const { added = [], skipped: chunkSkipped = [], work } = await res.json();
         for (const row of added) {
           state.items.unshift(toItem(row));
           markOnBoard(row.connector_id); // the response echoes the exact row we sent
         }
+        // The rows go to the grid; the work they queued goes to the chip and
+        // the jobs modal, which read the `work` payload alone — a vehicle
+        // enters at the fetch leg (instance-work-plan.md P1).
+        setWork(work);
         for (const s of chunkSkipped) if (s.reason === "duplicate") markOnBoard(s.id);
         addedCount += added.length;
         skipped.push(...chunkSkipped);

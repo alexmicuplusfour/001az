@@ -190,7 +190,13 @@ export function mountIngest(app, { db, sources, workFor }) {
       }
     }
 
-    res.json({ uploaded, rejected });
+    // …and the work the drop just queued, beside the rows themselves. An
+    // upload is the one gallery surface that starts work by MINTING items
+    // rather than re-queuing existing ones, and the chip reads the `work`
+    // payload alone, so without this a drop left it dark until the next
+    // delta poll (instance-work-plan.md, second pass P1). One composer, the
+    // shape every carrier serves.
+    res.json({ uploaded, rejected, work: await workFor(board.id, board) });
   }));
 
   // Multer limit errors from the route above; anything else falls through

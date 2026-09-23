@@ -1053,9 +1053,10 @@ export async function openBoardModal(boardId, opts = {}) {
           try {
             const r = await api("POST", `/api/admin/boards/${board.id}/reprocess`);
             toast(`Reprocessing ${r.queued} item${r.queued === 1 ? "" : "s"}…`, { duration: "short" });
-            // The gallery, if this is it, starts its poll; other pages have
-            // no listener and nothing to repaint.
-            document.dispatchEvent(new CustomEvent("app:board-reprocessed", { detail: { boardId: board.id } }));
+            // The gallery, if this is it, mirrors the answer's `work` and
+            // starts its poll; other pages have no listener and nothing to
+            // repaint.
+            document.dispatchEvent(new CustomEvent("app:board-reprocessed", { detail: { boardId: board.id, work: r.work } }));
           } catch (err) { toast.error(err.message); }
         } },
         { label: "Dismiss", onClick: () => t?.remove() },

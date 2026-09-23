@@ -127,7 +127,7 @@ const sidecarDown = () => async () => {
 
 test("add → stamp roundtrip: detail merges, error caps at 500, running vs settled listing", async () => {
   const board = await seedBoard(db, "jobs-helpers");
-  const eid = await createEntity(db, board, { identity: "clip.mp3" });
+  const eid = await createEntity(db, board, { identity: "clip.mp3", displayName: "The Clip" });
 
   const id = await addJobLog(db, {
     boardId: board, entityId: eid, itemId: 7, target: "clip.mp3",
@@ -136,7 +136,10 @@ test("add → stamp roundtrip: detail merges, error caps at 500, running vs sett
   let running = await listRunningJobs(db, board);
   assert.equal(running.length, 1);
   assert.equal(running[0].outcome, "running");
-  assert.equal(running[0].entity_identity, "clip.mp3"); // the display join
+  // The display join, and it carries the card's NAME alone — never `identity`,
+  // which on a raw board is the stored hex filename (instance-work-plan.md F3).
+  assert.equal(running[0].entity_display, "The Clip");
+  assert.equal(running[0].entity_identity, undefined);
   assert.equal((await listJobLog(db, board)).jobs.length, 0); // settled only
 
   await stampJobLog(db, id, { outcome: "ok", error: "x".repeat(600), detail: { chars: 11 } });
@@ -862,8 +865,14 @@ test("GET /api/boards/:id/jobs: running + paged history, member-visible, 404 out
   assert.equal(r.status, 200);
   assert.equal(r.json.work.running.length, 1);
   assert.equal(r.json.work.running[0].kind, "transcribe");
-  assert.equal(r.json.work.running[0].entity_display, "clip.mp3"); // no entity → frozen target
-  assert.equal(r.json.jobs.find((j) => j.kind === "tag").entity_display, "photo.png");
+  // The file travels as `target`; `entity_display` is the card's own name or
+  // nothing — never the hex identity, and never the file wearing the card's
+  // slot (instance-work-plan.md F3: the client composes the two).
+  assert.equal(r.json.work.running[0].target, "clip.mp3");
+  assert.equal(r.json.work.running[0].entity_display, null);
+  const tagRow = r.json.jobs.find((j) => j.kind === "tag");
+  assert.equal(tagRow.target, "photo.png");
+  assert.equal(tagRow.entity_display, null);
   assert.deepEqual(r.json.jobs.map((j) => j.outcome), ["failed", "ok", "ok"]); // newest first, running excluded
   assert.equal(r.json.jobs[0].error, "boom"); // error detail for every member
   assert.equal(r.json.nextCursor, null);
