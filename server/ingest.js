@@ -76,7 +76,7 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   // it was built with; user-initiated reprocess/re-extract re-stamp from
   // the current board mapping.
   // Only trigger extraction when the mapping involves a model (extract/detect
-  // fields or derived identity — aiWork asks the source table, so a future
+  // fields, the card key among them — aiWork asks the source table, so a future
   // inferred source is covered by its table row). Connector fields are
   // populated at entity creation, not by the extract leg.
   const hasMapping = aiWork(board.mapping);
@@ -115,7 +115,7 @@ export async function admitFile(dbc, sources, board, tmpPath, originalName,
   return { entityId, itemId, file, status };
 }
 
-export function mountIngest(app, { db, sources }) {
+export function mountIngest(app, { db, sources, workFor }) {
   // Disk-backed upload (bounded memory; we process one file at a time).
   const upload = multer({
     dest: os.tmpdir(),

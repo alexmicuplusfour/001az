@@ -651,7 +651,6 @@ const WIDGETS = {
     providers: [{ name: "acme", label: "Acme", description: "", needsKey: false }],
     template: {
       input: { connector: "widgets" },
-      identity: { source: "connector" },
       fields: [{ key: "rank", kind: "number", source: "connector", fn: "rank" }],
     },
     browse: {
@@ -762,7 +761,7 @@ test("ingest GET merges enum options onto column-backed filters, through the rea
 test("admit: entity + tag vehicle + ledger row; a duplicate identity propagates tagged", async () => {
   const boardId = await seedBoard(db, "feed-admit");
   await updateBoard(db, boardId, {
-    mapping: { input: { connector: "widgets" }, identity: { source: "connector" }, fields: [] },
+    mapping: { input: { connector: "widgets" }, fields: [] },
   });
   const board = await getBoard(db, boardId);
   const a = feedAdapter(stubConn());
@@ -927,12 +926,14 @@ test("switching a board's mapping input orphans and clears its ingest config", a
   assert.equal(b.ingest_next_run_at, null, "timer disarmed");
   assert.equal(b.ingest_state, null, "run state (incl. stale drain_left) wiped");
 
-  // A no-op mapping edit that doesn't change the input leaves a config intact.
+  // A mapping edit that doesn't change the input leaves a config intact.
+  // (A real edit — one field fewer — since the mapping refuses keys it
+  // doesn't have, so a decoy key is no longer a way to spell "no-op".)
   await updateBoard(db, boardId, {
     ingest: { enabled: true, source: {}, filters: [], sort: { by: "market_cap", order: "desc" }, trigger: { mode: "manual" } },
   });
   const r2 = await req(base, "PATCH", `/api/admin/boards/${boardId}`, {
-    sid: admin.sid, body: { mapping: { ...cryptoManifest.template, context: "edited" } },
+    sid: admin.sid, body: { mapping: { ...cryptoManifest.template, fields: cryptoManifest.template.fields.slice(1) } },
   });
   assert.equal(r2.status, 200);
   assert.ok((await getBoard(db, boardId)).ingest, "same connector input → config survives");
@@ -960,7 +961,7 @@ test("a failed MANUAL feed run disarms instead of retrying forever", async () =>
   // "ingestion is not available". Written directly (validateIngest would
   // refuse to save against a null descriptor), armed for an immediate run.
   await updateBoard(db, boardId, {
-    mapping: { input: { connector: "ghost" }, identity: { source: "connector" }, fields: [] },
+    mapping: { input: { connector: "ghost" }, fields: [] },
     ingest: { enabled: true, source: {}, filters: [], trigger: { mode: "manual" } },
   });
   await setIngestNextRun(db, boardId, Date.now() - 1);

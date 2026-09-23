@@ -573,15 +573,114 @@ test("tag leg: the facet-less completion is a real ok row with zero tags", async
   assert.deepEqual(rows[0].detail, { tags: 0 });
 });
 
+test("extract leg: with no card key, a shared instance gets its own card and a sole derived card resets to its file", async () => {
+  await setPluginState(db, "ai:openai", { installed: true });
+  const keyId = await createAiKey(db, "jobs-k-nocard", "openai", "sk-test");
+  // The board USED to be keyed (two people, one of them holding two photos);
+  // now it is one card per file. Reprocess must undo the grouping.
+  const mapping = { fields: [{ key: "role", source: "extract", kind: "text" }] };
+  const board = await createBoard(db, "jobs-nocard", FACETS, "", true, keyId, null, {}, false, { mapping });
+  const watson = await createEntity(db, board, { identity: "emma watson", displayName: "Emma Watson" });
+  const stone = await createEntity(db, board, { identity: "emma stone", displayName: "Emma Stone" });
+  // Real text files, so the extract leg reads material off disk (an image
+  // would go through the renderer, which has nothing to render here).
+  fs.mkdirSync(srv.galleryDir, { recursive: true });
+  const seedFile = (eid, name) => {
+    fs.writeFileSync(path.join(srv.galleryDir, name), `a photo caption for ${name}`);
+    return insertItem(db, board,
+      { identity: name, files: [{ name, original_name: name, kind: "text" }], fields: {}, mapping }, "pending_extract", eid);
+  };
+  const w1 = await seedFile(watson, "w1.txt");
+  const w2 = await seedFile(watson, "w2.txt");
+  const s1 = await seedFile(stone, "s1.txt");
+  const restore = stubFetch(toolCallResponse({
+    role: { value: "actress", why: "caption" },
+    kind: { values: ["a"], reasoning: "fits a" },
+    fit: { verdict: "fits", reasoning: "on-topic" },
+  }));
+  const stop = runWorker();
+  try {
+    await until(async () => (await itemStatus(w1)) === "tagged" && (await itemStatus(w2)) === "tagged" && (await itemStatus(s1)) === "tagged");
+  } finally {
+    await stop();
+    restore();
+  }
+  const { rows } = await db.query(
+    `SELECT i.id, i.entity_ids, e.identity, e.display_name FROM items i JOIN entities e ON e.id = i.entity_ids[1]
+      WHERE i.board_id=$1 ORDER BY i.id`, [board]);
+  // Every item is its own card, named by its file, no display name.
+  assert.deepEqual(rows.map((r) => [r.identity, r.display_name]), [["w1.txt", null], ["w2.txt", null], ["s1.txt", null]]);
+  assert.equal(new Set(rows.map((r) => r.entity_ids[0])).size, 3, "three cards");
+  // The sole card kept its id (hearts / crate places survive). The shared
+  // pair split into two file cards; which of them — if either — keeps the
+  // old id depends on whether the leg saw them one after the other or at
+  // once (extraction runs as wide as the key allows), and nothing hangs on
+  // it: a card shared by two files has no one file to carry its hearts to.
+  assert.equal(rows[2].entity_ids[0], stone, "sole card reset in place");
+  assert.ok(rows.slice(0, 2).every((r) => r.entity_ids[0] !== stone), "the pair never landed on the other card");
+  const { rows: ents } = await db.query("SELECT count(*)::int AS n FROM entities WHERE board_id=$1", [board]);
+  assert.equal(ents[0].n, 3, "no ghost left behind");
+});
+
+test("extract leg: a LIST card field lands canonical spellings with the marker, mints one entity per value, and the tag dossier joins it", async () => {
+  await setPluginState(db, "ai:openai", { installed: true });
+  const keyId = await createAiKey(db, "jobs-k-list", "openai", "sk-test");
+  const mapping = {
+    card: { by: "person" },
+    fields: [
+      { key: "role", source: "extract", kind: "text" },
+      { key: "person", source: "extract", kind: "text", instruction: "who is in the photo",
+        options: [{ value: "Emma Watson" }, { value: "Emma Stone" }] },
+    ],
+  };
+  const board = await createBoard(db, "jobs-list-card", FACETS, "", true, keyId, null, {}, false, { mapping });
+  const { eid, iid } = await seedLegItem(board, "two-emmas.txt", "pending_extract", { mapping });
+  const seen = [];
+  // Off-list, echoed-lowercase and duplicate answers all arrive — a best-effort
+  // provider can return them despite the enum.
+  const restore = stubFetch(toolCallResponse({
+    person: { values: ["emma stone", "Emma Watson", "Emma Roberts", "Emma Stone"], why: "both are on the red carpet" },
+    role: { value: "actress", why: "caption" },
+    kind: { values: ["a"], reasoning: "fits a" },
+    fit: { verdict: "fits", reasoning: "on-topic" },
+  }, seen));
+  const stop = runWorker();
+  try {
+    await until(async () => (await itemStatus(iid)) === "tagged");
+  } finally {
+    await stop();
+    restore();
+  }
+  const { rows: [row] } = await db.query("SELECT entity_ids, payload FROM items WHERE id=$1", [iid]);
+  // Landed: the options' spellings, in answer order, deduped, off-list dropped, marked as a list.
+  assert.deepEqual(row.payload.fields.person, { v: ["Emma Stone", "Emma Watson"], why: "both are on the red carpet", kind: "list" });
+  assert.deepEqual(row.payload.fields.role, { v: "actress", why: "caption" });
+  // Membership: one entity per value, named the option's way; the provisional
+  // upload shell was renamed in place for the first, a new entity minted for the second.
+  const { rows: ents } = await db.query(
+    "SELECT id, identity, display_name FROM entities WHERE id = ANY($1::bigint[]) ORDER BY array_position($1::bigint[], id)", [row.entity_ids]);
+  assert.deepEqual(ents.map((e) => [e.identity, e.display_name]), [["emma stone", "Emma Stone"], ["emma watson", "Emma Watson"]]);
+  assert.equal(ents[0].id, eid, "sole-instance shell renamed in place (hearts/crate survive)");
+  // The tag dossier carries the list joined — a list is not the box array the filter was written for.
+  const tagReq = JSON.stringify(seen[1]);
+  assert.ok(tagReq.includes("person: Emma Stone, Emma Watson"), tagReq.slice(0, 400));
+  assert.ok(tagReq.includes("role: actress"));
+  // And the job row calls it derived, counting the card field among the fields.
+  const [ext] = await jobsFor(board);
+  assert.equal(ext.kind, "extract");
+  assert.equal(ext.detail.identity, "moved");
+  assert.equal(ext.detail.fields, 2);
+});
+
 test("extract + tag legs: one ok row each, with fields/identity and tags detail", async () => {
   await setPluginState(db, "ai:openai", { installed: true });
   const keyId = await createAiKey(db, "jobs-k2", "openai", "sk-test");
-  const mapping = { identity: { source: "extract" }, fields: [{ key: "role", source: "extract", kind: "text" }] };
+  const mapping = { card: { by: "name" }, fields: [{ key: "name", source: "extract", kind: "text" }, { key: "role", source: "extract", kind: "text" }] };
   const board = await createBoard(db, "jobs-legs", FACETS, "", true, keyId, null, {}, false, { mapping });
   const { eid, iid } = await seedLegItem(board, "resume.txt", "pending_extract", { mapping });
   const seen = [];
   const restore = stubFetch(toolCallResponse({
-    identity: { value: "Maya Chen", why: "letterhead" },
+    name: { value: "Maya Chen", why: "letterhead" },
     role: { value: "engineer", why: "title line" },
     kind: { values: ["a"], reasoning: "fits a" },
     fit: { verdict: "fits", reasoning: "on-topic" },
@@ -596,7 +695,7 @@ test("extract + tag legs: one ok row each, with fields/identity and tags detail"
   const rows = await jobsFor(board);
   assert.deepEqual(rows.map((r) => [r.kind, r.outcome]), [["extract", "ok"], ["tag", "ok"]]);
   const [ext, tag] = rows;
-  assert.equal(ext.detail.fields, 1);
+  assert.equal(ext.detail.fields, 2); // the card key is one of the fields now
   assert.equal(ext.detail.identity, "derived");
   assert.equal(typeof ext.detail.model, "string");
   assert.equal(tag.detail.tags, 1);

@@ -24,7 +24,7 @@ export default function (ctx) {
       category: "test",
       description: "Live weather data",
       fields: [{ key: "temp", kind: "number", fn: "temp", label: "Temperature" }],
-      template: { input: { connector: "weather" }, identity: { from: "connector" }, fields: [] },
+      template: { input: { connector: "weather" }, fields: [] },
     },
   };
 }

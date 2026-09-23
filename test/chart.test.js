@@ -717,7 +717,7 @@ after(() => {
 
 async function seedChartEntity(connectorName, sourceId = "gg") {
   const boardId = await createBoard(db, `board-${connectorName}-${sourceId}`, [], "", true, null, null, {}, false, {
-    mapping: { input: { connector: connectorName }, identity: { source: "connector" }, fields: [] },
+    mapping: { input: { connector: connectorName }, fields: [] },
   });
   const entityId = await createEntity(db, boardId, { identity: "gg", displayName: "Gadget", symbol: "GG" });
   await insertItem(db, boardId,

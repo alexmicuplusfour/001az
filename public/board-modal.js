@@ -1037,6 +1037,32 @@ export async function openBoardModal(boardId, opts = {}) {
 
   // busy() is also the double-submit guard this handler never had: an
   // unguarded double-click on a slow save could POST two new boards.
+  // The card key the board's cards were generated from, as the modal found
+  // it. A save that moves the pointer does NOT regenerate the cards — they
+  // are generated, they carry hearts and crate places, and only an explicit
+  // reprocess is allowed to replace them (card-key-plan.md Stage 5) — so
+  // the save says so, and hands over the verb.
+  const cardBefore = board?.mapping?.card?.by ?? null;
+  const remindReprocess = (cardAfter) => {
+    const next = cardAfter ? `generate cards from ${cardAfter}` : "make each file its own card";
+    const t = toast.info(`Reprocess the board to ${next}.`, {
+      duration: null,
+      actions: [
+        { label: "Reprocess", onClick: async () => {
+          t?.remove();
+          try {
+            const r = await api("POST", `/api/admin/boards/${board.id}/reprocess`);
+            toast(`Reprocessing ${r.queued} item${r.queued === 1 ? "" : "s"}…`, { duration: "short" });
+            // The gallery, if this is it, starts its poll; other pages have
+            // no listener and nothing to repaint.
+            document.dispatchEvent(new CustomEvent("app:board-reprocessed", { detail: { boardId: board.id } }));
+          } catch (err) { toast.error(err.message); }
+        } },
+        { label: "Dismiss", onClick: () => t?.remove() },
+      ],
+    });
+  };
+
   const saveBtn = document.getElementById("board-modal-save");
   saveBtn.onclick = busy(saveBtn, async () => {
     let payload;
@@ -1068,6 +1094,13 @@ export async function openBoardModal(boardId, opts = {}) {
       close();
       onSaved?.(saved);
       toast(isNew ? `Board "${name}" created` : `Board "${name}" saved`);
+      // The pointer moved on a board that has cards to regenerate: remind.
+      // `payload.mapping` rides only when the pane was edited; absent, the
+      // pointer is what it was.
+      if (!isNew && board?.has_items && "mapping" in payload) {
+        const cardAfter = payload.mapping?.card?.by ?? null;
+        if (cardAfter !== cardBefore) remindReprocess(cardAfter);
+      }
     } catch (err) { toast.error(err.message); }
   });
 

@@ -1,9 +1,11 @@
 // The entity-mapping pane, rebuilt around the field-sources model
 // (planning/field-sources-plan.md): every mapped value names its SOURCE —
 // connector, file, extract, detect — and the pane draws all of them the same
-// way. Identity and face are definition rows (glyph, small mono label, plain
-// value line); fields are uniform tiles; everything is edited in a bottom
-// drawer (modal.js createDrawer) that buffers a draft and commits on its one
+// way. The card's two definition rows (glyph, small mono label, plain value
+// line) say what one card IS — "one card per file" or per an extract field,
+// picked from a menu (planning/card-key-plan.md) — and what it SHOWS (face);
+// fields are uniform tiles; everything else is edited in a bottom drawer
+// (modal.js createDrawer) that buffers a draft and commits on its one
 // primary button. Adding a field goes through a dark source menu: catalog
 // sources (connector, file) list their fields right in the menu and add on
 // click; open sources (extract, detect) proceed to the drawer. Violet glyphs
@@ -37,6 +39,9 @@ const cadWord = (bearer) => cadenceLabel(bearer?.refresh?.every ?? 0);
 
 // `url` keeps its wire id; the UI calls it "link" everywhere a kind is shown.
 const kindWord = (k) => (k === "url" ? "link" : k);
+// A field's format word: its kind, or its option count when it is a list —
+// the tile summary and the card menu's note say the same thing.
+const formatWord = (f) => (f.options?.length ? `one of ${f.options.length} options` : kindWord(f.kind));
 const quote = (s) => `“${s}”`;
 const clone = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)));
 
@@ -62,6 +67,9 @@ const clone = (v) => (v == null ? null : JSON.parse(JSON.stringify(v)));
 //               all (detect emits located hits, not a scalar).
 //   ask         the server's `takesInstruction`, carrying the copy the wire
 //               doesn't: the instruction editor's label, placeholder and hint.
+//   options     the server's `takesOptions`: the field may carry a closed list
+//               of answers ("Match to a list" in the drawer — text kind only,
+//               the server's rule mirrored in the drawer's format hint).
 //   refreshable the value can change under us — offer a re-pull cadence.
 //   filesOnly   needs stored files to act on, so a connector board doesn't
 //               offer it — there is nothing there to look at. (The server's
@@ -96,7 +104,7 @@ const SOURCES = {
   },
   extract: {
     id: "extract", glyph: "srcExtract", ai: true, capability: "extract",
-    kinds: ["text", "number", "date", "url"], cap: 12,
+    kinds: ["text", "number", "date", "url"], cap: 12, options: true,
     ask: {
       label: "AI instruction",
       placeholder: "AI instruction — describe what to extract and from where (e.g. \"the candidate's full name\")",
@@ -104,7 +112,7 @@ const SOURCES = {
     },
     label: () => "AI extraction",
     menuNote: "AI answers from the item's content",
-    tile: (f) => `AI extraction · ${kindWord(f.kind)}${f.instruction ? ` · ${quote(f.instruction)}` : ""}`,
+    tile: (f) => `AI extraction · ${formatWord(f)}${f.instruction ? ` · ${quote(f.instruction)}` : ""}`,
   },
   detect: {
     id: "detect", glyph: "srcFrame", ai: true, capability: "detect",
@@ -144,12 +152,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // Clone the current mapping so edits are buffered until Save. The state IS
   // the new wire shape — no per-slot from/hint/candidates translation layer.
   let fields = (mapping?.fields || []).map((f) => ({ ...f }));
-  let identityCfg = clone(mapping?.identity) || null; // null = the filename
-  let faceCfg = clone(mapping?.face) || null;         // null = the slot default
+  let cardBy = mapping?.card?.by || null;      // the card key's field key; null = one card per file
+  let faceCfg = clone(mapping?.face) || null;  // null = the slot default
   let inputConnector = mapping?.input?.connector || null;
 
   // The bound domain's whole row from /api/connectors — label, field catalog,
-  // face producers, its own words for the identity slot, providers, and whether
+  // face producers, its own words for its cards, providers, and whether
   // it can serve at all (`available`/`reason`, the capabilities feed's ladder).
   // ONE object, not eight parallel lets: every place that (re)binds a domain —
   // the catalog fetch, a template apply, a template clear — sets it in a single
@@ -228,7 +236,8 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // an edit was undone — so a pane the user opened, poked and put back told
   // the host to send `mapping`, and the server answered a no-op edit with a
   // full reschedule and backfill.
-  const snapshot = () => ({ input: inputConnector, identity: identityCfg, face: faceCfg, fields });
+  const cardSlot = () => (cardBy ? { by: cardBy } : null);
+  const snapshot = () => ({ input: inputConnector, card: cardSlot(), face: faceCfg, fields });
   // The baseline is kept as a VALUE, not as its string, because one part of it
   // has to be re-derived at comparison time. When the connector catalog lands
   // — a fetch, so tasks after the pane rendered — normalizedFace COERCES a
@@ -246,7 +255,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // Before the catalog arrives the coercion is a no-op on both sides.
   const opened = {
     input: inputConnector,
-    identity: clone(identityCfg),
+    card: cardSlot(),
     face: clone(faceCfg),
     fields: fields.map((f) => ({ ...f })),
   };
@@ -402,7 +411,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     cardHeading.style.margin = "0 0 8px";
     sheet.appendChild(cardHeading);
     const defs = el("div", "mm-def");
-    defs.append(identityDefRow(), faceDefRow());
+    defs.append(cardDefRow(), faceDefRow());
     sheet.appendChild(defs);
 
     const heading = sectionHeadingEl("Extract Fields");
@@ -425,11 +434,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     sheet.appendChild(tiles);
   });
 
-  // A definition row: glyph + small mono label + plain value line (+ options
-  // preview). A LOCKED slot (connector identity: the domain supplies it,
-  // nothing to configure; a file face under filename identity: one instance,
-  // nothing to pick) renders as a statement, not a control — no chevron, no
-  // hover, no drawer.
+  // A definition row: glyph + small mono label + plain value line (+ a dim
+  // detail line). A LOCKED slot (a connector board's card: the domain supplies
+  // it, nothing to configure; a file face under one-card-per-file: one
+  // instance, nothing to pick) renders as a statement, not a control — no
+  // chevron, no hover, no drawer.
+  // `value` is a string or a node (the card row sets the key in mono).
   function defRow({ glyph, ai, label, value, none, more, onOpen, place }) {
     const locked = !onOpen;
     const row = document.createElement(locked ? "div" : "button");
@@ -441,33 +451,100 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     row.appendChild(glyphEl(glyph, ai));
     const bodyEl = el("div", "mm-def-body");
     bodyEl.appendChild(el("div", "mm-def-label", label));
-    bodyEl.appendChild(el("div", "mm-def-val" + (none ? " none" : ""), value));
+    const valEl = el("div", "mm-def-val" + (none ? " none" : ""));
+    valEl.append(value);
+    bodyEl.appendChild(valEl);
     if (more) bodyEl.appendChild(el("div", "mm-def-more", more));
     row.appendChild(bodyEl);
     if (!locked) row.addEventListener("click", onOpen);
     return row;
   }
 
-  function identityDefRow() {
+  // Is this field the card key? ONE spelling of "the pointer names an extract
+  // field" — the def row, the tile mark and collect() all ask it. A removed
+  // tile resets the pointer (fieldTile), but a mapping written by the API can
+  // arrive dangling, and a dangling pointer reads as one card per file.
+  const isCardField = (f) => !!cardBy && f.key === cardBy && f.source === "extract";
+  const cardField = () => fields.find(isCardField) || null;
+
+
+  // "one card per ___": the card slot is a POINTER at one of the extract
+  // fields, so its control is a menu of them (+ "new field"), not a drawer —
+  // a mutually-exclusive choice belongs in one place, visible without opening
+  // anything. On a connector board the domain supplies the card, in its own
+  // words ("each coin is its own card", never "connector id"), locked.
+  function cardDefRow() {
     if (inputConnector) {
-      // Identity on a connector board is not a choice — the domain supplies
-      // it, in the domain's own words (the manifest names the thing, never the
-      // architecture: "each coin is its own card", not "connector id").
       return defRow({
         glyph: "srcGlobe", ai: false, label: "identity",
         value: conn?.identity?.blurb || "each entry is its own card",
       });
     }
-    const bound = identityCfg?.source === "extract";
+    // "generate": cards are produced FROM the field, and regenerating them is
+    // the reprocess the save's reminder offers — the verb says which way the
+    // dependency runs. The key wears the tile name's mono, no fill: a filled
+    // chip inside a row that is itself a button would read as a second
+    // control.
+    const f = cardField();
+    const value = document.createDocumentFragment();
+    value.append("generate one card per ");
+    if (f) {
+      const key = el("span", "", f.key);
+      key.style.fontFamily = "monospace";
+      value.append(key);
+    } else value.append("file");
     return defRow({
-      glyph: bound ? "srcExtract" : "srcDot", ai: bound, label: "identity",
-      value: bound ? (identityCfg.instruction || "not said yet") : "each file is its own card",
-      none: !bound,
-      more: bound && identityCfg.options?.length
-        ? identityCfg.options.map((o) => o.value).filter(Boolean).join("  ·  ")
+      glyph: f ? "srcExtract" : "srcDot", ai: !!f, label: "identity",
+      value,
+      none: !f,
+      more: f
+        ? (f.options?.length ? f.options.map((o) => o.value).filter(Boolean).join("  ·  ") : f.instruction || null)
         : null,
-      onOpen: isAdmin ? openIdentityDrawer : null,
+      onOpen: isAdmin ? (e) => openCardMenu(e.currentTarget) : null,
       place: "def:identity",
+    });
+  }
+
+  // The menu: file (the default — null on the wire), then every extract field
+  // by key, then "+ new field", which writes the field in the ordinary drawer
+  // and points the card at it on commit. The trailing note is the field's
+  // FORMAT (or its option count), not its instruction: ddNote has no ellipsis,
+  // and the tile already carries the instruction.
+  function openCardMenu(anchor) {
+    const pick = (key, close) => {
+      close();
+      if (key === cardBy) return;
+      cardBy = key;
+      render();
+    };
+    openDropdown(anchor, {
+      align: "start",
+      width: "anchor",
+      maxItems: 0,
+      build: (menuBody, { close }) => {
+        menuBody.appendChild(ddRow({
+          label: "file", active: !cardBy, leading: menuGlyph("srcDot", false),
+          trailing: ddNote("each file is its own card"),
+          onClick: () => pick(null, close),
+        }));
+        const extract = fields.filter((f) => f.source === "extract" && f.key);
+        if (extract.length) menuBody.appendChild(ddSep());
+        for (const f of extract) {
+          const lbl = el("span", "dd-label", f.key);
+          lbl.style.fontFamily = "monospace";
+          menuBody.appendChild(ddRow({
+            labelEl: lbl, active: f.key === cardBy, leading: menuGlyph("srcExtract", true),
+            trailing: ddNote(formatWord(f)),
+            onClick: () => pick(f.key, close),
+          }));
+        }
+        menuBody.appendChild(ddSep());
+        menuBody.appendChild(ddRow({
+          label: "+ new field", leading: menuGlyph("srcExtract", true),
+          trailing: ddNote("write it — the card follows"),
+          onClick: () => { close(); openFieldDrawer({ mode: "new", source: "extract", thenCard: true }); },
+        }));
+      },
     });
   }
 
@@ -490,11 +567,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         place: "def:face",
       });
     }
-    // A file board's face is always the file preview. Under extract identity
-    // an entity can bundle several instances, so WHICH file supplies the
-    // preview is configurable; under filename identity there is one instance
-    // per entity and nothing to pick — locked, like connector identity.
-    if (identityCfg?.source !== "extract") {
+    // A file board's face is always the file preview. Under a card key an
+    // entity can bundle several instances, so WHICH file supplies the preview
+    // is configurable; per file there is one instance per entity and nothing
+    // to pick — locked, like a connector board's card.
+    if (!cardField()) {
       return defRow({ glyph: "srcFile", ai: false, label: "face", value: "the file's preview" });
     }
     const cfg = faceCfg?.source === "file" ? faceCfg : null;
@@ -508,6 +585,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
 
   function fieldTile(f, i) {
     const def = SOURCES[f.source];
+    const isCard = isCardField(f);
     // A field whose source this build has no row for still renders and can
     // still be REMOVED — there's just no editor to open for it, because we
     // don't know what it would ask. (collect() passes such a field through
@@ -516,12 +594,21 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       glyph: def?.glyph || "srcDot",
       ai: !!def?.ai,
       name: f.key || "unnamed",
-      sum: tileSum(f),
+      // The card key's tile says so first — a word in the summary, echoing
+      // the choice the Card row owns (the control stays up there).
+      sum: (isCard ? "card key · " : "") + tileSum(f),
       place: `tile:${f.source}:${f.key || i}`,
       onOpen: isAdmin && def ? () => openFieldDrawer({ mode: "edit", index: i }) : null,
       onRemove: isAdmin
         ? () => {
             fields.splice(i, 1);
+            // Removing the card key's field puts the board back on one card
+            // per file — a default, not a law, so no confirm; the toast says
+            // what happened.
+            if (isCard) {
+              cardBy = null;
+              toast(`One card per file again — ${f.key} was the card key`);
+            }
             render();
           }
         : null,
@@ -547,11 +634,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
   // handler it's a HEADER — the catalog source, whose entries follow it and
   // which isn't itself pickable. With one it IS the pick: an open source has
   // nothing to list, so choosing it goes straight to a drawer.
+  // A glyph as a menu row's lead: inert, so a click on it is the row's.
+  const menuGlyph = (glyph, ai) => { const g = glyphEl(glyph, ai); g.style.pointerEvents = "none"; return g; };
   const sourceRow = (id, onClick) => {
     const def = SOURCES[id];
-    const lead = glyphEl(def.glyph, def.ai);
-    lead.style.pointerEvents = "none";
-    return ddRow({ label: srcLabel(def), leading: lead, trailing: ddNote(def.menuNote), onClick });
+    return ddRow({ label: srcLabel(def), leading: menuGlyph(def.glyph, def.ai), trailing: ddNote(def.menuNote), onClick });
   };
   // A catalog entry adds IMMEDIATELY — its key, kind and fn are all decided by
   // the catalog, so there is nothing left for a drawer to ask. The chip's title
@@ -633,16 +720,26 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     render();
   };
 
-  function openFieldDrawer({ mode, source, index }) {
+  // `thenCard`: the Card row's "+ new field" — the field is written here like
+  // any other, and the card points at it on commit.
+  function openFieldDrawer({ mode, source, index, thenCard = false }) {
     // The edit target is held by OBJECT, not index: the list can shift under
     // an open drawer (keyboard focus can reach a tile's × behind the scrim),
     // and a stale index would overwrite the wrong field on commit.
     const original = mode === "edit" ? fields[index] : null;
     const def = SOURCES[mode === "edit" ? original.source : source];
     const draft = mode === "edit"
-      ? { ...original }
+      ? clone(original)
       : { key: "", source: def.id, ...(def.kinds ? { kind: def.kinds[0] } : {}), ...(def.ask ? { instruction: "" } : {}) };
-    const head = drawerHeadParts(def.glyph, def.ai, draft.key || "new_field", srcLabel(def));
+    // `stash` is drawer-session scratch (see matchListBlock) and lives on the
+    // EDITOR, never on the draft — the draft is written to the mapping verbatim,
+    // and scratch on it would be config.
+    // `kind()` is the draft's format with the source's first as the fallback
+    // a legacy field without one gets — one spelling for the chips, the list
+    // gate and the hint.
+    const ed = { draft, stash: null, original, kind: () => draft.kind || def.kinds?.[0] || null };
+    const head = drawerHeadParts(def.glyph, def.ai, draft.key || "new_field",
+      srcLabel(def) + (thenCard ? " · the card key" : ""));
     // fns already used by OTHER fields of the same source — the edited field's
     // own binding stays pickable (it's the pressed chip).
     const takenFns = new Set(
@@ -658,8 +755,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         if (def.catalog) bodyEl.append(fnGroup(draft, head, takenFns));
         else {
           bodyEl.append(keyGroup(draft, head));
-          if (def.kinds) bodyEl.append(formatGroup(draft, def));
+          if (def.kinds) bodyEl.append(formatGroup(ed, def));
           if (def.ask) bodyEl.append(askGroup(draft, def.ask));
+          // "Match to a list" — text fields only (the server's rule); a
+          // non-text format hides the block and formatGroup stashes the list.
+          if (def.options && ed.kind() === "text") bodyEl.append(matchListBlock(ed, bodyEl));
         }
         if (def.refreshable) bodyEl.append(group("How often it re-pulls", cadenceSelect(draft), null));
       },
@@ -671,12 +771,18 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
             return;
           }
           commit(() => {
-            if (mode === "new") fields.push(draft);
-            else {
+            if (mode === "new") {
+              fields.push(draft);
+              if (thenCard) cardBy = draft.key;
+            } else {
               const at = fields.indexOf(original);
               // Removed while the drawer was open → the removal wins; committing
               // a draft of a deleted field must not resurrect it elsewhere.
-              if (at >= 0) fields[at] = draft;
+              if (at >= 0) {
+                fields[at] = draft;
+                // The card pointer follows a renamed key.
+                if (cardBy === original.key && draft.key) cardBy = draft.key;
+              }
             }
           });
         },
@@ -698,22 +804,34 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return group("Key", input, null);
   }
 
-  function formatGroup(draft, def) {
+  function formatGroup(ed, def) {
+    const { draft } = ed;
     const row = el("div", "mm-chips");
     for (const k of def.kinds) {
       const c = document.createElement("button");
       c.type = "button";
       c.textContent = kindWord(k);
-      c.setAttribute("aria-pressed", String((draft.kind || def.kinds[0]) === k));
-      // Pressed state flips in place — a refresh would rebuild the body and
-      // cost whoever is typing in the key input their focus.
+      c.setAttribute("aria-pressed", String(ed.kind() === k));
       c.addEventListener("click", () => {
+        const wasText = ed.kind() === "text";
         draft.kind = k;
+        // A list needs the text format (the server refuses options on any
+        // other): leaving text stashes the list and hides the block, coming
+        // back restores it — so a mis-click never costs the options. Only
+        // that crossing rebuilds the body (and costs a typist their focus);
+        // every other pick flips the pressed state in place.
+        if (def.options && wasText !== (k === "text")) {
+          if (k !== "text" && Array.isArray(draft.options)) { ed.stash = draft.options; delete draft.options; }
+          drawer().refresh();
+          return;
+        }
         for (const b of row.children) b.setAttribute("aria-pressed", String(b === c));
       });
       row.appendChild(c);
     }
-    return group("Format", row, "How the app stores and displays the extracted value.");
+    return group("Format", row, def.options && ed.kind() !== "text"
+      ? "How the app stores and displays the extracted value. A list of options needs the text format."
+      : "How the app stores and displays the extracted value.");
   }
 
   // What the source needs told, in the source's own words (SOURCES[…].ask).
@@ -795,67 +913,12 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     return sel;
   }
 
-  // ── The identity drawer (file boards) ─────────────────────────────────────
-  // "Get identity from" over horizontal source cards; picking reshapes the
-  // config below, draft-side. The Filename card sets the draft to null — the
-  // slot's absence-of-configuration, not a source of its own.
-  function openIdentityDrawer() {
-    // `stash` is drawer-session scratch (see matchListBlock) and lives on the
-    // EDITOR, never on the draft — the draft is written to the mapping verbatim,
-    // and scratch on it would be config.
-    const ed = { draft: identityCfg ? clone(identityCfg) : null, stash: null };
-    const head = drawerHeadParts("srcDot", false, "identity", "");
-    drawer().open({
-      head: head.nodes,
-      build: (bodyEl) => {
-        const isAi = ed.draft?.source === "extract";
-        // The head follows the current pick — it names what the slot would be
-        // saved as, not what it was when the drawer opened.
-        head.g.className = "glyph" + (isAi ? " ai" : "");
-        head.g.innerHTML = isAi ? ICONS.srcExtract : ICONS.srcDot;
-        head.s.textContent = isAi ? "AI extraction" : "Filename";
-
-        const row = el("div", "mm-srcrow");
-        row.append(
-          srcCard({
-            glyph: "srcDot", ai: false, lab: "Filename", note: "each file is its own card",
-            pressed: !ed.draft,
-            onPick: () => { ed.draft = null; drawer().refresh(); },
-          }),
-          srcCard({
-            glyph: "srcExtract", ai: true, lab: "AI extraction", note: "the AI derives it",
-            pressed: isAi,
-            onPick: () => {
-              // Re-picking AI restores what was saved rather than a blank —
-              // flipping to Filename and back should not cost the instruction.
-              ed.draft = identityCfg?.source === "extract" ? clone(identityCfg) : { source: "extract", instruction: "" };
-              drawer().refresh();
-            },
-          }),
-        );
-        bodyEl.appendChild(group("Get identity from", row, null));
-
-        if (isAi) {
-          // The identity slot asks the same question extraction fields do, in
-          // its own words — what the AI should read out of each item.
-          bodyEl.appendChild(askGroup(ed.draft, {
-            label: "AI instruction",
-            placeholder: "what to extract as the item's identity — e.g. \"the person's full name\"",
-            hint: "Sent to the model for every item.",
-          }));
-          bodyEl.appendChild(matchListBlock(ed, bodyEl));
-        }
-      },
-      primary: {
-        label: "Done",
-        onClick: () => commit(() => { identityCfg = ed.draft; }),
-      },
-    });
-  }
-
-  // "Match to a list": a declared list of allowed answers. Its presence on the
-  // draft (`options` is an array) IS the mode — the switch adds or deletes the
-  // array, and the option rows follow it with no second label.
+  // "Match to a list": a declared list of allowed answers on an extract
+  // field — the answer becomes a zero-or-more selection from it (an array on
+  // the wire, `kind: "list"` where it lands). Its presence on the draft
+  // (`options` is an array) IS the mode — the switch adds or deletes the
+  // array, and the option rows follow it with no second label. It used to be
+  // the identity drawer's alone; any text field takes it now.
   function matchListBlock(ed, bodyEl) {
     const wrap = el("div", "dw-group");
     const on = Array.isArray(ed.draft.options);
@@ -869,7 +932,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
           // off) over the committed list — an off/on flip mid-edit must not
           // silently discard fresh options.
           ed.draft.options = ed.stash
-            || (identityCfg?.options?.length ? clone(identityCfg.options) : [{ value: "", hint: "" }]);
+            || (ed.original?.options?.length ? clone(ed.original.options) : [{ value: "", hint: "" }]);
           ed.stash = null;
         } else {
           ed.stash = ed.draft.options;
@@ -1115,7 +1178,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
     }
     const t = row.template;
     inputConnector = t.input?.connector || null;
-    identityCfg = t.identity ? clone(t.identity) : null;
+    cardBy = null; // a connector board's cards are the domain's — no pointer
     faceCfg = t.face ? clone(t.face) : null;
     fields = (t.fields || []).map((f) => ({ ...f }));
     bindConnector(row);
@@ -1123,14 +1186,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
 
   // The inverse of applyTemplate: back to the pristine file board. A template
   // rewires the whole mapping, so unloading one has to undo the whole thing —
-  // the connector fields name a source that's gone, and the identity/face it
-  // set only mean something under that source. That takes the template's
+  // the connector fields name a source that's gone, and the face it set only
+  // means something under that source. That takes the template's
   // extract fields with it, which is the same wholesale swap applyTemplate
   // already does in the other direction.
   function clearTemplate() {
     if (!inputConnector) return;
     inputConnector = null;
-    identityCfg = null;
+    cardBy = null;
     faceCfg = null;
     fields = [];
     loadFileFields(); // the file source's menu section needs a catalog it never fetched
@@ -1157,12 +1220,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         toast.error(`Invalid field key: "${f.key}"`);
         return { ok: false };
       }
-      // Mirrors the server (validateMapping): "identity" is the identity
-      // slot's key in the record_fields schema; instructions cap at 500.
-      if (f.key === "identity") {
-        toast.error(`"identity" is reserved for the identity slot — pick another key`);
-        return { ok: false };
-      }
+      // Mirrors the server (validateMapping): instructions cap at 500.
       if ((f.instruction || "").length > 500) {
         toast.error(`The instruction for "${f.key}" is too long (max 500 characters)`);
         return { ok: false };
@@ -1172,49 +1230,35 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         return { ok: false };
       }
       seen.add(f.key);
-    }
-
-    // Identity: the domain's on connector boards; extract needs its
-    // instruction; absent = the filename (no slot stores a word for that).
-    let identity = null;
-    if (inputConnector) identity = { source: "connector" };
-    else if (identityCfg?.source === "extract") {
-      const instruction = (identityCfg.instruction || "").trim();
-      if (!instruction) {
-        toast.error("An AI instruction is required when identity comes from AI extraction");
-        return { ok: false };
-      }
-      if (instruction.length > 500) {
-        toast.error("The identity instruction is too long (max 500 characters)");
-        return { ok: false };
-      }
       // Match-list: keep only options that carry a value; trim hints. An on
       // toggle with nothing usable is a half-state — block it rather than save
       // a listless matcher (keeps "mode = has a list" true, like the server).
-      const cleanOptions = (identityCfg.options || [])
-        .map((o) => ({ value: (o.value || "").trim(), ...(o.hint && o.hint.trim() ? { hint: o.hint.trim() } : {}) }))
-        .filter((o) => o.value);
-      if (Array.isArray(identityCfg.options) && !cleanOptions.length) {
-        toast.error("Add at least one option, or turn off “Match to a list”");
-        return { ok: false };
-      }
-      // The server dedups options on a NORMALIZED key (worker normaliseIdentity:
-      // trim, collapse -_ and whitespace, lowercase) — "BTC" and "btc" collide.
-      // Catch it here so a colliding pair doesn't 400 the whole save.
-      const optKeys = new Set();
-      for (const o of cleanOptions) {
-        const k = o.value.trim().toLowerCase().replace(/[-_\s]+/g, " ");
-        if (optKeys.has(k)) {
-          toast.error(`Two options mean the same thing: "${o.value}"`);
+      if (Array.isArray(f.options)) {
+        const cleanOptions = f.options
+          .map((o) => ({ value: (o.value || "").trim(), ...(o.hint && o.hint.trim() ? { hint: o.hint.trim() } : {}) }))
+          .filter((o) => o.value);
+        if (!cleanOptions.length) {
+          toast.error(`Add at least one option to "${f.key}", or turn off “Match to a list”`);
           return { ok: false };
         }
-        optKeys.add(k);
-        if ((o.hint || "").length > 500) {
-          toast.error(`The hint for option "${o.value}" is too long (max 500 characters)`);
-          return { ok: false };
+        // The server dedups options on a NORMALIZED key (worker normaliseIdentity:
+        // trim, collapse -_ and whitespace, lowercase) — "BTC" and "btc" collide.
+        // Catch it here so a colliding pair doesn't 400 the whole save.
+        const optKeys = new Set();
+        for (const o of cleanOptions) {
+          const k = o.value.trim().toLowerCase().replace(/[-_\s]+/g, " ");
+          if (optKeys.has(k)) {
+            toast.error(`Two options of "${f.key}" mean the same thing: "${o.value}"`);
+            return { ok: false };
+          }
+          optKeys.add(k);
+          if ((o.hint || "").length > 500) {
+            toast.error(`The hint for option "${o.value}" is too long (max 500 characters)`);
+            return { ok: false };
+          }
         }
+        f.options = cleanOptions;
       }
-      identity = { source: "extract", instruction, ...(cleanOptions.length ? { options: cleanOptions } : {}) };
     }
 
     // Each field is emitted from what its source declares it carries, so the
@@ -1234,14 +1278,21 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       if (def.catalog) { out.kind = f.kind; out.fn = f.fn; }
       else if (def.kinds) out.kind = def.kinds.includes(f.kind) ? f.kind : def.kinds[0];
       if (def.ask && f.instruction?.trim()) out.instruction = f.instruction.trim();
+      if (def.options && Array.isArray(f.options) && f.options.length) out.options = f.options;
       if (def.refreshable && f.refresh?.every) out.refresh = { every: f.refresh.every };
       return out;
     });
 
+    // The card: a pointer at one of the extract fields just emitted. Connector
+    // boards carry none (the domain's entries are the cards). A pointer at a
+    // field that is no longer there is dropped — fieldTile already reset and
+    // toasted the removal; this only guards a mapping the API wrote.
+    const card = !inputConnector && outFields.some(isCardField) ? cardSlot() : null;
+
     // The face is emitted only where it was really configured. Connector
-    // boards: the normalized producer config. File boards: only under extract
-    // identity (several instances per entity) — the preference is soft, image/
-    // first by default, and flipping identity back to filename drops it.
+    // boards: the normalized producer config. File boards: only under a card
+    // key (several instances per entity) — the preference is soft, image/
+    // first by default, and going back to one card per file drops it.
     let face = null;
     if (inputConnector) {
       if (faceCfg?.source === "connector") {
@@ -1250,7 +1301,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
           ...(faceCfg.refresh?.every ? { refresh: { every: faceCfg.refresh.every } } : {}),
         };
       }
-    } else if (identity?.source === "extract") {
+    } else if (card) {
       face = {
         source: "file",
         prefer: (faceCfg?.source === "file" && faceCfg.prefer) || "image",
@@ -1260,11 +1311,11 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
 
     // Nothing configured at all collapses to null — an unmapped board, not an
     // empty mapping.
-    const hasContent = outFields.length > 0 || identity || inputConnector || face;
+    const hasContent = outFields.length > 0 || inputConnector || face;
     const out = hasContent
       ? {
           ...(inputConnector ? { input: { connector: inputConnector } } : {}),
-          ...(identity ? { identity } : {}),
+          ...(card ? { card } : {}),
           ...(face ? { face } : {}),
           fields: outFields,
         }

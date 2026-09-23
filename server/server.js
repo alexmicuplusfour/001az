@@ -14,6 +14,8 @@ import {
   deleteInstance,
   deleteEntityIfEmpty,
   reprocessEntity,
+  reprocessBoard,
+  boardHasTranscriptStamp,
   retagEntity,
   retagEntityFacets,
   reextractEntity,
@@ -185,7 +187,7 @@ import { addConnectorEntity, enqueueConnectorEntity } from "./connectors/add.js"
 import { wantedFields, faceSchedule, domainState } from "./connectors/runtime.js";
 import { mediaCatalog, getMediaField } from "./media/index.js";
 import { createFieldReconciler } from "./field-reconcile.js";
-import { FIELD_SOURCE, FIELD_SOURCE_DEFS } from "./field-sources.js";
+import { FIELD_SOURCE, FIELD_SOURCE_DEFS, keysCards } from "./field-sources.js";
 import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits, bundledPlugins } from "./plugins.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
@@ -2328,6 +2330,8 @@ app.post("/api/admin/boards/:id/duplicate", requireAdmin, requireBoardManager, w
 // further with their own `kinds`. Detect fields carry NO kind — their output is
 // located hits, not a scalar (field-sources.js `output`).
 const MAPPING_KINDS = ["text", "number", "url", "date"];
+// The mapping's top-level keys — anything else is refused (validateMapping).
+const MAPPING_KEYS = new Set(["input", "card", "face", "fields"]);
 
 // Shared by fields and the face slot: a `refresh: { every }` cadence in
 // minutes. Returns an error string or null.
@@ -2346,11 +2350,12 @@ const slotSources = (slot) =>
 
 // Returns an error string when mapping is invalid, null when valid. Field AND
 // slot rules are read off FIELD_SOURCE_DEFS — which sources a slot takes
-// (`slots`), on which board type (`filesOnly`/`connectorOnly`), instruction and
-// refresh rules — so a new source is validated by its table row, not by another
-// branch here. Only a source's own config vocabulary is checked by name below
-// (extract's options list; the connector face's producer/period; the file
-// face's prefer/pick).
+// (`slots`), on which board type (`filesOnly`/`connectorOnly`), instruction,
+// options and refresh rules — so a new source is validated by its table row,
+// not by another branch here. Only a source's own config vocabulary is
+// checked by name below (the connector face's producer/period; the file
+// face's prefer/pick). The card slot is checked LAST, after the fields, since
+// it is a pointer at one of them.
 function validateMapping(mapping) {
   // Optional input slot: absent = files. (The literal string "files" died with
   // `from:"raw"` — two spellings of the same absence; migration 0038 normalizes.)
@@ -2362,39 +2367,16 @@ function validateMapping(mapping) {
   }
   const filesBoard = !mapping.input;
 
-  // Identity slot: null/absent = the filename (the slot's default, owned by
-  // the renderer — no pseudo-source in the mapping).
-  if (mapping.identity !== undefined && mapping.identity !== null) {
-    const id = mapping.identity;
-    if (typeof id !== "object") return "mapping.identity must be an object or null";
-    const def = FIELD_SOURCE[id.source];
-    if (!def || !(def.slots || []).includes("identity"))
-      return `mapping.identity.source must be ${slotSources("identity")} (or the slot null)`;
-    if (def.connectorOnly && filesBoard)
-      return `a ${def.id} identity requires a connector input`;
-    if (def.takesInstruction) {
-      if (!id.instruction || typeof id.instruction !== "string" || !id.instruction.trim())
-        return `mapping.identity.instruction is required for a ${def.id} identity`;
-      if (id.instruction.length > 500) return `mapping.identity.instruction must be ≤500 chars`;
-    }
-    // Match-to-a-list mode: a declared options list constrains the AI's answer
-    // to a closed set (vs open extraction). Config only — never seeds entities.
-    if (id.options !== undefined) {
-      if (!def.takesInstruction)
-        return `mapping.identity.options needs an instruction-taking source`;
-      if (!Array.isArray(id.options)) return `mapping.identity.options must be an array`;
-      if (id.options.length > 200) return `mapping.identity may have at most 200 options`;
-      const seenKeys = new Set();
-      for (const c of id.options) {
-        if (!c || typeof c !== "object" || typeof c.value !== "string" || !c.value.trim())
-          return `each identity option needs a non-empty "value"`;
-        if (c.hint !== undefined && (typeof c.hint !== "string" || c.hint.length > 500))
-          return `identity option hint must be a string ≤500 chars`;
-        const k = normaliseIdentity(c.value); // same key the runtime dedups on
-        if (seenKeys.has(k)) return `duplicate identity option: "${c.value}"`;
-        seenKeys.add(k);
-      }
-    }
+  // A key the mapping doesn't have is refused, not ignored: a client still
+  // emitting a slot that moved would otherwise save a mapping missing its
+  // replacement and silently change the board (the identity slot, moved to
+  // `card` by planning/card-key-plan.md, is the case that taught this — an
+  // old pane would have reset every card-key board to one card per file).
+  // `identity: null` was that slot's spelling of absence and stays harmless.
+  for (const k of Object.keys(mapping)) {
+    if (MAPPING_KEYS.has(k) || (k === "identity" && mapping.identity === null)) continue;
+    if (k === "identity") return `mapping.identity moved to mapping.card — the card key is one of the fields (planning/card-key-plan.md)`;
+    return `unknown mapping key "${k}"`;
   }
 
   if (!Array.isArray(mapping.fields)) return "mapping.fields must be an array";
@@ -2404,9 +2386,6 @@ function validateMapping(mapping) {
     if (!f.key || typeof f.key !== "string" || !/^[a-z][a-z0-9_]*$/.test(f.key))
       return `invalid field key: ${JSON.stringify(f.key)}`;
     if (seen.has(f.key)) return `duplicate field key: ${f.key}`;
-    // "identity" is the identity slot's key in the record_fields schema — a
-    // field with the same name would silently overwrite it there.
-    if (f.key === "identity") return `field key "identity" is reserved for the identity slot`;
     seen.add(f.key);
 
     const def = FIELD_SOURCE[f.source];
@@ -2445,6 +2424,26 @@ function validateMapping(mapping) {
       if (typeof f.instruction !== "string" || f.instruction.length > 500)
         return `instruction for field "${f.key}" must be a string ≤500 chars`;
     }
+    // Match-to-a-list: a declared options list constrains the AI's answer to
+    // a closed set and makes the value a zero-or-more selection. Text only —
+    // an enum of dates or numbers is not a thing anyone asked for. Config
+    // only — never seeds entities, even when the field is the card key.
+    if (f.options !== undefined) {
+      if (!def.takesOptions) return `${def.id} field "${f.key}" takes no options`;
+      if (f.kind !== "text") return `field "${f.key}" needs the text kind to carry options`;
+      if (!Array.isArray(f.options)) return `options for field "${f.key}" must be an array`;
+      if (f.options.length > 200) return `field "${f.key}" may have at most 200 options`;
+      const seenKeys = new Set();
+      for (const c of f.options) {
+        if (!c || typeof c !== "object" || typeof c.value !== "string" || !c.value.trim())
+          return `each option of field "${f.key}" needs a non-empty "value"`;
+        if (c.hint !== undefined && (typeof c.hint !== "string" || c.hint.length > 500))
+          return `option hint for field "${f.key}" must be a string ≤500 chars`;
+        const k = normaliseIdentity(c.value); // same key the landing dedups on
+        if (seenKeys.has(k)) return `duplicate option in field "${f.key}": "${c.value}"`;
+        seenKeys.add(k);
+      }
+    }
     if (f.refresh !== undefined) {
       if (!def.refreshable) return `${def.id} field "${f.key}" cannot refresh`;
       const err = validateRefresh(f.refresh, `field "${f.key}"`);
@@ -2454,6 +2453,22 @@ function validateMapping(mapping) {
   for (const def of FIELD_SOURCE_DEFS) {
     if (def.cap && (perSource[def.id] || 0) > def.cap)
       return `mapping may have at most ${def.cap} ${def.id} fields`;
+  }
+
+  // Card slot: null/absent = one card per file (the default, owned by the
+  // renderer). `{ by }` names one of the mapping's extract fields as the key
+  // a card is minted per — a pointer, not a binding, so it is checked against
+  // the fields above. Refused on a connector board: the connector owns the
+  // card there (its identity is derived by the runtime, never mapped).
+  if (mapping.card !== undefined && mapping.card !== null) {
+    const card = mapping.card;
+    if (typeof card !== "object" || typeof card.by !== "string" || !card.by)
+      return "mapping.card must be { by: <field key> } or null";
+    if (!filesBoard) return "a connector board's cards are the connector's entries — mapping.card is not allowed with an input";
+    const target = mapping.fields.find((f) => f.key === card.by);
+    if (!target) return `mapping.card.by names no field: "${card.by}"`;
+    if (!keysCards(FIELD_SOURCE[target.source]))
+      return `mapping.card.by must name an extract field, not the ${target.source} field "${card.by}"`;
   }
 
   // Face slot: null/absent = the renderer's default (file preview on a files
@@ -2531,6 +2546,29 @@ app.post("/api/admin/boards/:id/retag", requireAdmin, wrap(async (req, res) => {
   invalidateBoardCache(req.params.id);
   console.log(`retag queued: ${queued} item(s) in board ${req.params.id}${scope ? ` (facets: ${scope.join(", ")})` : ""}`);
   res.json({ ok: true, queued, ...(scope ? { facets: scope } : {}) });
+}));
+
+// Board-level reprocess (card-key-plan.md Stage 5): every instance re-enters
+// the pipeline from the leg its payload calls for — the Reprocess action on
+// the "cards were generated from the old key" reminder, and the only way a
+// pointer change (or a move to one card per file) reaches the cards. The
+// transcriber is resolved once, and only when some instance carries a
+// transcript stamp (the entity route's rule).
+app.post("/api/admin/boards/:id/reprocess", requireAdmin, wrap(async (req, res) => {
+  const board = await getBoard(db, req.params.id);
+  if (!board) return res.status(404).json({ error: "not found" });
+  let engine = null;
+  try {
+    if (await boardHasTranscriptStamp(db, board.id)) {
+      const t = await resolveTranscriber(db, board);
+      if (t?.id && t?.model) engine = engineStamp(t);
+    }
+  } catch {}
+  const queued = await reprocessBoard(db, board.id, engine);
+  if (queued === null) return res.status(404).json({ error: "not found" });
+  invalidateBoardCache(board.id);
+  console.log(`reprocess queued: ${queued} item(s) in board ${board.id}`);
+  res.json({ ok: true, queued });
 }));
 
 // "Tag now" for a scheduled board: release held items without waiting for

@@ -70,13 +70,13 @@ export function toggleView() {
 }
 
 // Should the toolbar offer the rows toggle at all? Only where instances can
-// stack: derived-identity boards (the one mapping that produces multi-
+// stack: boards with a card key (the one mapping that produces multi-
 // instance entities), boards whose data already holds one (a mapping
 // switched away later), and whenever rows is currently effective — an
 // explicit rows choice must always have a way back.
 export function rowsRelevant() {
   return (
-    state.boardMapping?.identity?.source === "extract" ||
+    !!state.boardMapping?.card?.by ||
     state.items.some((i) => (i.instances?.length || 0) > 1) ||
     effectiveView() === "rows"
   );

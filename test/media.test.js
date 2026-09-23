@@ -164,7 +164,7 @@ test("validateMapping: accepts a file field, rejects unknown fn / kind mismatch 
 
   const onConn = await patchBoard(board.id, {
     mapping: {
-      input: { connector: "crypto" }, identity: { source: "connector" },
+      input: { connector: "crypto" },
       fields: [{ key: "file_size", kind: "number", source: "file", fn: "file_size" }],
     },
   });

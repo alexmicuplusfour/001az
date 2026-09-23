@@ -1,16 +1,18 @@
 // sort.js — attribute sorting for the board view. The menu's entries are
-// assembled from the board's attribute catalogs, decided by the mapping's
-// identity source (see planning/board-sorting-plan.md):
+// assembled from the board's attribute catalogs, decided by what one card IS
+// on the board — the mapping's card mode (planning/board-sorting-plan.md
+// wrote this up as the "identity source"; card-key-plan.md renamed it):
 //
-// - null (no identity source, or no mapping): universal + media-catalog fields
+// - null (one card per file, or no mapping): universal + media-catalog fields
 //   for the file kinds present on the board (entity:instance is 1:1, so a
 //   file's metadata IS the entity's — no aggregation question).
-// - connector: universal + the mapping's bound connector fields — exactly the
-//   keys whose values exist in entities.fields, so the menu can never offer a
-//   sort without data behind it.
-// - extract (derived identity): universal only, by decision — name, dates,
-//   hearts, file count. Media attributes are per-instance there and would need
-//   an aggregation policy we've declined to invent.
+// - connector (one card per connector entry): universal + the mapping's bound
+//   connector fields — exactly the keys whose values exist in entities.fields,
+//   so the menu can never offer a sort without data behind it.
+// - extract (one card per extracted value — `mapping.card.by`): universal
+//   only, by decision — name, dates, hearts, file count. Media attributes are
+//   per-instance there and would need an aggregation policy we've declined
+//   to invent.
 //
 // One sort at a time; state.sort === null is the server default (newest
 // first). Missing values sort last in either direction, in their incoming
@@ -24,13 +26,17 @@ const UNIVERSAL = [
   { by: "updated", label: "Date updated", kind: "date" },
   { by: "hearts", label: "Hearts", kind: "number" },
 ];
-// Files per identity — meaningful only on derived boards (raw and connector
+// Files per card — meaningful only on card-key boards (per-file and connector
 // entities always have exactly one instance).
 const INSTANCES_ENTRY = { by: "instances", label: "Files", kind: "number" };
 
-// The identity slot's source: "extract" | "connector" | null (null = the
-// filename default — the slot carries no config).
-const identityFrom = () => state.boardMapping?.identity?.source || null;
+// The board's card mode: "extract" (a card key names an extract field) |
+// "connector" (an input — the connector's entries are the cards) | null (one
+// card per file — neither slot carries config).
+const cardMode = () => {
+  const m = state.boardMapping;
+  return m?.card?.by ? "extract" : m?.input?.connector ? "connector" : null;
+};
 
 // Static per-session catalogs, fetched lazily on first menu open. A failed or
 // empty response isn't cached — a boot-time network blip shouldn't degrade the
@@ -65,7 +71,7 @@ function kindsPresent() {
 // The sectioned menu: [{ label, entries: [{ by, label, kind, count? }] }].
 // Async only for the catalog fetches (cached after the first call).
 export async function sortCatalog() {
-  const from = identityFrom();
+  const from = cardMode();
   const universal = from === "extract" ? [...UNIVERSAL, INSTANCES_ENTRY] : [...UNIVERSAL];
   const sections = [{ label: "Board", entries: universal }];
 
@@ -163,13 +169,13 @@ export function saveSort() {
   } catch { /* private mode / quota — sort just won't stick */ }
 }
 
-// A stored `by` must still make sense for the board's current identity mode —
+// A stored `by` must still make sense for the board's current card mode —
 // a mapping edit can strand one (e.g. a connector rebind dropping a field).
 // Media fns aren't checked against the catalog (that fetch is lazy); a stale
 // fn yields all-null values, which is just the default order.
 function validSort(s) {
   if (!s || typeof s.by !== "string" || !["asc", "desc"].includes(s.dir)) return false;
-  const from = identityFrom();
+  const from = cardMode();
   if (UNIVERSAL.some((u) => u.by === s.by)) return true;
   if (s.by === "instances") return from === "extract";
   if (s.by.startsWith("media:")) return from === null;
@@ -196,7 +202,7 @@ export function restoreSort() {
     return;
   }
   state.sort = null;
-  if (identityFrom() !== "connector") return;
+  if (cardMode() !== "connector") return;
   connectorList().then((mods) => {
     if (state.sort) return; // the user beat the fetch
     const mod = mods.find((c) => c.name === state.boardMapping?.input?.connector);

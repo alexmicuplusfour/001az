@@ -26,8 +26,15 @@
 //                    to get it (the dual of filesOnly; without it the scheduler
 //                    would sweep for a connector that isn't there).
 //   slots            mapping slots this source may bind BESIDES fields[]
-//                    ("identity", "face"). Slot validation reads this list —
+//                    (today only "face"). Slot validation reads this list —
 //                    a source that doesn't declare a slot is refused there.
+//                    The CARD slot (`mapping.card = { by }`) binds no source:
+//                    it names one of the mapping's own extract fields as the
+//                    key one card is minted per (planning/card-key-plan.md).
+//   takesOptions     may carry `options: [{ value, hint? }]` — a closed
+//                    answer list; the value becomes a zero-or-more selection
+//                    (stored as an array under `kind: "list"`, so the object
+//                    discriminator can tell it from detection boxes).
 //   refreshable      may carry `refresh: { every }` (minutes) — the value can
 //                    change under us and a sweep re-pulls it.
 //   takesInstruction may carry `instruction` (≤500 chars) — the source needs
@@ -67,7 +74,7 @@ export const FIELD_SOURCE_DEFS = [
     refreshable: true,
     capability: null,
     refill: "sweep",
-    slots: ["identity", "face"],
+    slots: ["face"],
     output: "scalar",
   },
   {
@@ -83,13 +90,12 @@ export const FIELD_SOURCE_DEFS = [
   {
     id: "extract",
     scope: "instance",
-    catalog: null, takesInstruction: true,
+    catalog: null, takesInstruction: true, takesOptions: true,
     refreshable: false,
     capability: "extract",
     refill: "manual",
     kinds: ["text", "number", "url", "date"],
     cap: 12, // extract fields generate the record_fields schema — the cap is a schema-size bound
-    slots: ["identity"],
     output: "scalar",
   },
   {
@@ -107,15 +113,22 @@ export const FIELD_SOURCE_DEFS = [
 
 export const FIELD_SOURCE = Object.fromEntries(FIELD_SOURCE_DEFS.map((s) => [s.id, s]));
 
+// May a field of this source be the card key (`mapping.card.by`)? A model
+// derives it (a deterministic source would need identity resolution at
+// admission — not built) and it is one value (located hits can't key a
+// card). Read off two columns the table declares for other reasons, so no
+// third column has to be kept in step by hand. Validation and the extract
+// leg both ask here.
+export const keysCards = (def) => !!def?.capability && def?.output === "scalar";
+
 // Does this mapping involve a model at all? Gates the stamp at ingest, the
 // pending_extract route, the Re-extract affordance, and the extract leg itself
 // — four sites that used to hand-copy `identity.from === "ai" || fields.some
 // (f.from === "ai")` and would each need to learn about every future inferred
-// source. `identity.source === "extract"` is the one slot-level AI binding;
-// fields ask their def, so a new capability-backed source is covered by its
-// table row alone. (public/utils.js mappingHasAiWork mirrors this — the client
-// can't import server modules; keep the two in step.)
+// source. Fields ask their def, so a new capability-backed source is covered
+// by its table row alone; the card key is one of the fields, so it needs no
+// clause of its own. (public/utils.js mappingHasAiWork mirrors this — the
+// client can't import server modules; keep the two in step.)
 export const aiWork = (mapping) =>
-  mapping?.identity?.source === "extract" ||
-  (Array.isArray(mapping?.fields) &&
-    mapping.fields.some((f) => !!FIELD_SOURCE[f.source]?.capability));
+  Array.isArray(mapping?.fields) &&
+  mapping.fields.some((f) => !!FIELD_SOURCE[f.source]?.capability);

@@ -204,12 +204,14 @@ export const affectedEntityIds = (rows) => [...new Set(rows.flatMap((r) => r.ent
 const touched = (result) => (result.rowCount ? affectedEntityIds(result.rows) : null);
 
 // The field KEYS holding ≥1 stored detection box (a non-empty array `v` is
-// the object-field discriminator, the same one the lightbox overlay reads).
-// Feeds the list payload's distilled summary AND the alert tag-set builders'
-// `~objects` projection — the two server faces of the objects system facet.
+// the object-field discriminator, the same one the lightbox overlay reads —
+// minus a LIST field, whose value is also an array but of option spellings,
+// stamped `kind: "list"` at landing for exactly this test). Feeds the list
+// payload's distilled summary AND the alert tag-set builders' `~objects`
+// projection — the two server faces of the objects system facet.
 export function objectKeysOf(fields) {
   return Object.entries(fields || {})
-    .filter(([, f]) => Array.isArray(f?.v) && f.v.length > 0)
+    .filter(([, f]) => Array.isArray(f?.v) && f.v.length > 0 && f.kind !== "list")
     .map(([k]) => k);
 }
 
@@ -886,7 +888,7 @@ export async function queuedAmong(db, ids) {
 }
 
 // The mapping to stamp for AI extraction: the given mapping when it has AI
-// work in it (derived identity or extract/detect fields — aiWork asks the
+// work in it (extract/detect fields, the card key among them — aiWork asks the
 // source table), else null. Same gate as ingest's admitFile.
 function aiMappingJson(mapping) {
   return aiWork(mapping) ? JSON.stringify(mapping) : null;
@@ -1067,6 +1069,15 @@ export async function entityHasTranscriptStamp(db, entityId) {
   const { rows } = await db.query(
     `SELECT 1 FROM items WHERE entity_ids @> ARRAY[$1]::bigint[] AND payload ? 'transcript_engine' LIMIT 1`,
     [entityId]
+  );
+  return rows.length > 0;
+}
+
+// The board form, for the board reprocess route — same reasoning.
+export async function boardHasTranscriptStamp(db, boardId) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM items WHERE board_id=$1 AND payload ? 'transcript_engine' LIMIT 1`,
+    [boardId]
   );
   return rows.length > 0;
 }
@@ -3040,6 +3051,21 @@ export async function setEntityIdentity(db, id, identity, displayName = null) {
   );
 }
 
+// Put an entity back to the upload shell — keyed by the stored filename, no
+// display name, no symbol — keeping its id (hearts and crate places survive).
+// The extract leg's no-card branch resets a sole card this way so a
+// one-card-per-file board looks like one uniformly (card-key-plan.md Stage 5).
+// Throws 23505 only if another entity already holds that filename as its key,
+// which the stored names' uniqueness rules out.
+export async function resetEntityToShell(db, id, fileName) {
+  await db.query(
+    `UPDATE entities
+     SET identity=$1, display_name=NULL, symbol=NULL, identity_provisional=FALSE, updated_at=$2
+     WHERE id=$3`,
+    [fileName, Date.now(), id]
+  );
+}
+
 // Flag an entity whose identity the AI couldn't derive (still keyed by its
 // provisional filename). Purely informational — nothing blocks on it.
 export async function markEntityProvisional(db, id) {
@@ -3652,27 +3678,24 @@ export async function floorOverdueRefreshes(db, boardId, now = Date.now()) {
 // face arm still exists for the no-vehicle edge (a chart face in the applying
 // mapping on a non-connector item); a vehicle is zero-files or generated-file,
 // never a user upload.
-export async function reprocessEntity(db, entityId, currentEngine = null) {
-  const { rows } = await db.query(
-    "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
-  if (!rows.length) return null;
-  const current = aiMappingJson(rows[0].mapping);
-  // `- 'park'`: an explicit reprocess runs the full pipeline through tagging,
-  // even on an auto-tag-off board — park only gates the automatic ingest flow.
-  // `- 'transcript_error'`: a reprocess retries a failed transcription. A
-  // successful `transcript` is KEPT — same bytes in, same text out, so redoing
-  // it only re-bills — unless the engine that would transcribe today ($4, null
-  // when unknown) differs from the stamp the transcript carries: a different
-  // engine can genuinely answer differently, so the trio drops and the
-  // absence-keyed lane re-transcribes. Unstamped legacy transcripts and a null
-  // $4 never drop — no surprise re-billing.
-  const STRIPPED = `(CASE WHEN $4::text IS NOT NULL AND payload ? 'transcript_engine'
-                               AND payload->>'transcript_engine' <> $4::text
+//
+// `- 'park'`: an explicit reprocess runs the full pipeline through tagging,
+// even on an auto-tag-off board — park only gates the automatic ingest flow.
+// `- 'transcript_error'`: a reprocess retries a failed transcription. A
+// successful `transcript` is KEPT — same bytes in, same text out, so redoing
+// it only re-bills — unless the engine that would transcribe today ($4, null
+// when unknown) differs from the stamp the transcript carries: a different
+// engine can genuinely answer differently, so the trio drops and the
+// absence-keyed lane re-transcribes. Unstamped legacy transcripts and a null
+// $4 never drop — no surprise re-billing.
+// Shared by the entity and board forms of reprocess: the SET clause is one
+// text, the scope is the caller's ($2), like reextractSql/retagSql above.
+const REPROCESS_STRIPPED = `(CASE WHEN $4::text IS NOT NULL AND payload ? 'transcript_engine'
+                             AND payload->>'transcript_engine' <> $4::text
                           THEN payload - 'transcript' - 'transcript_turns' - 'transcript_engine'
                           ELSE payload END) - 'park' - 'transcript_error'`;
-  const result = await db.query(
-    `UPDATE items
-     SET payload = ${restamped(STRIPPED)},
+const reprocessSql = (scope) => `UPDATE items
+     SET payload = ${restamped(REPROCESS_STRIPPED)},
          status = ${routingCase({
            fetch: CONNECTOR_VEHICLE,
            face: `${APPLYING_MAPPING}->'face'->>'source' = 'connector'
@@ -3681,11 +3704,27 @@ export async function reprocessEntity(db, entityId, currentEngine = null) {
            extract: `$3::jsonb IS NOT NULL OR payload ? 'mapping'`,
          })},
          ${CLEARED_VERDICT}, ${REQUEUE_RESET}
-     WHERE ${ENTITY_SCOPE}
-     RETURNING entity_ids`,
-    [Date.now(), entityId, current, currentEngine]
-  );
-  return touched(result);
+     WHERE ${scope}
+     RETURNING entity_ids`;
+
+export async function reprocessEntity(db, entityId, currentEngine = null) {
+  const { rows } = await db.query(
+    "SELECT b.mapping FROM entities e JOIN boards b ON b.id = e.board_id WHERE e.id=$1", [entityId]);
+  if (!rows.length) return null;
+  return touched(await db.query(reprocessSql(ENTITY_SCOPE),
+    [Date.now(), entityId, aiMappingJson(rows[0].mapping), currentEngine]));
+}
+
+// The board form (card-key-plan.md Stage 5): every instance on the board
+// re-enters the pipeline — what the pane's "cards were generated from the
+// old key" reminder offers. Same statement, board scope; returns the row
+// count (a whole board's routed report would be the listing itself).
+export async function reprocessBoard(db, boardId, currentEngine = null) {
+  const { rows } = await db.query("SELECT mapping FROM boards WHERE id=$1", [boardId]);
+  if (!rows.length) return null;
+  const result = await db.query(reprocessSql(`board_id=$2`),
+    [Date.now(), boardId, aiMappingJson(rows[0].mapping), currentEngine]);
+  return result.rowCount;
 }
 
 // Value-fenced (`AND status='processing'`): the stamp lands only while the row is

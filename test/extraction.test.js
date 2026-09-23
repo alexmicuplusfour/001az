@@ -236,13 +236,50 @@ test("mapping PATCH: >12 fields → 400", async () => {
   assert.match(r.json.error, /12/);
 });
 
-test("mapping PATCH: field key 'identity' → 400 (reserved for the identity slot)", async () => {
-  const { json: board } = await createBoard("map-reserved");
+test("mapping PATCH: a field may be called 'identity' — the old reserved key is free", async () => {
+  const { json: board } = await createBoard("map-unreserved");
   const r = await patchBoard(board.id, {
     mapping: { fields: [{ key: "identity", kind: "text", source: "extract" }] },
   });
+  assert.equal(r.status, 200);
+});
+
+test("mapping PATCH: the old identity slot is refused, not ignored (an old client must not strip a card)", async () => {
+  const { json: board } = await createBoard("map-stray-identity");
+  for (const identity of [{ source: "extract", instruction: "x" }, { source: "connector" }, {}]) {
+    const r = await patchBoard(board.id, { mapping: { identity, fields: [] } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /moved to mapping\.card/);
+  }
+  // null is the old "filename default" spelling — harmless, accepted.
+  assert.equal((await patchBoard(board.id, { mapping: { identity: null, fields: [] } })).status, 200);
+  // The general rule the identity case rides on: any key the mapping doesn't have.
+  const r = await patchBoard(board.id, { mapping: { grouping: { by: "x" }, fields: [] } });
   assert.equal(r.status, 400);
-  assert.match(r.json.error, /reserved/);
+  assert.match(r.json.error, /unknown mapping key "grouping"/);
+});
+
+test("mapping PATCH: the card slot points at one of the extract fields", async () => {
+  const { json: board } = await createBoard("map-card");
+  const ok = await patchBoard(board.id, {
+    mapping: { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract", instruction: "the person" }] },
+  });
+  assert.equal(ok.status, 200);
+  const bad = [
+    [{ card: { by: "ghost" }, fields: [] }, /names no field/],
+    [{ card: { by: "cat" }, fields: [{ key: "cat", source: "detect" }] }, /must name an extract field/],
+    [{ card: { by: "ext" }, fields: [{ key: "ext", kind: "text", source: "file", fn: "extension" }] }, /must name an extract field/],
+    [{ card: "who", fields: [] }, /mapping\.card must be/],
+    [{ card: { by: "" }, fields: [] }, /mapping\.card must be/],
+    [{ input: { connector: "crypto" }, card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract" }] }, /not allowed with an input/],
+  ];
+  for (const [mapping, err] of bad) {
+    const r = await patchBoard(board.id, { mapping });
+    assert.equal(r.status, 400, JSON.stringify(mapping));
+    assert.match(r.json.error, err);
+  }
+  // null = one card per file, like absence.
+  assert.equal((await patchBoard(board.id, { mapping: { card: null, fields: [] } })).status, 200);
 });
 
 // ── mapping on create (the modal's Mapping tab works on new boards too) ──────
@@ -430,7 +467,7 @@ test("reextract: re-stamps the current board mapping over a stale stamp", async 
   const { uploaded: [item] } = await uploadTxt(board.id); // stamped with MAPPING
   const instId = item.instances[0].id;
 
-  const edited = { identity: { source: "extract", instruction: "the invoice month, as Month - YYYY" }, fields: [] };
+  const edited = { card: { by: "month" }, fields: [{ key: "month", kind: "text", source: "extract", instruction: "the invoice month, as Month - YYYY" }] };
   await patchBoard(board.id, { mapping: edited });
   await req(base, "POST", `/api/instances/${instId}/reextract`, { sid: admin.sid });
 
@@ -528,7 +565,6 @@ test("retag: leaves in-pipeline items alone, routes settled items to the right l
   await patchBoard(board.id, { mapping: MAPPING });
   const FACE_MAPPING = {
     input: { connector: "crypto" },
-    identity: { source: "connector" },
     face: { source: "connector", producer: "chart", period: "1y" },
     fields: [],
   };

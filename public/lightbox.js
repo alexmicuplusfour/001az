@@ -143,9 +143,12 @@ function revealActiveInstance(list) {
 function displayedContentRect(img) {
   return contentRect(img.getBoundingClientRect(), img.naturalWidth, img.naturalHeight);
 }
+// A non-empty array `v` is the object-field discriminator — the same one the
+// server's objectKeysOf reads — minus a LIST field (`kind: "list"`, an array
+// of option spellings, no boxes to draw).
 function objectFieldsOf(fields) {
   const out = [];
-  for (const [key, f] of Object.entries(fields || {})) if (Array.isArray(f?.v)) out.push({ key, dets: f.v });
+  for (const [key, f] of Object.entries(fields || {})) if (Array.isArray(f?.v) && f.kind !== "list") out.push({ key, dets: f.v });
   return out;
 }
 // Size + place the overlay over the current displayed image; hidden when there's
@@ -371,6 +374,12 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
   sec.appendChild(secHead);
   for (const key of fieldKeys) {
     const { v, why, src, kind: fieldKind, at } = fields[key] || {};
+    // A list field (options on the mapping) stores an array of the options'
+    // spellings under `kind: "list"`; it reads as a joined line through the
+    // scalar path below — the same line the tag dossier sees — never as
+    // detection boxes.
+    const list = fieldKind === "list";
+    const isObjects = Array.isArray(v) && !list;
     const kv = document.createElement("div");
     kv.className = "lbp-field-kv";
     const k = document.createElement("span");
@@ -384,11 +393,11 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
       badge.textContent = src;
       keyMain.appendChild(badge);
     }
-    if (Array.isArray(v)) {
-      // Object-detection field — flag the kind like file fields flag their src.
+    if (isObjects || list) {
+      // Object-detection / list field — flag the kind like file fields flag their src.
       const badge = document.createElement("span");
       badge.className = "lbp-field-src";
-      badge.textContent = "object";
+      badge.textContent = isObjects ? "object" : "list";
       keyMain.appendChild(badge);
     }
     k.appendChild(keyMain);
@@ -402,8 +411,8 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
       k.appendChild(t);
     }
     let val;
-    const vStr = v !== null && v !== undefined ? String(v) : null;
-    if (Array.isArray(v)) {
+    const vStr = list ? (v?.length ? v.join(", ") : null) : v !== null && v !== undefined ? String(v) : null;
+    if (isObjects) {
       // Object-detection field: one hoverable row per detected object; hovering
       // highlights its box on the image (linked by the `key:idx` handle).
       val = document.createElement("div");
@@ -451,8 +460,8 @@ function fieldsSection(fields, { label = "Fields", reextract = null } = {}) {
     val.className = "lbp-field-val";
     kv.append(k, val);
     // Object fields carry a synthesized "Detected: …" why that just echoes the
-    // list — drop it; scalar fields keep the model's reasoning sentence.
-    sec.appendChild(panelCell(kv, Array.isArray(v) ? null : why));
+    // list — drop it; scalar and list fields keep the model's reasoning sentence.
+    sec.appendChild(panelCell(kv, isObjects ? null : why));
   }
   return sec;
 }

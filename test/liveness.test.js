@@ -132,7 +132,6 @@ test("runtime.refresh: liveness comes from the board mapping, not the stamped on
 function liveMapping() {
   return {
     input: { connector: "crypto" },
-    identity: { source: "connector" },
     fields: [
       { key: "price",      kind: "number", source: "connector", fn: "price", refresh: { every: 1 } },
       { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" }, // not live
@@ -281,7 +280,7 @@ test("validateMapping: live only on connector fields, with a valid cadence", asy
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "live-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
 
-  let r = await patch({ input: { connector: "crypto" }, identity: { source: "connector" },
+  let r = await patch({ input: { connector: "crypto" },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 5 } }] });
   assert.equal(r.status, 200);
 
@@ -290,7 +289,7 @@ test("validateMapping: live only on connector fields, with a valid cadence", asy
   assert.equal(r.status, 400);
   assert.match(r.json.error, /cannot refresh/);
 
-  r = await patch({ input: { connector: "crypto" }, identity: { source: "connector" },
+  r = await patch({ input: { connector: "crypto" },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 0 } }] });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /every/);

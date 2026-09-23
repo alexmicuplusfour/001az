@@ -61,7 +61,6 @@ const MARKETS_ROW = {
 // A crypto mapping declaring a two-field SUBSET of the provider's catalog.
 const subsetMapping = {
   input: { connector: "crypto" },
-  identity: { source: "connector" },
   fields: [
     { key: "price", kind: "number", source: "connector", fn: "price" },
     { key: "market_cap", kind: "number", source: "connector", fn: "market_cap" },

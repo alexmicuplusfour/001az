@@ -101,8 +101,8 @@ test("restoreView: junk in storage restores as null, not a broken mode", () => {
 
 // ── phase 3: the Re-extract gate mirrors the worker's aiWork condition ──────
 
-test("mappingHasAiWork: derived identity or any AI field → true", () => {
-  assert.equal(mappingHasAiWork({ identity: { source: "extract", instruction: "who" }, fields: [] }), true);
+test("mappingHasAiWork: a card key (an extract field) or any AI field → true", () => {
+  assert.equal(mappingHasAiWork({ card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract", instruction: "who" }] }), true);
   assert.equal(mappingHasAiWork({
     fields: [{ key: "color", kind: "text", source: "extract" }],
   }), true);
@@ -110,7 +110,6 @@ test("mappingHasAiWork: derived identity or any AI field → true", () => {
 
 test("mappingHasAiWork: connector/file-only mappings and no mapping → false", () => {
   assert.equal(mappingHasAiWork({
-    identity: { source: "connector" },
     fields: [{ key: "price", kind: "number", source: "connector" }, { key: "size", kind: "number", source: "file" }],
   }), false);
   assert.equal(mappingHasAiWork({ fields: [] }), false);
@@ -211,10 +210,10 @@ test("effectiveView: reflects the last resolution between renders", () => {
 
 // ── the rows toggle's visibility gate ───────────────────────────────────────
 
-test("rowsRelevant: derived mapping, multi-instance data, or effective rows", () => {
-  // Derived mapping alone (no merges yet) → the button shows from boot.
+test("rowsRelevant: card-key mapping, multi-instance data, or effective rows", () => {
+  // A card key alone (no merges yet) → the button shows from boot.
   state.view = null;
-  state.boardMapping = { identity: { source: "extract", instruction: "who" }, fields: [] };
+  state.boardMapping = { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract", instruction: "who" }] };
   state.items = [singleEnt()];
   assert.equal(rowsRelevant(), true);
 

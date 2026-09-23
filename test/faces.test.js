@@ -142,7 +142,6 @@ async function faceBoard(name) {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name } });
   const mapping = {
     input: { connector: "crypto" },
-    identity: { source: "connector" },
     face: { source: "connector", producer: "chart", period: "1y" },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
   };
@@ -204,7 +203,7 @@ test("generateFace: a provider without history() leaves the tile", async () => {
 test("a face render error does not block the field refresh (prices keep flowing)", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-isolate" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { source: "connector" },
+    input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "1y", refresh: { every: 1 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price", refresh: { every: 1 } }],
   };
@@ -241,7 +240,7 @@ test("refreshDueEntity: a face-only board stays scheduled when the render is una
   await setSetting(db, "crypto_provider", "coinmarketcap");
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-only-cmc" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { source: "connector" },
+    input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "1y", refresh: { every: 1 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // NOT live → face is the only live term
   };
@@ -561,7 +560,7 @@ test("advanceFaced: parked item returns to held; unparked flows to tagging", asy
 test("refreshDueEntity regenerates a due face (new filename) and folds it into refresh_at", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-regen" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { source: "connector" },
+    input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "24h", refresh: { every: 1 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // price NOT live → no /coins/ fetch
   };
@@ -594,7 +593,7 @@ test("refreshDueEntity regenerates a due face (new filename) and folds it into r
 test("refreshDueEntity renders the first face when a live face has none yet (face_at null)", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-firstrender" } });
   const mapping = {
-    input: { connector: "crypto" }, identity: { source: "connector" },
+    input: { connector: "crypto" },
     face: { source: "connector", producer: "chart", period: "24h", refresh: { every: 5 } },
     fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }], // not live
   };
@@ -619,7 +618,7 @@ test("refreshDueEntity renders the first face when a live face has none yet (fac
 test("turning the face on backfills existing entities with cadence Off — without re-tagging them", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-backfill" } });
   const path_ = `/api/admin/boards/${board.id}`;
-  const tile = { input: { connector: "crypto" }, identity: { source: "connector" }, fields: [] }; // no face key — the null slot
+  const tile = { input: { connector: "crypto" }, fields: [] }; // no face key — the null slot
   assert.equal((await req(base, "PATCH", path_, { sid: admin.sid, body: { mapping: tile } })).status, 200);
 
   // A coin added while the board was tile-faced: never entered the face leg.
@@ -654,7 +653,7 @@ test("turning the face on backfills existing entities with cadence Off — witho
 test("validateMapping: face slot rules", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "face-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
-  const crypto = (face) => ({ input: { connector: "crypto" }, identity: { source: "connector" }, face, fields: [] });
+  const crypto = (face) => ({ input: { connector: "crypto" }, face, fields: [] });
 
   assert.equal((await patch(crypto({ source: "connector", producer: "chart", period: "1y", refresh: { every: 60 } }))).status, 200);
   assert.equal((await patch(crypto(null))).status, 200); // the null slot (was the explicit tile)
@@ -722,7 +721,7 @@ test("selectFace: the client mirror is byte-identical to the server", () => {
 test("validateMapping: file-face slot rules", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "file-face-validate" } });
   const patch = (mapping) => req(base, "PATCH", `/api/admin/boards/${board.id}`, { sid: admin.sid, body: { mapping } });
-  const files = (face) => ({ identity: { source: "extract", instruction: "the title" }, face, fields: [] });
+  const files = (face) => ({ card: { by: "identity" }, face, fields: [{ key: "identity", kind: "text", source: "extract", instruction: "the title" }] });
 
   assert.equal((await patch(files({ source: "file" }))).status, 200);
   assert.equal((await patch(files({ source: "file", prefer: "image", pick: "latest" }))).status, 200);
@@ -738,14 +737,14 @@ test("validateMapping: file-face slot rules", async () => {
   assert.equal(r.status, 400); assert.match(r.json.error, /file face/);
 
   // A file face on a connector board → rejected.
-  r = await patch({ input: { connector: "crypto" }, identity: { source: "connector" }, face: { source: "file" }, fields: [] });
+  r = await patch({ input: { connector: "crypto" }, face: { source: "file" }, fields: [] });
   assert.equal(r.status, 400); assert.match(r.json.error, /files board/);
 });
 
 test("listing: the item face follows mapping.face over a multi-instance entity", async () => {
   const { json: board } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "file-face-listing" } });
   await req(base, "PATCH", `/api/admin/boards/${board.id}`, {
-    sid: admin.sid, body: { mapping: { identity: { source: "extract", instruction: "the title" }, face: { source: "file", prefer: "image", pick: "latest" }, fields: [] } },
+    sid: admin.sid, body: { mapping: { card: { by: "identity" }, face: { source: "file", prefer: "image", pick: "latest" }, fields: [{ key: "identity", kind: "text", source: "extract", instruction: "the title" }] } },
   });
   const eid = await createEntity(db, board.id, { identity: "invoice-7", displayName: "Invoice 7" });
   // Two instances, oldest→newest: an image (older) then a pdf (newer).
@@ -761,9 +760,9 @@ test("listing: the item face follows mapping.face over a multi-instance entity",
   // prefer:image → the webp scan wins even though it's the older instance.
   assert.equal((await list()).name, "scan.webp");
   // prefer:document,pick:latest → the newer pdf.
-  assert.equal((await list({ identity: { source: "extract", instruction: "t" }, face: { source: "file", prefer: "document", pick: "latest" }, fields: [] })).name, "doc.webp");
+  assert.equal((await list({ card: { by: "identity" }, face: { source: "file", prefer: "document", pick: "latest" }, fields: [{ key: "identity", kind: "text", source: "extract", instruction: "t" }] })).name, "doc.webp");
   // No face config → first (oldest) instance, the legacy default.
-  assert.equal((await list({ identity: { source: "extract", instruction: "t" }, fields: [] })).name, "scan.webp");
+  assert.equal((await list({ card: { by: "identity" }, fields: [{ key: "identity", kind: "text", source: "extract", instruction: "t" }] })).name, "scan.webp");
 });
 
 test("listing: a DRAWN face says so, so the card can band it instead of sizing to it", async () => {

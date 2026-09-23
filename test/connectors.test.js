@@ -32,7 +32,7 @@ test("crypto manifest: has required fields and a valid template", () => {
   // Template is a valid mapping shape bound to the domain, not the provider.
   const t = manifest.template;
   assert.equal(t.input?.connector, "crypto");
-  assert.equal(t.identity?.source, "connector");
+  assert.equal(t.identity, undefined, "no identity slot — the input says whose cards these are (card-key-plan.md)");
   assert.ok(Array.isArray(t.fields));
   for (const f of t.fields) {
     assert.equal(f.source, "connector");
@@ -318,7 +318,6 @@ test("mapping PATCH: input { connector: crypto } is valid", async () => {
   const r = await patchBoard(board.id, {
     mapping: {
       input: { connector: "crypto" },
-      identity: { source: "connector" },
       fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }],
     },
   });
@@ -328,7 +327,7 @@ test("mapping PATCH: input { connector: crypto } is valid", async () => {
 test("mapping PATCH: unknown connector → 400", async () => {
   const { json: board } = await createBoard("conn-unknown");
   const r = await patchBoard(board.id, {
-    mapping: { input: { connector: "fakecoin" }, identity: { source: "connector" }, fields: [] },
+    mapping: { input: { connector: "fakecoin" }, fields: [] },
   });
   assert.equal(r.status, 400);
   assert.match(r.json.error, /unknown connector/);
@@ -339,7 +338,6 @@ test("mapping PATCH: connector field without fn → 400", async () => {
   const r = await patchBoard(board.id, {
     mapping: {
       input: { connector: "crypto" },
-      identity: { source: "connector" },
       fields: [{ key: "price", kind: "number", source: "connector" }], // no fn
     },
   });
@@ -354,7 +352,7 @@ test("mapping PATCH: full crypto template shape saves successfully", async () =>
 
   const got = await req(base, "GET", `/api/boards/${board.id}`, { sid: admin.sid });
   assert.equal(got.json.mapping?.input?.connector, "crypto");
-  assert.equal(got.json.mapping?.identity?.source, "connector");
+  assert.equal(got.json.mapping?.identity, undefined);
 });
 
 // ── GET /api/connectors ───────────────────────────────────────────────────────

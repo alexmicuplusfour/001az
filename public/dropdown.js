@@ -253,6 +253,14 @@ export function openDropdown(anchor, {
     a?.setAttribute("aria-expanded", "false");
     if (current && current.close === close) current = null;
     onClose?.(reason);
+    // The menu is body-mounted, so a pick made in it never bubbles to
+    // whatever listens on the anchor's ancestors — a modal's save gate
+    // (save-gate.js: input/change/click under the dialog) most of all. A
+    // closing menu is the anchor's control having acted, so it says so on
+    // the anchor. Every close, not just picks: the gate re-reads and
+    // compares, so over-signalling costs one deferred comparison; a menu
+    // that changed nothing arms nothing.
+    if (a?.isConnected) a.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   // The anchor's open dressing — reapplied to the replacement element when an

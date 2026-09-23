@@ -1,5 +1,6 @@
 // Derived identity on the entity/instance model: buildFieldsPrompt with the
-// identity key, mapping validation for the identity slot, entity helpers
+// card key (planning/card-key-plan.md), mapping validation for the card slot
+// and per-field options, list-field landing, entity helpers
 // (create/lookup/rename/re-parent/empty-delete), the instance remove route,
 // per-instance reasoning, and entity-level reprocess.
 // No live AI — the merge/split paths' worker wiring is exercised in the live
@@ -7,7 +8,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedBoard, seedItem, req, routedStatus } from "./helpers.js";
-import { buildFieldsPrompt, resolveIdentity } from "../server/worker.js";
+import { buildFieldsPrompt, resolveIdentity, landListValues, extractFieldsOf, cardFieldOf } from "../server/worker.js";
 import {
   createEntity,
   getEntity,
@@ -20,135 +21,171 @@ import {
   deleteEntityIfEmpty,
   deleteEntity,
   reprocessEntity,
+  reprocessBoard,
   reapEmptyEntities,
   withTx,
   insertItem,
   createBoard,
+  objectKeysOf,
 } from "../server/db.js";
 
-// ─── pure: buildFieldsPrompt with derived identity ───────────────────────────
+// ─── pure: buildFieldsPrompt with a card key ─────────────────────────────────
 
-test("buildFieldsPrompt: identity key injected first when mapping.identity.source = 'extract'", () => {
-  const mapping = {
-    identity: { source: "extract", instruction: "the person's full name" },
-    fields: [{ key: "role", kind: "text", source: "extract", instruction: "job title" }],
-  };
-  const { schema, systemText } = buildFieldsPrompt(mapping);
+const CARD = (instruction, extra = []) => ({
+  card: { by: "person" },
+  fields: [
+    { key: "role", kind: "text", source: "extract", instruction: "job title" },
+    { key: "person", kind: "text", source: "extract", ...(instruction ? { instruction } : {}) },
+    ...extra,
+  ],
+});
 
-  // identity must be the first required key
-  assert.equal(schema.required[0], "identity");
-  assert.equal(schema.required[1], "role");
+test("buildFieldsPrompt: the card field is committed to first, wherever it sits in fields[]", () => {
+  const { schema, systemText } = buildFieldsPrompt(CARD("the person's full name"));
 
-  // identity field shape: why-before-value, nullable string
-  const id = schema.properties.identity;
-  assert.equal(id.type, "object");
-  assert.deepEqual(id.required, ["why", "value"]);
-  assert.equal(Object.keys(id.properties)[0], "why");
-  assert.deepEqual(id.properties.value.type, ["string", "null"]);
-  assert.equal(id.description, "the person's full name");
+  assert.deepEqual(schema.required, ["person", "role"]);
+  assert.deepEqual(extractFieldsOf(CARD("x")).map((f) => f.key), ["person", "role"]);
+  assert.equal(cardFieldOf(CARD("x")).key, "person");
 
-  // The user's instruction is the identity guidance, listed first among the
-  // fields — with no competing "unique key" framing to override it.
-  assert.match(systemText, /- identity \(text\): the person's full name/);
-  assert.ok(systemText.indexOf("- identity") < systemText.indexOf("- role"));
+  // Shape: why-before-value, nullable string, the user's instruction as the
+  // description — an ordinary field, no `identity` property anywhere.
+  const p = schema.properties.person;
+  assert.deepEqual(p.required, ["why", "value"]);
+  assert.equal(Object.keys(p.properties)[0], "why");
+  assert.deepEqual(p.properties.value.type, ["string", "null"]);
+  assert.equal(p.description, "the person's full name");
+  assert.equal(schema.properties.identity, undefined);
+
+  // The card field's line leads, carries the user's words, and ends with the
+  // consistency clause (merge/split needs same subject → same value) — with
+  // no competing "unique key" framing to override the user's format.
+  assert.match(systemText, /- person \(text\): the person's full name — the same subject must always produce the same value/);
+  assert.ok(systemText.indexOf("- person") < systemText.indexOf("- role"));
+  assert.doesNotMatch(systemText, /- role \(text\): job title — the same subject/);
   assert.doesNotMatch(systemText, /unique key/);
 });
 
-test("buildFieldsPrompt: instruction-less derived identity falls back to consistency guidance", () => {
-  const mapping = { identity: { source: "extract" }, fields: [] };
+test("buildFieldsPrompt: an instruction-less card field falls back to its key, plus the consistency clause", () => {
+  const { systemText, schema } = buildFieldsPrompt(CARD(null));
+  assert.match(systemText, /- person \(text\): person — the same subject must always produce the same value/);
+  assert.equal(schema.properties.person.description, "person");
+});
+
+test("buildFieldsPrompt: no card slot → plain fields in mapping order, no clause", () => {
+  const { schema, systemText } = buildFieldsPrompt({ card: null, fields: CARD("x").fields });
+  assert.deepEqual(schema.required, ["role", "person"]);
+  assert.doesNotMatch(systemText, /same subject/);
+  assert.equal(cardFieldOf({ fields: CARD("x").fields }), null);
+});
+
+test("buildFieldsPrompt: a card pointing at a non-extract key is ignored (validation refuses it upstream)", () => {
+  const mapping = { card: { by: "size" }, fields: [{ key: "size", kind: "number", source: "file", fn: "file_size" }, { key: "x", kind: "text", source: "extract" }] };
+  assert.equal(cardFieldOf(mapping), null);
+  assert.deepEqual(buildFieldsPrompt(mapping).schema.required, ["x"]);
+});
+
+// ─── options on a field (the old classify mode, now generic) ─────────────────
+
+test("buildFieldsPrompt: options turn a field into a closed multi-select enum", () => {
+  const mapping = CARD("which Emma this resembles");
+  mapping.fields[1].options = [
+    { value: "Emma Watson", hint: "British actress" },
+    { value: "Emma Roberts" },
+    { value: "Emma Stone" },
+  ];
   const { schema, systemText } = buildFieldsPrompt(mapping);
-  assert.match(systemText, /- identity \(text\): .*same subject must always produce the same value/);
-  assert.match(schema.properties.identity.description, /consistent name/);
-});
-
-test("buildFieldsPrompt: identity key absent when the identity slot is null (filename default)", () => {
-  const mapping = {
-    identity: null,
-    fields: [{ key: "role", kind: "text", source: "extract" }],
-  };
-  const { schema } = buildFieldsPrompt(mapping);
-  assert.equal(schema.properties.identity, undefined);
-  assert.deepEqual(schema.required, ["role"]);
-});
-
-test("buildFieldsPrompt: identity key absent when identity slot omitted", () => {
-  const { schema } = buildFieldsPrompt({ fields: [{ key: "x", kind: "text", source: "extract" }] });
-  assert.equal(schema.properties.identity, undefined);
-});
-
-// ─── classify mode (Slice 2): options list constrains the identity answer ──
-
-test("buildFieldsPrompt: options turn identity into a closed multi-select enum", () => {
-  const mapping = {
-    identity: {
-      source: "extract",
-      instruction: "which Emma this resembles",
-      options: [
-        { value: "Emma Watson", hint: "British actress" },
-        { value: "Emma Roberts" },
-        { value: "Emma Stone" },
-      ],
-    },
-    fields: [],
-  };
-  const { schema, systemText } = buildFieldsPrompt(mapping);
-  const id = schema.properties.identity;
+  const p = schema.properties.person;
   // why + values[] (not the scalar `value`), values constrained to the enum.
-  assert.deepEqual(id.required, ["why", "values"]);
-  assert.equal(id.properties.value, undefined);
-  assert.equal(id.properties.values.type, "array");
-  assert.deepEqual(id.properties.values.items.enum, ["Emma Watson", "Emma Roberts", "Emma Stone"]);
-  assert.equal(schema.required[0], "identity");
+  assert.deepEqual(p.required, ["why", "values"]);
+  assert.equal(p.properties.value, undefined);
+  assert.equal(p.properties.values.type, "array");
+  assert.deepEqual(p.properties.values.items.enum, ["Emma Watson", "Emma Roberts", "Emma Stone"]);
+  assert.equal(schema.required[0], "person");
   // The per-option hints ride in the prompt (the enum can't carry them).
   assert.match(systemText, /- Emma Watson: British actress/);
   // Cardinality is stated by the system, not left to the user's prose: multi +
   // conservatism, and an explicit counter to a "closest single match" reading.
   assert.match(systemText, /an item can match more than one/);
   assert.match(systemText, /not only the closest single match/);
+  // A list field carries no kind in its line (the options ARE its format) and
+  // no consistency clause (the list already makes the answer consistent).
+  assert.doesNotMatch(systemText, /- person \(text\)/);
+  assert.doesNotMatch(systemText, /same subject/);
 });
 
-test("buildFieldsPrompt: empty options array stays open extraction (scalar value)", () => {
-  const { schema } = buildFieldsPrompt({ identity: { source: "extract", instruction: "the name", options: [] }, fields: [] });
-  assert.deepEqual(schema.properties.identity.properties.value.type, ["string", "null"]);
-  assert.equal(schema.properties.identity.properties.values, undefined);
+test("buildFieldsPrompt: options on a NON-card field work the same way", () => {
+  const mapping = { fields: [{ key: "genre", kind: "text", source: "extract", instruction: "the genre", options: [{ value: "Jazz" }, { value: "Folk" }] }] };
+  const { schema } = buildFieldsPrompt(mapping);
+  assert.deepEqual(schema.properties.genre.properties.values.items.enum, ["Jazz", "Folk"]);
 });
 
-test("mapping PATCH: identity options validate, dedup by normalised key, and reject bad shapes", async () => {
+test("buildFieldsPrompt: an empty options array stays open extraction (scalar value)", () => {
+  const mapping = CARD("the name");
+  mapping.fields[1].options = [];
+  const { schema } = buildFieldsPrompt(mapping);
+  assert.deepEqual(schema.properties.person.properties.value.type, ["string", "null"]);
+  assert.equal(schema.properties.person.properties.values, undefined);
+});
+
+test("landListValues: filters to the options on the normalised key, spells them the option's way, dedupes", () => {
+  const field = { options: [{ value: "Emma Watson" }, { value: "Emma Stone" }] };
+  assert.deepEqual(landListValues(field, ["emma_watson", "Emma Stone", "Emma Watson", "Emma Roberts", 7]), ["Emma Watson", "Emma Stone"]);
+  assert.deepEqual(landListValues(field, "Emma Watson"), [], "a non-array answer is 'matches none'");
+  assert.deepEqual(landListValues(field, undefined), []);
+});
+
+test("objectKeysOf: a list field's array is NOT a detected-object field (kind: \"list\")", () => {
+  const fields = {
+    cat: { v: [{ label: "cat", box: [0, 0, 1, 1] }], why: "Detected: cat" },
+    empty: { v: [], why: "No objects detected" },
+    person: { v: ["Emma Watson"], why: "she is", kind: "list" },
+    none: { v: [], why: "nobody", kind: "list" },
+    name: { v: "x", why: "y" },
+    size: { v: 12, why: "", src: "file", kind: "number" },
+  };
+  assert.deepEqual(objectKeysOf(fields), ["cat"]);
+});
+
+// ─── mapping validation: options on fields ───────────────────────────────────
+
+test("mapping PATCH: field options validate, dedup by normalised key, and reject bad shapes", async () => {
   const { json: board } = await createBoardReq("id-candidates");
-  // Valid: source:extract + instruction + options.
+  const withOptions = (options, key = "person") => ({
+    card: { by: "person" },
+    fields: [{ key, kind: "text", source: "extract", instruction: "which person", options }],
+  });
+  // Valid: a text extract field with options — as the card key or not.
   assert.equal((await patchBoard(board.id, {
-    mapping: { identity: { source: "extract", instruction: "which person", options: [
-      { value: "Emma Watson", hint: "British" }, { value: "Emma Roberts" },
-    ] }, fields: [] },
+    mapping: withOptions([{ value: "Emma Watson", hint: "British" }, { value: "Emma Roberts" }]),
+  })).status, 200);
+  assert.equal((await patchBoard(board.id, {
+    mapping: { fields: [{ key: "genre", kind: "text", source: "extract", options: [{ value: "Jazz" }] }] },
   })).status, 200);
 
   // Duplicate by normalised key ("Emma  Watson" → "emma watson") is rejected.
   const dup = await patchBoard(board.id, {
-    mapping: { identity: { source: "extract", instruction: "x", options: [
-      { value: "Emma Watson" }, { value: "emma  watson" },
-    ] }, fields: [] },
+    mapping: withOptions([{ value: "Emma Watson" }, { value: "emma  watson" }]),
   });
   assert.equal(dup.status, 400);
-  assert.match(dup.json.error, /duplicate identity option/);
+  assert.match(dup.json.error, /duplicate option/);
 
   // An option without a value is rejected.
+  assert.equal((await patchBoard(board.id, { mapping: withOptions([{ hint: "no value" }]) })).status, 400);
+  // Not an array; too many.
+  assert.equal((await patchBoard(board.id, { mapping: withOptions("x") })).status, 400);
   assert.equal((await patchBoard(board.id, {
-    mapping: { identity: { source: "extract", instruction: "x", options: [{ hint: "no value" }] }, fields: [] },
-  })).status, 400);
-
-  // options require source:"extract" — a sourceless identity object is rejected.
-  assert.equal((await patchBoard(board.id, {
-    mapping: { identity: { options: [{ value: "x" }] }, fields: [] },
+    mapping: withOptions(Array.from({ length: 201 }, (_, i) => ({ value: `v${i}` }))),
   })).status, 400);
 });
 
-test("mapping PATCH: options persist on the board for extraction to read", async () => {
+test("mapping PATCH: options persist on the field for extraction to read", async () => {
   const { json: board } = await createBoardReq("id-candidates-persist");
   await patchBoard(board.id, {
-    mapping: { identity: { source: "extract", instruction: "which person", options: [{ value: "Ada Lovelace" }] }, fields: [] },
+    mapping: { card: { by: "person" }, fields: [{ key: "person", kind: "text", source: "extract", instruction: "which person", options: [{ value: "Ada Lovelace" }] }] },
   });
   const { rows: [b] } = await db.query("SELECT mapping FROM boards WHERE id=$1", [board.id]);
-  assert.deepEqual(b.mapping.identity.options, [{ value: "Ada Lovelace" }]);
+  assert.deepEqual(b.mapping.card, { by: "person" });
+  assert.deepEqual(b.mapping.fields[0].options, [{ value: "Ada Lovelace" }]);
 });
 
 // ─── integration ─────────────────────────────────────────────────────────────
@@ -174,39 +211,34 @@ async function seedInstance(boardId, entityId, file, extra = {}) {
   return insertItem(db, boardId, { identity: file.name, files: [file], fields: {}, ...extra }, "tagged", entityId);
 }
 
-// ── validateMapping: identity slot ───────────────────────────────────────────
+// ── validateMapping: the card slot ───────────────────────────────────────────
 
-test("mapping PATCH: identity source:extract with instruction is valid", async () => {
+test("mapping PATCH: a card key naming an extract field is valid, with or without an instruction", async () => {
   const { json: board } = await createBoardReq("id-valid");
-  const r = await patchBoard(board.id, {
-    mapping: { identity: { source: "extract", instruction: "full name" }, fields: [] },
-  });
-  assert.equal(r.status, 200);
+  assert.equal((await patchBoard(board.id, {
+    mapping: { card: { by: "name" }, fields: [{ key: "name", kind: "text", source: "extract", instruction: "full name" }] },
+  })).status, 200);
+  assert.equal((await patchBoard(board.id, {
+    mapping: { card: { by: "name" }, fields: [{ key: "name", kind: "text", source: "extract" }] },
+  })).status, 200, "the instruction is optional on a field, card key or not");
 });
 
-test("mapping PATCH: identity null (the filename default) is valid", async () => {
+test("mapping PATCH: card null / absent (one card per file) is valid", async () => {
   const { json: board } = await createBoardReq("id-raw");
-  const r = await patchBoard(board.id, {
-    mapping: { identity: null, fields: [] },
-  });
-  assert.equal(r.status, 200);
+  assert.equal((await patchBoard(board.id, { mapping: { card: null, fields: [] } })).status, 200);
+  assert.equal((await patchBoard(board.id, { mapping: { fields: [] } })).status, 200);
 });
 
-test("mapping PATCH: identity source:extract without instruction → 400", async () => {
-  const { json: board } = await createBoardReq("id-nohint");
+test("mapping PATCH: a connector board carries no card slot — the connector owns the card", async () => {
+  const { json: board } = await createBoardReq("id-connector");
+  assert.equal((await patchBoard(board.id, {
+    mapping: { input: { connector: "crypto" }, fields: [] },
+  })).status, 200);
   const r = await patchBoard(board.id, {
-    mapping: { identity: { source: "extract" }, fields: [] },
+    mapping: { input: { connector: "crypto" }, card: { by: "x" }, fields: [{ key: "x", kind: "text", source: "extract" }] },
   });
   assert.equal(r.status, 400);
-  assert.match(r.json.error, /instruction/);
-});
-
-test("mapping PATCH: identity source:connector is valid on a connector board", async () => {
-  const { json: board } = await createBoardReq("id-connector");
-  const r = await patchBoard(board.id, {
-    mapping: { input: { connector: "crypto" }, identity: { source: "connector" }, fields: [] },
-  });
-  assert.equal(r.status, 200);
+  assert.match(r.json.error, /not allowed with an input/);
 });
 
 // ── entity helpers ───────────────────────────────────────────────────────────
@@ -572,12 +604,38 @@ test("reprocess re-queues every instance of the entity", async () => {
   assert.ok(await reprocessEntity(db, eid));
 });
 
+test("reprocessBoard: every instance on the board re-enters the pipeline, board-scoped; the admin route wraps it", async () => {
+  const boardId = await seedBoard(db, "reprocess-board");
+  const other = await seedBoard(db, "reprocess-board-other");
+  const a = await createEntity(db, boardId, { identity: "a", displayName: "A" });
+  const b = await createEntity(db, boardId, { identity: "b", displayName: "B" });
+  const o = await createEntity(db, other, { identity: "o" });
+  const mapping = { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract", instruction: "x" }] };
+  await seedInstance(boardId, a, { name: "a1.png", kind: "image" }, { mapping });
+  await seedInstance(boardId, b, { name: "b1.png", kind: "image" }); // no stamp → tag leg
+  await seedInstance(other, o, { name: "o1.png", kind: "image" }, { mapping });
+
+  assert.equal(await reprocessBoard(db, boardId), 2);
+  const { rows } = await db.query("SELECT payload->'files'->0->>'name' AS name, status FROM items WHERE board_id=$1 ORDER BY id", [boardId]);
+  assert.deepEqual(rows, [{ name: "a1.png", status: "pending_extract" }, { name: "b1.png", status: "pending" }]);
+  const { rows: [untouched] } = await db.query("SELECT status FROM items WHERE board_id=$1", [other]);
+  assert.equal(untouched.status, "tagged", "the other board is not swept");
+  assert.equal(await reprocessBoard(db, "00000000-0000-4000-8000-000000000000"), null);
+
+  // The route: admin only, 404 for a board that isn't there.
+  await db.query("UPDATE items SET status='tagged' WHERE board_id=$1", [boardId]);
+  const r = await req(base, "POST", `/api/admin/boards/${boardId}/reprocess`, { sid: admin.sid });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { ok: true, queued: 2 });
+  assert.equal((await req(base, "POST", `/api/admin/boards/00000000-0000-4000-8000-000000000000/reprocess`, { sid: admin.sid })).status, 404);
+});
+
 test("reprocess restarts mapped instances at the extract leg, plain ones at tagging", async () => {
   const boardId = await seedBoard(db, "reprocess-mapped");
   const eid = await createEntity(db, boardId, { identity: "mixed", displayName: "Mixed" });
   // Mapped instance re-derives identity + fields (pending_extract); a plain one
   // (no stamped mapping) just re-tags (pending).
-  await seedInstance(boardId, eid, { name: "m1.png", kind: "image" }, { mapping: { identity: { source: "extract", instruction: "x" }, fields: [] } });
+  await seedInstance(boardId, eid, { name: "m1.png", kind: "image" }, { mapping: { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract", instruction: "x" }] } });
   await seedInstance(boardId, eid, { name: "m2.png", kind: "image" });
 
   await req(base, "POST", `/api/items/${eid}/reprocess`, { sid: admin.sid });

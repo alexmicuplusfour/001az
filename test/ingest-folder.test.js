@@ -121,7 +121,7 @@ test("admit: birth statuses match the upload door (unmapped→pending, mapped+pa
 
   // AI mapping + auto_tag off → pending_extract, parked.
   const mapped = await boardWatching("st-mapped", "st", {
-    mapping: { identity: { source: "extract", instruction: "x" }, fields: [] },
+    mapping: { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract", instruction: "x" }] },
     autoTag: false,
   });
   const r2 = await admit(db, mapped, cand, { sources });

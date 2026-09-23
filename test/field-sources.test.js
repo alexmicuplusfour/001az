@@ -8,6 +8,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { FIELD_SOURCE, FIELD_SOURCE_DEFS, aiWork } from "../server/field-sources.js";
 import { transformMapping, up } from "../server/migrations/0038_field_sources.js";
+import { transformMapping as lift52, up as up52 } from "../server/migrations/0052_card_key.js";
 import { startServer, adminSession, req } from "./helpers.js";
 import { createEntity, insertItem } from "../server/db.js";
 
@@ -30,11 +31,11 @@ test("field-source table: ids unique, capability ids only on inferred sources", 
   assert.equal(FIELD_SOURCE.detect.capability, "detect");
 });
 
-test("aiWork: extract identity, extract/detect fields yes; connector/file no", () => {
+test("aiWork: extract/detect fields yes (the card key is one of them); connector/file no", () => {
   assert.equal(aiWork(null), false);
   assert.equal(aiWork({ fields: [] }), false);
-  assert.equal(aiWork({ identity: { source: "extract", instruction: "x" }, fields: [] }), true);
-  assert.equal(aiWork({ identity: { source: "connector" }, fields: [] }), false);
+  assert.equal(aiWork({ card: { by: "x" }, fields: [{ key: "x", kind: "text", source: "extract", instruction: "x" }] }), true);
+  assert.equal(aiWork({ input: { connector: "crypto" }, fields: [] }), false);
   assert.equal(aiWork({ fields: [{ key: "a", kind: "text", source: "extract" }] }), true);
   assert.equal(aiWork({ fields: [{ key: "a", source: "detect" }] }), true);
   assert.equal(aiWork({
@@ -133,24 +134,30 @@ test("validateMapping: per-def rejections come from the source table", async () 
     ["extract field without a kind",
       { fields: [{ key: "x", source: "extract" }] }, /invalid kind/],
     ["instruction on a source that takes none",
-      { input: { connector: "crypto" }, identity: { source: "connector" },
+      { input: { connector: "crypto" },
         fields: [{ key: "price", kind: "number", source: "connector", fn: "price", instruction: "why" }] },
       /takes no instruction/],
     ["a 13th detect field — detect carries its own cap",
       { fields: Array.from({ length: 13 }, (_, i) => ({ key: `d${i}`, source: "detect" })) },
       /at most 12 detect/],
     ["refresh on a file face — a static file has nothing to refresh",
-      { identity: { source: "extract", instruction: "t" }, face: { source: "file", refresh: { every: 5 } }, fields: [] },
+      { face: { source: "file", refresh: { every: 5 } }, fields: [] },
       /file face has no "refresh"/],
-    ["a connector identity on a files board — nothing to pull the name from",
+    ["the old identity slot — moved to the card pointer (refused, not ignored)",
       { identity: { source: "connector" }, fields: [] },
-      /connector identity requires a connector input/],
+      /moved to mapping\.card/],
+    ["options on a source that takes none",
+      { fields: [{ key: "d", source: "detect", options: [{ value: "x" }] }] },
+      /takes no options/],
+    ["options on a number field — a closed list needs the text kind",
+      { fields: [{ key: "n", kind: "number", source: "extract", options: [{ value: "1" }] }] },
+      /text kind to carry options/],
     ["a connector field on a files board — the refresh sweep would have no domain to pull from",
       { fields: [{ key: "price", kind: "number", source: "connector", fn: "price" }] },
       /connector field "price" requires a connector input/],
-    ["a source that binds fields but not the identity slot (def.slots)",
-      { identity: { source: "detect", instruction: "cat" }, fields: [] },
-      /identity\.source must be/],
+    ["the card pointing at a detect field — occurrences can't key a card",
+      { card: { by: "cat" }, fields: [{ key: "cat", source: "detect", instruction: "cat" }] },
+      /must name an extract field/],
     ["a source that binds fields but not the face slot (def.slots)",
       { face: { source: "extract" }, fields: [] },
       /face\.source must be/],
@@ -165,7 +172,7 @@ test("validateMapping: per-def rejections come from the source table", async () 
   // board (its def carries no filesOnly — it would collect nothing, not mean
   // nothing); only the pane withholds the offer client-side.
   const ok = await patch({
-    input: { connector: "crypto" }, identity: { source: "connector" },
+    input: { connector: "crypto" },
     fields: [{ key: "logo", source: "detect", instruction: "logo" }],
   });
   assert.equal(ok.status, 200);
@@ -207,4 +214,70 @@ test("0038 up(): rewrites boards.mapping AND the per-item stamped copy, idempote
 
   await up(db); // a re-run (crash replay) must pass the new shape through untouched
   assert.deepEqual((await payloadOf(stamped)).mapping, NEW);
+});
+
+// ─── migration 0052: the identity slot becomes a field ───────────────────────
+// (planning/card-key-plan.md). Pure transform first, then `up` against the
+// database — kept after 0038's, same sweep-everything caveat.
+
+test("0052: an extract identity lifts into the FIRST field, named `identity`, and the card points at it", () => {
+  const OLD = {
+    identity: { source: "extract", instruction: "which person", options: [{ value: "Ada" }, { value: "Grace", hint: "the other one" }] },
+    face: { source: "file", prefer: "image", pick: "latest" },
+    fields: [{ key: "role", kind: "text", source: "extract", instruction: "job title" }],
+  };
+  assert.deepEqual(lift52(OLD), {
+    card: { by: "identity" },
+    face: { source: "file", prefer: "image", pick: "latest" },
+    fields: [
+      { key: "identity", kind: "text", source: "extract", instruction: "which person", options: [{ value: "Ada" }, { value: "Grace", hint: "the other one" }] },
+      { key: "role", kind: "text", source: "extract", instruction: "job title" },
+    ],
+  });
+  // No options → none carried; an empty options array is dropped too.
+  assert.deepEqual(lift52({ identity: { source: "extract", instruction: "the month", options: [] }, fields: [] }), {
+    card: { by: "identity" },
+    fields: [{ key: "identity", kind: "text", source: "extract", instruction: "the month" }],
+  });
+});
+
+test("0052: a connector identity is dropped — the input already says whose cards these are", () => {
+  assert.deepEqual(lift52({ input: { connector: "crypto" }, identity: { source: "connector" }, face: { source: "connector", producer: "chart", period: "1y" }, fields: [] }),
+    { input: { connector: "crypto" }, face: { source: "connector", producer: "chart", period: "1y" }, fields: [] });
+  assert.deepEqual(lift52({ identity: null, fields: [] }), { fields: [] });
+});
+
+test("0052: idempotent — a mapping without the slot passes through unchanged; garbage in, unchanged out", () => {
+  const NEW = { card: { by: "who" }, fields: [{ key: "who", kind: "text", source: "extract" }] };
+  assert.equal(lift52(NEW), NEW);
+  assert.equal(lift52(null), null);
+  assert.equal(lift52("x"), "x");
+});
+
+test("0052 up(): rewrites boards.mapping AND the per-item stamped copy, idempotently", async () => {
+  const OLD = { identity: { source: "extract", instruction: "who is this" }, fields: [{ key: "role", kind: "text", source: "extract" }] };
+  const NEW = lift52(OLD);
+
+  const { json: b } = await req(base, "POST", "/api/admin/boards", { sid: admin.sid, body: { name: "mig-52" } });
+  await db.query("UPDATE boards SET mapping=$1 WHERE id=$2", [JSON.stringify(OLD), b.id]);
+  const eid = await createEntity(db, b.id, { identity: "ada" });
+  const stamped = await insertItem(db, b.id, { identity: "ada", files: [], fields: {}, mapping: OLD }, "held", eid);
+  const plain = await insertItem(db, b.id, { identity: "ada", files: [], fields: {} }, "held", eid);
+
+  await up52(db);
+
+  const { rows: [board] } = await db.query("SELECT mapping FROM boards WHERE id=$1", [b.id]);
+  assert.deepEqual(board.mapping, NEW);
+  const payloadOf = async (id) => (await db.query("SELECT payload FROM items WHERE id=$1", [id])).rows[0].payload;
+  const p = await payloadOf(stamped);
+  assert.deepEqual(p.mapping, NEW, "the stamp is rewritten too — the extract replay reads it");
+  assert.equal(p.identity, "ada", "the rest of the payload rides through untouched");
+  assert.ok(!("mapping" in (await payloadOf(plain))), "an unstamped item is not visited");
+
+  await up52(db);
+  assert.deepEqual((await payloadOf(stamped)).mapping, NEW);
+
+  // The lifted shape is what the API now accepts — a migrated board can be re-saved as-is.
+  const r = await req(base, "PATCH", `/api/admin/boards/${b.id}`, { sid: admin.sid, body: { mapping: NEW } });
+  assert.equal(r.status, 200);
 });

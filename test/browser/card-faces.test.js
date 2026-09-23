@@ -273,7 +273,7 @@ test("the lightbox panel is the chart's shape too, so the chart fills it", async
   const boardId2 = await createBoard(app.db, "Stocks", [], "");
   // chartDetail only claims the stage on a connector-FACED board.
   await app.db.query("UPDATE boards SET mapping = $1 WHERE id = $2", [JSON.stringify({
-    input: { connector: "stocks" }, identity: { source: "connector" },
+    input: { connector: "stocks" },
     face: { source: "connector", producer: "price-chart", period: "5y" }, fields: [],
   }), boardId2]);
 

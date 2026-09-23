@@ -64,6 +64,10 @@
 }
 @keyframes toast-spin { to { transform: rotate(360deg); } }
 
+/* Two verbs sit side by side. The container was never styled while every
+   toast carried one action; as a narrow flex item its inline buttons wrapped
+   into a column the moment a second one appeared. */
+.toast-actions { display: flex; align-items: center; gap: 12px; flex: none; white-space: nowrap; }
 .toast-actions button {
   background: none;
   border: none;

@@ -101,11 +101,11 @@ export function instanceTagCounts(item) {
 // server's aiWork gate (server/field-sources.js — the client can't import it;
 // keep the two in step) — the reextract route answers 409 without a stamped
 // mapping, so the per-instance Re-extract button shows only here. extract and
-// detect are the model-backed sources; connector/file are deterministic.
+// detect are the model-backed sources; connector/file are deterministic. The
+// card key is one of the extract fields, so it needs no clause of its own.
 export const mappingHasAiWork = (mapping) =>
-  mapping?.identity?.source === "extract" ||
-  (Array.isArray(mapping?.fields) &&
-    mapping.fields.some((f) => f.source === "extract" || f.source === "detect"));
+  Array.isArray(mapping?.fields) &&
+  mapping.fields.some((f) => f.source === "extract" || f.source === "detect");
 
 // Mirrors the server's scoped-retag fence (retagItemFacets/retagEntityFacets):
 // a scoped pass needs tags to preserve AND a verdict it can leave alone, so

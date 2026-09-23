@@ -14,6 +14,13 @@ let ghostSeen = new Set();
 document.addEventListener('app:uploads-pending-tag', (e) => {
   pendingBatches.push(e.detail);
 });
+// A whole-board reprocess queued from the board modal (its "cards were
+// generated from the old key" reminder): every card is about to move through
+// the pipeline, so start the status poll and repaint as it lands.
+document.addEventListener('app:board-reprocessed', () => {
+  ensurePolling();
+  document.dispatchEvent(new Event('app:render'));
+});
 
 export function hasPendingUploadTags() {
   return pendingBatches.length > 0;

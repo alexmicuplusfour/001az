@@ -10,6 +10,8 @@ import {
   markTagged,
   markExtracted,
   objectKeysOf,
+  resetEntityToShell,
+  deleteEmptyEntities,
   failOrRequeue,
   recoverStuck,
   getBoard,
@@ -78,7 +80,7 @@ import { entityRefreshAt, faceSchedule, firstRefreshAt, activeProvider } from ".
 import { connectorLanding, fetchProjectedEntity } from "./connectors/add.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
-import { aiWork } from "./field-sources.js";
+import { aiWork, FIELD_SOURCE, keysCards } from "./field-sources.js";
 import { sharpGate, MAX_DECODE_PIXELS } from "./sharp-gate.js";
 import { aiImageFor, resolvePreset, GENERIC_IMAGES } from "./ai-image.js";
 
@@ -514,50 +516,82 @@ export function htmlToMarkdown(html) {
 // same way the runtime resolver does (no drift between the two).
 export const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
 
+// A field with a declared, non-empty options list — the answer is a
+// zero-or-more selection from it (buildFieldsPrompt's enum array, the
+// landing's `kind: "list"` stamp). One spelling for the prompt and the leg.
+export const hasOptions = (f) => Array.isArray(f?.options) && f.options.length > 0;
+
+// Land a list field's answer: the model's `values` filtered to the field's
+// options (the schema enum already forbids off-list answers on strict
+// providers, but a best-effort provider can still return one — the bounded
+// set is the whole point), keyed on the same normalisation the entity
+// resolver uses, deduped, and spelled the way the OPTION is spelled, not the
+// way the model echoed it — so a card minted from it is named as the user
+// declared. A non-array answer lands as "matches none".
+export function landListValues(field, values) {
+  const canon = new Map(field.options.map((c) => [normaliseIdentity(c.value), c.value.trim()]));
+  const out = [];
+  for (const v of Array.isArray(values) ? values : []) {
+    if (typeof v !== "string") continue;
+    const spelled = canon.get(normaliseIdentity(v));
+    if (spelled && !out.includes(spelled)) out.push(spelled);
+  }
+  return out;
+}
+
+// The mapping's extract fields with the card key first — the order the model
+// commits to them in (the schema's `required` and the system text's field
+// list both follow it). Only extract-sourced fields reach the model: file
+// fields are projected deterministically from the stored entry, connector
+// fields come from the source, and detect fields ride the detector pass in
+// extractOne — this builder IS the extract source's engine, so naming its own
+// source id here is legitimate (field-sources.js).
+export function extractFieldsOf(mapping) {
+  const fields = ((mapping && mapping.fields) || []).filter((f) => f.source === "extract");
+  const by = mapping?.card?.by;
+  const at = by ? fields.findIndex((f) => f.key === by) : -1;
+  return at > 0 ? [fields[at], ...fields.slice(0, at), ...fields.slice(at + 1)] : fields;
+}
+
+// The card key's field, or null when cards are minted per file (or the
+// pointer names a field that can't key cards — validation refuses that on
+// save, so it only reads that way off a mapping the API wrote). The one
+// place the extract leg dereferences the pointer; eligibility is the table's
+// (keysCards), the same rule validateMapping applies.
+export const cardFieldOf = (mapping) => {
+  const by = mapping?.card?.by;
+  return by ? (mapping.fields || []).find((f) => f.key === by && keysCards(FIELD_SOURCE[f.source])) || null : null;
+};
+
 // Build the extraction prompt + strict schema for a mapping's AI fields.
 // Pure function — no cache needed (extraction runs once per item; mappings
 // vary per item so a board-level cache wouldn't help).
 export function buildFieldsPrompt(mapping) {
-  // Only extract-sourced fields reach the model; file fields are projected
-  // deterministically from the stored entry, connector fields come from the
-  // source, and detect fields ride the detector pass in extractOne — this
-  // builder IS the extract source's engine, so naming its own source id here
-  // is legitimate (field-sources.js).
-  const fields = ((mapping && mapping.fields) || []).filter((f) => f.source === "extract");
-  const hasDerivedIdentity = mapping?.identity?.source === "extract";
-  const identityHint = hasDerivedIdentity ? (mapping.identity.instruction || "").trim() : "";
-  // Match-to-a-list mode: the identity answer is constrained to a user-declared
-  // list (each { value, hint? }). Absent/empty → open extraction, as before.
-  const candidates = hasDerivedIdentity && Array.isArray(mapping.identity.options)
-    ? mapping.identity.options : [];
-  const classify = candidates.length > 0;
-  const lines = fields.map((f) => `- ${f.key} (${f.kind}): ${f.instruction || f.key}`);
+  const fields = extractFieldsOf(mapping);
+  // The pointer itself: it can only match one of the extract fields above, so
+  // a dangling one matches nothing — no second lookup needed.
+  const cardKey = mapping?.card?.by ?? null;
 
-  // Identity is just another extraction field to the model: its hint rides in
-  // the system-text field list like everyone else's, first (mirroring schema
-  // order). Framing it as "the entity's unique key" made models favour
-  // uniqueness over the user's format (echoing filenames verbatim), so that
-  // consistency guidance survives only as the fallback when no hint was given —
-  // there it's the only signal the model has, and merge/split needs same
-  // subject → same value. In classify mode the allowed options (with their
-  // per-value hints) are listed instead — the schema enum forbids anything off
-  // the list, and the hints are the only place a per-option description can live.
-  if (hasDerivedIdentity) {
-    if (classify) {
-      const opts = candidates.map((c) => `    - ${c.value}${c.hint ? `: ${c.hint}` : ""}`).join("\n");
-      // Cardinality is the system's to state, not the user's prose (that's the
-      // whole point of the toggle) — so spell out multi here, and pair it with a
-      // conservatism clause so "select all that apply" doesn't become "select
-      // everything". "Not only the closest single match" specifically counters a
-      // hint phrased as a superlative ("resembles the most").
-      lines.unshift(`- identity: ${identityHint || "which of the options below this item matches"}` +
-        ` — an item can match more than one: select every option that genuinely applies` +
-        ` (one, several, or none), not only the closest single match; pick only options you can clearly justify:\n${opts}`);
-    } else {
-      lines.unshift(`- identity (text): ${identityHint ||
-        "a short name for what this item is about — the same subject must always produce the same value"}`);
+  // One line per field. A field with options lists them (with their per-value
+  // hints — the schema enum can't carry those) under a cardinality clause the
+  // SYSTEM states, not the user's prose: multi, paired with a conservatism
+  // clause so "select all that apply" doesn't become "select everything", and
+  // "not only the closest single match" to counter a hint phrased as a
+  // superlative. The card key's line carries the consistency clause instead
+  // when it is open-ended — merge/split needs same subject → same value, and
+  // with no list that guidance is the only signal the model has. Framing it
+  // as "the entity's unique key" made models favour uniqueness over the
+  // user's format (echoing filenames verbatim), so it stays a trailing clause.
+  const lines = fields.map((f) => {
+    const ask = f.instruction || f.key;
+    if (hasOptions(f)) {
+      const opts = f.options.map((c) => `    - ${c.value}${c.hint ? `: ${c.hint}` : ""}`).join("\n");
+      return `- ${f.key}: ${ask} — an item can match more than one: select every option that genuinely applies` +
+        ` (one, several, or none), not only the closest single match; pick only options you can clearly justify:\n${opts}`;
     }
-  }
+    const consistency = f.key === cardKey ? " — the same subject must always produce the same value" : "";
+    return `- ${f.key} (${f.kind}): ${ask}${consistency}`;
+  });
   const systemText =
     `You extract structured fields from items for a private research board.\n\n` +
     `For each field, first write one short sentence explaining why you chose the value ` +
@@ -569,46 +603,23 @@ export function buildFieldsPrompt(mapping) {
   const kindType = { text: "string", url: "string", date: "string", number: "number" };
   const properties = {};
   const required = [];
-
-  // Identity key is declared first so the model commits to it before extracting
-  // fields. Classify mode mirrors the facet enum-array shape (why + values[]);
-  // the closed enum makes an off-list answer structurally impossible and an
-  // empty array is the legal "matches none". Open mode keeps the scalar value.
-  if (hasDerivedIdentity) {
-    properties.identity = classify
-      ? {
-          type: "object",
-          description: identityHint || "Which of the listed options this item matches.",
-          properties: {
-            why: { type: "string", description: "One short sentence justifying the selection(s), or why none apply." },
-            values: { type: "array", items: { type: "string", enum: candidates.map((c) => c.value) } },
-          },
-          required: ["why", "values"],
-          additionalProperties: false,
-        }
-      : {
-          type: "object",
-          description: identityHint || "A short, consistent name for what this item is about.",
-          properties: {
-            why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
-            value: { type: ["string", "null"] },
-          },
-          required: ["why", "value"],
-          additionalProperties: false,
-        };
-    required.push("identity");
-  }
-
+  // Every property is why-before-value; only the value slot differs. A field
+  // with options mirrors the facet enum-array shape (why + values[]): the
+  // closed enum makes an off-list answer structurally impossible and an empty
+  // array is the legal "matches none". Everyone else keeps the nullable scalar.
   for (const f of fields) {
-    const jt = kindType[f.kind] || "string";
+    const slot = hasOptions(f)
+      ? { values: { type: "array", items: { type: "string", enum: f.options.map((c) => c.value) } } }
+      : { value: { type: [kindType[f.kind] || "string", "null"] } };
+    const [slotKey] = Object.keys(slot);
     properties[f.key] = {
       type: "object",
       description: f.instruction || f.key,
       properties: {
-        why: { type: "string", description: "One short sentence justifying the value, or why it was not found." },
-        value: { type: [jt, "null"] },
+        why: { type: "string", description: `One short sentence justifying the ${slotKey === "values" ? "selection(s), or why none apply" : "value, or why it was not found"}.` },
+        ...slot,
       },
-      required: ["why", "value"],
+      required: ["why", slotKey],
       additionalProperties: false,
     };
     required.push(f.key);
@@ -1908,11 +1919,12 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     // override on key collision.
     const fields = { ...(entity?.fields || {}), ...(row.payload.fields || {}) };
     const fieldLines = Object.entries(fields)
-      // Scalars only — an object-detection field's `v` is an array of boxes,
-      // which distils to noise (`key: [object Object],…`); it has no place in
-      // the tagger's text anyway.
-      .filter(([, { v }]) => v !== null && v !== undefined && typeof v !== "object")
-      .map(([key, { v }]) => `${key}: ${v}`);
+      // Scalars and lists — an object-detection field's `v` is an array of
+      // boxes, which distils to noise (`key: [object Object],…`); it has no
+      // place in the tagger's text anyway. A list field (`kind: "list"`, an
+      // array of option spellings) joins.
+      .filter(([, f]) => f.v !== null && f.v !== undefined && (f.kind === "list" || typeof f.v !== "object"))
+      .map(([key, f]) => `${key}: ${f.kind === "list" ? f.v.join(", ") : f.v}`);
     if (entity?.display_name) fieldLines.unshift(`entity: ${entity.display_name}`);
     if (fieldLines.length) parts.push({ kind: "text", text: `Extracted fields:\n${fieldLines.join("\n")}` });
     // A vote pass is an internal API call, NOT a pipeline event: however many
@@ -2480,7 +2492,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
 
   // Run extraction for one pending_extract item. Resolves the board's AI the
   // same way tagOne does; writes payload.fields and advances to pending so the
-  // normal tag leg picks it up next. When the mapping has derived identity,
+  // normal tag leg picks it up next. When the mapping names a card key,
   // resolves collisions by merging into the existing entity instead.
   // Returns a job-log summary for processExtractOne — { landed, fields,
   // identity, spent, image } — or null for the no-AI passthrough (a status
@@ -2496,13 +2508,13 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       return null;
     }
     const board = await getBoard(db, row.board_id);
-    const extractFields = (mapping.fields || []).filter((f) => f.source === "extract");
+    const extractFields = extractFieldsOf(mapping);
     const objectFields = (mapping.fields || []).filter((f) => f.source === "detect");
     // Detect fields ride a separate detector pass below, not the LLM — so the
-    // model is only called when there's derived identity or an extract field.
-    // A detect-only board skips the LLM entirely (ai/usage stay null and the
-    // tail guards for it).
-    const needsLLM = mapping?.identity?.source === "extract" || extractFields.length > 0;
+    // model is only called when there's an extract field (the card key, when
+    // there is one, is one of them). A detect-only board skips the LLM
+    // entirely (ai/usage stay null and the tail guards for it).
+    const needsLLM = extractFields.length > 0;
 
     // `imageRender` mirrors the tag leg: extraction sends a rendition too
     // whenever the item has no text sidecar (an image, a connector chart
@@ -2604,10 +2616,20 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
     const fields = extractFileFields(row.payload.files?.[0], board?.mapping?.fields || mapping.fields);
     // Lenient-validate each extracted scalar: wrong type → null (keep the why
     // sentence). Detect fields are populated by the detector pass below, not here.
+    // A field with options lands its answer as an ARRAY of the options'
+    // canonical spellings (landListValues), stamped `kind: "list"` — the
+    // shape column file fields already carry — so the object-field
+    // discriminator (objectKeysOf) and the lightbox can tell it from a box
+    // array. This branch comes first, since the kind checks below would
+    // null an array.
     for (const f of extractFields) {
       const entry = input[f.key];
       if (!entry) continue;
       const why = typeof entry.why === "string" ? entry.why.trim() : "";
+      if (hasOptions(f)) {
+        fields[f.key] = { v: landListValues(f, entry.values), why, kind: "list" };
+        continue;
+      }
       let v = entry.value ?? null;
       if (v !== null) {
         if (f.kind === "number" && typeof v !== "number") v = null;
@@ -2666,46 +2688,40 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
       }
     }
 
-    // Derived identity: resolve the item's membership SET before advancing.
-    // Extract and classify are the same path — extract yields one derived value,
-    // classify yields zero-or-more from the candidate list; both become the set
-    // of entity ids the item carries (entity_ids[0] canonical). The instance's
-    // fields are written either way — they're its own. `disposition` feeds the
-    // job-log summary; `landed` reports whether the stamp beat the fence.
+    // The card key: resolve the item's membership SET before advancing. Open
+    // and list fields are the same path — an open field yields one derived
+    // value, a list field zero-or-more from its options; both become the set
+    // of entity ids the item carries (entity_ids[0] canonical). The value is
+    // read off the LANDED field, so the list filter/canonical spelling above
+    // is the one canonicalisation for card and non-card fields alike. The
+    // instance's fields are written either way — they're its own.
+    // `disposition` feeds the job-log summary; `landed` reports whether the
+    // stamp beat the fence.
     let landed = false;
     let disposition = null;
-    if (mapping.identity?.source === "extract") {
-      const classify = Array.isArray(mapping.identity.options) && mapping.identity.options.length > 0;
-      // Classify: an allowed set keyed by normalised value → the candidate's
-      // canonical spelling. The schema enum already forbids off-list answers on
-      // strict providers, but a best-effort provider can still return one, so we
-      // filter here too (mirrors the tagging leg's `allowed.has(t)` guard) — the
-      // bounded set is the whole point. Display is the candidate's spelling, not
-      // the model's echo, so the entity's name matches the list the user declared.
-      const allowedByKey = classify
-        ? new Map(mapping.identity.options.map((c) => [normaliseIdentity(c.value), c.value.trim()]))
-        : null;
-      const raw = classify
-        ? (Array.isArray(input.identity?.values) ? input.identity.values : [])
-        : (input.identity?.value != null ? [input.identity.value] : []);
-      // Normalise + dedupe, preserving order (first stays canonical). In OPEN
-      // mode the display name is the model's output verbatim — identity can be
-      // anything ("INV-2026-04", "BTC-USD", a name, a date), so no cleanup
-      // heuristic mangles someone's format; fuzzy matching lives only in the key.
+    const cardField = cardFieldOf(mapping);
+    if (cardField) {
+      const landedV = fields[cardField.key]?.v;
+      // In OPEN mode the display name is the model's output verbatim —
+      // identity can be anything ("INV-2026-04", "BTC-USD", a name, a date),
+      // so no cleanup heuristic mangles someone's format; fuzzy matching
+      // lives only in the key. A list field's values are already the
+      // options' spellings, deduped. Normalise + dedupe, preserving order
+      // (first stays canonical).
+      const raw = Array.isArray(landedV) ? landedV : landedV != null ? [String(landedV)] : [];
       const seen = new Set();
       const derived = [];
       for (const v of raw) {
         if (typeof v !== "string" || !v.trim()) continue;
         const key = normaliseIdentity(v);
-        if (classify && !allowedByKey.has(key)) continue; // drop off-list answers
         if (seen.has(key)) continue;
         seen.add(key);
-        derived.push({ key, display: classify ? allowedByKey.get(key) : v.trim() });
+        derived.push({ key, display: v.trim() });
       }
 
       const oldIds = row.entity_ids || [];
       if (derived.length === 0) {
-        // AI derived nothing / matched no candidate. Keep the current membership;
+        // AI derived nothing / matched no option. Keep the current membership;
         // flag provisional only on entities never identified (no display_name) —
         // an established entity keeps its identity, this instance just didn't add
         // evidence.
@@ -2741,9 +2757,40 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
           console.log(`extracted #${row.id} identity=[${derived.map((d) => d.key).join(", ")}]${same ? "" : " (membership changed)"} [${ai.model}]`);
       }
     } else {
+      // One card per file: the item is its own card, named by its file. A
+      // board that HAD a card key keeps the cards it generated until a
+      // reprocess brings every instance through here, so this branch has to
+      // undo what the card branch did — an instance sharing an entity is
+      // moved to a fresh shell, a sole one is reset in place (id kept, so
+      // hearts and crate places survive; the name goes back to the file so
+      // the board looks per-file uniformly). Connector boards never reach
+      // this (their vehicles are sole by construction and carry no file).
       const label = row.payload?.identity || `item ${row.id}`;
+      const fileName = row.payload.files?.[0]?.name;
+      const oldIds = row.entity_ids || [];
+      if (!mapping.input && fileName && oldIds.length) {
+        const sole = oldIds.length === 1 && (await entityInstanceCount(db, oldIds[0])) <= 1;
+        if (sole) {
+          const e = await getEntity(db, oldIds[0]);
+          if (e && (e.identity !== fileName || e.display_name)) await resetEntityToShell(db, e.id, fileName);
+        } else {
+          const shell = await createEntity(db, row.board_id, { identity: fileName });
+          await withTx(db, async (client) => {
+            await setItemEntities(client, row.id, [shell]);
+            await reconcileEntities(client, [...oldIds, shell]);
+          });
+          // Two instances leaving the same card at once each still see the
+          // other inside their own transaction, so neither reconcile deletes
+          // it and it commits empty. reapEmptyEntities would collect it in
+          // time, but a dissolve that leaves a blank card on the board until
+          // then is the one thing this branch exists to prevent — sweep the
+          // old ids once more after the commit.
+          await deleteEmptyEntities(db, oldIds);
+          disposition = "moved";
+        }
+      }
       if ((landed = await stampExtracted(row, fields)))
-        console.log(`extracted #${row.id} ${label} [${spent?.model ?? "none"}] -> [${Object.keys(fields).join(", ")}]`);
+        console.log(`extracted #${row.id} ${label} [${spent?.model ?? "none"}] -> [${Object.keys(fields).join(", ")}]${disposition === "moved" ? " (own card again)" : ""}`);
     }
 
     // A membership change re-homes the instance's tags into a different entity's

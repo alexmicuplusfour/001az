@@ -9,6 +9,6 @@ export default function (ctx) {
   return {
     providers: { "acme.clash": p },
     defaultProvider: "acme.clash",
-    manifest: { label: "Crypto?", description: "x", fields: [], template: { input: { connector: "crypto" }, identity: { from: "connector" }, fields: [] } },
+    manifest: { label: "Crypto?", description: "x", fields: [], template: { input: { connector: "crypto" }, fields: [] } },
   };
 }
