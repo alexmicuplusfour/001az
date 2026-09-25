@@ -398,3 +398,21 @@ test('the records reset is ledger-wide, warns per descriptor, and hides at zero'
   modal = await openBuilt(t);
   assert.equal(link(modal, /^Clear ingestion records/), undefined);
 });
+
+// A kind whose schema has no subfolders switch — a plugin that reads a
+// channel, say — commits no `recursive`, so its tile says nothing about
+// subfolders. A kind with the switch still does.
+test('the source tile names subfolders only for a kind that has them', async (t) => {
+  SOURCES = [
+    { type: 'folder', label: 'Server folder', ready: true, sourceSchema: [{ key: 'folder' }, { key: 'recursive', default: true }] },
+    { type: 'acme.channel', label: 'Channel', browsable: false, needsConnection: false, sourceSchema: [{ key: 'path', label: 'Channel' }] },
+  ];
+  t.after(() => { SOURCES = null; CONFIG = SAVED; });
+  CONFIG = { ...SAVED, source: { type: 'acme.channel', path: 'some-channel' } };
+  let modal = await openBuilt(t);
+  assert.equal(modal.querySelector('.tile-sum').textContent, 'Channel');
+  modal.querySelector('.modal-close').click();
+  CONFIG = { ...SAVED, source: { type: 'folder', folder: 'watched' } };
+  modal = await openBuilt(t);
+  assert.equal(modal.querySelector('.tile-sum').textContent, 'Server folder · includes subfolders');
+});

@@ -379,7 +379,11 @@ export function openIngestModal() {
         const sk = sources.find((x) => x.type === cfg.source.type);
         const base = sk ? sourceRootLabel(sk, cfg.source.connectionId, info.rootPath) : "";
         const loc = fmtLocation(base, cfg.source[pathKeyFor(cfg.source.type)] || "");
-        const recWord = cfg.source.recursive !== false ? "includes subfolders" : "this folder only";
+        // Subfolders only for a kind that has them — its schema names a
+        // `recursive` switch. One without (a plugin reading a channel, say)
+        // commits none, and "includes subfolders" would describe nothing.
+        const recWord = !sk?.sourceSchema?.some((f) => f.key === "recursive") ? null
+          : cfg.source.recursive !== false ? "includes subfolders" : "this folder only";
         // A kind whose backend is gone (an uninstalled source plugin) still
         // renders and can still be removed — there's just no chooser to open
         // for it, since we don't know what it would ask. (The old type select
@@ -389,7 +393,7 @@ export function openIngestModal() {
           glyph: sourceGlyph(cfg.source.type),
           ai: false,
           name: loc,
-          sum: `${sk ? sk.label : `${cfg.source.type} (not installed)`} · ${recWord}`,
+          sum: [sk ? sk.label : `${cfg.source.type} (not installed)`, recWord].filter(Boolean).join(" · "),
           title: loc,
           onOpen: canEdit && sk ? () => openChooser(sk) : null,
           onRemove: canEdit
