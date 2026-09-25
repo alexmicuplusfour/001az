@@ -91,7 +91,7 @@ export async function loadPluginState() {
   // `capabilities` is the one status source: the modal's sections, the
   // Capabilities tab, and the cards' badges/tags/star states all read it —
   // the legacy `slots` payload has no reader left (7c). `communityIndex` is
-  // whether the Add dialog draws its Community chip.
+  // whether the Add dialog draws its Community tab.
   return {
     plugins: data.plugins, installLocked: !!data.installLocked, communityIndex: !!data.communityIndex,
     keys, connections, capabilities: caps.capabilities,
@@ -178,9 +178,7 @@ export async function renderPlugins(prefetched) {
 
 // A gallery-style filter chip: label + dim count, dark when active. Clicking
 // a chip selects it outright (single-select — "All" is how you widen back).
-// Also the Add dialog's Included · Community chips, which carry no count:
-// Community's isn't known until it's clicked.
-export function filterPill(label, count, active, onClick) {
+function filterPill(label, count, active, onClick) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "pill" + (active ? " active" : "");
@@ -191,7 +189,8 @@ export function filterPill(label, count, active, onClick) {
 }
 
 // What a button the operator's lock (PLUGIN_INSTALL_DISABLE) holds says — the
-// card's Update and Retry, and the Add dialog's listing buttons.
+// card's Update and Retry, and the Add dialog's listing buttons and its
+// Install from a URL.
 export const INSTALL_LOCKED_TITLE = "Installing plugins is turned off on this server";
 
 // A connector card's domain entry off the capabilities feed — `bound` is the

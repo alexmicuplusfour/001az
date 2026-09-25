@@ -3,44 +3,28 @@
 // plugins last, tagged as examples. Available ones show an Add button (writes
 // installed:true, refreshes the page underneath); already-installed ones show
 // a disabled "Added" — so added plugins stay in the list across reopens, not
-// just within one session. Above the list, an "Install from URL" field
-// fetches, installs, and loads a community plugin live (GitHub / npm /
-// tarball) — unless the operator has turned that off (PLUGIN_INSTALL_DISABLE);
-// the browse list below is the catalog that ships with the app.
+// just within one session. The footer's "Install from a URL…" opens a drawer
+// that fetches, installs, and loads a community plugin live (GitHub / npm /
+// tarball / a path on the server) — unless the operator has turned that off
+// (PLUGIN_INSTALL_DISABLE), when the footer says so instead.
 //
-// With the community index on (PLUGIN_INDEX_URL), two chips split the list:
+// With the community index on (PLUGIN_INDEX_URL), two tabs open the dialog:
 // Included — all of the above — and Community, the index's listings of plugins
 // other people wrote, fetched on the first click (community-index-plan.md,
 // Stage 4). A listing installs and updates from the source it pins, after the
 // URL box's own warning.
 import { toast } from "./toast.js";
 import { api } from "./api.js";
-import { createModal, busy, claim } from "./modal.js";
-import { tagFor, isExample, filterPill, provenance, INSTALL_LOCKED_TITLE } from "./admin-plugins.js";
+import { createModal, busy, claim, paneToggle, createDrawer, drawerHeadParts } from "./modal.js";
+import { tagFor, isExample, provenance, INSTALL_LOCKED_TITLE } from "./admin-plugins.js";
 import { relTime } from "./utils.js";
 
 export function openAddPluginModal(connections, ctx) {
-  const { body, close } = createModal({
+  const { body, footer, dialog, close } = createModal({
+    id: "plugin-add-modal",
     title: "Add a plugin",
     bodyStyle: "display:flex;flex-direction:column;",
   });
-
-  // The operator's lock (PLUGIN_INSTALL_DISABLE) closes the URL box; the list
-  // below — the app's own catalog and its bundled examples — stays.
-  if (ctx.installLocked) {
-    const locked = document.createElement("p");
-    locked.className = "sub";
-    locked.textContent = "Installing plugins from a URL, a package or a path is turned off on this server.";
-    body.appendChild(locked);
-  } else {
-    body.appendChild(installFromUrlZone(ctx, close));
-  }
-
-  const intro = document.createElement("p");
-  intro.className = "sub";
-  intro.style.margin = "0 0 6px";
-  intro.textContent = "Connections you can add. Adding one puts it on the Plugins page; configure its key via the gear.";
-  body.appendChild(intro);
 
   const list = document.createElement("div");
   let shown = "included";
@@ -71,24 +55,35 @@ export function openAddPluginModal(connections, ctx) {
   }
 
   if (ctx.communityIndex) {
-    const chips = document.createElement("div");
-    chips.className = "pill-row";
-    chips.style.margin = "0 0 8px";
-    const select = (which) => {
-      shown = which;
-      chips.replaceChildren(
-        filterPill("Included", null, which === "included", () => select("included")),
-        filterPill("Community", null, which === "community", () => select("community")),
-      );
-      if (which === "included") showIncluded();
+    body.appendChild(paneToggle([["included", "Included"], ["community", "Community"]], "included", (pane) => {
+      shown = pane;
+      if (pane === "included") showIncluded();
       else showCommunity();
-    };
-    body.appendChild(chips);
-    select("included");
-  } else {
-    showIncluded();
+    }));
   }
+  showIncluded();
   body.appendChild(list);
+
+  // Installing from a URL is the one act here that isn't a row's: it waits in
+  // the footer, and its box, what the box takes and why an install failed
+  // rise in a drawer over the dialog. Under the operator's lock the footer
+  // says so in words — a held button could say it only on hover, and never
+  // to a keyboard.
+  if (ctx.installLocked) {
+    const locked = document.createElement("p");
+    locked.className = "sub";
+    locked.style.margin = "0";
+    locked.textContent = "Installing plugins from a URL, a package or a path is turned off on this server.";
+    footer.appendChild(locked);
+  } else {
+    const fromUrl = document.createElement("button");
+    fromUrl.type = "button";
+    fromUrl.className = "ghost";
+    fromUrl.textContent = "Install from a URL…";
+    let drawer = null;
+    fromUrl.onclick = () => installDrawer((drawer ??= createDrawer(dialog)), ctx, close, fromUrl);
+    footer.appendChild(fromUrl);
+  }
 
   // The index's answer, as the tab shows it: a failure with nothing to show
   // says why; rows gone stale behind a failed refresh say how old they are and
@@ -149,9 +144,9 @@ export function openAddPluginModal(connections, ctx) {
         // Two verbs for two kinds of "not added": a built-in's code is loaded
         // and `installed` is a visibility flag, while a bundled example
         // (welcome-plan.md 2b) has never loaded at all — no def for PATCH to
-        // find — so it installs from its path, like the URL box above. No
-        // confirm on that path: that warning is about code from the internet,
-        // and this source is the image the server is running from.
+        // find — so it installs from its path, like the URL box. No confirm on
+        // that path: that warning is about code from the internet, and this
+        // source is the image the server is running from.
         if (p.bundled) await api("POST", "/api/admin/plugins/install", { url: p.bundled.path });
         else await api("PATCH", `/api/admin/plugins/${p.id}`, { installed: true });
         toast(`${p.label} added`);
@@ -238,59 +233,72 @@ function confirmInstall(what, source) {
   );
 }
 
-// Paste a GitHub/npm/tarball URL → the server downloads, runs `npm install`,
-// validates, and loads it live. This RUNS code from the internet as the server
-// (ratified self-hosted trust model, no sandbox), so a confirm names that risk
-// before the POST. The install is long-running (npm); the button shows a pending
-// state and errors surface inline rather than as a toast that outlives the modal.
-function installFromUrlZone(ctx, close) {
-  const zone = document.createElement("div");
-  zone.className = "pa-install";
-
-  const label = document.createElement("p");
-  label.className = "sub";
-  label.textContent = "Install a community plugin from a GitHub repo (or a folder inside one), an npm package, a tarball URL, or a directory path on the server.";
-  zone.appendChild(label);
-
-  const row = document.createElement("div");
-  row.className = "pa-install-row";
+// The URL box, in the dialog's drawer: paste a GitHub/npm/tarball URL or a
+// path → the server downloads, runs `npm install`, validates, and loads it
+// live. This RUNS code from the internet as the server (ratified self-hosted
+// trust model, no sandbox), so a confirm names that risk before the POST. The
+// install is long-running (npm): Install wears the busy state, and an error
+// stays in the drawer under the box, the source still in it, rather than as a
+// toast that outlives it. Success closes the dialog; the new card is on the
+// page underneath.
+//
+// Nothing stops an install once it has started, and the drawer can still be
+// dismissed while one runs. Then the footer's button (`opener`) stays busy
+// until it ends, so a second can't start beside it, and the end arrives as a
+// toast: a failure says why, and a success leaves the dialog open, since the
+// reader has moved on to something in it. A failure after the whole dialog
+// closed toasts too.
+function installDrawer(drawer, ctx, close, opener) {
   const input = document.createElement("input");
   input.type = "text";
   input.placeholder = "github:owner/repo · https://github.com/…/tree/main/dir · npm:name · /path/on/server";
   input.autocomplete = "off";
   input.spellcheck = false;
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "sm";
-  btn.textContent = "Install";
-  row.append(input, btn);
-  zone.appendChild(row);
-
   const err = document.createElement("div");
   err.className = "pa-install-err";
   err.hidden = true;
-  zone.appendChild(err);
+  let left = false; // the drawer dismissed: this task's end goes to a toast
 
-  async function install() {
+  const ok = drawer.open({
+    head: drawerHeadParts("download", false, "Install from a URL", "").nodes,
+    build(host) {
+      const hint = document.createElement("div");
+      hint.className = "dw-hint";
+      hint.textContent = "Install a community plugin from a GitHub repo (or a folder inside one), an npm package, a tarball URL, or a directory path on the server.";
+      host.append(hint, input, err);
+    },
+    // Unarmed until there's a source to install.
+    primary: { label: "Install", disabled: true, onClick: () => install() },
+    onDismiss: () => { left = true; },
+  });
+  const install = busy(ok, async () => {
     const url = input.value.trim();
     err.hidden = true;
-    if (!url) { input.focus(); return; }
     if (!confirmInstall("Install a plugin", url)) return;
     input.disabled = true; // busy() can only restore the element it wraps
+    const running = api("POST", "/api/admin/plugins/install", { url });
+    busy(opener, () => running.catch(() => {}))();
     try {
-      const { plugin } = await api("POST", "/api/admin/plugins/install", { url });
+      const { plugin } = await running;
       toast(`${plugin?.label || "Plugin"} installed`);
-      ctx.refresh();  // the new card appears on the page underneath
+      ctx.refresh();
+      if (left) return;
+      drawer.close();
       close();
     } catch (e) {
+      if (left || !ok.isConnected) {
+        drawer.close(); // a sheet orphaned with its dialog lets go of its keys
+        toast.error(e.message);
+        return;
+      }
       input.disabled = false;
+      input.focus(); // disabled, it lost focus; the fix is usually the source
       err.textContent = e.message;
       err.hidden = false;
     }
-  }
-
-  const run = busy(btn, install);
-  btn.onclick = run;
-  input.onkeydown = (e) => { if (e.key === "Enter") run(); };
-  return zone;
+  });
+  input.addEventListener("input", () => drawer.setPrimaryDisabled(!input.value.trim()));
+  // Enter presses Install, so it's held exactly when the button is: no source
+  // yet, or an install already running.
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") ok.click(); });
 }

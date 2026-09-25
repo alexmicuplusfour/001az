@@ -9,7 +9,7 @@ real server — connections register without a secret, pacing still applies.
 1. Admin → Plugins → **Add plugin** → **Ollama** → **Add**. It ships with the app (tagged
    `AI · example`), so it installs with no download. To install it from somewhere else —
    your own copy, or a server built without `examples/` — paste any of these into the
-   same dialog's URL box instead:
+   same dialog's **Install from a URL…** instead:
    - the GitHub folder URL of this directory —
      `https://github.com/<owner>/<repo>/tree/main/examples/plugins/ollama`
      (or the shorthand `github:<owner>/<repo>/examples/plugins/ollama`);

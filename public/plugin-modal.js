@@ -486,7 +486,7 @@ function keysSection(p, ctx, reload, drawer) {
 // which is what deleted the old form's edit-hijack and Cancel choreography
 // (a drawer open IS the mode). The <form> died with it, and its two jobs
 // re-homed deliberately: required-ness became live primary gating, and
-// Enter-to-submit is not replaced — no drawer task in the app wires Enter.
+// Enter-to-submit is not replaced.
 // The row id never changes on edit, so boards and the default bindings ride
 // through a rename / repoint / rotation.
 function keyDrawer(p, editing, drawer, reload) {

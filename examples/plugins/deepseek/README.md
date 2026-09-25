@@ -21,7 +21,7 @@ Ollama plugin next door covers the keyless self-hosted shape).
 1. Admin → Plugins → **Add plugin** → **DeepSeek** → **Add**. It ships with the app
    (tagged `AI · example`), so it installs with no download. To install it from somewhere
    else — your own copy, or a server built without `examples/` — paste any of these into
-   the same dialog's URL box instead:
+   the same dialog's **Install from a URL…** instead:
    - the GitHub folder URL of this directory —
      `https://github.com/<owner>/<repo>/tree/main/examples/plugins/deepseek`
      (or the shorthand `github:<owner>/<repo>/examples/plugins/deepseek`);

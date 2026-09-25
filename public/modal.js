@@ -299,8 +299,33 @@ export function sectionHeadingEl(title, sub) {
   return el;
 }
 
+// ─── Pane toggle — a full-width segmented control over a modal's panes ─────
+// One button per [key, label], the active one raised (.pane-toggle in
+// modal.css). A click moves the highlight and hands the key to onSelect; what
+// a pane IS stays the caller's — the board editor swaps two built panes, the
+// Add plugin dialog one list's rows.
+export function paneToggle(panes, active, onSelect) {
+  const el = document.createElement("div");
+  el.className = "pane-toggle";
+  for (const [key, label] of panes) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "pane-toggle-btn" + (key === active ? " active" : "");
+    b.dataset.pane = key;
+    b.textContent = label;
+    el.appendChild(b);
+  }
+  el.addEventListener("click", (e) => {
+    const btn = e.target.closest(".pane-toggle-btn");
+    if (!btn) return;
+    for (const b of el.children) b.classList.toggle("active", b === btn);
+    onSelect(btn.dataset.pane);
+  });
+  return el;
+}
+
 // ─── Bottom drawer — an editing surface inside a modal ──────────────────────
-// A full-width sheet that rises from the bottom of `hostEl` (a modal body)
+// A full-width sheet that rises from the bottom of `hostEl` (a modal's dialog)
 // over a scrim, holds one editing task, and ends it with ONE primary action.
 // The mapping pane's field/slot editors are the first consumer; the component
 // is generic on purpose — any modal whose editors currently inline-expand
@@ -314,11 +339,14 @@ export function sectionHeadingEl(title, sub) {
 // Draft/commit semantics therefore stay entirely caller-side: hand `build` a
 // COPY of your state and write it back only in primary.onClick.
 //
-//   const drawer = createDrawer(bodyEl);            // once per modal body
+//   const drawer = createDrawer(dialogEl);          // once per modal
 //   drawer.open({ head, build, primary: { label, onClick, disabled? },
 //                 onDismiss, tall });               // tall: fixed-height sheet
 //   drawer.refresh();                               // re-run build in place
 //   drawer.setPrimaryDisabled(on);                  // gate the commit while open
+//
+// open() returns the primary button, for a commit long enough to wear busy()
+// and a task whose one field presses it on Enter.
 //
 // Esc is registered on document in CAPTURE phase and stops propagation while
 // the drawer is open — mountModal's own Escape handler lives on document too
@@ -454,6 +482,7 @@ export function createDrawer(hostEl) {
     // stays on the opener until the trap's first Tab pulls it in.
     (body.querySelector("input, textarea, select, button") || ok)
       .focus?.({ preventScroll: true });
+    return ok;
   }
 
   // Re-run build in place — for editors whose structure changes mid-edit

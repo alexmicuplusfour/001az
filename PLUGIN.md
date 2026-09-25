@@ -113,8 +113,8 @@ some.
 
 ### Installing
 
-Admin → Plugins → **Add plugin**. The dialog lists the app's bundled examples, and its box
-takes a source:
+Admin → Plugins → **Add plugin**. The dialog lists the app's bundled examples, and
+**Install from a URL…**, at its bottom, takes a source:
 
 | source | for example |
 |---|---|
@@ -143,7 +143,8 @@ says why and nothing is left behind.
 - When the community list is on, the dialog has two tabs: **Included**, the app's own plugins,
   its examples and what you've added, and **Community**, the plugins listed in
   [community/plugins.json](community/plugins.json) (see [Getting listed](#getting-listed)). A
-  listed plugin installs from the source its entry pins, after the same question as the box.
+  listed plugin installs from the source its entry pins, after the same question as
+  **Install from a URL…** asks.
   `PLUGIN_INDEX_URL` is where the list is read from — this repository's copy by default, read
   when the tab is opened and at most every ten minutes. Empty turns the tab off.
 
@@ -198,7 +199,8 @@ Boards keep their items in every case.
 
 `PLUGIN_INSTALL_DISABLE=1` in the server's environment refuses installs and updates from any
 source except the bundled examples. Installed plugins keep loading, and Remove keeps working.
-The Community tab's **Add** and **Update to** buttons are held too, and say why.
+Add plugin says that installing from a URL is turned off, and the Community tab's **Add** and
+**Update to** buttons are held too, and say why.
 
 ## ctx
 

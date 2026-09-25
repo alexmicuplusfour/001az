@@ -2636,14 +2636,15 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   // lands where it belongs — out of the cards, into the Add modal — with no
   // edit. What they are NOT is part of pluginDefs(), which is what keeps the
   // routes below from addressing a plugin whose code was never loaded.
-  // `installLocked` tells the page to drop its URL box and to hold Update and
-  // Retry on cards whose source isn't bundled — the routes refuse them anyway.
-  // `communityIndex` tells the Add dialog whether to draw its Community chip;
-  // the list itself comes from the route below, on the click, never here.
+  // `installLocked` tells the page to say installing from a URL is off and to
+  // hold Update and Retry on cards whose source isn't bundled — the routes
+  // refuse them anyway. `communityIndex` tells the Add dialog whether to draw
+  // its Community tab; the list itself comes from the route below, on the
+  // click, never here.
   res.json({ plugins: [...plugins, ...(await bundledPlugins(db))], installLocked: installLocked(), communityIndex: !!indexUrl() });
 }));
 
-// The community index's rows for the Add dialog's Community chip
+// The community index's rows for the Add dialog's Community tab
 // (community-index-plan.md, D7/D8): fetched on the click and never with the
 // page, so a failed fetch shows its reason in its own tab and never empties
 // the catalog above — the last good rows marked stale, or none, with `error`

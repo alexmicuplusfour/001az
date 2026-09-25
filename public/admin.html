@@ -76,10 +76,8 @@
       /* an external plugin whose code failed to load: a warning-tinted card */
       .plugin-row.errored { border-color: #f0d8b0; background: #fffaf0; }
       .p-err { color: #b0741a; font-size: 12px; margin-top: 3px; white-space: normal; }
-      /* install-from-URL zone at the top of the add modal */
-      .pa-install { display: flex; flex-direction: column; gap: 8px; padding: 0 0 14px; border-bottom: 1px solid #ececef; margin-bottom: 4px; }
-      .pa-install-row { display: flex; gap: 8px; }
-      .pa-install .sub { margin: 0; }
+      /* why an install from a URL failed, in the add modal's drawer — npm's
+         output keeps its line breaks */
       .pa-install-err { color: #d33; font-size: 12px; white-space: pre-wrap; }
 
       /* capabilities tab — one card per capability; chips echo the .p-note look */

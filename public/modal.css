@@ -141,8 +141,8 @@
 .modal-section > .switch-row:not(:first-child) { margin-top: 12px; }
 /* Same rule one level up: a body's own padding is the air above its first
    child, so a component that carries its own top margin gives it back there.
-   The board editor's pane toggle opens its body (the name row moved into the
-   header block above it). */
+   A pane toggle opens its body: the board editor's (the name row moved into
+   the header block above it) and the Add plugin dialog's. */
 .modal-body > .pane-toggle:first-child { margin-top: 0; }
 
 /* base element styles — mirrors admin.html globals so the modal looks the same on all pages.
@@ -310,7 +310,9 @@ button.is-busy .busy-spin {
 .switch-row .switch { margin-top: -1px; }
 .switch-row .switch.sm { margin-top: 2px; }
 
-/* full-width segmented control — Mapping | Tagging pane switch in the board modal */
+/* full-width segmented control over a modal's panes (modal.js paneToggle) —
+   the board editor's Mapping | Tagging, the Add plugin dialog's
+   Included | Community */
 .pane-toggle {
   display: flex;
   gap: 3px;
@@ -627,6 +629,14 @@ textarea.fe-desc::placeholder { color: #b0b0b8; }
 #prices-modal .modal-dialog { width: min(900px, 94vw); }
 #prices-modal .price-filter { flex: none; max-width: 240px; margin-bottom: 10px; font-size: 13px; padding: 6px 8px; }
 #prices-modal .price-edit { flex: none; width: 100px; min-width: 0; padding: 3px 6px; font-size: 12px; }
+
+/* ── add plugin dialog (plugin-add-modal.js) ──────────────────────────────── */
+/* A floor under the height, which is otherwise the tab's: an empty Community
+   tab folded the dialog to its tabs and one line, with the install drawer to
+   rise inside what was left. The width is the base rule's. min() keeps the
+   floor under the base max-height on a short screen, where min-height would
+   otherwise win. */
+#plugin-add-modal .modal-dialog { min-height: min(560px, calc(100vh - 64px)); }
 
 /* ── automatic ingestion modal (ingest-modal.js) ──────────────────────────── */
 #ingest-modal .modal-dialog { width: min(640px, 94vw); }

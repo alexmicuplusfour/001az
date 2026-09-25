@@ -6,10 +6,13 @@
 // payload's AI section, and its tag would otherwise name whatever role it
 // serves.
 //
-// And its Community chip (community-index-plan.md, Stage 4). The index is a
+// And its Community tab (community-index-plan.md, Stage 4). The index is a
 // jsonBox, and the server's downloads — GitHub's archive, npm's packument and
 // tarball — are answered in this process, where the server runs, so an Add
 // from the Community tab installs for real with nothing leaving the machine.
+//
+// And Install from a URL, the footer's drawer: a path on this machine is a
+// source the server installs from without the network.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -85,6 +88,9 @@ async function openAdd() {
   return page;
 }
 
+// The tab named, clicked.
+const tab = (page, name) => page.locator(".modal-dialog .pane-toggle-btn", { hasText: name }).click();
+
 const rowsOf = (page) =>
   page.locator(".modal-dialog .pa-row").evaluateAll((rows) => rows.map((r) => ({
     label: r.querySelector(".p-label").textContent,
@@ -104,8 +110,8 @@ test("the examples come last, tagged as examples — and stay so once one is add
   await page.locator(".modal-dialog .pa-row", { hasText: "Ollama" }).locator("button").click();
   await page.locator(".modal-dialog .pa-row", { hasText: "Ollama" }).locator("button:text-is('Added')").waitFor();
   // A switch to Community and back puts the same row back, still "Added".
-  await page.locator(".modal-dialog .pill-row .pill", { hasText: "Community" }).click();
-  await page.locator(".modal-dialog .pill-row .pill", { hasText: "Included" }).click();
+  await tab(page, "Community");
+  await tab(page, "Included");
   assert.equal(await page.locator(".modal-dialog .pa-row", { hasText: "Ollama" }).locator("button").textContent(), "Added");
 
   page = await openAdd();
@@ -120,38 +126,47 @@ test("the examples come last, tagged as examples — and stay so once one is add
   assert.deepEqual(page.failures, []);
 });
 
-// --- the Community chip (community-index-plan.md, Stage 4) ---
+// --- the Community tab (community-index-plan.md, Stage 4) ---
 
-const community = (page) => page.locator(".modal-dialog .pill-row .pill", { hasText: "Community" }).click();
+const community = (page) => tab(page, "Community");
 const listing = (page, label) => page.locator(".modal-dialog .pa-row", { hasText: label });
-// Accept the next confirm, handing back what it asked.
-const accepting = (page) => new Promise((resolve) => page.once("dialog", async (d) => { resolve(d.message()); await d.accept(); }));
+// Accept the next confirm, handing back what it asked — within Playwright's
+// timeout, so a question that never comes fails the test that waited for it.
+const accepting = (page) => page.waitForEvent("dialog").then(async (d) => { await d.accept(); return d.message(); });
 const LOCKED = "Installing plugins is turned off on this server";
 const NEWER = "Written for plugin API version 2, which this version of the app doesn't run";
 
-test("the Community chip is drawn only with the index on, and Included is the list as before", async () => {
+test("the tabs are drawn only with the index on, at the top, and Included is the list as before", async () => {
   process.env.PLUGIN_INDEX_URL = "";
   let page = await openAdd();
-  assert.equal(await page.locator(".modal-dialog .pill-row").count(), 0, "no chips with the index off");
+  assert.equal(await page.locator(".modal-dialog .pane-toggle").count(), 0, "no tabs with the index off");
   const without = (await rowsOf(page)).map((r) => r.label);
 
   process.env.PLUGIN_INDEX_URL = box.url("/plugins.json");
   page = await openAdd();
-  assert.deepEqual(await page.locator(".modal-dialog .pill-row .pill").allTextContents(), ["Included", "Community"]);
-  assert.equal(await page.locator(".modal-dialog .pill-row .pill.active").textContent(), "Included");
+  assert.deepEqual(await page.locator(".modal-dialog .pane-toggle-btn").allTextContents(), ["Included", "Community"]);
+  assert.equal(await page.locator(".modal-dialog .pane-toggle-btn.active").textContent(), "Included");
+  assert.equal(await page.locator(".modal-dialog .modal-body > .pane-toggle:first-child").count(), 1, "the tabs open the dialog");
   assert.deepEqual((await rowsOf(page)).map((r) => r.label), without, "Included is the list as it was");
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
 });
 
-test("Community lists the index; Add installs a listing from its pin after the install warning, and its card prints each part once", async () => {
+test("Community lists the index; Add installs a listing from its pin after the install warning, and its card prints each part once", async (t) => {
   box.payload = index(gecko(), brain, later);
   // A URL of its own: the server keeps each URL's answer ten minutes, and the
   // first test's switch has already read this box empty.
   process.env.PLUGIN_INDEX_URL = box.url("/plugins.json?listed");
+  // Undone however the test ends, so a failure can't leave a plugin installed
+  // for the tests after it to trip over.
+  t.after(async () => {
+    for (const id of ["crypto:acme.gecko", "ai:acme.model"]) await req(app.base, "DELETE", `/api/admin/plugins/${id}`, { sid: admin.sid });
+    process.env.PLUGIN_INDEX_URL = box.url("/plugins.json");
+  });
   const page = await openAdd();
   await community(page);
   await listing(page, "Acme Gecko").waitFor();
+  assert.equal(await page.locator(".modal-dialog .pane-toggle-btn.active").textContent(), "Community", "the tab clicked is the one raised");
   const rows = await page.locator(".modal-dialog .pa-row").evaluateAll((rs) => rs.map((r) => {
     const b = r.querySelector("button");
     return [r.querySelector(".p-label").textContent, r.querySelector(".p-src").textContent, r.querySelector(".p-tag").textContent, b.textContent, b.disabled];
@@ -179,15 +194,12 @@ test("Community lists the index; Add installs a listing from its pin after the i
     assert.equal(await card.textContent(), provenance);
   }
   // A switch to Included and back puts the same rows back, still "Added".
-  await page.locator(".modal-dialog .pill-row .pill", { hasText: "Included" }).click();
+  await tab(page, "Included");
   await community(page);
   for (const label of ["Acme Gecko", "Acme AI"])
     assert.equal(await listing(page, label).locator("button").textContent(), "Added", label);
   assert.deepEqual(page.errors, []);
   assert.deepEqual(page.failures, []);
-  for (const id of ["crypto:acme.gecko", "ai:acme.model"])
-    assert.equal((await req(app.base, "DELETE", `/api/admin/plugins/${id}`, { sid: admin.sid })).status, 200);
-  process.env.PLUGIN_INDEX_URL = box.url("/plugins.json");
 });
 
 test("a listing whose pin moved reads Update to its version; updating asks about the new source, keeps the plugin's settings and moves its card", async () => {
@@ -221,7 +233,7 @@ test("a listing whose pin moved reads Update to its version; updating asks about
   }
 });
 
-test("with installs locked, a listing's Add and Update are held and say why", async () => {
+test("with installs locked, the footer says installing from a URL is off, and a listing's Add and Update are held and say why", async () => {
   assert.equal((await req(app.base, "POST", "/api/admin/plugins/install", { sid: admin.sid, body: { url: `github:acme/gecko@${SHA}` } })).status, 200);
   box.payload = index(gecko(SHA2, "1.1.0"), brain, later);
   process.env.PLUGIN_INDEX_URL = box.url("/plugins.json?locked");
@@ -235,6 +247,9 @@ test("with installs locked, a listing's Add and Update are held and say why", as
       ["Add", true, LOCKED],
       ["Needs a newer app", true, NEWER],
     ]);
+    // In words, where a held button could say it only on hover.
+    assert.equal(await page.locator(".modal-dialog .modal-footer").textContent(),
+      "Installing plugins from a URL, a package or a path is turned off on this server.");
     assert.deepEqual(page.errors, []);
   } finally {
     delete process.env.PLUGIN_INSTALL_DISABLE;
@@ -250,6 +265,9 @@ test("the list's states: none listed, a failure with nothing to show, and rows g
     let page = await openAdd();
     await community(page);
     await page.locator(".modal-dialog .pa-empty", { hasText: "None listed yet" }).waitFor();
+    // The dialog keeps its floor: an empty tab used to fold it to the tabs
+    // and this one line.
+    assert.ok((await page.locator(".modal-dialog").boundingBox()).height >= 500, "the empty tab keeps the dialog's height");
 
     // Failed: nothing answers at the index's address, and there is no
     // earlier answer to show.
@@ -283,4 +301,91 @@ test("the list's states: none listed, a failure with nothing to show, and rows g
   } finally {
     process.env.PLUGIN_INDEX_URL = box.url("/plugins.json");
   }
+});
+
+// --- Install from a URL: the footer's drawer ---
+
+test("Install from a URL opens a drawer: Install waits for a source, Enter asks the install question, a failure stays in the drawer with its source, and an install closes the dialog", async (t) => {
+  t.after(() => req(app.base, "DELETE", "/api/admin/plugins/crypto:acme.gecko", { sid: admin.sid }));
+  const page = await openAdd();
+  await page.locator(".modal-dialog .modal-footer button", { hasText: "Install from a URL" }).click();
+  const drawer = page.locator(".drawer.open");
+  const input = drawer.locator("input");
+  const install = drawer.locator(".drawer-foot button", { hasText: "Install" });
+  await drawer.waitFor();
+  assert.ok(await install.isDisabled(), "nothing to install yet");
+
+  await input.fill("/no/such/plugin");
+  assert.ok(await install.isEnabled(), "a source arms it");
+  let asked = accepting(page);
+  await input.press("Enter");
+  assert.equal((await asked).split("\n\n")[0], "Install a plugin from:\n/no/such/plugin");
+  await drawer.locator(".pa-install-err", { hasText: "local plugin path not found" }).waitFor();
+  assert.equal(await input.inputValue(), "/no/such/plugin", "the source stays, to be fixed");
+  assert.ok(await input.evaluate((el) => el === document.activeElement), "with the cursor in it");
+
+  // A directory on this machine: the server installs it without the network.
+  await input.fill(fileURLToPath(new URL("../fixtures/plugins/acme-gecko", import.meta.url)));
+  asked = accepting(page);
+  await install.click();
+  await asked;
+  await page.locator(".modal-overlay").waitFor({ state: "detached" });
+  await page.locator(".plugin-row", { hasText: "Acme Gecko" }).waitFor();
+  assert.deepEqual(page.errors, []);
+  assert.deepEqual(page.failures, [{ status: 400, url: "/api/admin/plugins/install" }], "the missing path, and nothing else");
+});
+
+test("an install outlives its drawer: the footer holds until it ends, the end arrives as a toast, and a success leaves the dialog open", async (t) => {
+  // An archive whose download waits for the test, so the install is still
+  // running when the drawer — or the whole dialog — goes.
+  const good = await tgzOf([["acme-gecko/manifest.json", withVersion("acme-gecko", "1.0.0")], ["acme-gecko/index.js", fixture("acme-gecko", "index.js")]]);
+  const inner = globalThis.fetch;
+  let held, release;
+  globalThis.fetch = (url, opts) => (String(url).startsWith("https://held.test/")
+    ? held.then(() => new Response(String(url).endsWith("good.tgz") ? good : "not an archive"))
+    : inner(url, opts));
+  t.after(async () => {
+    globalThis.fetch = inner;
+    await req(app.base, "DELETE", "/api/admin/plugins/crypto:acme.gecko", { sid: admin.sid });
+  });
+  // Install `source` from the footer's drawer, up to the moment it's running.
+  const start = async (page, source) => {
+    held = new Promise((r) => { release = r; });
+    await page.locator(".modal-dialog .modal-footer button").click();
+    const drawer = page.locator(".drawer.open");
+    await drawer.locator("input").fill(source);
+    const asked = accepting(page);
+    await drawer.locator(".drawer-foot button", { hasText: "Install" }).click();
+    await asked;
+    await drawer.locator(".drawer-foot button.is-busy").waitFor();
+  };
+  const footer = (page) => page.locator(".modal-dialog .modal-footer button");
+
+  // A failure, the drawer dismissed: the footer holds, then the reason is a toast.
+  let page = await openAdd();
+  await start(page, "https://held.test/bad.tgz");
+  await page.keyboard.press("Escape");
+  await page.locator(".drawer.open").waitFor({ state: "detached" });
+  assert.ok(await footer(page).isDisabled(), "no second install while the first runs");
+  release();
+  await page.locator(".toast--error").waitFor();
+  assert.ok(await footer(page).isEnabled(), "the footer lets go when it ends");
+
+  // A success, the drawer dismissed: toasted, the card appears, the dialog stays.
+  await start(page, "https://held.test/good.tgz");
+  await page.keyboard.press("Escape");
+  release();
+  await page.locator(".toast", { hasText: "Acme Gecko installed" }).waitFor();
+  await page.locator(".plugin-row", { hasText: "Acme Gecko" }).waitFor();
+  assert.equal(await page.locator(".modal-overlay").count(), 1, "the dialog stays: its reader moved on");
+  assert.deepEqual(page.errors, []);
+
+  // A failure after the whole dialog closed around the drawer: a toast still.
+  page = await openAdd();
+  await start(page, "https://held.test/bad.tgz");
+  await page.mouse.click(5, 5); // outside the dialog
+  await page.locator(".modal-overlay").waitFor({ state: "detached" });
+  release();
+  await page.locator(".toast--error").waitFor();
+  assert.deepEqual(page.errors, []);
 });

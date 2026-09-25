@@ -702,6 +702,9 @@ fetched, 0 problem(s)" before the fix — is now fetched and refused naming
 
 ### Stage 4 — the dialog
 
+*Later: the chips became tabs at the dialog's top and the URL box moved
+behind a footer button — see [After the arc](#after-the-arc-2026-09-25).*
+
 **Close read (2026-09-25) — what it changed.** Eight findings and one
 question, folded into D11 and the steps below.
 
@@ -1034,6 +1037,25 @@ row of both lists with its title and class, errors and failed requests —
 identical but for the stale note's wording. Unit 1990, 1989 green: the one red, mcp-asset.test.js's tamper check, is a flake in code this pass didn't touch — it tampers a signature by swapping its last character for X, which changes nothing when the character already is X, about one run in 64 — and passed on three reruns, lint clean, the
 browser suite 60/60 against the built frontend. Net about ten lines fewer;
 the gain is in duplication gone, not length.
+
+## After the arc (2026-09-25)
+
+Asked for once the arc was pushed, on the dialog Stage 4 built:
+
+- The Included · Community chips became the board editor's segmented tabs,
+  at the top of the dialog — one builder now, `paneToggle` in modal.js, which
+  the board editor uses too. `filterPill` is the Plugins page's alone again.
+- "Connections you can add…" is gone.
+- The URL box moved into a drawer behind **Install from a URL…** in the
+  footer, with its explanation and its error. Under the lock the footer says
+  so in words, as the sentence in the box's place did.
+- The dialog has a height floor, an id rule in modal.css: an empty Community
+  tab had folded it to the tabs and one line. The width never moved.
+
+Its second pass found the drawer could be dismissed with an install still
+running — the failure then silent, and a second install free to start beside
+it. The footer's button now holds until the install ends, and the end
+arrives as a toast.
 
 ## Verify (compose, end of each stage)
 

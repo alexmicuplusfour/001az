@@ -20,7 +20,7 @@
 // not be imported by a test at all. Five lines were the entire blocker.
 import { toast } from "./toast.js";
 import { ICONS, glyphEl } from "./utils.js";
-import { createModal, sectionHeading, keepPlace, busy } from "./modal.js";
+import { createModal, sectionHeading, keepPlace, busy, paneToggle } from "./modal.js";
 import { saveGate } from "./save-gate.js";
 import { api } from "./api.js";
 import { buildMappingPane } from "./mapping-modal.js";
@@ -530,15 +530,7 @@ export async function openBoardModal(boardId, opts = {}) {
     document.addEventListener("keydown", onStripKey, true);
   }
 
-  // Mapping|Tagging pane toggle. Tagging is the default — it's the
-  // more-touched half — so it's the active (right) segment on open.
-  const paneToggle = `
-    <div class="pane-toggle" id="board-modal-panes">
-      <button type="button" class="pane-toggle-btn" data-pane="mapping">Mapping</button>
-      <button type="button" class="pane-toggle-btn active" data-pane="tagging">Tagging</button>
-    </div>`;
   body.innerHTML = `
-    ${paneToggle}
     <div id="board-modal-tagging">
       <div class="modal-section" style="border-top:none;margin-top:0;padding-top:0;">
         ${sectionHeading("Tagging Settings")}
@@ -594,14 +586,12 @@ export async function openBoardModal(boardId, opts = {}) {
   // where connector templates are most useful (they lock once items exist).
   let mappingPane = null;
   {
-    const panes = document.getElementById("board-modal-panes");
     const taggingEl = document.getElementById("board-modal-tagging");
     const mappingEl = document.getElementById("board-modal-mapping");
-    panes.addEventListener("click", (e) => {
-      const btn = e.target.closest(".pane-toggle-btn");
-      if (!btn) return;
-      const showMapping = btn.dataset.pane === "mapping";
-      panes.querySelectorAll(".pane-toggle-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    // Mapping|Tagging, opening the body. Tagging is the default — it's the
+    // more-touched half — so it's the active (right) segment on open.
+    body.prepend(paneToggle([["mapping", "Mapping"], ["tagging", "Tagging"]], "tagging", (pane) => {
+      const showMapping = pane === "mapping";
       mappingEl.style.display = showMapping ? "flex" : "none";
       taggingEl.style.display = showMapping ? "none" : "";
       if (showMapping && !mappingPane) {
@@ -612,7 +602,7 @@ export async function openBoardModal(boardId, opts = {}) {
           hasItems: !!board?.has_items,
         });
       }
-    });
+    }));
   }
 
   // The Advanced fold: everything below auto-tagging is a tuning knob, folded
