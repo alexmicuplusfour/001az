@@ -13,7 +13,7 @@ import { busy } from "./modal.js";
 import { openAddPluginModal } from "./plugin-add-modal.js";
 import { renderCapabilities } from "./admin-capabilities.js";
 import { servingRoles, roleBadge } from "./capability-present.js";
-import { ICONS } from "./utils.js";
+import { ICONS, appendCount } from "./utils.js";
 
 // The kind filter above the list: chip labels per card family, in display
 // order. "all" is the default; the selection lives at module level so the
@@ -38,10 +38,11 @@ export const isExample = (p) => !!(p.bundled || p.source?.bundled);
 // always core. An example says that instead, so it never reads as one of the
 // app's own integrations; its AI card's badges still name what it serves.
 export function tagFor(p, caps) {
-  // Two kinds of row carry only a MANIFEST, with no live p.connector/p.ai
-  // descriptor behind it: an external plugin that failed to load, and a bundled
-  // example nobody has installed (welcome-plan.md Stage 2b). Guard every
-  // descriptor deref here and in keyNote below — both run over the same list.
+  // Three kinds of row carry only a MANIFEST, with no live p.connector/p.ai
+  // descriptor behind it: an external plugin that failed to load, a bundled
+  // example nobody has installed (welcome-plan.md Stage 2b), and a community
+  // listing, whose domain rides its `community` block. Guard every descriptor
+  // deref here and in keyNote below — both run over the same list.
   if (p.state?.loadError) return "Plugin · error";
   const family = FAMILY[p.kind];
   if (isExample(p)) return `${family} · example`;
@@ -49,7 +50,7 @@ export function tagFor(p, caps) {
     const role = servingRoles(caps, p.name)[0];
     return role ? `${family} · ${role.agent}` : family;
   }
-  if (p.kind === "connector") return `${family} · ${p.connector?.domain ?? "external"}`;
+  if (p.kind === "connector") return `${family} · ${p.connector?.domain ?? p.community?.domain ?? "external"}`;
   if (p.kind === "source") return `${family} · ${p.core ? "local" : "remote"}`;
   return `${family} · core`;
 }
@@ -89,8 +90,12 @@ export async function loadPluginState() {
   ]);
   // `capabilities` is the one status source: the modal's sections, the
   // Capabilities tab, and the cards' badges/tags/star states all read it —
-  // the legacy `slots` payload has no reader left (7c).
-  return { plugins: data.plugins, installLocked: !!data.installLocked, keys, connections, capabilities: caps.capabilities };
+  // the legacy `slots` payload has no reader left (7c). `communityIndex` is
+  // whether the Add dialog draws its Community chip.
+  return {
+    plugins: data.plugins, installLocked: !!data.installLocked, communityIndex: !!data.communityIndex,
+    keys, connections, capabilities: caps.capabilities,
+  };
 }
 
 // One refresh for the two surfaces that project plugin state, threading the
@@ -173,18 +178,21 @@ export async function renderPlugins(prefetched) {
 
 // A gallery-style filter chip: label + dim count, dark when active. Clicking
 // a chip selects it outright (single-select — "All" is how you widen back).
-function filterPill(label, count, active, onClick) {
+// Also the Add dialog's Included · Community chips, which carry no count:
+// Community's isn't known until it's clicked.
+export function filterPill(label, count, active, onClick) {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "pill" + (active ? " active" : "");
   b.textContent = label;
-  const c = document.createElement("span");
-  c.className = "count";
-  c.textContent = count;
-  b.appendChild(c);
+  appendCount(b, count);
   b.onclick = onClick;
   return b;
 }
+
+// What a button the operator's lock (PLUGIN_INSTALL_DISABLE) holds says — the
+// card's Update and Retry, and the Add dialog's listing buttons.
+export const INSTALL_LOCKED_TITLE = "Installing plugins is turned off on this server";
 
 // A connector card's domain entry off the capabilities feed — `bound` is the
 // stored star, `running` what actually resolves (the old slots.domains'
@@ -307,11 +315,23 @@ function pluginRow(p, ctx) {
 }
 
 // An external plugin's provenance: where it came from, the version its author
-// named (when the manifest names one) and the ref actually installed.
+// named (when the manifest names one) and the ref actually installed — each
+// once. A pinned source already ends with its ref (`…@<sha>` · `<sha>`), and an
+// npm one with its version, which the manifest usually repeats.
 function sourceLine(source) {
+  const parts = [source.url];
+  for (const part of [source.version, source.ref])
+    if (part && !parts.includes(part) && !source.url.endsWith(`@${part}`)) parts.push(part);
+  return provenance(parts);
+}
+
+// A provenance line: the parts, dot-separated, the whole of it on hover for
+// when it's cut short. The card's source line, and a Community listing's
+// author, version and source in the Add dialog.
+export function provenance(parts) {
   const el = document.createElement("div");
   el.className = "p-src";
-  el.textContent = [source.url, source.version, source.ref].filter(Boolean).join(" · ");
+  el.textContent = parts.join(" · ");
   el.title = el.textContent;
   return el;
 }
@@ -370,8 +390,7 @@ function updateButton(p, ctx) {
   b.textContent = retry ? "Retry" : "Update";
   const locked = ctx.installLocked && !p.source.bundled;
   b.disabled = locked;
-  b.title = locked ? "Installing plugins is turned off on this server"
-    : "Fetch it again from its source, keeping its keys and settings";
+  b.title = locked ? INSTALL_LOCKED_TITLE : "Fetch it again from its source, keeping its keys and settings";
   b.onclick = busy(b, () => updateFromSource(p, ctx, retry));
   return b;
 }

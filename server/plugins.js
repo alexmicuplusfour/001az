@@ -271,13 +271,14 @@ const health = (row) =>
 const CATALOG_KIND = { "ai-provider": "ai", "connector-provider": "connector", "connector-domain": "connector", "source": "source" };
 
 // A catalog row built from a MANIFEST ALONE — no live descriptor behind it.
-// Two rows are in that position and they are the same shape for the same
+// Three rows are in that position and they are the same shape for the same
 // reason: a plugin whose factory failed to run, and one whose factory has not
-// been asked to. Everything a descriptor declares (capabilities, config
-// fields, the ai/connector blocks) is therefore absent, and every reader of
-// these rows has to survive the absence — which is why they are empty rather
-// than missing.
-const manifestEntry = (id, m, extra) => ({
+// been asked to — a bundled example, or a community listing (plugin-index.js,
+// which imports this for it). Everything a descriptor declares (capabilities,
+// config fields, the ai/connector blocks) is therefore absent, and every
+// reader of these rows has to survive the absence — which is why they are
+// empty rather than missing.
+export const manifestEntry = (id, m, extra) => ({
   id,
   kind: CATALOG_KIND[m.kind] || "connector",
   segment: id.split(":")[0],
@@ -355,23 +356,11 @@ export function isBundledSource(url) {
 // path rule is cwd-relative, and an absolute one needs no agreement about where
 // that is.
 export async function bundledPlugins(db) {
-  let entries;
-  try { entries = fs.readdirSync(BUNDLED_DIR, { withFileTypes: true }); }
-  catch { return []; } // no examples/ in this deployment — nothing is bundled
+  const examples = bundledManifests();
+  if (!examples.length) return [];
   const onDisk = new Set((await listExternalPlugins(db)).map((r) => r.id));
   const out = [];
-  for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const dir = path.join(BUNDLED_DIR, e.name);
-    let manifest;
-    // One malformed example must not take the Plugins page with it — skipped
-    // and logged, the same isolation loadAll() gives a plugin that won't load.
-    try {
-      manifest = manifestIn(dir);
-    } catch (err) {
-      console.log(`bundled plugin ${e.name}: not listable — ${err.message}`);
-      continue;
-    }
+  for (const { dir, manifest } of examples) {
     const id = catalogIdFor(manifest);
     // Installed already (healthy or errored) — the real catalog owns the row,
     // and offering "Add" for something on disk would 409 at the install route.
@@ -386,6 +375,25 @@ export async function bundledPlugins(db) {
       bundled: { path: dir, keyless: !!manifest.keyless, needsBase: !!manifest.needsBase },
       state: { installed: false, config: {}, health: null },
     }));
+  }
+  return out;
+}
+
+// Every bundled example, as { dir, manifest } — the one scan of the image's
+// examples, shared by bundledPlugins and the community index's reviewer, which
+// keeps their ids out of the index (community-index-plan.md, D11). One
+// malformed example must not take the Plugins page with it — skipped and
+// logged, the same isolation loadAll() gives a plugin that won't load.
+export function bundledManifests() {
+  let entries;
+  try { entries = fs.readdirSync(BUNDLED_DIR, { withFileTypes: true }); }
+  catch { return []; } // no examples/ in this deployment — nothing is bundled
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(BUNDLED_DIR, e.name);
+    try { out.push({ dir, manifest: manifestIn(dir) }); }
+    catch (err) { console.log(`bundled plugin ${e.name}: not listable — ${err.message}`); }
   }
   return out;
 }

@@ -191,6 +191,7 @@ import { mediaCatalog } from "./media/index.js";
 import { createFieldReconciler } from "./field-reconcile.js";
 import { validateMapping } from "./mapping-rules.js";
 import { pluginCatalog, pluginDefs, getPluginDef, pluginState, pluginInstalled, mediaLimits, bundledPlugins, isBundledSource } from "./plugins.js";
+import { indexUrl, communityPlugins } from "./plugin-index.js";
 import { mountIngest } from "./ingest.js";
 import { mountBackups, restoreGate } from "./backup-routes.js";
 import { mountMcp } from "./mcp.js";
@@ -2637,7 +2638,20 @@ app.get("/api/admin/plugins", requireAdmin, wrap(async (_req, res) => {
   // routes below from addressing a plugin whose code was never loaded.
   // `installLocked` tells the page to drop its URL box and to hold Update and
   // Retry on cards whose source isn't bundled — the routes refuse them anyway.
-  res.json({ plugins: [...plugins, ...(await bundledPlugins(db))], installLocked: installLocked() });
+  // `communityIndex` tells the Add dialog whether to draw its Community chip;
+  // the list itself comes from the route below, on the click, never here.
+  res.json({ plugins: [...plugins, ...(await bundledPlugins(db))], installLocked: installLocked(), communityIndex: !!indexUrl() });
+}));
+
+// The community index's rows for the Add dialog's Community chip
+// (community-index-plan.md, D7/D8): fetched on the click and never with the
+// page, so a failed fetch shows its reason in its own tab and never empties
+// the catalog above — the last good rows marked stale, or none, with `error`
+// saying why. 404 with the index off (PLUGIN_INDEX_URL empty), which the flag
+// above already said.
+app.get("/api/admin/plugins/community", requireAdmin, wrap(async (_req, res) => {
+  if (!indexUrl()) return res.status(404).json({ error: "the community index is turned off on this server (PLUGIN_INDEX_URL is empty)" });
+  res.json(await communityPlugins(db));
 }));
 
 // Star a connector domain's default provider. (Registered before the :id
@@ -2769,16 +2783,21 @@ app.post("/api/admin/plugins/install", requireAdmin, wrap(async (req, res) => {
   }
 }));
 
-// Update an EXTERNAL plugin from the source it was installed from: the new
-// version is fetched, built and checked while the old one keeps serving, and
-// everything stored about it — keys, config, bindings, board pins — survives.
-// An errored card's Retry is the same verb. Long-running (npm); returns the
-// fresh card.
+// Update an EXTERNAL plugin from the source it was installed from, or from one
+// the body names: the new version is fetched, built and checked while the old
+// one keeps serving, and everything stored about it — keys, config, bindings,
+// board pins — survives. An errored card's Retry is the same verb.
+// Long-running (npm); returns the fresh card.
 app.post("/api/admin/plugins/:id/update", requireAdmin, wrap(async (req, res) => {
   const row = await getExternalPlugin(db, req.params.id);
-  if (row && installLocked() && !isBundledSource(row.source_url)) return res.status(403).json({ error: INSTALL_LOCKED });
+  // An optional `url` moves the plugin to a new source — the Community tab's
+  // "Update to …" (community-index-plan.md, D6). The card's own Update sends
+  // none, and a blank one is none: the stored source is fetched again. The
+  // lock judges the source that would run.
+  const url = String(req.body?.url ?? "").trim() || null;
+  if (row && installLocked() && !isBundledSource(url ?? row.source_url)) return res.status(403).json({ error: INSTALL_LOCKED });
   try {
-    const id = await updatePlugin(db, req.params.id);
+    const id = await updatePlugin(db, req.params.id, { sourceUrl: url });
     const plugin = (await pluginCatalog(db)).find((p) => p.id === id) || null;
     res.json({ ok: true, plugin });
   } catch (err) {

@@ -2,18 +2,16 @@
 // plugin-contract Stage 3): resolving a source URL, fetching code into place, and
 // the install→register→persist→update→uninstall lifecycle. Hermetic: a dep-free
 // `file:` fixture drives the whole path with no network and no npm; the tarball
-// and GitHub downloads run against a local HTTP server. npm's registry lookup is
-// the one network path not run here.
+// and GitHub downloads run against a local HTTP server, and npm's registry
+// lookup against a stubbed fetch.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import http from "node:http";
 import path from "node:path";
-import zlib from "node:zlib";
-import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { startServer, adminSession, req, seedBoard } from "./helpers.js";
+import { startServer, adminSession, req, seedBoard, withFetch, tgzOf, sri, npmAnswers, answering } from "./helpers.js";
 import { resolveSource, fetchModule } from "../server/plugin-fetch.js";
 import { installFromUrl, updatePlugin, uninstall, unregister, manifestIn } from "../server/plugin-loader.js";
 import { makeCtx } from "../server/plugin-ctx.js";
@@ -26,7 +24,6 @@ import {
 } from "../server/db.js";
 import { resolveCapability } from "../server/capability-resolve.js";
 import { ratesFor } from "../server/pricing.js";
-import { TarWriter } from "../server/tarfile.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { getSourceBackend } from "../server/ingestion/sources/index.js";
 import { listSources } from "../server/ingestion/files.js";
@@ -47,18 +44,6 @@ const rewrite = (dir, file, from, to) => {
   assert.ok(src.includes(from), `${file} holds ${from}`);
   fs.writeFileSync(f, src.replace(from, to));
 };
-
-// A gzipped tar built in memory, one [name, content] per file — the archive
-// shapes GitHub and npm serve, without a network.
-async function tgzOf(files) {
-  const out = new PassThrough();
-  const chunks = [];
-  out.on("data", (c) => chunks.push(c));
-  const tw = new TarWriter(out);
-  for (const [name, content] of files) await tw.file(name, Buffer.byteLength(content), Buffer.from(content));
-  await tw.end();
-  return zlib.gzipSync(Buffer.concat(chunks));
-}
 
 // Serve one archive on a local port for the length of `fn` — the download half
 // of a fetch, hermetically.
@@ -604,6 +589,38 @@ test("a plugin's declared rates reach the meter at install, follow an update, an
   fs.rmSync(src, { recursive: true, force: true });
 });
 
+// A source the caller names (community-index-plan.md, D6): the Community
+// tab's "Update to …" sends the entry's pin, and the row records it, so the
+// card's own Update re-fetches that pin from then on. Two temp copies of one
+// example stand in for two pins.
+test("updatePlugin: a source the caller names moves the plugin — recorded, its connection kept, another plugin's refused", async () => {
+  const a = copyOf(EXAMPLE("ollama"));
+  const b = copyOf(EXAMPLE("ollama"));
+  rewrite(b, "index.js", 'description: "Self-hosted models', 'description: "Moved. Self-hosted models');
+  const id = await installFromUrl(db, a);
+  await createAiKey(db, "ollama box", "community.ollama", "", "http://127.0.0.1:11434/v1");
+
+  await updatePlugin(db, id, { sourceUrl: b });
+  const entry = (await pluginCatalog(db)).find((p) => p.id === id);
+  assert.match(entry.description, /^Moved\. /, "the card reads the new source's code");
+  assert.equal(entry.state.keyCount, 1, "its connection survives");
+  assert.equal((await getExternalPlugin(db, id)).source_url, b, "the row records the source that ran");
+
+  // The id-and-kind check is what makes a named source safe: one naming
+  // another plugin is refused, and the row is untouched.
+  await assert.rejects(updatePlugin(db, id, { sourceUrl: FIX("acme-ai") }), /names a different plugin \(ai-provider ai:acme\.model\)/);
+  assert.equal((await getExternalPlugin(db, id)).source_url, b);
+
+  // The route: none, or a blank one, re-fetches the recorded pin; `{ url }` moves it.
+  assert.equal((await req(base, "POST", `/api/admin/plugins/${id}/update`, { sid: admin.sid, body: { url: " " } })).status, 200);
+  assert.match((await pluginCatalog(db)).find((p) => p.id === id).description, /^Moved\. /, "the recorded pin, not the first install's");
+  assert.equal((await req(base, "POST", `/api/admin/plugins/${id}/update`, { sid: admin.sid, body: { url: a } })).status, 200);
+  assert.equal((await getExternalPlugin(db, id)).source_url, a);
+
+  await uninstall(db, id);
+  for (const d of [a, b]) fs.rmSync(d, { recursive: true, force: true });
+});
+
 test("installFromUrl: an installed id is refused — an errored one is pointed at Retry", async () => {
   const id = await installFromUrl(db, FIX("acme-gecko"));
   unregister((await getExternalPlugin(db, id)).manifest);
@@ -730,6 +747,11 @@ test("PLUGIN_INSTALL_DISABLE: install and update refuse every source but a bundl
     assert.equal(add.status, 200);
     assert.equal(add.json.plugin.source.bundled, true, "an installed example's card knows where it came from");
     assert.equal((await req(base, "POST", "/api/admin/plugins/ai:community.ollama/update", { sid: admin.sid })).status, 200);
+    // The lock judges the source that WOULD run: a bundled plugin moved to a
+    // GitHub source is refused, where the stored source alone would pass it.
+    const moved = await req(base, "POST", "/api/admin/plugins/ai:community.ollama/update", { sid: admin.sid, body: { url: "github:acme/ollama" } });
+    assert.equal(moved.status, 403);
+    assert.match(moved.json.error, /PLUGIN_INSTALL_DISABLE/);
     assert.equal((await pluginCatalog(db)).find((p) => p.id === typed).source.bundled, false);
   } finally {
     delete process.env.PLUGIN_INSTALL_DISABLE;
@@ -763,6 +785,35 @@ test("installFromUrl: no staging dir outlives an install — committed, refused 
   await assert.rejects(installFromUrl(db, path.join(pluginsTmp, "no-such-plugin")), /not found/);
   assert.deepEqual(leftover(), [], "failed at the fetch");
   await uninstall(db, id);
+});
+
+// The npm path against a stubbed registry — one handler answers the packument
+// and the tarball. The download is checked against the registry's integrity
+// hash before anything is written or unpacked (community-index-plan.md,
+// Stage 1).
+const npmRegistry = (tgz, dist) => answering(npmAnswers("acme-gecko-pkg", "1.0.0", tgz, dist)).fetch;
+
+test("installFromUrl: an npm package is checked against the registry's integrity hash", async () => {
+  const gecko = ["manifest.json", "index.js"].map((f) => [`package/${f}`, fs.readFileSync(path.join(FIX("acme-gecko"), f), "utf8")]);
+  const tgz = await tgzOf(gecko);
+  const install = () => installFromUrl(db, "npm:acme-gecko-pkg@1.0.0");
+  // The published hash matches: installed, the version recorded.
+  const id = await withFetch(npmRegistry(tgz, { integrity: sri(tgz) }), install);
+  assert.equal(id, "crypto:acme.gecko");
+  assert.equal((await getExternalPlugin(db, id)).resolved_ref, "1.0.0");
+  await uninstall(db, id);
+  // Several hashes: the strongest this app can check is the one compared, its
+  // `?options` dropped — the sha256 here is some other file's.
+  await withFetch(npmRegistry(tgz, { integrity: `${sri(Buffer.from("x"), "sha256")} ${sri(tgz)}?x=y` }), install);
+  await uninstall(db, id);
+  // A tarball that isn't the published one: refused by name, before anything
+  // loads — nothing registered.
+  await withFetch(npmRegistry(tgz, { integrity: sri(Buffer.from("not the published tarball")) }), () =>
+    assert.rejects(install(), /npm tarball for acme-gecko-pkg@1\.0\.0 doesn't match the registry's integrity hash/));
+  assert.equal(getConnector("crypto").providers["acme.gecko"], undefined, "nothing registered");
+  // No hash, or one this app can't check: not the registry's answer.
+  await withFetch(npmRegistry(tgz, {}), () => assert.rejects(install(), /no integrity hash for acme-gecko-pkg@1\.0\.0/));
+  await withFetch(npmRegistry(tgz, { integrity: "md5-AAAA" }), () => assert.rejects(install(), /isn't one this app can check/));
 });
 
 test("fetchModule: a GitHub archive's top directory names the commit that ran", async () => {

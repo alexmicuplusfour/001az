@@ -1,0 +1,38 @@
+# Reviews a change to community/plugins.json, the community index: every entry
+# pins an immutable source, and a changed entry's manifest says what the entry
+# says. The plugin's code is downloaded and read, never run — this job sees a
+# stranger's pull request (community-index-plan.md, Stage 2). A pull request
+# checks only what it changed, against the base commit's copy of the file; a
+# push to main re-checks every pointer.
+name: Plugin index
+
+on:
+  pull_request:
+    paths: [community/plugins.json]
+  push:
+    branches: [main]
+    paths: [community/plugins.json]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The reviewer imports the loader, whose rules it runs on each manifest.
+      - run: npm ci
+      - if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          # Absent at the base, the file is empty and every entry is checked.
+          git show ${{ github.event.pull_request.base.sha }}:community/plugins.json > /tmp/base.json || true
+          echo "BASE=/tmp/base.json" >> "$GITHUB_ENV"
+      - run: node scripts/check-plugin-index.mjs community/plugins.json ${BASE:+--base "$BASE"}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -16,6 +16,7 @@ import { makeCtx } from "../server/plugin-ctx.js";
 import { CAPABILITY, CAPABILITY_IDS } from "../server/capabilities.js";
 import { FILTER_KIND } from "../server/ingestion/connector.js";
 import { getConnector } from "../server/connectors/index.js";
+import { ENTRY_FIELDS, validateIndex } from "../server/plugin-index.js";
 
 const DOC = fs.readFileSync(new URL("../PLUGIN.md", import.meta.url), "utf8");
 
@@ -33,6 +34,15 @@ function pinned(name) {
     rows.push(line.slice(1, -1).split("|").map((c) => c.trim()));
   }
   return rows.slice(2); // the header and its rule
+}
+// The fenced code block under `<!-- pin: name -->`, as text.
+function pinnedBlock(name) {
+  const lines = DOC.split(/\r?\n/);
+  const at = lines.indexOf(`<!-- pin: ${name} -->`);
+  assert.ok(at >= 0, `PLUGIN.md has no "${name}" block`);
+  const open = lines.findIndex((l, i) => i > at && l.startsWith("```"));
+  const close = lines.findIndex((l, i) => i > open && l.startsWith("```"));
+  return lines.slice(open + 1, close).join("\n");
 }
 // The name a cell leads with: `fetchJson(url, options)` → fetchJson.
 const nameIn = (cell) => /^`([A-Za-z_$][\w$-]*)/.exec(cell)?.[1] ?? null;
@@ -106,3 +116,16 @@ for (const domain of ["crypto", "stocks"]) {
     assert.deepEqual(row["chart default range"], [m.chart.defaultRange]);
   });
 }
+
+// The community list (community-index-plan.md, Stage 5): the fields its table
+// names are the ones the reviewer and the server read, and the example entry
+// shows every one of them and passes the rules a pull request is checked by.
+test("the community list's fields", () => {
+  assert.deepEqual(sorted(pinned("list-fields").flatMap((r) => codes(r[0]))), sorted(ENTRY_FIELDS));
+});
+
+test("the community list's example entry carries every field and passes the rules", () => {
+  const example = JSON.parse(pinnedBlock("list-example"));
+  assert.deepEqual(sorted(Object.keys(example)), sorted(ENTRY_FIELDS));
+  assert.deepEqual(validateIndex(JSON.stringify({ apiVersion: 1, plugins: [example] })).problems, []);
+});

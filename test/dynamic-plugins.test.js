@@ -28,7 +28,15 @@ const manifestOf = (name) => JSON.parse(fs.readFileSync(path.join(FIX(name), "ma
 test("validateManifest: rejects bad manifests with a readable reason", () => {
   const ok = { id: "acme.x", apiVersion: 1, kind: "connector-provider", domain: "crypto", label: "X", main: "index.js" };
   assert.doesNotThrow(() => validateManifest(ok));
-  assert.throws(() => validateManifest({ ...ok, id: "nodot" }), /namespaced/);
+  // The dot is what keeps a plugin from taking a built-in's name: the
+  // registries overwrite an existing name in silence, so this rule is the guard.
+  for (const [id, kind] of [["coingecko", "connector-provider"], ["openai", "ai-provider"], ["folder", "source"]])
+    assert.throws(() => validateManifest({ ...ok, id, kind }), /namespaced/, id);
+  // `version` is shown as written and never compared, so only its type is
+  // held; null is absent.
+  assert.doesNotThrow(() => validateManifest({ ...ok, version: "1.0.0" }));
+  assert.doesNotThrow(() => validateManifest({ ...ok, version: null }));
+  assert.throws(() => validateManifest({ ...ok, version: 2 }), /manifest\.version must be a string/);
   assert.throws(() => validateManifest({ ...ok, apiVersion: PLUGIN_API_VERSION + 1 }), /unsupported apiVersion/);
   assert.throws(() => validateManifest({ ...ok, kind: "weird" }), /kind must be/);
   assert.throws(() => validateManifest({ ...ok, main: "../evil.js" }), /relative path/);

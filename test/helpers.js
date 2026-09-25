@@ -11,6 +11,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import http from "node:http";
 import net from "node:net";
+import zlib from "node:zlib";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   createUser,
@@ -30,6 +32,7 @@ import {
 // sidecar-catalog.js (like worker.js and db.js) resolves once and is shared by
 // every bust and every static test import. Clearing here clears the app's.
 import { clearSidecarHealth, seedSidecarHealth, sweepSidecars } from "../server/sidecar-catalog.js";
+import { TarWriter } from "../server/tarfile.js";
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public");
 
@@ -260,6 +263,45 @@ export async function req(base, method, pathname, { sid, body } = {}) {
     /* non-JSON body (static files, redirects) */
   }
   return { status: res.status, json, text };
+}
+
+// A gzipped tar built in memory, one [name, content] per file — the archive
+// shapes GitHub and npm serve, without a network.
+export async function tgzOf(files) {
+  const out = new PassThrough();
+  const chunks = [];
+  out.on("data", (c) => chunks.push(c));
+  const tw = new TarWriter(out);
+  for (const [name, content] of files) await tw.file(name, Buffer.byteLength(content), Buffer.from(content));
+  await tw.end();
+  return zlib.gzipSync(Buffer.concat(chunks));
+}
+
+// An integrity string as npm's registry publishes one: `<algorithm>-<base64>`.
+export const sri = (buf, algo = "sha512") => `${algo}-${crypto.createHash(algo).update(buf).digest("base64")}`;
+
+// npm's answers for one published version, by URL: the packument — its
+// `dist` the tarball's integrity hash, or whatever `dist` a test hands it —
+// and the tarball.
+export function npmAnswers(name, version, tgz, dist = { integrity: sri(tgz) }) {
+  const tarball = `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`;
+  return {
+    [`https://registry.npmjs.org/${name}`]: JSON.stringify({ versions: { [version]: { dist: { tarball, ...dist } } } }),
+    [tarball]: tgz,
+  };
+}
+
+// A fetch stub answering URL → body and recording what it was asked; any
+// other URL throws, so a stray request fails the test.
+export function answering(answers) {
+  const calls = [];
+  const fetch = async (url) => {
+    calls.push(String(url));
+    const body = answers[String(url)];
+    if (!body) throw new Error(`unexpected fetch: ${url}`);
+    return new Response(body);
+  };
+  return { fetch, calls };
 }
 
 // --- local HTTP stand-ins ---

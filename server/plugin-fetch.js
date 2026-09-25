@@ -11,9 +11,10 @@
 //
 // Network is confined here. The loader stays offline-testable: a file: source
 // exercises the whole install path with no fetch and (for a dep-free plugin) no
-// npm. URL parsing is unit-tested, and the tarball and GitHub downloads run
-// against a local server in the tests; npm's registry lookup is the one
-// network path they don't run.
+// npm. URL parsing is unit-tested, the tarball and GitHub downloads run
+// against a local server in the tests, and npm's registry lookup against a
+// stubbed fetch.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -100,23 +101,48 @@ export function resolveSource(url) {
 
 // --- fetch the resolved source into an (existing, empty) staging dir ---
 
-async function downloadTarball(tarballUrl, stagingDir, headers = {}, subdir = null) {
-  const res = await fetch(tarballUrl, { headers: { "User-Agent": UA, ...headers }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "follow" });
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${tarballUrl}`);
-  // Reject on the declared size first, then cap while streaming — an unbounded or
-  // lying body must not be fully buffered (the droplet has 458 MB and no swap).
+// The strongest hash this app can check out of an npm integrity string —
+// `sha512-<base64>`, possibly several separated by spaces, each possibly with
+// `?options` — as [algorithm, base64]; null when none is one of the three.
+function strongestHash(integrity) {
+  const hashes = new Map(integrity.split(/\s+/).map((h) => [h.slice(0, h.indexOf("-")), h.slice(h.indexOf("-") + 1).split("?")[0]]));
+  const algo = ["sha512", "sha384", "sha256"].find((a) => hashes.has(a));
+  return algo ? [algo, hashes.get(algo)] : null;
+}
+
+// A response body, buffered under a cap: refused on the declared size first,
+// then capped while streaming — an unbounded or lying body must not be fully
+// buffered (the droplet has 458 MB and no swap). `what` names the body in the
+// refusal. Shared with the community index's fetch (plugin-index.js).
+export async function readBody(res, maxBytes, what) {
   const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_TARBALL_BYTES)
-    throw new Error(`plugin tarball is too large (${declared} bytes > ${MAX_TARBALL_BYTES})`);
+  if (Number.isFinite(declared) && declared > maxBytes)
+    throw new Error(`${what} is too large (${declared} bytes > ${maxBytes})`);
   const chunks = [];
   let total = 0;
   for await (const chunk of Readable.fromWeb(res.body)) {
     total += chunk.length;
-    if (total > MAX_TARBALL_BYTES) throw new Error(`plugin tarball exceeds ${MAX_TARBALL_BYTES} bytes`);
+    if (total > maxBytes) throw new Error(`${what} exceeds ${maxBytes} bytes`);
     chunks.push(chunk);
   }
+  return Buffer.concat(chunks);
+}
+
+async function downloadTarball(tarballUrl, stagingDir, { headers = {}, subdir = null, integrity = null } = {}) {
+  const res = await fetch(tarballUrl, { headers: { "User-Agent": UA, ...headers }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "follow" });
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${tarballUrl}`);
+  const body = await readBody(res, MAX_TARBALL_BYTES, "plugin tarball");
+  // An npm download is the registry's own hash or nothing: checked here,
+  // before a byte is written or unpacked (community-index-plan.md, Stage 1).
+  if (integrity) {
+    const strongest = strongestHash(integrity.hash);
+    if (!strongest) throw new Error(`the registry's integrity hash for ${integrity.of} isn't one this app can check (sha512, sha384 or sha256)`);
+    const [algo, want] = strongest;
+    if (crypto.createHash(algo).update(body).digest("base64") !== want)
+      throw new Error(`npm tarball for ${integrity.of} doesn't match the registry's integrity hash`);
+  }
   const tgz = path.join(stagingDir, "__plugin.tgz");
-  fs.writeFileSync(tgz, Buffer.concat(chunks));
+  fs.writeFileSync(tgz, body);
   // GitHub and npm tarballs both wrap everything in one top-level directory.
   // Unpack aside and read that directory's name before dropping it — GitHub's
   // names the commit (githubRef above) — then lift the plugin into the staging
@@ -150,7 +176,12 @@ async function npmTarball(source) {
   const version = source.version || meta["dist-tags"]?.latest;
   const v = meta.versions?.[version];
   if (!v) throw new Error(`npm package ${source.name}@${source.version || "latest"} not found`);
-  return { tarballUrl: v.dist.tarball, resolvedRef: version };
+  // The registry publishes an integrity hash with every version — it filled
+  // the field in for versions older than it — so an answer without one isn't
+  // the registry's.
+  if (typeof v.dist?.integrity !== "string" || !v.dist.integrity)
+    throw new Error(`the registry gave no integrity hash for ${source.name}@${version}`);
+  return { tarballUrl: v.dist.tarball, resolvedRef: version, integrity: { hash: v.dist.integrity, of: `${source.name}@${version}` } };
 }
 
 // Materialize `source` into `stagingDir`; returns { resolvedRef }. The dir must
@@ -164,15 +195,15 @@ export async function fetchModule(source, stagingDir) {
       return { resolvedRef: "local" };
     }
     case "github": {
-      const top = await downloadTarball(source.tarballUrl, stagingDir, { Accept: "application/vnd.github+json" }, source.subdir);
+      const top = await downloadTarball(source.tarballUrl, stagingDir, { headers: { Accept: "application/vnd.github+json" }, subdir: source.subdir });
       return { resolvedRef: githubRef(source.ref, top) };
     }
     case "tarball":
       await downloadTarball(source.tarballUrl, stagingDir);
       return { resolvedRef: source.resolvedRef };
     case "npm": {
-      const { tarballUrl, resolvedRef } = await npmTarball(source);
-      await downloadTarball(tarballUrl, stagingDir);
+      const { tarballUrl, resolvedRef, integrity } = await npmTarball(source);
+      await downloadTarball(tarballUrl, stagingDir, { integrity });
       return { resolvedRef };
     }
     default:

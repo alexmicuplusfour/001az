@@ -388,6 +388,9 @@ export const KINDS = new Set(Object.keys(KIND_DEFS));
 
 export function validateManifest(m) {
   if (!m || typeof m !== "object") throw new Error("manifest.json is missing or not an object");
+  // The dot is also what keeps a plugin from taking a built-in's name
+  // (`coingecko`, `openai`, `folder`): the registries overwrite an existing
+  // name in silence, so this rule is the guard.
   if (typeof m.id !== "string" || !m.id.includes("."))
     throw new Error('manifest.id must be a namespaced "vendor.name" string (a dot separates vendor from name)');
   // The id becomes half of the catalog id (split on ':') and, at install, the
@@ -401,6 +404,9 @@ export function validateManifest(m) {
   if (typeof m.label !== "string" || !m.label) throw new Error("manifest.label is required");
   if (typeof m.main !== "string" || !m.main || m.main.includes(".."))
     throw new Error("manifest.main must be a relative path inside the plugin (no '..')");
+  // A `null` is absent, as everywhere else a plugin writes one.
+  if (m.version != null && typeof m.version !== "string")
+    throw new Error("manifest.version must be a string — it is shown as written, never compared");
   // Opt-in to running npm lifecycle scripts at install (native modules). Default
   // off — nothing executes until the manifest validates and the factory loads.
   if (m.allowScripts !== undefined && typeof m.allowScripts !== "boolean")
@@ -639,9 +645,11 @@ export async function installFromUrl(db, url) {
   });
 }
 
-// Update an external plugin from the source it was installed from (D6),
-// keeping everything stored about it — keys, config, bindings, board pins —
-// because nothing here touches them. Register-last holds for a replacement
+// Update an external plugin from the source it was installed from, or from
+// one the caller names (the Community tab's "Update to …",
+// community-index-plan.md D6) — the row then records that one. Everything
+// stored about it — keys, config, bindings, board pins — is kept, because
+// nothing here touches it. Register-last holds for a replacement
 // too: the new version is fetched, built and validated while the old one keeps
 // serving, and the swap is one synchronous write. Every registry overwrites on
 // re-register, and the registers that can refuse (the AI registry's install()
@@ -650,15 +658,17 @@ export async function installFromUrl(db, url) {
 // A plugin holding no registration (an errored card's Retry is this same verb)
 // gets a fresh install's shadow check instead, and a failure refreshes its
 // stored reason so the card says why this attempt failed.
-export async function updatePlugin(db, id) {
+export async function updatePlugin(db, id, { sourceUrl = null } = {}) {
   const row = await getExternalPlugin(db, id);
   if (!row) throw new Error("not an installed plugin (built-ins update with the app)");
   const live = registered(id);
-  return withStage(row.source_url, async (staged) => {
+  const url = sourceUrl || row.source_url;
+  return withStage(url, async (staged) => {
     const { manifest, catalogId, resolvedRef } = staged;
     // The same id AND kind: the two connector kinds share `<domain>:<id>`, and a
     // changed kind would register into, or over, a domain this plugin doesn't
-    // own. It is also what lets a live domain plugin skip the shadow check.
+    // own. It is also what lets a live domain plugin skip the shadow check, and
+    // what makes a source the caller names safe: it can only bring this plugin.
     if (catalogId !== id || manifest.kind !== row.kind)
       throw Object.assign(new Error(`the source now names a different plugin (${manifest.kind} ${catalogId}) — remove this one and install that`), { status: 409 });
     const dir = await commitDir(staged);
@@ -675,12 +685,12 @@ export async function updatePlugin(db, id) {
       for (const n of row.manifest.faceProducers || [])
         if (!(manifest.faceProducers || []).includes(n)) unregisterFaceProducer(n);
     }
-    await upsertExternalPlugin(db, { id, kind: manifest.kind, sourceUrl: row.source_url, resolvedRef, dir, manifest });
+    await upsertExternalPlugin(db, { id, kind: manifest.kind, sourceUrl: url, resolvedRef, dir, manifest });
     // The new version's declared rates, not the old one's: costs are stamped
     // at write time and never recomputed.
     await refreshRateTable(db);
     if (row.dir && row.dir !== dir) fs.rmSync(row.dir, { recursive: true, force: true });
-    console.log(`plugin ${id} updated from ${row.source_url} (${resolvedRef})`);
+    console.log(`plugin ${id} updated from ${url} (${resolvedRef})`);
     return id;
   });
 }

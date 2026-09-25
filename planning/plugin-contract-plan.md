@@ -233,7 +233,10 @@ know is refused with the valid list and the near-miss named (`embeds` →
 `embed` is the trap the rename set). An own-wire plugin implementing the wire
 methods itself stays allowed — that is a descriptor, not a family.
 
-**D8 — an index of pointers in the repo, not the plugins.** `community/plugins.json`
+**D8 — an index of pointers in the repo, not the plugins.** *(Superseded
+2026-09-25 by [community-index-plan.md](community-index-plan.md), which keeps
+the pointer model and changes the pin, the checksum and the update path.)*
+`community/plugins.json`
 lists id, kind, label, description, author, a pinned source and the two
 listing hints, each entry pointing at the author's own repo. Reviewing an
 entry is vetting a pointer, not maintaining code; an author ships a fix
@@ -2136,6 +2139,12 @@ After:
   still not in it.
 
 ### Stage 6 — the community index (gated; designed, not built)
+
+**Superseded 2026-09-25 by [community-index-plan.md](community-index-plan.md)**,
+written from a deep dive of this design against the shipped code: the index
+could never update anyone (Update re-fetches the stored pin), "a tag or a sha"
+should be a sha, and the checksum pinned the wrong thing. The design below is
+kept as written, for the record.
 
 Not built until the index would hold an entry the maintainer did not write.
 Designed now so D8's decisions are concrete and PLUGIN.md can describe it.

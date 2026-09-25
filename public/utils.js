@@ -528,8 +528,7 @@ export const memberCell = ({ name, email, isAdmin }) =>
 // The small trailing note on a button or pill. `cls` is what it's a note ABOUT
 // — "count" for the tally every chip carries, "mult" for the odds lens's ×N
 // (filters.js) — so a second kind of note reuses the append instead of
-// hand-rolling the same four lines a third time (admin-plugins.js has the
-// other copy).
+// hand-rolling the same four lines again.
 export function appendCount(el, count, cls = "count") {
   if (count == null) return;
   const c = document.createElement("span");

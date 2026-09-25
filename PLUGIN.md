@@ -64,11 +64,13 @@ Install only what you'd run on your server yourself.
 What the app does about it:
 
 - Only an admin can install, update or remove a plugin.
-- Before installing anything but the app's bundled examples, the Add plugin dialog says the
-  code will run with the server's full access, and asks.
+- Before a plugin is installed or updated from anywhere but the app's bundled examples, the app
+  says the code will run with the server's full access, and asks.
 - npm installs a plugin's dependencies with their install scripts off, unless the manifest
   asks for them (`allowScripts`).
 - A plugin's card shows where it came from and the version that ran — for GitHub, the commit.
+- A plugin on the Add plugin dialog's Community tab is listed, not vouched for: its entry was
+  checked and merged, and nobody audited its code (see [Getting listed](#getting-listed)).
 - An operator can turn installing off: `PLUGIN_INSTALL_DISABLE=1` (see
   [Locking installs](#locking-installs)).
 
@@ -95,7 +97,7 @@ What the app does about it:
 | `label` | all | Required. The plugin's name until its code has run: on the Add plugin list (a bundled example's), and on the card of a plugin that failed to load. Once the code runs, the card shows the name the code returns. |
 | `description` | all | Optional. Shown under `label` on the Add plugin list until the code has run; after that, the description the code returns. |
 | `main` | all | Required. The module's path inside the directory, usually `index.js`. No `..`. |
-| `version` | all | Optional. Shown on the card as written; nothing compares versions. |
+| `version` | all | Optional. A string, shown on the card as written; nothing compares versions. |
 | `domain` | connector-provider, connector-domain | Required for these two: the domain the provider serves, or the new domain's name. Letters, digits and `-`. |
 | `faceProducers` | connector-domain | Optional. The card-face renderers the plugin brings — see [faces](#faces). |
 | `allowScripts` | all | Optional, `false` by default. `true` lets npm run install scripts — the plugin's own and its dependencies' — for a native module that has to compile. |
@@ -126,16 +128,24 @@ checks what it returned, and only then adds the plugin — live. If any step fai
 says why and nothing is left behind.
 
 - GitHub and npm are fetched without credentials, so only public repositories and packages
-  install. An npm source takes an exact version, or none for the latest — not a range or a tag.
+  install. An npm source takes an exact version, or none for the latest — not a range or a
+  tag — and the download is checked against the registry's integrity hash.
 - A tarball URL has to end in `.tgz` or `.tar.gz` (a query string after it is fine). A
   tarball — GitHub's and npm's included — has to hold one top-level directory. A GitHub
   folder URL installs the plugin in that folder, which needs its own `manifest.json`.
 - The card records what ran: `local` for a path, `url` for a tarball, the version for npm, and
-  `<ref>@<commit>` for GitHub — `main@7f02846`, which `github:you/repo@7f02846` pins.
+  `<ref>@<commit>` for GitHub — `main@7f02846`, which `github:you/repo@7f02846` pins. A source
+  pinned to a commit records the commit.
 - Limits: a 50 MB tarball, a 60-second download and 3 minutes of npm
   (`PLUGIN_MAX_TARBALL_BYTES`, `PLUGIN_FETCH_TIMEOUT_MS`, `PLUGIN_NPM_TIMEOUT_MS`).
 - Installed code lives in `PLUGINS_DIR` (default `/data/plugins`), on the data volume, so it
   survives restarts and image upgrades.
+- When the community list is on, the dialog has two tabs: **Included**, the app's own plugins,
+  its examples and what you've added, and **Community**, the plugins listed in
+  [community/plugins.json](community/plugins.json) (see [Getting listed](#getting-listed)). A
+  listed plugin installs from the source its entry pins, after the same question as the box.
+  `PLUGIN_INDEX_URL` is where the list is read from — this repository's copy by default, read
+  when the tab is opened and at most every ten minutes. Empty turns the tab off.
 
 ### Developing
 
@@ -155,13 +165,15 @@ Or push the plugin to GitHub and install the folder's URL; **Update** fetches th
 
 ### Updating
 
-**Update** on a plugin's card fetches it again from the source it was installed from. The new
-version is built and checked while the old one keeps serving, then swapped in; if anything
+**Update** on a plugin's card fetches it again from the source it was installed from, or the pin
+the Community tab last moved it to. The new version is built and checked while the old one keeps serving, then swapped in; if anything
 fails, the old one is untouched and you're told why. Everything saved for the plugin stays:
 connections and keys, settings, defaults, and boards' choices of it.
 
-- The source is fixed at install. Moving a plugin to another repository or tag means removing
-  it and adding it again, which deletes what it saved.
+- A listed plugin moves on through the Community tab: when its entry pins a different source
+  from the one installed, its row offers **Update to** the entry's `version`, which installs from
+  the new pin the same way and keeps everything saved. Any other move — another repository,
+  another tag — means removing the plugin and adding it again, which deletes what it saved.
 - The new version must keep its `id`, its `kind` and, for the two connector kinds, its `domain`.
 - The factory can run twice in one process — the new version is built while the old one still
   serves — so don't start timers or other work in it that outlive the object it returns.
@@ -186,6 +198,7 @@ Boards keep their items in every case.
 
 `PLUGIN_INSTALL_DISABLE=1` in the server's environment refuses installs and updates from any
 source except the bundled examples. Installed plugins keep loading, and Remove keeps working.
+The Community tab's **Add** and **Update to** buttons are held too, and say why.
 
 ## ctx
 
@@ -916,7 +929,8 @@ Error messages reach admins and board members, so keep keys out of them.
 ## Versions
 
 `apiVersion` is `1`. The app refuses a plugin whose `apiVersion` it doesn't speak, and says so
-on the card. Additions to the contract — a new `ctx` member, a new optional field — keep the
+on the card; on the Community tab, a listing written for one it doesn't speak shows **Needs a
+newer app**. Additions to the contract — a new `ctx` member, a new optional field — keep the
 number; a change that would break a working plugin changes it.
 
 `ctx` as listed here is the baseline. Its last six members, `providerSignal` to `pickFields`,
@@ -928,5 +942,80 @@ it. A plugin that has to run on older images can check for a member before using
 ## Sharing a plugin
 
 Publish the directory in any form [Installing](#installing) takes, and anyone can paste it into
-Add plugin. Tag your releases: a tag or a commit is a fixed install, while a branch moves.
-There's no directory of community plugins yet.
+Add plugin. A commit is a fixed install. A tag usually is, but it can be moved, and a branch
+moves with every push. To have your plugin show up on every app's Community tab, get it listed.
+
+### Getting listed
+
+The Add plugin dialog's **Community** tab reads [community/plugins.json](community/plugins.json)
+in this repository: a list of pointers at plugins other people wrote. To add yours, open a pull
+request adding an entry to its `plugins`, and leave the file's own `apiVersion` as it is:
+
+<!-- pin: list-example -->
+```json
+{
+  "id": "acme.tides",
+  "kind": "connector-domain",
+  "domain": "tides",
+  "label": "Tides",
+  "description": "Tide heights for harbours worldwide — no key needed.",
+  "author": "acme",
+  "version": "1.2.0",
+  "apiVersion": 1,
+  "source": "github:acme/001az-tides@3f2a9c1e7b0d4a5f6c8e9d0b1a2c3d4e5f6a7b8c"
+}
+```
+
+<!-- pin: list-fields -->
+| field | |
+|---|---|
+| `id`, `kind`, `label`, `apiVersion` | Your manifest's, exactly. |
+| `domain` | Your manifest's. |
+| `description` | Shown under the label. Yours to write: it can be shorter than the manifest's. |
+| `author` | Your name or handle, shown under the description. |
+| `version` | Shown on the row and on its **Update to** button. If your manifest names a version, the two must be the same; if it doesn't, the label is yours to choose. |
+| `source` | Where the plugin installs from, pinned: `github:owner/repo@<commit>` — `github:owner/repo/path/to/folder@<commit>` for a plugin in a folder — with the full 40-character commit, or `npm:name@<version>` with an exact version. |
+
+Every field is required, `domain` only for the two connector kinds. Any other field is ignored.
+
+The source is pinned because a listing is checked once, and what it points at must not change
+after that: a commit can't, and neither can a published npm version.
+
+**The check.** Every pull request that touches the file runs a check; the first time you
+contribute, GitHub may hold it until a maintainer approves it. It downloads each entry that's new
+or changed, the way the app installs it, and reads the manifest — it never runs the plugin's
+code, and never runs npm. It fails when:
+
+- the file isn't valid JSON, or an entry lacks a field or has one of the wrong type;
+- a source isn't pinned as above;
+- two entries would install as the same plugin, or an entry would install as one of the app's
+  bundled examples;
+- the download fails, or its `manifest.json` breaks a rule of [manifest.json](#manifestjson);
+- the manifest's `id`, `kind`, `label`, `apiVersion` or `domain` isn't the entry's, or it names
+  a `version` that isn't;
+- GitHub's download comes from another commit than the pinned one, or npm's doesn't match the
+  registry's integrity hash.
+
+It prints one line per problem and exits with 1 when there are any; once it gets through the
+file, it ends with how many entries it downloaded and how many problems it found. It can't catch
+a factory that throws, or a provider missing a method it needs, so install your pinned source in
+an app of your own before you open the pull request.
+
+To run it before you open the pull request, in a clone of this repository with your entry added:
+
+```sh
+npm ci
+node scripts/check-plugin-index.mjs community/plugins.json
+```
+
+Run that way, it downloads every entry in the file. Add `--base` with a copy of the file from
+before your change, and it downloads only the entries that are new or changed, as the pull
+request's check does: `node scripts/check-plugin-index.mjs community/plugins.json --base before.json`.
+
+Then a maintainer reads the entry and merges it — a review of the pointer, not an audit of the
+code. A merged entry reaches every app within about a quarter of an hour — GitHub caches the file
+for a few minutes, and each app reads it at most every ten.
+
+**Shipping an update.** Open a pull request changing your entry's `source` to the new commit or
+version, and its `version` to match. Once it's merged, apps that have your plugin show
+**Update to 1.3.0** on its Community row — see [Updating](#updating).
