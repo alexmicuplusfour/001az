@@ -800,8 +800,61 @@ export async function embedBatch(db, embedder, rows) {
   return { embedded, skipped };
 }
 
-// One board's slice of the batch — the wire calls, the poison isolation, and
-// the metering, which is why every row here shares a board. The whole group is
+// What a job row about one instance is ABOUT: its original filename, not
+// payload.identity — for uploads the identity is the vestigial STORED name (a
+// hex string nobody recognizes) — else the identity. The leg rows, the embed
+// rows and the poison rows all name an instance this way; pipelineWork's
+// COALESCE is the same rule in SQL.
+const rowTarget = (r) => r.payload?.files?.[0]?.original_name || r.payload?.identity || null;
+
+// One board's slice of the batch as ONE job-log row (embed-work-plan.md D1):
+// the embedder bills per call, so the call is the row, and a per-item row
+// could never honestly carry its tokens. The row is `running` while the call
+// is in the air, and its `item_ids` are how workFor keeps those items out of
+// the waiting count and counts the batch as that many. It settles with what
+// landed and drops the ids, which only a running row needs. A one-item batch
+// is named by its file like any other row; a bigger one by its count
+// (jobs-modal.js labelFor).
+//
+// A throw here is the ENGINE: embedGroupCalls has already isolated any poison
+// item and only throws when nothing could be embedded. The batch never left
+// the queue and comes back after the caller's backoff, so the row says "will
+// retry", and repeats fold into it the way transcription's do (D4). The fold
+// looks at the board's newest embed row whatever item it was about, so a
+// success in between ends it.
+async function embedGroup(db, embedder, rows, pacing) {
+  const one = rows.length === 1 ? rows[0] : null;
+  const boardId = rows[0].board_id;
+  // What every settle writes: the ids go (only a running row needs them), and
+  // `items` goes again because a lost open makes settle write the row outright
+  // from this detail alone.
+  const closing = { items: rows.length, item_ids: null, engine: engineStamp({ id: embedder.provider, model: embedder.model }) };
+  const job = await openJob(db, {
+    boardId, kind: "embed",
+    itemId: one?.id ?? null, entityId: one?.entity_ids?.[0] ?? null, target: one ? rowTarget(one) : null,
+    detail: { items: rows.length, item_ids: rows.map((r) => r.id) },
+  });
+  try {
+    const { embedded, skipped, usages } = await embedGroupCalls(db, embedder, rows, pacing);
+    const { tokens } = spentDetail(embedder, usages);
+    await job.settle({ outcome: "ok", detail: {
+      ...closing, embedded, ...(skipped ? { skipped } : {}), ...(tokens ? { tokens } : {}),
+    } });
+    return { embedded, skipped };
+  } catch (err) {
+    const prior = job.id == null ? null
+      : await jobLogWrite(() => latestSettledJob(db, boardId, "embed", null, { anyItem: true }));
+    if (prior?.outcome === "requeued") {
+      await foldJobRepeat(db, prior, job.id, { outcome: "requeued", error: err.message });
+    } else {
+      await job.settle({ outcome: "requeued", error: err.message, detail: closing });
+    }
+    throw err;
+  }
+}
+
+// The wire calls, the poison isolation, and the metering for one board's
+// slice, which is why every row here shares a board. The whole group is
 // one API call on the happy path. When it fails with a request-content 4xx —
 // the only class that can be item-specific; auth/model/rate statuses
 // (401/403/404/408/429) and 5xx/network are the caller's to back off on —
@@ -809,8 +862,9 @@ export async function embedBatch(db, embedder, rows) {
 // and skipped by future sweeps, innocents proceed. If NOTHING succeeds
 // one-by-one, the 400 was config-shaped after all (e.g. a provider that
 // rejects a bad model as 400), so throw for the backoff instead of wrongly
-// marking a whole batch.
-async function embedGroup(db, embedder, rows, { rpm, burst }) {
+// marking a whole batch. Answers the usages it metered, so the batch's row
+// can say what it spent.
+async function embedGroupCalls(db, embedder, rows, { rpm, burst }) {
   const t0 = Date.now();
   const dims = { capability: "embed", provider: embedder.provider, model: embedder.model };
   const call = (rs) =>
@@ -831,7 +885,7 @@ async function embedGroup(db, embedder, rows, { rpm, burst }) {
     // never throws (meterWrite).
     await meterAiCall(db, rows[0].board_id, dims, usage);
     for (let i = 0; i < rows.length; i++) await setItemEmbedding(db, rows[i].id, vectors[i], embedder.model);
-    return { embedded: rows.length, skipped: 0 };
+    return { embedded: rows.length, skipped: 0, usages: [usage] };
   } catch (err) {
     const s = Number(err?.status);
     const isolatable = Number.isInteger(s) && s >= 400 && s < 500 && ![401, 403, 404, 408, 429].includes(s);
@@ -857,17 +911,18 @@ async function embedGroup(db, embedder, rows, { rpm, burst }) {
   if (!embedded) throw new Error(failures[0].message);
   for (const { row: r, message } of failures) {
     await setItemEmbedError(db, r.id, message);
-    // Embed successes are plumbing nobody watches, but a marked-and-skipped
-    // item silently vanishes from the search corpus — that gets a job row.
+    // A marked-and-skipped item silently vanishes from the search corpus, so
+    // it gets a failed row of its own (which lights the dot) beside the
+    // batch's row, which only counts it as skipped.
     await jobLogWrite(() => addJobLog(db, {
       boardId: r.board_id, entityId: r.entity_ids?.[0] ?? null, itemId: r.id,
-      target: r.payload?.files?.[0]?.original_name || r.payload?.identity || null,
+      target: rowTarget(r),
       kind: "embed", outcome: "failed", error: message,
       detail: { model: embedder.model }, startedAt: t0, endedAt: Date.now(),
     }));
     console.warn(`embed: skipping item #${r.id} (${message}) — re-tagging retries it`);
   }
-  return { embedded, skipped: failures.length };
+  return { embedded, skipped: failures.length, usages };
 }
 
 // --- periodic retag schedule (server-local time; set TZ to move it) ---
@@ -1466,9 +1521,16 @@ function objectDetectorSidecar(binding, threshold) {
 // settings — deliberately global, never per-board.
 // Which backlog lanes are served for one board — the `queued` half's gate
 // (first-class-work-plan.md), living beside the resolvers it asks because
-// lane resolution is this module's job. Answers as `[{ kind, model? }]`,
+// lane resolution is this module's job. Answers as `[{ kind, model?, fast? }]`,
 // db.js's boardLaneQueues vocabulary; adding a backlog lane = one line here
 // + its predicate in LANE_NEED beside the claim queries.
+//
+// `fast` is how the lane drains, and the page's check rate follows it
+// (workFor carries it onto the wire). An embed backlog is picked up on the
+// sweep's next 3s poll and lands a second or so later, so it's gone by the
+// next 4s check or the one after. A transcription takes minutes and shows as
+// a running row while it works, so its backlog alone is followed at the slow
+// rate (embed-work-plan.md D2).
 //
 // Memoized briefly per board: the verdicts are configuration (bindings,
 // plugin installs, sidecar presence) but the delta poll asks every 4s per
@@ -1487,7 +1549,7 @@ export async function servedBacklogLanes(db, boardId, board = null) {
   const [transcriber, embedder] = await Promise.all([resolveTranscriber(db, b), resolveEmbedder(db)]);
   const lanes = [
     ...(transcriber ? [{ kind: "transcribe" }] : []),
-    ...(embedder ? [{ kind: "embed", model: embedder.model }] : []),
+    ...(embedder ? [{ kind: "embed", model: embedder.model, fast: true }] : []),
   ];
   laneVerdicts.set(boardId, { at: Date.now(), lanes });
   return lanes;
@@ -2345,9 +2407,7 @@ export function startWorker({ db, thumbsDir, galleryDir, sources = null, autoBac
   const legLog = (row, kind, t0, outcome, error = null, detail = {}) =>
     jobLogWrite(() => addJobLog(db, {
       boardId: row.board_id, entityId: row.entity_ids?.[0] ?? null, itemId: row.id,
-      // The original filename, not payload.identity — for uploads the
-      // identity is the vestigial STORED name (a hex string nobody recognizes).
-      target: row.payload?.files?.[0]?.original_name || row.payload?.identity || null,
+      target: rowTarget(row),
       kind, outcome, error, detail, startedAt: t0, endedAt: Date.now(),
     }));
 

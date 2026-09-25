@@ -217,3 +217,21 @@ test("a claimed instance says what its leg is doing, by kind", () => {
   assert.equal(runningStatus({ kind: "fetch", leg: true }), "fetching data");
   assert.equal(runningStatus({ kind: "diagnose" }), "running");
 });
+
+// planning/embed-work-plan.md Stage 2: one row per embed batch.
+test("an embed batch: named by its file or its count, says what it skipped and spent, and runs as 'embedding'", () => {
+  assert.equal(labelFor({ kind: "embed", target: null, entity_display: null, item_id: null, detail: { items: 64 } }), "64 items",
+    "no one file to name, so the count is the name");
+  assert.equal(labelFor({ kind: "embed", target: "a.png", entity_display: null, item_id: 7, detail: { items: 1 } }), "a.png",
+    "a one-item batch is named by its file, like every other row");
+  assert.equal(labelFor({ kind: "embed", target: null, entity_display: null, item_id: 7, detail: { items: 1 } }), "1 item");
+  assert.equal(labelFor({ kind: "embed", target: "p.png", entity_display: null, item_id: 9, detail: { model: "m" } }), "p.png",
+    "a poison item's own failed row is unchanged");
+  assert.equal(summaryFor({ kind: "embed", outcome: "ok", detail: { items: 1, embedded: 1 } }), "",
+    "nothing deviates and an on-device engine reports no tokens: nothing to say");
+  assert.equal(summaryFor({ kind: "embed", outcome: "ok", detail: { items: 2, embedded: 1, skipped: 1, tokens: { in: 1200, out: 0 } } }),
+    "1 skipped · 1.2K in / 0 out");
+  assert.equal(summaryFor({ kind: "embed", outcome: "requeued", error: "upstream 503", detail: { attempts: 3 } }),
+    "3 attempts · upstream 503", "an engine that's down reads like transcription's");
+  assert.equal(runningStatus({ kind: "embed" }), "embedding");
+});

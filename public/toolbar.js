@@ -186,10 +186,12 @@ export function jobsChip() {
   // The lanes, tallied by their served labels — the tooltip's sentences and
   // the pill number both read from this. A leg (Extraction, Tagging) is a
   // lane like Transcription is; the server named them all, and it already
-  // counted each unit of work once.
+  // counted each unit of work once. A running row that holds a batch says how
+  // many items (`n`, an embed batch), and counts as that many, since the
+  // waiting counts beside it count items too.
   const lanes = new Map();
   const lane = (key) => { if (!lanes.has(key)) lanes.set(key, { run: 0, wait: 0 }); return lanes.get(key); };
-  for (const j of state.work.running) lane(j.label).run++;
+  for (const j of state.work.running) lane(j.label).run += j.n ?? 1;
   for (const q of state.work.queued) lane(q.label).wait += q.n;
   const n = [...lanes.values()].reduce((k, l) => k + l.run + l.wait, 0);
   const busy = n > 0;

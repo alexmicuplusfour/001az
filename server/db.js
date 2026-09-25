@@ -3318,8 +3318,9 @@ export async function pruneTagSnapshots(db, cutoff) {
 
 // --- job log (the per-board transparency ledger, planning/job-log-plan.md) ---
 // One row per execution attempt. `running` rows exist only for the sweep
-// families (transcribe, ingest) — the pipeline legs are visible via
-// items.status while in flight and write one completed row at resolution.
+// families (transcribe, ingest, diagnose, and embed, one row per batch) —
+// the pipeline legs are visible via items.status while in flight and write
+// one completed row at resolution.
 // Writers never throw into the job they observe: the worker wraps every call
 // in jobLogWrite (warn, not throw).
 
@@ -3461,14 +3462,18 @@ export async function deleteJobLog(db, id) {
 // non-events: a transient transcribe retry every backoff tick, or a scheduled
 // scan re-finding the same error every 30 s, stamps its prior row (attempts
 // in detail) instead of writing a near-identical row per cycle. itemId=null
-// means board-level rows (an ingest or retag run).
-export async function latestSettledJob(db, boardId, kind, itemId = null) {
-  const cond = ["board_id=$1", "kind=$2", "outcome <> 'running'",
-    itemId == null ? "item_id IS NULL" : "item_id=$3"];
+// means board-level rows (an ingest or retag run). `anyItem` drops the item
+// condition: the embed fold asks "what did this board's embedder do last",
+// and a one-item success row (which carries its item) must end the fold as
+// surely as a batch row does (embed-work-plan.md D4).
+export async function latestSettledJob(db, boardId, kind, itemId = null, { anyItem = false } = {}) {
+  const args = [boardId, kind];
+  const cond = ["board_id=$1", "kind=$2", "outcome <> 'running'"];
+  if (!anyItem) cond.push(itemId == null ? "item_id IS NULL" : `item_id=$${args.push(itemId)}`);
   const { rows } = await db.query(
     `SELECT * FROM job_log WHERE ${cond.join(" AND ")}
       ORDER BY started_at DESC, id DESC LIMIT 1`,
-    itemId == null ? [boardId, kind] : [boardId, kind, itemId]
+    args
   );
   return rows[0] || null;
 }

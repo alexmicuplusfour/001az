@@ -32,6 +32,16 @@ const seedAudio = (boardId, name, { status = "held", extra = {} } = {}) =>
     payload: { identity: name, files: [{ name, original_name: name, kind: "audio" }], ...extra },
   });
 
+const seedImage = (boardId, status, name) =>
+  seedInstance(db, boardId, status, { payload: { files: [{ name: `${name}.stored`, original_name: name, kind: "image" }] } });
+
+// The three carriers of the work payload, each checked for the same answer.
+const carriers = (b) => [
+  ["delta poll", `/api/items?board=${b}&since=0`],
+  ["signals tick", `/api/boards/${b}/jobs/errors`],
+  ["jobs page", `/api/boards/${b}/jobs`],
+];
+
 test("transcribe backlog counts claimable, invisible clips only", async () => {
   const b = await seedBoard(db, "lanes-transcribe");
   await seedAudio(b, "one.mp3");
@@ -100,13 +110,49 @@ test("the three carriers serve one work payload, labelled from the kind vocabula
   assert.equal(jobs.json.work.queued[0]?.n, 1);
 });
 
+test("an embed backlog rides every carrier marked `fast` and not `leg`; a transcription backlog is neither", async () => {
+  // The check rate follows the mark (planning/embed-work-plan.md D2): an embed
+  // backlog is picked up on the sweep's next 3s poll and done a second or so
+  // later, so the page follows it at 4s; a transcription takes minutes, so its
+  // backlog alone is followed at 30s.
+  // No `leg` on the embed: Cancel queued can't pull it, and the modal's cancel
+  // verbs read that mark.
+  const b = await seedBoard(db, "lanes-fast");
+  await seedInstance(db, b, "tagged", { payload: { files: [{ name: "a.png", kind: "image" }] } }); // due to embed
+  await seedAudio(b, "wait.mp3"); // due to transcribe
+  const expected = [
+    { kind: "transcribe", n: 1, label: "Transcription" },
+    { kind: "embed", n: 1, label: "Embedding", fast: true },
+  ];
+  for (const [name, url] of carriers(b)) {
+    const { json: { work } } = await req(base, "GET", url, { sid });
+    assert.deepEqual(work.queued, expected, `${name}: embed is fast, transcription is not, neither is a leg`);
+  }
+});
+
+test("a running embed batch's items are running, not also waiting, and the row says how many", async () => {
+  // planning/embed-work-plan.md Stage 2: the batch's row carries its item ids
+  // while the call is in the air. The same list is excluded from the waiting
+  // count and counted as the row's `n`, so the two can't disagree.
+  const b = await seedBoard(db, "lanes-embed-batch");
+  const due = [];
+  for (const name of ["a.png", "b.png", "c.png"]) due.push((await seedImage(b, "tagged", name)).id);
+  await addJobLog(db, { boardId: b, kind: "embed", detail: { items: 2, item_ids: [due[0], due[1]] } });
+  for (const [name, url] of carriers(b)) {
+    const { json: { work } } = await req(base, "GET", url, { sid });
+    const row = work.running.find((r) => r.kind === "embed");
+    assert.ok(row, `${name}: the batch is a running row`);
+    assert.equal(row.n, 2, `${name}: …holding two items`);
+    assert.equal(row.label, "Embedding");
+    assert.deepEqual(work.queued, [{ kind: "embed", n: 1, label: "Embedding", fast: true }],
+      `${name}: only the third item is waiting — the batch's two are running`);
+  }
+});
+
 // ── the pipeline legs on the wire (planning/instance-work-plan.md) ──
 // A unit of work is one instance attempt: every claimed instance is a running
 // row wearing its leg's kind and its file, every waiting one a count under
 // its leg — derived from items.status, nothing written twice.
-
-const seedImage = (boardId, status, name) =>
-  seedInstance(db, boardId, status, { payload: { files: [{ name: `${name}.stored`, original_name: name, kind: "image" }] } });
 
 test("pipelineWork: one running row per claimed instance, one count per waiting leg, nothing else", async () => {
   const b = await seedBoard(db, "legs-shape");
@@ -159,19 +205,15 @@ test("a clip the tag leg claimed while its transcript is still running is one un
   assert.deepEqual(errors.json.work.queued, [], "…and the clip is not also waiting to tag");
 });
 
-test("the legs ride every carrier marked `leg`, and the reprocess answer is the fifth", async () => {
+test("the legs ride every carrier marked `leg` and `fast`, and the reprocess answer is the fifth", async () => {
   const b = await seedBoard(db, "legs-wire");
   await seedImage(b, "pending", "a.png");
   await seedImage(b, "pending", "b.png");
   await seedImage(b, "extracting", "c.png");
-  const tagLane = { kind: "tag", n: 2, label: "Tagging", leg: true };
+  const tagLane = { kind: "tag", n: 2, label: "Tagging", leg: true, fast: true };
   const extractRow = (w) => w.running.find((r) => r.kind === "extract");
 
-  for (const [name, url] of [
-    ["delta poll", `/api/items?board=${b}&since=0`],
-    ["signals tick", `/api/boards/${b}/jobs/errors`],
-    ["jobs page", `/api/boards/${b}/jobs`],
-  ]) {
+  for (const [name, url] of carriers(b)) {
     const { json: { work } } = await req(base, "GET", url, { sid });
     assert.deepEqual(work.queued, [tagLane], `${name}: the waiting leg, labelled from the kind vocabulary and marked leg`);
     const r = extractRow(work);
@@ -196,7 +238,7 @@ test("a per-card route answers `work` too — the click lights the chip in the s
   const r = await req(base, "POST", `/api/items/${eid}/reprocess`, { sid });
   assert.equal(r.status, 200);
   assert.ok(Array.isArray(r.json.entities), "the routed report, as before");
-  assert.deepEqual(r.json.work.queued, [{ kind: "tag", n: 1, label: "Tagging", leg: true }],
+  assert.deepEqual(r.json.work.queued, [{ kind: "tag", n: 1, label: "Tagging", leg: true, fast: true }],
     "…and the work it just queued, in the carriers' shape");
 });
 
@@ -215,7 +257,7 @@ test("an upload answers `work` too — a drop lights the chip on the same tick",
   assert.equal(json.uploaded.length, 1, "the rows, as before");
   assert.ok(json.work, "…and the work the drop queued");
   const waiting = json.work.queued.find((q) => q.leg);
-  assert.deepEqual(waiting, { kind: "tag", n: 1, label: "Tagging", leg: true });
+  assert.deepEqual(waiting, { kind: "tag", n: 1, label: "Tagging", leg: true, fast: true });
 });
 
 test("…and the query every work read runs has an index the planner actually takes", async () => {

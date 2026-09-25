@@ -155,6 +155,10 @@ export function summaryFor(j) {
       return bits.join(" · ");
     }
     if (j.kind === "retag") return d.skipped ? `skipped (${d.skipped})` : `queued ${d.queued ?? 0} item${d.queued === 1 ? "" : "s"}`;
+    // An embed batch: the count is the label (labelFor), so this says only
+    // what deviates — items skipped (each has its own failed row) — and what
+    // it cost, when the engine reports tokens (an on-device one reports none).
+    if (j.kind === "embed") return [d.skipped ? `${d.skipped} skipped` : "", tokensNote(d.tokens)].filter(Boolean).join(" · ");
     if (j.kind === "cancel") {
       // Name the verb: both strengths come through one route, so this row is
       // the only place an abort is distinguishable from a cancel — with
@@ -267,7 +271,7 @@ function jobRow(j, newSince = 0) {
 // between "running" and a number you can decide against — the row is a long
 // single pass, not a queue you can count on screen. Pure and exported for the
 // same reason summaryFor is.
-const RUNNING_VERBS = { transcribe: "transcribing", extract: "extracting", tag: "tagging", face: "rendering chart", fetch: "fetching data" };
+const RUNNING_VERBS = { transcribe: "transcribing", extract: "extracting", tag: "tagging", face: "rendering chart", fetch: "fetching data", embed: "embedding" };
 export function runningStatus(j) {
   if (RUNNING_VERBS[j.kind]) return RUNNING_VERBS[j.kind];
   const planned = Number(j.detail?.planned);
@@ -282,9 +286,12 @@ export function runningStatus(j) {
 // board's row is the file alone; a refresh row (no file) the card alone; a
 // connector vehicle reads `snyr · Synergy CHC Corp.`, which is the vehicle.
 // A board-level row (a retag pass, a cancel) wears its kind badge and needs
-// no label — it used to render the literal "item " there.
+// no label — it used to render the literal "item " there. An embed batch of
+// more than one item has no one file to name, so its count is its name.
 export function labelFor(j) {
   if (j.kind === "ingest") return "Feed run";
+  const items = Number(j.detail?.items);
+  if (j.kind === "embed" && !j.target && items > 0) return `${items} item${items === 1 ? "" : "s"}`;
   const bits = [];
   for (const s of [j.target, j.entity_display]) if (s && !bits.includes(s)) bits.push(s);
   if (bits.length) return bits.join(" · ");

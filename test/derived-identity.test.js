@@ -634,8 +634,8 @@ test("reprocessBoard: every instance on the board re-enters the pipeline, board-
   assert.deepEqual(r.json.work, {
     running: [],
     queued: [
-      { kind: "extract", n: 1, label: "Extraction", leg: true },
-      { kind: "tag", n: 1, label: "Tagging", leg: true },
+      { kind: "extract", n: 1, label: "Extraction", leg: true, fast: true },
+      { kind: "tag", n: 1, label: "Tagging", leg: true, fast: true },
     ],
   });
   assert.equal((await req(base, "POST", `/api/admin/boards/00000000-0000-4000-8000-000000000000/reprocess`, { sid: admin.sid })).status, 404);

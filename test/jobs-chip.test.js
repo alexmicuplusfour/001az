@@ -60,3 +60,17 @@ test("a sweep row and a lane backlog count as they always did, beside the legs",
   assert.equal(chip.querySelector(".jobs-chip-count")?.textContent, "7");
   assert.match(chip.title, /Transcription: 1 running — Embedding: 4 waiting — Tagging: 2 waiting/);
 });
+
+test("a running embed batch counts as its items, beside the items still waiting", () => {
+  // planning/embed-work-plan.md Stage 2: the server keeps a running batch's
+  // items out of the waiting count and puts their number on the row as `n`.
+  // Counted as one row, a 64-item batch would read "1 running" and the total
+  // would drop by 63 the moment the batch started.
+  state.work = {
+    running: [{ id: 9, kind: "embed", label: "Embedding", target: null, item_id: null, entity_id: null, entity_display: null, started_at: Date.now() - 800, n: 64 }],
+    queued: [{ kind: "embed", label: "Embedding", n: 936, fast: true }],
+  };
+  const chip = jobsChip();
+  assert.equal(chip.querySelector(".jobs-chip-count")?.textContent, "1000");
+  assert.match(chip.title, /Embedding: 64 running, 936 waiting/);
+});

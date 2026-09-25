@@ -1233,13 +1233,17 @@ async function workFor(boardId, board = null) {
   // pipeline rows (planning/instance-work-plan.md, close read F2): the tag
   // leg claims an audio row and only then finds its transcript missing, so
   // for a moment one clip is both a claimed row and the transcribe lane's
-  // running row. One unit of work, one record — decided here, once.
-  const runningIds = running.map((j) => j.item_id).filter((x) => x != null);
+  // running row. One unit of work, one record — decided here, once. An embed
+  // batch's row names every item it holds (detail.item_ids), and the same
+  // list is its `n` below, so the count and the exclusion can't disagree
+  // (embed-work-plan.md Stage 2).
+  const runningIds = running.flatMap((j) => j.detail?.item_ids ?? (j.item_id != null ? [j.item_id] : []));
   const [queued, legs] = await Promise.all([
     boardLaneQueues(db, boardId, lanes, runningIds),
     pipelineWork(db, boardId, runningIds),
   ]);
   const labelled = (r) => ({ ...r, label: capabilityLabel(r.kind) });
+  const fastLanes = new Set(lanes.filter((l) => l.fast).map((l) => l.kind));
   return {
     // Job rows and claimed instances in ONE list, oldest first, wearing the
     // kind vocabulary either way — the same badges History wears.
@@ -1258,15 +1262,21 @@ async function workFor(boardId, board = null) {
         // stored hex name.
         entity_display: j.entity_display,
         started_at: j.started_at,
+        // How many items the row holds, when it holds a batch: the chip counts
+        // it as that many, the way the waiting counts count items.
+        ...(j.detail?.item_ids ? { n: j.detail.item_ids.length } : {}),
       })),
       ...legs.running.map((r) => ({ ...labelled(r), leg: true })),
     ].sort((a, b) => a.started_at - b.started_at),
-    // The pipeline queues first, in pipeline order, marked `leg` — the one
-    // fact the cancel verb and the poll cadence need (D3, F5) — then the
-    // lane backlogs.
+    // The pipeline queues first, in pipeline order, then the lane backlogs.
+    // Two marks for two facts. `leg` means Cancel queued can pull it (the
+    // modal's cancel verbs read it). `fast` means it clears at the worker's
+    // pace, so the page checks every 4s rather than every 30s (pollDelay
+    // reads it). Every leg is both; a lane is `fast` when servedBacklogLanes
+    // says so (embed-work-plan.md D2).
     queued: [
-      ...legs.queued.map((q) => ({ ...labelled(q), leg: true })),
-      ...queued.map(labelled),
+      ...legs.queued.map((q) => ({ ...labelled(q), leg: true, fast: true })),
+      ...queued.map((q) => ({ ...labelled(q), ...(fastLanes.has(q.kind) ? { fast: true } : {}) })),
     ],
   };
 }

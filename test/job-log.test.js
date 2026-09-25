@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { startServer, seedBoard, seedUser, adminSession, req, primeSidecars } from "./helpers.js";
+import { startServer, seedBoard, seedUser, adminSession, req, primeSidecars, seedInstance } from "./helpers.js";
 import { _reset as resetPool } from "../server/resource-pool.js";
 import {
   addJobLog,
@@ -81,8 +81,16 @@ const runWorker = (opts = {}) => {
   return startWorker({ db, galleryDir: srv.galleryDir, thumbsDir: srv.thumbsDir, ...opts });
 };
 
+// Embed rows are left out. The worker these tests run also runs the embed
+// sweep, with the real on-device embedder, and since every batch is a row
+// (embed-work-plan.md Stage 2) one lands beside the row under test on its own
+// clock — enough to fail a count, or to satisfy a wait for "some row is ok"
+// before the right one does. The embed tests drive embedBatch directly and
+// read their rows with embedRowsFor.
 const jobsFor = async (boardId) =>
-  (await db.query("SELECT * FROM job_log WHERE board_id=$1 ORDER BY id", [boardId])).rows;
+  (await db.query("SELECT * FROM job_log WHERE board_id=$1 AND kind <> 'embed' ORDER BY id", [boardId])).rows;
+const embedRowsFor = async (boardId) =>
+  (await db.query("SELECT * FROM job_log WHERE board_id=$1 AND kind='embed' ORDER BY id", [boardId])).rows;
 
 const itemPayload = async (id) =>
   (await db.query("SELECT payload FROM items WHERE id=$1", [id])).rows[0]?.payload;
@@ -763,6 +771,35 @@ test("retag sweep: one board-run row with the queued count", async () => {
   assert.equal(rows[0].item_id, null); // a board run, not an instance job
 });
 
+// ── embeds (planning/embed-work-plan.md Stage 2) ──
+// One row per call, because the embedder bills per call. `running` while the
+// call is in the air, carrying the batch so workFor can keep those items out
+// of the waiting count; settled with what landed.
+
+const EMBEDDER = { provider: "openai", apiKey: "k", model: "text-embedding-3-small" };
+const seedDue = async (board, name) => (await seedInstance(db, board, "tagged", {
+  payload: { files: [{ name: `${name}.stored`, original_name: name, kind: "image" }] },
+})).id;
+// This board's due rows only: the pull is app-wide, and other tests leave rows.
+const dueOn = async (board) =>
+  (await itemsNeedingEmbedding(db, EMBEDDER.model, 64)).filter((r) => r.board_id === board);
+
+// The /embeddings stub. `answer` decides each call from its input: "ok", a
+// status to fail with, or a promise to hold the call on.
+function stubEmbeddings(answer) {
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => {
+    if (!String(url).includes("/embeddings")) return realFetch(url, opts);
+    const { input } = JSON.parse(opts.body);
+    const a = await answer(input);
+    if (typeof a === "number") return { ok: false, status: a, json: async () => ({ error: { message: `upstream ${a}` } }) };
+    return { ok: true, status: 200, json: async () => ({
+      data: input.map((_, i) => ({ index: i, embedding: [1, 0] })), usage: { prompt_tokens: 7 * input.length },
+    }) };
+  };
+  return () => { global.fetch = realFetch; };
+}
+
 test("embed: a marked-and-skipped poison item writes a failed row", async () => {
   const board = await seedBoard(db, "jobs-embed");
   const insertTagged = async (description) => (await db.query(
@@ -773,28 +810,115 @@ test("embed: a marked-and-skipped poison item writes a failed row", async () => 
   await insertTagged("a fine description");
   const poison = await insertTagged("POISON text the embedder rejects");
 
-  // The embed-sweep stub: /embeddings 400s any request whose input mentions
-  // POISON, so the batch fails, isolation runs, and only the poison is marked.
-  const realFetch = global.fetch;
-  global.fetch = async (url, opts) => {
-    if (!String(url).includes("/embeddings")) return realFetch(url, opts);
-    const { input } = JSON.parse(opts.body);
-    if (input.some((t) => t.includes("POISON")))
-      return { ok: false, status: 400, json: async () => ({ error: { message: "rejected input" } }) };
-    return { ok: true, status: 200, json: async () => ({ data: input.map((_, i) => ({ index: i, embedding: [1, 0] })), usage: {} }) };
-  };
+  // 400 any request whose input mentions POISON, so the batch fails,
+  // isolation runs, and only the poison is marked.
+  const restore = stubEmbeddings((input) => (input.some((t) => t.includes("POISON")) ? 400 : "ok"));
   try {
-    const rows = await itemsNeedingEmbedding(db, "text-embedding-3-small", 64);
-    const r = await embedBatch(db, { provider: "openai", apiKey: "k", model: "text-embedding-3-small" }, rows);
+    const r = await embedBatch(db, EMBEDDER, await itemsNeedingEmbedding(db, EMBEDDER.model, 64));
     assert.ok(r.skipped >= 1);
   } finally {
-    global.fetch = realFetch;
+    restore();
   }
-  const rows = (await jobsFor(board)).filter((r) => r.kind === "embed");
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].outcome, "failed");
-  assert.equal(Number(rows[0].item_id), poison);
-  assert.match(rows[0].error, /rejected input/);
+  // Two rows (embed-work-plan.md Stage 2): the batch's, which counts the
+  // poison as skipped, and the poison's own failed row, which lights the dot.
+  const rows = await embedRowsFor(board);
+  assert.equal(rows.length, 2);
+  const batch = rows.find((r) => r.outcome === "ok");
+  assert.equal(batch.detail.skipped, 1, "the batch counts what it skipped");
+  assert.equal(batch.detail.embedded, 1);
+  const failed = rows.find((r) => r.outcome === "failed");
+  assert.equal(Number(failed.item_id), poison);
+  assert.match(failed.error, /upstream 400/);
+});
+
+test("embed: a batch is one row — running with its items while the call is held, settled ok after", async () => {
+  const board = await seedBoard(db, "jobs-embed-batch");
+  const a = await seedDue(board, "a.png");
+  const b = await seedDue(board, "b.png");
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const restore = stubEmbeddings(() => held.then(() => "ok"));
+  try {
+    const run = embedBatch(db, EMBEDDER, await dueOn(board));
+    // The call is in the air: the row is there, running, holding the batch.
+    const running = await until(async () => {
+      const r = (await listRunningJobs(db, board)).filter((j) => j.kind === "embed");
+      return r.length ? r : null;
+    });
+    assert.equal(running.length, 1, "one running row for the batch");
+    assert.equal(running[0].detail.items, 2);
+    assert.deepEqual(running[0].detail.item_ids.map(Number).sort(), [a, b].sort());
+    assert.equal(running[0].item_id, null, "two items: no one item to name");
+    assert.equal(running[0].target, null);
+    release();
+    await run;
+  } finally {
+    restore();
+  }
+  const rows = await embedRowsFor(board);
+  assert.equal(rows.length, 1, "the same row, settled — not a second one");
+  assert.equal(rows[0].outcome, "ok");
+  assert.equal(rows[0].detail.items, 2);
+  assert.equal(rows[0].detail.embedded, 2);
+  assert.equal(rows[0].detail.item_ids, null, "the ids are dropped once nothing runs");
+  assert.deepEqual(rows[0].detail.tokens, { in: 14, out: 0 }, "what the call spent, from its usage");
+  assert.equal(rows[0].detail.engine, "openai:text-embedding-3-small");
+});
+
+test("embed: a one-item batch is named by its file, like every other row", async () => {
+  const board = await seedBoard(db, "jobs-embed-one");
+  const id = await seedDue(board, "only.png");
+  const restore = stubEmbeddings(() => "ok");
+  try {
+    await embedBatch(db, EMBEDDER, await dueOn(board));
+  } finally {
+    restore();
+  }
+  const [row] = await embedRowsFor(board);
+  assert.equal(row.outcome, "ok");
+  assert.equal(row.target, "only.png");
+  assert.equal(Number(row.item_id), id);
+  assert.equal(row.detail.items, 1);
+});
+
+test("embed: an engine failure is one 'will retry' row, repeats fold into it, and a success ends the fold", async () => {
+  const board = await seedBoard(db, "jobs-embed-down");
+  await seedDue(board, "x.png");
+  await seedDue(board, "y.png");
+  let status = 503;
+  const restore = stubEmbeddings(() => status);
+  const attempt = async () => {
+    const due = await dueOn(board);
+    await assert.rejects(embedBatch(db, EMBEDDER, due), /503/, "a batch-level failure still throws, for the caller's backoff");
+  };
+  try {
+    await attempt();
+    let rows = await embedRowsFor(board);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].outcome, "requeued", "the batch is still queued — it will retry, it hasn't failed");
+    assert.match(rows[0].error, /503/);
+    assert.equal(rows[0].detail.item_ids, null);
+
+    await attempt();
+    rows = await embedRowsFor(board);
+    assert.equal(rows.length, 1, "the repeat folds into the row it repeats");
+    assert.equal(rows[0].detail.attempts, 2);
+
+    // One item succeeds (a one-item batch, so its row carries the item)...
+    status = "ok";
+    const [first] = await dueOn(board);
+    await embedBatch(db, EMBEDDER, [first]);
+    // ...and the next failure starts a new row instead of extending the old one.
+    status = 503;
+    await attempt();
+    rows = await embedRowsFor(board);
+    assert.deepEqual(rows.map((r) => r.outcome), ["requeued", "ok", "requeued"],
+      "a success in between ends the fold, even one that names an item");
+  } finally {
+    restore();
+  }
+  const { rows: [dot] } = await db.query("SELECT count(*)::int AS n FROM job_log WHERE board_id=$1 AND outcome='failed'", [board]);
+  assert.equal(dot.n, 0, "no failed row, so no red dot: nothing was given up on");
 });
 
 test("kind=refresh serves field_snapshots; has_refresh and scheduled stamps ride along", async () => {

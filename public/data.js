@@ -62,12 +62,15 @@ const IN_FLIGHT = new Set([...ACTIVE, ...QUEUED]);
 // (The server filters queued to n > 0, so presence is the test.)
 export const workRunning = () => state.work.running.length > 0;
 export const workInFlight = () => workRunning() || state.work.queued.length > 0;
-// A pipeline leg's backlog is work WAITING that drains at claim pace — the
-// worker's next tick takes it — unlike a lane backlog (a transcription is
-// minutes), so it earns the fast tier the cards' own pending statuses always
-// did. The server marks the leg lanes; no client-side list of which kinds
-// are legs (instance-work-plan.md, D3/F5).
-export const workLegQueued = () => state.work.queued.some((q) => q.leg);
+// A backlog the worker clears within a tick or two: a pipeline leg (its next
+// tick claims it) or an embed batch (picked up on the sweep's next 3s poll,
+// done a second or so later). It earns the
+// fast tier the cards' own pending statuses always did. A transcription
+// backlog doesn't, because a clip takes minutes and shows as a running row
+// while it works. The server marks which is which with `fast`, so there's no
+// client-side list of kinds (embed-work-plan.md D2). Not `leg`: that mark
+// means "Cancel queued can pull it", which embeds aren't.
+export const workFastQueued = () => state.work.queued.some((q) => q.fast);
 export function setWork(w) {
   if (!w) return; // absent on a server that predates the payload — keep the last known state
   const had = workInFlight();
@@ -333,13 +336,14 @@ export function pollDelay() {
   // this a paused backlog would hold the 4s poll open indefinitely.
   // Both carriers of "something is in flight" are read: the cards (the
   // per-card routes mirror their report there instantly) and the work
-  // payload (a claimed leg is a running row; a waiting leg drains at claim
-  // pace, so its lane is fast-tier work too).
-  if (needsPoll() || workRunning() || workLegQueued()) return state.boardPaused && !moving() ? 30000 : 4000;
-  // A lane backlog with nothing running drains at sweep pace (one clip at a
-  // time, a transcription is minutes) — the slow tier tracks it without
-  // holding the fast poll open for hours behind a lane backoff, and the
-  // running row a claim produces promotes the cadence the moment work moves.
+  // payload (a claimed leg is a running row; a backlog marked `fast` clears
+  // within a tick or two, so it's fast-tier work too).
+  if (needsPoll() || workRunning() || workFastQueued()) return state.boardPaused && !moving() ? 30000 : 4000;
+  // A backlog not marked `fast` (today only transcription's: one clip at a
+  // time, minutes each) with nothing running drains at sweep pace. The slow
+  // tier tracks it without holding the fast poll open for hours behind a lane
+  // backoff, and the running row a claim produces promotes the cadence the
+  // moment work moves.
   if (workInFlight() || liveBoard() || state.boardIngestNextRun != null || state.alerts.length) return 30000;
   return 0;
 }
