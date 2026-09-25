@@ -1,4 +1,15 @@
 {
   "apiVersion": 1,
-  "plugins": []
+  "plugins": [
+    {
+      "id": "alexmicuplusfour.arena",
+      "kind": "source",
+      "label": "Are.na",
+      "description": "Images from a public Are.na channel — no key needed.",
+      "author": "alexmicuplusfour",
+      "version": "1.0.0",
+      "apiVersion": 1,
+      "source": "github:alexmicuplusfour/001az-arena@1490336c725c2958b5adeb455c17f59852f340e1"
+    }
+  ]
 }
