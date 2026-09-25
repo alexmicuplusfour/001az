@@ -15,15 +15,18 @@ import { recordIngest } from "../db.js";
 import { singleFlight, SAFETY_CAP, cacheTtl, readWindow, writeWindow, resetWindow, ageWindow } from "./window-cache.js";
 
 // Browse column kinds are display vocabulary (usd/percent drive client
-// formatting); the filter engine only knows text/number/date.
-const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "number", date: "date" };
+// formatting); the filter engine only knows text/number/date. Its keys are
+// the column kinds the host knows, which the plugin loader holds a
+// connector-domain's columns to.
+export const FILTER_KIND = { text: "text", number: "number", usd: "number", percent: "number", date: "date" };
 
 // Contract-declared numeric presets ("Large — over $10 billion"), normalized
-// on the way into the catalog: plugin-domain loading validates no browse
-// shapes at all (plugin-loader validateBuilt), so this is the one gate
-// between a malformed plugin preset and the modal. Presentation sugar only —
-// picking one writes a plain { op, value } filter row; the engine, the
-// validator, and the saved config never know presets exist.
+// on the way into the catalog: plugin-domain loading checks browse's columns,
+// sorts and filters but not presets (plugin-loader validateDomainModule), so
+// this is the one gate between a malformed plugin preset and the modal.
+// Presentation sugar only — picking one writes a plain { op, value } filter
+// row; the engine, the validator, and the saved config never know presets
+// exist.
 const PRESET_OPS = new Set(["gte", "lte"]);
 function presetsOf(column) {
   if ((FILTER_KIND[column.kind] || "text") !== "number") return null;
@@ -226,7 +229,10 @@ export function feedAdapter(conn) {
         return {
           fn: c.key,
           kind: FILTER_KIND[c.kind] || "text",
-          label: c.label,
+          // An unlabelled column is named by its key, as every other unlabelled
+          // sub-entry is — the ingest modal's filter menu and preview header
+          // both print this (plugin-contract-plan.md, Stage 5).
+          label: c.label || c.key,
           display: c.kind,
           // `preview: true` opts a column into the ingest preview's column set
           // (see ingest-modal). Kept off the object when unset so the catalog

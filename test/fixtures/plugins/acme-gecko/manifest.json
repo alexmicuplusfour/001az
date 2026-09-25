@@ -5,5 +5,6 @@
   "domain": "crypto",
   "label": "Acme Gecko",
   "description": "A test crypto provider (fixture)",
+  "version": "1.0.0",
   "main": "index.js"
 }

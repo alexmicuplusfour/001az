@@ -10,7 +10,7 @@
 // seam. Probe record: planning/gemini-research-plan.md.
 import { DEFAULT_TOOL, OUTPUT_BUDGET, clippedError, wholeCall, providerError, rejectDocuments } from "./tool.js";
 import { askFor, negotiate } from "./refusals.js";
-import { compatWire, compatFetch, temperatureAsked } from "./compat.js";
+import { compatWire, compatFetch, temperatureAsked, quirks } from "./compat.js";
 
 // Research turns legitimately run minutes — searching, digesting, thinking —
 // which is exactly why the Anthropic wire declines a short deadline and rides
@@ -90,12 +90,13 @@ async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base,
   if (base && base !== desc.base)
     throw new Error(`${desc.label}: web research speaks the provider's native endpoint and cannot honor this connection's server URL — turn research off for this board, or use a connection without one`);
   const url = `${desc.nativeBase}/models/${encodeURIComponent(model)}:generateContent`;
+  const q = quirks(desc);
   const send = (sent) => compatFetch(desc.label, url, {
     method: "POST",
     headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
     // The temperature value comes from the descriptor's compat quirk block —
     // one measured choice per provider, not per protocol.
-    body: JSON.stringify(googleRequest({ systemText, schema, parts, tool, temperature: sent.temperature ? desc.compat.temperature : undefined })),
+    body: JSON.stringify(googleRequest({ systemText, schema, parts, tool, temperature: sent.temperature ? q.temperature : undefined })),
     signal: researchSignal(),
   });
   // The refusal negotiation (negotiate in refusals.js), temperature only —
@@ -103,7 +104,7 @@ async function nativeTag(desc, { apiKey, model, systemText, schema, parts, base,
   // downstream as always. Keyed on the native URL so a learned refusal never
   // bleeds between a provider's two endpoints.
   const r = await negotiate({
-    sent: { temperature: askFor(url, model).temperature && temperatureAsked(desc.compat, model) },
+    sent: { temperature: askFor(url, model).temperature && temperatureAsked(q, model) },
     sendFromSent: send,
     errOf: (res) => googleError(res, desc.label),
     endpoint: url, model, label: desc.label,

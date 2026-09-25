@@ -1,14 +1,16 @@
 // The "Add plugin" browse modal: the whole CONNECTION catalog (every non-core
-// plugin), each with its label + description + role tag. Available ones show an
-// Add button (writes installed:true, refreshes the page underneath); already-
-// installed ones show a disabled "Added" — so added plugins stay in the list
-// across reopens, not just within one session. Above the list, an "Install from
-// URL" field fetches, installs, and loads a community plugin live (GitHub / npm /
-// tarball); the browse list below is the catalog that ships with the app.
+// plugin), each with its label + description + role tag — the image's example
+// plugins last, tagged as examples. Available ones show an Add button (writes
+// installed:true, refreshes the page underneath); already-installed ones show
+// a disabled "Added" — so added plugins stay in the list across reopens, not
+// just within one session. Above the list, an "Install from URL" field
+// fetches, installs, and loads a community plugin live (GitHub / npm /
+// tarball) — unless the operator has turned that off (PLUGIN_INSTALL_DISABLE);
+// the browse list below is the catalog that ships with the app.
 import { toast } from "./toast.js";
 import { api } from "./api.js";
 import { createModal, busy } from "./modal.js";
-import { tagFor } from "./admin-plugins.js";
+import { tagFor, isExample } from "./admin-plugins.js";
 
 export function openAddPluginModal(connections, ctx) {
   const { body, close } = createModal({
@@ -16,7 +18,16 @@ export function openAddPluginModal(connections, ctx) {
     bodyStyle: "display:flex;flex-direction:column;",
   });
 
-  body.appendChild(installFromUrlZone(ctx, close));
+  // The operator's lock (PLUGIN_INSTALL_DISABLE) closes the URL box; the list
+  // below — the app's own catalog and its bundled examples — stays.
+  if (ctx.installLocked) {
+    const locked = document.createElement("p");
+    locked.className = "sub";
+    locked.textContent = "Installing plugins from a URL, a package or a path is turned off on this server.";
+    body.appendChild(locked);
+  } else {
+    body.appendChild(installFromUrlZone(ctx, close));
+  }
 
   const intro = document.createElement("p");
   intro.className = "sub";
@@ -33,7 +44,10 @@ export function openAddPluginModal(connections, ctx) {
     empty.textContent = "No connections available.";
     list.appendChild(empty);
   } else {
-    for (const p of connections) list.appendChild(row(p));
+    // The app's own plugins first, then its examples — added or not, an
+    // example keeps its place at the end.
+    for (const p of [...connections.filter((c) => !isExample(c)), ...connections.filter(isExample)])
+      list.appendChild(row(p));
   }
 
   function row(p) {

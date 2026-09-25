@@ -3,7 +3,8 @@
 // (AI providers, data providers) side by side, no segment headers. Each card =
 // label + one-line description + a right-aligned role tag; the gear opens the
 // plugin's config modal, Remove takes it off the page (disabled for
-// built-ins). "Add plugin" browses what's available. Everything renders from
+// built-ins), and a plugin installed from a source gets Update. "Add plugin"
+// browses what's available. Everything renders from
 // GET /api/admin/plugins; this module holds no catalog knowledge of its own.
 import { toast } from "./toast.js";
 import { api } from "./api.js";
@@ -21,24 +22,36 @@ const KIND_FILTERS = [["ai", "AI"], ["connector", "Data"], ["media", "Media"], [
 let activeKind = "all";
 
 
+// The word every tag leads with: the card's family.
+const FAMILY = { ai: "AI", connector: "Data", source: "Source", media: "Media" };
+
+// One of the image's own example plugins (examples/plugins/*): a bundled row
+// nobody has added yet, or a plugin added from one (its `source.bundled`).
+// Added or not, it is the same example — it keeps its tag and, in the Add
+// modal, its place at the end (planning/plugin-contract-plan.md, Stage 4).
+export const isExample = (p) => !!(p.bundled || p.source?.bundled);
+
 // The right-aligned tag: category + the role/qualifier that defines the card.
 // AI shows the first capability this provider currently serves — read off the
 // capabilities feed by the same rule as the badges, so no capability can be
 // left out of a hand-list here; a data connector shows its domain; media is
-// always core.
+// always core. An example says that instead, so it never reads as one of the
+// app's own integrations; its AI card's badges still name what it serves.
 export function tagFor(p, caps) {
   // Two kinds of row carry only a MANIFEST, with no live p.connector/p.ai
   // descriptor behind it: an external plugin that failed to load, and a bundled
   // example nobody has installed (welcome-plan.md Stage 2b). Guard every
   // descriptor deref here and in keyNote below — both run over the same list.
   if (p.state?.loadError) return "Plugin · error";
+  const family = FAMILY[p.kind];
+  if (isExample(p)) return `${family} · example`;
   if (p.kind === "ai") {
     const role = servingRoles(caps, p.name)[0];
-    return role ? `AI · ${role.agent}` : "AI";
+    return role ? `${family} · ${role.agent}` : family;
   }
-  if (p.kind === "connector") return `Data · ${p.connector?.domain ?? "external"}`;
-  if (p.kind === "source") return p.core ? "Source · local" : "Source · remote";
-  return "Media · core";
+  if (p.kind === "connector") return `${family} · ${p.connector?.domain ?? "external"}`;
+  if (p.kind === "source") return `${family} · ${p.core ? "local" : "remote"}`;
+  return `${family} · core`;
 }
 
 // The dynamic key state — whether a connection is configured yet. The static
@@ -77,7 +90,7 @@ export async function loadPluginState() {
   // `capabilities` is the one status source: the modal's sections, the
   // Capabilities tab, and the cards' badges/tags/star states all read it —
   // the legacy `slots` payload has no reader left (7c).
-  return { plugins: data.plugins, keys, connections, capabilities: caps.capabilities };
+  return { plugins: data.plugins, installLocked: !!data.installLocked, keys, connections, capabilities: caps.capabilities };
 }
 
 // One refresh for the two surfaces that project plugin state, threading the
@@ -104,27 +117,20 @@ export async function renderPlugins(prefetched) {
   // fetched so we don't hit the network twice for the same render.
   let state = prefetched;
   if (!state) { try { state = await loadPluginState(); } catch { return; } }
-  const { plugins, keys, connections: srcConnections, capabilities } = state;
+  const { plugins } = state;
   const installed = plugins.filter((p) => p.state.installed);
 
   const sec = document.createElement("div");
   sec.className = "section";
   sec.innerHTML = `<h2>Plugins</h2><p class="sub">Built-ins and connections in one place. Add the services you use; the built-ins are always on. Configure keys and options via the gear.</p>`;
 
-  // refresh repaints BOTH admin surfaces that project this state — the cards
-  // here and the Capabilities tab, which would otherwise go stale the moment a
-  // modal opened from THIS tab rebinds something. (Deliberate module cycle with
-  // admin-capabilities; both sides only call each other's functions later, so
-  // ESM resolves it fine.)
-  // `capabilities` rides in ctx from the FIRST render — the modal's sections
-  // read it, and before 7c a gear-opened modal only received it after its
-  // first mutation's reload merged fresh state (sections were missing on
-  // first open from this tab).
-  const ctx = {
-    plugins, keys, connections: srcConnections, capabilities,
-    refresh: refreshPluginSurfaces,
-    getState: loadPluginState,
-  };
+  // ctx is the whole state, from the FIRST render — the modal's sections read
+  // it — plus refresh, which repaints BOTH admin surfaces that project this
+  // state: the cards here and the Capabilities tab, which would otherwise go
+  // stale the moment a modal opened from THIS tab rebinds something.
+  // (Deliberate module cycle with admin-capabilities; both sides only call
+  // each other's functions later, so ESM resolves it fine.)
+  const ctx = { ...state, refresh: refreshPluginSurfaces, getState: loadPluginState };
 
   // The Add modal browses the whole CONNECTION catalog (every non-core plugin),
   // marking installed ones "Added" — so they stay visible across reopens, not
@@ -279,6 +285,10 @@ function pluginRow(p, ctx) {
   gear.onclick = () => openPluginModal(p, ctx);
   row.appendChild(gear);
 
+  // A plugin installed from a source can fetch it again; a built-in updates
+  // with the app.
+  if (p.external) row.appendChild(updateButton(p, ctx));
+
   const remove = document.createElement("button");
   remove.type = "button";
   remove.textContent = "Remove";
@@ -296,18 +306,19 @@ function pluginRow(p, ctx) {
   return row;
 }
 
-// An external plugin's provenance: where it came from + the ref actually installed.
+// An external plugin's provenance: where it came from, the version its author
+// named (when the manifest names one) and the ref actually installed.
 function sourceLine(source) {
   const el = document.createElement("div");
   el.className = "p-src";
-  el.textContent = source.ref ? `${source.url} · ${source.ref}` : source.url;
+  el.textContent = [source.url, source.version, source.ref].filter(Boolean).join(" · ");
   el.title = el.textContent;
   return el;
 }
 
-// A failed-to-load external plugin: its reason + Retry (re-run the install from the
-// stored URL — installFromUrl retries an errored id in place) + Remove (uninstall).
-// No gear/badges/key-note: there's no live descriptor to configure.
+// A failed-to-load external plugin: its reason + Retry (the Update verb, from the
+// stored source) + Remove (uninstall). No gear/badges/key-note: there's no live
+// descriptor to configure.
 function erroredRow(p, ctx) {
   const row = document.createElement("div");
   row.className = "plugin-row errored";
@@ -334,14 +345,7 @@ function erroredRow(p, ctx) {
   main.appendChild(meta);
   row.appendChild(main);
 
-  const retry = document.createElement("button");
-  retry.type = "button";
-  retry.className = "ghost sm";
-  retry.textContent = "Retry";
-  retry.disabled = !p.source?.url;
-  retry.title = p.source?.url ? "Re-download and load from the stored source" : "No source URL on record";
-  retry.onclick = busy(retry, () => retryInstall(p, ctx));
-  row.appendChild(retry);
+  row.appendChild(updateButton(p, ctx));
 
   const remove = document.createElement("button");
   remove.type = "button";
@@ -353,24 +357,44 @@ function erroredRow(p, ctx) {
   return row;
 }
 
-async function retryInstall(p, ctx) {
-  // Retry re-downloads and re-RUNS code from the stored URL — the same risk the
-  // install modal confirms. For a moving ref (a branch / the default) that code
-  // may have changed since it was first trusted, so name the risk again here.
-  // (Button state is `busy`'s job — the shared helper the rest of the admin
-  // client uses.)
-  if (!confirm(
-    `Reinstall ${p.label} from:\n${p.source.url}\n\n` +
-    "This re-downloads and runs code from the internet with the server's full " +
-    "access — there is no sandbox. Only continue if you trust this source.",
+// Update and Retry: one verb (POST …/update), two labels — Retry is its name on
+// a card whose code failed to load. The operator's lock (PLUGIN_INSTALL_DISABLE)
+// leaves only the bundled examples updatable; the button then stays, disabled,
+// saying why. (Button state while it runs is `busy`'s job — the shared helper
+// the rest of the admin client uses.)
+function updateButton(p, ctx) {
+  const retry = !!p.state.loadError;
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "ghost sm";
+  b.textContent = retry ? "Retry" : "Update";
+  const locked = ctx.installLocked && !p.source.bundled;
+  b.disabled = locked;
+  b.title = locked ? "Installing plugins is turned off on this server"
+    : "Fetch it again from its source, keeping its keys and settings";
+  b.onclick = busy(b, () => updateFromSource(p, ctx, retry));
+  return b;
+}
+
+// Fetch an external plugin again from its stored source and swap the new
+// version in; its keys, settings, bindings and pins all stay. That re-RUNS code
+// — at a moving ref (a branch, the default) possibly different code from what
+// was first trusted — so it confirms like an install. Except a bundled source:
+// the image's own examples, which the Add modal installs without asking either.
+async function updateFromSource(p, ctx, retry) {
+  if (!p.source.bundled && !confirm(
+    `${retry ? "Reinstall" : "Update"} ${p.label} from:\n${p.source.url}\n\n` +
+    "This fetches its code again and runs it with the server's full access — " +
+    "there is no sandbox, and the code there may have changed since you added it. " +
+    "Only continue if you trust this source.",
   )) return;
   try {
-    await api("POST", "/api/admin/plugins/install", { url: p.source.url });
-    toast(`${p.label} reinstalled`);
+    await api("POST", `/api/admin/plugins/${p.id}/update`);
+    toast(`${p.label} ${retry ? "reinstalled" : "updated"}`);
     ctx.refresh();
   } catch (err) {
     toast.error(err.message);
-    ctx.refresh(); // a failed retry persisted a fresh reason — re-render so the card shows it
+    ctx.refresh(); // a failed Retry stored a fresh reason — re-render so the card shows it
   }
 }
 
@@ -379,13 +403,12 @@ async function retryInstall(p, ctx) {
 // is only made unavailable (PATCH installed:false), so the copy differs.
 async function removePlugin(p, ctx) {
   const impact = removalImpact(p, ctx);
-  const msg = p.external
-    ? `Uninstall ${p.label}?` +
-      (impact ? `\n\n${impact}` : "") +
-      `\n\nThis deletes its downloaded code. Existing boards keep their data; re-adding means downloading it again.`
-    : `Remove ${p.label}?` +
-      (impact ? `\n\n${impact}` : "") +
-      `\n\nExisting boards keep their data — it just won't refresh until you add it back.`;
+  const msg = [
+    `${p.external ? "Uninstall" : "Remove"} ${p.label}?`,
+    impact,
+    p.external ? `This deletes ${uninstallDeletes(p)}. Existing boards keep their data.`
+      : "Existing boards keep their data — it just won't refresh until you add it back.",
+  ].filter(Boolean).join("\n\n");
   if (!confirm(msg)) return;
   try {
     if (p.external) await api("DELETE", `/api/admin/plugins/${p.id}`);
@@ -395,6 +418,19 @@ async function removePlugin(p, ctx) {
   } catch (err) {
     toast.error(err.message);
   }
+}
+
+// What an uninstall deletes, in the order the server deletes it
+// (plugin-loader.js cleanupPluginConfig): every kind's saved connections or
+// key go with its code, and the confirm says so (plugin-contract-plan.md,
+// Stage 5). An errored card's counts never loaded, so it names the kinds of
+// thing instead.
+function uninstallDeletes(p) {
+  if (p.state.loadError) return "its downloaded code and anything saved for it — connections, keys, settings";
+  const n = p.kind === "ai" ? p.state.keyCount : p.kind === "source" ? p.state.connectionCount : 0;
+  if (n) return `its ${n} saved connection${n === 1 ? "" : "s"} and its downloaded code`;
+  if (p.kind === "connector" && p.state.hasKey) return "its stored API key and its downloaded code";
+  return "its downloaded code";
 }
 
 function removalImpact(p, ctx) {
@@ -407,10 +443,25 @@ function removalImpact(p, ctx) {
     if (roles.length) return `This is ${roles.join(" and ")}.`;
   }
   if (p.kind === "connector") {
+    // A domain plugin's Remove takes its domain: every board on it stops
+    // refreshing, and every other plugin providing it stops working. That, not
+    // being its default — which its own provider nearly always is — is what
+    // the admin is deciding (plugin-contract-plan.md, Stage 5 second pass).
+    if (p.connector.addsDomain) {
+      const domain = p.connector.domain;
+      const others = ctx.plugins
+        .filter((o) => o.kind === "connector" && o.state.installed && o.id !== p.id && o.connector?.domain === domain)
+        .map((o) => o.label);
+      const one = others.length === 1;
+      return `It adds the ${domain} domain, which goes with it: boards on ${domain} stop refreshing` +
+        (others.length ? `, and ${others.join(" and ")}, which provide${one ? "s" : ""} ${domain}, stop${one ? "s" : ""} working.` : ".");
+    }
     const d = domainCap(ctx, p);
     if ((d?.bound?.provider || d?.running?.provider) === p.name) return `This is the default ${p.connector.domain} provider.`;
   }
-  if (p.kind === "source") {
+  // A built-in source is only switched off, so its connections wait for it; an
+  // external one's are deleted with it, which the uninstall sentence says.
+  if (p.kind === "source" && !p.external) {
     const n = p.state.connectionCount || 0;
     if (n) return `Its ${n} saved connection${n > 1 ? "s" : ""} become unusable until you add it back.`;
   }

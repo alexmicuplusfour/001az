@@ -29,7 +29,7 @@ function bind(name, mod) {
   return {
     name,
     manifest: mod.manifest,
-    providers: mod.providers, // raw provider modules (rpm/burst defaults for the plugin registry)
+    providers: mod.providers, // raw provider objects (rpm/burst defaults for the plugin registry)
     providerList: () => providerDescriptors(conn.providers), // live descriptors (single source)
     search: (db, q, board) => runtime.search(db, conn, q, board),
     list: (db, opts, board) => runtime.list(db, conn, opts, board),
@@ -44,7 +44,7 @@ function bind(name, mod) {
     produceFace: (db, entity, source, faceCfg, board) => runtime.produceFace(db, conn, entity, source, faceCfg, board),
     chartSeries: (db, entity, source, opts, board) => runtime.chartSeries(db, conn, entity, source, opts, board),
     // Annotate the declared face producers for a given provider: `available`
-    // = that provider can render it (exports the method named by `requires`),
+    // = that provider can render it (has the method named by `requires`),
     // `supportedBy` = every provider that can. A producer with no `requires`
     // is always available. Drives the mapping modal's "can't render" hint.
     renderableFaces: (providerName) =>
@@ -127,12 +127,11 @@ export async function prefetchClaimedFetches(db, rows) {
 
 // Manifest listing for the client. `providers` is static (descriptors, no key
 // material); the active provider + key state is admin-only, resolved by the
-// /api/admin/plugins catalog. `category` groups siblings in the picker.
+// /api/admin/plugins catalog.
 export function listConnectors() {
   return Object.values(CONNECTORS).map((c) => ({
     name: c.name,
     label: c.manifest.label,
-    category: c.manifest.category || null,
     description: c.manifest.description,
     fields: c.manifest.fields,
     faces: c.manifest.faces || [],
@@ -143,11 +142,10 @@ export function listConnectors() {
     // payload can answer for.
     browse: c.manifest.browse ? { ...c.manifest.browse, filters: undefined } : null,
     template: c.manifest.template,
-    // The domain's own words for its identity slot ("Coin", "each coin is its
-    // own card") — the mapping pane's locked identity row reads this, so users
-    // never meet the word "connector". Label falls back for a plugin domain
-    // that doesn't declare it.
-    identity: c.manifest.identity || { label: c.manifest.label, blurb: `each entry is its own card` },
+    // The domain's own words for what one card is ("each coin is its own
+    // card") — the mapping pane's locked identity row reads the blurb, and
+    // says "each entry is its own card" itself for a domain that declares none.
+    identity: c.manifest.identity || null,
     providers: c.providerList(),
   }));
 }
@@ -156,7 +154,7 @@ export function listConnectors() {
 // Adding a domain or a provider is a live mutation of the maps above; because
 // listConnectors()/providerList() derive from the live `providers` map, the
 // catalog and the resolver update together from a single write. The loader
-// (server/plugins/loader.js) calls these AFTER a module is fully built +
+// (server/plugin-loader.js) calls these AFTER a module is fully built +
 // validated, so a half-built plugin never lands here (register-last).
 
 // Register a whole new data domain (a `connector-domain` plugin). `mod` is the

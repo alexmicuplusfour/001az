@@ -15,9 +15,13 @@ import { getFaceProducer, registerFaceProducer, unregisterFaceProducer } from ".
 import * as runtime from "../server/connectors/runtime.js";
 import { free as poolFree, _reset as resetPool } from "../server/resource-pool.js";
 import * as pacing from "../server/provider-pacing.js";
-import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { generateFace, refreshDueEntity } from "../server/worker.js";
 import { up as migrate0035 } from "../server/migrations/0035_connector_chart_face.js";
+import { getConnector } from "../server/connectors/index.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const coingecko = getConnector("crypto").providers.coingecko;
 
 let srv, db, base, admin, galleryDir, thumbsDir;
 before(async () => {

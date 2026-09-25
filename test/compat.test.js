@@ -457,3 +457,50 @@ test("compat wire: the right-name call is found past an invented one", async () 
   );
   assert.deepEqual(result.input, { kind: ["a"] });
 });
+
+// A plugin may leave the quirk block out, or any key of it, and a key written
+// as `undefined` or `null` is one left out, as a `null` is absent everywhere
+// else a plugin writes one (plugin-contract-plan.md, Stage 5 and its second
+// pass). Without the defaults a missing block threw on every tag, a missing
+// maxTokensField sent a field literally named "undefined" (or "null", with
+// `temperature: null`), and the key test asked for /models/<defaultModel> —
+// which an embed-only plugin doesn't have.
+test("compat wire: a quirk left out, undefined or null keeps its default", async () => {
+  const { compatWire } = await import("../server/ai-providers/wires/compat.js");
+  const blank = (v) => ({ maxTokensField: v, keyTest: v, temperature: v });
+  for (const [what, compat] of [["no quirk block", undefined], ["undefined", blank(undefined)], ["null", blank(null)]]) {
+    const desc = { label: "Blank", base: "http://box.invalid/v1", compat };
+    const rec = recorder(tagOk);
+    await withFetch(rec.fetch, () => compatWire.tag(desc, tagOpts()));
+    assert.equal(rec.bodies[0].max_tokens, OUTPUT_BUDGET, `${what}: the default output-cap field`);
+    assert.ok(!("undefined" in rec.bodies[0]) && !("null" in rec.bodies[0]), `${what}: no field named undefined or null`);
+    assert.ok(!("temperature" in rec.bodies[0]), `${what}: no temperature sent`);
+    assert.equal(rec.bodies[0].tool_choice, "auto", `${what}: an absent forceToolChoice leaves the call unforced`);
+
+    const urls = [];
+    await withFetch(async (url) => { urls.push(url); return new Response("{}", { status: 200 }); },
+      () => compatWire.testKey(desc, { apiKey: "k" }));
+    assert.deepEqual(urls, ["http://box.invalid/v1/models"], `${what}: the index, not /models/undefined`);
+  }
+});
+
+// A connection that names its own server is where every call goes, tagging
+// included (plugin-contract-plan.md, Stage 5 second pass). The anthropic wire's
+// Test and model list read the connection's URL while tag() went to the
+// descriptor's — or, with none, to Anthropic's own API — carrying that
+// connection's key.
+test("anthropic wire: tag() goes to the connection's own server", async () => {
+  const { anthropicWire } = await import("../server/ai-providers/wires/anthropic.js");
+  const urls = [];
+  // A key this test alone uses: the SDK client is cached per (base, key) and
+  // captures globalThis.fetch when it's built.
+  const opts = {
+    ...tagOpts({ name: "record_tags", description: "d" }),
+    apiKey: "k-anthropic-connection-base", model: "claude-fable-5-1", base: "http://connection.invalid",
+  };
+  const gateway = { label: "Gateway", base: "http://descriptor.invalid" };
+  const result = await withFetch(async (url) => { urls.push(String(url)); return anthropicTagOk(); },
+    () => anthropicWire.tag(gateway, opts));
+  assert.deepEqual(result.input, { kind: ["a"] });
+  assert.ok(urls.length && urls.every((u) => u.startsWith("http://connection.invalid/")), urls.join(", "));
+});

@@ -3,7 +3,9 @@
 // against the REAL FMP API (key via FMP_KEY env; never printed). Read-only:
 // no DB, no board mutations. Kept as the standing check that the measured
 // posture (full universe, search bridge, snapshot economics) still holds.
-import * as fmp from "../server/connectors/stocks/financialmodelingprep.js";
+import { providers } from "../server/connectors/stocks/index.js";
+
+const fmp = providers.financialmodelingprep; // built the way the loader builds a plugin — no server
 
 const apiKey = process.env.FMP_KEY;
 if (!apiKey) { console.error("FMP_KEY env required"); process.exit(1); }

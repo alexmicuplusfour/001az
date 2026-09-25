@@ -132,3 +132,11 @@ export const keysCards = (def) => !!def?.capability && def?.output === "scalar";
 export const aiWork = (mapping) =>
   Array.isArray(mapping?.fields) &&
   mapping.fields.some((f) => !!FIELD_SOURCE[f.source]?.capability);
+
+// Normalise a derived identity value for consistent collision detection.
+// Underscores and hyphens are treated as word separators so the AI returning
+// "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
+// Here, beside the table, so validateMapping's option dup-check
+// (mapping-rules.js) keys the same way the runtime resolver (worker.js) does —
+// and so the plugin loader, which runs validateMapping, never imports the worker.
+export const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();

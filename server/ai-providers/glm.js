@@ -7,7 +7,7 @@
 // defaults ON and must be disabled or it burns output tokens, and there is no
 // /models endpoint (keyTest is a one-token completion). No embeddings API on the
 // international platform.
-export default (wires) => ({
+export default ({ wires }) => ({
   label: "GLM",
   description: "Z.ai GLM models for tagging — bring a key",
   wire: wires.compat,

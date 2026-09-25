@@ -5,6 +5,8 @@
 export default function (ctx) {
   const acme = {
     label: "Acme WF",
+    rpm: 30,
+    burst: 15,
     async search() { return [{ id: "wf-1", symbol: "WF", name: "Weatherville" }]; },
     async fetchEntity(id) { return { id, symbol: "WF", name: "Weatherville", fields: {} }; },
     async history() { return [{ t: 0, price: 1 }, { t: 1, price: 2 }]; },

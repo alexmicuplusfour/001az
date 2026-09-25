@@ -6,14 +6,17 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { startServer, adminSession, seedUser, seedBoard, seedItem, req, installConnectors } from "./helpers.js";
 import { createBoard, createEntity, insertItem, getPluginRow, setSetting } from "../server/db.js";
-import { registerConnector, unregisterConnector } from "../server/connectors/index.js";
+import { getConnector, registerConnector, unregisterConnector } from "../server/connectors/index.js";
 import * as runtime from "../server/connectors/runtime.js";
 import { unsupported, dedupeAscending, utcDate, strideArea, aggregateCandles, CHART_TTL_SETTLED } from "../server/connectors/chart-series.js";
 import { manifest as stocksManifest } from "../server/connectors/stocks/index.js";
 import { manifest as cryptoManifest } from "../server/connectors/crypto/index.js";
-import * as fmp from "../server/connectors/stocks/financialmodelingprep.js";
-import * as coingecko from "../server/connectors/crypto/coingecko.js";
-import * as coinmarketcap from "../server/connectors/crypto/coinmarketcap.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const fmp = getConnector("stocks").providers.financialmodelingprep;
+const coingecko = getConnector("crypto").providers.coingecko;
+const coinmarketcap = getConnector("crypto").providers.coinmarketcap;
 
 function response(body, status = 200) {
   return {

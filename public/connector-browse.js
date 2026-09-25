@@ -90,7 +90,9 @@ export function openConnectorBrowse(connectorName) {
     tr.appendChild(selTh);
     for (const col of descriptor.browse.columns) {
       const th = document.createElement("th");
-      th.textContent = col.label;
+      // An unlabelled column is named by its key, as every unlabelled
+      // sub-entry is (plugin-contract-plan.md, Stage 5).
+      th.textContent = col.label || col.key;
       if (ALIGN_END.has(col.kind)) th.className = "cb-end";
       if (col.width) th.style.width = `${col.width}px`;
       tr.appendChild(th);
@@ -368,7 +370,7 @@ export function openConnectorBrowse(connectorName) {
     opts.sort = descriptor.browse.defaultSort || descriptor.browse.sorts?.[0]?.key || null;
     for (const s of descriptor.browse.sorts || []) {
       const o = document.createElement("option");
-      o.value = s.key; o.textContent = s.label;
+      o.value = s.key; o.textContent = s.label || s.key;
       sortSel.appendChild(o);
     }
     sortSel.value = opts.sort;

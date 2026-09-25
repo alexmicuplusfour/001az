@@ -23,13 +23,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROVIDERS, providerCatalog } from "./providers.js";
 import { CAPABILITY_IDS } from "./capabilities.js";
-// A deliberate module cycle: plugin-loader.js imports resetDefs() from here.
+// A deliberate module cycle: plugin-loader.js imports resetDefs() and
+// pluginDefs() from here.
 // Both directions are CALLS, never module-eval reads of each other's bindings,
 // and both bindings are hoisted function declarations — so whichever module
 // loads first, the other's namespace is complete by the time anything runs.
 // The alternative was a second copy of the manifest → catalog-id rule, which is
 // the one thing catalogIdFor exists to prevent.
 import { catalogIdFor, manifestIn } from "./plugin-loader.js";
+import { resolveSource } from "./plugin-fetch.js";
 import { getConnector, listConnectors } from "./connectors/index.js";
 import { MANIFESTS as MEDIA_MANIFESTS, extOf } from "./sources/index.js";
 import { sourceManifests } from "./ingestion/sources/index.js";
@@ -288,6 +290,18 @@ const manifestEntry = (id, m, extra) => ({
   ...extra,
 });
 
+// An external plugin's provenance, as its card prints it: where it was
+// installed from, the ref that actually ran, and the version its manifest
+// names. The version is the author's label, shown as written and never
+// compared — nothing here orders versions. `bundled` says the source is one of
+// the image's own examples, which an installed row no longer says otherwise:
+// its Update runs without the install confirm, and the operator's lock leaves
+// it open.
+const sourceOf = (ext) => ({
+  url: ext.source_url, ref: ext.resolved_ref, version: ext.manifest?.version ?? null,
+  bundled: isBundledSource(ext.source_url),
+});
+
 // An external plugin that FAILED to load never reaches the live registries, so
 // pluginDefs() can't see it — but it's installed (code on disk) and must show as
 // an errored card with its reason + a Retry. Built from the stored manifest +
@@ -295,7 +309,7 @@ const manifestEntry = (id, m, extra) => ({
 const erroredExternalEntry = (ext, row) =>
   manifestEntry(ext.id, ext.manifest || {}, {
     external: true,
-    source: { url: ext.source_url, ref: ext.resolved_ref },
+    source: sourceOf(ext),
     state: { installed: true, config: {}, loadError: ext.load_error || { message: "failed to load", at: null }, health: health(row) },
   });
 
@@ -307,6 +321,17 @@ const erroredExternalEntry = (ext, row) =>
 // into the URL box and the wrong one for a scan that has to find the same
 // directory however node was started.
 const BUNDLED_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "examples", "plugins");
+
+// Whether an install source is one of those examples: a local path under
+// BUNDLED_DIR, however it was spelled (relative, or through `..`). The one
+// source the Add modal installs without its confirm — the image's own code,
+// with no dependencies to fetch — and so the one the operator's lock
+// (PLUGIN_INSTALL_DISABLE) leaves open, like the built-ins.
+export function isBundledSource(url) {
+  let source;
+  try { source = resolveSource(url); } catch { return false; }
+  return source.kind === "file" && source.dir.startsWith(BUNDLED_DIR + path.sep);
+}
 
 // Catalog rows for every bundled plugin this instance has NOT installed.
 //
@@ -389,11 +414,15 @@ export async function pluginCatalog(db) {
     const ext = externals.get(def.id);
     if (ext) {
       entry.external = true;
-      entry.source = { url: ext.source_url, ref: ext.resolved_ref };
+      entry.source = sourceOf(ext);
       entry.state.installed = true; // installed-from-URL: present ⇒ installed (Remove = uninstall)
       // Never core: an installed-from-URL plugin is always removable, even if its
       // manifest claims core (which would otherwise disable Remove in the admin UI).
       entry.core = false;
+      // A connector-domain plugin brings its domain, and its Remove takes the
+      // domain with it — which the confirm has to say (plugin-contract-plan.md,
+      // Stage 5 second pass). A copy: `connector` is the memoized def's own.
+      if (ext.manifest?.kind === "connector-domain") entry.connector = { ...entry.connector, addsDomain: true };
       externals.delete(def.id); // consumed — the rest are errored (below)
     }
     if (def.kind === "connector") {

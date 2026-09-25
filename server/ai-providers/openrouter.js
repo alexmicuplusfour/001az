@@ -4,7 +4,7 @@
 // and the key test is a one-token completion — OpenRouter has no per-model GET
 // and its ids carry a slash. Free vision models exist (`:free`), so tagging can
 // be verified at zero cost; the default is a cheap dedicated vision model.
-export default (wires) => ({
+export default ({ wires }) => ({
   label: "OpenRouter",
   description: "Many model backends behind one key",
   wire: wires.compat,

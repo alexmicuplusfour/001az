@@ -1,8 +1,8 @@
 // Anthropic — Claude via the SDK wire (tool_use blocks, server-side web_search).
 // The only research-capable built-in; no `compat` block (that's the openai
-// family's data). A factory (wires) => descriptor, the same contract an
-// ai-provider plugin's factory returns.
-export default (wires) => ({
+// family's data). A factory ({ wires }) => descriptor, the same one an
+// ai-provider plugin exports.
+export default ({ wires }) => ({
   label: "Anthropic",
   description: "Claude models for tagging & descriptions — bring a key",
   wire: wires.anthropic,

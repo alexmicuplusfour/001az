@@ -6,13 +6,18 @@
 // name the provider, so switching backends leaves every board intact.
 //
 // Two layers by design (domain → provider), mirroring the AI tagger's
-// domain → provider split. `category: "finance"` is a display label that lets
-// the template picker group siblings (Crypto, later Stocks) — not a third
-// structural layer. See slice-5b-crypto-provider-plan.md.
-import * as coingecko from "./coingecko.js";
-import * as coinmarketcap from "./coinmarketcap.js";
+// domain → provider split. See slice-5b-crypto-provider-plan.md.
+import coingecko from "./coingecko.js";
+import coinmarketcap from "./coinmarketcap.js";
+import { makeCtx } from "../../plugin-ctx.js";
 
-export const providers = { coingecko, coinmarketcap };
+// Each provider module is a factory over the plugin ctx — the same thing a
+// connector-provider plugin exports — built here once, each with its own ctx,
+// the way the loader builds a plugin's.
+export const providers = {
+  coingecko: coingecko(makeCtx({ id: "coingecko" })),
+  coinmarketcap: coinmarketcap(makeCtx({ id: "coinmarketcap" })),
+};
 export const defaultProvider = "coingecko";
 
 // Face wiring — which shared face producer (server/faces) renders this domain's
@@ -28,7 +33,6 @@ export const faces = { chart: "price-chart" };
 // quote payload has no all-time-high), served as an honest null under CMC.
 export const manifest = {
   label: "Crypto",
-  category: "finance",
   description: "Cryptocurrency prices and market data",
   fields: [
     { key: "price",      kind: "number", fn: "price",      label: "Price (USD)" },
@@ -43,9 +47,10 @@ export const manifest = {
     { key: "circulating_supply", kind: "number", fn: "circulating_supply", label: "Circulating supply" },
     { key: "url",        kind: "url",    fn: "url",        label: "Market page" },
   ],
-  // The identity slot in this domain's own words — the mapping pane's locked
-  // identity row reads it, so users meet "Coin", never "connector".
-  identity: { label: "Coin", blurb: "each coin is its own card" },
+  // What one card is, in this domain's own words — the mapping pane's locked
+  // identity row reads it, so users meet "each coin is its own card", never
+  // "connector".
+  identity: { blurb: "each coin is its own card" },
   // The lightbox live chart's control surface (planning/lightbox-live-chart-
   // plan.md) — the same full row stocks declares, on purpose: what a backend
   // or key can't serve (CoinGecko's demo host caps history at 365 days, so
@@ -80,14 +85,6 @@ export const manifest = {
       { key: "url",        kind: "url",    source: "connector", fn: "url" },
     ],
   },
-  // Static provider descriptors (no db); the active choice is resolved per call
-  // by the runtime.
-  providers: Object.entries(providers).map(([name, p]) => ({
-    name,
-    label: p.label,
-    description: p.description || "",
-    needsKey: !!p.needsKey,
-  })),
   // Face producers this domain can render; drives the mapping modal's face row.
   // Periods reflect what the providers' tiers serve — both CoinGecko's demo
   // tier and CMC's Basic historical access cap out at 365 days back.

@@ -13,8 +13,12 @@ import {
 } from "../server/db.js";
 import { up as stampFieldAt } from "../server/migrations/0008_stamp_field_at.js";
 import * as runtime from "../server/connectors/runtime.js";
-import * as coingecko from "../server/connectors/crypto/coingecko.js";
 import { refreshDueEntity, boardResource, invalidateAllBoardCaches } from "../server/worker.js";
+import { getConnector } from "../server/connectors/index.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const coingecko = getConnector("crypto").providers.coingecko;
 
 let srv, db, base, admin;
 before(async () => {

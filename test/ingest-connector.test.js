@@ -88,6 +88,21 @@ test("descriptor carries a column's preview flag; unflagged columns omit it", ()
   assert.ok(!("preview" in byFn.rank), "an unflagged column omits the key so the catalog stays clean");
 });
 
+test("descriptor: an unlabelled column is named by its key — the filter menu and preview header print it", () => {
+  // A plugin domain may leave a column's label out; the ingest modal's filter
+  // menu and preview header read this label with no fallback of their own, so
+  // it printed blank (plugin-contract-plan.md, Stage 5).
+  const a = feedAdapter(stubConn({
+    browse: {
+      columns: [{ key: "name", label: "Name", kind: "text", primary: true }, { key: "humidity", kind: "percent" }],
+      sorts: [{ key: "name" }],
+    },
+  }));
+  const byFn = Object.fromEntries(a.descriptor().filters.map((f) => [f.fn, f]));
+  assert.equal(byFn.humidity.label, "humidity");
+  assert.equal(byFn.name.label, "Name", "a label, when there is one, is kept");
+});
+
 test("crypto/stocks descriptors flag volume for the preview (regression: volume was missing)", () => {
   for (const [name, manifest] of [["crypto", cryptoManifest], ["stocks", stocksManifest]]) {
     const d = feedAdapter({ name, manifest, activeProvider: async () => ({}) }).descriptor();

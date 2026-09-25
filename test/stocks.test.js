@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getConnector, listConnectors } from "../server/connectors/index.js";
 import { manifest } from "../server/connectors/stocks/index.js";
-import * as fmp from "../server/connectors/stocks/financialmodelingprep.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const fmp = getConnector("stocks").providers.financialmodelingprep;
 
 function response(body, status = 200, headers = {}) {
   return {
@@ -16,12 +19,14 @@ function response(body, status = 200, headers = {}) {
 test("stocks manifest: registered finance connector with FMP and a chart face", () => {
   const stocks = listConnectors().find((connector) => connector.name === "stocks");
   assert.ok(stocks);
-  assert.equal(stocks.category, "finance");
+  assert.ok(!("category" in stocks), "no category — it was read by nothing");
+  assert.ok(!("category" in manifest));
   assert.equal(manifest.template.input.connector, "stocks");
   assert.equal(manifest.template.identity, undefined, "no identity slot — the input says whose cards these are");
   assert.ok(manifest.fields.some((field) => field.key === "price"));
   assert.ok(manifest.fields.some((field) => field.key === "sector"));
-  assert.ok(manifest.providers.some((provider) =>
+  assert.equal(manifest.providers, undefined, "no snapshot of the provider list — the live one is served");
+  assert.ok(getConnector("stocks").providerList().some((provider) =>
     provider.name === "financialmodelingprep" && provider.needsKey
   ));
   assert.deepEqual(manifest.faces[0].periods, ["7d", "30d", "90d", "1y", "5y"]);
@@ -95,6 +100,21 @@ test("FMP fetchEntity: combines quote and profile into canonical stock fields", 
     assert.deepEqual(entity.fields.dividend_yield, { v: 1.25, kind: "number" });
     assert.deepEqual(entity.fields.sector, { v: "Industrials", kind: "text" });
     assert.deepEqual(entity.fields.website, { v: "https://acme.example", kind: "url" });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("FMP fetchEntity: a symbol with no quote is a 404 — its item fails at once, FMP isn't paused", async () => {
+  // Status-less, it read as FMP being unwell: five retries over half an hour,
+  // and a minute's pause for every board on the provider. The doc tells plugin
+  // authors to throw a 404, and the built-ins are the reference copies
+  // (plugin-contract-plan.md, Stage 5).
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => response([]);
+  try {
+    await assert.rejects(fmp.fetchEntity("NOPE404", { apiKey: "test-key" }),
+      (e) => e.status === 404 && /no quote for NOPE404/.test(e.message));
   } finally {
     globalThis.fetch = original;
   }

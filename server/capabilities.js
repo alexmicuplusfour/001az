@@ -379,18 +379,3 @@ export const CAPABILITY_IDS = CAPABILITY_DEFS.filter((c) => c.declaredBy === c.i
 // …and the subset with a model axis, i.e. what the per-connection model listing
 // (/api/admin/ai-keys/:id/models) can be asked about.
 export const MODEL_CAPABILITIES = CAPABILITY_DEFS.filter((c) => c.models).map((c) => c.id);
-
-// capability id -> the wire method the PLUGIN LOADER requires to back it.
-//
-// NOTE 1: this is a plugin rule, not a universal invariant. The built-in whisper
-// and localDetector descriptors advertise a capability with `wire: null` — they
-// are sidecar-backed and their HTTP call is assembled in worker.js. Never hoist
-// this check into providers.js install().
-//
-// NOTE 2: deliberately NOT derived from the `verb` fields above, and narrower
-// than they are. `tag` is absent because it is declared BY wire.tag existing
-// (the check would be circular), and `research` because it is a flag on the
-// tagging call rather than a call of its own. `embed` joined in slice 7a: the
-// loader historically never required wire.embed, so an embed advertiser with
-// wire null loaded and then threw at the first embedTexts call.
-export const WIRE_VERB = { embed: "embed", transcribe: "transcribe", detect: "detect" };

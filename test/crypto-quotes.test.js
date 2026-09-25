@@ -6,8 +6,12 @@
 // tests — fetch is stubbed, ctx passed directly, no server or db.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as coingecko from "../server/connectors/crypto/coingecko.js";
-import * as coinmarketcap from "../server/connectors/crypto/coinmarketcap.js";
+import { getConnector } from "../server/connectors/index.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const coingecko = getConnector("crypto").providers.coingecko;
+const coinmarketcap = getConnector("crypto").providers.coinmarketcap;
 
 const jsonResponse = (body) => ({ ok: true, status: 200, text: async () => "", json: async () => body });
 
@@ -321,5 +325,24 @@ test("coinmarketcap.history: chart points from Basic-tier historical quotes, eit
     assert.match(seen[1], /interval=1d&count=30/);
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test("an id the provider doesn't know is a 404 — its item fails at once, the provider isn't paused", async () => {
+  // Status-less, "not found" read as the provider being unwell: five retries
+  // over half an hour, and a minute's pause for every board on it. The doc
+  // tells plugin authors to throw a 404, and the built-ins are the reference
+  // copies (plugin-contract-plan.md, Stage 5).
+  coingecko._resetQuoteCache();
+  coinmarketcap._resetQuoteCache();
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => jsonResponse(String(url).includes("coingecko") ? [] : { status: { error_code: 0 }, data: {} });
+  try {
+    await assert.rejects(coingecko.fetchEntity("no-such-coin", {}), (e) => e.status === 404 && /no market data/.test(e.message));
+    await assert.rejects(coinmarketcap.fetchEntity("999999", { apiKey: "k" }), (e) => e.status === 404 && /no data for id 999999/.test(e.message));
+  } finally {
+    globalThis.fetch = original;
+    coingecko._resetQuoteCache();
+    coinmarketcap._resetQuoteCache();
   }
 });

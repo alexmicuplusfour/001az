@@ -4,403 +4,418 @@
 // domain's search/fetch contract and returns raw values; the connector
 // (crypto/index.js) derives identity and stamps provenance, so the provider
 // stays agnostic about its own registry name.
-import { providerSignal, num } from "../runtime.js";
-import {
-  unsupported, createTtlCache, ytdDays, encodeArea, encodeCandles,
-  CHART_TTL_LIVE, CHART_TTL_SETTLED,
-} from "../chart-series.js";
-import { createQuoteCache, pickFields } from "./quote-cache.js";
-
-const BASE = "https://api.coingecko.com/api/v3";
-
-export const label = "CoinGecko";
-export const description = "Live crypto prices & market data — keyless";
-export const needsKey = false;
-// The demo tier's ToS requires visible attribution (brand.coingecko.com);
-// surfaced by the browse modal next to the rows this provider filled.
-export const attribution = { text: "Data by CoinGecko", url: "https://www.coingecko.com" };
-// Calls/min the runtime paces to. The two tiers are genuinely different:
-// keyless rides a 5–15/min pool shared per source IP, while a demo key is
-// documented at 100/min (re-checked 2026-08-13, and measured against a live
-// demo key the same day — a full catalog walk ran clean at 100).
 //
-// This was 30 for a while, on the reasoning that the docs had said both 30 and
-// 100 so 30 was correct under either, and that "the gap doesn't cost
-// throughput — the caches, not rpm, are what make a board cheap." That second
-// half stopped being true when the feed window lost its 1,000-row ration. A
-// cold catalog walk went from 4 requests to 75, which makes rpm the wall: 134 s
-// at 30, 40 s at 100, for the same work. Paying a 3× latency tax to hedge
-// against a number CoinGecko itself no longer publishes is the wrong side of
-// that trade, and it is paid on the interactive path (an ingest preview) where
-// it is most visible.
-//
-// The hedge still has a real point, so keep it in view: CoinGecko counts FAILED
-// requests against the limit, so pacing over the true allowance doesn't just
-// 429, it burns the monthly meter it was denied by. Two things bound that
-// today — this number only applies to KEYED accounts (activeProvider picks
-// keylessRpm when no key is stored, and the keyless pool is unknowable per-IP,
-// so it stays conservative), and the Plugins-page rpm override beats the
-// descriptor for an operator whose plan says otherwise. What is missing is a
-// limiter that LEARNS the tier: withRetry (runtime.js) retries a 429 but never
-// slows the bucket, so a wrong guess here stays wrong for the process's life.
-// Until that exists, this number is a claim about CoinGecko's published tier
-// and nothing more.
-//
-// The burst is a cold-start smoother, not a walk budget — it used to be sized
-// to "one cold feed-window fill (4 pages)", which a 75-page walk retired. The
-// MONTHLY meter (10k credits on demo) is guarded by the caches and by refresh
-// cadence, not by rpm. Truthful request pacing: each raw fetch awaits
-// ctx.pace() (pacesRequests — see runtime.callProvider), so the query-path
-// list() honestly pays 2 and nothing pays for cache hits.
-export const pacesRequests = true;
-export const rpm = 100;
-export const keylessRpm = 10;
-export const burst = 8;
+// Written as a connector-provider plugin: a factory over the plugin ctx
+// (server/plugin-ctx.js). The parameter list is everything this file takes
+// from the app, which is why a verbatim copy of it installs as a plugin.
+export default function ({
+  providerSignal, num, createQuoteCache, pickFields,
+  series: {
+    unsupported, createTtlCache, ytdDays, encodeArea, encodeCandles,
+    CHART_TTL_LIVE, CHART_TTL_SETTLED,
+  },
+}) {
+  const BASE = "https://api.coingecko.com/api/v3";
 
-// Optional demo key raises the rate limit; omitted → keyless public tier.
-function cgHeaders(apiKey) {
-  const h = { Accept: "application/json" };
-  if (apiKey) h["x-cg-demo-api-key"] = apiKey;
-  return h;
-}
+  const label = "CoinGecko";
+  const description = "Live crypto prices & market data — keyless";
+  const needsKey = false;
+  // The demo tier's ToS requires visible attribution (brand.coingecko.com);
+  // surfaced by the browse modal next to the rows this provider filled.
+  const attribution = { text: "Data by CoinGecko", url: "https://www.coingecko.com" };
+  // Calls/min the runtime paces to. The two tiers are genuinely different:
+  // keyless rides a 5–15/min pool shared per source IP, while a demo key is
+  // documented at 100/min (re-checked 2026-08-13, and measured against a live
+  // demo key the same day — a full catalog walk ran clean at 100).
+  //
+  // This was 30 for a while, on the reasoning that the docs had said both 30 and
+  // 100 so 30 was correct under either, and that "the gap doesn't cost
+  // throughput — the caches, not rpm, are what make a board cheap." That second
+  // half stopped being true when the feed window lost its 1,000-row ration. A
+  // cold catalog walk went from 4 requests to 75, which makes rpm the wall: 134 s
+  // at 30, 40 s at 100, for the same work. Paying a 3× latency tax to hedge
+  // against a number CoinGecko itself no longer publishes is the wrong side of
+  // that trade, and it is paid on the interactive path (an ingest preview) where
+  // it is most visible.
+  //
+  // The hedge still has a real point, so keep it in view: CoinGecko counts FAILED
+  // requests against the limit, so pacing over the true allowance doesn't just
+  // 429, it burns the monthly meter it was denied by. Two things bound that
+  // today — this number only applies to KEYED accounts (activeProvider picks
+  // keylessRpm when no key is stored, and the keyless pool is unknowable per-IP,
+  // so it stays conservative), and the Plugins-page rpm override beats the
+  // descriptor for an operator whose plan says otherwise. A wrong guess no
+  // longer stays wrong for the process's life: a 429 halves the bucket's rate
+  // (withRetry → throttled, provider-pacing.js) and it eases back after — but
+  // that is the limiter learning from refusals, so this number is still a claim
+  // about CoinGecko's published tier and nothing more.
+  //
+  // The burst is a cold-start smoother, not a walk budget — it used to be sized
+  // to "one cold feed-window fill (4 pages)", which a 75-page walk retired. The
+  // MONTHLY meter (10k credits on demo) is guarded by the caches and by refresh
+  // cadence, not by rpm. Truthful request pacing: each raw fetch awaits
+  // ctx.pace() (pacesRequests — see runtime.callProvider), so the query-path
+  // list() honestly pays 2 and nothing pays for cache hits.
+  const pacesRequests = true;
+  const rpm = 100;
+  const keylessRpm = 10;
+  const burst = 8;
 
-// A failed response as an Error carrying the status + Retry-After, so the
-// runtime's rate limiter can recognise a 429 and back off.
-function cgFail(r, what) {
-  const e = new Error(`CoinGecko ${what} failed: HTTP ${r.status}`);
-  e.status = r.status;
-  const ra = r.headers?.get?.("retry-after");
-  if (ra != null) e.retryAfter = ra;
-  return e;
-}
+  // Optional demo key raises the rate limit; omitted → keyless public tier.
+  function cgHeaders(apiKey) {
+    const h = { Accept: "application/json" };
+    if (apiKey) h["x-cg-demo-api-key"] = apiKey;
+    return h;
+  }
 
-// Up to 10 matching coins, normalised to the connector's search-hit shape.
-export async function search(query, { apiKey, pace } = {}) {
-  await pace?.();
-  const r = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}`, {
-    headers: cgHeaders(apiKey),
-    signal: providerSignal(),
+  // A failed response as an Error carrying the status + Retry-After, so the
+  // runtime's rate limiter can recognise a 429 and back off.
+  function cgFail(r, what) {
+    const e = new Error(`CoinGecko ${what} failed: HTTP ${r.status}`);
+    e.status = r.status;
+    const ra = r.headers?.get?.("retry-after");
+    if (ra != null) e.retryAfter = ra;
+    return e;
+  }
+
+  // Up to 10 matching coins, normalised to the connector's search-hit shape.
+  async function search(query, { apiKey, pace } = {}) {
+    await pace?.();
+    const r = await fetch(`${BASE}/search?query=${encodeURIComponent(query)}`, {
+      headers: cgHeaders(apiKey),
+      signal: providerSignal(),
+    });
+    if (!r.ok) throw cgFail(r, "search");
+    const data = await r.json();
+    return (data.coins || []).slice(0, 10).map((c) => ({
+      id: c.id,
+      label: c.name,
+      symbol: c.symbol?.toUpperCase() || "",
+      rank: c.market_cap_rank || null,
+    }));
+  }
+
+  // Biggest page /coins/markets will serve — its documented per_page ceiling, and
+  // the size the feed adapter walks the catalog in (~74 requests for the full
+  // ~18.4k coins). Stated here rather than assumed by the adapter: it is this
+  // API's limit, not a number the ingestion layer gets to pick.
+  const maxPageSize = 250;
+
+  // The multi-window change parameter: one param, no extra request, and the
+  // SAME markets row then feeds browse columns, fetchFields and the prefetch
+  // cache — 1h/24h/7d/30d are the windows both providers can serve, so they're
+  // the domain's canonical change fields.
+  const CHANGE_WINDOWS = "1h,24h,7d,30d";
+
+  // One coin's canonical crypto fields from a /coins/markets row. The row is the
+  // cheap shape (the /coins/{id} detail is ~50× the bytes for the same numbers),
+  // and with CHANGE_WINDOWS it carries every canonical field: multi-window
+  // change, volume, rank, ATH and supply ride along at zero marginal cost.
+  const marketFields = (c) => ({
+    price:              { v: num(c.current_price), kind: "number" },
+    market_cap:         { v: num(c.market_cap), kind: "number" },
+    change_1h:          { v: num(c.price_change_percentage_1h_in_currency), kind: "number" },
+    change_24h:         { v: num(c.price_change_percentage_24h), kind: "number" },
+    change_7d:          { v: num(c.price_change_percentage_7d_in_currency), kind: "number" },
+    change_30d:         { v: num(c.price_change_percentage_30d_in_currency), kind: "number" },
+    volume:             { v: num(c.total_volume), kind: "number" },
+    rank:               { v: num(c.market_cap_rank), kind: "number" },
+    ath:                { v: num(c.ath), kind: "number" },
+    circulating_supply: { v: num(c.circulating_supply), kind: "number" },
+    url:                { v: `https://www.coingecko.com/en/coins/${c.id}`, kind: "url" },
   });
-  if (!r.ok) throw cgFail(r, "search");
-  const data = await r.json();
-  return (data.coins || []).slice(0, 10).map((c) => ({
-    id: c.id,
-    label: c.name,
-    symbol: c.symbol?.toUpperCase() || "",
-    rank: c.market_cap_rank || null,
-  }));
-}
 
-// Biggest page /coins/markets will serve — its documented per_page ceiling, and
-// the size the feed adapter walks the catalog in (~74 requests for the full
-// ~18.4k coins). Stated here rather than assumed by the adapter: it is this
-// API's limit, not a number the ingestion layer gets to pick.
-export const maxPageSize = 250;
+  // Markets rows by coin id, filled in batches. The refresh sweep prefetches its
+  // whole due set (250 ids per request — the endpoint's own cap), then each
+  // entity's fetchFields is a cache hit: a 100-coin board's sweep pays 1 request
+  // instead of 100. Every path that already buys these rows warms it, so a
+  // browse-then-add costs nothing either.
+  const quotes = createQuoteCache();
+  const warmQuotes = quotes.warm;
 
-// The multi-window change parameter: one param, no extra request, and the
-// SAME markets row then feeds browse columns, fetchFields and the prefetch
-// cache — 1h/24h/7d/30d are the windows both providers can serve, so they're
-// the domain's canonical change fields.
-const CHANGE_WINDOWS = "1h,24h,7d,30d";
+  // `extra` carries an already-encoded query fragment (the category filter);
+  // the browse path is its only caller — refresh/prefetch never narrows.
+  async function marketRowsByIds(ids, { apiKey, pace } = {}, extra = "") {
+    const out = [];
+    for (let i = 0; i < ids.length; i += 250) {
+      const chunk = ids.slice(i, i + 250);
+      await pace?.();
+      const r = await fetch(
+        `${BASE}/coins/markets?vs_currency=usd&price_change_percentage=${CHANGE_WINDOWS}${extra}` +
+          `&per_page=250&ids=${chunk.map(encodeURIComponent).join(",")}`,
+        { headers: cgHeaders(apiKey), signal: providerSignal() }
+      );
+      if (!r.ok) throw cgFail(r, "markets");
+      out.push(...(await r.json()));
+    }
+    warmQuotes(out);
+    return out;
+  }
 
-// One coin's canonical crypto fields from a /coins/markets row. The row is the
-// cheap shape (the /coins/{id} detail is ~50× the bytes for the same numbers),
-// and with CHANGE_WINDOWS it carries every canonical field: multi-window
-// change, volume, rank, ATH and supply ride along at zero marginal cost.
-const marketFields = (c) => ({
-  price:              { v: num(c.current_price), kind: "number" },
-  market_cap:         { v: num(c.market_cap), kind: "number" },
-  change_1h:          { v: num(c.price_change_percentage_1h_in_currency), kind: "number" },
-  change_24h:         { v: num(c.price_change_percentage_24h), kind: "number" },
-  change_7d:          { v: num(c.price_change_percentage_7d_in_currency), kind: "number" },
-  change_30d:         { v: num(c.price_change_percentage_30d_in_currency), kind: "number" },
-  volume:             { v: num(c.total_volume), kind: "number" },
-  rank:               { v: num(c.market_cap_rank), kind: "number" },
-  ath:                { v: num(c.ath), kind: "number" },
-  circulating_supply: { v: num(c.circulating_supply), kind: "number" },
-  url:                { v: `https://www.coingecko.com/en/coins/${c.id}`, kind: "url" },
-});
+  // Batch-warm the quote cache for a refresh sweep's due ids (see the worker's
+  // prefetch leg). Best-effort by contract: a failure here just means the
+  // per-entity path pays retail.
+  async function prefetch(ids, ctx = {}) {
+    const missing = quotes.missing(ids);
+    if (missing.length) await marketRowsByIds(missing, ctx);
+  }
 
-// Markets rows by coin id, filled in batches. The refresh sweep prefetches its
-// whole due set (250 ids per request — the endpoint's own cap), then each
-// entity's fetchFields is a cache hit: a 100-coin board's sweep pays 1 request
-// instead of 100. Every path that already buys these rows warms it, so a
-// browse-then-add costs nothing either.
-const quotes = createQuoteCache();
-const warmQuotes = quotes.warm;
+  // One coin's market row: the warm one, or the one request that buys it.
+  const quoteFor = async (id, ctx) => quotes.fresh(id) || (await marketRowsByIds([id], ctx))[0];
 
-// `extra` carries an already-encoded query fragment (the category filter);
-// the browse path is its only caller — refresh/prefetch never narrows.
-async function marketRowsByIds(ids, { apiKey, pace } = {}, extra = "") {
-  const out = [];
-  for (let i = 0; i < ids.length; i += 250) {
-    const chunk = ids.slice(i, i + 250);
+  // One coin's canonical crypto fields. Returns the provider id + symbol +
+  // display name and per-field { v, kind }; the connector adds identity and the
+  // `src` provenance tag. Served from the markets shape — same request class as
+  // a one-coin browse page, ~2% of the /coins/{id} payload it used to buy.
+  async function fetchEntity(id, ctx = {}) {
+    const row = await quoteFor(id, ctx);
+    // 404: an answer about this id, not about CoinGecko — the item fails at
+    // once and the provider isn't paused, where a status-less error would do
+    // both the other way round (plugin-contract-plan.md, Stage 5).
+    if (!row) throw Object.assign(new Error(`CoinGecko: no market data for "${id}"`), { status: 404 });
+    return {
+      id: row.id,
+      symbol: row.symbol?.toUpperCase() || "",
+      display_name: row.name,
+      fields: marketFields(row),
+    };
+  }
+
+  // Field-aware refresh (runtime.refresh sends the DUE keys): every canonical
+  // field lives on the cached markets row, so a prefetched sweep serves whole
+  // boards from memory and a cold single entity pays one batched-shape request.
+  // `url` is derivable from the id alone — a url-only refresh never spends HTTP.
+  async function fetchFields(id, keys, ctx = {}) {
+    const want = [...new Set(keys || [])];
+    if (want.length === 1 && want[0] === "url")
+      return { fields: { url: { v: `https://www.coingecko.com/en/coins/${id}`, kind: "url" } } };
+    const row = await quoteFor(id, ctx);
+    // Unknown/inactive id → no keys served, and runtime.refresh falls back to
+    // fetchEntity's error path rather than writing nulls over live values.
+    return { fields: row ? pickFields(marketFields(row), want) : {} };
+  }
+
+  // Price history for the chart face (slice 5d): the market_chart endpoint, whose
+  // granularity CoinGecko picks from the day span (≤1d = 5-min, ≤90d = hourly,
+  // else daily). Returns [{ t, price }]; the crypto connector's chart producer
+  // downsamples + renders. (CoinMarketCap serves history too these days — its
+  // Basic tier gained historical quotes — so the face renders under either
+  // backend; the `requires` gate matters for plugin providers.)
+  // The free/demo tier caps historical range at 365 days (366+ → 401), so only
+  // these periods are offered and the day count is clamped defensively.
+  const DEMO_MAX_DAYS = 365;
+  const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 };
+
+  // One market_chart fetch, the raw [t, price] pairs — history() (the face) and
+  // chart()'s area flavour differ only in the shape they map these into.
+  async function marketChartPrices(id, days, { apiKey, pace } = {}) {
     await pace?.();
     const r = await fetch(
-      `${BASE}/coins/markets?vs_currency=usd&price_change_percentage=${CHANGE_WINDOWS}${extra}` +
-        `&per_page=250&ids=${chunk.map(encodeURIComponent).join(",")}`,
+      `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
       { headers: cgHeaders(apiKey), signal: providerSignal() }
     );
-    if (!r.ok) throw cgFail(r, "markets");
-    out.push(...(await r.json()));
+    if (!r.ok) throw cgFail(r, "history");
+    return (await r.json()).prices || [];
   }
-  warmQuotes(out);
-  return out;
-}
 
-// Batch-warm the quote cache for a refresh sweep's due ids (see the worker's
-// prefetch leg). Best-effort by contract: a failure here just means the
-// per-entity path pays retail.
-export async function prefetch(ids, ctx = {}) {
-  const missing = quotes.missing(ids);
-  if (missing.length) await marketRowsByIds(missing, ctx);
-}
+  async function history(id, period, ctx = {}) {
+    const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
+    return (await marketChartPrices(id, days, ctx)).map(([t, price]) => ({ t, price }));
+  }
 
-// One coin's market row: the warm one, or the one request that buys it.
-const quoteFor = async (id, ctx) => quotes.fresh(id) || (await marketRowsByIds([id], ctx))[0];
+  // --- live chart (the lightbox detail view; planning/lightbox-live-chart-plan.md) ---
+  // The domain manifest declares the (range, kind) surface; this maps it onto two
+  // endpoints: area → market_chart (exact day counts, fine granularity), candles
+  // → /ohlc, whose `days` is an ENUM {1,7,14,30,90,180,365} (verified 2026-08-23;
+  // non-enum values 400). The enum never shrinks the offer: a non-enum window
+  // fetches the smallest covering enum and TRIMS to the window, so every ≤365d
+  // range serves both kinds. Past the host's 365-day cap this refuses
+  // synchronously — zero HTTP — which also means this module needs no HTTP gate
+  // recognition at all: every request it makes is legal by construction. (That
+  // matters: the >365d gate manifests as a 401, and withRetry retries 401s.)
+  //
+  // Granularity → encoding (the series invariants in ../chart-series.js):
+  // market_chart serves 5-min at 1 day, hourly through 90, daily above — daily
+  // series END WITH A LIVE TAIL point whose UTC date duplicates today's midnight
+  // point (verified 2026-08-23), which dedupeAscending's keep-last collapses.
+  // /ohlc serves 30-min candles at 1 day, 4-hour through 30, 4-day above.
+  const CHART_ENUM_DAYS = [1, 7, 14, 30, 90, 180, 365];
+  const CHART_RANGE_DAYS = { "1d": 1, "5d": 5, "1m": 30, "6m": 180, "1y": 365 };
+  const chartCache = createTtlCache(); // `${id}|${range}|${kind}` -> encoded series
 
-// One coin's canonical crypto fields. Returns the provider id + symbol +
-// display name and per-field { v, kind }; the connector adds identity and the
-// `src` provenance tag. Served from the markets shape — same request class as
-// a one-coin browse page, ~2% of the /coins/{id} payload it used to buy.
-export async function fetchEntity(id, ctx = {}) {
-  const row = await quoteFor(id, ctx);
-  if (!row) throw new Error(`CoinGecko: no market data for "${id}"`);
-  return {
-    id: row.id,
-    symbol: row.symbol?.toUpperCase() || "",
-    display_name: row.name,
-    fields: marketFields(row),
+  async function chart(id, { range, kind } = {}, { apiKey, pace } = {}) {
+    const wanted = CHART_RANGE_DAYS[range] ?? (range === "ytd" ? ytdDays() : null);
+    if (wanted == null || wanted > DEMO_MAX_DAYS)
+      throw unsupported("CoinGecko: history past 365 days isn't available on this API tier");
+
+    const key = `${id}|${range}|${kind}`;
+    const cached = chartCache.get(key);
+    if (cached) return cached;
+
+    let data;
+    if (kind === "candles") {
+      // The guard above holds wanted ≤ 365, so a covering enum entry always exists.
+      const days = CHART_ENUM_DAYS.find((d) => d >= wanted);
+      await pace?.();
+      const r = await fetch(
+        `${BASE}/coins/${encodeURIComponent(id)}/ohlc?vs_currency=usd&days=${days}`,
+        { headers: cgHeaders(apiKey), signal: providerSignal() }
+      );
+      if (!r.ok) throw cgFail(r, "ohlc");
+      const cutoff = Date.now() - wanted * 86400000; // covering enum → trim to the asked window
+      const bars = ((await r.json()) || [])
+        .map(([t, o, h, l, c]) => ({ t, o: num(o), h: num(h), l: num(l), c: num(c) }))
+        .filter((b) => Number.isFinite(b.t) && b.t >= cutoff &&
+          b.o != null && b.h != null && b.l != null && b.c != null);
+      data = encodeCandles(bars, { daily: days > 30, tz: "local" }); // 4-day candles above 30
+    } else {
+      const prices = (await marketChartPrices(id, wanted, { apiKey, pace }))
+        .map(([t, p]) => ({ t, p: num(p) }))
+        .filter((x) => Number.isFinite(x.t) && x.p != null);
+      data = encodeArea(prices, { daily: wanted > 90, tz: "local" }); // daily granularity above 90
+    }
+
+    chartCache.put(key, data, range === "1d" ? CHART_TTL_LIVE : CHART_TTL_SETTLED);
+    return data;
+  }
+
+  // Browse-and-add (the ingestion modal): a sorted, paginated page of coins with
+  // the domain's canonical columns. The /coins/markets endpoint returns market
+  // data already sorted by the `order` param; a text query bridges through /search
+  // (ids only) then re-fetches those ids' market rows so the columns match. Each
+  // row is { id, symbol, label, values: {<column key>: value} }.
+  const SORT_ORDER = {
+    market_cap: (desc) => (desc ? "market_cap_desc" : "market_cap_asc"),
+    volume:     (desc) => (desc ? "volume_desc" : "volume_asc"),
+    name:       (desc) => (desc ? "id_desc" : "id_asc"), // no name sort; id ≈ alphabetical
+    // `price` isn't a /coins/markets order → falls through to the default below.
   };
-}
 
-// Field-aware refresh (runtime.refresh sends the DUE keys): every canonical
-// field lives on the cached markets row, so a prefetched sweep serves whole
-// boards from memory and a cold single entity pays one batched-shape request.
-// `url` is derivable from the id alone — a url-only refresh never spends HTTP.
-export async function fetchFields(id, keys, ctx = {}) {
-  const want = [...new Set(keys || [])];
-  if (want.length === 1 && want[0] === "url")
-    return { fields: { url: { v: `https://www.coingecko.com/en/coins/${id}`, kind: "url" } } };
-  const row = await quoteFor(id, ctx);
-  // Unknown/inactive id → no keys served, and runtime.refresh falls back to
-  // fetchEntity's error path rather than writing nulls over live values.
-  return { fields: row ? pickFields(marketFields(row), want) : {} };
-}
+  // Sort keys this provider orders EXACTLY, server-side. Narrower than
+  // SORT_ORDER on purpose: `price` isn't an order at all here (it silently
+  // serves market_cap order), and `name` is approximated by coin id, which is
+  // alphabetical-ish and nothing stronger. The feed adapter reads this before it
+  // will treat the ordering as a proof and stop a catalog walk at a filter
+  // threshold — on a key we only approximate, that would drop real matches.
+  // Everything downstream re-sorts anyway, so being conservative here costs
+  // nothing but a longer walk.
+  const honorsSorts = ["market_cap", "volume"];
 
-// Price history for the chart face (slice 5d): the market_chart endpoint, whose
-// granularity CoinGecko picks from the day span (≤1d = 5-min, ≤90d = hourly,
-// else daily). Returns [{ t, price }]; the crypto connector's chart producer
-// downsamples + renders. (CoinMarketCap serves history too these days — its
-// Basic tier gained historical quotes — so the face renders under either
-// backend; the `requires` gate matters for plugin providers.)
-// The free/demo tier caps historical range at 365 days (366+ → 401), so only
-// these periods are offered and the day count is clamped defensively.
-const DEMO_MAX_DAYS = 365;
-const PERIOD_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 };
-export const periods = Object.keys(PERIOD_DAYS);
+  function marketRow(c) {
+    return {
+      id: c.id,
+      symbol: (c.symbol || "").toUpperCase(),
+      label: c.name,
+      values: {
+        rank:       c.market_cap_rank ?? null,
+        name:       c.name,
+        price:      c.current_price ?? null,
+        change_24h: c.price_change_percentage_24h ?? null,
+        change_7d:  c.price_change_percentage_7d_in_currency ?? null,
+        market_cap: c.market_cap ?? null,
+        volume:     c.total_volume ?? null,
+      },
+    };
+  }
 
-// One market_chart fetch, the raw [t, price] pairs — history() (the face) and
-// chart()'s area flavour differ only in the shape they map these into.
-async function marketChartPrices(id, days, { apiKey, pace } = {}) {
-  await pace?.();
-  const r = await fetch(
-    `${BASE}/coins/${encodeURIComponent(id)}/market_chart?vs_currency=usd&days=${days}`,
-    { headers: cgHeaders(apiKey), signal: providerSignal() }
-  );
-  if (!r.ok) throw cgFail(r, "history");
-  return (await r.json()).prices || [];
-}
+  async function list({ sort, order, page = 1, pageSize = 50, query, category } = {}, { apiKey, pace } = {}) {
+    const desc = order !== "asc";
+    const common = `vs_currency=usd&price_change_percentage=${CHANGE_WINDOWS}`;
+    // Category narrows server-side, and it composes with an id list rather than
+    // overriding it — verified live 2026-08-13: category=meme-token with
+    // ids=bitcoin,dogecoin returned dogecoin ALONE, i.e. the intersection, not
+    // the category's own top rows. So the same param serves both paths and a
+    // filtered search stays a real search.
+    const cat = category ? `&category=${encodeURIComponent(category)}` : "";
 
-export async function history(id, period, ctx = {}) {
-  const days = Math.min(PERIOD_DAYS[period] ?? 365, DEMO_MAX_DAYS);
-  return (await marketChartPrices(id, days, ctx)).map(([t, price]) => ({ t, price }));
-}
+    if (query && query.trim()) {
+      await pace?.();
+      const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
+      if (!sr.ok) throw cgFail(sr, "search");
+      // Page the hit list like the plain browse pages the catalog — page 2 must
+      // be the NEXT slice, not the first one again (the modal appends pages, so
+      // repeating the slice rendered duplicate rows and a "Load more" that
+      // never ran dry).
+      const pageNo = Math.max(1, Number(page) || 1);
+      const ids = ((await sr.json()).coins || [])
+        .slice((pageNo - 1) * pageSize, pageNo * pageSize)
+        .map((c) => c.id);
+      if (!ids.length) return [];
+      // marketRowsByIds warms the quote cache in passing, and its rows come back
+      // in the endpoint's market-cap order — re-emit in ids (relevance) order so
+      // paging is stable and the CMC path's behavior matches.
+      const byId = new Map((await marketRowsByIds(ids, { apiKey, pace }, cat)).map((c) => [c.id, c]));
+      return ids.map((id) => byId.get(id)).filter(Boolean).map(marketRow);
+    }
 
-// --- live chart (the lightbox detail view; planning/lightbox-live-chart-plan.md) ---
-// The domain manifest declares the (range, kind) surface; this maps it onto two
-// endpoints: area → market_chart (exact day counts, fine granularity), candles
-// → /ohlc, whose `days` is an ENUM {1,7,14,30,90,180,365} (verified 2026-08-23;
-// non-enum values 400). The enum never shrinks the offer: a non-enum window
-// fetches the smallest covering enum and TRIMS to the window, so every ≤365d
-// range serves both kinds. Past the host's 365-day cap this refuses
-// synchronously — zero HTTP — which also means this module needs no HTTP gate
-// recognition at all: every request it makes is legal by construction. (That
-// matters: the >365d gate manifests as a 401, and withRetry retries 401s.)
-//
-// Granularity → encoding (the series invariants in ../chart-series.js):
-// market_chart serves 5-min at 1 day, hourly through 90, daily above — daily
-// series END WITH A LIVE TAIL point whose UTC date duplicates today's midnight
-// point (verified 2026-08-23), which dedupeAscending's keep-last collapses.
-// /ohlc serves 30-min candles at 1 day, 4-hour through 30, 4-day above.
-const CHART_ENUM_DAYS = [1, 7, 14, 30, 90, 180, 365];
-const CHART_RANGE_DAYS = { "1d": 1, "5d": 5, "1m": 30, "6m": 180, "1y": 365 };
-const chartCache = createTtlCache(); // `${id}|${range}|${kind}` -> encoded series
-
-export async function chart(id, { range, kind } = {}, { apiKey, pace } = {}) {
-  const wanted = CHART_RANGE_DAYS[range] ?? (range === "ytd" ? ytdDays() : null);
-  if (wanted == null || wanted > DEMO_MAX_DAYS)
-    throw unsupported("CoinGecko: history past 365 days isn't available on this API tier");
-
-  const key = `${id}|${range}|${kind}`;
-  const cached = chartCache.get(key);
-  if (cached) return cached;
-
-  let data;
-  if (kind === "candles") {
-    // The guard above holds wanted ≤ 365, so a covering enum entry always exists.
-    const days = CHART_ENUM_DAYS.find((d) => d >= wanted);
+    const orderParam = (SORT_ORDER[sort] || SORT_ORDER.market_cap)(desc);
     await pace?.();
     const r = await fetch(
-      `${BASE}/coins/${encodeURIComponent(id)}/ohlc?vs_currency=usd&days=${days}`,
+      `${BASE}/coins/markets?${common}${cat}&order=${orderParam}&per_page=${pageSize}&page=${page}`,
       { headers: cgHeaders(apiKey), signal: providerSignal() }
     );
-    if (!r.ok) throw cgFail(r, "ohlc");
-    const cutoff = Date.now() - wanted * 86400000; // covering enum → trim to the asked window
-    const bars = ((await r.json()) || [])
-      .map(([t, o, h, l, c]) => ({ t, o: num(o), h: num(h), l: num(l), c: num(c) }))
-      .filter((b) => Number.isFinite(b.t) && b.t >= cutoff &&
-        b.o != null && b.h != null && b.l != null && b.c != null);
-    data = encodeCandles(bars, { daily: days > 30, tz: "local" }); // 4-day candles above 30
-  } else {
-    const prices = (await marketChartPrices(id, wanted, { apiKey, pace }))
-      .map(([t, p]) => ({ t, p: num(p) }))
-      .filter((x) => Number.isFinite(x.t) && x.p != null);
-    data = encodeArea(prices, { daily: wanted > 90, tz: "local" }); // daily granularity above 90
+    if (!r.ok) throw cgFail(r, "list");
+    const rows = await r.json();
+    // These ARE quote rows — same endpoint, same `price_change_percentage`
+    // windows the refresh path asks for — so keep them. Without this, browsing a
+    // page and adding what you see re-bought every row one at a time
+    // (`fetchEntity` → cache miss → a 250-id endpoint used for one id): 100
+    // metered requests for a 100-row bulk add, and 25 per feed drain tick, all
+    // for data already in hand. The query branch warms via marketRowsByIds and
+    // the CMC sibling warms its listings page; this was the one path that didn't.
+    warmQuotes(rows);
+    return rows.map(marketRow);
   }
 
-  chartCache.put(key, data, range === "1d" ? CHART_TTL_LIVE : CHART_TTL_SETTLED);
-  return data;
-}
+  // Browse filter vocabularies (runtime.browseFilters). CoinGecko's category
+  // taxonomy is ~857 entries and moves with the market, so it's fetched rather
+  // than frozen — one request a day, and the endpoint is a plain id/name list
+  // (the market-data flavour costs more bytes for data a dropdown can't use).
+  const CATEGORY_TTL = 24 * 60 * 60 * 1000;
+  let categoryCache = { at: 0, options: null };
 
-// Browse-and-add (the ingestion modal): a sorted, paginated page of coins with
-// the domain's canonical columns. The /coins/markets endpoint returns market
-// data already sorted by the `order` param; a text query bridges through /search
-// (ids only) then re-fetches those ids' market rows so the columns match. Each
-// row is { id, symbol, label, values: {<column key>: value} }.
-const SORT_ORDER = {
-  market_cap: (desc) => (desc ? "market_cap_desc" : "market_cap_asc"),
-  volume:     (desc) => (desc ? "volume_desc" : "volume_asc"),
-  name:       (desc) => (desc ? "id_desc" : "id_asc"), // no name sort; id ≈ alphabetical
-  // `price` isn't a /coins/markets order → falls through to the default below.
-};
-
-// Sort keys this provider orders EXACTLY, server-side. Narrower than
-// SORT_ORDER on purpose: `price` isn't an order at all here (it silently
-// serves market_cap order), and `name` is approximated by coin id, which is
-// alphabetical-ish and nothing stronger. The feed adapter reads this before it
-// will treat the ordering as a proof and stop a catalog walk at a filter
-// threshold — on a key we only approximate, that would drop real matches.
-// Everything downstream re-sorts anyway, so being conservative here costs
-// nothing but a longer walk.
-export const honorsSorts = ["market_cap", "volume"];
-
-function marketRow(c) {
-  return {
-    id: c.id,
-    symbol: (c.symbol || "").toUpperCase(),
-    label: c.name,
-    values: {
-      rank:       c.market_cap_rank ?? null,
-      name:       c.name,
-      price:      c.current_price ?? null,
-      change_24h: c.price_change_percentage_24h ?? null,
-      change_7d:  c.price_change_percentage_7d_in_currency ?? null,
-      market_cap: c.market_cap ?? null,
-      volume:     c.total_volume ?? null,
-    },
-  };
-}
-
-export async function list({ sort, order, page = 1, pageSize = 50, query, category } = {}, { apiKey, pace } = {}) {
-  const desc = order !== "asc";
-  const common = `vs_currency=usd&price_change_percentage=${CHANGE_WINDOWS}`;
-  // Category narrows server-side, and it composes with an id list rather than
-  // overriding it — verified live 2026-08-13: category=meme-token with
-  // ids=bitcoin,dogecoin returned dogecoin ALONE, i.e. the intersection, not
-  // the category's own top rows. So the same param serves both paths and a
-  // filtered search stays a real search.
-  const cat = category ? `&category=${encodeURIComponent(category)}` : "";
-
-  if (query && query.trim()) {
+  async function filterOptions({ apiKey, pace } = {}) {
+    if (categoryCache.options && Date.now() - categoryCache.at < CATEGORY_TTL)
+      return { category: categoryCache.options };
     await pace?.();
-    const sr = await fetch(`${BASE}/search?query=${encodeURIComponent(query.trim())}`, { headers: cgHeaders(apiKey), signal: providerSignal() });
-    if (!sr.ok) throw cgFail(sr, "search");
-    // Page the hit list like the plain browse pages the catalog — page 2 must
-    // be the NEXT slice, not the first one again (the modal appends pages, so
-    // repeating the slice rendered duplicate rows and a "Load more" that
-    // never ran dry).
-    const pageNo = Math.max(1, Number(page) || 1);
-    const ids = ((await sr.json()).coins || [])
-      .slice((pageNo - 1) * pageSize, pageNo * pageSize)
-      .map((c) => c.id);
-    if (!ids.length) return [];
-    // marketRowsByIds warms the quote cache in passing, and its rows come back
-    // in the endpoint's market-cap order — re-emit in ids (relevance) order so
-    // paging is stable and the CMC path's behavior matches.
-    const byId = new Map((await marketRowsByIds(ids, { apiKey, pace }, cat)).map((c) => [c.id, c]));
-    return ids.map((id) => byId.get(id)).filter(Boolean).map(marketRow);
+    const r = await fetch(`${BASE}/coins/categories/list`, { headers: cgHeaders(apiKey), signal: providerSignal() });
+    if (!r.ok) throw cgFail(r, "categories");
+    // Ordering is browseFilters' job; the only thing to do here is name the
+    // options. Some names carry stray whitespace (" DN-404" sorted above
+    // everything until this trim) — a display artifact of their data, not a name.
+    const options = (await r.json())
+      .filter((c) => c?.category_id)
+      .map((c) => ({ value: c.category_id, label: String(c.name || c.category_id).trim() }));
+    categoryCache = { at: Date.now(), options };
+    return { category: options };
   }
 
-  const orderParam = (SORT_ORDER[sort] || SORT_ORDER.market_cap)(desc);
-  await pace?.();
-  const r = await fetch(
-    `${BASE}/coins/markets?${common}${cat}&order=${orderParam}&per_page=${pageSize}&page=${page}`,
-    { headers: cgHeaders(apiKey), signal: providerSignal() }
-  );
-  if (!r.ok) throw cgFail(r, "list");
-  const rows = await r.json();
-  // These ARE quote rows — same endpoint, same `price_change_percentage`
-  // windows the refresh path asks for — so keep them. Without this, browsing a
-  // page and adding what you see re-bought every row one at a time
-  // (`fetchEntity` → cache miss → a 250-id endpoint used for one id): 100
-  // metered requests for a 100-row bulk add, and 25 per feed drain tick, all
-  // for data already in hand. The query branch warms via marketRowsByIds and
-  // the CMC sibling warms its listings page; this was the one path that didn't.
-  warmQuotes(rows);
-  return rows.map(marketRow);
-}
+  // Cheap liveness ping for the admin Test button. With a key present this also
+  // validates it (an invalid demo key is rejected by the API).
+  async function testConnection({ apiKey, pace } = {}) {
+    await pace?.();
+    const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey), signal: providerSignal() });
+    if (!r.ok) throw cgFail(r, "unreachable");
+    return true;
+  }
 
-// Browse filter vocabularies (runtime.browseFilters). CoinGecko's category
-// taxonomy is ~857 entries and moves with the market, so it's fetched rather
-// than frozen — one request a day, and the endpoint is a plain id/name list
-// (the market-data flavour costs more bytes for data a dropdown can't use).
-const CATEGORY_TTL = 24 * 60 * 60 * 1000;
-let categoryCache = { at: 0, options: null };
+  // Test seams only (house convention: provider-pacing's _resetBuckets).
+  function _resetQuoteCache() {
+    quotes.reset();
+    categoryCache = { at: 0, options: null };
+  }
+  function _resetChartCache() {
+    chartCache.reset();
+  }
+  function _ageChartCache(ms) {
+    chartCache.age(ms);
+  }
 
-export async function filterOptions({ apiKey, pace } = {}) {
-  if (categoryCache.options && Date.now() - categoryCache.at < CATEGORY_TTL)
-    return { category: categoryCache.options };
-  await pace?.();
-  const r = await fetch(`${BASE}/coins/categories/list`, { headers: cgHeaders(apiKey), signal: providerSignal() });
-  if (!r.ok) throw cgFail(r, "categories");
-  // Ordering is browseFilters' job; the only thing to do here is name the
-  // options. Some names carry stray whitespace (" DN-404" sorted above
-  // everything until this trim) — a display artifact of their data, not a name.
-  const options = (await r.json())
-    .filter((c) => c?.category_id)
-    .map((c) => ({ value: c.category_id, label: String(c.name || c.category_id).trim() }));
-  categoryCache = { at: Date.now(), options };
-  return { category: options };
-}
-
-// Cheap liveness ping for the admin Test button. With a key present this also
-// validates it (an invalid demo key is rejected by the API).
-export async function testConnection({ apiKey, pace } = {}) {
-  await pace?.();
-  const r = await fetch(`${BASE}/ping`, { headers: cgHeaders(apiKey), signal: providerSignal() });
-  if (!r.ok) throw cgFail(r, "unreachable");
-  return true;
-}
-
-// Test seams only (house convention: provider-pacing's _resetBuckets).
-export function _resetQuoteCache() {
-  quotes.reset();
-  categoryCache = { at: 0, options: null };
-}
-export function _resetChartCache() {
-  chartCache.reset();
-}
-export function _ageChartCache(ms) {
-  chartCache.age(ms);
+  return {
+    label, description, needsKey, attribution, pacesRequests, rpm, keylessRpm,
+    burst, search, maxPageSize, prefetch, fetchEntity, fetchFields,
+    history, chart, honorsSorts, list, filterOptions, testConnection,
+    // test seams
+    _resetQuoteCache, _resetChartCache, _ageChartCache,
+  };
 }

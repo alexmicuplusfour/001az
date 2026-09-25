@@ -232,7 +232,7 @@ export async function activeProvider(db, conn) {
   return { name, provider: paced(conn.providers[name], st.config, apiKey), apiKey };
 }
 
-// The provider descriptor every call site actually uses: the module's own
+// The provider descriptor every call site actually uses: the provider's own
 // declarations with the effective pacing merged in. Two rules, in precedence
 // order, and they live here rather than at each call site because both
 // activeProvider and testConnection resolve them and the second used to say
@@ -421,7 +421,7 @@ const resolveProviderId = (db, conn, activeName, source, symbol, board = null) =
   activeName === source?.provider ? source.id : resolveBySymbol(db, conn, symbol, board);
 
 // Batch-warm the active provider's quote cache for a set of provider ids (a
-// provider declares the capability by exporting prefetch(ids, ctx)). Purely an
+// provider declares the capability by having prefetch(ids, ctx)). Purely an
 // economics move: whatever reads those ids next hits the warm cache, so a
 // 100-coin batch pays one metered call instead of 100. Best-effort by design —
 // any failure just means the per-entity path pays retail.
@@ -465,7 +465,7 @@ export async function prefetchRefresh(db, conn, rows) {
 // doesn't read "due" forever. `moved` holds only value changes.
 //
 // The fetch itself is field-aware when the provider allows: a provider may
-// export fetchFields(id, keys, ctx) → { fields } serving just the requested
+// have fetchFields(id, keys, ctx) → { fields } serving just the requested
 // keys from its cheapest sources (FMP serves price/market_cap/volume/… from
 // its cached screener universe — ZERO marginal HTTP for a whole board's
 // refresh cycle; only change_1d needs a per-symbol quote). The response must

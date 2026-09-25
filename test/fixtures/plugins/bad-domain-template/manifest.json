@@ -1,0 +1,10 @@
+{
+  "id": "acme.badtemplate",
+  "apiVersion": 1,
+  "kind": "connector-domain",
+  "domain": "badtemplate",
+  "label": "Acme Bad Template",
+  "description": "a domain whose template binds a field its own catalog lacks — refused at install (fixture)",
+  "main": "index.js",
+  "faceProducers": ["acme.badtemplate.tile"]
+}

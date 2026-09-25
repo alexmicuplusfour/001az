@@ -2,16 +2,19 @@
 // of foreign issuers), ETFs and closed-end funds, i.e. everything the
 // provider's tier can actually quote. The domain defines stable fields and
 // presentation while provider modules normalize their own APIs.
-import * as financialmodelingprep from "./financialmodelingprep.js";
+import financialmodelingprep from "./financialmodelingprep.js";
+import { makeCtx } from "../../plugin-ctx.js";
 
-export const providers = { financialmodelingprep };
+// A factory over the plugin ctx, built once with its own — see crypto's note.
+export const providers = {
+  financialmodelingprep: financialmodelingprep(makeCtx({ id: "financialmodelingprep" })),
+};
 export const defaultProvider = "financialmodelingprep";
 // Face wiring: the shared price-chart producer (server/faces), by name. See crypto.
 export const faces = { chart: "price-chart" };
 
 export const manifest = {
   label: "Stocks",
-  category: "finance",
   description: "US-listed stocks, ADRs and ETFs — quotes, company data, price history",
   fields: [
     { key: "price",      kind: "number", fn: "price",      label: "Price (USD)" },
@@ -26,8 +29,8 @@ export const manifest = {
     { key: "currency",   kind: "text",   fn: "currency",   label: "Currency" },
     { key: "website",    kind: "url",    fn: "website",    label: "Company website" },
   ],
-  // The identity slot in this domain's own words (see crypto's note).
-  identity: { label: "Ticker", blurb: "each stock is its own card" },
+  // What one card is, in this domain's own words (see crypto's note).
+  identity: { blurb: "each stock is its own card" },
   // The lightbox live chart's control surface (planning/lightbox-live-chart-
   // plan.md): the full Google-parity row, deliberately NOT shrunk to any
   // provider's tier. What a deployment's key can't serve is discovered from
@@ -57,17 +60,11 @@ export const manifest = {
       { key: "website",    kind: "url",    source: "connector", fn: "website" },
     ],
   },
-  providers: Object.entries(providers).map(([name, provider]) => ({
-    name,
-    label: provider.label,
-    description: provider.description || "",
-    needsKey: !!provider.needsKey,
-  })),
   faces: [
     {
       name: "chart",
       label: "Price chart",
-      periods: financialmodelingprep.periods,
+      periods: providers.financialmodelingprep.periods,
       requires: "history",
     },
   ],

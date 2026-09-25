@@ -765,11 +765,14 @@ function capabilityDrawer(cap, p, plan, drawer, reload) {
 // --- source: saved connections (add / edit / test / remove) ---
 
 function sourceSection(p, ctx, reload) {
-  // The local folder is built in — no saved connection, boards pick a
-  // subfolder in their own ingestion settings.
+  // A source with no connection has nothing to configure here — boards say
+  // what to read in their own ingestion settings. The ingest root is the
+  // built-in folder's alone.
   if (!p.capabilities.needsConnection) {
-    const sec = section("Local folder", null);
-    sec.appendChild(muted("Built-in — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here."));
+    const sec = section(p.core ? "Local folder" : "Connections", null);
+    sec.appendChild(muted(p.core
+      ? "Built-in — files under the server's ingest root (INGEST_ROOT). Boards choose a subfolder in their own ingestion settings; there's nothing to configure here."
+      : "This source needs no connection. Boards choose what to read in their own ingestion settings; there's nothing to configure here."));
     return sec;
   }
 

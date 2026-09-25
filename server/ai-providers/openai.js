@@ -2,7 +2,7 @@
 // Brings only its descriptor: base URL, the `compat` quirk block the generic
 // request builder reads, and the model catalogs. All three capabilities (tag,
 // embed, transcribe) ride the shared compat wire.
-export default (wires) => ({
+export default ({ wires }) => ({
   label: "OpenAI",
   description: "GPT models for tagging + embeddings — bring a key",
   wire: wires.compat,

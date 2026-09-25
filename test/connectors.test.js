@@ -11,14 +11,21 @@ import { meterSpend } from "../server/metering.js";
 import { up as coingeckoToCrypto } from "../server/migrations/0007_coingecko_to_crypto.js";
 import { manifest } from "../server/connectors/crypto/index.js";
 import * as runtime from "../server/connectors/runtime.js";
-import * as coingecko from "../server/connectors/crypto/coingecko.js";
-import * as coinmarketcap from "../server/connectors/crypto/coinmarketcap.js";
+import { getConnector } from "../server/connectors/index.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const coingecko = getConnector("crypto").providers.coingecko;
+const coinmarketcap = getConnector("crypto").providers.coinmarketcap;
 
 // ─── pure: connector manifest shape ──────────────────────────────────────────
 
 test("crypto manifest: has required fields and a valid template", () => {
   assert.ok(manifest.label);
-  assert.equal(manifest.category, "finance"); // groups the picker; display-only
+  // `category` was declared, shipped and read by nothing — deleted so the
+  // reference domains don't teach a dead field (plugin-contract-plan.md,
+  // Stage 5); pinned so it can't quietly come back.
+  assert.ok(!("category" in manifest), "no domain declares a category");
   assert.ok(Array.isArray(manifest.fields) && manifest.fields.length > 0);
   // Every manifest field has key, kind, fn, label
   for (const f of manifest.fields) {
@@ -27,8 +34,10 @@ test("crypto manifest: has required fields and a valid template", () => {
     assert.ok(f.fn);
     assert.ok(f.label);
   }
-  // At least the default provider is advertised.
-  assert.ok(manifest.providers.some((p) => p.name === "coingecko" && p.needsKey === false));
+  // At least the default provider is advertised — on the live list the app
+  // serves; the manifest no longer carries a snapshot of it.
+  assert.equal(manifest.providers, undefined);
+  assert.ok(getConnector("crypto").providerList().some((p) => p.name === "coingecko" && p.needsKey === false));
   // Template is a valid mapping shape bound to the domain, not the provider.
   const t = manifest.template;
   assert.equal(t.input?.connector, "crypto");
@@ -364,7 +373,7 @@ test("GET /api/connectors: returns connector list with manifest", async () => {
   const cg = r.json.find((c) => c.name === "crypto");
   assert.ok(cg, "crypto connector in list");
   assert.equal(cg.label, "Crypto");
-  assert.equal(cg.category, "finance");
+  assert.ok(!("category" in cg), "the listing ships no category");
   assert.ok(Array.isArray(cg.fields));
   assert.ok(cg.providers.some((p) => p.name === "coingecko"));
 });
@@ -1043,8 +1052,8 @@ test("migration: coingecko boards + entities re-key to crypto/symbol", async () 
 // These mutate app-global settings (crypto_provider/crypto_api_key), so they run
 // last; earlier tests rely on the unset default (coingecko).
 
-test("crypto manifest advertises CoinMarketCap as a keyed provider", () => {
-  const cmc = manifest.providers.find((p) => p.name === "coinmarketcap");
+test("the crypto connector advertises CoinMarketCap as a keyed provider", () => {
+  const cmc = getConnector("crypto").providerList().find((p) => p.name === "coinmarketcap");
   assert.ok(cmc, "coinmarketcap in providers");
   assert.equal(cmc.label, "CoinMarketCap");
   assert.equal(cmc.needsKey, true);

@@ -28,11 +28,23 @@ const embedSignal = () => AbortSignal.timeout(Number(process.env.AI_EMBED_TIMEOU
 const transcribeSignal = () => AbortSignal.timeout(Number(process.env.AI_TRANSCRIBE_TIMEOUT_MS) || 240000);
 const keyTestSignal = () => AbortSignal.timeout(30000); // admin Test button — interactive, fail fast
 
+// A descriptor's quirk block with its defaults — the one reading of it, so a
+// plugin may leave `compat` out, or any key of it, and a key written as
+// `undefined` or `null` counts as left out, as a `null` does everywhere else a
+// plugin writes one. `max_tokens` is five of the six compat descriptors'
+// choice; listing the models proves a key without betting on any one of them,
+// and an embed-only plugin has no model to probe (plugin-contract-plan.md,
+// Stage 5). Exported: the google family reads the same block.
+export const quirks = (desc) => ({
+  maxTokensField: "max_tokens", keyTest: "list",
+  ...Object.fromEntries(Object.entries(desc.compat || {}).filter(([, v]) => v != null)),
+});
+
 // GET {base}/models, the raw rows — the ONE fetch behind both listModels and
 // listPrices. null when the provider has no models endpoint at all (GLM says
 // so in its quirk block); the engine serves the curated fallback instead.
 async function modelRows(desc, { apiKey, base } = {}) {
-  if (desc.compat.listModels === false) return null;
+  if (quirks(desc).listModels === false) return null;
   const r = await compatFetch(desc.label, `${baseOf(desc, base)}/models`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
   if (!r.ok) throw await compatError(r, desc.label);
   const data = await r.json();
@@ -43,7 +55,7 @@ async function modelRows(desc, { apiKey, base } = {}) {
 // use — see stripListPrefix on listModels.
 function modelId(desc, m) {
   const id = String(m.id || "");
-  const strip = desc.compat.stripListPrefix;
+  const strip = quirks(desc).stripListPrefix;
   return strip && id.startsWith(strip) ? id.slice(strip.length) : id;
 }
 
@@ -185,15 +197,16 @@ export const compatWire = {
     // omit a quirk, so the rebuild from the surviving flags needs no second
     // code path.
     const ask = askFor(url, model, { schema });
+    const q = quirks(desc);
     const quirksOf = (sent) => ({
-      ...desc.compat,
+      ...q,
       ...(sent.temperature ? {} : { temperature: undefined }),
       strictTools: sent.strict,
     });
     const r = await negotiate({
       sent: {
-        temperature: ask.temperature && temperatureAsked(desc.compat, model),
-        strict: ask.strict && !!desc.compat.strictTools,
+        temperature: ask.temperature && temperatureAsked(q, model),
+        strict: ask.strict && !!q.strictTools,
       },
       sendFromSent: (sent) => send(quirksOf(sent)),
       errOf: (res) => compatError(res, desc.label),
@@ -242,6 +255,7 @@ export const compatWire = {
 
   async testKey(desc, { apiKey, model, base }) {
     const id = model || desc.defaultModel;
+    const q = quirks(desc);
     // "completion": a one-token chat call (for providers with no models
     // endpoint — GLM). "models": a cheap GET on the model id. "list": GET the
     // models INDEX — proves the box is up and talking without requiring any
@@ -249,19 +263,19 @@ export const compatWire = {
     // varies per box and the picker already shows it, so a per-model probe
     // answering "model not found" on a healthy box reads as breakage. All
     // three surface the provider's own error message.
-    if (desc.compat.keyTest === "list") {
+    if (q.keyTest === "list") {
       const r = await compatFetch(desc.label, `${baseOf(desc, base)}/models`, { headers: compatHeaders(apiKey), signal: keyTestSignal() });
       if (!r.ok) throw await compatError(r, desc.label);
       return;
     }
-    if (desc.compat.keyTest === "completion") {
+    if (q.keyTest === "completion") {
       const r = await compatFetch(desc.label, `${baseOf(desc, base)}/chat/completions`, {
         method: "POST",
         headers: compatHeaders(apiKey),
         body: JSON.stringify({
           model: id,
-          [desc.compat.maxTokensField]: 1,
-          ...(desc.compat.disableThinking ? { thinking: { type: "disabled" } } : {}),
+          [q.maxTokensField]: 1,
+          ...(q.disableThinking ? { thinking: { type: "disabled" } } : {}),
           messages: [{ role: "user", content: "hi" }],
         }),
         signal: keyTestSignal(),
@@ -310,7 +324,7 @@ export const compatWire = {
   // negative (-1 = "variable") is dropped, since that is not a rate and we
   // never guess one.
   async listPrices(desc, opts) {
-    const fields = desc.compat.priceFields;
+    const fields = quirks(desc).priceFields;
     if (!fields) return null;
     const rows = await modelRows(desc, opts);
     const out = [];
@@ -326,8 +340,8 @@ export const compatWire = {
     return out.length ? out : null;
   },
 
-  // Embed a batch of texts. Returns { vectors: Float32Array[], usage } with
-  // every vector L2-normalized, so similarity is a plain dot product.
+  // Embed a batch of texts. Returns { vectors, usage }, the vectors as the
+  // provider sent them: the engine's embedTexts makes each a unit Float32Array.
   async embed(desc, { apiKey, model, texts, base }) {
     const r = await compatFetch(desc.label, `${baseOf(desc, base)}/embeddings`, {
       method: "POST",
@@ -339,15 +353,7 @@ export const compatWire = {
     const data = await r.json();
     const rows = (data.data || []).slice().sort((a, b) => a.index - b.index);
     if (rows.length !== texts.length) throw new Error(`${desc.label} returned ${rows.length} embeddings for ${texts.length} inputs`);
-    const vectors = rows.map((d) => {
-      const v = Float32Array.from(d.embedding);
-      let norm = 0;
-      for (const x of v) norm += x * x;
-      norm = Math.sqrt(norm) || 1;
-      for (let i = 0; i < v.length; i++) v[i] /= norm;
-      return v;
-    });
-    return { vectors, usage: { input: data.usage?.prompt_tokens || 0, output: 0, cacheRead: 0 } };
+    return { vectors: rows.map((d) => d.embedding), usage: { input: data.usage?.prompt_tokens || 0, output: 0, cacheRead: 0 } };
   },
 
   // Transcribe audio → text (OpenAI-style POST /audio/transcriptions, multipart).

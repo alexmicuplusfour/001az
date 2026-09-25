@@ -20,6 +20,7 @@ import { getSourceBackend, sourceModules } from "./sources/index.js";
 import { SAFETY_CAP, cacheTtl, readWindow, writeWindow, singleFlight } from "./window-cache.js";
 import { resolveJailed } from "./sources/folder.js";
 import { pluginInstalled, mediaLimitLookup } from "../plugins.js";
+import { num } from "../connectors/runtime.js";
 
 // The file filter catalog + sorts, shared by every file source. `values` a
 // backend fills (name/path/extension/file_size/modified/created) feed these.
@@ -130,6 +131,10 @@ export function descriptor() {
 // `accept`/`maxBytes` are applied inside the backend walk so `limit` counts only
 // admissible files (identical to the pre-split folder behaviour).
 // Map backend file entries → the candidate shape the shared engine filters/sorts.
+// Sizes and times leave here as the ledger keeps them: whole numbers, in BIGINT
+// columns (a plugin's list may stamp `stat.mtimeMs`, fraction and all), and a
+// value that isn't a number is null.
+const whole = (v) => { const n = num(v); return n == null ? null : Math.round(n); };
 function toCandidates(entries) {
   return entries
     .filter((e) => e.type === "file")
@@ -140,9 +145,9 @@ function toCandidates(entries) {
         name: e.name,
         path: e.path,
         extension: extOf(e.name),
-        file_size: e.size,
-        modified: e.modified,
-        created: e.created,
+        file_size: whole(e.size),
+        modified: whole(e.modified),
+        created: whole(e.created),
       },
     }));
 }
@@ -417,7 +422,13 @@ export async function browse(db, source = {}, navPath = "", { limit } = {}) {
   const mod = getSourceBackend(type);
   if (!mod || !mod.manifest.browsable) throw new Error("this source can't be browsed");
   const be = await resolveBackend(db, { ...source, path: navPath, folder: navPath });
-  const { entries, truncated } = await be.list({ path: navPath, recursive: false, includeDirs: true, limit: lim });
+  // `accept` and `maxBytesFor` ride along as they do on a run, letting every
+  // file through, so the tree shows them all — and a plugin's list may filter
+  // with them, as PLUGIN.md says.
+  const { entries, truncated } = await be.list({
+    path: navPath, recursive: false, includeDirs: true, limit: lim,
+    accept: () => true, maxBytesFor: () => Infinity,
+  });
   const dirs = entries.filter((e) => e.type === "dir");
   const filesE = entries.filter((e) => e.type === "file");
   return {

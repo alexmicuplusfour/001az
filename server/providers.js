@@ -1,16 +1,17 @@
 // The AI-provider ENGINE: the registry, per-key pacing, and the dispatchers
-// (tag / embed / transcribe / key test). Everything here is provider-agnostic —
+// (tag / embed / transcribe / detect / key test). Everything here is provider-agnostic —
 // it reads descriptor fields and dispatches through descriptor.wire; no vendor
 // name, protocol constant, or SDK import appears in this file. Prompt building,
 // the queue, and tag validation live in worker.js.
 //
 // A provider is one descriptor: its quirks are data (base URL, which max-tokens
 // field it wants, whether it forces the tool call, …) and it points at one of
-// two `wire` families — `anthropic` (SDK, tool_use blocks, server-side
-// web_search) or `compat` (plain fetch to /chat/completions) — which live in
+// three `wire` families — `anthropic` (SDK, tool_use blocks, server-side
+// web_search), `compat` (plain fetch to /chat/completions) or `google` (compat,
+// plus a native endpoint for research) — which live in
 // ./ai-providers/wires/, one module per protocol. The built-in descriptors live
-// in ./ai-providers/ as (wires) => descriptor factories — the same contract a
-// plugin returns — and are registered below; a dropped-in plugin enters the
+// in ./ai-providers/ as ({ wires }) => descriptor factories — the same factory a
+// plugin exports — and are registered below; a dropped-in plugin enters the
 // SAME registry the SAME way (registerProvider). Adding a provider, built-in or
 // plugin, is one descriptor.
 import crypto from "node:crypto";
@@ -118,7 +119,9 @@ export function requireValidPrices(name, desc) {
 // the catalog object `provides` wants. Only `tag` (spread across three sibling
 // fields) and `research` (a bare boolean) need their own handling — which is
 // why they appear explicitly in both functions below and these three don't.
-const RENAMED = { embed: "embeds", transcribe: "transcribes", detect: "detects" };
+// Exported for the plugin loader, which names the rename when a plugin writes
+// the legacy spelling inside `provides` (`provides.embeds`).
+export const RENAMED = { embed: "embeds", transcribe: "transcribes", detect: "detects" };
 
 // Legacy fields → `provides`, with an explicitly-supplied `provides` winning per
 // capability (so a hybrid descriptor that writes provides.tag but still declares
@@ -131,15 +134,28 @@ const RENAMED = { embed: "embeds", transcribe: "transcribes", detect: "detects" 
 // implementation, or the loader and the registry drift.
 export function normalizeProvides(desc) {
   const out = {};
-  // Tagging is declared by wire.tag EXISTING (local sets it to null, which is not
-  // the same as absent), and its catalog lives in three sibling fields.
-  if (desc.wire?.tag) out.tag = { models: desc.models || [], default: desc.defaultModel ?? null, filter: desc.modelFilter ?? null };
+  // In the legacy spelling, tagging is declared by wire.tag EXISTING (local sets
+  // it to null, which is not the same as absent), and its catalog lives in three
+  // sibling fields. A descriptor that writes `provides` declares tagging there
+  // or not at all: a shared wire always carries a tag method, so an embed-only
+  // plugin on ctx.wires.compat would otherwise read as a tagger with no default
+  // (plugin-contract-plan.md, Stage 5). The loader refuses the half-converted
+  // shape this would otherwise silently strip — tagging in the legacy fields,
+  // `provides` without it.
+  if (desc.wire?.tag && !desc.provides) out.tag = { models: desc.models, default: desc.defaultModel, filter: desc.modelFilter };
   // Truthiness is the flag, deliberately: the whisper sidecar advertises
   // transcription as { default: null, models: [] } — the model is baked into its
   // image, so the catalog is legitimately empty and must still read as advertised.
   for (const [cap, field] of Object.entries(RENAMED)) if (desc[field]) out[cap] = desc[field];
   if (desc.research) out.research = true;
-  return { ...out, ...(desc.provides || {}) };
+  const provides = { ...out, ...(desc.provides || {}) };
+  // Tagging's catalog with its empties filled, whichever way it was declared:
+  // `provides.tag: { default }` (the DeepSeek example: no list, no filter)
+  // must register what `defaultModel` alone does (plugin-contract-plan.md,
+  // Stage 4).
+  const t = provides.tag;
+  if (t) provides.tag = { ...t, models: t.models || [], default: t.default ?? null, filter: t.filter ?? null };
+  return provides;
 }
 
 // The mirror image: fill the legacy fields FROM an explicit `provides`, so a
@@ -206,8 +222,10 @@ function install(name, desc) {
 
 // Populate the built-ins: call each factory with the shared wires and install the
 // descriptor it returns. Insertion order (see ai-providers/index.js) sets the
-// registry + catalog display order.
-for (const [name, make] of Object.entries(BUILTIN_PROVIDERS)) install(name, make(WIRES));
+// registry + catalog display order. `{ wires }`, not the plugin ctx: it is all a
+// descriptor reads, and building the whole ctx here would pull the connector
+// runtime into the AI engine (plugin-ctx.js imports it).
+for (const [name, make] of Object.entries(BUILTIN_PROVIDERS)) install(name, make({ wires: WIRES }));
 
 // --- dynamic registration (phase 2) ---
 // Register a dynamically-loaded AI provider (an `ai-provider` plugin). The
@@ -309,13 +327,31 @@ export async function callTagger({ provider, research = false, rpm, burst, ...re
     desc.wire.tag(desc, { ...rest, research: research && desc.research }));
 }
 
+// One vector as everything downstream reads it: a Float32Array (storage writes
+// its `.buffer`) of unit length (the search score is a plain dot product).
+// Already so — the on-device embedder's are — it passes through untouched.
+const unitVector = (v) => {
+  const f = v instanceof Float32Array ? v : Float32Array.from(v);
+  let sq = 0;
+  for (const x of f) sq += x * x;
+  const norm = Math.sqrt(sq);
+  return !(norm > 0) || Math.abs(norm - 1) < 1e-4 ? f : f.map((x) => x / norm);
+};
+
 // Embed a batch of texts (semantic search). Only embeddings-capable providers
 // qualify — callers gate on PROVIDERS[provider].embeds before reaching here. The
 // on-device `local` provider rides its own wire.embed like any other (paceAi
 // no-ops for keyless), so there's no provider-name branch here.
+//
+// The vectors are made unit Float32Arrays HERE, at the one funnel, the way
+// detectObjects normalizes the bare-array answer below: an own-wire plugin
+// answering plain arrays used to throw at storage AFTER the batch was metered,
+// and go back to be paid for again; one answering unnormalized vectors ranked
+// search wrong in silence (plugin-contract-plan.md, Stage 5).
 export async function embedTexts({ provider, rpm, burst, ...rest }) {
   const desc = PROVIDERS[provider];
-  return viaKey(provider, rest.apiKey, rpm, burst, () => desc.wire.embed(desc, rest));
+  const answer = await viaKey(provider, rest.apiKey, rpm, burst, () => desc.wire.embed(desc, rest));
+  return { ...answer, vectors: answer.vectors.map(unitVector) };
 }
 
 // Transcribe audio bytes → { text, usage } via a provider's wire. Only
@@ -514,8 +550,11 @@ export function providerCatalog() {
       name,
       label: p.label,
       description: p.description || "",
-      defaultModel: p.defaultModel,
-      models: p.models,
+      // Derived, not passed through, for the reason `research` is below: a
+      // provider that doesn't tag has neither, in either spelling, and an
+      // `undefined` here is dropped by JSON (plugin-contract-plan.md, Stage 5).
+      defaultModel: p.defaultModel ?? null,
+      models: p.models ?? [],
       // `!!` not a passthrough: a descriptor that omits `research` would put
       // `undefined` here, which JSON-drops and then fails the route-vs-catalog
       // deepStrictEqual. Every built-in sets it explicitly so that has never

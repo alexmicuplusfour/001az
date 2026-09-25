@@ -72,25 +72,71 @@ test("an embed-only on-device provider declares embed and nothing else", () => {
     Object.fromEntries(CAPABILITY_IDS.map((c) => [c, c === "embed"])));
 });
 
+// Register descriptors for the length of `fn`, which gets the catalog by name.
+const withProviders = (descs, fn) => {
+  for (const [name, desc] of Object.entries(descs)) registerProvider(name, desc);
+  try { fn(Object.fromEntries(providerCatalog().map((p) => [p.name, p]))); }
+  finally { for (const name of Object.keys(descs)) unregisterProvider(name); }
+};
+const strip = ({ name, ...rest }) => rest;
+
 test("a legacy-shaped and a provides-shaped descriptor produce identical catalog entries", () => {
   const models = [{ id: "m-1", note: "only" }];
   const embeds = { default: "e-1", models: [{ id: "e-1", note: "only" }], filter: "^e-" };
-  registerProvider("shape.legacy", {
-    label: "Shape", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat,
-    defaultModel: "m-1", models, modelFilter: "^m-", research: false, embeds,
+  withProviders({
+    "shape.legacy": {
+      label: "Shape", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat,
+      defaultModel: "m-1", models, modelFilter: "^m-", research: false, embeds,
+    },
+    "shape.modern": {
+      label: "Shape", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat,
+      provides: { tag: { models, default: "m-1", filter: "^m-" }, embed: embeds },
+    },
+  }, (cat) => assert.deepEqual(strip(cat["shape.modern"]), strip(cat["shape.legacy"])));
+});
+
+test("…and so does a provides tag block that leaves out a list and a filter it doesn't have", () => {
+  // The DeepSeek example's shape (plugin-contract-plan.md, Stage 4); Ollama's
+  // leaves out only the list. The legacy spelling is assembled with its empties
+  // filled; taken as written, the short one left `models` undefined for
+  // backfillLegacy to copy into the catalog, where JSON drops it — so the round
+  // trip fails with it.
+  withProviders({
+    "short.legacy": { label: "Short", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat, defaultModel: "m-1" },
+    "short.modern": { label: "Short", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat, provides: { tag: { default: "m-1" } } },
+  }, (cat) => {
+    assert.deepEqual(strip(cat["short.modern"]), strip(cat["short.legacy"]));
+    assert.deepEqual(JSON.parse(JSON.stringify(cat["short.modern"])), cat["short.modern"], "nothing undefined for JSON to drop");
   });
-  registerProvider("shape.modern", {
-    label: "Shape", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat,
-    provides: { tag: { models, default: "m-1", filter: "^m-" }, embed: embeds },
+});
+
+// A shared wire always carries a tag method, so reading tagging off the wire
+// made an embed-only plugin on ctx.wires.compat a tagger with no default — refused
+// in words naming a field PLUGIN.md never teaches. With `provides`, `provides`
+// alone declares; the legacy spelling keeps its inference (plugin-contract-plan.md,
+// Stage 5).
+test("with provides, a shared wire's tag method declares nothing — the legacy spelling still infers it", () => {
+  const embedOnly = normalizeProvides({ wire: WIRES.compat, provides: { embed: { default: "e-1" } } });
+  assert.equal(embedOnly.tag, undefined, "no tagging the plugin didn't declare");
+  assert.deepEqual(embedOnly.embed, { default: "e-1" });
+  const legacy = normalizeProvides({ wire: WIRES.compat, defaultModel: "m-1" });
+  assert.equal(legacy.tag.default, "m-1", "no `provides`: the wire's tag method still declares");
+});
+
+test("an embed-only provider's catalog entry survives the JSON round trip, in either spelling", () => {
+  // It has no tagging default and no tagging list; passed through, both were
+  // `undefined` in providerCatalog, which JSON drops (Stage 4 second pass,
+  // measured). Derived now, as `research` is.
+  withProviders({
+    "embed.modern": { label: "E", keyless: true, rpm: 10, burst: 2, wire: WIRES.compat, provides: { embed: { default: "e-1" } } },
+    "embed.legacy": { label: "E", keyless: true, rpm: 10, burst: 2, wire: { ...WIRES.compat, tag: null }, embeds: { default: "e-1" } },
+  }, (cat) => {
+    for (const name of ["embed.modern", "embed.legacy"]) {
+      assert.equal(cat[name].defaultModel, null, name);
+      assert.deepEqual(cat[name].models, [], name);
+      assert.deepEqual(JSON.parse(JSON.stringify(cat[name])), cat[name], `${name}: nothing undefined for JSON to drop`);
+    }
   });
-  try {
-    const strip = (p) => { const { name, ...rest } = p; return rest; };
-    const cat = Object.fromEntries(providerCatalog().map((p) => [p.name, p]));
-    assert.deepEqual(strip(cat["shape.modern"]), strip(cat["shape.legacy"]));
-  } finally {
-    unregisterProvider("shape.legacy");
-    unregisterProvider("shape.modern");
-  }
 });
 
 test("a hybrid descriptor keeps both halves — an explicit provides wins per capability, it does not replace the map", () => {

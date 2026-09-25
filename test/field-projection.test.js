@@ -7,7 +7,11 @@ import assert from "node:assert/strict";
 import { startServer, adminSession, req, installConnectors, withFetch } from "./helpers.js";
 import { projectConnectorFields } from "../server/connectors/project.js";
 import * as runtime from "../server/connectors/runtime.js";
-import * as coingecko from "../server/connectors/crypto/coingecko.js";
+import { getConnector } from "../server/connectors/index.js";
+
+// The registered instances — the ones the app itself runs — so the seams
+// below clear the caches the app reads, never a private copy's.
+const coingecko = getConnector("crypto").providers.coingecko;
 
 // ─── pure: the land-time projection ──────────────────────────────────────────
 

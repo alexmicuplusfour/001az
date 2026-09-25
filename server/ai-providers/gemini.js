@@ -5,7 +5,7 @@
 // google wire family rides the shared compat wire with this base + quirks for
 // tagging and embeds, and speaks the native generateContent protocol — from
 // nativeBase below — when research is on.
-export default (wires) => ({
+export default ({ wires }) => ({
   label: "Gemini",
   description: "Google models for tagging + embeddings — bring a key",
   wire: wires.google,

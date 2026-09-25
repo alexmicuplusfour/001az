@@ -1,26 +1,77 @@
-// Dynamic plugin install/uninstall (phase 2, slice 2): resolving a source URL,
-// fetching code into place, and the install→register→persist→uninstall lifecycle.
-// Hermetic: a dep-free `file:` fixture drives the whole path with no network and
-// no npm. GitHub/npm URL parsing is unit-tested; their downloads aren't run here.
+// Dynamic plugin install/update/uninstall (phase 2, slice 2; update is
+// plugin-contract Stage 3): resolving a source URL, fetching code into place, and
+// the install→register→persist→update→uninstall lifecycle. Hermetic: a dep-free
+// `file:` fixture drives the whole path with no network and no npm; the tarball
+// and GitHub downloads run against a local HTTP server. npm's registry lookup is
+// the one network path not run here.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import http from "node:http";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { startServer, adminSession, req } from "./helpers.js";
-import { resolveSource } from "../server/plugin-fetch.js";
-import { installFromUrl, uninstall, unregister } from "../server/plugin-loader.js";
+import zlib from "node:zlib";
+import { PassThrough } from "node:stream";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { startServer, adminSession, req, seedBoard } from "./helpers.js";
+import { resolveSource, fetchModule } from "../server/plugin-fetch.js";
+import { installFromUrl, updatePlugin, uninstall, unregister, manifestIn } from "../server/plugin-loader.js";
+import { makeCtx } from "../server/plugin-ctx.js";
 import { getConnector } from "../server/connectors/index.js";
-import { PROVIDERS } from "../server/providers.js";
+import { PROVIDERS, RENAMED } from "../server/providers.js";
 import { pluginCatalog, bundledPlugins } from "../server/plugins.js";
-import { getExternalPlugin, setExternalLoadError, getSetting, setSetting, listAiKeys, createAiKey } from "../server/db.js";
+import {
+  getExternalPlugin, setExternalLoadError, getSetting, setSetting, listAiKeys, createAiKey, setPluginState,
+  createSourceConnection, listSourceConnections, deleteSourceConnection,
+} from "../server/db.js";
+import { resolveCapability } from "../server/capability-resolve.js";
+import { ratesFor } from "../server/pricing.js";
+import { TarWriter } from "../server/tarfile.js";
 import { getFaceProducer } from "../server/faces/index.js";
 import { getSourceBackend } from "../server/ingestion/sources/index.js";
 import { listSources } from "../server/ingestion/files.js";
 
 const FIX = (name) => fileURLToPath(new URL(`./fixtures/plugins/${name}`, import.meta.url));
+const EXAMPLE = (name) => fileURLToPath(new URL(`../examples/plugins/${name}`, import.meta.url));
+
+// A source an update can find something new at: a temp copy of a fixture or an
+// example, installed from, then changed in place.
+const copyOf = (dir) => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-src-"));
+  fs.cpSync(dir, d, { recursive: true });
+  return d;
+};
+const rewrite = (dir, file, from, to) => {
+  const f = path.join(dir, file);
+  const src = fs.readFileSync(f, "utf8");
+  assert.ok(src.includes(from), `${file} holds ${from}`);
+  fs.writeFileSync(f, src.replace(from, to));
+};
+
+// A gzipped tar built in memory, one [name, content] per file — the archive
+// shapes GitHub and npm serve, without a network.
+async function tgzOf(files) {
+  const out = new PassThrough();
+  const chunks = [];
+  out.on("data", (c) => chunks.push(c));
+  const tw = new TarWriter(out);
+  for (const [name, content] of files) await tw.file(name, Buffer.byteLength(content), Buffer.from(content));
+  await tw.end();
+  return zlib.gzipSync(Buffer.concat(chunks));
+}
+
+// Serve one archive on a local port for the length of `fn` — the download half
+// of a fetch, hermetically.
+async function serving(body, fn) {
+  const server = await new Promise((resolve) => {
+    const s = http.createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/gzip", "Content-Length": body.length });
+      res.end(body);
+    }).listen(0, "127.0.0.1", () => resolve(s));
+  });
+  try { return await fn(`http://127.0.0.1:${server.address().port}/archive.tgz`); }
+  finally { await new Promise((r) => server.close(r)); }
+}
 
 // --- resolveSource (pure) ---
 
@@ -154,6 +205,31 @@ test("bundled: every listing hint matches the descriptor it stands in for", asyn
   }
 });
 
+test("bundled: each example declares what it does in `provides` alone — the shape the doc teaches", async () => {
+  // The examples are the reference PLUGIN.md points at (D2): the legacy
+  // capability fields stay accepted but go unwritten, so an example that
+  // drifted back to one would teach a shape the doc doesn't have. Read off the
+  // factory's own return, BEFORE install() — its backfill writes the legacy
+  // fields onto every registered descriptor for the readers that still take
+  // them, so a registered one proves nothing. The examples directory is read
+  // directly rather than through bundledPlugins, which lists only what isn't
+  // installed.
+  const legacy = ["defaultModel", "models", "modelFilter", "research", ...Object.values(RENAMED)];
+  let seen = 0;
+  for (const e of fs.readdirSync(EXAMPLE(""), { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    const name = e.name;
+    const manifest = manifestIn(EXAMPLE(name));
+    if (manifest.kind !== "ai-provider") continue;
+    const make = (await import(pathToFileURL(path.join(EXAMPLE(name), manifest.main)).href)).default;
+    const built = make(makeCtx(manifest));
+    assert.ok(built.provides, `${name}: declares provides`);
+    assert.deepEqual(legacy.filter((k) => k in built), [], `${name}: no legacy capability field`);
+    seen++;
+  }
+  assert.equal(seen, 2, "both examples were read");
+});
+
 test("installFromUrl: a connector-domain installs the whole domain (dir named from the catalog id)", async () => {
   const id = await installFromUrl(db, FIX("acme-weather"));
   assert.equal(id, "weather:acme.weather");
@@ -222,10 +298,20 @@ test("installFromUrl: a source plugin installs as the 4th kind (registers live; 
   assert.equal(entry.external, true);
   assert.equal(entry.state.installed, true);
 
+  // Its saved connections go with it, as every other kind's do — and only its
+  // own: a built-in source's connection stays (plugin-contract-plan.md,
+  // Stage 5, decided with the user).
+  await createSourceConnection(db, "acme.filedrop", "Drop A", { host: "a" });
+  await createSourceConnection(db, "acme.filedrop", "Drop B", { host: "b" });
+  const ftp = await createSourceConnection(db, "ftp", "Someone else's", { host: "ftp" });
+
   await uninstall(db, id);
   assert.equal(getSourceBackend("acme.filedrop"), null, "unregistered on uninstall");
   assert.equal((await listSources(db)).some((s) => s.type === "acme.filedrop"), false, "gone from the source list");
   assert.equal((await pluginCatalog(db)).some((p) => p.id === id), false, "off the catalog");
+  assert.deepEqual(await listSourceConnections(db, "acme.filedrop"), [], "its connections, secrets and all, are gone");
+  assert.deepEqual((await listSourceConnections(db, "ftp")).map((c) => c.label), ["Someone else's"], "another source's stays");
+  await deleteSourceConnection(db, ftp);
 });
 
 test("installFromUrl: an external source can't make itself un-removable via core:true", async () => {
@@ -290,6 +376,45 @@ test("uninstall: a connector uninstall leaves a DIFFERENT domain provider's sele
   await setSetting(db, "crypto_provider", null); // tidy up
 });
 
+test("a domain plugin that never loaded: Retry can't take the domain another plugin holds, and Remove leaves it alone", async () => {
+  const domainPlugin = (id) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${id}-`));
+    fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+      id, apiVersion: 1, kind: "connector-domain", domain: "weatherx", label: id, main: "index.js",
+    }));
+    fs.writeFileSync(path.join(dir, "index.js"),
+      `export default () => ({ providers: { "${id}": { label: "${id}", rpm: 30, burst: 15,` +
+      " async search() { return []; }, async fetchEntity(x) { return { id: x, fields: {} }; } } }," +
+      ` defaultProvider: "${id}", manifest: { label: "${id}" } });\n`);
+    return dir;
+  };
+  const dirA = domainPlugin("acme.wa");
+  const dirB = domainPlugin("acme.wb");
+  const a = await installFromUrl(db, dirA);
+  // A fails to load at boot, and B claims the domain it would have held.
+  unregister((await getExternalPlugin(db, a)).manifest);
+  await setExternalLoadError(db, a, new Error("failed at boot"));
+  const b = await installFromUrl(db, dirB);
+  await setSetting(db, "weatherx_provider", "acme.wb");
+  const heldByB = getConnector("weatherx");
+
+  // A's Retry gets a fresh install's shadow check: the domain is B's now.
+  await assert.rejects(updatePlugin(db, a), /domain "weatherx" already exists/);
+  assert.equal(getConnector("weatherx"), heldByB, "B's domain is untouched");
+  assert.match((await getExternalPlugin(db, a)).load_error.message, /already exists/, "A's card says why");
+
+  await uninstall(db, a);
+  assert.deepEqual(Object.keys(getConnector("weatherx")?.providers || {}), ["acme.wb"], "the domain stays with B");
+  assert.equal(await getSetting(db, "weatherx_provider"), "acme.wb", "and so does B's star");
+  assert.equal((await pluginCatalog(db)).find((p) => p.id === b).state.loadError, undefined, "B's card is healthy");
+
+  await uninstall(db, b);
+  assert.equal(getConnector("weatherx"), null);
+  assert.equal(await getSetting(db, "weatherx_provider"), null, "a live domain's uninstall still clears its star");
+  fs.rmSync(dirA, { recursive: true, force: true });
+  fs.rmSync(dirB, { recursive: true, force: true });
+});
+
 test("uninstall: an ai-provider's registered keys are removed", async () => {
   const id = await installFromUrl(db, FIX("acme-ai")); // ai:acme.model, provider "acme.model"
   await createAiKey(db, "acme key", "acme.model", "sk-acme");
@@ -299,33 +424,195 @@ test("uninstall: an ai-provider's registered keys are removed", async () => {
   assert.equal((await listAiKeys(db)).some((k) => k.provider === "acme.model"), false, "no orphan keys for a gone provider");
 });
 
-test("installFromUrl: a failed errored-retry preserves the prior install and refreshes the reason", async () => {
-  // Set up an errored plugin the way boot does: code on disk + a row, but
-  // load_error set and NOT registered (so a retry is allowed, not 409'd).
-  const id = await installFromUrl(db, FIX("acme-gecko"));
+// --- update (plugin-contract Stage 3) ---
+
+test("updatePlugin: a new version swaps in; keys, the election, a board pin and config all stay", async () => {
+  const src = copyOf(EXAMPLE("ollama"));
+  const id = await installFromUrl(db, src);
+  assert.equal(id, "ai:community.ollama");
+  const keyId = await createAiKey(db, "ollama box", "community.ollama", "", "http://127.0.0.1:11434/v1");
+  await setSetting(db, "embed_key_id", String(keyId)); // elected embedder, through its connection
+  const board = await seedBoard(db, "tagged by ollama");
+  await db.query("UPDATE boards SET ai_key_id=$1 WHERE id=$2", [keyId, board]); // a board's tagging pinned to it
+  await setPluginState(db, id, { config: { rpm: 7 } });
   const before = await getExternalPlugin(db, id);
+  const running = PROVIDERS["community.ollama"];
+
+  rewrite(src, "index.js", 'description: "Self-hosted models', 'description: "Updated. Self-hosted models');
+  await updatePlugin(db, id);
+
+  assert.notEqual(PROVIDERS["community.ollama"], running, "the new version is the one registered");
+  const entry = (await pluginCatalog(db)).find((p) => p.id === id);
+  assert.match(entry.description, /^Updated\. /, "the card reads the new code");
+  assert.equal(entry.state.keyCount, 1, "its connection survives");
+  assert.equal(entry.state.config.rpm, 7, "its config survives");
+  assert.equal(await getSetting(db, "embed_key_id"), String(keyId), "the election survives");
+  assert.equal((await resolveCapability(db, "embed"))?.provider, "community.ollama", "and still resolves to it");
+  const { rows: [pin] } = await db.query("SELECT ai_key_id FROM boards WHERE id=$1", [board]);
+  assert.equal(Number(pin.ai_key_id), keyId, "the board pin survives");
+
+  const after = await getExternalPlugin(db, id);
+  assert.equal(after.source_url, before.source_url, "from the stored source");
+  assert.notEqual(after.dir, before.dir, "into a fresh dir");
+  assert.ok(fs.existsSync(after.dir));
+  assert.equal(fs.existsSync(before.dir), false, "the prior dir is removed once the new one serves");
+  assert.equal(after.load_error, null);
+
+  await uninstall(db, id);
+  await setSetting(db, "embed_key_id", null);
+  fs.rmSync(src, { recursive: true, force: true });
+});
+
+test("updatePlugin: a version that fails leaves the running one exactly as it was", async () => {
+  const src = copyOf(FIX("acme-ai"));
+  const id = await installFromUrl(db, src);
+  const before = await getExternalPlugin(db, id);
+  const running = PROVIDERS["acme.model"];
+  const good = fs.readFileSync(path.join(src, "index.js"), "utf8");
+
+  // A factory that throws — refused while building, before any registry write.
+  fs.writeFileSync(path.join(src, "index.js"), "export default function () { throw new Error('v2 is broken'); }\n");
+  await assert.rejects(updatePlugin(db, id), /v2 is broken/);
+  // A descriptor only the registry refuses (install()'s price rule): refused at
+  // the register write, which throws before it writes.
+  fs.writeFileSync(path.join(src, "index.js"), good.replace("rpm: 60,", 'prices: { "acme-1": { input: -1 } }, rpm: 60,'));
+  await assert.rejects(updatePlugin(db, id), /prices/);
+
+  assert.equal(PROVIDERS["acme.model"], running, "the running version never left the registry");
+  const after = await getExternalPlugin(db, id);
+  assert.equal(after.dir, before.dir, "the prior dir is still the one on record");
+  assert.ok(fs.existsSync(before.dir), "and still on disk");
+  assert.equal(after.load_error, null, "no stored error — the plugin is still serving");
+  assert.deepEqual(fs.readdirSync(pluginsTmp).filter((n) => n.startsWith("ai__acme.model@")), [path.basename(before.dir)],
+    "the failed versions' dirs are gone");
+
+  await uninstall(db, id);
+  fs.rmSync(src, { recursive: true, force: true });
+});
+
+test("updatePlugin: Retry on an errored plugin — a failure refreshes its reason, a fix loads it", async () => {
+  const src = copyOf(FIX("acme-gecko"));
+  const id = await installFromUrl(db, src);
+  const before = await getExternalPlugin(db, id);
+  // As boot leaves a plugin whose load failed: code on disk, a reason, nothing registered.
   unregister(before.manifest);
   await setExternalLoadError(db, id, new Error("boot load failed once"));
 
-  // A same-id retry source whose factory throws (built inline so it shares the
-  // catalog id but fails to load).
-  const badDir = fs.mkdtempSync(path.join(os.tmpdir(), "acme-gecko-bad-"));
-  fs.writeFileSync(path.join(badDir, "manifest.json"), JSON.stringify({
-    id: "acme.gecko", apiVersion: 1, kind: "connector-provider", domain: "crypto", label: "Acme Gecko", main: "index.js",
-  }));
-  fs.writeFileSync(path.join(badDir, "index.js"), "export default function () { throw new Error('retry still broken'); }\n");
-
-  await assert.rejects(installFromUrl(db, badDir), /retry still broken/);
-
-  const after = await getExternalPlugin(db, id);
-  assert.ok(after, "install record survives the failed retry");
-  assert.equal(after.dir, before.dir, "prior dir unchanged");
+  const good = fs.readFileSync(path.join(src, "index.js"), "utf8");
+  fs.writeFileSync(path.join(src, "index.js"), "export default function () { throw new Error('retry still broken'); }\n");
+  await assert.rejects(updatePlugin(db, id), /retry still broken/);
+  let row = await getExternalPlugin(db, id);
+  assert.equal(row.dir, before.dir, "the prior dir is still the one on record");
   assert.ok(fs.existsSync(before.dir), "prior code still on disk");
-  assert.match(after.load_error.message, /retry still broken/, "reason refreshed to this attempt");
-  const geckoDirs = fs.readdirSync(pluginsTmp).filter((n) => n.startsWith("crypto__acme.gecko@"));
-  assert.deepEqual(geckoDirs, [path.basename(before.dir)], "the failed retry's dir was cleaned; only the prior one remains");
+  assert.match(row.load_error.message, /retry still broken/, "the card says why THIS attempt failed");
+  assert.deepEqual(fs.readdirSync(pluginsTmp).filter((n) => n.startsWith("crypto__acme.gecko@")), [path.basename(before.dir)],
+    "the failed attempt's dir is gone");
 
-  fs.rmSync(badDir, { recursive: true, force: true });
+  fs.writeFileSync(path.join(src, "index.js"), good);
+  await updatePlugin(db, id);
+  row = await getExternalPlugin(db, id);
+  assert.equal(row.load_error, null, "loaded, so the reason clears");
+  assert.ok(getConnector("crypto").providers["acme.gecko"], "registered");
+  assert.equal(fs.existsSync(before.dir), false, "the version that failed at boot is removed");
+
+  await uninstall(db, id);
+  fs.rmSync(src, { recursive: true, force: true });
+});
+
+test("updatePlugin: a source that now names another plugin, or the same id as another kind, is refused", async () => {
+  const src = copyOf(FIX("acme-gecko"));
+  const id = await installFromUrl(db, src);
+  const before = await getExternalPlugin(db, id);
+  const running = getConnector("crypto").providers["acme.gecko"];
+
+  rewrite(src, "manifest.json", '"id": "acme.gecko"', '"id": "acme.other"');
+  await assert.rejects(updatePlugin(db, id), /names a different plugin \(connector-provider crypto:acme\.other\)/);
+  // The two connector kinds share `<domain>:<id>` — the kind must match too.
+  rewrite(src, "manifest.json", '"id": "acme.other"', '"id": "acme.gecko"');
+  rewrite(src, "manifest.json", '"kind": "connector-provider"', '"kind": "connector-domain"');
+  await assert.rejects(updatePlugin(db, id), /names a different plugin \(connector-domain crypto:acme\.gecko\)/);
+
+  assert.equal(getConnector("crypto").providers["acme.gecko"], running, "still the running version");
+  assert.deepEqual(await getExternalPlugin(db, id), before, "the record is untouched");
+  await uninstall(db, id);
+  fs.rmSync(src, { recursive: true, force: true });
+});
+
+test("updatePlugin: a domain plugin's face producers follow the new version", async () => {
+  const src = copyOf(FIX("acme-weatherface"));
+  const id = await installFromUrl(db, src);
+  const tile = "acme.weatherface.tile";
+
+  // v2 draws its tile at a new size: the registered producer is v2's function.
+  rewrite(src, "index.js", "w: 120, h: 90", "w: 60, h: 45");
+  await updatePlugin(db, id);
+  assert.equal((await getFaceProducer(tile)([{ t: 0, price: 1 }])).w, 60, "the new producer is the registered one");
+
+  // v3 stops declaring the producer, but its faces map still names it. v2's is
+  // still registered while v3 is checked, and must not count for v3.
+  rewrite(src, "manifest.json", '"faceProducers": ["acme.weatherface.tile"]', '"faceProducers": []');
+  await assert.rejects(updatePlugin(db, id), /faces\.tile names face producer "acme\.weatherface\.tile"/);
+  assert.equal(typeof getFaceProducer(tile), "function", "the running version keeps its producer");
+
+  // v4 drops it for real (the slot moves to the built-in chart): it's unregistered.
+  rewrite(src, "index.js", 'faces: { tile: "acme.weatherface.tile" }', 'faces: { tile: "price-chart" }');
+  await updatePlugin(db, id);
+  assert.equal(getFaceProducer(tile), null, "a producer the new version dropped is unregistered");
+  assert.ok(getConnector("weatherface"), "and the domain is still registered");
+
+  await uninstall(db, id);
+  fs.rmSync(src, { recursive: true, force: true });
+});
+
+test("updatePlugin: a domain plugin's update keeps the providers other plugins added to it", async () => {
+  const domain = await installFromUrl(db, FIX("acme-weather"));
+  const provDir = fs.mkdtempSync(path.join(os.tmpdir(), "wprov-"));
+  fs.writeFileSync(path.join(provDir, "manifest.json"), JSON.stringify({
+    id: "acme.wprov", apiVersion: 1, kind: "connector-provider", domain: "weather", label: "Acme W provider", main: "index.js",
+  }));
+  fs.writeFileSync(path.join(provDir, "index.js"),
+    'export default () => ({ label: "Acme W provider", rpm: 30, burst: 15,' +
+    " async search() { return []; }, async fetchEntity(id) { return { id, fields: {} }; } });\n");
+  const provider = await installFromUrl(db, provDir);
+  await setSetting(db, "weather_provider", "acme.wprov"); // the domain's star is the other plugin's provider
+  const theirs = getConnector("weather").providers["acme.wprov"];
+  assert.equal((await getConnector("weather").activeProvider(db)).name, "acme.wprov");
+
+  await updatePlugin(db, domain);
+  assert.equal(getConnector("weather").providers["acme.wprov"], theirs, "their provider moved into the new version's domain");
+  assert.equal((await getConnector("weather").activeProvider(db)).name, "acme.wprov", "so the star still resolves to it");
+  assert.equal((await pluginCatalog(db)).find((p) => p.id === provider).state.loadError, undefined, "and its card stays healthy");
+
+  await uninstall(db, provider);
+  await uninstall(db, domain);
+  fs.rmSync(provDir, { recursive: true, force: true });
+});
+
+test("a plugin's declared rates reach the meter at install, follow an update, and leave with it", async () => {
+  const src = copyOf(FIX("acme-ai"));
+  const good = fs.readFileSync(path.join(src, "index.js"), "utf8");
+  const priced = (input, output) =>
+    fs.writeFileSync(path.join(src, "index.js"), good.replace("rpm: 60,", `prices: { "acme-1": { input: ${input}, output: ${output} } }, rpm: 60,`));
+  priced(3, 15);
+  const id = await installFromUrl(db, src);
+  assert.deepEqual(ratesFor("acme.model", "acme-1"), { input: 3, output: 15 }, "stamped from the first call, not after the next restart");
+  priced(5, 25);
+  await updatePlugin(db, id);
+  assert.deepEqual(ratesFor("acme.model", "acme-1"), { input: 5, output: 25 }, "the new version's rates, not the old one's");
+  await uninstall(db, id);
+  assert.deepEqual(ratesFor("acme.model", "acme-1"), {}, "gone with the plugin");
+  fs.rmSync(src, { recursive: true, force: true });
+});
+
+test("installFromUrl: an installed id is refused — an errored one is pointed at Retry", async () => {
+  const id = await installFromUrl(db, FIX("acme-gecko"));
+  unregister((await getExternalPlugin(db, id)).manifest);
+  await setExternalLoadError(db, id, new Error("failed at boot"));
+  await assert.rejects(installFromUrl(db, FIX("acme-gecko")), (e) => {
+    assert.equal(e.status, 409);
+    assert.match(e.message, /failed to load — Retry it from its card/);
+    return true;
+  });
   await uninstall(db, id);
 });
 
@@ -376,11 +663,26 @@ test("POST /api/admin/plugins/install: admin-only; installs; 409 on repeat", asy
   assert.equal(ok.status, 200);
   assert.equal(ok.json.plugin.id, "crypto:acme.gecko");
   assert.equal(ok.json.plugin.external, true);
+  assert.equal(ok.json.plugin.source.version, "1.0.0", "the manifest's version rides the card's source line");
 
   const dup = await req(base, "POST", "/api/admin/plugins/install", { sid: admin.sid, body: { url: FIX("acme-gecko") } });
   assert.equal(dup.status, 409);
 
   assert.equal((await req(base, "POST", "/api/admin/plugins/install", { sid: admin.sid, body: {} })).status, 400);
+});
+
+test("PATCH /api/admin/plugins/:id: an external plugin is removed, never switched off", async () => {
+  // (acme.gecko is installed from the previous test.) Its card reads installed
+  // off the install record, while resolution and the connector runtime read the
+  // plugins row — `false` would make the two disagree.
+  const off = await req(base, "PATCH", "/api/admin/plugins/crypto:acme.gecko", { sid: admin.sid, body: { installed: false } });
+  assert.equal(off.status, 400);
+  assert.match(off.json.error, /removed, not toggled/);
+  // `true` is the row install already wrote, and the welcome flow sends it for
+  // the bundled plugin it has just installed — it must keep answering 200.
+  const on = await req(base, "PATCH", "/api/admin/plugins/crypto:acme.gecko", { sid: admin.sid, body: { installed: true } });
+  assert.equal(on.status, 200);
+  assert.equal(on.json.state.installed, true);
 });
 
 test("DELETE /api/admin/plugins/:id: uninstalls an external; rejects a built-in", async () => {
@@ -395,26 +697,111 @@ test("DELETE /api/admin/plugins/:id: uninstalls an external; rejects a built-in"
   assert.equal(await getExternalPlugin(db, "crypto:acme.gecko"), null);
 });
 
-// The real download → tar --strip-components=1 → load path, exercised hermetically
-// against a local HTTP server serving a genuine .tgz (built like github/npm: one
-// wrapper dir). This is the only test that runs fetchModule's network branch.
-test("installFromUrl: a tarball URL downloads, extracts (strip-components), and loads", async () => {
-  const tgz = fs.readFileSync(fileURLToPath(new URL("./fixtures/plugin-tarball.tgz", import.meta.url)));
-  const server = await new Promise((resolve) => {
-    const s = http.createServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "application/gzip", "Content-Length": tgz.length });
-      res.end(tgz);
-    }).listen(0, "127.0.0.1", () => resolve(s));
-  });
-  const port = server.address().port;
+test("POST /api/admin/plugins/:id/update: admin-only; answers the fresh card; refuses a built-in", async () => {
+  const id = await installFromUrl(db, FIX("acme-gecko"));
+  assert.equal((await req(base, "POST", `/api/admin/plugins/${id}/update`)).status, 403); // anon
+  const ok = await req(base, "POST", `/api/admin/plugins/${id}/update`, { sid: admin.sid });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.plugin.id, id);
+  assert.equal(ok.json.plugin.source.ref, "local");
+  const builtin = await req(base, "POST", "/api/admin/plugins/crypto:coingecko/update", { sid: admin.sid });
+  assert.equal(builtin.status, 400);
+  assert.match(builtin.json.error, /not an installed plugin/);
+  await uninstall(db, id);
+});
+
+test("PLUGIN_INSTALL_DISABLE: install and update refuse every source but a bundled one", async () => {
+  const typed = await installFromUrl(db, FIX("acme-gecko")); // installed before the lock
+  process.env.PLUGIN_INSTALL_DISABLE = "1";
   try {
-    const id = await installFromUrl(db, `http://127.0.0.1:${port}/plugin.tgz`);
-    assert.equal(id, "crypto:acme.gecko");
-    assert.ok(getConnector("crypto").providers["acme.gecko"], "registered from the downloaded tarball");
-    const row = await getExternalPlugin(db, id);
-    assert.ok(fs.existsSync(path.join(row.dir, "manifest.json")), "strip-components unwrapped the top dir");
-    await uninstall(db, id);
+    const page = await req(base, "GET", "/api/admin/plugins", { sid: admin.sid });
+    assert.equal(page.json.installLocked, true, "the page learns its URL box is closed");
+    for (const url of ["github:acme/gecko", FIX("acme-weather")]) {
+      const r = await req(base, "POST", "/api/admin/plugins/install", { sid: admin.sid, body: { url } });
+      assert.equal(r.status, 403, url);
+      assert.match(r.json.error, /PLUGIN_INSTALL_DISABLE/);
+    }
+    assert.equal((await req(base, "POST", `/api/admin/plugins/${typed}/update`, { sid: admin.sid })).status, 403,
+      "an update from a typed path too");
+
+    // The image's own examples stay open: the welcome flow installs them.
+    const row = (await bundledPlugins(db)).find((p) => p.id === "ai:community.ollama");
+    const add = await req(base, "POST", "/api/admin/plugins/install", { sid: admin.sid, body: { url: row.bundled.path } });
+    assert.equal(add.status, 200);
+    assert.equal(add.json.plugin.source.bundled, true, "an installed example's card knows where it came from");
+    assert.equal((await req(base, "POST", "/api/admin/plugins/ai:community.ollama/update", { sid: admin.sid })).status, 200);
+    assert.equal((await pluginCatalog(db)).find((p) => p.id === typed).source.bundled, false);
   } finally {
-    await new Promise((r) => server.close(r));
+    delete process.env.PLUGIN_INSTALL_DISABLE;
   }
+  assert.equal((await req(base, "GET", "/api/admin/plugins", { sid: admin.sid })).json.installLocked, false);
+  await uninstall(db, typed);
+  await uninstall(db, "ai:community.ollama");
+});
+
+// The real download → unpack → unwrap → load path, exercised hermetically
+// against a local HTTP server serving a genuine .tgz (built like github/npm: one
+// wrapper dir). The GitHub test below runs the same branch with GitHub's naming.
+test("installFromUrl: a tarball URL downloads, unwraps its top directory, and loads", async () => {
+  const tgz = fs.readFileSync(fileURLToPath(new URL("./fixtures/plugin-tarball.tgz", import.meta.url)));
+  const id = await serving(tgz, (url) => installFromUrl(db, url));
+  assert.equal(id, "crypto:acme.gecko");
+  assert.ok(getConnector("crypto").providers["acme.gecko"], "registered from the downloaded tarball");
+  const row = await getExternalPlugin(db, id);
+  assert.ok(fs.existsSync(path.join(row.dir, "manifest.json")), "the wrapper dir was unwrapped");
+  await uninstall(db, id);
+});
+
+// One owner for the staging dir (withStage): it goes whether the fetched
+// plugin is committed, refused after the fetch, or never fetched at all.
+test("installFromUrl: no staging dir outlives an install — committed, refused or failed", async () => {
+  const leftover = () => fs.readdirSync(path.join(pluginsTmp, ".staging"));
+  const id = await installFromUrl(db, FIX("acme-gecko"));
+  assert.deepEqual(leftover(), [], "committed: renamed into place");
+  await assert.rejects(installFromUrl(db, FIX("acme-gecko")), /already installed/);
+  assert.deepEqual(leftover(), [], "refused after the fetch");
+  await assert.rejects(installFromUrl(db, path.join(pluginsTmp, "no-such-plugin")), /not found/);
+  assert.deepEqual(leftover(), [], "failed at the fetch");
+  await uninstall(db, id);
+});
+
+test("fetchModule: a GitHub archive's top directory names the commit that ran", async () => {
+  const gecko = ["manifest.json", "index.js"].map((f) => [f, fs.readFileSync(path.join(FIX("acme-gecko"), f), "utf8")]);
+  const at = (top) => gecko.map(([f, c]) => [`${top}/${f}`, c]);
+  // fetchModule takes a resolved source; a github one aimed at a local server
+  // runs GitHub's real path — download, unpack, lift, read the top directory.
+  const fetchGithub = async (files, { ref = null, subdir = null } = {}) => {
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), "gh-staging-"));
+    try {
+      const { resolvedRef } = await serving(await tgzOf(files),
+        (url) => fetchModule({ kind: "github", tarballUrl: url, ref, subdir }, staging));
+      return { resolvedRef, files: fs.readdirSync(staging).sort() };
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
+  };
+
+  // The default branch — the case whose card used to say only `default`.
+  assert.deepEqual(await fetchGithub(at("acme-gecko-7fd1a60")),
+    { resolvedRef: "default@7fd1a60", files: ["index.js", "manifest.json"] });
+  // A branch, and a plugin inside a repo: the archive is the whole repo.
+  const repo = [["acme-plugins-0badc0f/README.md", "the repo"], ...at("acme-plugins-0badc0f/plugins/gecko")];
+  assert.deepEqual(await fetchGithub(repo, { ref: "main", subdir: "plugins/gecko" }),
+    { resolvedRef: "main@0badc0f", files: ["index.js", "manifest.json"] });
+  // A ref that already is the commit isn't repeated.
+  assert.equal((await fetchGithub(at("acme-gecko-7fd1a60"), { ref: "7fd1a60" })).resolvedRef, "7fd1a60");
+  // No sha on the directory: the ref alone, as before.
+  assert.equal((await fetchGithub(at("acme-gecko-main"), { ref: "v1.2" })).resolvedRef, "v1.2");
+});
+
+test("installFromUrl: an archive needs one top-level directory; loose files beside it are dropped", async () => {
+  const body = await tgzOf([["manifest.json", "{}"], ["index.js", "export default () => ({});\n"]]);
+  await serving(body, (url) => assert.rejects(installFromUrl(db, url), /one top-level directory/));
+  // A loose file at the root — a macOS `._` entry beside the plugin, say — was
+  // always dropped by --strip-components, and still is.
+  const gecko = ["manifest.json", "index.js"].map((f) => [`acme-gecko/${f}`, fs.readFileSync(path.join(FIX("acme-gecko"), f), "utf8")]);
+  const id = await serving(await tgzOf([["._acme-gecko", "xattrs"], ...gecko]), (url) => installFromUrl(db, url));
+  assert.equal(id, "crypto:acme.gecko");
+  assert.deepEqual(fs.readdirSync((await getExternalPlugin(db, id)).dir).sort(), ["index.js", "manifest.json"]);
+  await uninstall(db, id);
 });

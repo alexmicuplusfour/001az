@@ -5,10 +5,6 @@
 // provider whose vendor diverges from the OpenAI defaults (the Ollama example
 // next door covers the keyless self-hosted shape).
 //
-// Tagging only: DeepSeek publishes no embeddings and no audio endpoint, so
-// `embeds`/`transcribes` stay null and semantic search keeps whatever embedder
-// is already selected.
-//
 // Every quirk below was live-probed against the real API on 2026-08-08 — this
 // file names no behaviour that wasn't observed, per the same rule the built-in
 // GLM descriptor follows.
@@ -56,22 +52,28 @@ export default function (ctx) {
     // provider number: a conservative pace, far under any concurrency ceiling
     // given the worker is single-flight anyway. Adjustable on the plugin card.
     rpm: 60, burst: 5,
-    // NO `models` list. The picker is served live from DeepSeek's own GET
-    // /models (the shared compat wire's listModels, asked per connection with
-    // that connection's key), so a model DeepSeek adds or retires appears or
-    // drops out with no edit here and no app update. A curated array would only
+    // What this plugin does: tagging — which also serves field extraction, as
+    // every tagger does. What `provides` leaves out it doesn't do: no
+    // embeddings and no transcription (DeepSeek has neither endpoint; semantic
+    // search keeps whatever embedder is already selected), no object detection
+    // (no vision at all, above), no web research (there's no server-side
+    // search on the chat-completions path).
+    //
+    // NO model list. The picker is served live from DeepSeek's own GET /models
+    // (the shared compat wire's listModels, asked per connection with that
+    // connection's key), so a model DeepSeek adds or retires appears or drops
+    // out with no edit here and no app update. A curated array would only
     // duplicate that answer and then go stale against it.
     //
-    // `defaultModel` is the one model id this file names, and it is not a
-    // catalog — it is the pre-selection for a picker nobody has touched yet,
-    // and the contract requires it of any tagging provider (the loader's
+    // `default` is the one model id this file names, and it is not a catalog
+    // — it is the pre-selection for a picker nobody has touched yet, and the
+    // contract requires one of any tagging provider (the loader's
     // validateBuilt). It doubles as the sole option if DeepSeek can't be
     // reached when a picker opens, so the select is never empty. Flash is the
     // pick: cheaper, and it honours all three reasoning_effort levels where pro
     // clamps `low` up to `high`. (deepseek-chat / deepseek-reasoner are
     // deprecated as of 2026-07-24; the V4 pair replaces them.)
-    defaultModel: "deepseek-v4-flash",
-    research: false, // no server-side web search on the chat-completions path
+    provides: { tag: { default: "deepseek-v4-flash" } },
     keyless: false,
     compat: {
       maxTokensField: "max_tokens", // DeepSeek does not use max_completion_tokens
@@ -108,14 +110,12 @@ export default function (ctx) {
       temperature: 0,
       // "list" (GET /models) rather than "models" (GET /models/{id}). BOTH work
       // — the per-model GET is undocumented but answers 200 — so this is a
-      // robustness choice, not a compatibility one: `defaultModel` is the only
+      // robustness choice, not a compatibility one: the tag default is the only
       // model id this file names, and a `models` probe would turn a retired
       // default into a red Test button on a perfectly good key. The index
       // answers "is this key live" without betting on any one model, and the
       // model picker is fed from the same call.
       keyTest: "list",
     },
-    embeds: null,      // DeepSeek publishes no /embeddings endpoint
-    transcribes: null, // …and no /audio/transcriptions
   };
 }

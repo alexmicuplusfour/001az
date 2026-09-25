@@ -9,7 +9,9 @@
 // shared per source IP and counts FAILED requests against the limit — a
 // verification run that 429s is a verification run that spent quota to learn
 // nothing.
-import * as cg from "../server/connectors/crypto/coingecko.js";
+import { providers } from "../server/connectors/crypto/index.js";
+
+const cg = providers.coingecko; // built the way the loader builds a plugin — no server
 
 const apiKey = process.env.CG_KEY || null;
 const SPACING_MS = Number(process.env.CG_VERIFY_SPACING_MS) || (apiKey ? 1500 : 6000);

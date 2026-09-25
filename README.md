@@ -2,6 +2,8 @@
 
 Work in progress.
 
+Writing a plugin — an AI provider, a live-data source, a file source: [PLUGIN.md](PLUGIN.md).
+
 ## Screenshots
 
 ![Boards](docs/screens/front/01-boards.png)

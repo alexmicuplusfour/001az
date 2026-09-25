@@ -2801,7 +2801,7 @@ export async function getExternalPlugin(db, id) {
   return rows[0] || null;
 }
 
-// Record an install (or re-install). `manifest` is stored verbatim; a successful
+// Record an install or an update. `manifest` is stored verbatim; a successful
 // (re)load clears any prior load_error. Called only after the code is on disk.
 export async function upsertExternalPlugin(db, { id, kind, sourceUrl, resolvedRef, dir, manifest }) {
   await db.query(
@@ -2815,8 +2815,9 @@ export async function upsertExternalPlugin(db, { id, kind, sourceUrl, resolvedRe
 }
 
 // Mark a load failure without dropping the install record — the code stays on
-// disk (the dir is unchanged), so a later Retry can reload it. `error` is
-// coerced to the same structured shape the health ledger uses.
+// disk (the dir is unchanged) and the card shows the reason; its Retry fetches
+// the plugin again from the stored source. `error` is coerced to the same
+// structured shape the health ledger uses.
 export async function setExternalLoadError(db, id, error) {
   const payload = error
     ? JSON.stringify({ message: String(error.message || error).slice(0, 500), at: Date.now() })

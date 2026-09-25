@@ -407,8 +407,11 @@ export function openIngestModal() {
         health.style.display = "none";
         wrap.appendChild(health);
         // Silent existence check whenever the tile stands (open, commit) —
-        // only bad news renders.
-        if (sk && !sk.needsConnection) probe(sk, health);
+        // only bad news renders. The check browses, so a source that can't be
+        // browsed isn't asked: its answer would be "can't be browsed", on
+        // every tile, about a source working as declared
+        // (plugin-contract-plan.md, Stage 5).
+        if (sk && !sk.needsConnection && sk.browsable) probe(sk, health);
       }
 
       function renderSource() {

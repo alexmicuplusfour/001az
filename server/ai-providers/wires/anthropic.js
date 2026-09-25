@@ -65,7 +65,7 @@ export function anthropicRequest({ model, systemText, schema, parts, research = 
 }
 
 export const anthropicWire = {
-  async tag(desc, { apiKey, model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
+  async tag(desc, { apiKey, base, model, systemText, schema, parts, research = false, tool = DEFAULT_TOOL }) {
     // The refusal negotiation (see refusals.js): ask for everything not yet
     // refused; when the model 400s naming a feature this request carried,
     // drop it, re-send, remember. Each refusal costs one unbilled round trip
@@ -73,8 +73,10 @@ export const anthropicWire = {
     // catalog in advance. The loop is bounded by the feature count: every
     // pass turns one sent flag off, and refusedFeature only matches sent
     // ones, so an unrelated (or repeat) 400 throws.
-    const client = anthropicClient(apiKey, desc.base);
-    const endpoint = desc.base || "";
+    // The connection's own server first, as testKey and listModels go: a
+    // gateway plugin's connections name their servers (needsBase).
+    const endpoint = base || desc.base || "";
+    const client = anthropicClient(apiKey, endpoint);
     // Anthropic reports an empty credit balance as a 400 invalid_request_error
     // — permanent-shaped (4xx), so failOrRequeue would stamp the ACCOUNT's
     // problem onto items one by one as terminal failures (39 rows in 90

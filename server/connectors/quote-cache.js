@@ -1,4 +1,6 @@
-// The quote plane both crypto providers run on. What differs between them is
+// The quote plane both crypto providers run on, and any provider can: it reaches
+// them as ctx.createQuoteCache / ctx.pickFields (plugin-ctx.js), so a plugin
+// gets the same economics instead of a copy. What differs between them is
 // the request (a CoinGecko `/coins/markets` page vs a CoinMarketCap
 // `quotes/latest` bundle) and the field mapping — everything AROUND that is
 // the same machinery, and it was written twice: the TTL, the eviction bound,

@@ -80,7 +80,7 @@ import { entityRefreshAt, faceSchedule, firstRefreshAt, activeProvider } from ".
 import { connectorLanding, fetchProjectedEntity } from "./connectors/add.js";
 import { storeFace } from "./faces/index.js";
 import { extractFileFields, projectEntry } from "./media/index.js";
-import { aiWork, FIELD_SOURCE, keysCards } from "./field-sources.js";
+import { aiWork, FIELD_SOURCE, keysCards, normaliseIdentity } from "./field-sources.js";
 import { sharpGate, MAX_DECODE_PIXELS } from "./sharp-gate.js";
 import { aiImageFor, resolvePreset, GENERIC_IMAGES } from "./ai-image.js";
 
@@ -508,13 +508,6 @@ export function htmlToMarkdown(html) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
-
-// Normalise a derived identity value for consistent collision detection.
-// Underscores and hyphens are treated as word separators so the AI returning
-// "priya_ramanathan" or "Priya Ramanathan" both key to "priya ramanathan".
-// Module-level + exported so validateMapping's candidate dup-check keys the
-// same way the runtime resolver does (no drift between the two).
-export const normaliseIdentity = (s) => s.trim().replace(/[-_\s]+/g, " ").toLowerCase();
 
 // A field with a declared, non-empty options list — the answer is a
 // zero-or-more selection from it (buildFieldsPrompt's enum array, the

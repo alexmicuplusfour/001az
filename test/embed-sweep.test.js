@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { startServer, adminSession, seedUser, seedBoard, req, meterTotals } from "./helpers.js";
 import { itemsNeedingEmbedding, markTagged, setItemTags, embeddingStats, createAiKey, setSetting, setPluginState, setItemEmbedding } from "../server/db.js";
-import { PROVIDERS, aiKeyBucket } from "../server/providers.js";
+import { PROVIDERS, aiKeyBucket, registerProvider, unregisterProvider } from "../server/providers.js";
 import { embedBatch, embedTextFor, embedResource } from "../server/worker.js";
 import { maxFor } from "../server/resource-pool.js";
 
@@ -71,6 +71,33 @@ test("embedBatch: happy path is one call, all vectors stored", async () => {
     assert.equal(calls.length, 1, "one batched call");
   } finally { restore(); }
   assert.ok((await row(a)).embedding && (await row(b)).embedding);
+});
+
+// An own-wire plugin may answer plain arrays of any length: the one funnel
+// every embed call goes through (providers.js embedTexts) hands storage unit
+// Float32Arrays either way. Before it, a plain array threw at storage AFTER the
+// batch was metered, and a vector that wasn't unit length ranked search wrong
+// (plugin-contract-plan.md, Stage 5).
+test("embedBatch: a wire's plain, unnormalized vectors are stored as unit Float32Arrays", async () => {
+  registerProvider("plainvec", {
+    label: "PlainVec", onDevice: true,
+    wire: { embed: async (_desc, { texts }) => ({ vectors: texts.map(() => [3, 4]), usage: {} }) },
+    provides: { embed: { default: "pv-1" } },
+  });
+  // Its own item only, removed after: the sweep's candidates span every test
+  // in this file, and a row embedded for another model counts in theirs.
+  const id = await insertTagged("an item a plugin embeds");
+  try {
+    const rows = (await itemsNeedingEmbedding(db, "pv-1", 64)).filter((x) => x.id === id);
+    const r = await embedBatch(db, { provider: "plainvec", apiKey: null, model: "pv-1" }, rows);
+    assert.equal(r.embedded, 1, "stored, not thrown at the write");
+    const buf = (await row(id)).embedding;
+    const v = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+    assert.deepEqual([...v].map((x) => +x.toFixed(4)), [0.6, 0.8], "(3, 4) scaled to unit length");
+  } finally {
+    unregisterProvider("plainvec");
+    await db.query("DELETE FROM items WHERE id=$1", [id]);
+  }
 });
 
 test("embedBatch: a poison input is isolated and marked; innocents embed; the sweep moves on", async () => {

@@ -572,3 +572,46 @@ test("remote enumerate: concurrent callers on one connection share ONE listing (
     resetDefs();
   }
 });
+
+// A source written from PLUGIN.md alone (plugin-contract-plan.md, Stage 5 second
+// pass): its list filters with accept and maxBytesFor, which browsing never
+// passed — "accept is not a function" in the folder tree and on the ingest
+// tile — and it stamps `modified` from stat.mtimeMs, whose fraction the
+// ledger's BIGINT columns refused on every run.
+test("a plugin source: browsing hands list accept and maxBytesFor, and a fractional mtime lands", async () => {
+  registerSource("doc.src", {
+    manifest: {
+      name: "doc.src", label: "Doc", browsable: true, needsConnection: true,
+      connectionSchema: [{ key: "host", label: "Host", type: "text" }], sourceSchema: [],
+    },
+    backend: () => ({
+      async list(opts) {
+        const all = [{ type: "file", key: "a.txt", name: "a.txt", path: "a.txt", size: 5, modified: 1727270000123.456, created: null }];
+        return { entries: all.filter((e) => opts.accept(e.name) && e.size <= opts.maxBytesFor(e.name)), truncated: false };
+      },
+      async fetch(_key, tmpPath) { fs.writeFileSync(tmpPath, "hello"); },
+      async test() {},
+    }),
+  });
+  resetDefs();
+  try {
+    await setPluginState(db, "source:doc.src", { installed: true });
+    const connId = await createSourceConnection(db, "doc.src", "doc", { host: "h" });
+    const level = await files.browse(db, { type: "doc.src", connectionId: connId }, "");
+    assert.deepEqual(level.entries.map((e) => e.name), ["a.txt"], "listed, not thrown at opts.accept");
+
+    const boardId = await seedBoard(db, "doc-src-board");
+    await updateBoard(db, boardId, {
+      ingest: { enabled: true, source: { type: "doc.src", connectionId: connId, path: "", recursive: true }, trigger: { mode: "manual" } },
+    });
+    const board = await getBoard(db, boardId);
+    const { candidates } = await files.enumerate(db, board, board.ingest);
+    assert.equal(candidates[0].values.modified, 1727270000123, "whole milliseconds, as the ledger keeps them");
+    const r = await files.admit(db, board, candidates[0], { sources });
+    assert.ok(r.itemId, "admitted: the ledger write took it");
+    assert.ok((await ingestedKeys(db, boardId)).has("a.txt"));
+  } finally {
+    unregisterSource("doc.src");
+    resetDefs();
+  }
+});

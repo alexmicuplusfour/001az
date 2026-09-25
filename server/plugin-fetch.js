@@ -11,7 +11,9 @@
 //
 // Network is confined here. The loader stays offline-testable: a file: source
 // exercises the whole install path with no fetch and (for a dep-free plugin) no
-// npm. GitHub/npm URL PARSING is unit-tested; the actual download is not run in CI.
+// npm. URL parsing is unit-tested, and the tarball and GitHub downloads run
+// against a local server in the tests; npm's registry lookup is the one
+// network path they don't run.
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -43,8 +45,23 @@ function githubSource(owner, repo, ref, subdir) {
   return {
     kind: "github", owner, repo, ref: ref || null, subdir: cleanSubdir(subdir),
     tarballUrl: `https://api.github.com/repos/${owner}/${repo}/tarball/${ref || ""}`,
-    resolvedRef: ref || "default",
   };
+}
+
+// The ref a GitHub install records: the ref as written ("default" for none),
+// then the commit that actually ran — a branch and the default both move.
+// GitHub names an API tarball's top directory `<owner>-<repo>-<sha7>` after
+// the commit it was cut from (octocat/Hello-World → octocat-Hello-World-7fd1a60,
+// measured 2026-09-25), and that short sha is itself a valid tarball ref, so a
+// card's `main@7fd1a60` is a pin the admin can paste back. A ref that already
+// is the commit stays as written, and a top directory with no sha on it records
+// the ref alone.
+function githubRef(ref, topDir) {
+  const named = ref || "default";
+  const sha = /-([0-9a-f]{7,40})$/.exec(topDir)?.[1];
+  if (!sha) return named;
+  if (/^[0-9a-f]{7,40}$/i.test(named) && named.toLowerCase().startsWith(sha)) return named;
+  return `${named}@${sha}`;
 }
 
 function npmSource(spec) {
@@ -100,26 +117,30 @@ async function downloadTarball(tarballUrl, stagingDir, headers = {}, subdir = nu
   }
   const tgz = path.join(stagingDir, "__plugin.tgz");
   fs.writeFileSync(tgz, Buffer.concat(chunks));
-  // Both GitHub and npm tarballs wrap everything in one top-level dir → strip it.
-  // Run with cwd inside staging and a RELATIVE archive name so a Windows
-  // drive-letter path (C:\…) is never passed to tar — GNU tar reads the ':' as
-  // a host:path spec.
-  if (subdir) {
-    // The tarball holds the whole repo; the plugin lives in a subdir (monorepo /
-    // examples layout). Unpack aside, lift the subdir into the staging root, and
-    // the rest of the install path sees a plain plugin dir like any other.
-    const unpack = path.join(stagingDir, ".unpack");
-    fs.mkdirSync(unpack);
-    await run("tar", ["-xzf", "../__plugin.tgz", "--strip-components=1"], { cwd: unpack });
-    const src = path.join(unpack, subdir);
-    if (!fs.existsSync(path.join(src, "manifest.json")))
-      throw new Error(`no manifest.json under "${subdir}" in the repo — is that the plugin's directory?`);
-    fs.cpSync(src, stagingDir, { recursive: true });
-    fs.rmSync(unpack, { recursive: true, force: true });
-  } else {
-    await run("tar", ["-xzf", "__plugin.tgz", "--strip-components=1"], { cwd: stagingDir });
-  }
+  // GitHub and npm tarballs both wrap everything in one top-level directory.
+  // Unpack aside and read that directory's name before dropping it — GitHub's
+  // names the commit (githubRef above) — then lift the plugin into the staging
+  // root: the wrapper's contents, or, for a plugin that lives inside a repo
+  // (monorepo / examples layout), the subdir within it. The rest of the install
+  // path sees a plain plugin dir like any other. tar runs with cwd inside
+  // staging and a RELATIVE archive name, so a Windows drive-letter path (C:\…)
+  // is never passed to it — GNU tar reads the ':' as a host:path spec.
+  const unpack = path.join(stagingDir, ".unpack");
+  fs.mkdirSync(unpack);
+  await run("tar", ["-xzf", "../__plugin.tgz"], { cwd: unpack });
   fs.rmSync(tgz, { force: true });
+  // One top-level directory. Loose files beside it (a macOS `._` entry, say)
+  // are dropped, as --strip-components always dropped them.
+  const dirs = fs.readdirSync(unpack, { withFileTypes: true }).filter((e) => e.isDirectory());
+  if (dirs.length !== 1)
+    throw new Error("the archive must hold one top-level directory, as GitHub and npm tarballs do");
+  const top = dirs[0].name;
+  const src = subdir ? path.join(unpack, top, subdir) : path.join(unpack, top);
+  if (subdir && !fs.existsSync(path.join(src, "manifest.json")))
+    throw new Error(`no manifest.json under "${subdir}" in the repo — is that the plugin's directory?`);
+  for (const name of fs.readdirSync(src)) fs.renameSync(path.join(src, name), path.join(stagingDir, name));
+  fs.rmSync(unpack, { recursive: true, force: true });
+  return top;
 }
 
 // Resolve the concrete tarball + version for an npm spec off the registry.
@@ -142,9 +163,10 @@ export async function fetchModule(source, stagingDir) {
       fs.cpSync(source.dir, stagingDir, { recursive: true });
       return { resolvedRef: "local" };
     }
-    case "github":
-      await downloadTarball(source.tarballUrl, stagingDir, { Accept: "application/vnd.github+json" }, source.subdir);
-      return { resolvedRef: source.resolvedRef };
+    case "github": {
+      const top = await downloadTarball(source.tarballUrl, stagingDir, { Accept: "application/vnd.github+json" }, source.subdir);
+      return { resolvedRef: githubRef(source.ref, top) };
+    }
     case "tarball":
       await downloadTarball(source.tarballUrl, stagingDir);
       return { resolvedRef: source.resolvedRef };

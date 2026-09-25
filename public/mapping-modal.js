@@ -559,9 +559,13 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
       // whole answer, locked.
       const cfg = faceCfg?.source === "connector" ? faceCfg : null;
       const producer = faces().find((p) => p.name === cfg?.producer) || faces()[0] || null;
+      // A face may offer no periods and carry no label (both optional): it
+      // reads "a tile, daily", not "a undefined chart" — named by its name, as
+      // the drawer names it (plugin-contract-plan.md, Stage 5).
+      const what = [cfg?.period, (producer?.label || producer?.name || "chart").toLowerCase()].filter(Boolean).join(" ");
       return defRow({
         glyph: "srcGlobe", ai: false, label: "face",
-        value: cfg ? `a ${cfg.period} ${(producer?.label || "chart").toLowerCase()}, ${cadWord(cfg)}` : "the symbol tile",
+        value: cfg ? `a ${what}, ${cadWord(cfg)}` : "the symbol tile",
         none: !cfg,
         onOpen: isAdmin && faces().length ? openConnectorFaceDrawer : null,
         place: "def:face",
@@ -1043,7 +1047,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         const row = el("div", "mm-srcrow");
         for (const p of faces()) {
           row.appendChild(srcCard({
-            glyph: "srcGlobe", ai: false, lab: p.label, note: "drawn from live history",
+            glyph: "srcGlobe", ai: false, lab: p.label || p.name, note: "drawn from live history",
             pressed: ed.draft.producer === p.name,
             onPick: faces().length > 1 ? () => {
               ed.draft.producer = p.name;
@@ -1058,10 +1062,14 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
         bodyEl.appendChild(group("Get face from", row, null));
 
         const producer = faces().find((p) => p.name === ed.draft.producer) || faces()[0];
-        const periodSel = mkSel((producer.periods || []).map((p) => [p, p]), ed.draft.period,
-          "How much history the chart covers");
-        periodSel.addEventListener("change", () => { ed.draft.period = periodSel.value; });
-        bodyEl.appendChild(group("How much history the chart covers", periodSel, null));
+        // A face that offers no periods has no history to choose — no empty
+        // select for it.
+        if (producer.periods?.length) {
+          const periodSel = mkSel(producer.periods.map((p) => [p, p]), ed.draft.period,
+            "How much history the chart covers");
+          periodSel.addEventListener("change", () => { ed.draft.period = periodSel.value; });
+          bodyEl.appendChild(group("How much history the chart covers", periodSel, null));
+        }
         bodyEl.appendChild(group("How often it re-draws", cadenceSelect(ed.draft), null));
 
         // Warn when the face can't be rendered by the connector's active
@@ -1241,7 +1249,7 @@ export function buildMappingPane({ container, isAdmin = false, mapping = null, h
           toast.error(`Add at least one option to "${f.key}", or turn off “Match to a list”`);
           return { ok: false };
         }
-        // The server dedups options on a NORMALIZED key (worker normaliseIdentity:
+        // The server dedups options on a NORMALIZED key (normaliseIdentity:
         // trim, collapse -_ and whitespace, lowercase) — "BTC" and "btc" collide.
         // Catch it here so a colliding pair doesn't 400 the whole save.
         const optKeys = new Set();
