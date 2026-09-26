@@ -1,10 +1,13 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
+import { batch } from './vendor/signals.mjs';
 import { getJson } from './api.js';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { createCheckbox } from './checkbox.js';
 import { toast } from './toast.js';
 import { pinWhileOpen } from './grid.js';
+import { html, render } from './vendor/preact.mjs';
 
 let crateState = null; // { close, card } for the currently open crate pop
 
@@ -25,10 +28,12 @@ export async function loadCrates() {
 // keeps matching item.crateIds against an id no crate has, so the grid empties
 // with nothing on screen to say why.
 export function setCrates(list) {
-  state.crates = list;
-  if (state.selectedCrateId != null && !list.some((c) => c.id === state.selectedCrateId)) {
-    state.selectedCrateId = null;
-  }
+  batch(() => {
+    state.crates = list;
+    if (state.selectedCrateId != null && !list.some((c) => c.id === state.selectedCrateId)) {
+      state.selectedCrateId = null;
+    }
+  });
 }
 
 export function closeCratePop(skipTeardown = false) {
@@ -39,14 +44,17 @@ export function crateDisplayName(crate) {
   return crate.owned ? crate.name : `${crate.name} (${crate.owner_name})`;
 }
 
+// A crate's name, and whose it is when it isn't yours. The component is for the
+// toolbar's Crates button (Preact); appendCrateLabel draws the same into a
+// hand-built element, the crates menu's rows (planning/ui-updates-plan.md, D6).
+export function CrateLabel({ crate }) {
+  return html`${crate.name}${crate.owned ? null : html`<span class="crate-owner">${` (${crate.owner_name})`}</span>`}`;
+}
+
 export function appendCrateLabel(parent, crate) {
-  parent.append(crate.name);
-  if (!crate.owned) {
-    const owner = document.createElement("span");
-    owner.className = "crate-owner";
-    owner.textContent = ` (${crate.owner_name})`;
-    parent.appendChild(owner);
-  }
+  const box = document.createElement("span");
+  render(html`<${CrateLabel} crate=${crate} />`, box);
+  parent.append(...box.childNodes);
 }
 
 export function crateLabelEl(crate) {
@@ -64,10 +72,12 @@ async function doDeleteCrate(crate, onClose) {
   try {
     const r = await fetch(`/api/crates/${crate.id}`, { method: "DELETE" });
     if (!r.ok) throw new Error();
-    setCrates(state.crates.filter((c) => c.id !== crate.id));
-    for (const item of state.items) item.crateIds.delete(crate.id);
+    batch(() => {
+      setCrates(state.crates.filter((c) => c.id !== crate.id));
+      for (const item of state.items) item.crateIds.delete(crate.id);
+      itemsChanged();
+    });
     onClose();
-    document.dispatchEvent(new Event('app:render'));
   } catch {
     toast.error("Couldn't delete crate");
   }
@@ -130,19 +140,22 @@ async function toggleCrateItemApi(item, crateId, checkbox) {
     if (!r.ok) throw new Error();
     const { added, count } = await r.json();
     checkbox.checked = added;
-    if (added) item.crateIds.add(crateId);
-    else item.crateIds.delete(crateId);
-    const crate = state.crates.find((c) => c.id === crateId);
-    if (crate) crate.item_count = count;
-    if (state.selectedCrateId === crateId && !added) {
-      // The item just left the filtered crate: its card is about to be
-      // re-rendered away, so a card-anchored pop would be left orphaned.
-      if (crateState?.card) closeCratePop(true);
-      document.dispatchEvent(new Event('app:render'));
-    } else {
-      // Targeted update: only the lightbox crate button needs refreshing.
-      document.dispatchEvent(new Event('app:lightbox-crate-changed'));
-    }
+    const leaving = state.selectedCrateId === crateId && !added;
+    // The item just left the filtered crate: its card is about to be drawn
+    // away, so a card-anchored pop closes first, or it would be left orphaned.
+    if (leaving && crateState?.card) closeCratePop(true);
+    batch(() => {
+      if (added) item.crateIds.add(crateId);
+      else item.crateIds.delete(crateId);
+      itemsChanged();
+      const crate = state.crates.find((c) => c.id === crateId);
+      if (crate) {
+        crate.item_count = count;
+        state.crates = [...state.crates]; // a count moved in place: a new list, so what reads it redraws
+      }
+    });
+    // The lightbox's crate button reads membership off the item.
+    if (!leaving) document.dispatchEvent(new Event('app:lightbox-crate-changed'));
   } catch {
     checkbox.checked = prev;
     toast.error("Couldn't update crate");
@@ -158,18 +171,20 @@ async function createCrateWithItem(name, item, anchorEl) {
     });
     if (!r.ok) { toast.error("Couldn't create crate"); return; }
     const { crate } = await r.json();
-    if (!state.crates.find((c) => c.id === crate.id)) state.crates.push(crate);
+    // The toolbar's Crates button only exists while state.crates is non-empty,
+    // so the first crate's write is what draws it. The card persists across
+    // it and its chrome stays pinned (the "keep-card" close below), so
+    // anchorEl survives the draw.
+    if (!state.crates.find((c) => c.id === crate.id)) state.crates = [...state.crates, crate];
     const r2 = await fetch(`/api/crates/${crate.id}/items/${item.id}`, { method: "POST" });
     if (r2.ok) {
       const { added, count } = await r2.json();
-      if (added) item.crateIds.add(crate.id);
-      const found = state.crates.find((c) => c.id === crate.id);
-      if (found) found.item_count = count;
+      batch(() => {
+        if (added) item.crateIds.add(crate.id);
+        itemsChanged();
+        state.crates = state.crates.map((c) => (c.id === crate.id ? { ...c, item_count: count } : c));
+      });
     }
-    // The toolbar's Crates button only exists while state.crates is non-empty,
-    // so the first crate needs a full render to surface it. Cards are reused
-    // (crate membership isn't in cardSig), so anchorEl survives the render.
-    document.dispatchEvent(new Event('app:render'));
     // Reopen so the new crate shows up as a row; keep the card's hover chrome.
     closeCratePop(true);
     openCratePop(anchorEl, item);
@@ -211,9 +226,8 @@ export function openCratePop(anchorEl, item = null) {
             active: state.selectedCrateId === crate.id,
             trailing: crateTrailing(crate),
             onClick: () => {
-              state.selectedCrateId = state.selectedCrateId === crate.id ? null : crate.id;
               closeCratePop();
-              document.dispatchEvent(new Event('app:render'));
+              state.selectedCrateId = state.selectedCrateId === crate.id ? null : crate.id;
             },
           }));
         }

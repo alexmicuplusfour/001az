@@ -1,5 +1,9 @@
 import { state } from './state.js';
-import { ICONS, actionBtn, hasIdentity, instanceTagCounts, mappingHasAiWork, scopableInstance, facetName } from './utils.js';
+import { itemsChanged, itemsVersion } from './state-signals.js';
+import { ICONS, hasIdentity, instanceTagCounts, mappingHasAiWork, scopableInstance, facetName } from './utils.js';
+import { html, render, Component, useState, useRef, useLayoutEffect } from './vendor/preact.mjs';
+import { batch } from './vendor/signals.mjs';
+import { Icon } from './icon.js';
 import { openDropdown, ddRow, ddAction, openFacetScopePop } from './dropdown.js';
 import { toast } from './toast.js';
 import { taggedFiltered, needsTags } from './filters.js';
@@ -21,62 +25,49 @@ const COL_MIN = 320;  // minimum column width
 const RENDER_BATCH = 60;
 
 let layoutTimer = null;
-let renderLimit = RENDER_BATCH;
-let lastFilterKey = "";
+let limit = RENDER_BATCH; // how many of the filtered items are drawn
+let last = { progress: [], items: [] }; // what renderGrid last drew, for the appends
 
-// Rendered card elements, reused across renders so a heart click or poll
-// tick doesn't recreate the whole grid. A card is reused only while its
-// signature matches; a change (tagging finished, hearts moved) recreates
-// just that card.
-let cardCache = new Map();     // item id -> { el, sig }
-let progressCache = new Map(); // upload tempId / item id -> el
+// The cards are components (planning/ui-updates-plan.md, Stage 4): drawn
+// into #grid from render() as before, keyed by item id, and each one redraws
+// only when a prop it draws has changed. A poll tick that brought nothing
+// costs nothing per card, whatever the scroll depth; a heart on one card
+// redraws that card. What a card used to keep in the DOM (its hover chrome,
+// a menu pinned on it, its picture loaded or broken) is its state.
 
 // Spinners run only while their card is near the viewport (.onstage) — a
 // scrolled queue view mounts hundreds of cards, and hundreds of infinite
-// animations grind the tab even when each is cheap. Cards are observed at
-// creation; every path that drops a card must unobserve it, or the
-// observer's strong refs leak recreated cards across status churn.
+// animations grind the tab even when each is cheap. An in-flight card watches
+// itself while it's mounted; the observer tells the component, which owns
+// the class.
+const onstageOf = new WeakMap(); // element -> (onstage) => void
 const stageObserver = new IntersectionObserver((entries) => {
-  for (const e of entries) e.target.classList.toggle("onstage", e.isIntersecting);
+  for (const e of entries) onstageOf.get(e.target)?.(e.isIntersecting);
 }, { rootMargin: "300px 0px" });
-
-// Everything cardFor bakes into the DOM that can change after creation.
-// Bulk selection isn't included: bulk.js updates card elements in place.
-// name + instance count: a merge/split can swap the face file or change the
-// stack badge without touching anything else. Exported for rows.js, whose
-// row signature embeds it (a row re-renders when its card would).
-export function cardSig(item) {
-  return `${item.status}|${item.undecided}|${item.hearts}|${item.favoritedByMe}|${item.w}|${item.name}|${item.instances?.length || 0}|${item.displayLabel}|${item.tags.join(",")}`;
+function watchStage(el, set) { onstageOf.set(el, set); stageObserver.observe(el); }
+function unwatchStage(el) { onstageOf.delete(el); stageObserver.unobserve(el); }
+function useOnstage(ref, active) {
+  const [onstage, setOnstage] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!active || !el) return undefined;
+    watchStage(el, setOnstage);
+    return () => unwatchStage(el);
+  }, [active]);
+  return onstage;
 }
 
-// Drop a card element rows.js (or any cache owner) is done with — the stage
-// observer holds strong refs, so every dropped card must be unobserved.
-export function releaseCard(el) {
-  if (el) stageObserver.unobserve(el);
-}
-
-// The grid counterpart of rows.js dropAllRows, called on each rows-mode
-// render (a no-op once empty): release the cached cards from the stage
-// observer — nothing else prunes this cache while the grid isn't rendering —
-// and reset the render key, so a later flip back re-enters at a fresh first
-// batch instead of synchronously rebuilding a scrolled-deep limit's worth of
-// cards under a scroll position that just reset to the top.
-export function dropAllCards() {
-  for (const { el } of cardCache.values()) stageObserver.unobserve(el);
-  cardCache = new Map();
-  lastFilterKey = "";
-}
-
-function cardEl(item) {
-  const sig = cardSig(item);
-  const hit = cardCache.get(item.id);
-  // isConnected: a card that removed itself (broken image) must not be
-  // resurrected from the cache — recreate so the error path runs again.
-  if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
-  if (hit) stageObserver.unobserve(hit.el);
-  const el = cardFor(item);
-  cardCache.set(item.id, { el, sig });
-  return el;
+// The grid's box and the columns it holds, read one way for the masonry and
+// the lane's budget (they used to differ by the grid's padding, so the lane
+// could wrap a row early near a column boundary).
+function gridBox() {
+  const cs = getComputedStyle(elGrid);
+  const pl = parseFloat(cs.paddingLeft) || 0; // jsdom answers "" for these
+  const pr = parseFloat(cs.paddingRight) || 0;
+  const pt = parseFloat(cs.paddingTop) || 0;
+  const pb = parseFloat(cs.paddingBottom) || 0;
+  const inner = elGrid.clientWidth - pl - pr;
+  return { pl, pt, pb, inner, cols: Math.max(1, Math.floor((inner + GAP) / (COL_MIN + GAP))) };
 }
 
 export function layoutGrid() {
@@ -85,13 +76,7 @@ export function layoutGrid() {
   if (effectiveView() === "rows") return;
   const cards = [...elGrid.querySelectorAll(".card")];
   if (!cards.length) { elGrid.style.height = ""; return; }
-  const cs = getComputedStyle(elGrid);
-  const pl = parseFloat(cs.paddingLeft);
-  const pr = parseFloat(cs.paddingRight);
-  const pt = parseFloat(cs.paddingTop);
-  const pb = parseFloat(cs.paddingBottom);
-  const inner = elGrid.clientWidth - pl - pr;
-  const cols = Math.max(1, Math.floor((inner + GAP) / (COL_MIN + GAP)));
+  const { pl, pt, pb, inner, cols } = gridBox();
   const cardW = (inner - GAP * (cols - 1)) / cols;
 
   // Interleaving width writes with height reads forces a full page reflow
@@ -144,22 +129,15 @@ async function doDelete(id) {
     if (!r.ok) throw new Error();
     state.items = state.items.filter((i) => i.id !== id);
     dropPendingUploadId(id);
-    document.dispatchEvent(new Event('app:render'));
     toast("Item deleted");
   } catch {
     toast.error("Delete failed");
   }
 }
 
-// The split button's caret: the granular slices of reprocess, each an entry
-// only when it applies to THIS card — absence is the honest state, no
-// disabled ghosts. Applicability rides fields the client already holds
-// (instance kind/status/undecided, state.facets, state.boardMapping) through
-// the same mirrors rows-mode already gates with; the plan's close look is
-// explicit that a server-shipped can[] waits until these mirrors multiply.
 // Which caret entries apply to THIS card. Absence is the honest state — an
 // entry that can't run isn't shown, and a card with no entries gets no caret
-// at all (cardActions asks the same question). Applicability rides fields the
+// at all (CardActions asks the same question). Applicability rides fields the
 // client already holds (instance kind/status/undecided, state.facets,
 // state.boardMapping) through the same mirrors rows-mode gates with; the
 // plan's close look is explicit that a server-shipped can[] waits until those
@@ -217,80 +195,62 @@ function openVerbsPop(anchor, item) {
   pin.hold(ctx);
 }
 
-function cardActions(item) {
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
+// An action button on a card's chrome: the glyph, the class the stylesheet
+// knows, and a click that never reaches the card (which would open the
+// detail view). Exported for the rows view's tiles.
+export const Act = ({ icon, cls, title, onClick }) => html`<button class=${"act " + cls} title=${title}
+  onClick=${(e) => { e.stopPropagation(); onClick(e); }}><${Icon} svg=${ICONS[icon]} /></button>`;
+
+function CardActions({ item }) {
   // Reprocess is a split control: main click = the whole shebang, the caret
   // opens the granular verbs (the reprocess formalization plan's Stage 4).
-  const split = document.createElement("div");
-  split.className = "split-btn";
-  split.appendChild(actionBtn("redo", "reprocess", "Reprocess — redo everything for this item",
-    () => requeueToast(`/api/items/${item.id}/reprocess`, "Reprocessing…", "Reprocess failed")));
   // No caret when the menu would be empty (no facets, no AI mapping, no
   // connector, no audio) — the same honesty the entries themselves get.
   // `.dd-caret` on the button, the spelling the toolbar's split arrow uses.
-  if (verbsFor(item).length) {
-    const caret = actionBtn("chevron", "split-arrow dd-caret", "More processing actions",
-      () => openVerbsPop(caret, item));
-    split.appendChild(caret);
-  }
-  actions.appendChild(split);
-  actions.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(item.id)));
-  const cb = document.createElement("button");
-  cb.className = "act crate";
-  cb.title = "Add to crate";
-  cb.innerHTML = ICONS.crate;
-  cb.addEventListener("click", (e) => { e.stopPropagation(); openCratePop(cb, item); });
-  actions.appendChild(cb);
-  return actions;
+  return html`<div class="card-actions">
+    <div class="split-btn">
+      <${Act} icon="redo" cls="reprocess" title="Reprocess — redo everything for this item"
+        onClick=${() => requeueToast(`/api/items/${item.id}/reprocess`, "Reprocessing…", "Reprocess failed")} />
+      ${verbsFor(item).length > 0 && html`<${Act} icon="chevron" cls="split-arrow dd-caret" title="More processing actions"
+        onClick=${(e) => openVerbsPop(e.currentTarget, item)} />`}
+    </div>
+    <${Act} icon="trash" cls="delete" title="Delete" onClick=${() => doDelete(item.id)} />
+    <${Act} icon="crate" cls="crate" title="Add to crate" onClick=${(e) => openCratePop(e.currentTarget, item)} />
+  </div>`;
 }
 
-function heartControl(item) {
-  const wrap = document.createElement("div");
-  wrap.className = "heart" + (item.favoritedByMe ? " on" : "") + (item.hearts > 0 ? " has" : "");
-  wrap.title = "Favorite";
-  const icon = document.createElement("span");
-  icon.className = "hi";
-  icon.innerHTML = ICONS.heart;
-  const count = document.createElement("span");
-  count.className = "hc";
-  count.textContent = item.hearts || "";
-  wrap.append(icon, count);
-
-  const pop = document.createElement("div");
-  pop.className = "heart-pop";
-  wrap.appendChild(pop);
-
-  let loaded = false;
-  wrap.addEventListener("mouseenter", async () => {
-    if (loaded || !item.hearts) { if (!item.hearts) pop.textContent = "no hearts yet"; return; }
-    loaded = true;
+// The heart: on and its count from the card's props; who hearted it fetched
+// on hover, once per count.
+function HeartControl({ item, hearts, on }) {
+  const [names, setNames] = useState(null); // { hearts, text } — the answer, for the count it was asked at
+  const asked = useRef(-1);
+  const text = names && names.hearts === hearts ? names.text : "";
+  const enter = async () => {
+    if (!hearts) { setNames({ hearts, text: "no hearts yet" }); return; }
+    if (asked.current === hearts) return;
+    asked.current = hearts;
     try {
-      const { names } = await fetch(`/api/items/${item.id}/hearts`).then((r) => r.json());
-      pop.textContent = names && names.length ? names.join(", ") : "no hearts yet";
-    } catch { loaded = false; }
-  });
-
-  wrap.addEventListener("click", async (e) => {
+      const { names: who } = await fetch(`/api/items/${item.id}/hearts`).then((r) => r.json());
+      setNames({ hearts, text: who && who.length ? who.join(", ") : "no hearts yet" });
+    } catch { asked.current = -1; }
+  };
+  const click = async (e) => {
     e.stopPropagation();
     try {
       const r = await fetch(`/api/items/${item.id}/favorite`, { method: "POST" });
       // Session gone (expired, or revoked by a password change elsewhere).
       if (r.status === 401) return location.replace("/login.html?next=" + encodeURIComponent(location.pathname + location.search));
-const { favorited, count: n } = await r.json();
+      const { favorited, count: n } = await r.json();
       item.favoritedByMe = favorited;
       item.hearts = n;
-      wrap.classList.toggle("on", favorited);
-      wrap.classList.toggle("has", n > 0);
-      count.textContent = n || "";
-      loaded = false;
-      pop.textContent = "";
-      document.dispatchEvent(new Event('app:render'));
+      itemsChanged(); // the card redraws from its new props
     } catch {
       toast.error("Couldn't update favorite");
     }
-  });
-  return wrap;
+  };
+  return html`<div class=${"heart" + (on ? " on" : "") + (hearts > 0 ? " has" : "")} title="Favorite" onMouseEnter=${enter} onClick=${click}>
+    <span class="hi"><${Icon} svg=${ICONS.heart} /></span><span class="hc">${hearts || ""}</span><div class="heart-pop">${text}</div>
+  </div>`;
 }
 
 function openTagPop(chip, item) {
@@ -352,255 +312,320 @@ function openTagPop(chip, item) {
   pin.hold(ctx);
 }
 
-function tagChip(item) {
-  const chip = document.createElement("div");
-  chip.className = "tag-chip";
-  chip.addEventListener("click", (e) => e.stopPropagation());
-  const icon = document.createElement("span");
-  icon.className = "ti";
-  icon.innerHTML = ICONS.tag;
-  const count = document.createElement("span");
-  count.className = "tc";
-  count.textContent = item.tags.length;
-  chip.append(icon, count);
-  chip.addEventListener("pointerenter", () => openTagPop(chip, item));
-  return chip;
-}
+const TagChip = ({ item, count }) => html`<div class="tag-chip" onClick=${(e) => e.stopPropagation()} onPointerEnter=${(e) => openTagPop(e.currentTarget, item)}>
+  <span class="ti"><${Icon} svg=${ICONS.tag} /></span><span class="tc">${count}</span>
+</div>`;
 
 // Two rows' worth of progress cards — under this, a drop behaves exactly as
 // before; past it, the lane truncates and the tail card carries the count.
 function laneBudget() {
-  const cols = Math.max(1, Math.floor((elGrid.clientWidth + GAP) / (COL_MIN + GAP)));
-  return Math.max(4, cols * 2);
+  return Math.max(4, gridBox().cols * 2);
+}
+
+// The lane's share of a draw's stamp (below): which items are in it and,
+// while there are any, its budget, which reads the grid's width. Exported for
+// rows.js, which draws the same lane.
+export function laneStamp(progress) {
+  return progress.length ? `${progress.map((p) => p.tempId ?? p.id).join(",")}/${laneBudget()}` : "";
 }
 
 // The lane's tail: "+N processing…" standing in for everything past the
-// budget. One cached element whose count updates in place, so poll ticks
-// where nothing else changed keep the DOM-untouched fast path.
-let laneMoreCard = null;
-function laneMore(count) {
-  if (!laneMoreCard) {
-    laneMoreCard = document.createElement("div");
-    laneMoreCard.className = "card lane-more";
-    laneMoreCard.title = "Show the whole queue";
-    const n = document.createElement("div");
-    n.className = "lane-more-count";
-    const label = document.createElement("div");
-    label.className = "lane-more-label";
-    label.textContent = "processing…";
-    laneMoreCard.append(n, label);
-    laneMoreCard.addEventListener("click", () => {
-      // "Show me the queue" — active facet pills would exclude the tagless
-      // queue items, so clear them rather than landing on an empty grid.
+// budget.
+function LaneMore({ count }) {
+  const showQueue = () => {
+    // "Show me the queue" — active facet pills would exclude the tagless
+    // queue items, so clear them rather than landing on an empty grid.
+    batch(() => {
       state.selected = new Map();
       state.showUntagged = false;
       state.showProcessing = true;
       state.showUnprocessed = true;
-      document.dispatchEvent(new Event('app:render'));
     });
-  }
-  laneMoreCard.querySelector(".lane-more-count").textContent = `+${count}`;
-  return laneMoreCard;
+  };
+  return html`<div class="card lane-more" title="Show the whole queue" onClick=${showQueue}>
+    <div class="lane-more-count">+${count}</div><div class="lane-more-label">processing…</div>
+  </div>`;
 }
 
-function progressCard(p) {
-  const card = document.createElement("div");
-  card.className = "card loading";
-  const body = kindFor(p).progressFace?.(p, card, scheduleLayout);
-  if (body) card.appendChild(body);
-  const sp = document.createElement("div");
-  sp.className = "spinner";
-  card.appendChild(sp);
-  if (p.id && state.me) {
-    const acts = document.createElement("div");
-    acts.className = "card-actions";
-    acts.appendChild(actionBtn("trash", "delete", "Delete", () => doDelete(p.id)));
-    card.appendChild(acts);
-  }
-  stageObserver.observe(card);
-  return card;
+// An upload placeholder or an item still in flight, in the lane. Its face
+// follows its kind; it has no data-id, so the settled-card counts (tests,
+// the select-all shortcut) don't see it.
+function ProgressCard({ p, me }) {
+  const [loaded, setLoaded] = useState(false);
+  const [broken, setBroken] = useState(false);
+  const ref = useRef(null);
+  const onstage = useOnstage(ref, !broken);
+  if (broken) return null;
+  const kind = kindFor(p);
+  const cls = "card loading" + (kind.instant || loaded ? " loaded" : "") + (onstage ? " onstage" : "");
+  return html`<div ref=${ref} class=${cls}>
+    <${kind.ProgressFace} name=${p.name} objURL=${p.objURL} w=${p.w} h=${p.h} symbol=${p.symbol} identity=${p.identity}
+      label=${p.displayLabel} count=${p.instances?.length || 0} loaded=${loaded}
+      onLoaded=${() => setLoaded(true)} onBroken=${() => setBroken(true)} onLayout=${scheduleLayout} />
+    <div class="spinner" />
+    ${p.id && me && html`<div class="card-actions"><${Act} icon="trash" cls="delete" title="Delete" onClick=${() => doDelete(p.id)} /></div>`}
+  </div>`;
 }
 
-// Pin an element's hover chrome while a pop owns it. Four surfaces need the
-// same three moves — add .pop-open on open, drop it on close, and tear the
-// chrome down only if the pointer has since left — and they differ solely in
-// which element and which teardown. `release` takes the dropdown's close
-// REASON: "keep-card" means the pop handed off to another pop over the same
-// anchor (crates' re-open, the caret's facet-scope chain), so the chrome must
-// survive or the second pop is placed against an element that just vanished.
-export function pinWhileOpen(anchor, { sel = ".card", teardown = teardownCardHover } = {}) {
+// The progress lane, budgeted — shared by both gallery modes (rows.js draws
+// the same lane above its entity rows).
+export function Lane({ progress, me }) {
+  const budget = laneBudget();
+  const out = progress.slice(0, budget).map((p) => html`<${ProgressCard} key=${p.tempId != null ? `u${p.tempId}` : `p${p.id}`} p=${p} me=${me} />`);
+  if (progress.length > budget) out.push(html`<${LaneMore} key="lane-more" count=${progress.length - budget} />`);
+  return out;
+}
+
+// Pin a card's (or a tile's) hover chrome while a menu opened from it is up.
+// The chrome is component state, so the pin is set on the component: each
+// mounted card and tile registers its setter under its own element, and a
+// menu's opener finds that element from the button it was given. By element,
+// not by id: one file can sit under two entities (in classify mode a file
+// belongs to every entity that claimed it, data.js), so two tiles can share
+// an id. `release` takes the dropdown's close REASON: "keep-card" means the
+// menu handed off to another over the same anchor (crates' re-open, the
+// caret's facet-scope chain), so the chrome must survive or the second menu
+// is placed against an element that just vanished. Stage 5 turns the
+// registry into a signal the card reads.
+const pins = new WeakMap(); // a card's or tile's element -> its setPinned
+export function registerPin(el, set) {
+  if (el) pins.set(el, set);
+}
+export function pinWhileOpen(anchor, { sel = ".card" } = {}) {
   const el = anchor.closest(sel);
+  const set = el ? pins.get(el) : undefined;
   return {
     el,
-    hold: (ctx) => { if (ctx && el) el.classList.add("pop-open"); },
-    release: (reason) => {
-      if (!el || reason === "keep-card") return;
-      el.classList.remove("pop-open");
-      if (!el.matches(":hover")) teardown(el);
-    },
+    hold: (ctx) => { if (ctx) set?.(true); },
+    release: (reason) => { if (reason !== "keep-card") set?.(false); },
   };
 }
 
-export function teardownCardHover(card) {
-  card.querySelector(".card-actions")?.remove();
-  card.querySelector(".tag-chip")?.remove();
-  const heart = card.querySelector(".heart");
-  if (heart && !heart.classList.contains("on") && !heart.classList.contains("has")) heart.remove();
+// Props compared one by one: the card redraws when one of them changed.
+export function sameProps(a, b) {
+  if (a === b) return true;
+  for (const k in a) if (a[k] !== b[k]) return false;
+  for (const k in b) if (!(k in a)) return false;
+  return true;
 }
 
-export function scrollToCard(item) {
-  if (!item) return;
-  let card = elGrid.querySelector(`[data-id="${item.id}"]`);
-  // The backfill below builds masonry cards — grid-mode machinery. In rows
-  // mode an off-screen row (past the render limit) is just not scrolled to.
-  if (!card && effectiveView() !== "rows") {
-    const items = taggedFiltered();
-    const targetIdx = items.indexOf(item);
-    if (targetIdx < 0) return;
-    for (let i = 0; i <= targetIdx; i++) {
-      if (cardCache.has(items[i].id)) continue;
-      elGrid.appendChild(cardEl(items[i]));
+// What a card draws, read off the item once per repaint. The card renders
+// from these alone (the item rides along for its handlers), so a field that
+// isn't here can't be drawn stale, and the card's redraw check is a compare
+// of these values. Exported for the rows view, whose rows carry the same
+// card.
+export function cardProps(item) {
+  return {
+    item,
+    id: item.id,
+    status: item.status,
+    loading: ACTIVE.has(item.status) || QUEUED.has(item.status),
+    // Anything in the grid without tags needs human attention — AI-undecided,
+    // held (waiting for auto-tagging), failed, or hand-cleared — but only on
+    // a board with a taxonomy; a board with no facets can't be tagged at all,
+    // so the dotted "needs tags" treatment there would be a permanent false
+    // alarm (needsTags).
+    undecided: needsTags(item),
+    hearts: item.hearts || 0,
+    favoritedByMe: !!item.favoritedByMe,
+    name: item.name,
+    w: item.w,
+    h: item.h,
+    kind: item.kind,
+    generated: !!item.generated,
+    label: item.displayLabel,
+    titled: hasIdentity(item),
+    symbol: item.symbol,
+    identity: item.identity,
+    count: item.instances?.length || 0,
+    tags: item.tags, // replaced by every writer, never edited (D5)
+    selected: state.bulkSelected.has(item.id),
+  };
+}
+
+// A card: the frame and the chrome around a face (kinds.js owns the face).
+// It draws from its props alone and redraws only when one changed. Its own
+// state: the pointer over it (the chrome draws while it is, as it always
+// did), a menu pinned on it, its picture loaded or broken, and whether it's
+// near the viewport (the spinner runs only then). In bulk mode the chrome is
+// hidden by the stylesheet (body.bulk-mode), not by a prop: a prop would
+// redraw every card on the first and the last selection. Exported for the
+// rows view.
+export class Card extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { pic: props.name, hover: false, pinned: false, loaded: false, broken: false, onstage: false };
+    this.setPinned = (on) => {
+      if (on) { this.setState({ pinned: true }); return; }
+      // Released with the pointer still over the card (the menu closed under
+      // it): the chrome stays, as :hover says, not as the last pointerleave
+      // said — that one fired when the pointer went onto the menu.
+      let hover = false;
+      try { hover = !!this.base?.matches?.(":hover"); } catch { /* jsdom: no pointer */ }
+      this.setState({ pinned: false, hover });
+    };
+    this.onLoaded = () => { if (!this.state.loaded) this.setState({ loaded: true }); };
+    this.onBroken = () => this.setState({ broken: true });
+    this.onEnter = () => this.setState({ hover: true });
+    this.onLeave = () => this.setState({ hover: false });
+    this.onClick = () => {
+      if (state.bulkSelected.size) toggleBulkSelect(this.props.item);
+      else openDetail(this.props.item);
+    };
+    this.onSelect = (e) => { e.stopPropagation(); toggleBulkSelect(this.props.item); };
+  }
+
+  // Loaded and broken belong to a picture: a new one (the item's face moved
+  // to another file, or a chart was drawn again under a new name) starts
+  // over, as a rebuilt card did before Stage 4. Kept, a new picture drew on
+  // a blank face with no shimmer while it loaded (Chromium drops a lazy
+  // image's old picture when its src changes), and a card whose picture had
+  // failed stayed hidden through every new one.
+  static getDerivedStateFromProps(p, s) {
+    return p.name === s.pic ? null : { pic: p.name, loaded: false, broken: false };
+  }
+
+  shouldComponentUpdate(nextProps, nextState) {
+    return !sameProps(nextProps, this.props) || !sameProps(nextState, this.state);
+  }
+
+  componentDidMount() {
+    registerPin(this.base, this.setPinned);
+    this.watch();
+  }
+
+  componentDidUpdate(prev, prevState) {
+    registerPin(this.base, this.setPinned); // a card back from a broken picture is a new element
+    this.watch();
+    // A picture that failed took the card with it, and one that replaced it
+    // brought the card back: the masonry has a hole, or a card to place.
+    if (this.state.broken !== prevState.broken) scheduleLayout();
+  }
+
+  componentWillUnmount() {
+    this.unwatch();
+  }
+
+  // Watched while in flight and drawn; the observer holds strong refs, so
+  // whatever stops needing it is unwatched.
+  watch() {
+    const el = this.state.broken ? null : this.base;
+    const want = !!(this.props.loading && el && el.nodeType === 1);
+    if (want && this.watched !== el) {
+      this.unwatch();
+      watchStage(el, (v) => this.setState({ onstage: v }));
+      this.watched = el;
+    } else if (!want) {
+      this.unwatch();
     }
-    renderLimit = Math.max(renderLimit, targetIdx + 1);
-    layoutGrid();
-    pokeSentinel();
-    card = elGrid.querySelector(`[data-id="${item.id}"]`);
-  }
-  if (card) card.scrollIntoView({ behavior: "instant", block: "center" });
-}
-
-function faceOverlay(card) {
-  return card.querySelector(".face-media") || card;
-}
-
-// Exported for rows.js: a row is this exact card (all entity affordances —
-// hearts, crate, tag chip, reprocess, delete, bulk select — ride along) plus
-// an instance strip beside it. rows.js keeps its own element cache; cards
-// created here are masonry-positioned only by layoutGrid, which rows mode
-// never runs, so the same builder serves both layouts.
-export function cardFor(item) {
-  const card = document.createElement("div");
-  card.className = "card";
-  card.dataset.id = item.id;
-  // Lets layoutGrid compute the height (cardW / ratio) instead of measuring.
-  // Only valid while the body is a pinned-ratio image and no card state adds
-  // layout height (selected/undecided use outline + inner padding, which
-  // don't). Bodies with content-dependent height (doc faces and identity-titled
-  // images carry a title strip) must leave this unset — they take the measured lane.
-  if (item.w && item.h && item.kind === "image" && !hasIdentity(item)) card.dataset.ratio = item.w / item.h;
-  // Anything in the grid without tags needs human attention — AI-undecided,
-  // held (waiting for auto-tagging), failed, or hand-cleared — but only on a
-  // board with a taxonomy; a board with no facets can't be tagged at all, so
-  // the dotted "needs tags" treatment there would be a permanent false alarm.
-  if (needsTags(item)) card.classList.add("undecided");
-  // The file kind owns the face (the media); grid owns the frame + chrome.
-  // (The instance-count chip rides inside the face's title strip — kinds.js.)
-  card.appendChild(kindFor(item).face(item, card, scheduleLayout));
-  if (ACTIVE.has(item.status) || QUEUED.has(item.status)) {
-    card.classList.add("loading");
-    const sp = document.createElement("div");
-    sp.className = "spinner";
-    card.appendChild(sp);
-  }
-  card.addEventListener("click", () => {
-    if (state.bulkSelected.size) { toggleBulkSelect(item, card); return; }
-    openDetail(item);
-  });
-
-  if (state.me) {
-    const cb = document.createElement("button");
-    cb.className = "sel-cb";
-    cb.title = "Select";
-    cb.innerHTML = ICONS.check;
-    cb.setAttribute("aria-pressed", String(state.bulkSelected.has(item.id)));
-    cb.addEventListener("click", (e) => { e.stopPropagation(); toggleBulkSelect(item, card); });
-    faceOverlay(card).appendChild(cb);
-    if (state.bulkSelected.has(item.id)) card.classList.add("selected");
   }
 
-  if (state.me && (item.hearts > 0 || item.favoritedByMe)) faceOverlay(card).appendChild(heartControl(item));
-
-  card.addEventListener("pointerenter", () => {
-    if (state.bulkSelected.size) return;
-    if (state.me && !card.querySelector(".card-actions")) card.appendChild(cardActions(item));
-    if (!card.querySelector(".tag-chip")) card.appendChild(tagChip(item));
-    if (state.me && !card.querySelector(".heart")) faceOverlay(card).appendChild(heartControl(item));
-  });
-  card.addEventListener("pointerleave", () => {
-    if (card.classList.contains("pop-open")) return;
-    teardownCardHover(card);
-  });
-  stageObserver.observe(card);
-  return card;
-}
-
-// The progress lane's cards, budgeted and cached — shared verbatim by both
-// gallery modes (rows.js prepends the same lane above its entity rows), so
-// the cache has one owner and upload placeholders survive a mode flip.
-export function progressLane(progressItems) {
-  const children = [];
-  const nextProgress = new Map();
-  const budget = laneBudget();
-  for (const p of progressItems.slice(0, budget)) {
-    const k = p.tempId != null ? `u${p.tempId}` : p.id;
-    const el = progressCache.get(k) || progressCard(p);
-    nextProgress.set(k, el);
-    children.push(el);
+  unwatch() {
+    if (this.watched) { unwatchStage(this.watched); this.watched = null; }
   }
-  for (const [k, el] of progressCache) {
-    if (!nextProgress.has(k)) stageObserver.unobserve(el);
+
+  render(p, s) {
+    if (s.broken) return null;
+    const kind = kindFor(p);
+    const loaded = !!kind.instant || s.loaded;
+    const chrome = s.hover || s.pinned;
+    const cls = "card" + (loaded ? " loaded" : "") + (p.loading ? " loading" : "") + (p.undecided ? " undecided" : "")
+      + (p.selected ? " selected" : "") + (s.onstage ? " onstage" : "") + (s.pinned ? " pop-open" : "");
+    // Lets layoutGrid compute the height (cardW / ratio) instead of measuring.
+    // Only valid while the body is a pinned-ratio image and no card state adds
+    // layout height (selected/undecided use outline + inner padding, which
+    // don't). Bodies with content-dependent height (doc faces and
+    // identity-titled images carry a title strip) leave this unset — they
+    // take the measured lane.
+    const ratio = p.w && p.h && p.kind === "image" && !p.titled ? p.w / p.h : undefined;
+    // The select button and the heart sit inside the face's media region,
+    // above the title strip if there is one.
+    const overlay = html`${p.me && html`<button class="sel-cb" title="Select" aria-pressed=${String(p.selected)} onClick=${this.onSelect}><${Icon} svg=${ICONS.check} /></button>`}
+      ${p.me && (chrome || p.hearts > 0 || p.favoritedByMe) && html`<${HeartControl} item=${p.item} hearts=${p.hearts} on=${p.favoritedByMe} />`}`;
+    return html`<div class=${cls} data-id=${p.id} data-ratio=${ratio} onClick=${this.onClick} onPointerEnter=${this.onEnter} onPointerLeave=${this.onLeave}>
+      <${kind.Face} ...${p} loaded=${loaded} overlay=${overlay} onLoaded=${this.onLoaded} onBroken=${this.onBroken} onLayout=${scheduleLayout} />
+      ${p.loading && html`<div class="spinner" />`}
+      ${chrome && p.me && html`<${CardActions} item=${p.item} />`}
+      ${chrome && html`<${TagChip} item=${p.item} count=${p.tags.length} />`}
+    </div>`;
   }
-  progressCache = nextProgress;
-  if (progressItems.length > budget) children.push(laneMore(progressItems.length - budget));
-  return children;
 }
 
 // The two empty states are different sentences: a board with nothing in it is
 // not a filter result, and "No items match these filters" on a fresh board
 // blames filters that were never touched. state.items is the UNFILTERED set,
 // so it is the discriminant — the filtered list going empty while items exist
-// is the filters' doing. Exported so rows.js says the same thing (it already
-// borrows this file's cards and lane for the same reason).
-export function emptyNote() {
-  const e = document.createElement("div");
-  e.className = "empty";
-  e.textContent = state.items.length
-    ? "No items match these filters."
-    : "Nothing here yet — use + to add the first items.";
-  return e;
+// is the filters' doing. Exported so rows.js says the same thing.
+export const EmptyNote = () => html`<div class="empty">${state.items.length
+  ? "No items match these filters."
+  : "Nothing here yet — use + to add the first items."}</div>`;
+
+function Grid({ progress, items, limit, me }) {
+  if (!items.length && !progress.length) return html`<${EmptyNote} />`;
+  return [
+    html`<${Lane} key="lane" progress=${progress} me=${me} />`,
+    ...items.slice(0, limit).map((item) => html`<${Card} key=${`c${item.id}`} ...${cardProps(item)} me=${me} />`),
+  ];
 }
 
-// key is passed in from app.js render() so grid.js doesn't need to import filterKey.
+// What the tree is drawn from, as a stamp: a draw is skipped when none of it
+// moved since the last one, so a repaint that changed nothing (the common
+// poll tick) doesn't walk the cards at all, whatever the scroll depth.
+// Everything a card draws comes from its item (itemsVersion counts every
+// write to one, Stage 3), the selection, the viewer, the board's facets (the
+// needs-tags outline), the lane and the limit. Stage 5 makes this the grid's
+// own subscription.
+let drawn = null;
+function stamp() {
+  return [last.items, limit, laneStamp(last.progress), state.me, state.bulkSelected, state.facets, itemsVersion.value];
+}
+
+function draw(force = false) {
+  const s = stamp();
+  if (!force && drawn && s.every((v, i) => v === drawn[i])) return;
+  drawn = s;
+  render(html`<${Grid} progress=${last.progress} items=${last.items} limit=${limit} me=${!!state.me} />`, elGrid);
+}
+
+// The key #grid was last drawn under, from app.js render(): the filters and
+// the view. Both views draw into #grid, so both go by this one key. A key
+// other than the last one (the filters changed, or the view flipped) starts
+// the view over at its first batch and always draws, since #grid may be
+// holding the other view's tree: each view skips a draw when nothing it
+// reads has moved, and a flip moves nothing it reads. Exported for rows.js.
+let shownKey = "";
+export function freshKey(key) {
+  if (key === shownKey) return false;
+  shownKey = key;
+  return true;
+}
+
+// key is passed in from app.js render() so grid.js doesn't need to import
+// filterKey.
 export function renderGrid(key, progressItems, items) {
-  if (key !== lastFilterKey) {
-    lastFilterKey = key;
-    renderLimit = RENDER_BATCH;
+  const fresh = freshKey(key);
+  if (fresh) limit = RENDER_BATCH;
+  last = { progress: progressItems, items };
+  draw(fresh);
+}
+
+export function scrollToCard(item) {
+  if (!item) return;
+  let card = elGrid.querySelector(`[data-id="${item.id}"]`);
+  // The backfill below draws masonry cards — grid-mode machinery. In rows
+  // mode an off-screen row (past the render limit) is just not scrolled to.
+  if (!card && effectiveView() !== "rows") {
+    const items = taggedFiltered();
+    const targetIdx = items.indexOf(item);
+    if (targetIdx < 0) return;
+    limit = Math.max(limit, targetIdx + 1);
+    last.items = items;
+    draw();
+    layoutGrid();
+    pokeSentinel();
+    card = elGrid.querySelector(`[data-id="${item.id}"]`);
   }
-  const children = progressLane(progressItems);
-
-  if (!items.length && !progressItems.length) {
-    for (const { el } of cardCache.values()) stageObserver.unobserve(el);
-    cardCache = new Map();
-    elGrid.replaceChildren(emptyNote());
-    return;
-  }
-
-  for (const item of items.slice(0, renderLimit)) children.push(cardEl(item));
-
-  // Prune cards that fell out of view or were deleted.
-  const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
-  for (const [id, { el }] of cardCache) {
-    if (!keep.has(id)) {
-      stageObserver.unobserve(el);
-      cardCache.delete(id);
-    }
-  }
-
-  // Nothing changed (the common poll tick) — leave the DOM alone.
-  const same =
-    children.length === elGrid.children.length &&
-    children.every((el, i) => el === elGrid.children[i]);
-  if (!same) elGrid.replaceChildren(...children);
+  if (card) card.scrollIntoView({ behavior: "instant", block: "center" });
 }
 
 export function pokeSentinel() {
@@ -613,15 +638,10 @@ function appendMoreCards() {
   // no-ops outside its own mode (rows.js has the rows counterpart).
   if (effectiveView() === "rows") return;
   const items = taggedFiltered();
-  let appended = 0;
-  for (const item of items) {
-    if (appended >= RENDER_BATCH) break;
-    if (cardCache.has(item.id)) continue;
-    elGrid.appendChild(cardEl(item));
-    appended++;
-  }
-  if (!appended) return;
-  renderLimit = cardCache.size;
+  if (limit >= items.length) return;
+  limit = Math.min(limit + RENDER_BATCH, items.length);
+  last.items = items;
+  draw();
   layoutGrid();
   pokeSentinel();
 }

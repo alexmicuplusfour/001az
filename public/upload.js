@@ -1,4 +1,6 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
+import { batch } from './vendor/signals.mjs';
 import { toItem } from './utils.js';
 import { toast } from './toast.js';
 import { ensurePolling, hasPendingUploadTags, pendingUploadTagCount, setWork } from './data.js';
@@ -157,6 +159,7 @@ export function mergeUploadedRows(rows) {
     }
     if (rowStatus === "pending" || rowStatus === "pending_extract") pendingIds.push(row.id);
   }
+  itemsChanged();
   return pendingIds;
 }
 
@@ -165,14 +168,13 @@ async function uploadChunk(chunk) {
   renderUploadStatus();
 
   // Doc placeholders get a badge face, not an <img> (no object URL to show).
-  const batch = chunk.map((f) => ({
+  const placeholders = chunk.map((f) => ({
     tempId: ++state.uid,
     name: f.name,
     kind: isImageFile(f) ? "image" : "doc",
     objURL: isImageFile(f) ? URL.createObjectURL(f) : null,
   }));
-  state.uploading.push(...batch);
-  document.dispatchEvent(new Event('app:render'));
+  state.uploading = [...state.uploading, ...placeholders];
 
   const fd = new FormData();
   // Interleave each file with its original modified time (File.lastModified);
@@ -204,28 +206,31 @@ async function uploadChunk(chunk) {
     if (attempt < UPLOAD_ATTEMPTS) await sleep(1000 * attempt);
   }
 
-  for (const b of batch) if (b.objURL) URL.revokeObjectURL(b.objURL);
-  state.uploading = state.uploading.filter((u) => !batch.includes(u));
+  for (const p of placeholders) if (p.objURL) URL.revokeObjectURL(p.objURL);
+  // One batch, so the page draws the answer once: the placeholders give way
+  // to the rows they became, and the chip takes the work those queued.
+  batch(() => {
+    state.uploading = state.uploading.filter((u) => !placeholders.includes(u));
 
-  inFlight -= chunk.length;
-  uploadStats.done += chunk.length;
-  if (data) {
-    const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
-    uploadStats.pendingIds.push(...mergeUploadedRows(rows));
-    // The rows go to the grid; the work they queued goes to the chip and the
-    // jobs modal, which read the `work` payload alone (instance-work-plan.md
-    // P1). Both halves of the same answer, applied in the same tick — without
-    // this the chip sat dark for a poll while the drop was already queued.
-    setWork(data.work);
-    uploadStats.uploaded += rows.length;
-    for (const r of data.rejected || []) {
-      uploadStats.skipped.set(r.reason, (uploadStats.skipped.get(r.reason) || 0) + 1);
+    inFlight -= chunk.length;
+    uploadStats.done += chunk.length;
+    if (data) {
+      const rows = Array.isArray(data.uploaded) ? data.uploaded : [];
+      uploadStats.pendingIds.push(...mergeUploadedRows(rows));
+      // The rows go to the grid; the work they queued goes to the chip and the
+      // jobs modal, which read the `work` payload alone (instance-work-plan.md
+      // P1). Both halves of the same answer, applied in the same tick — without
+      // this the chip sat dark for a poll while the drop was already queued.
+      setWork(data.work);
+      uploadStats.uploaded += rows.length;
+      for (const r of data.rejected || []) {
+        uploadStats.skipped.set(r.reason, (uploadStats.skipped.get(r.reason) || 0) + 1);
+      }
+    } else {
+      uploadStats.failed += chunk.length;
+      uploadStats.failReason = failReason;
     }
-  } else {
-    uploadStats.failed += chunk.length;
-    uploadStats.failReason = failReason;
-  }
-  document.dispatchEvent(new Event('app:render'));
+  });
   ensurePolling();
 }
 

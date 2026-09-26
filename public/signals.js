@@ -24,6 +24,7 @@
 // each signal names its own interval, and a signal whose surface isn't on
 // screen is never fetched at all.
 import { state } from './state.js';
+import { signal, batch } from './vendor/signals.mjs';
 import { createTicker } from './ticker.js';
 import { ensurePolling, setWork } from './data.js';
 import { refreshFacetStats, canSeeDiagnostics } from './facet-diagnosis.js';
@@ -49,8 +50,14 @@ import { noteServerNow } from './seen-mark.js';
 // Read by announce.js's ready() and by nothing else. What the dot should do
 // with a value it hasn't got is a different question, and "stay dark" is
 // already the right answer to it.
-const landed = new Set();
-export const signalLanded = (name) => landed.has(name);
+//
+// A signal, replaced on each landing, so announce.js's effect asks again when
+// one lands.
+const landed = signal(new Set());
+export const signalLanded = (name) => landed.value.has(name);
+function land(name) {
+  if (!landed.value.has(name)) landed.value = new Set(landed.value).add(name);
+}
 
 export async function refreshAlerts() {
   if (!state.boardId) return;
@@ -60,8 +67,10 @@ export async function refreshAlerts() {
     const list = await r.json();
     if (!Array.isArray(list)) return;
     const had = state.alerts.length;
-    state.alerts = list;
-    landed.add("alerts");
+    batch(() => {
+      state.alerts = list;
+      land("alerts");
+    });
     // Holding an alert holds the slow item poll (pollDelay) — an alert is a
     // standing statement that arrivals on this board matter, and arrivals are
     // items. This read is the only place a tab can LEARN it holds one without
@@ -91,15 +100,17 @@ export async function refreshJobErrors() {
     // read that does — so it is what keeps every dot's watermark comparing
     // server stamps against a server-floored mark.
     noteServerNow(d.now);
-    state.jobsFailedAt = d.failed_at ?? null;
-    // The lane-work discovery leg: a sweep starting server-side on an idle
-    // board has no client-side event, and the delta poll may not be running
-    // at all — this tick is what notices, and setWork's rising edge wakes it.
-    setWork(d.work);
-    // …including a response that says null. "This board has never failed" is an
-    // answer; not having asked successfully is not, and the two were the same
-    // value until this line.
-    landed.add("jobErrors");
+    batch(() => {
+      state.jobsFailedAt = d.failed_at ?? null;
+      // The lane-work discovery leg: a sweep starting server-side on an idle
+      // board has no client-side event, and the delta poll may not be running
+      // at all — this tick is what notices, and setWork's rising edge wakes it.
+      setWork(d.work);
+      // …including a response that says null. "This board has never failed" is
+      // an answer; not having asked successfully is not, and the two were the
+      // same value until this line.
+      land("jobErrors");
+    });
   } catch { /* keep the last known stamp */ }
 }
 
@@ -140,7 +151,6 @@ const ticker = createTicker({
   tickMs: TICK_MS,
   signals: SIGNALS,
   ready: () => !!state.boardId && !!state.me,
-  onBatch: () => document.dispatchEvent(new Event('app:render')),
 });
 
 export const startSignals = ticker.start;

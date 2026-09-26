@@ -43,10 +43,9 @@ const SLICES = {
 // SERIALIZED per slice, not sequence-numbered. A counter compared after the
 // await is the obvious shape and it is wrong: the refresh functions write state
 // inside `run()`, so by the time a "this one is stale" check runs, the stale
-// answer is already in state — the check only suppresses the repaint, leaving
-// the screen and the state disagreeing, which is worse than either. Chaining
-// makes them land in the order they were issued, which is the property actually
-// wanted.
+// answer is already in state, and on screen, since the write is the repaint.
+// Chaining makes them land in the order they were issued, which is the
+// property actually wanted.
 const chain = new Map();
 
 // …and a burst of events for one slice should cost one fetch, not five: a bulk
@@ -55,19 +54,6 @@ const chain = new Map();
 // a second burst starts while the first fetch is still in the air.
 const DEBOUNCE_MS = 150;
 const pending = new Map();
-
-// One repaint per burst, not one per slice. A crate change moves two slices and
-// a reconnect moves four, and each was dispatching its own `app:render` — which
-// is a full facet recompute and grid pass, several times, within a frame.
-let painting = false;
-function paint() {
-  if (painting) return;
-  painting = true;
-  queueMicrotask(() => {
-    painting = false;
-    document.dispatchEvent(new Event("app:render"));
-  });
-}
 
 function refresh(slice) {
   const run = SLICES[slice];
@@ -87,8 +73,7 @@ function refresh(slice) {
     // parked on a slice nobody refreshes again — which surfaces as an unhandled
     // rejection, which the browser tests assert against.
     const next = (chain.get(slice) || Promise.resolve())
-      .then(run)
-      .then(paint)
+      .then(run) // what it writes is the repaint
       .catch(() => {});
     chain.set(slice, next);
   }, DEBOUNCE_MS));

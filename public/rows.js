@@ -1,22 +1,33 @@
 // rows.js — the instance-rows gallery mode (planning/instance-rows-plan.md).
-// Entities stack vertically; each row is the untouched entity card (built by
-// grid.js's cardFor, so every entity affordance rides along) plus a
-// horizontally scrolling strip of its instance tiles, the whole group in a
-// bordered container. Single-instance entities render without a strip — the
-// card already IS that instance, and a one-tile strip would repeat the same
+// Entities stack vertically; each row is the untouched entity card (grid.js's
+// Card, so every entity affordance rides along) plus a horizontally
+// scrolling strip of its instance tiles, the whole group in a bordered
+// container. Single-instance entities render without a strip — the card
+// already IS that instance, and a one-tile strip would repeat the same
 // photo. Everything on a tile is instance-scoped (the lightbox's per-instance
 // verbs, relocated): its own tag pop + editor, Retag, Re-extract on mapped
 // boards, and remove; hearts/crates stay on the card — they reference
 // entities(id) in the schema.
+//
+// Rows and tiles are components (planning/ui-updates-plan.md, Stage 4), drawn
+// from render() as before and keyed by entity and file id. A row redraws only
+// when something it draws changed: its card's props, its file list, which
+// tiles match the filter, which files are in work, which file is the face.
+// Rows persist across repaints, so a strip keeps its own scroll; the
+// bookkeeping that carried a scroll position from a rebuilt row to its
+// replacement is gone with the rebuilds.
 import { state } from './state.js';
-import { cardFor, cardSig, releaseCard, progressLane, pinWhileOpen, emptyNote } from './grid.js';
+import { itemsChanged, itemsVersion } from './state-signals.js';
+import { html, render, Component, useState, useRef, useLayoutEffect } from './vendor/preact.mjs';
+import { Icon } from './icon.js';
+import { cardProps, Card, Lane, EmptyNote, Act, pinWhileOpen, registerPin, sameProps, freshKey, laneStamp } from './grid.js';
 import { thumbUrl } from './kinds.js';
 import { openDetailAt } from './detail-open.js';
 import { selectFace } from './face-select.js';
 import { taggedFiltered, instanceMatches } from './filters.js';
 import { effectiveView } from './view.js';
 import { ACTIVE, QUEUED, requeueToast } from './data.js';
-import { ICONS, actionBtn, refreshEntityTags, mappingHasAiWork, applyFace } from './utils.js';
+import { ICONS, refreshEntityTags, mappingHasAiWork, applyFace } from './utils.js';
 import { openDropdown, ddAction } from './dropdown.js';
 import { openTagEditor } from './tag-editor.js';
 import { toggleBulkSelect } from './bulk.js';
@@ -27,39 +38,25 @@ const elGridSentinel = document.getElementById("grid-sentinel");
 
 // Rows carry more DOM than cards; smaller batches, same sentinel flow.
 const RENDER_BATCH = 30;
-let renderLimit = RENDER_BATCH;
-let lastKey = "";
-let rowCache = new Map(); // entity id -> { el, sig }
-
-// A row re-renders when anything its card OR its strip shows changes: the
-// card signature, each instance's identity/status/tags, its filter-match
-// state (a facet toggle that moves the dim pattern repaints the row), and
-// which instance is the face. Per-instance tags ride in (not just the union)
-// so a tile tag edit that doesn't move the union still repaints its row.
-function rowSig(item) {
-  const face = selectFace(item.instances, state.boardMapping?.face);
-  const insts = item.instances
-    .map((i) => `${i.id}:${i.status}:${i.undecided ? 1 : 0}:${instanceMatches(i) ? 1 : 0}:${i.tags.join("+")}`)
-    .join("|");
-  return `${cardSig(item)}~${insts}~${face?.id ?? ""}`;
-}
+let limit = RENDER_BATCH;
+let epoch = ""; // the key of the last fresh draw (grid.js freshKey): the rows' filters
+let last = { progress: [], items: [] };
 
 // ── per-instance verbs (the lightbox's, relocated to the tile) ──────────────
 
-// Cached rows outlive reconcile: data.js takes the server's instance list
-// wholesale on every delta row, so a sig-equal row keeps its DOM while its
-// closures hold objects the entity no longer contains. Everything below
-// re-resolves by id at fire time — mutating a captured orphan is a write the
-// union recompute and the next render never read (a tag edit would look
-// lost, an optimistic status would never paint). The captured object is the
-// fallback (instance deleted in another tab): the request still fires and
-// the server's 404/409 surfaces as the toast.
+// data.js takes the server's instance list wholesale on every delta row, so
+// a handler made at draw time can hold an object the entity no longer
+// contains. Everything below re-resolves by id at fire time — mutating a
+// captured orphan is a write the union recompute and the next draw never
+// read (a tag edit would look lost, an optimistic status would never paint).
+// The captured object is the fallback (instance deleted in another tab): the
+// request still fires and the server's 404/409 surfaces as the toast.
 const liveInst = (item, inst) => item.instances.find((x) => x.id === inst.id) || inst;
 
-// The lightbox disables its buttons mid-flight; tile buttons are recreated on
-// every row rebuild, so the latch lives here instead. Without it a double
-// click double-DELETEs — the second 404s and toasts a failure after a
-// removal that succeeded.
+// The lightbox disables its buttons mid-flight; a tile's buttons come and go
+// with the hover, so the latch lives here instead. Without it a double click
+// double-DELETEs — the second 404s and toasts a failure after a removal that
+// succeeded.
 const inflight = new Set();
 async function once(key, fn) {
   if (inflight.has(key)) return;
@@ -100,7 +97,7 @@ function doRemoveInstance(item, inst) {
       item.instances = item.instances.filter((x) => x.id !== inst.id);
       refreshEntityTags(item);
       applyFace(item, selectFace(item.instances, state.boardMapping?.face));
-      document.dispatchEvent(new Event('app:render'));
+      itemsChanged();
       toast("File removed");
     } catch {
       toast.error("Couldn't remove file");
@@ -111,10 +108,10 @@ function doRemoveInstance(item, inst) {
 // The tile's tag pop: this instance's own tags (no union — that's the card's
 // story), with Edit/Retag in the footer. Click-open, unlike the card's
 // hover pop — tiles are small and their overlay buttons sit millimetres away.
-// pop-open pins the hover chrome while the pop is up (the card's pattern).
+// The pin keeps the hover chrome while the pop is up (the card's pattern).
 function openInstTagPop(chip, item, inst) {
   inst = liveInst(item, inst); // freshest tags for the list about to render
-  const pin = pinWhileOpen(chip, { sel: ".inst-tile", teardown: teardownTileHover });
+  const pin = pinWhileOpen(chip, { sel: ".inst-tile" });
   const ctx = openDropdown(chip, {
     className: "tag-pop",
     align: "start",
@@ -165,231 +162,149 @@ function openInstTagPop(chip, item, inst) {
   pin.hold(ctx);
 }
 
-// Tile chrome is mounted on hover, exactly like the card's — a 60-instance
-// strip would otherwise carry 60 chips and 120 buttons nobody is pointing
-// at. The face chip stays static (informational, one per strip at most).
-function teardownTileHover(tile) {
-  tile.querySelector(".inst-tag-chip")?.remove();
-  tile.querySelector(".inst-actions")?.remove();
-}
-
-function mountTileChrome(tile, item, inst) {
-  inst = liveInst(item, inst); // the chip count reads tags at mount time
-  const tagChip = document.createElement("div");
-  tagChip.className = "inst-tag-chip";
-  tagChip.title = "Tags for this file";
-  tagChip.innerHTML = ICONS.tag + `<span class="tc">${inst.tags.length}</span>`;
-  tagChip.addEventListener("click", (e) => {
-    e.stopPropagation();
-    openInstTagPop(tagChip, item, inst);
-  });
-  tile.appendChild(tagChip);
-
-  if (state.me) {
-    const acts = document.createElement("div");
-    acts.className = "inst-actions";
-    if (mappingHasAiWork(state.boardMapping)) {
-      acts.appendChild(actionBtn("redo", "reextract", "Re-extract (re-derive identity + fields for this file)", () => doReextract(item, inst)));
-    }
-    acts.appendChild(actionBtn("trash", "delete", "Remove this file from the entity", () => doRemoveInstance(item, inst)));
-    tile.appendChild(acts);
-  }
-}
-
-function tileFor(item, inst, faceId) {
-  const tile = document.createElement("div");
-  tile.className = "inst-tile";
-  tile.dataset.instId = inst.id;
-  tile.title = inst.label || inst.name;
-  if (inst.w && inst.h) {
-    // A rendered preview exists exactly when dimensions do (the previewUrl
-    // convention in kinds.js) — images always, docs/audio when one rendered.
-    // aspect-ratio makes the tile's width resolve BEFORE the lazy image
-    // loads: no strip reflow as thumbs land, and scrollFlaggedStrips (one
-    // frame after insert) measures real offsets, not collapsed ones.
-    const img = document.createElement("img");
-    img.loading = "lazy";
-    img.style.aspectRatio = `${inst.w} / ${inst.h}`;
-    img.src = thumbUrl(inst.name);
-    img.alt = inst.label || inst.name;
-    tile.appendChild(img);
-  } else {
-    const badge = document.createElement("div");
-    badge.className = "inst-badge";
-    badge.textContent = ((inst.label || inst.name || "").match(/\.(\w+)$/)?.[1] || inst.kind || "file").toUpperCase();
-    tile.appendChild(badge);
-  }
-  if (inst.id === faceId) {
-    const chip = document.createElement("span");
-    chip.className = "inst-face-chip";
-    chip.textContent = "face";
-    chip.title = "This file is the entity's card face";
-    tile.appendChild(chip);
-  }
-  if (ACTIVE.has(inst.status) || QUEUED.has(inst.status)) tile.classList.add("loading");
+// A tile: one file of the entity. Its chrome (the tag chip, the buttons)
+// draws while the pointer is over it or a menu is pinned on it, exactly like
+// the card's — a 60-instance strip would otherwise carry 60 chips and 120
+// buttons nobody is pointing at — and the stylesheet hides it in bulk mode.
+// The face chip stays (informational, one per strip at most).
+function Tile({ item, inst, dim, loading, isFace, me, aiWork }) {
+  const [hover, setHover] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const ref = useRef(null);
+  useLayoutEffect(() => { registerPin(ref.current, setPinned); }, []);
+  const chrome = hover || pinned;
   // Dim, don't hide: the entity filter is per-facet-any-instance, so a row
   // can match while no single tile does — hiding would leave it empty. An
   // all-dim strip is the honest rendering ("matches only in aggregate").
-  if (!instanceMatches(inst)) tile.classList.add("dim");
-  tile.addEventListener("click", () => {
+  const cls = "inst-tile" + (loading ? " loading" : "") + (dim ? " dim" : "") + (pinned ? " pop-open" : "");
+  const onClick = () => {
     // Bulk mode selects entities — a tile stands for its whole row there,
     // exactly like a card click (the tile chrome is CSS-hidden in bulk mode).
-    if (state.bulkSelected.size) {
-      const card = tile.closest(".entity-row")?.querySelector(".card");
-      if (card) toggleBulkSelect(item, card);
-      return;
-    }
+    if (state.bulkSelected.size) { toggleBulkSelect(item); return; }
     openDetailAt(item, inst.id);
-  });
-
-  tile.addEventListener("pointerenter", () => {
-    if (state.bulkSelected.size) return;
-    if (!tile.querySelector(".inst-tag-chip")) mountTileChrome(tile, item, inst);
-  });
-  tile.addEventListener("pointerleave", () => {
-    if (tile.classList.contains("pop-open")) return;
-    teardownTileHover(tile);
-  });
-  return tile;
+  };
+  // A rendered preview exists exactly when dimensions do (the previewUrl
+  // convention in kinds.js) — images always, docs/audio when one rendered.
+  // aspect-ratio makes the tile's width resolve BEFORE the lazy image loads:
+  // no strip reflow as thumbs land, and the first-match scroll (one frame
+  // after the draw) measures real offsets, not collapsed ones.
+  const face = inst.w && inst.h
+    ? html`<img loading="lazy" style=${`aspect-ratio: ${inst.w} / ${inst.h}`} src=${thumbUrl(inst.name)} alt=${inst.label || inst.name} />`
+    : html`<div class="inst-badge">${((inst.label || inst.name || "").match(/\.(\w+)$/)?.[1] || inst.kind || "file").toUpperCase()}</div>`;
+  return html`<div ref=${ref} class=${cls} data-inst-id=${inst.id} title=${inst.label || inst.name} onClick=${onClick}
+      onPointerEnter=${() => setHover(true)} onPointerLeave=${() => setHover(false)}>
+    ${face}
+    ${isFace && html`<span class="inst-face-chip" title="This file is the entity's card face">face</span>`}
+    ${chrome && html`<div class="inst-tag-chip" title="Tags for this file" onClick=${(e) => { e.stopPropagation(); openInstTagPop(e.currentTarget, item, inst); }}>
+      <${Icon} svg=${ICONS.tag} /><span class="tc">${inst.tags.length}</span>
+    </div>`}
+    ${chrome && me && html`<div class="inst-actions">
+      ${aiWork && html`<${Act} icon="redo" cls="reextract" title="Re-extract (re-derive identity + fields for this file)" onClick=${() => doReextract(item, inst)} />`}
+      <${Act} icon="trash" cls="delete" title="Remove this file from the entity" onClick=${() => doRemoveInstance(item, inst)} />
+    </div>`}
+  </div>`;
 }
 
-function rowFor(item) {
-  const row = document.createElement("div");
-  row.className = "entity-row";
-  row.dataset.eid = item.id;
-  row.appendChild(cardFor(item));
-  if (item.instances.length > 1) {
-    const strip = document.createElement("div");
-    strip.className = "inst-strip";
-    const faceId = selectFace(item.instances, state.boardMapping?.face)?.id ?? null;
-    for (const inst of item.instances) strip.appendChild(tileFor(item, inst, faceId));
-    // A mixed strip (some tiles match the filter, some dimmed) gets flagged
-    // to scroll its first match into view once it's in the DOM — the reason
-    // the row surfaced shouldn't be off-screen right. Fresh and filter-
-    // changed builds only: rowEl strips the flag from same-key rebuilds
-    // (data churn) and hands them their predecessor's scroll position; a
-    // reused row simply keeps its own.
-    if (strip.querySelector(".inst-tile.dim") && strip.querySelector(".inst-tile:not(.dim)")) {
-      row.dataset.scrollMatch = "1";
+// A row: the entity's card plus its strip. `card` is the card's props
+// (grid.js cardProps), compared value by value. `matches` and `busy` are one
+// character per file: whether it matches the filters, and whether it's in
+// work. A file's status is written in place (data.js applyRoutedEntities,
+// on every re-queue's answer), so the file list can be the same array with a
+// new status in it: the row compares these strings, not the files. A facet
+// toggle that moves the dim pattern, or a file sent back to work, redraws
+// the row, and nothing else does.
+class Row extends Component {
+  shouldComponentUpdate(next) {
+    for (const k in next) {
+      if (k === "card" ? !sameProps(next.card, this.props.card) : next[k] !== this.props[k]) return true;
     }
-    row.appendChild(strip);
+    return false;
   }
-  return row;
-}
 
-// Scroll targets need layout (offsets, clamp range), so flagged strips
-// scroll one frame after insertion; flags clear immediately so later renders
-// never re-yank the strip. Two flags, at most one per row: scroll-keep
-// restores a rebuilt strip's inherited position, scroll-match aims a fresh
-// strip at its first filter match.
-function scrollFlaggedStrips() {
-  requestAnimationFrame(() => {
-    for (const row of elGrid.querySelectorAll(".entity-row[data-scroll-keep]")) {
-      const strip = row.querySelector(".inst-strip");
-      if (strip) strip.scrollLeft = Number(row.dataset.scrollKeep);
-      delete row.dataset.scrollKeep;
-    }
-    for (const row of elGrid.querySelectorAll(".entity-row[data-scroll-match]")) {
-      delete row.dataset.scrollMatch;
-      const strip = row.querySelector(".inst-strip");
-      const first = strip?.querySelector(".inst-tile:not(.dim)");
-      if (first) strip.scrollLeft = Math.max(0, first.offsetLeft - strip.offsetLeft - 8);
-    }
-  });
-}
+  componentDidMount() { this.aim(); }
 
-function rowEl(item, keyChanged = false) {
-  const sig = rowSig(item);
-  const hit = rowCache.get(item.id);
-  if (hit && hit.sig === sig && hit.el.isConnected) return hit.el;
-  if (hit) releaseCard(hit.el.querySelector(".card"));
-  const el = rowFor(item);
-  // A same-key rebuild is data churn (status poll, tag save, a heart on the
-  // card), not a new presentation: the strip inherits its predecessor's
-  // scroll position instead of snapping to 0, and never re-yanks to the
-  // first match — the user's hand is mid-strip. Across a key change the
-  // filters moved, so scrollMatch re-aims at the new evidence; a strip that
-  // just appeared (1→2 instances, a merge) has no position to keep and
-  // behaves like a fresh build. The restore rides scroll-keep because a
-  // detached strip clamps scrollLeft writes to 0; reading the old row's
-  // pending scroll-keep first covers chained same-frame rebuilds, whose
-  // strip hasn't been restored yet and still reads 0.
-  if (hit && !keyChanged) {
-    const oldStrip = hit.el.querySelector(".inst-strip");
-    if (oldStrip && el.querySelector(".inst-strip")) {
-      delete el.dataset.scrollMatch;
-      const prev = Number(hit.el.dataset.scrollKeep || 0) || oldStrip.scrollLeft;
-      if (prev) el.dataset.scrollKeep = prev;
-    }
+  // Aimed where a rebuilt strip was before rows persisted: a strip that just
+  // appeared (a second file arrived), or a filter change that moved this
+  // strip's dim pattern. Data churn, and a filter change that leaves this
+  // row's files as they were (a sort, the favorites, another facet), keep
+  // the hand where it is.
+  componentDidUpdate(prev) {
+    const appeared = prev.instances.length < 2 && this.props.instances.length > 1;
+    if (appeared || (prev.epoch !== this.props.epoch && prev.matches !== this.props.matches)) this.aim();
   }
-  rowCache.set(item.id, { el, sig });
-  return el;
+
+  // A mixed strip (some tiles match the filters, some dimmed) scrolls its
+  // first match into view — the reason the row surfaced shouldn't be off-
+  // screen right; any other strip goes back to its start. One frame later,
+  // because the offsets need layout.
+  aim() {
+    const strip = this.base?.querySelector?.(".inst-strip");
+    if (!strip) return;
+    requestAnimationFrame(() => {
+      const first = strip.querySelector(".inst-tile.dim") ? strip.querySelector(".inst-tile:not(.dim)") : null;
+      strip.scrollLeft = first ? Math.max(0, first.offsetLeft - strip.offsetLeft - 8) : 0;
+    });
+  }
+
+  render(p) {
+    const strip = p.instances.length > 1 && html`<div class="inst-strip">
+      ${p.instances.map((inst, i) => html`<${Tile} key=${inst.id} item=${p.card.item} inst=${inst} dim=${p.matches[i] === "0"}
+        loading=${p.busy[i] === "1"} isFace=${inst.id === p.faceId} me=${p.me} aiWork=${p.aiWork} />`)}
+    </div>`;
+    return html`<div class="entity-row" data-eid=${p.card.id}>
+      <${Card} ...${p.card} me=${p.me} />
+      ${strip}
+    </div>`;
+  }
 }
 
-// Release every cached row's card from the stage observer. Called on each
-// grid-mode render (a no-op once empty) so a mode flip doesn't strand
-// observed cards in a cache nothing will prune. The key reset makes the
-// return trip start from a fresh first batch — without it, rows→grid→rows
-// under the same filters re-enters with the old scrolled-deep limit and an
-// empty cache, one giant synchronous rebuild at top-of-page.
-export function dropAllRows() {
-  for (const { el } of rowCache.values()) releaseCard(el.querySelector(".card"));
-  rowCache = new Map();
-  lastKey = "";
+function Rows({ progress, items, limit, epoch, me, aiWork, faceCfg }) {
+  if (!items.length && !progress.length) return html`<${EmptyNote} />`;
+  return [
+    html`<${Lane} key="lane" progress=${progress} me=${me} />`,
+    ...items.slice(0, limit).map((item) => html`<${Row} key=${`r${item.id}`} card=${cardProps(item)} instances=${item.instances}
+      matches=${item.instances.map((i) => (instanceMatches(i) ? "1" : "0")).join("")}
+      busy=${item.instances.map((i) => (ACTIVE.has(i.status) || QUEUED.has(i.status) ? "1" : "0")).join("")}
+      faceId=${selectFace(item.instances, faceCfg)?.id ?? null}
+      epoch=${epoch} me=${me} aiWork=${aiWork} />`),
+  ];
 }
 
-// The rows counterpart of renderGrid — same contract, same caching shape.
+// The draw's inputs as a stamp, the grid's way (grid.js draw): a repaint that
+// moved none of them is skipped. Rows also read the selection (which tiles
+// match) and the board's mapping (the face, the re-extract button).
+let drawn = null;
+function stamp() {
+  return [last.items, limit, laneStamp(last.progress), state.me, state.bulkSelected, state.facets,
+    state.selected, state.boardMapping, itemsVersion.value];
+}
+
+function draw(force = false) {
+  const s = stamp();
+  if (!force && drawn && s.every((v, i) => v === drawn[i])) return;
+  drawn = s;
+  render(html`<${Rows} progress=${last.progress} items=${last.items} limit=${limit} epoch=${epoch} me=${!!state.me}
+    aiWork=${mappingHasAiWork(state.boardMapping)} faceCfg=${state.boardMapping?.face} />`, elGrid);
+}
+
+// The rows counterpart of renderGrid — same contract, and the same key.
 export function renderRows(key, progressItems, items) {
-  const keyChanged = key !== lastKey;
-  if (keyChanged) {
-    lastKey = key;
-    renderLimit = RENDER_BATCH;
+  const fresh = freshKey(key);
+  if (fresh) {
+    epoch = key;
+    limit = RENDER_BATCH;
   }
-  elGrid.style.height = ""; // masonry's inline height from a prior grid render
-  const children = progressLane(progressItems);
-  // The same cleanup at card level: lane elements are shared with grid mode
-  // (progressCache and laneMoreCard survive a flip so spinners don't reset),
-  // and layoutGrid stamps inline masonry width/left/top on every .card it
-  // sees. In rows-mode normal flow those read as relative offsets and
-  // displace the lane; strip them — the return trip re-stamps via layoutGrid.
-  for (const el of children) { el.style.left = el.style.top = el.style.width = ""; }
-
-  if (!items.length && !progressItems.length) {
-    dropAllRows();
-    elGrid.replaceChildren(emptyNote());
-    return;
-  }
-
-  for (const item of items.slice(0, renderLimit)) children.push(rowEl(item, keyChanged));
-
-  const keep = new Set(items.slice(0, renderLimit).map((i) => i.id));
-  for (const [id, { el }] of rowCache) {
-    if (!keep.has(id)) {
-      releaseCard(el.querySelector(".card"));
-      rowCache.delete(id);
-    }
-  }
-
-  // Nothing changed (the common poll tick) — leave the DOM alone.
-  const same =
-    children.length === elGrid.children.length &&
-    children.every((el, i) => el === elGrid.children[i]);
-  if (!same) elGrid.replaceChildren(...children);
-  scrollFlaggedStrips();
+  last = { progress: progressItems, items };
+  elGrid.style.height = ""; // masonry's inline height from a prior grid draw
+  draw(fresh);
 }
 
 function appendMoreRows() {
   const items = taggedFiltered();
-  let appended = 0;
-  for (const item of items) {
-    if (appended >= RENDER_BATCH) break;
-    if (rowCache.has(item.id)) continue;
-    elGrid.appendChild(rowEl(item));
-    appended++;
-  }
-  if (!appended) return;
-  renderLimit = rowCache.size;
-  scrollFlaggedStrips();
+  if (limit >= items.length) return;
+  limit = Math.min(limit + RENDER_BATCH, items.length);
+  last.items = items;
+  draw();
   pokeRowsSentinel();
 }
 

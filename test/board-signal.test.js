@@ -190,10 +190,10 @@ test("a dark board says nothing extra, and keeps its own name", () => {
 });
 
 test("repeated paints leave ONE dot, not one per tick", () => {
-  // The accumulation guarantee the header gets for free from renderToolbar
-  // building fresh elements each pass. Here the node survives, so the module has
-  // to remove before it adds — and a board with a standing failure repaints
-  // every minute for as long as the tab is open.
+  // The header can't pile dots up: it draws each dot with its button, from
+  // state (toolbar.js). Here the dot is appended to a node that survives, so the
+  // module has to remove before it adds — and a board with a standing failure
+  // repaints every minute for as long as the tab is open.
   store.clear();
   fresh();
   for (let i = 0; i < 5; i++) applyBoardDot(wrap, row({ failed_at: 5000 }));

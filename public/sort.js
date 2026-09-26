@@ -215,6 +215,5 @@ export function restoreSort() {
     if (!bound) return;
     const label = (mod.fields || []).find((c) => c.fn === bound.fn)?.label || key;
     state.sort = { by: `field:${key}`, dir: defaultDir(bound.kind), label };
-    document.dispatchEvent(new Event("app:render"));
   });
 }

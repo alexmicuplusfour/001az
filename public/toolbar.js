@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { nudgeBoardIngest } from './data.js';
-import { ICONS, toolBtn, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUnit, unitDefs, attachBtnDot } from './utils.js';
+import { ICONS, formatTokens, fmtDuration, fmtCost, fmtUnpriced, fmtUnit, unitDefs } from './utils.js';
 import { jobsUnseen } from './jobs-state.js';
 // The modals this toolbar opens fetch their own code — none is reachable
 // without a click, and together they were about half of what the board page
@@ -11,10 +11,10 @@ import {
   openDiagnosticsModal, withModals,
 } from './modal-door.js';
 import { Odometer } from './odometer.js';
-import { openDropdown, ddRow, ddSep, ddAction, ddHead } from './dropdown.js';
+import { openDropdown, ddRow, ddAction, ddHead } from './dropdown.js';
 import { userMenuButton } from './user-menu.js';
 import { activeCount, clearAll, favoritesInContext, toggleFiltersOrDrawer, selectedAsConfig, reconcileSelection } from './filters.js';
-import { openCratePop, appendCrateLabel } from './crates.js';
+import { openCratePop, CrateLabel } from './crates.js';
 import { openFilterConfigPop } from './filterconfigs.js';
 import { runSearch, clearSearch } from './search.js';
 import { triggerFilePicker } from './upload.js';
@@ -24,34 +24,53 @@ import { diagnosticsUnseen, ensureFacetStats, canSeeDiagnostics } from './facet-
 import { clearAlertEvent } from './alert-event.js';
 import { sortCatalog, defaultDir, saveSort, restoreSort } from './sort.js';
 import { effectiveView, toggleView, rowsRelevant } from './view.js';
+import { html, render, useState, useEffect, useLayoutEffect, useRef, useErrorBoundary } from './vendor/preact.mjs';
+import { batch } from './vendor/signals.mjs';
+import { Icon } from './icon.js';
+import { Count } from './pill.js';
 
+// Both rows are drawn with Preact (planning/ui-updates-plan.md, Stage 2): each
+// repaint compares what should be there with what it drew last time and
+// changes only the difference, so a button, the search box and the chips keep
+// their elements, and with them the focus, the caret, an open menu's hold on
+// its button, and the animations running on them.
 const elToolbar = document.getElementById("toolbar");
 const elToolbarSub = document.getElementById("toolbar-sub");
 
-// The live token counter persists across toolbar rebuilds so it can roll from
-// the previous value to the new one as tagging ticks the total up.
-let tokenOdo = null;
+// The corner dot: the pair attachBtnDot (utils.js) puts on hand-built buttons,
+// drawn here with the button instead. Preact rewrites a button's whole class
+// list whenever the classes it draws there change, which would erase one set
+// from outside (the plan's D6). `hasDot` is the button's half.
+const hasDot = (on) => (on ? " has-dot" : "");
+const Dot = ({ on }) => (on ? html`<span class="btn-dot"></span>` : null);
+
+// The toolbar button: .tool-btn and its variant, then an icon, a label, a count
+// and the corner dot, each only when given. Nothing here sizes the glyph or
+// sets the gap: .tool-btn owns both, which is what lets a caller pass any icon
+// and get the same button. A label beside an icon comes as a <span>, which is
+// what makes it one flex item for the button's own 5px gap to space.
+function ToolBtn({ cls, icon, label, count, dot, title, ariaLabel, ariaPressed, onClick }) {
+  return html`<button class=${"tool-btn" + (cls ? " " + cls : "") + hasDot(dot)} title=${title} aria-label=${ariaLabel} aria-pressed=${ariaPressed} onClick=${onClick}>${icon ? html`<${Icon} svg=${icon} />` : null}${label}<${Count} n=${count} /><${Dot} on=${dot} /></button>`;
+}
 
 // ── ingestion chip: countdown to the board's next automatic run ──
 // The board payload carries ingest_next_run_at once; after each run the stamp
 // moves server-side, so when the countdown expires the chip re-learns the
 // schedule via data.js's nudgeBoardIngest — the one throttle+backoff per tab,
-// shared with the ingest modal's header tick. (A rebuilt toolbar strands the
-// old chip's interval, which self-clears on its next tick via isConnected.)
-
-function ingestChip() {
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "mapping-chip ingest-chip";
-  const icon = document.createElement("span");
-  icon.className = "ingest-chip-icon";
-  icon.innerHTML = ICONS.redo;
-  const eta = document.createElement("span");
-  chip.append(icon, eta);
-  chip.addEventListener("click", () => openIngestModal());
-  // render() runs on a 1s interval — the title only changes when the state
-  // does, so skip the attribute write (and its a11y-tree churn) otherwise.
-  const setTitle = (t) => { if (chip.title !== t) chip.title = t; };
+// shared with the ingest modal's header tick. The chip's own timer redraws it
+// every second, and stops when the chip goes.
+function IngestChip() {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => {
+      tick((k) => k + 1);
+      // Expired (or run-now fired): the sweep claims within a worker tick, so
+      // shortly after "now" the server holds a fresh next_run_at. The re-learn
+      // itself — throttle, backoff, the one clock per tab — is data.js's.
+      nudgeBoardIngest();
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
 
   // Precedence, classification, and the words come from the presenter — the
   // same verdict the ingest modal's header chip and the boards-page chip
@@ -60,42 +79,23 @@ function ingestChip() {
   // doesn't replace — the countdown is real, it's the retry"). What stays
   // local is compact FORM — the bare countdown off p.left/p.due, the word
   // "paused" — and the click affordance only this surface has.
-  const render = () => {
-    const p = presentIngest({
-      mode: state.boardIngestMode,
-      nextRunAt: state.boardIngestNextRun,
-      error: state.boardIngestError,
-      now: Date.now(),
-    });
-    // The error tint is the state signal the jobs dot deliberately isn't (it
-    // fires once at onset; this holds while the failure does, and clears the
-    // moment a run succeeds).
-    chip.classList.toggle("error", p.tone === "error");
-    const title = `Automatic ingestion: ${p.title} Click to ${p.tone === "error" ? "see the error" : "configure"}.`;
-    if (p.left == null) {
-      // A manual board's chip is on its way out here — the run it was showing
-      // just landed and the next toolbar render drops it — so leave its last
-      // text alone rather than flashing "paused" at something that isn't.
-      if (p.state !== "paused" && p.state !== "held-failed") return;
-      chip.classList.add("paused");
-      eta.textContent = "paused";
-      setTitle(title);
-      return;
-    }
-    chip.classList.remove("paused");
-    eta.textContent = p.due ? "now" : fmtDuration(p.left);
-    setTitle(title);
-  };
-  render();
-  const t = setInterval(() => {
-    if (!chip.isConnected) return clearInterval(t);
-    render();
-    // Expired (or run-now fired): the sweep claims within a worker tick, so
-    // shortly after "now" the server holds a fresh next_run_at. The re-learn
-    // itself — throttle, backoff, the one clock per tab — is data.js's.
-    nudgeBoardIngest();
-  }, 1000);
-  return chip;
+  const p = presentIngest({
+    mode: state.boardIngestMode,
+    nextRunAt: state.boardIngestNextRun,
+    error: state.boardIngestError,
+    now: Date.now(),
+  });
+  const title = `Automatic ingestion: ${p.title} Click to ${p.tone === "error" ? "see the error" : "configure"}.`;
+  let face;
+  if (p.left != null) face = { eta: p.due ? "now" : fmtDuration(p.left), paused: false, title };
+  else if (p.state === "paused" || p.state === "held-failed") face = { eta: "paused", paused: true, title };
+  // No countdown and no hold: a schedule armed but not yet stamped (the sweep
+  // stamps it within a tick). The chip shows just its icon until then.
+  else face = { eta: "", paused: false, title: undefined };
+  // The error tint is the state signal the jobs dot deliberately isn't (it
+  // fires once at onset; this holds while the failure does, and clears the
+  // moment a run succeeds).
+  return html`<button type="button" class=${"mapping-chip ingest-chip" + (p.tone === "error" ? " error" : "") + (face.paused ? " paused" : "")} title=${face.title} onClick=${() => openIngestModal()}><span class="ingest-chip-icon"><${Icon} svg=${ICONS.redo} /></span><span>${face.eta}</span></button>`;
 }
 
 // The door to facet diagnosis, and its attention signal — a third icon in the
@@ -107,7 +107,7 @@ function ingestChip() {
 //
 // Both halves of the gate are load-bearing. `boardManage` because the pencil is
 // and this is the same cluster: a facet suggestion is only useful to someone who
-// can edit facets. (jobsChip() is deliberately ungated — the log is
+// can edit facets. (JobsChip is deliberately ungated — the log is
 // transparency, not management — and this is the opposite kind of thing.)
 // `boardVotes > 1` because a single-pass board writes no confidence at all, so
 // the modal would be permanently empty.
@@ -127,24 +127,20 @@ function ingestChip() {
 export const openDiagnosticsDoor = () => openDiagnosticsModal({
   onEdit: () => openBoardModal(state.boardId, {
     canEditAI: !!state.me?.is_admin,
-    onSaved: () => document.dispatchEvent(new Event('app:render')),
   }),
 });
 
-function diagnosticsBtn() {
+function DiagnosticsBtn() {
   if (!canSeeDiagnostics(state)) return null;
   // The roll-up is board-manager data on its own endpoint, so it is not in the
   // gallery's board payload. Fetched once per board and re-rendered on arrival,
   // the ingest-chip pattern: the button is drawn immediately either way, and
   // only the dot waits.
   ensureFacetStats();
-  const b = toolBtn(ICONS.doubleCheck, "board-diag-btn", openDiagnosticsDoor);
-  b.title = "Tagging consistency";
-  b.setAttribute("aria-label", "Tagging consistency");
-  // The ambient "a finding landed while you were away" signal, exactly the
-  // plus-caret's unseen-alert precedent.
-  if (diagnosticsUnseen(state.boardId, state.facetStats, state.facetGates)) attachBtnDot(b);
-  return b;
+  // The dot is the ambient "a finding landed while you were away" signal,
+  // exactly the plus-caret's unseen-alert precedent.
+  return html`<${ToolBtn} cls="board-diag-btn" icon=${ICONS.doubleCheck} title="Tagging consistency" ariaLabel="Tagging consistency"
+    dot=${diagnosticsUnseen(state.boardId, state.facetStats, state.facetGates)} onClick=${openDiagnosticsDoor} />`;
 }
 
 // ── jobs chip: ambient "work is happening" signal + the door to the job log ──
@@ -160,20 +156,6 @@ function diagnosticsBtn() {
 // HAPPENING and goes away on its own, the dot is work that went WRONG and
 // doesn't. Same corner treatment as the plus-caret's unseen alerts and the
 // Tagging-consistency finding — three signals, one vocabulary.
-// Idle↔busy edge tracking for the chip's ignite/cool animations: every render
-// builds a fresh chip, so a CSS transition on the class flip has no element to
-// run on. The edge is a timestamped WINDOW, not a single render: a queue
-// draining lands several app:render dispatches back-to-back, and if only the
-// crossing render wore the class, the very next rebuild would strip it and
-// cut the fade to nothing. Every rebuild inside the window re-wears the class
-// and hands CSS the edge's age as a negative delay (--jobs-edge-phase), so
-// the rebuilt node resumes the animation mid-flight instead of restarting or
-// dropping it. Same-board edges only — a board switch swaps state.items
-// wholesale, and that's navigation, not work starting or ending.
-let lastJobsBusy = null;
-let lastJobsCount = 0;
-let lastJobsBoard = null;
-let jobsEdge = null; // { dir: "igniting" | "cooling", at: performance.now() }
 const JOBS_EDGE_MS = 450; // matches the jobs-ignite/jobs-cool duration in styles.css
 // The glow's noise wobble is SMIL (the <animate> inside #jobs-dune), out of
 // CSS's reach — honor reduced motion by removing it once at boot.
@@ -182,7 +164,7 @@ if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) document.qu
 // Exported for its test (jobs-chip.test.js), the way jobs-modal.js exports
 // its pure pieces: the count is a claim about the payload, and the claim is
 // worth pinning.
-export function jobsChip() {
+export function JobsChip() {
   // The lanes, tallied by their served labels — the tooltip's sentences and
   // the pill number both read from this. A leg (Extraction, Tagging) is a
   // lane like Transcription is; the server named them all, and it already
@@ -195,22 +177,27 @@ export function jobsChip() {
   for (const q of state.work.queued) lane(q.label).wait += q.n;
   const n = [...lanes.values()].reduce((k, l) => k + l.run + l.wait, 0);
   const busy = n > 0;
-  if (lastJobsBoard !== state.boardId) jobsEdge = null;
-  else if (lastJobsBusy !== null && lastJobsBusy !== busy) jobsEdge = { dir: busy ? "igniting" : "cooling", at: performance.now() };
-  const edgeAge = jobsEdge ? performance.now() - jobsEdge.at : Infinity;
-  // The direction check guards a re-crossing inside the window (busy again
-  // before the cool-down finished): the flip above already re-stamped the
-  // edge, this just keeps a stale class off a chip whose state moved on.
-  const edgeClass = edgeAge < JOBS_EDGE_MS && (jobsEdge.dir === "igniting") === busy ? jobsEdge.dir : "";
-  const cooling = edgeClass === "cooling";
+
+  // The idle↔busy edge. The chip stays the same element, so crossing the edge
+  // wears a one-shot class (igniting, cooling) for as long as its CSS animation
+  // runs, and a timer drops it rather than the animation's end: with reduced
+  // motion the animations are off and no end would ever come. Cooling shows
+  // the ghost of the final count so the pill narrows with the fade instead of
+  // snapping the moment the queue drains.
+  const [, redraw] = useState(0);
+  const seen = useRef({ busy: null, count: 0, edge: "" }).current;
+  if (seen.busy !== null && seen.busy !== busy) seen.edge = busy ? "igniting" : "cooling";
+  const { edge } = seen;
+  const shown = busy ? n : seen.count;
+  seen.busy = busy;
+  if (busy) seen.count = n;
+  useEffect(() => {
+    if (!edge) return;
+    const t = setTimeout(() => { seen.edge = ""; redraw((k) => k + 1); }, JOBS_EDGE_MS);
+    return () => clearTimeout(t);
+  }, [edge]);
+
   const failed = jobsUnseen();
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "mapping-chip jobs-chip" + (busy ? " busy" : "") + (edgeClass ? ` ${edgeClass}` : "") + (state.boardPaused ? " paused" : "");
-  // The aurora's phase rides the wall clock, not element age — rebuilds while
-  // busy would otherwise snap the sweep back to frame zero every delta poll.
-  if (busy || cooling) chip.style.setProperty("--jobs-phase", `-${(performance.now() / 1000).toFixed(2)}s`);
-  if (edgeClass) chip.style.setProperty("--jobs-edge-phase", `-${Math.round(edgeAge)}ms`);
   // Every fact that holds, in one list — a queue draining while an earlier item
   // failed is the ordinary case, and the tooltip is the only place any of them
   // is named. Paused keeps the count (the queue is intact, which is the point)
@@ -224,27 +211,24 @@ export function jobsChip() {
     state.boardPaused ? "board paused" : "",
     failed ? "something failed since you last looked" : "",
   ].filter(Boolean);
-  chip.title = notes.join(" — ") || "Job log";
-  if (notes.length) chip.title += " — click for the job log";
-  chip.setAttribute("aria-label", failed ? "Job log — new errors" : "Job log");
-  const icon = document.createElement("span");
-  icon.className = "jobs-chip-icon";
-  icon.innerHTML = ICONS.activity;
-  chip.appendChild(icon);
-  // Cooling shows the ghost of the final count so the pill narrows with the
-  // fade instead of snapping the moment the queue drains.
-  if (busy || cooling) {
-    const count = document.createElement("span");
-    count.className = "jobs-chip-count";
-    count.textContent = busy ? n : lastJobsCount;
-    chip.appendChild(count);
-  }
-  chip.addEventListener("click", () => openJobsModal());
-  if (failed) attachBtnDot(chip);
-  lastJobsBusy = busy;
-  if (busy) lastJobsCount = n;
-  lastJobsBoard = state.boardId;
-  return chip;
+  const title = (notes.join(" — ") || "Job log") + (notes.length ? " — click for the job log" : "");
+  const cls = "mapping-chip jobs-chip" + (busy ? " busy" : "") + (edge ? ` ${edge}` : "") + (state.boardPaused ? " paused" : "") + hasDot(failed);
+  return html`<button type="button" class=${cls} title=${title} aria-label=${failed ? "Job log — new errors" : "Job log"} onClick=${() => openJobsModal()}><span class="jobs-chip-icon"><${Icon} svg=${ICONS.activity} /></span>${busy || edge === "cooling" ? html`<span class="jobs-chip-count">${shown}</span>` : null}<${Dot} on=${failed} /></button>`;
+}
+
+// The token chip. Input and output bill at very different rates, so it never
+// sums them: "in / out", each bucket rolling on its own (the odometer renders
+// the non-digit " / " as static cells). The Odometer fills the counter this
+// draws empty (the plan's D7) and lives as long as the chip does, so a total
+// that grew since the last repaint rolls its changed digits.
+function TokenChip({ text, title }) {
+  const counter = useRef(null);
+  const odo = useRef(null);
+  useLayoutEffect(() => {
+    if (!odo.current) odo.current = new Odometer(counter.current, text);
+    else odo.current.set(text);
+  }, [text]);
+  return html`<span class="token-chip" title=${title}><${Icon} svg=${ICONS.coin} /><span class="odo" ref=${counter}></span></span>`;
 }
 
 // A mode chip: the inert labeled pill announcing what derived set the
@@ -253,21 +237,8 @@ export function jobsChip() {
 // SURVIVE the clipping (the CSS ellipsis lives on the text span alone — an
 // anchor's name can be a whole filename, and end-clipping one string would
 // eat exactly the part that tells the modes apart).
-function modeChip(iconMarkup, text, onClear, tail = "") {
-  const el = document.createElement("span");
-  el.className = "tool-btn mode-chip active";
-  el.title = tail ? `${text} ${tail}` : text;
-  const icon = document.createElement("span");
-  icon.className = "mode-chip-icon";
-  icon.innerHTML = iconMarkup;
-  const lbl = document.createElement("span");
-  lbl.className = "mode-chip-label";
-  lbl.textContent = text;
-  el.append(icon, lbl);
-  if (tail) el.appendChild(Object.assign(document.createElement("span"), { textContent: tail }));
-  const clear = toolBtn(ICONS.x, "crates-clear", onClear);
-  clear.title = "Show all items";
-  elToolbarSub.append(el, clear);
+function ModeChip({ icon, text, onClear, tail = "" }) {
+  return html`<span class="tool-btn mode-chip active" title=${tail ? `${text} ${tail}` : text}><span class="mode-chip-icon"><${Icon} svg=${icon} /></span><span class="mode-chip-label">${text}</span>${tail ? html`<span>${tail}</span>` : null}</span><${ToolBtn} cls="crates-clear" icon=${ICONS.x} title="Show all items" onClick=${onClear} />`;
 }
 
 function openBoardPop(anchorEl) {
@@ -306,394 +277,293 @@ function openBoardPop(anchorEl) {
   });
 }
 
-export function renderToolbar(resultCount) {
-  // Re-rendering replaces the search input; remember focus to restore it.
-  const searchHadFocus = !!document.activeElement?.closest?.(".search-box");
-  elToolbar.replaceChildren();
-  elToolbarSub.replaceChildren();
-
-  // Row 1: identity + upload + auth
-  // The logo is the conventional "home" — here that's the boards index. The
-  // switcher's All-boards footer is the signed way there; this is the quiet
-  // one.
-  const logo = document.createElement("a");
-  logo.className = "toolbar-logo";
-  logo.href = "/boards";
-  logo.title = "All boards";
-  logo.textContent = "001az/";
-  elToolbar.appendChild(logo);
-
-  document.title = state.boardName ? `001az - ${state.boardName}` : "001az";
-
-  if (state.boardName) {
-    // The board selector and its edit pencil are one unit — keep them tight.
-    const boardGroup = document.createElement("div");
-    boardGroup.className = "board-group";
-
-    // A connector-backed board carries a mapping template; surface its name as a
-    // chip beside the edit pencil. The data source is a board-config detail, so
-    // it belongs with the board controls, not the ingest (+) cluster.
-    const connectorName = state.boardMapping?.input?.connector;
-    let templateChip = null;
-    if (connectorName) {
-      templateChip = document.createElement("span");
-      templateChip.className = "mapping-chip";
-      templateChip.textContent = connectorName.charAt(0).toUpperCase() + connectorName.slice(1);
-      templateChip.title = `Entity mapping template: ${connectorName}`;
+// Board admins (global or per-board) get an inline "edit board" pencil that
+// opens the same board editor as the admin page (content-only + read-only
+// Mapping view for non-admin board-admins).
+const openBoardEditor = () => openBoardModal(state.boardId, {
+  canEditAI: !!state.me?.is_admin,
+  // One batch: the page draws the save once, whole.
+  onSaved: (payload) => batch(() => {
+    state.boardName = payload.name;
+    state.facets = payload.facets;
+    // The save that just removed a value may have removed one this reader
+    // is standing on — no reload separates the two, so the filter goes
+    // dead in the same breath as the edit. Straight after the facets land
+    // and before anything reads them back.
+    reconcileSelection();
+    state.aiReasoning = payload.ai_reasoning !== false;
+    // Both PATCH routes take ai_votes (buildBoardContentUpdate), so a save
+    // can turn vote mode on or off from right here — sync it or anything
+    // gated on confidence data reads the pre-save answer until a reload.
+    state.boardVotes = Number(payload.ai_votes) || 1;
+    // `mapping` is present only when the Mapping pane was touched — sync
+    // it so the toolbar's connector chip re-reads mapping.input, and
+    // re-validate the sort: the edit may have unbound the sorted field
+    // or changed the identity mode out from under it.
+    if (payload.mapping !== undefined) {
+      state.boardMapping = payload.mapping;
+      restoreSort();
     }
+    state.boards = state.boards.map((x) => (x.id === state.boardId ? { ...x, name: payload.name } : x));
+  }),
+});
 
-    // The pill, ALWAYS — reverted from a one-board plain label whose reasoning
-    // was "a member with one board has nothing to open". That stopped being
-    // true when the dropdown's footer grew "All boards" and the admin's "New
-    // board": a sole board still has somewhere to go, so the caret is an
-    // affordance every reader can honour. Glyph, label, caret — the crates
-    // selector's shape; `grid` is this app's word for the boards domain (the
-    // logo's destination, the All-boards row in the dropdown).
-    const boardBtn = document.createElement("button");
-    boardBtn.className = "tool-btn board-btn";
-    boardBtn.innerHTML = ICONS.grid;
-    const nameEl = document.createElement("span");
-    nameEl.textContent = state.boardName;
-    const chev = document.createElement("span");
-    chev.className = "dd-caret";
-    chev.innerHTML = ICONS.chevron;
-    boardBtn.append(nameEl, chev);
-    boardBtn.addEventListener("click", () => openBoardPop(boardBtn));
-    boardGroup.appendChild(boardBtn);
+// The board selector, its edit pencil and the board's chips — one unit, kept
+// tight.
+function BoardGroup() {
+  // A connector-backed board carries a mapping template; surface its name as a
+  // chip beside the edit pencil. The data source is a board-config detail, so
+  // it belongs with the board controls, not the ingest (+) cluster.
+  const connectorName = state.boardMapping?.input?.connector;
+  const templateChip = connectorName
+    ? html`<span class="mapping-chip" title=${`Entity mapping template: ${connectorName}`}>${connectorName.charAt(0).toUpperCase() + connectorName.slice(1)}</span>`
+    : null;
 
-    // Board admins (global or per-board) get an inline "edit board" pencil that
-    // opens the same board editor as the admin page (content-only + read-only
-    // Mapping view for non-admin board-admins).
-    if (state.boardManage) {
-      const editBtn = toolBtn(ICONS.pencil, "board-edit-btn", () => openBoardModal(state.boardId, {
-        canEditAI: !!state.me?.is_admin,
-        onSaved: (payload) => {
-          state.boardName = payload.name;
-          state.facets = payload.facets;
-          // The save that just removed a value may have removed one this reader
-          // is standing on — no reload separates the two, so the filter goes
-          // dead in the same breath as the edit. Straight after the facets land
-          // and before anything reads them back.
-          reconcileSelection();
-          state.aiReasoning = payload.ai_reasoning !== false;
-          // Both PATCH routes take ai_votes (buildBoardContentUpdate), so a save
-          // can turn vote mode on or off from right here — sync it or anything
-          // gated on confidence data reads the pre-save answer until a reload.
-          state.boardVotes = Number(payload.ai_votes) || 1;
-          // `mapping` is present only when the Mapping pane was touched — sync
-          // it so the toolbar's connector chip re-reads mapping.input, and
-          // re-validate the sort: the edit may have unbound the sorted field
-          // or changed the identity mode out from under it.
-          if (payload.mapping !== undefined) {
-            state.boardMapping = payload.mapping;
-            restoreSort();
-          }
-          const b = state.boards.find((x) => x.id === state.boardId);
-          if (b) b.name = payload.name;
-          document.dispatchEvent(new Event('app:render'));
-        },
-      }));
-      editBtn.title = "Edit board";
-      editBtn.setAttribute("aria-label", "Edit board");
-      boardGroup.appendChild(editBtn);
-      const diag = diagnosticsBtn();
-      if (diag) boardGroup.appendChild(diag);
-      if (templateChip) boardGroup.appendChild(templateChip);
+  // The pill, ALWAYS — reverted from a one-board plain label whose reasoning
+  // was "a member with one board has nothing to open". That stopped being
+  // true when the dropdown's footer grew "All boards" and the admin's "New
+  // board": a sole board still has somewhere to go, so the caret is an
+  // affordance every reader can honour. Glyph, label, caret — the crates
+  // selector's shape; `grid` is this app's word for the boards domain (the
+  // logo's destination, the All-boards row in the dropdown).
+  const boardBtn = html`<${ToolBtn} cls="board-btn" icon=${ICONS.grid}
+    label=${html`<span>${state.boardName}</span><span class="dd-caret"><${Icon} svg=${ICONS.chevron} /></span>`}
+    onClick=${(e) => openBoardPop(e.currentTarget)} />`;
 
-      // Input and output bill at very different rates, so the chip never sums
-      // them: "in / out", each bucket rolling on its own (the odometer renders
-      // the non-digit " / " as static cells).
-      //
-      // The GATE is "did this board spend anything", asked of every unit —
-      // not of tokens. It used to add input+output, which quietly made the
-      // chip a tokens-only instrument: a board whose spend was transcription
-      // showed nothing at all, dollars included, while the admin table showed
-      // both. The units are the server's now (state.boardUnits), so a board
-      // that spends in a unit this file has never heard of still gets its
-      // chip, its cost, and its remainder.
-      //
-      // This chip living in the manager branch is a decision, not an accident:
-      // spend detail is management-visible (metering-plan.md), and the cost
-      // figure rides the SAME odometer — " · ≈$" renders as static cells
-      // exactly like " / ", and the cents roll as spend accrues. Cost only
-      // when known (state.boardCost is null when nothing was ever priced —
-      // no ≈$0.00 out of ignorance; a free on-device board's true $0 shows).
-      const units = state.boardUnits;
-      if (units && Object.values(units).some((n) => n > 0)) {
-        const defs = unitDefs(state.boardUnitDefs);
-        const q = (unit) => units[unit] || 0;
-        const cost = state.boardCost;
-        // Tokens lead when there are any — the phrase this chip has always
-        // said. A board with none leads with whatever it did spend, named
-        // from the served vocabulary rather than from a list kept here.
-        const tokenText = q("input_tokens") || q("output_tokens")
-          ? `${formatTokens(q("input_tokens"))} / ${formatTokens(q("output_tokens"))}`
-          : Object.entries(units).filter(([, n]) => n > 0)
-              .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
-        const chipText = tokenText + (cost ? ` · ${fmtCost(cost)}` : "");
-        if (!tokenOdo) tokenOdo = new Odometer(chipText);
-        const tokenChip = document.createElement("span");
-        tokenChip.className = "token-chip";
-        tokenChip.innerHTML = ICONS.coin;
-        tokenChip.appendChild(tokenOdo.el);
-        // No capability list here either (see admin-boards.js): the totals sum
-        // whatever is metered on this board, which is a set that grows. Same
-        // rule for the unit LABELS, here and in the unpriced remainder — they
-        // come from the server (server/units.js), because a client that turns
-        // a unit id into English is making a claim about a vocabulary it
-        // doesn't own.
-        const unpriced = fmtUnpriced(cost?.unpriced);
-        const detail = Object.entries(units).filter(([, n]) => n > 0)
+  // Jobs chip for every member (the log is transparency, not management).
+  const jobs = state.me ? html`<${JobsChip} />` : null;
+  if (!state.boardManage) {
+    // No edit pencil (non-manager) — still show the data-source chip.
+    return html`<div class="board-group">${boardBtn}${templateChip}${jobs}</div>`;
+  }
+
+  // The GATE is "did this board spend anything", asked of every unit —
+  // not of tokens. It used to add input+output, which quietly made the
+  // chip a tokens-only instrument: a board whose spend was transcription
+  // showed nothing at all, dollars included, while the admin table showed
+  // both. The units are the server's now (state.boardUnits), so a board
+  // that spends in a unit this file has never heard of still gets its
+  // chip, its cost, and its remainder.
+  //
+  // This chip living in the manager branch is a decision, not an accident:
+  // spend detail is management-visible (metering-plan.md), and the cost
+  // figure rides the SAME odometer — " · ≈$" renders as static cells
+  // exactly like " / ", and the cents roll as spend accrues. Cost only
+  // when known (state.boardCost is null when nothing was ever priced —
+  // no ≈$0.00 out of ignorance; a free on-device board's true $0 shows).
+  let tokenChip = null;
+  const units = state.boardUnits;
+  if (units && Object.values(units).some((n) => n > 0)) {
+    const defs = unitDefs(state.boardUnitDefs);
+    const q = (unit) => units[unit] || 0;
+    const cost = state.boardCost;
+    // Tokens lead when there are any — the phrase this chip has always
+    // said. A board with none leads with whatever it did spend, named
+    // from the served vocabulary rather than from a list kept here.
+    const tokenText = q("input_tokens") || q("output_tokens")
+      ? `${formatTokens(q("input_tokens"))} / ${formatTokens(q("output_tokens"))}`
+      : Object.entries(units).filter(([, n]) => n > 0)
           .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
-        tokenChip.title = `${detail} — AI usage`
-          + (cost ? `\n${fmtCost(cost)} at the rates known when each call ran` : "")
-          + (unpriced ? `\nnot in the figure: ${unpriced}` : "");
-        boardGroup.appendChild(tokenChip);
-        // Re-append then set: if a value grew since the last render, the
-        // changed digits roll; if not, this is a no-op.
-        tokenOdo.set(chipText);
-      }
-    } else if (templateChip) {
-      // No edit pencil (non-manager) — still show the data-source chip.
-      boardGroup.appendChild(templateChip);
-    }
-    // Jobs chip for every member (the log is transparency, not management).
-    if (state.me) boardGroup.appendChild(jobsChip());
-    elToolbar.appendChild(boardGroup);
+    // No capability list here either (see admin-boards.js): the totals sum
+    // whatever is metered on this board, which is a set that grows. Same
+    // rule for the unit LABELS, here and in the unpriced remainder — they
+    // come from the server (server/units.js), because a client that turns
+    // a unit id into English is making a claim about a vocabulary it
+    // doesn't own.
+    const unpriced = fmtUnpriced(cost?.unpriced);
+    const detail = Object.entries(units).filter(([, n]) => n > 0)
+      .map(([u, n]) => fmtUnit(n, defs[u] ?? { unit: u })).join(" · ");
+    const title = `${detail} — AI usage`
+      + (cost ? `\n${fmtCost(cost)} at the rates known when each call ran` : "")
+      + (unpriced ? `\nnot in the figure: ${unpriced}` : "");
+    tokenChip = html`<${TokenChip} text=${tokenText + (cost ? ` · ${fmtCost(cost)}` : "")} title=${title} />`;
   }
+  return html`<div class="board-group">${boardBtn}<${ToolBtn} cls="board-edit-btn" icon=${ICONS.pencil} title="Edit board" ariaLabel="Edit board" onClick=${openBoardEditor} /><${DiagnosticsBtn} />${templateChip}${tokenChip}${jobs}</div>`;
+}
 
-  const auth = document.createElement("div");
-  auth.className = "auth";
-  if (state.me) {
-    if (state.boardName) {
-      // Split button: plus = file picker OR connector search (based on mapping.input);
-      // chevron always opens the ingestion menu.
-      // The + button's behaviour depends on the board's input source (file
-      // picker vs connector browse); the template chip itself now renders in the
-      // board-group beside the edit pencil.
-      const connectorName = state.boardMapping?.input?.connector;
+// The ingestion menu behind the + button's caret. Its modules are resolved
+// before openDropdown, not inside build(): dropdown.js calls build and footer
+// synchronously, so the module has to be in hand by the time the menu opens.
+// Awaiting out here is what lets dropdown.js stay exactly as it is rather than
+// learning to accept a promise for one caller.
+const openPlusMenu = withModals((m, anchor) => openDropdown(anchor, {
+  align: "end",
+  minWidth: 200,
+  build: (body, { close }) => {
+    body.appendChild(ddRow({
+      label: "Automatic ingestion…",
+      onClick: () => { close(); m.openIngestModal(); },
+    }));
+    m.appendAlertMenu(body, close);
+  },
+  // The create door needs a selection to watch — no pills, no footer
+  // (the body's empty-state hint teaches the flow instead).
+  footer: Object.keys(selectedAsConfig()).length
+    ? (foot, { close }) => m.appendAlertFooter(foot, close)
+    : undefined,
+}));
 
-      // Ingestion chip: a live countdown to the next run, or "paused" for a
-      // held schedule. Shown for any configured board EXCEPT an idle manual
-      // one — nothing to count down to and nothing being held, so a permanent
-      // badge would just be noise. A hand-fired run pending on that manual
-      // board is a run, so it gets the chip back. Clicking opens the modal.
-      const mode = state.boardIngestMode;
-      if (mode && !(mode === "manual" && state.boardIngestNextRun == null)) {
-        auth.appendChild(ingestChip());
-      }
+// The user menu is user-menu.js's, shared with the boards and welcome pages.
+// This draws its button empty and hands it over to be filled, once, so it
+// keeps its place as the row around it redraws (the plan's D7). Sign-out
+// reloads rather than redirects: this page's own gate (app.js) sends a
+// signed-out reader to login, so the one true answer is "ask again".
+function UserMenu() {
+  const btn = useRef(null);
+  useLayoutEffect(() => {
+    userMenuButton({ me: state.me, afterSignOut: () => location.reload(), el: btn.current });
+  }, []);
+  return html`<button class="tool-btn user-menu-btn" ref=${btn}></button>`;
+}
 
-      // Add button + its ingestion menu — two separate rounded buttons with a
-      // small gap, mirroring the board selector / edit-pencil pairing.
-      const plusWrap = document.createElement("div");
-      plusWrap.className = "board-group";
-      const plusBtn = toolBtn(ICONS.plus, "upload", null); // onClick set below
-      // A connector board browses its source; everything else opens the file
-      // picker. Which of the two this button is never changes within a render,
-      // so it is decided here rather than on every click.
-      plusBtn.addEventListener("click", connectorName
-        ? () => openConnectorBrowse(connectorName)
-        : triggerFilePicker);
-      plusWrap.appendChild(plusBtn);
-      const plusMenu = document.createElement("button");
-      plusMenu.className = "tool-btn plus-caret dd-caret";
-      plusMenu.title = "Ingestion & alerts";
-      plusMenu.setAttribute("aria-label", "Ingestion & alerts");
-      plusMenu.innerHTML = ICONS.chevron;
-      // The ambient "an alert fired while you were away" signal — without it
-      // a record-only alert is invisible until you think to look.
-      if (alertsUnseen() > 0) attachBtnDot(plusMenu);
-      // Resolved before openDropdown, not inside build(): dropdown.js calls
-      // build and footer synchronously, so the module has to be in hand by the
-      // time the menu opens. Awaiting out here is what lets dropdown.js stay
-      // exactly as it is rather than learning to accept a promise for one caller.
-      plusMenu.addEventListener("click", withModals((m) => openDropdown(plusMenu, {
-        align: "end",
-        minWidth: 200,
-        build: (body, { close }) => {
-          body.appendChild(ddRow({
-            label: "Automatic ingestion…",
-            onClick: () => { close(); m.openIngestModal(); },
-          }));
-          m.appendAlertMenu(body, close);
-        },
-        // The create door needs a selection to watch — no pills, no footer
-        // (the body's empty-state hint teaches the flow instead).
-        footer: Object.keys(selectedAsConfig()).length
-          ? (foot, { close }) => m.appendAlertFooter(foot, close)
-          : undefined,
-      })));
-      plusWrap.appendChild(plusMenu);
-      auth.appendChild(plusWrap);
-    }
-    // Reload rather than a redirect: this page's own gate (app.js) sends a
-    // signed-out reader to login, so the one true answer is "ask again".
-    auth.appendChild(userMenuButton({ me: state.me, afterSignOut: () => location.reload() }));
-  }
-  elToolbar.appendChild(auth);
+function Auth() {
+  if (!state.me) return html`<div class="auth"></div>`;
+  // Ingestion chip: a live countdown to the next run, or "paused" for a
+  // held schedule. Shown for any configured board EXCEPT an idle manual
+  // one — nothing to count down to and nothing being held, so a permanent
+  // badge would just be noise. A hand-fired run pending on that manual
+  // board is a run, so it gets the chip back. Clicking opens the modal.
+  const mode = state.boardIngestMode;
+  const ingest = state.boardName && mode && !(mode === "manual" && state.boardIngestNextRun == null);
+  // Add button + its ingestion menu — two separate rounded buttons with a
+  // small gap, mirroring the board selector / edit-pencil pairing. A
+  // connector board's + browses its source; everything else opens the file
+  // picker. The ambient "an alert fired while you were away" dot rides the
+  // caret — without it a record-only alert is invisible until you think to
+  // look.
+  const connectorName = state.boardMapping?.input?.connector;
+  const plus = state.boardName
+    ? html`<div class="board-group"><${ToolBtn} cls="upload" icon=${ICONS.plus} onClick=${connectorName ? () => openConnectorBrowse(connectorName) : triggerFilePicker} /><${ToolBtn} cls="plus-caret dd-caret" icon=${ICONS.chevron} title="Ingestion & alerts" ariaLabel="Ingestion & alerts" dot=${alertsUnseen() > 0} onClick=${(e) => openPlusMenu(e.currentTarget)} /></div>`
+    : null;
+  return html`<div class="auth">${ingest ? html`<${IngestChip} />` : null}${plus}<${UserMenu} /></div>`;
+}
 
-  // Row 2: filters / sort / count
-  if (!state.boardName) return;
+// Row 1: identity + upload + auth. The logo is the conventional "home" —
+// here that's the boards index. The switcher's All-boards footer is the
+// signed way there; this is the quiet one.
+function ToolbarTop() {
+  return html`<a class="toolbar-logo" href="/boards" title="All boards">001az/</a>${state.boardName ? html`<${BoardGroup} />` : null}<${Auth} />`;
+}
 
+// Semantic search (only when the server has embeddings configured). Submits on
+// Enter — every query is one paid embedding call server-side.
+//
+// The box keeps its element across repaints, so the focus and the caret stay
+// where they are, and Preact writes its value only when state says something
+// other than what's in it. That holds because every keystroke goes straight to
+// state.searchDraft: never delay that write, or each repaint would put the
+// older text back under the cursor.
+function SearchBox() {
+  // While the Find-similar mode is up, the box stays quiet even though
+  // searchResults is set — the mode chip below owns the display and the
+  // one clear affordance; a lit box would offer a second ×.
+  const typedSearch = state.searchResults && !state.searchSimilarTo;
+  // Clearing takes the × away, and with it the focus a click gave it, so the
+  // caret goes to the box instead, ready for the next search.
+  const input = useRef(null);
+  const clear = () => { clearSearch(); input.current.focus(); };
+  return html`<div class=${"search-box" + (typedSearch ? " active" : "")}><input type="search" placeholder="Search by meaning…" aria-label="Semantic search" value=${state.searchDraft} ref=${input}
+    onInput=${(e) => { state.searchDraft = e.currentTarget.value; }}
+    onKeyDown=${(e) => {
+      if (e.key === "Enter") runSearch(e.currentTarget.value);
+      else if (e.key === "Escape") { e.stopPropagation(); clearSearch(); e.currentTarget.blur(); }
+    }} />${state.searchLoading
+      ? html`<span class="search-spinner" aria-label="Searching…"></span>`
+      : typedSearch ? html`<button class="search-clear" title="Clear search" aria-label="Clear search" onClick=${clear}><${Icon} svg=${ICONS.x} /></button>` : null}</div>`;
+}
+
+function Crates() {
+  const activeCrate = state.crates.find((c) => c.id === state.selectedCrateId) || null;
+  return html`<${ToolBtn} cls=${"crates-btn" + (activeCrate ? " active" : "")} icon=${ICONS.crate}
+    label=${html`<span>${activeCrate ? html`<${CrateLabel} crate=${activeCrate} />` : "Crates"}</span><span class="dd-caret"><${Icon} svg=${ICONS.chevron} /></span>`}
+    onClick=${(e) => openCratePop(e.currentTarget)} />${activeCrate
+      ? html`<${ToolBtn} cls="crates-clear" icon=${ICONS.x} title="Clear crate filter" onClick=${() => {
+          state.selectedCrateId = null;
+        }} />`
+      : null}`;
+}
+
+// Row 2: filters / sort / count.
+function ToolbarSub({ resultCount }) {
+  const ac = activeCount();
   // Filters is a split button: the label toggles the facet panel, the
   // chevron opens saved filter configs (logged-in only — they're per-user).
-  const ac = activeCount();
-  const filtersWrap = document.createElement("div");
-  filtersWrap.className = "split-btn";
-  filtersWrap.appendChild(toolBtn(
-    ac > 0 ? `Filters (${ac})` : "Filters",
-    ac > 0 ? "active" : "",
-    toggleFiltersOrDrawer
-  ));
-  if (state.me) {
-    const arrow = document.createElement("button");
-    arrow.className = "tool-btn split-arrow dd-caret" + (ac > 0 ? " active" : "");
-    arrow.title = "Filter options";
-    arrow.setAttribute("aria-label", "Filter options");
-    arrow.innerHTML = ICONS.chevron;
-    // Anchored by accessor, not by this element: the pop's lens toggles
-    // re-render this toolbar (chevron included) with the pop still open, and
-    // the accessor is how it hangs onto the chevron's replacement.
-    arrow.addEventListener("click", () => openFilterConfigPop(() => elToolbarSub.querySelector(".split-arrow")));
-    filtersWrap.appendChild(arrow);
-  }
-  elToolbarSub.appendChild(filtersWrap);
+  // The chevron passes itself as the pop's anchor: the pop's lens toggles
+  // repaint this row with the pop still open, and the chevron stays the same
+  // element through it.
+  const filters = html`<div class="split-btn"><${ToolBtn} cls=${ac > 0 ? "active" : ""} label=${ac > 0 ? `Filters (${ac})` : "Filters"} onClick=${toggleFiltersOrDrawer} />${state.me
+    ? html`<${ToolBtn} cls=${"split-arrow dd-caret" + (ac > 0 ? " active" : "")} icon=${ICONS.chevron} title="Filter options" ariaLabel="Filter options" onClick=${(e) => openFilterConfigPop(e.currentTarget)} />`
+    : null}</div>`;
 
-  // Semantic search (only when the server has embeddings configured).
-  // Submits on Enter — every query is one paid embedding call server-side.
-  if (state.searchAvailable) {
-    // While the Find-similar mode is up, the box stays quiet even though
-    // searchResults is set — the mode chip below owns the display and the
-    // one clear affordance; a lit box would offer a second ×.
-    const typedSearch = state.searchResults && !state.searchSimilarTo;
-    const box = document.createElement("div");
-    box.className = "search-box" + (typedSearch ? " active" : "");
-    const input = document.createElement("input");
-    input.type = "search";
-    input.placeholder = "Search by meaning…";
-    input.setAttribute("aria-label", "Semantic search");
-    input.value = state.searchDraft;
-    input.addEventListener("input", () => { state.searchDraft = input.value; });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") runSearch(input.value);
-      else if (e.key === "Escape") { e.stopPropagation(); clearSearch(); input.blur(); }
-    });
-    box.appendChild(input);
-    if (state.searchLoading) {
-      const spin = document.createElement("span");
-      spin.className = "search-spinner";
-      spin.setAttribute("aria-label", "Searching…");
-      box.appendChild(spin);
-    } else if (typedSearch) {
-      const clearBtn = document.createElement("button");
-      clearBtn.className = "search-clear";
-      clearBtn.title = "Clear search";
-      clearBtn.setAttribute("aria-label", "Clear search");
-      clearBtn.innerHTML = ICONS.x;
-      clearBtn.addEventListener("click", clearSearch);
-      box.appendChild(clearBtn);
-    }
-    elToolbarSub.appendChild(box);
-    if (searchHadFocus) {
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
-    }
-  }
-
-  if (state.me) {
-    elToolbarSub.appendChild(toolBtn(
-      ICONS.heart + "<span>Your favorites</span>",
-      "fav" + (state.showFavorites ? " active" : ""),
-      () => {
-        state.showFavorites = !state.showFavorites;
-        document.dispatchEvent(new Event('app:render'));
-      },
-      favoritesInContext()
-    ));
-
-    if (state.crates.length > 0) {
-      const activeCrate = state.crates.find((c) => c.id === state.selectedCrateId) || null;
-      const cratesBtn = document.createElement("button");
-      cratesBtn.className = "tool-btn crates-btn" + (activeCrate ? " active" : "");
-      cratesBtn.innerHTML = ICONS.crate;
-      const lbl = document.createElement("span");
-      lbl.replaceChildren();
-      if (activeCrate) appendCrateLabel(lbl, activeCrate);
-      else lbl.textContent = "Crates";
-      cratesBtn.appendChild(lbl);
-      const chev = document.createElement("span");
-      chev.className = "dd-caret";
-      chev.innerHTML = ICONS.chevron;
-      cratesBtn.appendChild(chev);
-      cratesBtn.addEventListener("click", () => openCratePop(cratesBtn));
-      elToolbarSub.appendChild(cratesBtn);
-
-      if (activeCrate) {
-        const clearCrateBtn = toolBtn(ICONS.x, "crates-clear", () => {
-          state.selectedCrateId = null;
-          document.dispatchEvent(new Event('app:render'));
-        });
-        clearCrateBtn.title = "Clear crate filter";
-        elToolbarSub.appendChild(clearCrateBtn);
-      }
-    }
-  }
+  const favorites = state.me ? html`<${ToolBtn} cls=${"fav" + (state.showFavorites ? " active" : "")} icon=${ICONS.heart} label=${html`<span>Your favorites</span>`}
+    count=${favoritesInContext()} onClick=${() => {
+      state.showFavorites = !state.showFavorites;
+    }} />` : null;
 
   // The mode chips: the gallery is showing a derived result set, and the
   // chip says which one — one item's similars (plan stage 1b; rendered
   // whether or not the search box is, since similarity needs no
   // embeddings), or an alert firing's entities.
-  if (state.searchSimilarTo) {
-    const flavor = state.searchQuery.startsWith("similar-meaning:") ? "· meaning" : "";
-    modeChip(ICONS.search, `Similar to ${state.searchSimilarTo}`, clearSearch, flavor);
-  }
-  if (state.alertEvent) modeChip(ICONS.bell, `${state.alertEvent.name} — ${state.alertEvent.count} new`, clearAlertEvent);
+  const similar = state.searchSimilarTo
+    ? html`<${ModeChip} icon=${ICONS.search} text=${`Similar to ${state.searchSimilarTo}`} onClear=${clearSearch} tail=${state.searchQuery.startsWith("similar-meaning:") ? "· meaning" : ""} />`
+    : null;
+  const alertMode = state.alertEvent
+    ? html`<${ModeChip} icon=${ICONS.bell} text=${`${state.alertEvent.name} — ${state.alertEvent.count} new`} onClear=${clearAlertEvent} />`
+    : null;
 
-  const count = document.createElement("span");
-  count.className = "result-count";
-  count.textContent = `${resultCount} item${resultCount === 1 ? "" : "s"}`;
-  elToolbarSub.appendChild(count);
+  // The × names the undo before the words do, which is what tells this
+  // borderless button apart from the labels beside it.
+  const clear = ac > 0 ? html`<${ToolBtn} cls="clear" icon=${ICONS.x} label=${html`<span>${`Clear filters (${ac})`}</span>`} onClick=${clearAll} />` : null;
 
-  const active = activeCount();
-  if (active > 0) {
-    // toolBtn takes markup: the × names the undo before the words do, which is
-    // what tells this borderless button apart from the labels beside it.
-    elToolbarSub.appendChild(toolBtn(ICONS.x + `<span>Clear filters (${active})</span>`, "clear", clearAll));
-  }
-
-  // One sort control: a dropdown over the board's sortable attributes —
-  // sort.js assembles the sections from the identity mode and the catalogs.
-  // Wrapped so only the group gets margin-left:auto.
-  const sortWrap = document.createElement("div");
-  sortWrap.className = "sort-group";
   // Rows-view toggle — a single button, shown only where rows can matter
   // (rowsRelevant: derived boards, multi-instance data, or rows currently
   // effective). Grid is the unmarked default; the button highlights when
   // rows is the EFFECTIVE mode, so a filter-engaged auto flip is visible
   // where the user's hand already is. The flip itself is session-scoped
   // while filters are active and persistent otherwise (view.js toggleView).
-  if (rowsRelevant()) {
-    const rowsOn = effectiveView() === "rows";
-    const b = document.createElement("button");
-    b.className = "tool-btn view-btn" + (rowsOn ? " active" : "");
-    b.title = rowsOn ? "Back to grid view" : "Rows view — every instance visible";
-    b.setAttribute("aria-label", "Toggle rows view");
-    b.setAttribute("aria-pressed", String(rowsOn));
-    b.innerHTML = ICONS.viewRows;
-    b.addEventListener("click", () => {
-      toggleView();
-      document.dispatchEvent(new Event('app:render'));
-    });
-    sortWrap.appendChild(b);
-  }
-  const sortBtn = toolBtn(
-    state.sort ? `${state.sort.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : "Newest",
-    "sort-btn" + (state.sort ? " active" : ""),
-    async () => openSortMenu(sortBtn, await sortCatalog())
-  );
-  sortBtn.title = "Sort";
-  sortWrap.appendChild(sortBtn);
-  elToolbarSub.appendChild(sortWrap);
+  const rowsOn = effectiveView() === "rows";
+  const view = rowsRelevant()
+    ? html`<${ToolBtn} cls=${"view-btn" + (rowsOn ? " active" : "")} icon=${ICONS.viewRows} title=${rowsOn ? "Back to grid view" : "Rows view — every instance visible"}
+        ariaLabel="Toggle rows view" ariaPressed=${String(rowsOn)} onClick=${() => {
+          toggleView();
+        }} />`
+    : null;
+  // One sort control: a dropdown over the board's sortable attributes —
+  // sort.js assembles the sections from the identity mode and the catalogs.
+  // Wrapped so only the group gets margin-left:auto.
+  const sort = html`<${ToolBtn} cls=${"sort-btn" + (state.sort ? " active" : "")} label=${state.sort ? `${state.sort.label} ${state.sort.dir === "asc" ? "↑" : "↓"}` : "Newest"}
+    title="Sort" onClick=${async (e) => {
+      const anchor = e.currentTarget;
+      openSortMenu(anchor, await sortCatalog());
+    }} />`;
+
+  return html`${filters}${state.searchAvailable ? html`<${SearchBox} />` : null}${favorites}${state.me && state.crates.length > 0 ? html`<${Crates} />` : null}${similar}${alertMode}<span class="result-count">${`${resultCount} item${resultCount === 1 ? "" : "s"}`}</span>${clear}<div class="sort-group">${view}${sort}</div>`;
+}
+
+// A row that throws while it draws would leave Preact's record of it half
+// updated, and the next repaint would draw on top of that (measured: a second
+// user menu and + button beside the first, there until a reload). The old
+// rebuild started from nothing each time, so it was back on the next repaint.
+// So each row sits under an error boundary: what threw keeps what it last
+// drew, the rest of the row still draws, the error is reported as if nothing
+// had caught it, and the next repaint tries again. Preact settles a catch a
+// moment later and can't catch another before then, so a second repaint in
+// the same moment (a click can repaint twice) leaves the row as it is.
+function Row({ at, children }) {
+  useErrorBoundary((e) => { at.settling = true; reportError(e); });
+  at.settling = false;
+  return children;
+}
+const top = { settling: false };
+const sub = { settling: false };
+const draw = (vnode, el, at) => {
+  if (!at.settling) render(vnode && html`<${Row} at=${at}>${vnode}</${Row}>`, el);
+};
+
+export function renderToolbar(resultCount) {
+  document.title = state.boardName ? `001az - ${state.boardName}` : "001az";
+  draw(html`<${ToolbarTop} />`, elToolbar, top);
+  draw(state.boardName ? html`<${ToolbarSub} resultCount=${resultCount} />` : null, elToolbarSub, sub);
 }
 
 // The sort menu: "Newest first" (the null default) on top, then the catalog's
@@ -704,7 +574,6 @@ function openSortMenu(anchorEl, sections) {
     state.sort = sort;
     saveSort();
     close();
-    document.dispatchEvent(new Event('app:render'));
   };
   openDropdown(anchorEl, {
     className: "sort-pop",

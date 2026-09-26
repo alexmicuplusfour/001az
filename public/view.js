@@ -3,6 +3,7 @@
 // plus a horizontal strip of instance tiles. This module owns which one is in
 // effect and its per-board persistence; the renderers live in grid.js/rows.js.
 import { state } from './state.js';
+import { signal } from './vendor/signals.mjs';
 
 // Two layers decide the mode:
 // - Base: the viewer's standing per-board preference (state.view, persisted
@@ -14,7 +15,7 @@ import { state } from './state.js';
 // Module state on purpose: a board switch is a page load, and a reload
 // mid-filter re-derives the same session from the URL's filters.
 let inSession = false;
-let sessionChoice = null; // an explicit toggle made during the session
+const sessionChoice = signal(null); // an explicit toggle made during the session (a signal: the toggle is the repaint)
 let sessionAuto = "grid"; // the session's auto resolution; ratchets to rows, re-armed per session
 
 const base = () => (state.view === "rows" ? "rows" : "grid");
@@ -23,7 +24,7 @@ const base = () => (state.view === "rows" ? "rows" : "grid");
 // is consulted between renders by layout, sentinel and scroll callbacks, and
 // the answer only changes when a render changes the inputs.
 export function effectiveView() {
-  if (inSession) return sessionChoice || sessionAuto;
+  if (inSession) return sessionChoice.value || sessionAuto;
   return base();
 }
 
@@ -45,7 +46,7 @@ export function effectiveView() {
 export function resolveView(items, filtersActive) {
   if (filtersActive !== inSession) {
     inSession = filtersActive;
-    sessionChoice = null;
+    sessionChoice.value = null;
     sessionAuto = "grid"; // re-arm the ratchet for the new session
   }
   if (inSession && sessionAuto !== "rows") {
@@ -62,7 +63,7 @@ export function resolveView(items, filtersActive) {
 export function toggleView() {
   const next = effectiveView() === "rows" ? "grid" : "rows";
   if (inSession) {
-    sessionChoice = next;
+    sessionChoice.value = next;
   } else {
     state.view = next;
     saveView();

@@ -25,7 +25,10 @@
          same pill stating a fact, and isn't a control. */
       .boards-chip { border: 1px solid transparent; }
       button.boards-chip { cursor: pointer; }
-      button.boards-chip:hover, .boards-chip.dd-open { background: #e6e6ea; color: #111; }
+      /* Lit while its popover is up too: aria-expanded is dropdown.js's open
+         mark. One attribute, not dropdown.css's pair, so .empty below still
+         wins on order and an empty chip stays an add zone. */
+      button.boards-chip:hover, .boards-chip[aria-expanded="true"] { background: #e6e6ea; color: #111; }
       /* Nothing granted yet — a dashed "add zone", the same affordance the
          plugins tab's add button uses, so the click is visibly the point of the
          cell rather than a dead "0". */

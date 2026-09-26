@@ -1,4 +1,5 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
 import { ICONS, refreshEntityTags, fmtDuration, scopableInstance, facetName, applyFace } from './utils.js';
 import { toast } from './toast.js';
 import { taggedFiltered } from './filters.js';
@@ -537,8 +538,8 @@ function paintPanel(item, inst, reasoning, fields, confidence) {
           refreshEntityTags(item);
           // The face may have changed; re-pick per the board's face config.
           applyFace(item, selectFace(item.instances, state.boardMapping?.face));
+          itemsChanged();
           if (currentInstIndex >= item.instances.length) currentInstIndex = 0;
-          document.dispatchEvent(new Event('app:render'));
           showInstance(Math.min(currentInstIndex, item.instances.length - 1));
           toast("File removed");
         } catch {
@@ -973,8 +974,8 @@ export function initLightbox() {
       const { favorited, count } = await r.json();
       lightboxItem.favoritedByMe = favorited;
       lightboxItem.hearts = count;
+      itemsChanged(); // the grid's card follows
       renderLightboxFav();
-      document.dispatchEvent(new Event('app:render')); // keep grid card in sync
     } catch {
       toast.error("Couldn't update favorite");
     }

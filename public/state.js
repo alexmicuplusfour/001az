@@ -22,6 +22,7 @@ export const state = {
   filterConfigs: [],
   alerts: [],           // the user's alerts on this board (with unseen counts)
   jobsFailedAt: null,   // newest failed job on this board (ms); drives the jobs chip's dot
+  seenMarks: 0,         // counts writes of the "seen" marks (seen-mark.js), so the board page redraws the dots when one moves
   // The lane half of in-flight work — running sweep rows (a transcription, an
   // ingest run, a diagnose pass) and the backlogs no items.status carries.
   // Streamed by the same carriers as items and read by the chip, the poll
@@ -51,6 +52,7 @@ export const state = {
   boardPaused: false,   // board pause: automatic work held — the jobs chip dims, the delta poll slows
   boardIngestMode: null, // null | "manual" | "paused" | "scheduled" — drives the toolbar chip
   boardIngestNextRun: null, // ms timestamp of the next ingestion run (chip countdown; also what keeps the slow delta poll alive)
+  boardIngestError: false, // the last run failed — the chip's error tint (stampBoard sets all three)
   boardUnits: null, // { unit: quantity } — every unit metered on this board, never summed across them
   boardUnitDefs: null, // the served vocabulary for boardUnits ([{ unit, label, format }])
   boardCost: null, // { micros, unpriced: [{ unit, label, format, quantity }] } — manager-only, absent when nothing was ever priced

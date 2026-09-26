@@ -2,6 +2,7 @@
 // items come back ranked by similarity. Results land in state.searchResults
 // (Map id -> score); taggedFiltered() intersects them with the tag filters.
 import { state } from './state.js';
+import { batch } from './vendor/signals.mjs';
 import { toast } from './toast.js';
 import { similarTo } from './patterns.js';
 
@@ -24,20 +25,19 @@ export async function runSearch(q) {
   if (!q) return clearSearch();
   const token = ++searchReq;
   state.searchLoading = true;
-  document.dispatchEvent(new Event('app:render'));
   try {
     const results = await fetchResults(`/api/search?board=${state.boardId}&q=${encodeURIComponent(q)}`);
     if (token !== searchReq) return; // superseded by a newer search/clear
-    state.searchLoading = false;
-    state.searchQuery = q;
-    state.searchDraft = q;
-    state.searchResults = results;
-    state.searchSimilarTo = null; // a typed search gracefully replaces the similar mode
-    document.dispatchEvent(new Event('app:render'));
+    batch(() => {
+      state.searchLoading = false;
+      state.searchQuery = q;
+      state.searchDraft = q;
+      state.searchResults = results;
+      state.searchSimilarTo = null; // a typed search gracefully replaces the similar mode
+    });
   } catch (err) {
     if (token !== searchReq) return;
     state.searchLoading = false;
-    document.dispatchEvent(new Event('app:render'));
     toast.error(err.message || "Search failed");
   }
 }
@@ -67,13 +67,14 @@ export function runSimilar(item) {
   const results = similarTo(item);
   if (!results) return; // the action is gated on MIN_TAGS, so only a degenerate board lands here
   searchReq++; // supersedes any in-flight typed search
-  state.searchLoading = false;
-  state.searchDraft = "";
-  state.searchQuery = `similar:${item.identity}`; // feeds filterKey; never displayed
-  state.searchResults = results;
-  state.searchSimilarTo = anchorLabel(item);
-  leaveViews();
-  document.dispatchEvent(new Event('app:render'));
+  batch(() => {
+    state.searchLoading = false;
+    state.searchDraft = "";
+    state.searchQuery = `similar:${item.identity}`; // feeds filterKey; never displayed
+    state.searchResults = results;
+    state.searchSimilarTo = anchorLabel(item);
+    leaveViews();
+  });
 }
 
 // The meaning flavor (plan 1b-meaning): same mode, different scorer. The
@@ -89,15 +90,15 @@ export async function runSimilarMeaning(item) {
   try {
     const results = await fetchResults(`/api/search/similar?board=${state.boardId}&item=${item.id}`);
     if (token !== searchReq) return; // superseded
-    state.searchDraft = ""; // the supersede is total — see runSimilar
-    state.searchQuery = `similar-meaning:${item.id}`;
-    state.searchResults = results;
-    state.searchSimilarTo = anchorLabel(item);
-    leaveViews();
-    document.dispatchEvent(new Event('app:render'));
+    batch(() => {
+      state.searchDraft = ""; // the supersede is total — see runSimilar
+      state.searchQuery = `similar-meaning:${item.id}`;
+      state.searchResults = results;
+      state.searchSimilarTo = anchorLabel(item);
+      leaveViews();
+    });
   } catch (err) {
     if (token !== searchReq) return;
-    document.dispatchEvent(new Event('app:render')); // repaint the spinner cleared above
     toast.error(err.message || "Search failed");
   }
 }
@@ -105,10 +106,11 @@ export async function runSimilarMeaning(item) {
 export function clearSearch() {
   searchReq++; // invalidates any in-flight search
   if (!state.searchResults && !state.searchDraft && !state.searchLoading) return;
-  state.searchLoading = false;
-  state.searchDraft = "";
-  state.searchQuery = "";
-  state.searchResults = null;
-  state.searchSimilarTo = null;
-  document.dispatchEvent(new Event('app:render'));
+  batch(() => {
+    state.searchLoading = false;
+    state.searchDraft = "";
+    state.searchQuery = "";
+    state.searchResults = null;
+    state.searchSimilarTo = null;
+  });
 }

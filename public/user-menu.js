@@ -17,12 +17,20 @@
 //                 anyway, which is the same answer by luck.
 //   afterSignOut  the gallery reloads; the standalone pages go to login with
 //                 their own `next`.
+//
+// `el` is for the gallery, whose toolbar is drawn by Preact: it draws the
+// button empty and hands it here to be filled, once, so the button keeps its
+// place in a row that redraws (planning/ui-updates-plan.md, D7). The boards
+// and welcome pages leave it out and get a button built here.
 import { openDropdown, ddRow, ddSep } from "./dropdown.js";
 import { ICONS } from "./utils.js";
 
-export function userMenuButton({ me, afterSignOut }) {
-  const btn = document.createElement("button");
-  btn.className = "tool-btn user-menu-btn";
+export function userMenuButton({ me, afterSignOut, el }) {
+  let btn = el;
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.className = "tool-btn user-menu-btn";
+  }
   const name = document.createElement("span");
   name.className = "user-menu-name";
   name.textContent = me.name || me.email;

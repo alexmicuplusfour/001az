@@ -3,17 +3,18 @@
 // changed digit rolls up to its new glyph — an odometer tick. Non-digit
 // characters render static. Used for the live per-board token chip.
 //
-// The element persists across toolbar re-renders (the toolbar rebuilds every
-// poll), so it holds the previous value and can animate old -> new. Calling
-// set() with an unchanged string is a no-op, so cosmetic re-renders don't flip.
+// It fills an element it's given (the token chip's span.odo, which the toolbar
+// draws empty and never touches again: planning/ui-updates-plan.md, D7), and
+// lives as long as the chip does, so it holds the previous value and can
+// animate old -> new. Calling set() with an unchanged string is a no-op, so
+// cosmetic re-renders don't flip.
 
 const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
 const isDigit = (ch) => ch >= "0" && ch <= "9";
 
 export class Odometer {
-  constructor(initial = "") {
-    this.el = document.createElement("span");
-    this.el.className = "odo";
+  constructor(el, initial = "") {
+    this.el = el;
     this.chars = [];
     this.cells = []; // { node, char, isDigit } per index
     this.build(initial);
@@ -84,11 +85,10 @@ export class Odometer {
       { once: true }
     );
 
-    // renderToolbar builds its whole subtree detached and only attaches it at
-    // the end, so we can't reflow now — offsetHeight is 0 while disconnected and
-    // the transition would be skipped. Wait a frame: by then the toolbar is live
-    // in the DOM, the reflow pins the ribbon at translateY(0), and adding
-    // .rolling animates it up to the new glyph.
+    // The reflow that pins the ribbon at translateY(0) waits for the next
+    // frame: read here, in the middle of the toolbar's redraw, offsetHeight
+    // would make the browser lay out the whole page there and then. Adding
+    // .rolling then animates it up to the new glyph.
     requestAnimationFrame(() => {
       void roll.offsetHeight;
       roll.classList.add("rolling");

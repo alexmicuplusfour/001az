@@ -30,13 +30,14 @@ state.boardPaused = false;
 let WORK = { running: [], queued: [] };
 let JOBS = [];
 let SCHEDULED = { ingest_next_run_at: null, retag_next_run_at: null, refresh_next_at: null };
+let FAILED_AT = null; // the newest failure's stamp, the jobs dot's
 globalThis.confirm = () => false; // no test presses through a confirm
 globalThis.fetch = async (url) => {
   if (String(url).includes('/jobs')) {
     return { ok: true, json: async () => ({
       work: structuredClone(WORK), jobs: structuredClone(JOBS), nextCursor: null,
       kinds: null, has_refresh: false, paused: false, now: Date.now(),
-      scheduled: SCHEDULED,
+      scheduled: SCHEDULED, failed_at: FAILED_AT,
     }) };
   }
   return { ok: true, json: async () => ({}) };
@@ -166,6 +167,35 @@ test('Abort counts the legs it would take, in instances', async (t) => {
   assert.ok(shown(btn));
   assert.equal(btn.textContent, 'Abort — 5 left',
     "one claimed leg + four waiting; the transcription and the embed backlog are not the verb's to take");
+});
+
+test('a failure that lands while the log shows it is acknowledged with it: no toast, no chime', async (t) => {
+  // announce.js reads the header's dots in an effect, on every change
+  // (planning/ui-updates-plan.md, Stage 5). The log records the newest
+  // failure's stamp and acknowledges it in one batch; a stamp recorded on its
+  // own would be a rising edge, and would toast and chime about the row the
+  // reader is looking straight at.
+  let chimes = 0;
+  globalThis.Audio = class { constructor() { this.volume = 0; this.currentTime = 0; } play() { chimes++; return Promise.resolve(); } };
+  const { startAnnouncing } = await import('../public/announce.js');
+  const { refreshJobErrors } = await import('../public/signals.js');
+  WORK = { running: [], queued: [] };
+  JOBS = [];
+  FAILED_AT = null;
+  await refreshJobErrors(); // the jobs dot's data has landed: dark
+  startAnnouncing();
+  const toasts = () => document.querySelectorAll('.toast').length;
+  const before = toasts();
+  const at = Date.now() + 60000; // newer than the mark that opening the log sets
+  FAILED_AT = at;
+  JOBS = [{ id: 9, kind: 'tag', outcome: 'failed', error: 'boom', detail: null, target: 'a.png',
+    entity_id: 1, item_id: 1, entity_display: null, started_at: at, ended_at: at + 1000 }];
+  const modal = await openModal(t);
+  assert.equal(state.jobsFailedAt, at, 'setup: the log recorded the new stamp');
+  assert.ok(modal.textContent.includes('boom'), 'setup: the failure is on screen');
+  assert.equal(toasts(), before, 'no toast about the row on screen');
+  assert.equal(chimes, 0);
+  FAILED_AT = null;
 });
 
 // Every open wrote the served work into state and woke the delta poll; its

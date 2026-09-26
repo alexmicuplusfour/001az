@@ -10,13 +10,12 @@
 //
 // Dismissal-on-pick belongs to each ROW, not to the shell: a selection row
 // ends the errand and calls ctx.close(); an in-place control (a ddToggleRow
-// lens, a ddCheckRow filter) leaves the pop open for the next flip. What
-// makes staying open SAFE is the anchor contract: `anchor` may be the element
-// itself, or an accessor returning the current one — for openers living in
-// re-rendered containers (the toolbar rebuilds wholesale on app:render), so
-// the pop re-finds its anchor's replacement instead of dying with the
-// original. With an accessor, the pop closes itself only when a render
-// removes the anchor outright rather than replacing it.
+// lens, a ddCheckRow filter) leaves the pop open for the next flip. Staying
+// open is safe because the opener that repaints under an open pop, the
+// toolbar, keeps its elements (it's drawn by Preact). The open mark on the
+// anchor is aria-expanded, not a class, for the same reason: Preact rewrites
+// an element's classes whenever its own change, and would erase one set from
+// out here (planning/ui-updates-plan.md, D10).
 //
 // Callers describe content with `build(body, ctx)` (the scrollable area) and an
 // optional `footer(foot, ctx)` (pinned below the scroll area), composing rows
@@ -52,7 +51,7 @@ export function placePop({ anchor, pop, viewport, align = "end", gap = GAP, marg
   return { left: Math.round(left), top: Math.round(top) };
 }
 
-let current = null; // { anchorEl, hover, close }
+let current = null; // { anchor, hover, close }
 
 export function closeDropdown(reason = "manual") {
   current?.close(reason);
@@ -79,11 +78,8 @@ export function openDropdown(anchor, {
   focus,           // selector focused after open, e.g. ".dd-input"
   onClose,
 } = {}) {
-  // Resolved per use, so an accessor anchor always means the element that IS
-  // on the page — including the twin that replaced the opener in a re-render.
-  const anchorEl = typeof anchor === "function" ? anchor : () => anchor;
   if (current) {
-    const same = current.anchorEl() === anchorEl();
+    const same = current.anchor === anchor;
     if (hover && same) return null;       // already open; hover-hold keeps it alive
     if (hover && !current.hover) return null; // a hover pop never steals a click-opened menu
     // The inverse of the rule above: a click-open REPLACES a hover pop on the
@@ -170,13 +166,15 @@ export function openDropdown(anchor, {
 
   // A detached anchor gives an all-zero rect — the pop would fly to the top
   // corner on the next scroll tick. Holding the last position instead is
-  // right for both anchor kinds: an accessor is mid-swap (the render pass
-  // dresses or closes it), a plain element's pop is a click away from
-  // closing anyway.
+  // right while anything still repaints by replacing elements: the cards
+  // don't since planning/ui-updates-plan.md Stage 4, but the lightbox panel
+  // does under its Retag menu (the reasoning fetch, the arrow keys), the
+  // admin Boards table after a retag, the mapping pane when its catalog
+  // lands, and the toolbar's Crates button goes if the last crate does. The
+  // pop is a click away from closing anyway.
   function reposition() {
-    const node = anchorEl();
-    if (!node || !node.isConnected) return;
-    const a = node.getBoundingClientRect();
+    if (!anchor.isConnected) return;
+    const a = anchor.getBoundingClientRect();
     applyWidth(a);
     capBodyHeight(a);
     const { left, top } = placePop({
@@ -190,7 +188,7 @@ export function openDropdown(anchor, {
   }
 
   const onOutside = (e) => {
-    if (!el.contains(e.target) && !anchorEl()?.contains(e.target)) close("outside");
+    if (!el.contains(e.target) && !anchor.contains(e.target)) close("outside");
   };
 
   const onKeydown = (e) => {
@@ -198,7 +196,7 @@ export function openDropdown(anchor, {
       // consume it: an open dropdown outranks lightbox/bulk Escape handling
       e.stopPropagation();
       close("escape");
-      if (!hover) anchorEl()?.focus?.();
+      if (!hover) anchor.focus();
       return;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -242,15 +240,12 @@ export function openDropdown(anchor, {
     document.removeEventListener("keydown", onKeydown, true);
     window.removeEventListener("resize", onScrollOrResize);
     document.removeEventListener("scroll", onScrollOrResize, true);
-    if (onRender) document.removeEventListener("app:render", onRender);
     if (hoverAnchor) {
       hoverAnchor.removeEventListener("pointerenter", holdOpen);
       hoverAnchor.removeEventListener("pointerleave", scheduleClose);
     }
     el.remove();
-    const a = anchorEl();
-    a?.classList.remove("dd-open");
-    a?.setAttribute("aria-expanded", "false");
+    anchor.setAttribute("aria-expanded", "false");
     if (current && current.close === close) current = null;
     onClose?.(reason);
     // The menu is body-mounted, so a pick made in it never bubbles to
@@ -260,29 +255,8 @@ export function openDropdown(anchor, {
     // the anchor. Every close, not just picks: the gate re-reads and
     // compares, so over-signalling costs one deferred comparison; a menu
     // that changed nothing arms nothing.
-    if (a?.isConnected) a.dispatchEvent(new Event("change", { bubbles: true }));
+    if (anchor.isConnected) anchor.dispatchEvent(new Event("change", { bubbles: true }));
   }
-
-  // The anchor's open dressing — reapplied to the replacement element when an
-  // accessor anchor's container re-renders, so the caret stays flipped and
-  // the ARIA stays true across the swap.
-  const dress = (a) => {
-    a.classList.add("dd-open");
-    a.setAttribute("aria-haspopup", "menu");
-    a.setAttribute("aria-expanded", "true");
-  };
-
-  // Only an accessor anchor rides app:render: registered here — after app.js's
-  // boot-time render listener — so by the time this runs, the rebuilt page is
-  // in place and the accessor finds the anchor's twin. An anchor that is gone
-  // outright (the render decided against it: a sign-out, an emptied toolbar)
-  // leaves the pop nothing to hang from, so it closes.
-  const onRender = typeof anchor === "function" ? () => {
-    const a = anchorEl();
-    if (!a || !a.isConnected) return close("anchor-gone");
-    dress(a);
-    reposition();
-  } : null;
 
   // The click that opened the menu has already passed document's capture
   // phase, so listening immediately can't catch it.
@@ -290,10 +264,7 @@ export function openDropdown(anchor, {
   document.addEventListener("keydown", onKeydown, true);
   window.addEventListener("resize", onScrollOrResize);
   document.addEventListener("scroll", onScrollOrResize, { capture: true, passive: true });
-  if (onRender) document.addEventListener("app:render", onRender);
-  // Hover listeners bind to the element in hand: hover pops are short-lived
-  // previews whose anchors don't get re-rendered out from under them.
-  const hoverAnchor = hover ? anchorEl() : null;
+  const hoverAnchor = hover ? anchor : null;
   if (hoverAnchor) {
     el.addEventListener("pointerenter", holdOpen);
     el.addEventListener("pointerleave", scheduleClose);
@@ -303,10 +274,12 @@ export function openDropdown(anchor, {
 
   reposition();
   revealActive();
-  dress(anchorEl());
+  // The open mark, which dropdown.css also turns the caret by (D10).
+  anchor.setAttribute("aria-haspopup", "menu");
+  anchor.setAttribute("aria-expanded", "true");
   if (focus) requestAnimationFrame(() => el.querySelector(focus)?.focus());
 
-  current = { anchorEl, hover, close };
+  current = { anchor, hover, close };
   return ctx;
 }
 

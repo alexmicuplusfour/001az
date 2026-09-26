@@ -8,8 +8,8 @@
 //
 // Assign the classes UNCONDITIONALLY: Node ships its own global
 // Event/CustomEvent, and jsdom's dispatchEvent rejects instances of them —
-// a module doing `new Event('app:render')` must get jsdom's class or every
-// dispatch throws.
+// a module doing `new Event('app:lightbox-crate-changed')` must get jsdom's
+// class or every dispatch throws.
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 
@@ -17,7 +17,7 @@ const html = readFileSync(new URL('../public/index.html', import.meta.url), 'utf
 export const dom = new JSDOM(html, { url: 'http://localhost/', pretendToBeVisual: true });
 export const { window } = dom;
 
-for (const k of ['document', 'localStorage', 'Event', 'CustomEvent', 'KeyboardEvent', 'MouseEvent', 'HTMLElement', 'Node']) {
+for (const k of ['document', 'localStorage', 'Event', 'CustomEvent', 'KeyboardEvent', 'MouseEvent', 'HTMLElement', 'Node', 'Image']) {
   globalThis[k] = window[k];
 }
 globalThis.window = window;
@@ -25,3 +25,6 @@ globalThis.getComputedStyle = window.getComputedStyle.bind(window);
 globalThis.requestAnimationFrame = window.requestAnimationFrame.bind(window);
 globalThis.cancelAnimationFrame = window.cancelAnimationFrame.bind(window);
 globalThis.IntersectionObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
+// jsdom lays nothing out, so it has no scrolling to do.
+window.HTMLElement.prototype.scrollIntoView ??= function () {};

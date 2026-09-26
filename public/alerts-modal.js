@@ -6,6 +6,7 @@
 //    gallery into that firing's ?event= view).
 // Alerts are per-user like saved filters; state.alerts is the local mirror.
 import { state } from './state.js';
+import { batch } from './vendor/signals.mjs';
 import { ICONS, fmtDuration, relTime } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
@@ -70,7 +71,6 @@ export function appendAlertMenu(body, close) {
         if (!r.ok) throw new Error();
         state.alerts = state.alerts.filter((x) => x.id !== a.id);
         close();
-        document.dispatchEvent(new Event('app:render'));
       } catch {
         toast.error("Couldn't delete alert");
       }
@@ -421,15 +421,15 @@ export function openAlertEditor(existing) {
       }
       const saved = data.alert;
       const i = state.alerts.findIndex((a) => a.id === saved.id);
-      if (i >= 0) state.alerts[i] = { ...state.alerts[i], ...saved };
-      else state.alerts.push(saved);
+      state.alerts = i >= 0
+        ? state.alerts.map((a, n) => (n === i ? { ...a, ...saved } : a))
+        : [...state.alerts, saved];
       // Alerts hold the slow poll (pollDelay) — the first one on a quiet board
       // must START it, or the arrivals it watches for never reach the grid.
       // (The last delete needs nothing: the tick sees the empty list and stops.)
       ensurePolling();
       toast(isNew ? `Alert "${saved.name}" created` : "Alert saved");
       close();
-      document.dispatchEvent(new Event('app:render'));
     } catch {
       toast.error("Couldn't save alert");
     }
@@ -477,12 +477,13 @@ export function openAlertHistory(alert) {
       if (!r.ok) return;
     } catch { return; }
     // The LIVE object, not the one we were handed. The alerts dropdown builds
-    // its rows once and does not close on app:render, while refreshAlerts
-    // replaces state.alerts wholesale every 20 s — so a menu that has been open
-    // a while hands us an orphan, and zeroing an orphan clears nothing.
+    // its rows once and does not close when the page redraws, while
+    // refreshAlerts replaces state.alerts wholesale every 20 s — so a menu that
+    // has been open a while hands us an orphan, and zeroing an orphan clears
+    // nothing.
     const live = state.alerts.find((a) => a.id === alert.id) || alert;
     live.unseen = 0;
-    document.dispatchEvent(new Event('app:render'));
+    state.alerts = [...state.alerts]; // a count moved in place: a new list, so the dot redraws
   }
 
   const list = document.createElement("div");
@@ -564,10 +565,13 @@ export function openAlertHistory(alert) {
   viewBtn.addEventListener("click", () => {
     close();
     // The alert's view replaces whatever the list was showing — a lingering
-    // crate, search, ?event= view or extra pills would intersect it.
-    resetListFilters();
-    clearAlertEvent();
-    applyFilterConfig(alert.condition);
+    // crate, search, ?event= view or extra pills would intersect it. One
+    // batch: the page draws the alert's view, not each step of the reset.
+    batch(() => {
+      resetListFilters();
+      clearAlertEvent();
+      applyFilterConfig(alert.condition);
+    });
   });
   footer.appendChild(viewBtn);
 }

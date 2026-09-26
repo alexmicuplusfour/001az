@@ -56,6 +56,7 @@ export async function openApp({ headed = false } = {}) {
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gallery-browser-"));
   const pages = [];
+  const opened = []; // every page open() made, for close()'s look at their errors
 
   // A signed-in member on their own board, which is the only state most of
   // these tests need to get to. Auto-tagging OFF: with it on every upload is
@@ -89,6 +90,12 @@ export async function openApp({ headed = false } = {}) {
   async function open(url, { sid } = {}) {
     const ctx = await browser.newContext();
     if (sid) await ctx.addCookies([{ name: "sid", value: sid, url: srv.base }]);
+    // The board page's check on its cached counts (filters.js checkCached,
+    // planning/ui-updates-plan.md Stage 3): every repaint compares the cached
+    // chip counts and filtered list with fresh ones and throws on a difference,
+    // which lands in page.errors. It's how a change that skipped
+    // itemsChanged() fails a test instead of leaving the rail quietly wrong.
+    await ctx.addInitScript(() => { window.__checkCached = true; });
     const page = await ctx.newPage();
     const errors = [];
     const failures = [];
@@ -104,6 +111,7 @@ export async function openApp({ headed = false } = {}) {
     page.errors = errors;
     page.failures = failures;
     pages.push(ctx);
+    opened.push(page);
     await page.goto(srv.base + url);
     return page;
   }
@@ -127,6 +135,11 @@ export async function openApp({ headed = false } = {}) {
     await browser.close().catch(() => {});
     await srv.close();
     fs.rmSync(tmp, { recursive: true, force: true });
+    // The cache check (open, above) fails a test only where that test reads
+    // page.errors afterwards. What it caught in any other page fails the file
+    // here, so the net has no hole a test forgot to look through.
+    const missed = opened.flatMap((p) => p.errors.filter((e) => e.includes("checkCached:")));
+    if (missed.length) throw new Error(`the cache check threw and no test read page.errors after it:\n${missed.join("\n")}`);
   }
 
   return { ...srv, browser, signIn, open, fixture, close };

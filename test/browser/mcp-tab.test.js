@@ -376,8 +376,16 @@ test("board scope persists across a reload", async () => {
   // none ticked) have one readout, which they could not have as checkboxes.
   assert.equal(await page.textContent("#mcp-scope"), "All boards");
 
+  // With its popover up the chip stays lit, the pointer on it or not. admin.html
+  // reads that from dropdown.js's aria-expanded. The class it read before was
+  // deleted (planning/ui-updates-plan.md, D10), and the chip stopped lighting.
+  const fill = () => page.$eval("#mcp-scope", (el) => getComputedStyle(el).backgroundColor);
+  await page.mouse.move(0, 0);
+  const resting = await fill();
   await page.click("#mcp-scope");
   await page.waitForSelector(".dd-check");
+  await page.mouse.move(0, 0);
+  assert.notEqual(await fill(), resting, "the chip reads open while its popover is up");
   const labels = await page.$$eval(".dd-check .cb-text", (els) => els.map((e) => e.textContent.trim()));
   assert.ok(labels.includes("Scope A") && labels.includes("Scope B"));
   // An empty scope reads as everything ticked, because that is what empty MEANS.

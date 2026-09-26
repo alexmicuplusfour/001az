@@ -1,4 +1,6 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
+import { batch } from './vendor/signals.mjs';
 import { toItem } from './utils.js';
 import { api } from './api.js';
 import { toast } from './toast.js';
@@ -22,7 +24,6 @@ document.addEventListener('app:uploads-pending-tag', (e) => {
 document.addEventListener('app:board-reprocessed', (e) => {
   setWork(e.detail?.work);
   ensurePolling();
-  document.dispatchEvent(new Event('app:render'));
 });
 
 export function hasPendingUploadTags() {
@@ -128,6 +129,7 @@ export function applyRoutedEntities(entities = []) {
     const byId = new Map(instances.map((i) => [i.id, i.status]));
     for (const i of item.instances || []) i.status = byId.get(i.id) ?? i.status;
   }
+  itemsChanged();
 }
 
 // The whole re-queue click, one call: POST, mirror the report, repaint, and
@@ -138,13 +140,14 @@ export function applyRoutedEntities(entities = []) {
 // failure (api unwraps the server's `{error}`); callers own the toast.
 export async function requeue(url, body) {
   const { entities, work } = await api("POST", url, body);
-  applyRoutedEntities(entities);
-  // …and the `work` the same answer carries (instance-work-plan.md G1): the
-  // chip and the modal read the payload, not the cards, so the click lights
-  // them in this render rather than a poll later. Last write wins — every
-  // carrier's copy is the same server truth.
-  setWork(work);
-  document.dispatchEvent(new Event('app:render'));
+  batch(() => {
+    applyRoutedEntities(entities);
+    // …and the `work` the same answer carries (instance-work-plan.md G1): the
+    // chip and the modal read the payload, not the cards, so the click lights
+    // them in this draw rather than a poll later. Last write wins — every
+    // carrier's copy is the same server truth.
+    setWork(work);
+  });
   ensurePolling();
 }
 
@@ -221,6 +224,10 @@ export function reconcile(data, presentIds = null) {
       state.items.unshift(toItem(d));
     }
   }
+  // Only when the answer brought something: a quiet tick recounts nothing
+  // (planning/ui-updates-plan.md, Stage 3). The ghost sweep below replaces
+  // state.items, which announces itself.
+  if (data.length) itemsChanged();
 
   // An in-flight card that vanished from the server's id list was merged into
   // another entity (or deleted elsewhere). Two separate jobs here:
@@ -229,8 +236,8 @@ export function reconcile(data, presentIds = null) {
   //      toast counts down instead of stalling on a row that never reports
   //      again, and announce the merge to the uploader.
   //  (b) sweep the ghost CARD out of the grid — its spinner runs forever
-  //      otherwise: the poll never lists a deleted entity again, and cardSig
-  //      keys on status, so nothing repaints it. Crucially this is NOT gated on
+  //      otherwise: the poll never lists a deleted entity again, and a card
+  //      redraws only when its item changes. Crucially this is NOT gated on
   //      a batch tracking the id (the old bug): a merge from a re-extract,
   //      another tab's upload, ingestion, or a batch that already settled left a
   //      spinner only a reload could clear.
@@ -298,11 +305,13 @@ async function refreshTokens() {
     if (!r.ok) return;
     const { units, unitDefs, cost } = await r.json();
     if (units) {
-      state.boardUnits = units;
-      state.boardUnitDefs = unitDefs ?? null;
-      // cost is a manager-only key and absent when nothing was priced — both
-      // read as "no figure", so the chip drops its ≈$ rather than showing $0.
-      state.boardCost = cost ?? null;
+      batch(() => {
+        state.boardUnits = units;
+        state.boardUnitDefs = unitDefs ?? null;
+        // cost is a manager-only key and absent when nothing was priced — both
+        // read as "no figure", so the chip drops its ≈$ rather than showing $0.
+        state.boardCost = cost ?? null;
+      });
     }
   } catch { /* leave the last known totals */ }
 }
@@ -378,15 +387,17 @@ export async function refreshItemsOnce() {
       ? `/api/items?board=${state.boardId}&since=${state.itemsSince}`
       : `/api/items?board=${state.boardId}`;
     const data = await fetch(url, { cache: "no-store" }).then((r) => r.json());
-    if (Array.isArray(data)) {
-      // Bare array = a server without delta support — full-list semantics.
-      state.itemsSince = null;
-      reconcile(data);
-    } else if (Array.isArray(data.items) && Array.isArray(data.ids)) {
-      reconcile(data.items, new Set(data.ids));
-      if (typeof data.now === 'number') state.itemsSince = data.now;
-      setWork(data.work); // the lane half rides the same tick
-    }
+    batch(() => {
+      if (Array.isArray(data)) {
+        // Bare array = a server without delta support — full-list semantics.
+        state.itemsSince = null;
+        reconcile(data);
+      } else if (Array.isArray(data.items) && Array.isArray(data.ids)) {
+        reconcile(data.items, new Set(data.ids));
+        if (typeof data.now === 'number') state.itemsSince = data.now;
+        setWork(data.work); // the lane half rides the same tick
+      }
+    });
     // Any other shape (proxy error body, partial JSON): skip it rather than
     // feed reconcile an empty presentIds set — that reads as "everything merged
     // away" and would wrongly drop in-flight items.
@@ -399,16 +410,12 @@ async function pollTick() {
     // The last item's tokens land just after its status flips to tagged, so
     // catch that final bump once the queue has drained.
     await refreshTokens();
-    document.dispatchEvent(new Event('app:render'));
     return;
   }
-  // Both swallow their own failures, so a tick whose fetch failed now repaints
-  // the state it still has rather than skipping the paint. That is a change,
-  // and a harmless one: render is idempotent, and the alternative was a frame
-  // silently dropped whenever the network blipped.
+  // Both swallow their own failures, and what they write is the repaint: a
+  // tick whose fetch failed writes nothing, and draws nothing.
   await refreshItemsOnce();
   await refreshTokens();
-  document.dispatchEvent(new Event('app:render'));
   schedule(pollDelay()); // recomputed — the queue may have settled or refilled
 }
 
@@ -429,27 +436,28 @@ export function ensurePolling() {
 // place — the boot path, the ingest modal and the toolbar chip all funnel
 // through here so they can't drift on what "refreshed" means.
 export function stampBoard(b) {
-  state.boardIngestMode = b.ingest_mode ?? null;
-  state.boardIngestNextRun = b.ingest_next_run_at ?? null;
-  // ?? false covers payloads without the flag (the boot fallback {}). A save
-  // response's false is truthful, not stale: saving an ingest config clears
-  // last_error server-side (superseded — the next run judges the new config),
-  // so the chip clearing on save agrees with every other surface.
-  state.boardIngestError = b.ingest_error ?? false;
-  // Board pause rides the same funnel and for the same reason: it drives the
-  // jobs chip AND pollDelay below, so a payload arriving anywhere must reach
-  // both. Reset semantics like ingest_error — which is why the board PATCH
-  // echoes `paused` back, so a save response can't read as "unpaused".
-  state.boardPaused = b.paused ?? false;
+  batch(() => {
+    state.boardIngestMode = b.ingest_mode ?? null;
+    state.boardIngestNextRun = b.ingest_next_run_at ?? null;
+    // ?? false covers payloads without the flag (the boot fallback {}). A save
+    // response's false is truthful, not stale: saving an ingest config clears
+    // last_error server-side (superseded — the next run judges the new config),
+    // so the chip clearing on save agrees with every other surface.
+    state.boardIngestError = b.ingest_error ?? false;
+    // Board pause rides the same funnel and for the same reason: it drives the
+    // jobs chip AND pollDelay below, so a payload arriving anywhere must reach
+    // both. Reset semantics like ingest_error — which is why the board PATCH
+    // echoes `paused` back, so a save response can't read as "unpaused".
+    state.boardPaused = b.paused ?? false;
+  });
 }
 
 // The user (or another manager's poll) flipped the pause. One setter so the
-// three consequences travel together: the flag, the poll cadence it feeds,
-// and the render that repaints the chip. refreshBoardIngest's shape exactly.
+// two consequences travel together: the flag (whose write repaints the chip)
+// and the poll cadence it feeds. refreshBoardIngest's shape exactly.
 export function setBoardPaused(v) {
   state.boardPaused = !!v;
   ensurePolling(); // resume drops us back to the fast tier without waiting out the slow timer
-  document.dispatchEvent(new Event("app:render"));
 }
 
 // Re-learn the flags after something changed them server-side (save, run-now,
@@ -461,7 +469,6 @@ export async function refreshBoardIngest() {
     if (!b) return false;
     stampBoard(b);
     ensurePolling(); // the slow poll follows the flag
-    document.dispatchEvent(new Event("app:render"));
     return true;
   } catch {
     return false;
@@ -502,6 +509,7 @@ function appendItems(rows) {
   for (const d of rows) {
     if (!have.has(d.id)) state.items.push(toItem(d));
   }
+  itemsChanged();
 }
 
 // After a paginated boot: fetch the rest of the board page by page, rendering
@@ -532,7 +540,6 @@ export async function drainItems(cursor) {
       // A late page may hold the only in-flight items — needsPoll() scans
       // state.items, so re-arm after every append.
       ensurePolling();
-      document.dispatchEvent(new Event('app:render'));
     }
   } finally {
     draining = false;

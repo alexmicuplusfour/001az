@@ -1,4 +1,6 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
+import { batch } from './vendor/signals.mjs';
 import { toItem, sentence, plural, fmtUsd } from './utils.js';
 import { toast } from './toast.js';
 import { createModal, busy } from './modal.js';
@@ -233,18 +235,20 @@ export function openConnectorBrowse(connectorName) {
           break;
         }
         const { added = [], skipped: chunkSkipped = [], work } = await res.json();
-        for (const row of added) {
-          state.items.unshift(toItem(row));
-          markOnBoard(row.connector_id); // the response echoes the exact row we sent
-        }
-        // The rows go to the grid; the work they queued goes to the chip and
-        // the jobs modal, which read the `work` payload alone — a vehicle
-        // enters at the fetch leg (instance-work-plan.md P1).
-        setWork(work);
+        batch(() => {
+          for (const row of added) {
+            state.items.unshift(toItem(row));
+            markOnBoard(row.connector_id); // the response echoes the exact row we sent
+          }
+          itemsChanged();
+          // The rows go to the grid; the work they queued goes to the chip and
+          // the jobs modal, which read the `work` payload alone — a vehicle
+          // enters at the fetch leg (instance-work-plan.md P1).
+          setWork(work);
+        });
         for (const s of chunkSkipped) if (s.reason === "duplicate") markOnBoard(s.id);
         addedCount += added.length;
         skipped.push(...chunkSkipped);
-        if (added.length) document.dispatchEvent(new Event('app:render'));
       }
       if (addedCount) {
         ensurePolling();

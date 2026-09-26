@@ -74,26 +74,3 @@ test('the lens rows are toggles, and flipping one leaves the pop open', () => {
   drop();
   state.showOdds = false;
 });
-
-test('an accessor anchor keeps the pop through a re-render, and closes it when the anchor is gone', () => {
-  state.filterConfigs = [];
-  state.selected = new Map();
-  const arrow = document.createElement('button');
-  arrow.id = 'test-arrow';
-  document.body.appendChild(arrow);
-  openFilterConfigPop(() => document.getElementById('test-arrow'));
-  const pop = document.querySelector('.filter-config-pop');
-  assert.ok(pop && arrow.classList.contains('dd-open'));
-  // the toolbar's move: the anchor is replaced by an identical twin mid-open
-  const twin = document.createElement('button');
-  twin.id = 'test-arrow';
-  arrow.replaceWith(twin);
-  document.dispatchEvent(new Event('app:render'));
-  assert.ok(pop.isConnected, 'the pop survived the swap');
-  assert.ok(twin.classList.contains('dd-open'), 'and dressed the replacement');
-  assert.equal(twin.getAttribute('aria-expanded'), 'true');
-  // a render that REMOVES the anchor rather than replacing it takes the pop with it
-  twin.remove();
-  document.dispatchEvent(new Event('app:render'));
-  assert.equal(pop.isConnected, false, 'nothing to hang from — closed');
-});

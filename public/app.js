@@ -1,11 +1,14 @@
 import { state } from './state.js';
 import { getJson } from './api.js';
 import { toItem } from './utils.js';
-import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount, reconcileSelection } from './filters.js';
+import { filterKey, taggedFiltered, renderFacets, initFilters, decodeSelection, syncFiltersToUrl, activeCount, reconcileSelection, checkCached } from './filters.js';
 import { selEntry } from './facet-match.js';
 import { inProgress, reconcile, ensurePolling, drainItems, stampBoard, setWork } from './data.js';
-import { renderGrid, layoutGrid, pokeSentinel, initGrid, dropAllCards } from './grid.js';
-import { renderRows, dropAllRows, pokeRowsSentinel } from './rows.js';
+import { renderGrid, layoutGrid, pokeSentinel, initGrid } from './grid.js';
+import { renderRows, pokeRowsSentinel } from './rows.js';
+import { pruneSelection } from './bulk.js';
+import { itemsVersion } from './state-signals.js';
+import { effect } from './vendor/signals.mjs';
 import { resolveView, restoreView } from './view.js';
 import { initShortcuts } from './shortcuts.js';
 import { renderToolbar } from './toolbar.js';
@@ -25,16 +28,22 @@ import { openJobsModal, preloadModals } from './modal-door.js';
 
 const elGridRoot = document.getElementById("grid");
 
+// The page, drawn from state. It runs in an effect (main, below), so a write
+// to anything it reads draws it again, at once (planning/ui-updates-plan.md,
+// Stage 5); a handler that writes several fields batches them into one draw.
 function render() {
+  // A selection of items that are gone (deleted elsewhere) is pruned before
+  // anything draws it.
+  pruneSelection();
   // Before anything reads the board: taggedFiltered and the rail both go
-  // through the ~clusters membership map, so it refreshes first (a no-op
-  // unless the lens is on AND the tag data moved — see patterns.js). This
-  // one line is also what keeps the map fresh for taggedFiltered's callers
-  // OUTSIDE render (lightbox, rows): every data mutation dispatches
-  // app:render synchronously, so nothing reads between a mutation and this.
+  // through the ~clusters grouping, so it refreshes first (a no-op unless
+  // the lens is on AND the tag data moved — see patterns.js). Callers of
+  // taggedFiltered outside render (the lightbox, the rows view, the grid's
+  // next batch) see the grouping the last repaint published.
   refreshClusters();
   const key = filterKey();
   const tagged = taggedFiltered();
+  if (globalThis.__checkCached) checkCached(); // the tests' check (filters.js)
   // Resolve the gallery mode before the toolbar renders — its toggle
   // highlights the EFFECTIVE mode, including an auto-engaged rows (filters
   // active + a multi-instance entity in the filtered result).
@@ -45,19 +54,12 @@ function render() {
   // just duplicate the same items.
   const laneHidden = state.showProcessing || state.showUnprocessed;
   const progress = laneHidden ? [] : inProgress();
-  // Each renderer owns a cache and a batch limit; rendering one drops the
-  // other's cache (releasing its cards from the stage observer) and resets
-  // its key, so a flip never strands observed elements and the return trip
-  // re-enters at a fresh first batch. The mode suffix on the key is the
-  // belt to that suspender: the caches can never serve each other.
+  // Each renderer draws its own tree into #grid and owns a batch limit. Both
+  // go by one key for #grid (grid.js freshKey), and it ends in the mode, so a
+  // flip always draws the other tree, from its first batch.
   elGridRoot.classList.toggle("rows-mode", mode === "rows");
-  if (mode === "rows") {
-    dropAllCards();
-    renderRows(`${key}|rows`, progress, tagged);
-  } else {
-    dropAllRows();
-    renderGrid(`${key}|grid`, progress, tagged);
-  }
+  if (mode === "rows") renderRows(`${key}|rows`, progress, tagged);
+  else renderGrid(`${key}|grid`, progress, tagged);
   syncFiltersToUrl();
   requestAnimationFrame(() => {
     layoutGrid(); // self-gates in rows mode
@@ -65,8 +67,6 @@ function render() {
     pokeRowsSentinel();
   });
 }
-
-document.addEventListener('app:render', render);
 
 async function main() {
   initGrid();
@@ -84,7 +84,7 @@ async function main() {
   const uParam = params.get("u");
   if (uParam && !state.selected.has("~uploaders")) {
     const ids = uParam.split(",").filter(Boolean);
-    if (ids.length) state.selected.set("~uploaders", selEntry(ids));
+    if (ids.length) state.selected = new Map(state.selected).set("~uploaders", selEntry(ids));
   }
 
   // Set when the landing rule below has already asked which boards are ours,
@@ -245,7 +245,12 @@ async function main() {
   restoreClusters();
   restoreMeaningClusters();
   restoreView();
-  render();
+  // From here the page draws itself: whenever something render() read
+  // changes, it runs again. An error in it is reported, not thrown back into
+  // whatever wrote the signal.
+  effect(() => {
+    try { render(); } catch (e) { reportError(e); }
+  });
   ensurePolling();
   startSignals(); // the header's dots, on their own cadence from here on
   // …and their voice. After the first render, so whatever is ALREADY lit when
@@ -296,21 +301,30 @@ async function main() {
   if (eventId) openAlertEvent(eventId);
   const itemId = Number(params.get("item"));
   if (itemId) {
-    const tryOpen = () => {
-      const item = state.items.find((i) => i.id === itemId);
-      if (!item) return false;
+    const find = () => state.items.find((i) => i.id === itemId);
+    const open = (item) => {
       openDetail(item);
       // Consumed — strip the param so browsing on (and a later reload)
       // doesn't keep re-opening the same lightbox.
       const url = new URL(location.href);
       url.searchParams.delete("item");
       history.replaceState(null, "", url.pathname + url.search);
-      return true;
     };
-    if (!tryOpen()) {
-      const onRender = () => { if (tryOpen()) document.removeEventListener('app:render', onRender); };
-      document.addEventListener('app:render', onRender);
-      setTimeout(() => document.removeEventListener('app:render', onRender), 60000);
+    const item = find();
+    if (item) open(item);
+    else {
+      // Still draining in, maybe: look again as the items change (the drain
+      // appends in place and announces each page), for a minute. Opened
+      // outside the effect, so the lightbox's own reads don't become its.
+      let done = false;
+      const stop = effect(() => {
+        void itemsVersion.value;
+        const found = find();
+        if (!found || done) return;
+        done = true;
+        queueMicrotask(() => { stop(); open(found); });
+      });
+      setTimeout(() => stop(), 60000);
     }
   }
 

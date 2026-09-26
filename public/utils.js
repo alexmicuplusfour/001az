@@ -1,9 +1,3 @@
-import { state } from './state.js';
-
-export function isAdmin() {
-  return !!(state.me && state.me.is_admin);
-}
-
 // One instance = one file with its own tags/status/fields under an entity.
 export function toInstance(i) {
   const list = Array.isArray(i.tags) ? i.tags : [];
@@ -376,22 +370,15 @@ export const glyphEl = (name, ai) => {
 
 // Corner presence dot for any button — sits centered on the top-right
 // corner, half in and half out. Reusable: the class pair does the placement,
-// this just wires it on.
+// this just wires it on. For hand-built surfaces: the gallery's toolbar draws
+// the same pair itself, since Preact would erase a class set on its buttons
+// from outside (planning/ui-updates-plan.md, D6).
 export function attachBtnDot(btn) {
   btn.classList.add("has-dot");
   const dot = document.createElement("span");
   dot.className = "btn-dot";
   btn.appendChild(dot);
   return dot;
-}
-
-export function actionBtn(icon, cls, title, onClick) {
-  const b = document.createElement("button");
-  b.className = "act " + cls;
-  b.title = title;
-  b.innerHTML = ICONS[icon];
-  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
-  return b;
 }
 
 // Always render in whole thousands ("525k", "1,247k") — never rolling up to
@@ -525,61 +512,14 @@ export const memberCell = ({ name, email, isAdmin }) =>
     isAdmin ? ' <span class="badge">admin</span>' : ""
   }</div><div class="email">${esc(email)}</div></div></div>`;
 
-// The small trailing note on a button or pill. `cls` is what it's a note ABOUT
-// — "count" for the tally every chip carries, "mult" for the odds lens's ×N
-// (filters.js) — so a second kind of note reuses the append instead of
-// hand-rolling the same four lines again.
-export function appendCount(el, count, cls = "count") {
+// The small trailing count on a hand-built button: the plugin catalog's filter
+// chips (admin-plugins.js). The filter rail's chips and the toolbar's
+// favorites button draw theirs with `Count` (pill.js).
+export function appendCount(el, count) {
   if (count == null) return;
   const c = document.createElement("span");
-  c.className = cls;
+  c.className = "count";
   c.textContent = count;
   el.appendChild(c);
-}
-
-// The toolbar button. `label` is markup: an icon button passes an ICONS glyph,
-// a labelled one passes `ICONS.foo + "<span>Text</span>"` — the span is what
-// makes the label one flex item, so the button's own 5px gap spaces it from
-// the icon. Nothing here sizes the glyph or sets the gap: .tool-btn owns both,
-// which is what lets a caller pass any icon and get the same button.
-export function toolBtn(label, cls, onClick, count) {
-  const b = document.createElement("button");
-  b.className = "tool-btn" + (cls ? " " + cls : "");
-  b.innerHTML = label;
-  appendCount(b, count);
-  if (onClick) b.addEventListener("click", onClick);
-  return b;
-}
-
-// The label rides its own element so it can be the ONE part that gives way:
-// a value long enough to outrun the rail (the mobile drawer is the narrow
-// case) ellipsises, while the count — the whole reason the chip carries a
-// number — stays whole. The title is the only way back to the full string
-// once the ellipsis eats it.
-export function pill(label, count, active, muted, onClick) {
-  const b = document.createElement("button");
-  b.className = "pill" + (active ? " active" : "") + (muted ? " muted" : "");
-  b.title = label;
-  const text = document.createElement("span");
-  text.className = "pill-label";
-  text.textContent = label;
-  b.appendChild(text);
-  appendCount(b, count);
-  b.addEventListener("click", onClick);
-  return b;
-}
-
-// An ACTION riding a pill row — the clusters row's "more"/"fewer" steps. It
-// borrows the pill's shape so the row reads as one line, but not the white
-// fill: in the rail, the filled capsule means "a value you can select", and
-// an action is not one. `title` is required — with no count and no active
-// state, the one line of hover help is all the explanation these get.
-export function pillAction(label, title, onClick) {
-  const b = document.createElement("button");
-  b.className = "pill pill-action";
-  b.textContent = label;
-  b.title = title;
-  b.addEventListener("click", onClick);
-  return b;
 }
 

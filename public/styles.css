@@ -404,7 +404,7 @@ header.header-collapsed #toolbar-fold {
   background: var(--pill-bg);
 }
 
-/* the action pill (pillAction — utils.js): no fill and dim ink at rest, so
+/* the action pill (stepPill — filters.js): no fill and dim ink at rest, so
    a command sits in a value row without claiming to be one of the values */
 .pill.pill-action {
   background: transparent;
@@ -600,8 +600,8 @@ main#grid {
   background: rgba(20, 22, 26, 0.72);
   color: #fff;
 }
-/* per-instance verbs — DOM-mounted on hover, exactly the card's pattern
-   (rows.js mountTileChrome/teardownTileHover) */
+/* per-instance verbs — drawn while the tile is hovered or its menu is open,
+   exactly the card's pattern (rows.js Tile) */
 .inst-actions {
   position: absolute;
   top: 6px;
@@ -698,9 +698,10 @@ body.bulk-mode .inst-tag-chip {
 .tool-btn.plus-caret svg {
   opacity: 0.65;
 }
-/* corner presence dot for any button (attachBtnDot, utils.js): centered on
-   the top-right corner, half in and half out; the ring keeps it readable
-   against whatever sits behind the overhang */
+/* corner presence dot for any button (attachBtnDot, utils.js, or drawn with
+   its button, as the toolbar does): centered on the top-right corner, half in
+   and half out; the ring keeps it readable against whatever sits behind the
+   overhang */
 .has-dot {
   position: relative;
 }
@@ -1653,10 +1654,9 @@ body.bulk-mode .heart {
   background-repeat: no-repeat;
   pointer-events: none;
 }
-/* Two sweeps at co-prime periods so the sheen never visibly loops. The phase
-   is anchored to the wall clock (--jobs-phase, a negative delay stamped by
-   toolbar.js): the toolbar rebuilds the chip every render, and an element-age
-   phase would snap the sweep back to frame zero on every delta poll. */
+/* Two sweeps at co-prime periods so the sheen never visibly loops. The chip
+   stays the same element across repaints, so the sweep simply runs on from
+   whenever the chip went busy. */
 .jobs-chip.busy::before,
 .jobs-chip.cooling::before {
   background-image:
@@ -1664,53 +1664,42 @@ body.bulk-mode .heart {
     radial-gradient(38% 100% at 50% 95%, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0) 74%);
   background-size: 100% 100%, 260% 100%;
   animation: jobs-aurora-a 3s ease-in-out infinite alternate;
-  animation-delay: var(--jobs-phase, 0s);
 }
 .jobs-chip.busy::after,
 .jobs-chip.cooling::after {
   background-image: radial-gradient(28% 78% at 50% 90%, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0) 74%);
   background-size: 320% 100%;
   animation: jobs-aurora-b 4.6s ease-in-out infinite alternate;
-  animation-delay: var(--jobs-phase, 0s);
 }
 @keyframes jobs-aurora-a { from { background-position: 0 0, 0% 0; } to { background-position: 0 0, 100% 0; } }
 @keyframes jobs-aurora-b { from { background-position: 100% 0; opacity: 0.7; } 50% { opacity: 1; } to { background-position: 0% 0; opacity: 0.75; } }
 /* the count stays (the queue is intact), the light stops moving (nothing is) */
 .jobs-chip.busy.paused::before,
 .jobs-chip.busy.paused::after { animation-play-state: paused; }
-/* idle↔busy edges: the toolbar rebuilds fresh nodes every render, so a class
-   flip has no element to transition on. Instead every render inside a 450ms
-   window after the edge wears a one-shot class (toolbar.js keeps the window;
-   renders land in bursts, so one render can't carry it alone): .igniting
-   darkens the pill while the glow rises, .cooling runs the reverse on the
-   now-idle chip. --jobs-edge-phase is the edge's age as a negative delay —
-   a rebuild mid-window resumes the animation where the torn-down node left
-   it. Aurora keeps its wall-clock phase through both, so the light that
-   fades in is mid-sweep, not restarting. */
-.jobs-chip.igniting { animation: jobs-ignite 0.45s ease-out; animation-delay: var(--jobs-edge-phase, 0s); }
+/* idle↔busy edges: crossing one puts a one-shot class on the chip for 450ms
+   (toolbar.js drops it by a timer, which works with the animations off too):
+   .igniting darkens the pill while the glow rises, .cooling runs the reverse
+   on the now-idle chip. The chip is the same element throughout, so the
+   sweep under the glow carries on through both rather than restarting. */
+.jobs-chip.igniting { animation: jobs-ignite 0.45s ease-out; }
 .jobs-chip.igniting::before {
   animation: jobs-aurora-a 3s ease-in-out infinite alternate, jobs-glow-in 0.45s ease-out;
-  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
 }
 .jobs-chip.igniting::after {
   animation: jobs-aurora-b 4.6s ease-in-out infinite alternate, jobs-glow-in 0.45s ease-out;
-  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
 }
-.jobs-chip.cooling { animation: jobs-cool 0.45s ease-out; animation-delay: var(--jobs-edge-phase, 0s); }
+.jobs-chip.cooling { animation: jobs-cool 0.45s ease-out; }
 .jobs-chip.cooling::before {
   animation: jobs-aurora-a 3s ease-in-out infinite alternate, jobs-glow-out 0.45s ease-out forwards;
-  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
 }
 .jobs-chip.cooling::after {
   animation: jobs-aurora-b 4.6s ease-in-out infinite alternate, jobs-glow-out 0.45s ease-out forwards;
-  animation-delay: var(--jobs-phase, 0s), var(--jobs-edge-phase, 0s);
 }
 /* the ghost of the final count rides the cool-down out — without it the pill
    snaps narrow the instant the queue drains */
 .jobs-chip.cooling .jobs-chip-count {
   overflow: hidden;
   animation: jobs-count-collapse 0.45s ease-out forwards;
-  animation-delay: var(--jobs-edge-phase, 0s);
 }
 @keyframes jobs-ignite { from { color: var(--text-dim); background-color: var(--pill-bg); } }
 @keyframes jobs-cool { from { color: #fff; background-color: var(--pill-active); } }

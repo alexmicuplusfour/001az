@@ -14,11 +14,12 @@
 // already tracks answers all of it, and a rule you can state in a sentence is
 // one that can't develop a spam mode nobody predicted.
 //
-// The edge is checked on `app:render` rather than on a signal of its own,
-// because every path that can move these three — the signals tick, the boot
-// fetch, opening either modal — already ends in one. Reading the dots when the
-// header repaints is the same moment the dots themselves are read.
+// The edge is checked in an effect (planning/ui-updates-plan.md, Stage 5): it
+// reads the dots again whenever anything they read changes — the alerts, the
+// jobs stamp, the facet stats, the "seen" marks (state.seenMarks counts their
+// writes), and whether each one's data has landed.
 import { state } from './state.js';
+import { effect } from './vendor/signals.mjs';
 import { toast } from './toast.js';
 import { chime } from './chime.js';
 import { alertsUnseen } from './alerts-state.js';
@@ -119,6 +120,5 @@ function check() {
 }
 
 export function startAnnouncing() {
-  check(); // establishes the baseline; whatever is already lit is not news
-  document.addEventListener("app:render", check);
+  effect(check); // the first reading establishes the baseline: whatever is already lit is not news
 }

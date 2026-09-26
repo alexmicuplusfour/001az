@@ -68,9 +68,9 @@ test("absence from the ids list still reads as merged away", () => {
 
 // The stuck-spinner bug: a merge can delete a card no upload batch is tracking
 // (a re-extract, another tab's upload, ingestion, or a survivor whose batch
-// already settled). The card's spinner never repaints (cardSig keys on status
-// and the poll never lists a deleted entity again), so it ran forever until a
-// reload. The sweep must drop it even with no batch — after a one-tick grace so
+// already settled). The card's spinner never repaints (a card redraws only
+// when its item changes, and the poll never lists a deleted entity again), so
+// it ran forever until a reload. The sweep must drop it even with no batch — after a one-tick grace so
 // a not-yet-acknowledged fresh upload isn't yanked out from under a live drop.
 test("in-flight card gone from ids with no batch is swept after a grace tick", () => {
   state.items = [];

@@ -28,7 +28,7 @@ globalThis.fetch = async (url, opts = {}) => {
 
 const { state } = await import('../public/state.js');
 const { openCratePop, closeCratePop } = await import('../public/crates.js');
-const { cardFor } = await import('../public/grid.js');
+const { renderGrid } = await import('../public/grid.js');
 
 const settle = async () => { for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0)); };
 const enter = (el) => el.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
@@ -40,12 +40,14 @@ const noListenerErrors = () => assert.deepEqual(listenerErrors, []);
 state.me = { id: 1, name: 'tester' };
 state.boardId = 1;
 
+// A stand-in card with a button in it, outside #grid: that container is drawn
+// by Preact since Stage 4, and a foreign element in it would be swept away.
 function cardWithCrateBtn() {
   const card = document.createElement('div');
   card.className = 'card';
   const btn = document.createElement('button');
   card.appendChild(btn);
-  document.getElementById('grid').appendChild(card);
+  document.body.appendChild(card);
   return btn;
 }
 
@@ -71,13 +73,11 @@ test('creating a crate from the card pop: no false error toast, pop reopens with
   closeCratePop();
 });
 
-test('deleting a crate from the filter pop: state drops it and a repaint fires', async () => {
-  state.crates = [{ id: 7, name: 'olds', owned: true, public: false, item_count: 0 }];
+test('deleting a crate from the filter pop: state drops it, as a new list', async () => {
+  const before = [{ id: 7, name: 'olds', owned: true, public: false, item_count: 0 }];
+  state.crates = before;
   state.items = [];
   routes.set('DELETE /api/crates/7', {});
-  let renders = 0;
-  const count = () => renders++;
-  document.addEventListener('app:render', count);
 
   const btn = document.createElement('button'); // toolbar Crates button: not in a .card
   document.body.appendChild(btn);
@@ -88,10 +88,11 @@ test('deleting a crate from the filter pop: state drops it and a repaint fires',
   await settle();
 
   assert.equal(state.crates.length, 0, 'crate should leave state');
-  assert.ok(renders >= 1, 'delete must dispatch app:render — the live-update the UI depends on');
+  // Since Stage 5 nothing asks for a repaint: the page draws on a write it can
+  // see, which for a list is a new list, not the old one edited.
+  assert.notEqual(state.crates, before, 'a new list, not the old one edited');
   noErrorToast();
   noListenerErrors();
-  document.removeEventListener('app:render', count);
 });
 
 test('tag pop opens with its Edit tags footer', async () => {
@@ -101,9 +102,11 @@ test('tag pop opens with its Edit tags footer', async () => {
     tags: ['sleek'], instances: [{ id: 1, kind: 'image', status: 'tagged' }],
     status: 'tagged', undecided: false, crateIds: new Set(), hearts: 0, favoritedByMe: false,
   };
-  const card = cardFor(item);
-  document.getElementById('grid').appendChild(card);
+  renderGrid('crate-pop|grid', [], [item]); // the grid draws the card (Stage 4: cards are components)
+  const card = document.querySelector('#grid .card[data-id="12"]');
+  assert.ok(card, 'the grid drew the card');
   pointerenter(card); // hover chrome: card-actions + tag chip
+  await settle(); // a card's hover is state, drawn a tick later (Stage 4)
   const chip = card.querySelector('.tag-chip');
   assert.ok(chip, 'hover should attach the tag chip');
   pointerenter(chip); // opens the tag pop

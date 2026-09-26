@@ -12,6 +12,8 @@
 //
 // `scope` is the storage prefix, not a display name — it is baked into the key
 // and changing it silently re-lights every dot once.
+import { state } from './state.js';
+
 const key = (scope, boardId) => `${scope}:${boardId}`;
 
 // The two scopes, named HERE rather than at the surfaces that write them.
@@ -64,6 +66,11 @@ const serverNow = () => Date.now() + skew;
 // The raw watermark — for a surface that wants to show WHICH things are new
 // rather than only whether any are.
 export function seenAt(scope, boardId) {
+  // Every write of a mark is counted on `state` (markSeen), and every read
+  // reads the count: on the board page, where state's fields are signals,
+  // what shows a dot (the toolbar, announce.js) draws again when a mark
+  // moves. Elsewhere it's a plain number.
+  void state.seenMarks;
   try {
     return Number(localStorage.getItem(key(scope, boardId))) || 0;
   } catch {
@@ -91,5 +98,6 @@ export function unseen(scope, boardId, newestAt) {
 export function markSeen(scope, boardId, newestAt) {
   try {
     localStorage.setItem(key(scope, boardId), String(Math.max(Number(newestAt) || 0, serverNow() - 1)));
+    state.seenMarks++;
   } catch { /* private mode / quota — the acknowledgement just won't stick */ }
 }

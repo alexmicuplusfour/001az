@@ -59,10 +59,9 @@ export function boardSignal(row) {
 // would be a parameter the body never reads and a dependency on the overview
 // payload that does not exist.
 export function applyBoardDot(wrap, row) {
-  // Remove before adding, both of them. The gallery gets this for free —
-  // renderToolbar builds fresh elements each pass, so attachBtnDot always
-  // appends to a new node — but a repaint appends to a SURVIVING node, and a
-  // board with a standing failure would otherwise grow a dot per tick.
+  // Remove before adding, both of them: a repaint appends to a SURVIVING
+  // node, and a board with a standing failure would otherwise grow a dot per
+  // tick.
   wrap.querySelector(":scope > .btn-dot")?.remove();
   wrap.classList.remove("has-dot");
   const card = wrap.querySelector(".board-card");

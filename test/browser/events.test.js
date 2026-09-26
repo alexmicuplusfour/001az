@@ -12,8 +12,9 @@
 // and what is under test is "a change this tab did not make" — which a plain
 // HTTP request is.
 //
-// The observable is the heart control APPEARING. grid.js:521 only attaches one
-// when `hearts > 0 || favoritedByMe`, so an unhearted card has no `.heart` node
+// The observable is the heart control APPEARING. grid.js's Card draws one only
+// when `hearts > 0 || favoritedByMe` (or while the pointer is over the card,
+// and this test never points at it), so an unhearted card has no `.heart` node
 // at all — which makes its arrival unambiguous in a way a changing number is
 // not. (Deletion would be the other obvious candidate and is the wrong one: the
 // ghost sweep in reconcile() requires a SECOND consecutive absence before it

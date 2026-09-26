@@ -279,10 +279,16 @@ export async function openDiagnosticsModal({ onEdit } = {}) {
   const gates = data.gates || {};
   // Opening the modal is the freshest read there is — keep the toolbar's copy
   // in step so the dot clears against the same data the user just saw.
-  state.facetStats = facets;
+  //
+  // The mark first. The board page reads the dots on every write, and fresh
+  // stats landing before their mark would light the dot for an instant under
+  // the reader's own click: a toast and a chime about the dialog they're
+  // opening. Then the gates before the stats, as refreshFacetStats does. (No
+  // batch(): this module loads on the boards and admin pages too, which have
+  // no signals.)
+  markDiagnosticsSeen(state.boardId, facets); // clears the dot
   state.facetGates = gates;
-  markDiagnosticsSeen(state.boardId, facets);
-  document.dispatchEvent(new Event('app:render')); // clear the dot
+  state.facetStats = facets;
 
   document.getElementById("facet-diagnostics-modal")?.remove();
   const { body, footer, close } = createModal({ id: "facet-diagnostics-modal", title: "Tagging consistency" });

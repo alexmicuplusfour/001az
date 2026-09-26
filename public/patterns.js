@@ -8,6 +8,7 @@
 // lens an on/off, the clusters lens its granularity level).
 
 import { state } from "./state.js";
+import { signal, batch } from "./vendor/signals.mjs";
 import { api } from "./api.js";
 import { ACTIVE, QUEUED } from "./data.js";
 import { toast } from "./toast.js";
@@ -98,10 +99,11 @@ function boardLens(prefix, field, onOff) {
   return {
     field, // which state slot this lens owns — what lets a caller hold the LENS instead of re-deciding the flavor
     toggle(on) {
-      state[field] = +on;
-      if (!on) onOff?.();
+      batch(() => {
+        state[field] = +on;
+        if (!on) onOff?.();
+      });
       save();
-      document.dispatchEvent(new Event("app:render"));
     },
     save,
     restore() {
@@ -193,8 +195,8 @@ function computeClusters(level) {
   return { values, sets };
 }
 
-// The cache. app:render fires unconditionally on every poll tick (4s while
-// anything is in flight), and the compute is ~70ms on a 4.5k board — so it
+// The cache. The page draws again on every poll tick that moves anything (4s
+// while anything is in flight), and the compute is ~70ms on a 4.5k board — so it
 // runs only when the tag data actually changed. The change signal is exact
 // and allocation-free: every writer REPLACES an item's tags array rather
 // than mutating it (data.js reconcile, tag-editor.js, refreshEntityTags), so
@@ -234,7 +236,7 @@ function refreshMeaning(level) {
         return [id, s];
       }));
       mServed = { key, result: { values: body.values, sets } };
-      document.dispatchEvent(new Event("app:render"));
+      publish(); // the grouping is a signal: publishing it is the repaint
     })
     .catch((err) => {
       if (mKey !== key) return;
@@ -242,7 +244,24 @@ function refreshMeaning(level) {
     });
 }
 
+// The grouping the rail's counts and the filtered list read, through
+// clusterSet and clusterValues (planning/ui-updates-plan.md, Stage 3). The
+// caches decide it and publish it here whenever it changes (a refresh, or the
+// meaning grouping's answer landing), since a cached value only notices a
+// signal. It isn't a `computed` of its own: the cache serves the old grouping
+// while items are still being worked, on purpose, and the meaning grouping
+// arrives from the server.
+const grouping = signal(null);
+function publish() {
+  grouping.value = activeResult() ?? null;
+}
+
 export function refreshClusters() {
+  refreshCache();
+  publish();
+}
+
+function refreshCache() {
   if (state.showMeaningClusters) {
     refreshMeaning(clusterLevel());
     return;
@@ -265,8 +284,8 @@ export function refreshClusters() {
 // its save knows its key.
 const activeLens = () => (state.showMeaningClusters ? meaningLens : tagsLens);
 const activeResult = () => (state.showMeaningClusters ? mServed?.result : cache?.result);
-export const clusterValues = () => activeResult()?.values || [];
-export const clusterSet = (item) => activeResult()?.sets.get(item.id);
+export const clusterValues = () => grouping.value?.values || [];
+export const clusterSet = (item) => grouping.value?.sets.get(item.id);
 
 // The granularity knob, clamped: the ACTIVE flavor's field holds the level
 // (0 = off), and out-of-range stored values just pin to the nearest end.
@@ -282,10 +301,20 @@ export function stepClusters(delta) {
   const cur = clusterLevel();
   const next = Math.max(1, Math.min(LEVEL_MAX, cur + delta));
   if (!cur || next === cur) return;
-  state[lens.field] = next;
-  state.selected.delete("~clusters");
+  batch(() => {
+    state[lens.field] = next;
+    dropClusterChips();
+  });
   lens.save();
-  document.dispatchEvent(new Event("app:render"));
+}
+
+// The lens's chips leave the selection as a new map, never by editing the old
+// one: the cached counts notice only a new value (Stage 3).
+function dropClusterChips() {
+  if (!state.selected.has("~clusters")) return;
+  const next = new Map(state.selected);
+  next.delete("~clusters");
+  state.selected = next;
 }
 
 // Off also clears the lens's own selection: a left-behind ~clusters chip can
@@ -295,20 +324,24 @@ export function stepClusters(delta) {
 // (which also clears the selection — the other carving's values can't
 // match). On a restore where both boards somehow stored a level (two tabs,
 // two toggles), meaning wins, arbitrarily but stated.
-const tagsLens = boardLens("boardClusters", "showClusters", () => state.selected.delete("~clusters"));
+const tagsLens = boardLens("boardClusters", "showClusters", dropClusterChips);
 const meaningLens = boardLens("boardClustersM", "showMeaningClusters", () => {
-  state.selected.delete("~clusters");
+  dropClusterChips();
   mKey = mServed = null; // the flavor's cache dies with it, off the render path
 });
 export const saveClusters = tagsLens.save;
 export const restoreClusters = tagsLens.restore;
 export function toggleClusters(on) {
-  if (on && state.showMeaningClusters) meaningLens.toggle(false);
-  tagsLens.toggle(on);
+  batch(() => {
+    if (on && state.showMeaningClusters) meaningLens.toggle(false);
+    tagsLens.toggle(on);
+  });
 }
 export function toggleMeaningClusters(on) {
-  if (on && state.showClusters) tagsLens.toggle(false);
-  meaningLens.toggle(on);
+  batch(() => {
+    if (on && state.showClusters) tagsLens.toggle(false);
+    meaningLens.toggle(on);
+  });
 }
 export function restoreMeaningClusters() {
   meaningLens.restore();

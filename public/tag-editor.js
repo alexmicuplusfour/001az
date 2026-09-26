@@ -1,4 +1,6 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
+import { batch } from './vendor/signals.mjs';
 import { ICONS, refreshEntityTags } from './utils.js';
 import { applyRoutedEntities } from './data.js';
 import { api } from './api.js';
@@ -117,16 +119,18 @@ export function openTagEditor(item, inst = item.instances?.[0]) {
       // save looks lost until a reload. Fallback to the captured object
       // (instance deleted elsewhere) keeps this a no-op on a dead entity.
       const live = item.instances?.find((x) => x.id === inst.id) || inst;
-      live.tags = saved;
-      live.tagSet = new Set(saved);
-      live.undecided = false;
-      refreshEntityTags(item);
-      // Statuses come from the routed report — the server's aggregate rule,
-      // not a client re-derivation (the old every() here called all-tagged-
-      // plus-one-failed "tagged" where STATUS_PRIORITY says "failed").
-      applyRoutedEntities(entities);
+      batch(() => {
+        live.tags = saved;
+        live.tagSet = new Set(saved);
+        live.undecided = false;
+        refreshEntityTags(item);
+        itemsChanged();
+        // Statuses come from the routed report — the server's aggregate rule,
+        // not a client re-derivation (the old every() here called all-tagged-
+        // plus-one-failed "tagged" where STATUS_PRIORITY says "failed").
+        applyRoutedEntities(entities);
+      });
       close();
-      document.dispatchEvent(new Event('app:render'));
     } catch {
       toast.error("Couldn't save tags");
     }

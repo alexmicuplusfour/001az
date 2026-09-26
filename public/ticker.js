@@ -17,7 +17,7 @@
 // tab is hidden, each signal names its own interval, and a signal whose surface
 // isn't on screen says so through `when` and is never fetched at all.
 
-export function createTicker({ tickMs, signals, ready, onBatch }) {
+export function createTicker({ tickMs, signals, ready }) {
   let timer = null;
   const lastAt = new Map();
 
@@ -46,12 +46,8 @@ export function createTicker({ tickMs, signals, ready, onBatch }) {
     // Each signal is expected to swallow its own network failures; this is the
     // backstop for anything they don't, because a rejection here happens inside
     // a setInterval callback where nothing is waiting to catch it — an
-    // unhandled rejection, and one signal's bad day silently taking every other
-    // signal's render with it.
+    // unhandled rejection.
     await Promise.all(due.map((s) => s.run().catch(() => {})));
-    // One call for the batch. Every signal a caller registers here feeds the
-    // same surface, so a render per signal would repaint it to the same pixels.
-    onBatch?.();
   }
 
   // Called once, after the caller's boot has filled these signals for the first

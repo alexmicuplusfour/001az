@@ -483,9 +483,12 @@
    button) or IS the whole button (icon-only triggers), so both wear this class
    and only the host's spacing differs. Size and opacity sit on the svg, not on
    the element: on an icon-only trigger the element is a bordered box, and
-   dimming or rotating THAT would take the border with it. dropdown.js stamps
-   .dd-open on the anchor while the menu is up — the button in both shapes,
-   hence the two selectors — so the flip comes free. */
+   dimming or rotating THAT would take the border with it. dropdown.js sets
+   aria-expanded on the anchor while the menu is up — the button in both
+   shapes, hence the two selectors — so the flip comes free. Scoped by
+   aria-haspopup, which only dropdown.js sets, so a disclosure's own
+   aria-expanded (the board editor's, the welcome page's) doesn't turn a
+   caret that isn't a menu's. */
 .dd-caret {
   flex: none;
   display: inline-flex;
@@ -496,8 +499,8 @@
   opacity: 0.45;
   transition: transform 0.12s;
 }
-.dd-open .dd-caret svg,
-.dd-caret.dd-open svg {
+[aria-haspopup="menu"][aria-expanded="true"] .dd-caret svg,
+.dd-caret[aria-haspopup="menu"][aria-expanded="true"] svg {
   transform: rotate(180deg);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -524,6 +527,6 @@
   cursor: pointer;
 }
 .dd-trigger:hover { background: #f3f3f8; }
-.dd-trigger.dd-open { border-color: #a8a8b8; background: #f3f3f8; }
+.dd-trigger[aria-expanded="true"] { border-color: #a8a8b8; background: #f3f3f8; }
 .dd-trigger:disabled { opacity: 0.5; cursor: default; }
 .dd-trigger-value { font-weight: 500; }

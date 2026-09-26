@@ -10,10 +10,11 @@
 // those five lines relative the module imports here, and what is left is a
 // browser shim broad enough to let the chain load.
 //
-// The shims are deliberately dumb. Nothing below tests rendering; `document` is
-// a real EventTarget so `app:render` genuinely drives check(), and everything
-// else exists only so module-scope code (grid's IntersectionObserver, toast's
-// wrapper div) does not throw on the way in.
+// The shims are deliberately dumb. Nothing below tests rendering: announce.js
+// reads the dots in an effect (planning/ui-updates-plan.md, Stage 5), so the
+// state writes below are what drive check(), as they do on the page, and
+// everything else exists only so module-scope code (grid's
+// IntersectionObserver, toast's wrapper div) does not throw on the way in.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -36,8 +37,8 @@ const node = () => ({
   querySelector: () => null, querySelectorAll: () => [],
 });
 
-// A real EventTarget underneath, so startAnnouncing's listener and the
-// app:render dispatches below are the actual wiring rather than a stand-in.
+// A real EventTarget underneath, for the modules that listen to the page's
+// events on their way in.
 const bus = new EventTarget();
 const body = node();
 globalThis.document = {
@@ -71,6 +72,8 @@ const { state } = await import("../public/state.js");
 const { startAnnouncing } = await import("../public/announce.js");
 const { refreshAlerts, refreshJobErrors } = await import("../public/signals.js");
 const { markJobsSeen } = await import("../public/jobs-modal.js");
+const { refreshFacetStats, markDiagnosticsSeen, diagnosticsUnseen } = await import("../public/facet-diagnosis.js");
+const { openDiagnosticsModal } = await import("../public/facet-diagnostics.js");
 
 // toast.js builds its wrapper at module scope and appends it to body, so the
 // first child of body IS the toast list. Counting its children counts the
@@ -78,7 +81,6 @@ const { markJobsSeen } = await import("../public/jobs-modal.js");
 // and the difference is the point of one of the cases below.
 const toasts = () => body.children[0].children.length;
 
-const render = () => document.dispatchEvent(new Event("app:render"));
 const replies = (payload) => async () => ({ ok: true, json: async () => payload });
 const withFetch = async (impl, fn) => {
   const real = globalThis.fetch;
@@ -119,7 +121,6 @@ test("the edge rule", async (t) => {
     // opens is never news" is the plan's sentence, and this is the line where a
     // missing ready() turns it false.
     await withFetch(replies({ failed_at: 5_000_000, now: Date.now() }), refreshJobErrors);
-    render();
     assert.equal(toasts(), 0, "a failure that predates the session is not news");
     assert.equal(chimes, 0);
   });
@@ -129,25 +130,23 @@ test("the edge rule", async (t) => {
     // is one toast rather than three hundred. The dot is already saying "unread
     // news here"; a fresher stamp behind it does not make that more true.
     state.jobsFailedAt = Date.now() + 60_000;
-    render();
     assert.equal(toasts(), 0);
     assert.equal(chimes, 0);
   });
 
   await t.test("acknowledging re-arms it, and the next failure announces", async () => {
     markJobsSeen();
-    render();
     assert.equal(toasts(), 0, "acknowledging is a falling edge, not an announcement");
 
     state.jobsFailedAt = Date.now() + 120_000;
-    render();
     assert.equal(toasts(), 1);
     assert.equal(chimes, 1);
   });
 
   await t.test("…and not again while it stays lit", async () => {
-    render();
-    render();
+    // Read again, twice, with the dot still lit.
+    state.jobsFailedAt += 1_000;
+    state.jobsFailedAt += 1_000;
     assert.equal(toasts(), 1);
     assert.equal(chimes, 1);
   });
@@ -159,9 +158,7 @@ test("the edge rule", async (t) => {
     // has to go with it: a sound with nothing to read is a notification that says
     // only "something", which is how a sound gets switched off for good.
     markJobsSeen();
-    render();
     state.jobsFailedAt = Date.now() + 180_000;
-    render();
     assert.equal(toasts(), 1, "the duplicate never reached the screen");
     assert.equal(chimes, 1, "so it made no sound either");
   });
@@ -172,15 +169,51 @@ test("the edge rule", async (t) => {
     // though five toasts' worth of jobs history has gone by. The dots do not
     // share a baseline any more than they share a watermark.
     await withFetch(replies([{ id: 1, name: "Yellow chairs", unseen: 0 }]), refreshAlerts);
-    render();
     assert.equal(toasts(), 1, "the first alerts reading is a baseline, not news");
 
     // …and now a firing. The message carries a count, so unlike "A job failed"
     // it is never a duplicate — which is what makes this the case that proves an
     // acknowledged signal really can announce again.
     await withFetch(replies([{ id: 1, name: "Yellow chairs", unseen: 3 }]), refreshAlerts);
-    render();
     assert.equal(toasts(), 2);
     assert.equal(chimes, 2);
+  });
+});
+
+test("the Tagging-consistency dot: no reading is taken halfway through a write", async (t) => {
+  // Its reading takes three writes: the stats, the gates they're judged by,
+  // and, when the dialog opens, the mark that clears them. The dots are read
+  // on every write, and these modules can't batch (they load on pages that
+  // have no signals), so the order of the writes is what keeps a half-made
+  // reading from being an edge.
+  state.boardManage = true;
+  state.boardVotes = 2;
+  // A finding at a rate of 0.25: over the served floor of 0.2, under the
+  // fallback's 0.3, so read with the fallback it's nothing at all.
+  const stats = (at) => replies({
+    facets: [{ key: "shape", label: "Shape", items: 20, unanimous: 15, stale: 0, queued: 0,
+      diagnostic: { verdict: "overlapping-values", explanation: "round and wide overlap", at } }],
+    gates: { minRate: 0.2 },
+  });
+
+  const lit = () => diagnosticsUnseen(state.boardId, state.facetStats, state.facetGates);
+
+  await t.test("the first reading has its gates, so a finding already there is the baseline", async () => {
+    await withFetch(stats(Date.now()), refreshFacetStats);
+    assert.equal(lit(), true, "setup: the finding landed, unseen");
+    assert.equal(toasts(), 2, "no toast");
+    assert.equal(chimes, 2, "no chime");
+  });
+
+  await t.test("opening the dialog on a newer finding clears it without announcing it", async () => {
+    markDiagnosticsSeen(state.boardId, state.facetStats);
+    assert.equal(lit(), false, "setup: read, so the dot is dark");
+    const at = Date.now() + 60_000;
+    // The rest of the dialog may not build in this shim; only the writes
+    // before it matter here.
+    await withFetch(stats(at), () => openDiagnosticsModal().catch(() => {}));
+    assert.equal(state.facetStats[0].diagnostic.at, at, "setup: the dialog's fresh stats landed");
+    assert.equal(toasts(), 2, "no toast");
+    assert.equal(chimes, 2, "no chime");
   });
 });

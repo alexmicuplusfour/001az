@@ -1,5 +1,9 @@
+import { itemsVersion } from './state-signals.js';
 import { state } from './state.js';
-import { tag, pill, pillAction, appendCount, ICONS } from './utils.js';
+import { tag, ICONS } from './utils.js';
+import { html, render } from './vendor/preact.mjs';
+import { computed, batch } from './vendor/signals.mjs';
+import { Pill } from './pill.js';
 import { facetPass, selEntry, halvesOf, wireEntry, canonEntry, selSize, selHas, selValues, encodePairs, decodePairs, pruneToDeclared } from './facet-match.js';
 import { ACTIVE, QUEUED } from './data.js';
 import { applyBoardSort } from './sort.js';
@@ -63,8 +67,8 @@ function instanceHasValue(inst, key, value) {
   return inst.tagSet.has(tag(key, value));
 }
 
-function matchesExcept(item, exceptKey) {
-  for (const [key, values] of state.selected) {
+function matchesExcept(item, exceptKey, selected) {
+  for (const [key, values] of selected) {
     // Toggled-empty entries linger in the map; skip them before paying the
     // closure + facetPass call per item — this loop runs per render pass.
     if (key === exceptKey || !selSize(values)) continue;
@@ -131,22 +135,29 @@ function statusFilter() {
   return (item) => sets.some((s) => s.has(item.status));
 }
 
-export function taggedFiltered() {
+// The filtered, sorted list, worked out from scratch. The page reads the cached
+// copy (taggedFiltered, below); this is for that cache, the tests' check and
+// the bench.
+export function filterItems() {
   const statusOk = statusFilter();
+  // Each field is read once, not once per item: every `state.x` is a signal
+  // read through a getter (state-signals.js), and 5000 items × five fields cost
+  // ~2ms at 4x-slowed CPU (planning/ui-updates-plan.md, Stage 3).
+  const { searchResults, showUntagged, showFavorites, selectedCrateId, alertEvent, selected } = state;
   const list = state.items.filter(
     (item) =>
       statusOk(item) &&
-      (state.searchResults == null || state.searchResults.has(item.id)) &&
-      (!state.showUntagged || isUntagged(item)) &&
-      (!state.showFavorites || item.favoritedByMe) &&
-      (state.selectedCrateId == null || item.crateIds.has(state.selectedCrateId)) &&
-      (state.alertEvent == null || state.alertEvent.ids.has(item.id)) &&
-      matchesExcept(item, null)
+      (searchResults == null || searchResults.has(item.id)) &&
+      (!showUntagged || isUntagged(item)) &&
+      (!showFavorites || item.favoritedByMe) &&
+      (selectedCrateId == null || item.crateIds.has(selectedCrateId)) &&
+      (alertEvent == null || alertEvent.ids.has(item.id)) &&
+      matchesExcept(item, null, selected)
   );
   // While a search is active its similarity order wins outright — the chosen
   // board sort resumes when the search clears. Otherwise the attribute sort
   // (sort.js) over the server order (newest first).
-  if (state.searchResults) list.sort((a, b) => state.searchResults.get(b.id) - state.searchResults.get(a.id));
+  if (searchResults) list.sort((a, b) => searchResults.get(b.id) - searchResults.get(a.id));
   else applyBoardSort(list);
   return list;
 }
@@ -159,6 +170,7 @@ export function taggedFiltered() {
 // facet/value tag convention already requires this).
 export function computeFacetStats() {
   const activeSel = [...state.selected].filter(([, v]) => selSize(v));
+  const { showFavorites, selectedCrateId } = state; // read once, as filterItems does
   const totals = new Map(); // "facet/value" -> count over all items
   const counts = new Map(); // "facet/value" -> count in the current filter context
   // An EXCLUDED chip answers a different question than an included one.
@@ -224,7 +236,7 @@ export function computeFacetStats() {
 
     // An uploader selection rides `fails` like any facet (the `~uploaders`
     // system key sits in activeSel), so no separate uploader gate.
-    const inContext = fails === 0 && (!state.showFavorites || item.favoritedByMe) && (state.selectedCrateId == null || item.crateIds.has(state.selectedCrateId));
+    const inContext = fails === 0 && (!showFavorites || item.favoritedByMe) && (selectedCrateId == null || item.crateIds.has(selectedCrateId));
 
     if (isTagged(item) && isUntagged(item)) {
       totalUntagged++;
@@ -285,36 +297,76 @@ export function activeCount() {
   return n;
 }
 
-// Favorites in the current filter context — reuses taggedFiltered so the
-// count stays in sync with facet chips, search, crate, and untagged filters.
-export function favoritesInContext() {
-  return taggedFiltered().filter((item) => item.favoritedByMe).length;
+// ── Cached (planning/ui-updates-plan.md, Stage 3) ──────────────────────────
+// The chip counts and the filtered list are worked out again only when
+// something they read has changed, not on every repaint: a poll tick that
+// brought nothing costs no recount. Each `computed` notices the `state` fields
+// it read (they're signals, state-signals.js), the clusters grouping
+// (patterns.js), and the items version, which stands in for the items' own
+// fields since those change in place (itemsChanged).
+const cachedStats = computed(() => { itemsVersion.value; return computeFacetStats(); });
+const cachedList = computed(() => { itemsVersion.value; return filterItems(); });
+const cachedFavorites = computed(() => cachedList.value.filter((item) => item.favoritedByMe).length);
+
+// The filtered list the page shows: the grid, the rows view, the lightbox and
+// render() all read this one copy, and none of them edits it.
+export const taggedFiltered = () => cachedList.value;
+
+// Favorites in the current filter context — counted over the filtered list,
+// so it stays in sync with facet chips, search, crate, and untagged filters.
+export const favoritesInContext = () => cachedFavorites.value;
+
+// The check the tests switch on: the cached values against a fresh
+// computation, once a repaint (app.js). A writer that changes an item without
+// itemsChanged(), or edits the selection in place, would leave the rail
+// showing old numbers without a sound; with the flag set it throws instead.
+// The browser harness sets it on every page it opens.
+export function checkCached() {
+  const same = (a, b) => {
+    if (a === b) return true;
+    if (a instanceof Map) return b instanceof Map && a.size === b.size && [...a].every(([k, v]) => b.has(k) && same(v, b.get(k)));
+    if (a instanceof Set) return b instanceof Set && a.size === b.size && [...a].every((v) => b.has(v));
+    if (a && b && typeof a === "object") return Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => same(a[k], b[k]));
+    return false;
+  };
+  const fresh = filterItems();
+  const list = cachedList.value;
+  if (list.length !== fresh.length || list.some((item, i) => item !== fresh[i])) {
+    throw new Error("checkCached: the cached filtered list differs from a fresh one. Something changed an item without itemsChanged(), or edited state in place.");
+  }
+  if (cachedFavorites.value !== fresh.filter((item) => item.favoritedByMe).length) {
+    throw new Error("checkCached: the cached favorites count differs from a fresh one. Something changed an item without itemsChanged().");
+  }
+  if (!same(cachedStats.value, computeFacetStats())) {
+    throw new Error("checkCached: the cached chip counts differ from fresh ones. Something changed an item without itemsChanged(), or edited state in place.");
+  }
 }
 
 // One body for both verbs, so the each-state-clears-the-other rule can't
 // drift between them: toggling a value into one half removes it from the
-// sibling.
+// sibling. The entry is copied into a new map rather than edited: the cached
+// counts notice only a new value.
 function toggleHalf(facetKey, value, mine, other) {
-  const entry = state.selected.get(facetKey) || selEntry();
+  const was = state.selected.get(facetKey);
+  const entry = selEntry(was?.any, was?.not);
   if (entry[mine].has(value)) entry[mine].delete(value);
   else { entry[mine].add(value); entry[other].delete(value); }
-  state.selected.set(facetKey, entry);
-  document.dispatchEvent(new Event('app:render'));
+  state.selected = new Map(state.selected).set(facetKey, entry);
 }
 
 export const toggle = (facetKey, value) => toggleHalf(facetKey, value, "any", "not");
 // The exclusion twin — right-click / Alt+click / long-press land here.
 export const toggleNeg = (facetKey, value) => toggleHalf(facetKey, value, "not", "any");
 
-// The exclusion gesture, wired ONCE per rail container (they survive
-// replaceChildren): one contextmenu listener covers desktop right-click and
-// Android's native long-press alike. iOS never fires contextmenu for
-// touches, so iOS has NO exclusion gesture yet — deliberately: the
-// timer-and-click-swallow rig that stood here was speculative complexity
+// The exclusion gesture, wired ONCE per rail container (the containers are
+// fixed; only what's drawn in them changes): one contextmenu listener covers
+// desktop right-click and Android's native long-press alike. iOS never fires
+// contextmenu for touches, so iOS has NO exclusion gesture yet — deliberately:
+// the timer-and-click-swallow rig that stood here was speculative complexity
 // for an untested platform, and its swallow flag ate real clicks on
 // desktop. Build the iOS path from a device, not a guess. Chips carry
-// their address in data-facet/data-value; pills without one (status,
-// pillAction) are ignored.
+// their address in data-facet/data-value; pills without one (status, the
+// clusters row's fewer/more steps) are ignored.
 const excludeWired = new WeakSet();
 function wireExclusion(container) {
   if (excludeWired.has(container)) return;
@@ -328,16 +380,16 @@ function wireExclusion(container) {
 }
 
 export function clearAll() {
-  state.selected = new Map();
-  state.showUntagged = false;
-  state.showProcessing = false;
-  state.showUnprocessed = false;
-  document.dispatchEvent(new Event('app:render'));
+  batch(() => {
+    state.selected = new Map();
+    state.showUntagged = false;
+    state.showProcessing = false;
+    state.showUnprocessed = false;
+  });
 }
 
 function toggleFlag(flag) {
   state[flag] = !state[flag];
-  document.dispatchEvent(new Event('app:render'));
 }
 
 // --- saved filter configs + URL encoding ---
@@ -354,15 +406,18 @@ export function selectedAsConfig() {
   return out;
 }
 
+// One batch: the selection lands already trimmed, so the view's rows choice
+// (a ratchet, view.js) never sees the half-applied one.
 export function applyFilterConfig(config) {
-  state.selected = new Map(
-    Object.entries(config || {}).map(([k, v]) => {
-      const { any, not } = halvesOf(v);
-      return [k, selEntry(any, not)];
-    })
-  );
-  reconcileSelection();
-  document.dispatchEvent(new Event('app:render'));
+  batch(() => {
+    state.selected = new Map(
+      Object.entries(config || {}).map(([k, v]) => {
+        const { any, not } = halvesOf(v);
+        return [k, selEntry(any, not)];
+      })
+    );
+    reconcileSelection();
+  });
 }
 
 // THE gate for a selection that came from outside the rail — a saved config, a
@@ -449,9 +504,15 @@ export function syncFiltersToUrl() {
   if (next !== location.pathname + location.search) history.replaceState(null, "", next);
 }
 
+// Draws the rail into `container` with Preact (planning/ui-updates-plan.md,
+// Stage 1), which compares what should be there with what is and changes only
+// the difference. A chip stays the same element for as long as it's in the
+// rail, whatever changes on it, so the keyboard focus on it survives the
+// poll's repaints and the chip's own toggle.
+// Everything below keys its rows and chips so the comparison can find them
+// again: see `row` for why rows need it too.
 export function renderFacetsInto(container, stats = computeFacetStats()) {
   wireExclusion(container);
-  container.replaceChildren();
   const {
     totals, counts, negCounts, ctxAll, ctxFail, facetsWithData,
     totalUntagged, untaggedInContext,
@@ -471,7 +532,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   // The odds (patterns.js) ride here for the same reason: active chips are
   // chosen and muted ones impossible, so neither carries a number — one rule,
   // one place.
-  const chip = (facetKey, value, label = value) => {
+  const chip = (facetKey, value, label = value, title) => {
     const t = tag(facetKey, value);
     const ctxCount = counts.get(t) || 0;
     const entry = state.selected.get(facetKey);
@@ -483,35 +544,37 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     // is a CHOSEN state: never muted, no odds badge, same as active.
     const removed = negated ? negCounts.get(t) || 0 : 0;
     const count = negated ? (removed ? `−${removed}` : 0) : ctxCount;
-    const el = pill(label, count, active,
-      !active && !negated && ctxCount === 0,
-      (e) => (e.altKey ? toggleNeg : toggle)(facetKey, value));
-    if (negated) el.classList.add("neg");
-    // The address the container-level exclusion gesture reads (wireExclusion).
-    el.dataset.facet = facetKey;
-    el.dataset.value = value;
     const odds = state.showOdds && !active && !negated && chipOdds(stats, facetKey, t);
-    if (odds) appendCount(el, odds.text, `mult mult-${odds.tone}`);
-    return el;
+    // Keyed by value: its row is keyed by facet, so within the row the value
+    // alone finds the same chip again when the chips around it come and go.
+    // facet/value are also the address the container-level exclusion gesture
+    // reads (wireExclusion). `title` is only ever a cluster's signature.
+    return html`<${Pill} key=${value} label=${label} count=${count} active=${active}
+      muted=${!active && !negated && ctxCount === 0} neg=${negated} title=${title}
+      facet=${facetKey} value=${value}
+      onClick=${(e) => (e.altKey ? toggleNeg : toggle)(facetKey, value)}
+    >${odds ? html`<span class=${`mult mult-${odds.tone}`}>${odds.text}</span>` : null}</${Pill}>`;
   };
-  // ...and ONE labeled row: the scaffold every band row shares, appended to
-  // the container on creation (every caller gates visibility before building).
-  // Returns the pills box; filling it — the universe rules — is the only
-  // thing that actually differs per row. The status row keeps its hand-built
-  // spacer variant.
-  const rowInto = (labelText) => {
-    const row = document.createElement("div");
-    row.className = "facet";
-    const label = document.createElement("div");
-    label.className = "facet-label";
-    label.textContent = labelText;
-    row.appendChild(label);
-    const pills = document.createElement("div");
-    pills.className = "pills";
-    row.appendChild(pills);
-    container.appendChild(row);
-    return pills;
-  };
+  // ...and ONE labeled row: the scaffold every band row shares. Filling it —
+  // the universe rules — is the only thing that actually differs per row.
+  // The status row keeps its own spacer variant.
+  //
+  // Keyed by facet, not left to position. When a row appears above another
+  // (the status row does, as soon as anything starts processing), rows matched
+  // by position would each be redrawn as the row above them, and a chip with
+  // keyboard focus would be replaced and lose it. Measured in the plan's
+  // Stage 1 close look; the keys test in test/browser/ui-updates.test.js
+  // holds it.
+  const row = (key, labelText, pills) =>
+    html`<div class="facet" key=${key}><div class="facet-label">${labelText}</div><div class="pills">${pills}</div></div>`;
+  // An ACTION riding a pill row — the clusters row's "more"/"fewer" steps. It
+  // borrows the pill's shape so the row reads as one line, but not the white
+  // fill: in the rail, the filled capsule means "a value you can select", and
+  // an action is not one. `title` is required — with no count and no active
+  // state, the one line of hover help is all the explanation these get.
+  const stepPill = (label, title, step) =>
+    html`<button class="pill pill-action" key=${label} title=${title} onClick=${() => stepClusters(step)}>${label}</button>`;
+  const rows = [];
   // The status row: Untagged plus the two queue pills (Processing = actively
   // worked, Unprocessed = waiting in line). Each shows only while it has items
   // or is switched on, so the row disappears entirely on a quiet board.
@@ -527,21 +590,10 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     ["Unprocessed", totalQueued, queuedInContext, "showUnprocessed"],
   ].filter(([, total, , flag]) => total > 0 || state[flag]);
   if (statusPills.length) {
-    const row = document.createElement("div");
-    row.className = "facet facet-untagged";
-    const spacer = document.createElement("div");
-    spacer.className = "facet-label facet-label-empty";
-    spacer.setAttribute("aria-hidden", "true");
-    row.appendChild(spacer);
-    const pills = document.createElement("div");
-    pills.className = "pills";
-    for (const [label, , ctx, flag] of statusPills) {
-      pills.appendChild(
-        pill(label, ctx, state[flag], !state[flag] && ctx === 0, () => toggleFlag(flag))
-      );
-    }
-    row.appendChild(pills);
-    container.appendChild(row);
+    rows.push(html`<div class="facet facet-untagged" key="~status"><div class="facet-label facet-label-empty" aria-hidden="true"></div><div class="pills">${
+      statusPills.map(([label, , ctx, flag]) => html`<${Pill} key=${flag} label=${label} count=${ctx}
+        active=${state[flag]} muted=${!state[flag] && ctx === 0} onClick=${() => toggleFlag(flag)} />`)
+    }</div></div>`);
   }
   // The CLUSTERS row — the `~clusters` lens, first of the labeled band when
   // it's on: it is the most compressed view of the board, so it reads first.
@@ -557,23 +609,14 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const sel = state.selected.get("~clusters") || selEntry();
     const values = clusterValues();
     if (values.length || selSize(sel)) {
-      const pills = rowInto(SYSTEM_FACETS["~clusters"].label);
-      const shown = new Set();
-      for (const v of values) {
-        shown.add(v.value);
-        const el = chip("~clusters", v.value, v.label);
-        if (v.title) el.title = v.title;
-        pills.appendChild(el);
-      }
-      for (const value of selValues(sel)) {
-        if (!shown.has(value)) pills.appendChild(chip("~clusters", value));
-      }
-      if (clusterLevel() > 1) {
-        pills.appendChild(pillAction("fewer", "Carve the board into fewer groups", () => stepClusters(-1)));
-      }
-      if (clusterLevel() < LEVEL_MAX && values.length) {
-        pills.appendChild(pillAction("more", "Carve the board into more groups", () => stepClusters(1)));
-      }
+      const shown = new Set(values.map((v) => v.value));
+      const pills = [
+        ...values.map((v) => chip("~clusters", v.value, v.label, v.title || undefined)),
+        ...selValues(sel).filter((value) => !shown.has(value)).map((value) => chip("~clusters", value)),
+      ];
+      if (clusterLevel() > 1) pills.push(stepPill("fewer", "Carve the board into fewer groups", -1));
+      if (clusterLevel() < LEVEL_MAX && values.length) pills.push(stepPill("more", "Carve the board into more groups", 1));
+      rows.push(row("~clusters", SYSTEM_FACETS["~clusters"].label, pills));
     }
   }
   // The OBJECTS row — the `~objects` system facet
@@ -592,10 +635,7 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
     const chips = [...new Set([...declared, ...selValues(sel)])].filter(
       (key) => (totals.get(tag("~objects", key)) || 0) > 0 || selHas(sel, key)
     );
-    if (chips.length) {
-      const pills = rowInto(SYSTEM_FACETS["~objects"].label);
-      for (const key of chips) pills.appendChild(chip("~objects", key));
-    }
+    if (chips.length) rows.push(row("~objects", SYSTEM_FACETS["~objects"].label, chips.map((key) => chip("~objects", key))));
   }
   // Uploader row — the `~uploaders` system facet (entity-level: never dims
   // rows tiles). Universe = distinct uploaders in the board (2+ to show, the
@@ -604,39 +644,47 @@ export function renderFacetsInto(container, stats = computeFacetStats()) {
   {
     const sel = state.selected.get("~uploaders") || selEntry();
     if (uploaderTotals.size >= 2 || selSize(sel) > 0) {
+      // Sorted by count, so a poll can re-sort this row, and Chromium drops
+      // focus from a chip that moves even when it's the same element: a known
+      // limit (the plan's Stage 1). The clusters row, sorted by size, has it
+      // too; facet and object rows keep their declared order and never move a
+      // chip.
       const uploaderItems = [...uploaderTotals.entries()].sort((a, b) => b[1] - a[1]);
-      const pills = rowInto(SYSTEM_FACETS["~uploaders"].label);
+      const pills = [];
       const shown = new Set();
       for (const [uid, total] of uploaderItems) {
         const key = String(uid);
         if (total === 0 && !selHas(sel, key)) continue;
         shown.add(key);
         const uploader = state.items.find((item) => item.uploadedBy?.id === uid)?.uploadedBy;
-        pills.appendChild(chip("~uploaders", key, uploader ? (uploader.name || uploader.email) : key));
+        pills.push(chip("~uploaders", key, uploader ? (uploader.name || uploader.email) : key));
       }
       // Selected but gone from the board — chip() lands the same pill by
       // arithmetic (no items means no context count, so: active, unmuted).
       for (const key of selValues(sel)) {
-        if (!shown.has(key)) pills.appendChild(chip("~uploaders", key));
+        if (!shown.has(key)) pills.push(chip("~uploaders", key));
       }
+      rows.push(row("~uploaders", SYSTEM_FACETS["~uploaders"].label, pills));
     }
   }
 
   for (const facet of state.facets) {
     const sel = state.selected.get(facet.key) || selEntry();
     if (!facetsWithData.has(facet.key) && selSize(sel) === 0) continue;
-    const pills = rowInto(facet.label);
+    const pills = [];
     for (const value of facet.values) {
       const total = totals.get(tag(facet.key, value)) || 0;
       if (total === 0 && !selHas(sel, value)) continue;
-      pills.appendChild(chip(facet.key, value));
+      pills.push(chip(facet.key, value));
     }
+    rows.push(row(facet.key, facet.label, pills));
   }
+  render(rows, container);
 }
 
 export function renderFacets() {
   elFilters.classList.toggle("is-hidden", state.filtersHidden);
-  const stats = computeFacetStats();
+  const stats = cachedStats.value;
   if (!state.filtersHidden) renderFacetsInto(elFilters, stats);
   renderFacetsInto(elFiltersMobile, stats);
   // drawer header: mirror the toolbar's "Clear filters (n)" button
@@ -651,13 +699,11 @@ function toggleFiltersDesktop() {
   // the grid doesn't jump under the sticky header.
   if (window.scrollY <= 4) {
     state.filtersHidden = !state.filtersHidden;
-    document.dispatchEvent(new Event('app:render'));
     return;
   }
   elFilters.style.transition = "none";
   const before = elFilters.offsetHeight;
-  state.filtersHidden = !state.filtersHidden;
-  document.dispatchEvent(new Event('app:render'));
+  state.filtersHidden = !state.filtersHidden; // draws at once, so the height below is the new one
   const after = elFilters.offsetHeight;
   window.scrollBy(0, after - before);
   void elFilters.offsetHeight; // flush before re-enabling transition

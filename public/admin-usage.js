@@ -17,7 +17,8 @@
 import { api } from "./api.js";
 import { toast } from "./toast.js";
 import { busy } from "./modal.js";
-import { ICONS, pill, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "./utils.js";
+import { ICONS, kpi, tokPair, fmtTok, fmtUsd, fmtCost, fmtUnpriced, fmtQty, relTime } from "./utils.js";
+import { pill } from "./pill.js";
 import { sparkline, dayKey } from "./sparkline.js";
 import { openPricesModal } from "./prices-modal.js";
 

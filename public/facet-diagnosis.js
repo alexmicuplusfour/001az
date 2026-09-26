@@ -180,8 +180,12 @@ export const canSeeDiagnostics = (s) => !!s.boardManage && Number(s.boardVotes) 
 export async function refreshFacetStats() {
   try {
     const d = await api("GET", `/api/boards/${state.boardId}/facet-stats`);
-    state.facetStats = d.facets || [];
+    // The gates first. The board page reads the dots on every write, and the
+    // stats are what makes this dot readable (announce.js's ready()), so a
+    // first reading with the fallback gates could make a finding already there
+    // look new the moment the served ones land.
     state.facetGates = d.gates || {};
+    state.facetStats = d.facets || [];
   } catch {
     // Left exactly as found, which for a first read means `null` stands.
     //
@@ -206,7 +210,7 @@ let statsFetchedFor = null;
 export function ensureFacetStats() {
   if (statsFetchedFor === state.boardId) return;
   statsFetchedFor = state.boardId;
-  refreshFacetStats().then(() => document.dispatchEvent(new Event('app:render')));
+  refreshFacetStats();
 }
 
 // The dot's memory (seen-mark.js — the jobs chip's dot keeps its in the same

@@ -956,7 +956,6 @@ export function openIngestModal() {
       if (data.ledger) info.ledger = data.ledger; // the route's own counts, not our arithmetic
       renderHatch();
       renderStatus();
-      document.dispatchEvent(new Event("app:render"));
       toast(data.cleared ? done(data.cleared) : "Nothing to change");
       if (scoped) await runPreview();
       else invalidatePreview(); // the whole-ledger reset moved every number
@@ -1320,11 +1319,10 @@ export function openIngestModal() {
           // Only stamp if the pair actually arrived: a 200 whose body didn't
           // survive the trip would otherwise blank a chip the save just kept.
           if (data.ingest_mode !== undefined) stampBoard(data);
-          // The save has landed, so everything the save changes repaints NOW —
-          // before the run is attempted. A run that fails afterwards must not
-          // leave the chip showing the config it just replaced.
+          // The save has landed, and its stamp above drew everything the save
+          // changes before the run is attempted: a run that fails afterwards
+          // must not leave the chip showing the config it just replaced.
           ensurePolling();
-          document.dispatchEvent(new Event("app:render"));
           // A save that REMOVED the ingestion has nothing to run, and the route
           // would only 409 at it. The save stands; say so and close.
           if (run && !removing) {

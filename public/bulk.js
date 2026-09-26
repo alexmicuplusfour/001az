@@ -1,8 +1,10 @@
 import { state } from './state.js';
+import { itemsChanged } from './state-signals.js';
+import { batch } from './vendor/signals.mjs';
 import { ICONS } from './utils.js';
 import { openDropdown, ddRow, ddSep, ddInput } from './dropdown.js';
 import { toast } from './toast.js';
-import { ensurePolling, applyRoutedEntities, setWork } from './data.js';
+import { requeue } from './data.js';
 
 let bar = null;
 let countEl = null;
@@ -55,49 +57,35 @@ export function updateBulkBar() {
   if (n === 0) closeBulkCratePop();
 }
 
-export function toggleBulkSelect(item, card) {
-  const on = !state.bulkSelected.has(item.id);
-  if (on) state.bulkSelected.add(item.id);
-  else state.bulkSelected.delete(item.id);
-  card.classList.toggle("selected", on);
-  card.querySelector(".sel-cb")?.setAttribute("aria-pressed", on);
+// The selection is replaced, never edited: the cards read it from their props
+// (planning/ui-updates-plan.md, Stage 4) and the write is the repaint (Stage
+// 5), so nothing here touches a card element.
+function select(next) {
+  state.bulkSelected = next;
   updateBulkBar();
+}
+
+export function toggleBulkSelect(item) {
+  const next = new Set(state.bulkSelected);
+  if (next.has(item.id)) next.delete(item.id);
+  else next.add(item.id);
+  select(next);
 }
 
 export function clearBulk() {
-  state.bulkSelected.clear();
-  for (const card of document.querySelectorAll(".card.selected")) {
-    card.classList.remove("selected");
-    card.querySelector(".sel-cb")?.setAttribute("aria-pressed", "false");
-  }
-  updateBulkBar();
+  select(new Set());
 }
 
 export function selectAllVisible(items) {
-  state.bulkSelected.clear();
-  for (const item of items) state.bulkSelected.add(item.id);
-  for (const card of document.querySelectorAll(".card[data-id]")) {
-    const id = Number(card.dataset.id);
-    const on = state.bulkSelected.has(id);
-    card.classList.toggle("selected", on);
-    card.querySelector(".sel-cb")?.setAttribute("aria-pressed", String(on));
-  }
-  updateBulkBar();
+  select(new Set(items.map((item) => item.id)));
 }
 
 async function doBulkReprocess() {
   const items = selectedItems();
-  const results = await Promise.allSettled(items.map(async (item) => {
-    const r = await fetch(`/api/items/${item.id}/reprocess`, { method: "POST" });
-    if (!r.ok) throw new Error();
-    const answer = await r.json();
-    applyRoutedEntities(answer.entities);
-    setWork(answer.work); // every answer's copy is the same truth — last write wins
-  }));
+  // Each through requeue (data.js), the one re-queue every surface takes.
+  const results = await Promise.allSettled(items.map((item) => requeue(`/api/items/${item.id}/reprocess`)));
   const failed = results.filter((r) => r.status === "rejected").length;
-  clearBulk();
-  document.dispatchEvent(new Event('app:render'));
-  ensurePolling();
+  clearBulk(); // repaints
   if (failed) toast.error(`Reprocess failed for ${failed} of ${items.length}`);
   else toast(`Reprocessing ${items.length} item${items.length === 1 ? "" : "s"}…`, { duration: "short" });
 }
@@ -111,10 +99,11 @@ async function doBulkDelete() {
     if (!r.ok) throw new Error();
     deleted.add(item.id);
   }));
-  state.items = state.items.filter((i) => !deleted.has(i.id));
   const failed = items.length - deleted.size;
-  clearBulk();
-  document.dispatchEvent(new Event('app:render'));
+  batch(() => {
+    state.items = state.items.filter((i) => !deleted.has(i.id));
+    clearBulk();
+  });
   // The error already implies the rest went through, so don't double-toast.
   if (failed) toast.error(`Couldn't delete ${failed} of ${items.length}`);
   else toast(`Deleted ${deleted.size} item${deleted.size === 1 ? "" : "s"}`);
@@ -133,12 +122,17 @@ async function addAllToCrate(crateId) {
     const r = await fetch(`/api/crates/${crateId}/items/${item.id}`, { method: "POST" });
     if (!r.ok) throw new Error();
     const { added, count } = await r.json();
-    if (added) item.crateIds.add(crateId);
+    // Announced as each answer lands, not after the last: a repaint or the
+    // grid's next batch in between shows the items already in (the crate
+    // filter reads membership).
+    if (added) { item.crateIds.add(crateId); itemsChanged(); }
     counts.push(count);
   }));
-  if (crate && counts.length) crate.item_count = Math.max(crate.item_count || 0, ...counts);
+  if (crate && counts.length) {
+    crate.item_count = Math.max(crate.item_count || 0, ...counts);
+    state.crates = [...state.crates]; // a count moved in place: a new list, so what reads it redraws
+  }
   const failed = items.length - counts.length;
-  document.dispatchEvent(new Event('app:render'));
   if (failed) toast.error(`Couldn't add ${failed} of ${items.length} to crate`);
   else toast(`Added ${counts.length} to "${crate ? crate.name : "crate"}"`, { duration: "short" });
 }
@@ -176,7 +170,7 @@ function openBulkCratePop(anchorEl) {
             });
             if (!r.ok) { toast.error("Couldn't create crate"); return; }
             const { crate } = await r.json();
-            if (!state.crates.find((c) => c.id === crate.id)) state.crates.push(crate);
+            if (!state.crates.find((c) => c.id === crate.id)) state.crates = [...state.crates, crate];
             closeBulkCratePop();
             addAllToCrate(crate.id);
           } catch {
@@ -190,13 +184,14 @@ function openBulkCratePop(anchorEl) {
   if (ctx) closeCratePop = ctx.close;
 }
 
-// Drop selections for items that no longer exist (deleted elsewhere, board change).
-document.addEventListener('app:render', () => {
+// Drop selections for items that no longer exist (deleted elsewhere, board
+// change). app.js's render() calls this before it draws anything, so the
+// cards draw the pruned selection.
+export function pruneSelection() {
   if (!state.bulkSelected.size) return;
   const ids = new Set(state.items.map((i) => i.id));
-  for (const id of [...state.bulkSelected]) {
-    if (!ids.has(id)) state.bulkSelected.delete(id);
-  }
+  const kept = [...state.bulkSelected].filter((id) => ids.has(id));
+  if (kept.length !== state.bulkSelected.size) state.bulkSelected = new Set(kept);
   updateBulkBar();
-});
+}
 

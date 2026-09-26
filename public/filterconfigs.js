@@ -22,7 +22,6 @@ async function doDeleteConfig(cfg, onClose) {
     if (!r.ok) throw new Error();
     state.filterConfigs = state.filterConfigs.filter((c) => c.id !== cfg.id);
     onClose();
-    document.dispatchEvent(new Event('app:render')); // saved row in the filter panel
   } catch {
     toast.error("Couldn't delete saved filter");
   }
@@ -52,10 +51,10 @@ async function saveCurrentAs(name, onClose) {
     const { config } = await r.json();
     // Same name overwrites server-side; mirror that here.
     const i = state.filterConfigs.findIndex((c) => c.id === config.id);
-    if (i >= 0) state.filterConfigs[i] = config;
-    else state.filterConfigs.push(config);
+    state.filterConfigs = i >= 0
+      ? state.filterConfigs.map((c, n) => (n === i ? config : c))
+      : [...state.filterConfigs, config];
     onClose();
-    document.dispatchEvent(new Event('app:render')); // saved row in the filter panel
     toast(`Saved "${config.name}"`, { duration: "short" });
   } catch {
     toast.error("Couldn't save filters");
@@ -84,7 +83,7 @@ export function initFilterConfigsUI() {
   btn.addEventListener("click", () => openFilterConfigPop(btn));
 }
 
-export function openFilterConfigPop(anchor) { // an element, or the toolbar's accessor (see dropdown.js anchor contract)
+export function openFilterConfigPop(anchor) {
   openDropdown(anchor, {
     className: "filter-config-pop",
     align: "start",
@@ -112,7 +111,7 @@ export function openFilterConfigPop(anchor) { // an element, or the toolbar's ac
         }));
       }
     },
-    footer: (foot, { close }) => {
+    footer: (foot, { close, reposition }) => {
       // The section head above does the segmenting — no divider between the
       // list and its input; they're one thing. And a selection that's
       // already saved says so instead of offering a second name for the same
@@ -130,8 +129,8 @@ export function openFilterConfigPop(anchor) { // an element, or the toolbar's ac
       // looking, so they live with the other per-viewer filter things rather
       // than in board settings. Toggle rows, and the pop stays open through
       // the flip — the effect lands on the rail below, and the menu holding
-      // still is what lets the eye go compare (the render this triggers is
-      // survived by the accessor anchor the toolbar opens this with).
+      // still is what lets the eye go compare (the render this triggers keeps
+      // the toolbar's arrow, which the pop hangs from).
       foot.appendChild(ddSep());
       const cb = ddToggleRow({
         label: "Show pattern odds",
@@ -142,10 +141,14 @@ export function openFilterConfigPop(anchor) { // an element, or the toolbar's ac
       foot.appendChild(cb.el);
       // The two cluster carvings are mutually exclusive — patterns.js owns
       // the rule; the rows just re-read the state it wrote, since the pop
-      // stays open across the flip and doesn't rebuild.
+      // stays open across the flip and doesn't rebuild. A flip that clears a
+      // cluster selection also takes the count off the Filters label, which
+      // moves the arrow the pop hangs from, so the pop re-places itself
+      // under it. The toggle has repainted the toolbar by the time it returns.
       const sync = () => {
         cl.checked = !!state.showClusters;
         if (cm) cm.checked = !!state.showMeaningClusters;
+        reposition();
       };
       const cl = ddToggleRow({
         label: "Clusters by tags",

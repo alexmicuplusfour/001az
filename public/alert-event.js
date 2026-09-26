@@ -3,6 +3,7 @@
 // currently matching. The id set rides state.alertEvent and filters the grid
 // like a crate does; the URL param makes webhook links land here directly.
 import { state } from './state.js';
+import { batch } from './vendor/signals.mjs';
 import { toast } from './toast.js';
 import { clearSearch } from './search.js';
 
@@ -41,10 +42,11 @@ export async function openAlertEvent(firingId) {
     }
     // count states the original truth — entities deleted since simply don't
     // render, and the chip's number says how many the firing was.
-    resetListFilters();
-    state.alertEvent = { id: firing.id, name: firing.name, count: firing.entity_count, ids: new Set(entityIds) };
+    batch(() => {
+      resetListFilters();
+      state.alertEvent = { id: firing.id, name: firing.name, count: firing.entity_count, ids: new Set(entityIds) };
+    });
     setEventParam(firing.id);
-    document.dispatchEvent(new Event('app:render'));
   } catch {
     toast.error("Couldn't load the alert view");
     setEventParam(null);
@@ -54,5 +56,4 @@ export async function openAlertEvent(firingId) {
 export function clearAlertEvent() {
   state.alertEvent = null;
   setEventParam(null);
-  document.dispatchEvent(new Event('app:render'));
 }

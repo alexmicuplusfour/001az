@@ -127,28 +127,12 @@ test("lastAt is stamped before the await, so a slow fetch is not double-started"
   await first;
 });
 
-test("one signal's failure takes neither the batch nor the render with it", async () => {
+test("one signal's failure doesn't take the batch with it", async () => {
   const bad = { name: "bad", every: 0, run: () => Promise.reject(new Error("network")) };
   const good = probe("good");
-  let batches = 0;
-  const t = createTicker({ tickMs: NEVER, signals: [bad, good], onBatch: () => batches++ });
+  const t = createTicker({ tickMs: NEVER, signals: [bad, good] });
   await t.tick(); // must not reject — a rejection here is an unhandled one
   assert.equal(good.calls, 1);
-  assert.equal(batches, 1);
-});
-
-test("onBatch fires once per batch, and not at all when nothing is due", async () => {
-  // Every signal feeds the same surface, so a render per signal repaints it to
-  // the same pixels.
-  const a = probe("a", { every: 0 });
-  const b = probe("b", { every: 0 });
-  let batches = 0;
-  const t = createTicker({ tickMs: NEVER, signals: [a, b], onBatch: () => batches++ });
-  await t.tick();
-  assert.equal(batches, 1, "two signals, one render");
-  a.every = b.every = NEVER;
-  await t.tick();
-  assert.equal(batches, 1, "nothing due, nothing rendered");
 });
 
 test("start() is idempotent", async () => {

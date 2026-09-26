@@ -5,14 +5,16 @@
 // waiting lane — one payload, composed server-side, the same one the chip
 // counts, so the two cannot disagree and neither reads the cards; "History"
 // pages the job_log newest-first with kind filter pills. The in-progress half
-// re-renders on every app:render for free (the delta poll writes state.work);
+// redraws whenever the work changes, in an effect (the delta poll writes state.work);
 // the server half refreshes on a modest interval while the modal is open —
 // history only re-pulls page one, so a reader deep in Load-more pages isn't
 // yanked back to the top.
 import { state } from './state.js';
+import { effect, batch } from './vendor/signals.mjs';
 import { createModal, sectionHeadingEl, busy } from './modal.js';
 import { setBoardPaused, setWork } from './data.js';
-import { fmtDuration, pill, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
+import { fmtDuration, fmtTok, tokPair, relTime, fmtQty } from './utils.js';
+import { pill } from './pill.js';
 import { markSeen, seenAt, noteServerNow, JOBS_SEEN as SEEN } from './seen-mark.js';
 import { jobsUnseen, jobsModalOpen, setJobsOpen } from './jobs-state.js';
 import { toast } from './toast.js';
@@ -326,17 +328,18 @@ function runningRow(j) {
 export function openJobsModal({ kind } = {}) {
   if (jobsModalOpen()) return; // already open
   let timer = null;
-  // Everything pause repaints rides the app's render tick, so setBoardPaused's
-  // dispatch is the single path whether the flip came from this button or from
-  // another manager landing on the 5s pull.
-  const onRender = () => { renderPause(); renderScheduled(); renderLive(); };
+  // The pause line, the scheduled line and "In progress" follow the state they
+  // read: an effect draws them again whenever the board's pause, its work or
+  // its items change, whether the flip came from this button or from another
+  // manager landing on the 5s pull (planning/ui-updates-plan.md, Stage 5).
+  let stopDrawing = null;
   const { body, overlay } = createModal({
     title: "Jobs",
     id: "jobs-modal",
     onClose: () => {
       setJobsOpen(false);
       clearInterval(timer);
-      document.removeEventListener("app:render", onRender);
+      stopDrawing?.();
     },
   });
   setJobsOpen(true);
@@ -543,8 +546,8 @@ export function openJobsModal({ kind } = {}) {
     el.appendChild(p);
   };
 
-  // Called with a fresh `scheduled` block, or bare (from the render tick) to
-  // redraw the last one — pause rewrites this line, so it has to be repaintable
+  // Called with a fresh `scheduled` block, or bare (from the effect) to redraw
+  // the last one — pause rewrites this line, so it has to be repaintable
   // without a fetch.
   function renderScheduled(sched = lastSched) {
     lastSched = sched;
@@ -631,18 +634,15 @@ export function openJobsModal({ kind } = {}) {
   // claim — not "you had the log" but "this landed while you were watching" —
   // which is only true if the row was actually drawn. See drawn().
   //
-  // Mutates and REPORTS rather than rendering, and so does noteStamp below. The
-  // stamp and the mark have to move with no app:render between them:
-  // announce.js reads the dots on that event, so a stamp recorded without its
-  // mark is a rising edge, and it would toast and chime about a row the reader
-  // is looking straight at.
+  // The stamp (noteStamp below) and the mark have to land together:
+  // announce.js reads the dots on every write, so a stamp recorded without
+  // its mark is a rising edge, and it would toast and chime about a row the
+  // reader is looking straight at. So load() writes both in one batch().
   //
   // Declared above load() — which calls them — rather than below, where they
   // would work only by the grace of load's first await.
   const ack = () => {
-    if (!jobsUnseen()) return false;
-    markJobsSeen();
-    return true;
+    if (jobsUnseen()) markJobsSeen();
   };
 
   // Was the newest failure actually put on screen? Three ordinary states say
@@ -670,19 +670,7 @@ export function openJobsModal({ kind } = {}) {
   // been in this payload since b743290, long before the dot needed it.
   const noteStamp = (data) => {
     noteServerNow(data.now);
-    const at = data.failed_at ?? null;
-    if (state.jobsFailedAt === at) return false;
-    state.jobsFailedAt = at;
-    return true;
-  };
-
-  // The pair, settled together and rendered once. Both sides are evaluated
-  // before the test — `moved || ack()` would short-circuit past the
-  // acknowledgement in exactly the case that needs it, the one where the stamp
-  // has just moved.
-  const settle = (moved) => {
-    const acked = drawn() && ack();
-    if (moved || acked) document.dispatchEvent(new Event('app:render'));
+    state.jobsFailedAt = data.failed_at ?? null;
   };
 
   // reset=true replaces the list (open, filter switch, interval refresh of
@@ -698,22 +686,26 @@ export function openJobsModal({ kind } = {}) {
     try {
       const data = await fetchPage(reset ? null : cursor);
       if (g !== gen) return; // a newer load took over while this one was in flight
-      setWork(data.work);
-      if (data.kinds) kindDefs = data.kinds; // the server's vocabulary, refreshed per fetch
-      if (reset) { jobs = data.jobs; pages = 1; }
-      else { jobs = jobs.concat(data.jobs); pages++; }
-      cursor = data.nextCursor;
-      const moved = noteStamp(data);
-      for (const j of [...data.work.running, ...data.jobs]) seenKinds.add(j.kind);
-      // Refresh history lives outside job_log (field_snapshots) — the flag is
-      // how its pill appears before the kind is ever fetched.
-      if (data.has_refresh) seenKinds.add("refresh");
-      syncPaused(data);
-      renderScheduled(data.scheduled);
-      renderLive();
-      renderFilters();
-      renderHistory();
-      settle(moved); // against what was just rendered, not what the tick last knew
+      batch(() => {
+        setWork(data.work);
+        if (data.kinds) kindDefs = data.kinds; // the server's vocabulary, refreshed per fetch
+        if (reset) { jobs = data.jobs; pages = 1; }
+        else { jobs = jobs.concat(data.jobs); pages++; }
+        cursor = data.nextCursor;
+        noteStamp(data);
+        for (const j of [...data.work.running, ...data.jobs]) seenKinds.add(j.kind);
+        // Refresh history lives outside job_log (field_snapshots) — the flag is
+        // how its pill appears before the kind is ever fetched.
+        if (data.has_refresh) seenKinds.add("refresh");
+        syncPaused(data);
+        renderScheduled(data.scheduled);
+        renderLive();
+        renderFilters();
+        renderHistory();
+        // Acknowledged only if the newest failure was put on screen: against
+        // what was just rendered, not what the tick last knew.
+        if (drawn()) ack();
+      });
     } catch {
       if (g === gen && !jobs.length) { histList.replaceChildren(); note(histList, "Failed to load — retrying…"); }
     }
@@ -721,28 +713,27 @@ export function openJobsModal({ kind } = {}) {
 
   more.addEventListener("click", () => load(false));
 
-  renderLive(); // the client half needs no fetch — show it immediately
+  // The client half needs no fetch: drawn now, and again whenever the state
+  // it reads moves (the pause, the work). The interval below re-pulls the
+  // server half (running rows tick, fresh completions land) but only
+  // refreshes history when the reader hasn't paged deeper.
+  stopDrawing = effect(() => { renderPause(); renderScheduled(); renderLive(); });
   load(true);
   // The unconditional one: you opened the log. Ahead of load's first page, so
   // the dot clears on the click rather than a round trip later.
-  if (ack()) document.dispatchEvent(new Event('app:render'));
-  // The delta poll re-renders the pipeline half as statuses move; the interval
-  // re-pulls the server half (running rows tick, fresh completions land) but
-  // only refreshes history when the reader hasn't paged deeper.
-  document.addEventListener("app:render", onRender);
+  ack();
   timer = setInterval(() => {
     if (pages <= 1) { load(true); return; }
     // Paged deeper, so history is deliberately NOT re-pulled — a reader on page
     // three should not be yanked back to the top. Which is exactly why nothing
     // acknowledges here: a failure landing now is never drawn, so the dot (and
     // the toast the rising edge earns it) is the only notice it will get.
-    fetchPage(null).then((d) => {
+    fetchPage(null).then((d) => batch(() => {
       setWork(d.work);
-      const moved = noteStamp(d);
+      noteStamp(d);
       syncPaused(d);
       renderScheduled(d.scheduled);
       renderLive();
-      if (moved) document.dispatchEvent(new Event('app:render'));
-    }).catch(() => {});
+    })).catch(() => {});
   }, REFRESH_MS);
 }
