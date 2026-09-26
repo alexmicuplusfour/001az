@@ -140,7 +140,7 @@ function renderToolbar() {
 
   const logo = document.createElement("span");
   logo.className = "toolbar-logo";
-  logo.textContent = "001az/";
+  logo.textContent = "001az";
 
   const auth = document.createElement("div");
   auth.className = "auth"; // margin-left:auto pushes it to the right edge

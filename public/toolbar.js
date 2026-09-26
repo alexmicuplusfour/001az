@@ -442,7 +442,7 @@ function Auth() {
 // here that's the boards index. The switcher's All-boards footer is the
 // signed way there; this is the quiet one.
 function ToolbarTop() {
-  return html`<a class="toolbar-logo" href="/boards" title="All boards">001az/</a>${state.boardName ? html`<${BoardGroup} />` : null}<${Auth} />`;
+  return html`<a class="toolbar-logo" href="/boards" title="All boards">001az</a>${state.boardName ? html`<${BoardGroup} />` : null}<${Auth} />`;
 }
 
 // Semantic search (only when the server has embeddings configured). Submits on

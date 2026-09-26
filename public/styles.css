@@ -277,9 +277,9 @@ header.header-collapsed #toolbar-fold {
 }
 
 .toolbar-logo {
-  font-family: monospace;
-  font-size: 13px;
-  font-weight: 700;
+  font-family: var(--serif);
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text);
   letter-spacing: -0.02em;
   flex-shrink: 0;

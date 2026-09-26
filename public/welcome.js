@@ -58,7 +58,7 @@ function renderToolbar() {
   const logo = document.createElement("a");
   logo.className = "toolbar-logo";
   logo.href = "/boards";
-  logo.textContent = "001az/";
+  logo.textContent = "001az";
 
   const auth = document.createElement("div");
   auth.className = "auth"; // margin-left:auto pushes it to the right edge
